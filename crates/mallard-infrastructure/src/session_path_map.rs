@@ -15,7 +15,10 @@ const ROOT_NAMESPACE: &str = "/__mallard_root__";
 const ESCAPE_TOKEN: &str = "/__mallard_escape__";
 const ESCAPED_ROOT_TOKEN: &str = "/__mallard_escape__/r";
 const ESCAPED_ESCAPE_TOKEN: &str = "/__mallard_escape__/e";
-const TOKENS: [&str; 8] = [
+// Tag order is the spelling order in `SessionPathMapper::spellings`. The
+// first eight are the POSIX family; the last six exist only for Windows
+// roots (forward-slash, JSON-escaped, and verbatim `\\?\` spellings).
+const TOKENS: [&str; 14] = [
     ROOT_TOKEN,
     "/__mallard_root__/c;",
     "/__mallard_root__/bt;",
@@ -24,10 +27,47 @@ const TOKENS: [&str; 8] = [
     "/__mallard_root__/cu;",
     "/__mallard_root__/be;",
     "/__mallard_root__/ce;",
+    "/__mallard_root__/bs;",
+    "/__mallard_root__/cs;",
+    "/__mallard_root__/bj;",
+    "/__mallard_root__/cj;",
+    "/__mallard_root__/bx;",
+    "/__mallard_root__/cx;",
 ];
+const WINDOWS_VERBATIM_PREFIX: &str = "\\\\?\\";
+
+/// Which grammar a project root follows. Decided from the root text, not
+/// the build target: a Mac must decode a thread pushed from Windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootFamily {
+    Posix,
+    Windows,
+}
+
+pub fn root_family(root: &str) -> Option<RootFamily> {
+    let bytes = root.as_bytes();
+    if bytes.first() == Some(&b'/') {
+        Some(RootFamily::Posix)
+    } else if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+    {
+        Some(RootFamily::Windows)
+    } else {
+        None
+    }
+}
 
 pub(crate) fn is_wire_atom(text: &str) -> bool {
     TOKENS.contains(&text) || text == ESCAPED_ROOT_TOKEN || text == ESCAPED_ESCAPE_TOKEN
+}
+
+/// The current user's home directory as mapper input. `dirs` reads `HOME`
+/// on Unix (so tests that set it keep working) and `USERPROFILE` on
+/// Windows, where `HOME` is normally unset.
+pub fn home_dir_text() -> Option<String> {
+    dirs::home_dir().map(|home| home.to_string_lossy().into_owned())
 }
 
 pub fn path_map_marker() -> Value {
@@ -51,13 +91,12 @@ pub fn validate_pathmap_root(label: &str, root: &str) -> Result<(), String> {
             root.escape_debug()
         ));
     }
-    if !root.starts_with('/') || root.contains('\\') {
+    let Some(family) = root_family(root) else {
         return Err(format!(
-            "{label} '{}' is not an absolute POSIX path; conversation Push and Pull support \
-             POSIX roots only (Windows paths need their own design)",
+            "{label} '{}' is not an absolute POSIX path or a drive-absolute Windows path",
             root.escape_debug()
         ));
-    }
+    };
     if root
         .bytes()
         .any(|byte| byte == b'"' || byte < 0x20 || byte == 0x7f)
@@ -66,19 +105,47 @@ pub fn validate_pathmap_root(label: &str, root: &str) -> Result<(), String> {
             "{label} contains quote or control bytes and cannot be remapped safely"
         ));
     }
-    if root.ends_with('/') {
+    let (separator, body) = match family {
+        RootFamily::Posix => {
+            if root.contains('\\') {
+                return Err(format!("{label} '{root}' is not a clean path"));
+            }
+            ('/', &root[1..])
+        }
+        RootFamily::Windows => {
+            // One canonical Windows spelling: upper-case drive, backslashes,
+            // no verbatim prefix. Other spellings are matched, never bound.
+            if !root.as_bytes()[0].is_ascii_uppercase() {
+                return Err(format!("{label} '{root}' must use an upper-case drive letter"));
+            }
+            if root.contains('/') {
+                return Err(format!("{label} '{root}' must use backslash separators"));
+            }
+            if root[3..]
+                .bytes()
+                .any(|byte| matches!(byte, b'<' | b'>' | b':' | b'|' | b'?' | b'*'))
+            {
+                return Err(format!("{label} '{root}' contains a reserved Windows character"));
+            }
+            ('\\', &root[3..])
+        }
+    };
+    if body.ends_with(separator) {
         return Err(format!("{label} '{root}' is not a clean path"));
     }
-    let components: Vec<&str> = root[1..].split('/').collect();
+    let components: Vec<&str> = body.split(separator).collect();
     if components.len() < 2 {
         return Err(format!(
             "{label} '{root}' must have at least two path components"
         ));
     }
-    if components
-        .iter()
-        .any(|component| component.is_empty() || *component == "." || *component == "..")
-    {
+    if components.iter().any(|component| {
+        component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.ends_with(' ')
+            || component.ends_with('.')
+    }) {
         return Err(format!("{label} '{root}' is not a clean path"));
     }
     if root.contains("__mallard_root__") || root.contains("__mallard_escape__") {
@@ -89,13 +156,14 @@ pub fn validate_pathmap_root(label: &str, root: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn percent_encode_path(path: &str) -> String {
+fn percent_encode_path(path: &str, family: RootFamily) -> String {
     let mut output = String::with_capacity(path.len());
     for byte in path.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 output.push(byte as char);
             }
+            b':' if family == RootFamily::Windows => output.push(':'),
             other => {
                 output.push('%');
                 output.push_str(&format!("{other:02X}"));
@@ -112,10 +180,22 @@ struct EncodePattern {
 
 pub struct SessionPathMapper {
     root: String,
+    family: RootFamily,
     automaton: AhoCorasick,
     wire_automaton: AhoCorasick,
     patterns: Vec<EncodePattern>,
-    spellings: [String; 8],
+    /// Destination rendering for every tag, indexed like `TOKENS`. A tag
+    /// with no spelling in this family renders as the absolute root.
+    spellings: [String; 14],
+}
+
+/// The `file:` URI form of a root: POSIX roots keep their slashes, Windows
+/// roots become `file:///C:/…` as Node, VS Code, and Git render them.
+fn file_uri_path(root: &str, family: RootFamily) -> String {
+    match family {
+        RootFamily::Posix => root.to_string(),
+        RootFamily::Windows => format!("/{}", root.replace('\\', "/")),
+    }
 }
 
 pub struct EncodedRecord {
@@ -138,7 +218,14 @@ impl SessionPathMapper {
         validate_pathmap_root("project root", root)?;
         let canonical = canonical_root.unwrap_or(root);
         validate_pathmap_root("canonical project root", canonical)?;
+        let family = root_family(root).expect("validated root has a family");
+        if root_family(canonical) != Some(family) {
+            return Err("project root and canonical project root use different path families".into());
+        }
+        // Windows has no stable tilde spelling across cmd, PowerShell, and
+        // Git Bash, so tilde tags render as the absolute root there.
         let home = home
+            .filter(|_| family == RootFamily::Posix)
             .map(|home| home.trim_end_matches('/'))
             .filter(|home| home.starts_with('/') && !home.is_empty());
         let tilde = |path: &str| {
@@ -148,6 +235,17 @@ impl SessionPathMapper {
         };
         let tilde_binding = tilde(root);
         let tilde_canonical = tilde(canonical);
+        let windows_only = |path: &str, spelling: fn(&str) -> String| match family {
+            RootFamily::Windows => Some(spelling(path)),
+            RootFamily::Posix => None,
+        };
+        let slash_binding = windows_only(root, |path| path.replace('\\', "/"));
+        let slash_canonical = windows_only(canonical, |path| path.replace('\\', "/"));
+        let json_binding = windows_only(root, |path| path.replace('\\', "\\\\"));
+        let json_canonical = windows_only(canonical, |path| path.replace('\\', "\\\\"));
+        let verbatim_binding = windows_only(root, |path| format!("{WINDOWS_VERBATIM_PREFIX}{path}"));
+        let verbatim_canonical =
+            windows_only(canonical, |path| format!("{WINDOWS_VERBATIM_PREFIX}{path}"));
         let spellings = [
             root.to_string(),
             canonical.to_string(),
@@ -155,16 +253,45 @@ impl SessionPathMapper {
             tilde_canonical
                 .clone()
                 .unwrap_or_else(|| canonical.to_string()),
-            format!("file://{root}"),
-            format!("file://{canonical}"),
-            format!("file://{}", percent_encode_path(root)),
-            format!("file://{}", percent_encode_path(canonical)),
+            format!("file://{}", file_uri_path(root, family)),
+            format!("file://{}", file_uri_path(canonical, family)),
+            format!(
+                "file://{}",
+                percent_encode_path(&file_uri_path(root, family), family)
+            ),
+            format!(
+                "file://{}",
+                percent_encode_path(&file_uri_path(canonical, family), family)
+            ),
+            slash_binding.clone().unwrap_or_else(|| root.to_string()),
+            slash_canonical.clone().unwrap_or_else(|| canonical.to_string()),
+            json_binding.clone().unwrap_or_else(|| root.to_string()),
+            json_canonical.clone().unwrap_or_else(|| canonical.to_string()),
+            verbatim_binding.clone().unwrap_or_else(|| root.to_string()),
+            verbatim_canonical
+                .clone()
+                .unwrap_or_else(|| canonical.to_string()),
+        ];
+        let available = [
+            true,
+            true,
+            tilde_binding.is_some(),
+            tilde_canonical.is_some(),
+            true,
+            true,
+            true,
+            true,
+            slash_binding.is_some(),
+            slash_canonical.is_some(),
+            json_binding.is_some(),
+            json_canonical.is_some(),
+            verbatim_binding.is_some(),
+            verbatim_canonical.is_some(),
         ];
         let mut texts = Vec::new();
         let mut patterns = Vec::new();
         for (index, spelling) in spellings.iter().enumerate() {
-            if (index == 2 && tilde_binding.is_none()) || (index == 3 && tilde_canonical.is_none())
-            {
+            if !available[index] {
                 continue;
             }
             if !texts.contains(spelling) {
@@ -185,6 +312,9 @@ impl SessionPathMapper {
                 literal: true,
             });
         }
+        // Matching is exact-case on every family. NTFS ignores case, but a
+        // wire reference cannot carry source casing, and the encode gate
+        // requires plain decoding to restore the source byte for byte.
         let automaton = AhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostLongest)
             .build(&texts)
@@ -193,6 +323,7 @@ impl SessionPathMapper {
             .map_err(|error| format!("build wire path matcher: {error}"))?;
         Ok(Self {
             root: root.to_string(),
+            family,
             automaton,
             wire_automaton,
             patterns,
@@ -204,13 +335,22 @@ impl SessionPathMapper {
         &self.root
     }
 
+    pub fn family(&self) -> RootFamily {
+        self.family
+    }
+
     fn match_boundary_valid(
+        &self,
         input: &str,
         start: usize,
         end: usize,
         embedded: &mut Option<bool>,
     ) -> bool {
-        boundary_valid(input.as_bytes(), start, end)
+        let separators: &[u8] = match self.family {
+            RootFamily::Posix => b"/",
+            RootFamily::Windows => b"\\/",
+        };
+        boundary_valid(input.as_bytes(), start, end, separators)
             || (left_boundary_valid(input.as_bytes(), start)
                 && input.as_bytes().get(end) == Some(&b'"')
                 && *embedded.get_or_insert_with(|| valid_json_text(input)))
@@ -229,7 +369,7 @@ impl SessionPathMapper {
             let start = search + found.start();
             let next = search + found.end();
             let pattern = &self.patterns[found.pattern().as_usize()];
-            if pattern.literal || Self::match_boundary_valid(input, start, next, &mut embedded) {
+            if pattern.literal || self.match_boundary_valid(input, start, next, &mut embedded) {
                 output.push_str(&input[end..start]);
                 output.push_str(pattern.token);
                 spans.push(PathSpan {
@@ -569,7 +709,9 @@ mod tests {
             Some("/home-a"),
         )
         .unwrap();
-        for (index, prefix) in a.spellings.iter().enumerate() {
+        // Tags 8.. are Windows-only spellings; on a POSIX root they render as
+        // the absolute root and therefore encode as `b`/`c` again.
+        for (index, prefix) in a.spellings.iter().enumerate().take(8) {
             let source = json!(format!("{prefix}/file"));
             let wire = a.encode_record_gated(&source).unwrap();
             assert_eq!(wire, json!(format!("{}/file", TOKENS[index])));
@@ -721,5 +863,110 @@ mod tests {
         }
         validate_path_map_marker(&path_map_marker()).unwrap();
         assert!(validate_path_map_marker(&json!({"codec":"mallard.pathmap.v9"})).is_err());
+    }
+
+    // ----- Windows root family -------------------------------------------
+
+    fn windows_mapper() -> SessionPathMapper {
+        SessionPathMapper::new(
+            r"C:\Users\Ada\proj",
+            Some(r"D:\Work\proj alias"),
+            Some(r"C:\Users\Ada"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn windows_root_grammar_is_strict() {
+        assert!(validate_pathmap_root("r", r"C:\Users\Ada\proj").is_ok());
+        assert!(validate_pathmap_root("r", r"D:\Work\proj alias").is_ok());
+        for bad in [
+            r"c:\Users\Ada\proj",     // lower-case drive
+            "C:/Users/Ada/proj",      // forward slashes
+            r"\\?\C:\Users\Ada\proj", // verbatim prefix
+            r"\\server\share\proj",   // UNC
+            r"C:\Users\Ada\proj\",    // trailing separator
+            r"C:\proj",               // one component
+            r"C:\Users\..\proj",      // parent
+            r"C:\Users\Ada\pro?j",    // reserved character
+            r"C:\Users\Ada\proj.",    // trailing dot
+            r"C:\Users\Ada\__mallard_root__",
+        ] {
+            assert!(validate_pathmap_root("r", bad).is_err(), "{bad}");
+        }
+        assert_eq!(root_family(r"C:\x\y"), Some(RootFamily::Windows));
+        assert_eq!(root_family("/x/y"), Some(RootFamily::Posix));
+        assert_eq!(root_family("x/y"), None);
+        assert!(SessionPathMapper::new(r"C:\Users\Ada\proj", Some("/alias/proj"), None).is_err());
+    }
+
+    #[test]
+    fn windows_spellings_round_trip_to_their_own_tags() {
+        let w = windows_mapper();
+        assert_eq!(w.family(), RootFamily::Windows);
+        let cases = [
+            (r"C:\Users\Ada\proj\src\main.rs", r"/__mallard_root__/b;\src\main.rs"),
+            (r"D:\Work\proj alias\src", r"/__mallard_root__/c;\src"),
+            ("C:/Users/Ada/proj/src/main.rs", "/__mallard_root__/bs;/src/main.rs"),
+            ("D:/Work/proj alias/src", "/__mallard_root__/cs;/src"),
+            (r"C:\\Users\\Ada\\proj\\src", r"/__mallard_root__/bj;\\src"),
+            (r"D:\\Work\\proj alias\\src", r"/__mallard_root__/cj;\\src"),
+            (r"\\?\C:\Users\Ada\proj\src", r"/__mallard_root__/bx;\src"),
+            ("file:///C:/Users/Ada/proj/src", "/__mallard_root__/bu;/src"),
+            ("file:///D:/Work/proj%20alias/src", "/__mallard_root__/ce;/src"),
+        ];
+        for (local, wire) in cases {
+            let encoded = w.encode_record_gated(&json!(local)).unwrap();
+            assert_eq!(encoded, json!(wire), "{local}");
+            assert_eq!(w.decode_record(&encoded).unwrap(), json!(local), "{local}");
+        }
+        // Windows roots have no tilde spelling even when a home is supplied.
+        assert_eq!(
+            w.encode_record_gated(&json!(r"~\proj\src")).unwrap(),
+            json!(r"~\proj\src")
+        );
+    }
+
+    #[test]
+    fn windows_matching_is_exact_case_and_bounded() {
+        let w = windows_mapper();
+        let source = json!({
+            "cwd": r"C:\Users\Ada\proj\src",
+            "sibling": r"C:\Users\Ada\proj2\x",
+            "other_case": r"c:\users\ada\PROJ\src"
+        });
+        let encoded = w.encode_record(&source).unwrap();
+        assert_eq!(
+            encoded.wire,
+            json!({
+                "cwd": r"/__mallard_root__/b;\src",
+                "sibling": r"C:\Users\Ada\proj2\x",
+                "other_case": r"c:\users\ada\PROJ\src"
+            })
+        );
+        assert_eq!(w.decode_record(&encoded.wire).unwrap(), source);
+        assert_eq!(encoded.origins.replay(&source).unwrap(), encoded.wire);
+    }
+
+    #[test]
+    fn windows_and_posix_bindings_exchange_threads() {
+        let w = windows_mapper();
+        let p = SessionPathMapper::new("/Users/bob/proj", None, Some("/Users/bob")).unwrap();
+        // Windows → macOS: every Windows-only tag renders as the POSIX root.
+        let from_windows = w
+            .encode_record_gated(&json!(["C:/Users/Ada/proj/a", r"C:\\Users\\Ada\\proj\\b"]))
+            .unwrap();
+        assert_eq!(
+            p.decode_record(&from_windows).unwrap(),
+            json!(["/Users/bob/proj/a", r"/Users/bob/proj\\b"])
+        );
+        // macOS → Windows: the tilde tag renders as the Windows root.
+        let from_posix = p
+            .encode_record_gated(&json!(["~/proj/a", "file:///Users/bob/proj/b"]))
+            .unwrap();
+        assert_eq!(
+            w.decode_record(&from_posix).unwrap(),
+            json!([r"C:\Users\Ada\proj/a", "file:///C:/Users/Ada/proj/b"])
+        );
     }
 }

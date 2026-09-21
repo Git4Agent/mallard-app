@@ -643,7 +643,7 @@ pub fn prepare_child_payloads(
     let mapper = crate::session_path_map::SessionPathMapper::new(
         root,
         canonical_root,
-        std::env::var("HOME").ok().as_deref(),
+        crate::session_path_map::home_dir_text().as_deref(),
     )?;
     let mut result = Vec::with_capacity(children.len());
     for (key, (bytes, normalized)) in children {

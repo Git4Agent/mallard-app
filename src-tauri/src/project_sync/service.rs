@@ -4660,7 +4660,7 @@ fn observe_claude_local(
         let mapper = SessionPathMapper::new(
             project_root,
             (canonical_project_root != project_root).then_some(canonical_project_root),
-            std::env::var("HOME").ok().as_deref(),
+            mallard_infrastructure::session_path_map::home_dir_text().as_deref(),
         )
         .ok()?;
         let text = std::str::from_utf8(&bytes[..consumed]).ok()?;
@@ -5956,7 +5956,7 @@ fn provider_thread_review(
                         &binding.project_root,
                         (binding.canonical_project_root != binding.project_root)
                             .then_some(binding.canonical_project_root.as_str()),
-                        std::env::var("HOME").ok().as_deref(),
+                        mallard_infrastructure::session_path_map::home_dir_text().as_deref(),
                     )?;
                     let origins = local_binding
                         .filter(|row| row.path_origins_ref.is_some())
@@ -8857,7 +8857,7 @@ fn build_conversation_publication(
             &binding.project_root,
             (binding.canonical_project_root != binding.project_root)
                 .then_some(binding.canonical_project_root.as_str()),
-            std::env::var("HOME").ok().as_deref(),
+            mallard_infrastructure::session_path_map::home_dir_text().as_deref(),
         )?;
         let source_id = conversation
             .source_thread_id
@@ -15892,7 +15892,33 @@ fn fs_profile_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
 }
 
 pub(super) fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
-    std::fs::canonicalize(path).map_err(|error| format!("resolve '{}': {}", path.display(), error))
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("resolve '{}': {}", path.display(), error))?;
+    Ok(strip_windows_verbatim_prefix(canonical))
+}
+
+/// `std::fs::canonicalize` on Windows returns verbatim paths (`\\?\C:\…`).
+/// Bindings, the path-map root grammar, and provider `cwd` fields all use
+/// the ordinary drive spelling, so strip the prefix for plain drive paths.
+#[cfg(windows)]
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => {
+                let mut plain = PathBuf::from(format!("{}:\\", drive as char));
+                plain.extend(path.components().skip(2));
+                plain
+            }
+            _ => path,
+        },
+        _ => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(test)]

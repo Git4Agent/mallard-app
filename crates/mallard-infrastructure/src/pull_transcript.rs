@@ -234,7 +234,7 @@ pub fn prepare_pull_transcript_with_identities(
             request.project_root,
             (request.canonical_project_root != request.project_root)
                 .then_some(request.canonical_project_root),
-            std::env::var("HOME").ok().as_deref(),
+            crate::session_path_map::home_dir_text().as_deref(),
         )?;
         let wire_text = std::str::from_utf8(cloud_bytes)
             .map_err(|_| format!("conversation '{}' wire is not valid UTF-8", cloud_thread_id))?;

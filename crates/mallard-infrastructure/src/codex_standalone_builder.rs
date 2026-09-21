@@ -295,7 +295,7 @@ fn reconstruct_codex_root(
     identities: &std::collections::BTreeMap<String, String>,
     read_segment: &SegmentReader<'_>,
 ) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
-    let home = std::env::var("HOME").ok();
+    let home = crate::session_path_map::home_dir_text();
     let (mut output_root_id, mapper, encode_mode) = match mode {
         BuildMode::Encode {
             root,
