@@ -10,6 +10,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which platforms the dry run builds
+        default: all
+        type: choice
+        options: [all, macos, macos-intel, windows]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -18,6 +24,7 @@ concurrency:
 jobs:
   publish_macos:
     name: macOS Apple Silicon
+    if: github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'macos'
     permissions:
       contents: write
     runs-on: macos-latest
@@ -159,9 +166,16 @@ jobs:
           path: target/aarch64-apple-darwin/release/bundle/macos/Mallard_*_aarch64.app.tar.gz.sig
           if-no-files-found: error
 
+  # Tag releases and full dry runs need the Apple Silicon job's draft or
+  # verification first; a single-platform dry run may skip it.
   publish_macos_intel:
     name: macOS Intel
     needs: publish_macos
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'macos-intel')
+      && (needs.publish_macos.result == 'success'
+          || (github.event_name == 'workflow_dispatch' && needs.publish_macos.result == 'skipped'))
     permissions:
       contents: write
     runs-on: macos-latest
@@ -277,6 +291,11 @@ jobs:
   publish_windows:
     name: Windows x64
     needs: publish_macos
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'windows')
+      && (needs.publish_macos.result == 'success'
+          || (github.event_name == 'workflow_dispatch' && needs.publish_macos.result == 'skipped'))
     permissions:
       contents: write
     runs-on: windows-latest
