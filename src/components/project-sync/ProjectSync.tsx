@@ -100,6 +100,11 @@ import {
   type SyncOutcomeAction,
 } from "./syncOutcome";
 import { projectSyncApi } from "./api";
+import { UpdateProgressDialog, useAppUpdates } from "../AppUpdater";
+
+/** The Settings › Privacy choice, read fresh at the moment a check is due. */
+const readAutoUpdateCheckEnabled = () =>
+  projectSyncApi.getAppSettings().then((settings) => settings.update_check_enabled);
 import {
   applyPullReview,
   beginPullReview,
@@ -319,6 +324,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   busyRef.current = busy;
+  /* The updater never restarts over a tracked operation; `busy` is that gate.
+     The scheduled-check preference is read when a check is due, so the
+     Settings toggle needs no plumbing back here. */
+  const appUpdates = useAppUpdates({
+    busy,
+    autoCheckEnabled: readAutoUpdateCheckEnabled,
+  });
   const [error, setError] = useState<string | null>(null);
   const [catalogRemovalErrorTarget, setCatalogRemovalErrorTarget] = useState<{
     label: string;
@@ -3396,6 +3408,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       ),
     });
   }
+  /* A newer release, a manual check's result, or the receipt of a restart:
+     one item, and it shares the box with whatever else the shell is saying. */
+  if (appUpdates.notice) shellNotices.push(appUpdates.notice);
   if (notice) {
     shellNotices.push({
       key: "shell-notice",
@@ -3755,6 +3770,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           onSubmit={(next) => void saveRemap(next)}
         />
       )}
+
+      {appUpdates.progress && <UpdateProgressDialog {...appUpdates.progress} />}
 
     </div>
   );

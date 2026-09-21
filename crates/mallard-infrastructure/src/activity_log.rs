@@ -897,6 +897,10 @@ fn secure_file(path: &Path) -> Result<(), String> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("secure activity log '{}': {error}", path.display()))?;
     }
+    // Windows: the log lives under the user's profile, whose ACL already
+    // limits access to the user and administrators.
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

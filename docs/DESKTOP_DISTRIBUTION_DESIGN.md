@@ -1,6 +1,10 @@
 # Desktop Distribution Design
 
-Status: Implemented in code; production launch gates remain
+Status: Historical. Distribution, signing, and release-pipeline planning
+now lives in [`PLAN_TRUSTED_DESKTOP_RELEASES.md`](./PLAN_TRUSTED_DESKTOP_RELEASES.md).
+Section 9 describes the July 2026 updater that was removed the next day
+(`af20e1a`); the current in-app update design, restored on top of trusted
+releases, is [`DESIGN_APP_UPDATES.md`](./DESIGN_APP_UPDATES.md).
 Date: 2026-07-19
 Application: Mallard (Tauri 2)
 

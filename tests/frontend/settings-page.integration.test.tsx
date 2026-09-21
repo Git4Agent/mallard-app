@@ -53,9 +53,13 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, />Light</);
   assert.match(html, />Dark</);
 
-  // Boolean settings render as switches. Redaction defaults On while loading.
+  // Boolean settings render as switches. Redaction and the scheduled update
+  // check default On while loading.
   const switches = html.match(/role="switch"[^>]*class="sync-settings-switch"[^>]*checked=""/g) ?? [];
-  assert.equal(switches.length, 6);
+  assert.equal(switches.length, 7);
+  assert.match(html, /<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Automatic update checks"[^>]*checked=""/);
+  // The manual check sits beside its switch and is inert outside the desktop app.
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Check for updates<\/button>/);
   for (const provider of ["Codex", "Claude"]) {
     assert.match(html, new RegExp(`<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Push ${provider} subagents"[^>]*checked=""`));
   }

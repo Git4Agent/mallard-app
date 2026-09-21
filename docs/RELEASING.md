@@ -1,50 +1,135 @@
 # Releasing Mallard
 
-Mallard is distributed through GitHub Releases as an Apple Silicon DMG and a
-Windows x64 NSIS installer. A pushed `v*` tag starts
-`.github/workflows/release.yml`. The Apple Silicon job builds
-`aarch64-apple-darwin` and creates the draft release first. Only after that job
-succeeds does the Windows job build `x86_64-pc-windows-msvc`, verify a temporary
-installation, and upload its installer to the same draft.
+Mallard is distributed through GitHub Releases as Developer ID signed and
+notarized Apple Silicon and Intel DMGs and an unsigned Windows x64 NSIS
+installer. A pushed `v*` tag starts `.github/workflows/release.yml`. The Apple
+Silicon job builds `aarch64-apple-darwin`, signs, notarizes, verifies, and
+creates the draft release first. Only after that job succeeds do the other two
+jobs run in parallel: the Intel job cross-compiles `x86_64-apple-darwin` on an
+Apple Silicon runner (Rosetta 2 lets the verifier run the packaged x86_64 CLI)
+and the Windows job builds `x86_64-pc-windows-msvc` and verifies a temporary
+installation. Both upload to the same draft only while it is still a draft.
+
+The same workflow can be started by hand from the Actions tab (**Run
+workflow**, `workflow_dispatch`). That is a dry run: every build, signing,
+notarization, and verification step runs, but the artifacts are attached to
+the workflow run instead of a release, and no tag or draft is touched. Use it
+to debug signing without consuming a version.
 
 ## Signing and platform approval
 
-Mallard does not currently have an Apple Developer Program certificate. Its
-macOS bundle therefore uses Tauri's explicit ad-hoc identity (`-`). This gives
-the Apple Silicon application a structurally valid code signature, but it is
-not a Developer ID signature and the application is not notarized.
+### macOS
 
-The release build validates the application before upload with:
+The release build signs `Mallard.app` and the packaged `mallard-cli` with a
+`Developer ID Application` certificate, enables the hardened runtime, submits
+the application to Apple's notary service, and staples the ticket. The build
+wrapper then notarizes and staples the DMG itself. Gatekeeper opens the result
+without any security override.
+
+The hardened runtime blocks Apple Events unless the application carries the
+`com.apple.security.automation.apple-events` entitlement
+(`src-tauri/Entitlements.plist`) and declares `NSAppleEventsUsageDescription`
+(`src-tauri/Info.plist`). Mallard needs both for **Open in Terminal** and the
+Codex App refresh. Exercise those actions on every trusted build; a missing
+entitlement fails silently with error -1743 rather than at build time.
+
+`src-tauri/tauri.conf.json` keeps `signingIdentity: "-"` so local builds
+without the certificate remain structurally valid ad-hoc builds. The Tauri CLI
+reads `APPLE_SIGNING_IDENTITY` from the environment before the configuration
+value, so trusted builds override it without editing the file.
+
+Trusted builds require these GitHub Actions repository secrets:
+
+| Secret | Value |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 of the Developer ID Application `.p12` (certificate and private key) |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: <Name> (<TEAMID>)` |
+| `APPLE_TEAM_ID` | the Apple Developer Team ID |
+| `APPLE_API_KEY` | App Store Connect API Key ID |
+| `APPLE_API_ISSUER` | App Store Connect API Issuer ID |
+| `APPLE_API_KEY_CONTENT` | full text of `AuthKey_<KEYID>.p8` |
+
+The workflow writes the API key to `$RUNNER_TEMP/AuthKey.p8` and passes its
+path as `APPLE_API_KEY_PATH`. Nothing in the repository prints a secret. How
+to obtain each value is in
+[`PLAN_TRUSTED_DESKTOP_RELEASES.md`](./PLAN_TRUSTED_DESKTOP_RELEASES.md)
+§2.1.
+
+Two environment variables control verification in `scripts/tauri-build.mjs`:
+
+- `MALLARD_VERIFY_MACOS_BUNDLE=1` runs `scripts/verify-macos-bundle.mjs`
+  against the produced DMG.
+- `MALLARD_REQUIRE_TRUSTED_MACOS=1` fails the build unless the App Store
+  Connect credentials are present, and makes the verifier require a Developer
+  ID Application signature with the hardened runtime on the app and the CLI,
+  the Apple Events entitlement, `spctl --assess --type execute` reporting
+  `source=Notarized Developer ID`, `spctl --assess --type open` accepting the
+  DMG, and `xcrun stapler validate` succeeding on both. The release workflow
+  sets both.
+
+### Windows
+
+The Windows NSIS installer is currently unsigned. Windows shows a Microsoft
+Defender SmartScreen warning ("Windows protected your PC"); testers choose
+**More info → Run anyway**. The workflow does not claim an Authenticode
+signature; the installer's updater signature (below) is a separate thing.
+
+### Updater signing
+
+Installed copies update themselves from GitHub Releases
+([`DESIGN_APP_UPDATES.md`](./DESIGN_APP_UPDATES.md)). Every updater artifact —
+the macOS `.app.tar.gz` archives and the Windows installer — is signed with a
+minisign key that is separate from Apple signing, and `latest.json` carries
+those signatures. The app verifies them against the public key committed in
+`src-tauri/tauri.conf.json` (`plugins.updater.pubkey`).
+
+One-time setup:
 
 ```bash
-codesign --verify --deep --strict --verbose=4 /path/to/Mallard.app
+npm run tauri signer generate -- -w ~/.private_keys/mallard-updater.key
 ```
 
-If that validation fails, the GitHub release draft is not created or updated.
-Ad-hoc signing does not prevent Gatekeeper warnings; testers must approve the
-application manually.
+Back up the key file and its password outside the repository. **Losing the
+private key strands every installed copy**: no later release can be trusted
+by the updater and users must reinstall by hand. Only the printed public key
+goes into `tauri.conf.json` (`plugins.updater.pubkey`); the committed one is
+minisign key ID `3DBE1722FCFE006B`, and it changes only on rotation.
 
-The Windows NSIS installer is currently unsigned. Windows may show a Microsoft
-Defender SmartScreen warning, and testers must review and approve that prompt
-manually. The workflow does not produce automatic-update metadata and does not
-claim an Authenticode or Developer ID signature.
+| Secret | Value |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | full contents of `mallard-updater.key` (locally, a path to the file also works) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the password chosen at generation; must be set (to the empty string for a passwordless key) or the CLI prompts on a terminal that CI does not have |
+
+The build wrapper requests updater artifacts only when
+`TAURI_SIGNING_PRIVATE_KEY` is set, so a local build without the key is an
+ordinary build. Every release job sets `MALLARD_REQUIRE_UPDATER_ARTIFACTS=1`,
+which turns a missing key into a build failure rather than an unsigned
+release. On macOS the wrapper renames the archive to
+`Mallard_<version>_<aarch64|x64>.app.tar.gz` and, in trusted mode, the
+verifier extracts it and runs the same Gatekeeper and stapler checks on its
+contents as on the DMG.
+
+`latest.json` is written by the `publish_updater_manifest` job after all
+three build jobs have attached their assets, and only to a draft. Publishing
+the draft is what makes
+`https://github.com/Git4Agent/mallard-app/releases/latest/download/latest.json`
+resolve to it; a draft is never offered to users.
 
 ## Install the DMG
 
-1. Download the Apple Silicon DMG from the GitHub Release.
+1. Download the DMG for your Mac from the GitHub Release: `_aarch64.dmg` for
+   Apple Silicon, `_x64.dmg` for Intel. (Apple menu → About This Mac shows
+   which chip you have.)
 2. Open the DMG and drag Mallard to Applications.
-3. Attempt to open Mallard from Applications.
-4. If macOS blocks it, open System Settings, select Privacy & Security, find the
-   message about Mallard, and choose Open Anyway.
-5. Confirm the final Open prompt.
-
-Do not tell users that this build is notarized or signed by an identified Apple
-developer.
+3. Open Mallard from Applications. No security override is required.
+4. The first **Open in Terminal** or Codex App refresh shows a macOS
+   Automation prompt for Mallard; allow it.
 
 ## Install on Windows
 
 1. Download the Windows x64 NSIS `.exe` from the same GitHub Release.
-2. Run the installer and review any SmartScreen warning before choosing to
+2. Run the installer and review the SmartScreen warning before choosing to
    continue.
 3. Launch Mallard from the Start menu and confirm the storage workspace opens.
 
@@ -53,7 +138,14 @@ for the app's agent-assisted workflow. It does not add the CLI to `PATH`, edit a
 PowerShell profile, or modify shell startup configuration. Mallard passes an
 absolute packaged path to an agent instead.
 
-## Prepare version 0.1.2
+On Windows, **Open in Terminal** opens a new console running the Codex or
+Claude CLI found on `PATH`, and **Open in Codex** / **Open in Claude** start
+the desktop app registered for the `codex://` or `claude://` link with the
+profile home pinned in its environment. Project roots and conversation paths
+use the Windows path grammar described in
+[`PLAN_WINDOWS_PATH_HANDLING.md`](./PLAN_WINDOWS_PATH_HANDLING.md).
+
+## Prepare version 0.1.3
 
 The version must match in these files:
 
@@ -61,11 +153,17 @@ The version must match in these files:
 - `package-lock.json`
 - `Cargo.toml` (`[workspace.package]`; `src-tauri/Cargo.toml` inherits it)
 - `src-tauri/tauri.conf.json`
+- `tests/release-config.test.mjs`
+
+Before the first tag that ships the in-app updater, confirm the
+`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets
+exist and belong to the public key committed in `src-tauri/tauri.conf.json`;
+the dry-run workflow's signing step is what proves the pair matches.
 
 Run the release checks before creating a tag:
 
 ```bash
-npm run check:release-version -- v0.1.2
+npm run check:release-version -- v0.1.3
 npm run test:integration
 npm run build
 cargo check --workspace
@@ -73,35 +171,68 @@ cargo check --workspace
 
 ## Build and verify locally on macOS
 
-Build the same Apple Silicon DMG locally before creating the release tag:
+A trusted local build needs the Developer ID certificate in the login keychain
+(`security find-identity -v -p codesigning` lists it) and the App Store Connect
+API key on disk. Build the same Apple Silicon DMG the workflow produces:
 
 ```bash
-MALLARD_VERIFY_MACOS_BUNDLE=1 npm run tauri build -- \
-  --target aarch64-apple-darwin \
-  --bundles dmg
+APPLE_SIGNING_IDENTITY="Developer ID Application: <Name> (<TEAMID>)" \
+APPLE_TEAM_ID=<TEAMID> \
+APPLE_API_KEY=<KEYID> \
+APPLE_API_ISSUER=<ISSUER> \
+APPLE_API_KEY_PATH=~/.private_keys/AuthKey_<KEYID>.p8 \
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.private_keys/mallard-updater.key)" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<password> \
+MALLARD_VERIFY_MACOS_BUNDLE=1 \
+MALLARD_REQUIRE_TRUSTED_MACOS=1 \
+MALLARD_REQUIRE_UPDATER_ARTIFACTS=1 \
+npm run tauri build -- --target aarch64-apple-darwin --bundles dmg
 ```
 
-Inspect the generated DMG and application:
+Without the `APPLE_*` variables and without `MALLARD_REQUIRE_TRUSTED_MACOS`,
+the same command produces an ad-hoc signed DMG for local testing only; never
+upload one. Without `TAURI_SIGNING_PRIVATE_KEY` no updater archive is
+produced; with it, the build also leaves
+`target/aarch64-apple-darwin/release/bundle/macos/Mallard_0.1.3_aarch64.app.tar.gz`
+and its `.sig`.
+
+The Intel DMG builds the same way from an Apple Silicon Mac after
+`rustup target add x86_64-apple-darwin`, replacing the target with
+`--target x86_64-apple-darwin`. The verifier then runs the packaged x86_64
+`mallard-cli` under Rosetta 2 and checks with `lipo -archs` that both the app
+and the CLI contain exactly `x86_64`. Output lands under
+`target/x86_64-apple-darwin/release/bundle/dmg/Mallard_0.1.3_x64.dmg`.
+
+Inspect the generated DMG and application by hand if needed:
 
 ```bash
 hdiutil verify \
-  target/aarch64-apple-darwin/release/bundle/dmg/Mallard_0.1.2_aarch64.dmg
+  target/aarch64-apple-darwin/release/bundle/dmg/Mallard_0.1.3_aarch64.dmg
 
-file \
-  target/aarch64-apple-darwin/release/bundle/macos/Mallard.app/Contents/MacOS/mallard
+spctl --assess --type open --context context:primary-signature --verbose=4 \
+  target/aarch64-apple-darwin/release/bundle/dmg/Mallard_0.1.3_aarch64.dmg
 
-codesign --verify --deep --strict --verbose=4 \
+codesign -dvv \
   target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
 
-codesign -dvvv \
+spctl --assess --type execute --verbose=4 \
+  target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
+
+xcrun stapler validate \
   target/aarch64-apple-darwin/release/bundle/macos/Mallard.app
 ```
 
-The DMG verification must succeed, `file` must report an `arm64` executable,
-and `codesign` must report a valid ad-hoc signature. The automated verifier also
-runs the packaged `mallard-cli --help` from the mounted image and from a
-temporary installed location. Install this local DMG and complete the manual
-Gatekeeper approval flow before creating the tag.
+`codesign` must report `Authority=Developer ID Application: …` and
+`flags=0x10000(runtime)`, and both `spctl` assessments must print `accepted`.
+The automated verifier also runs the packaged `mallard-cli --help` from the
+mounted image and from a temporary installed location.
+
+Then test Gatekeeper the way a user meets it: copy the DMG to another user
+account or a clean Mac through a browser download (or add the quarantine flag
+by hand with `xattr -w com.apple.quarantine "0083;$(printf '%x' $(date +%s));Safari;" <dmg>`),
+open it, install, and launch. No "unidentified developer" dialog may appear.
+Finally run **Open in Terminal** and a Codex App refresh from the installed
+build and confirm the Automation prompt appears once and the action succeeds.
 
 ## Build and verify locally on Windows
 
@@ -133,17 +264,50 @@ directory for manual inspection and upload.
 
 ## Create the GitHub draft
 
-After the local installation succeeds, commit the release changes and push
-them to the default branch. Then create and push the matching tag:
+Run the dry-run workflow first (Actions → **Release macOS and Windows apps** →
+**Run workflow**) and confirm both jobs pass with the trusted verifier. Then
+commit the release changes, push them to the default branch, and create and
+push the matching tag:
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
-Wait for both release jobs. The Windows job is deliberately ordered after the
-Apple Silicon job so the draft exists before the second artifact is uploaded.
-Inspect the draft release, download and install the DMG on an Apple Silicon Mac,
-and install the NSIS artifact on Windows x64. Publish the draft only after both
-artifacts pass the same checks. Do not replace an artifact for an existing
-version; fix the problem, increment the version, and create a new release.
+Wait for all four release jobs. The Intel and Windows jobs are deliberately
+ordered after the Apple Silicon job so the draft exists before their artifacts
+are uploaded, and the manifest job runs after all three. Inspect the draft
+release: it must hold exactly nine assets —
+`Mallard_<version>_aarch64.dmg`, `Mallard_<version>_aarch64.app.tar.gz` and
+its `.sig`, `Mallard_<version>_x64.dmg`, `Mallard_<version>_x64.app.tar.gz`
+and its `.sig`, `Mallard_<version>_x64-setup.exe` and its `.sig`, and
+`latest.json`. A draft without `latest.json` must not be published: installed
+copies would never learn about the release. Download and install the DMGs on
+an Apple Silicon Mac and an Intel Mac, and install the NSIS artifact on
+Windows x64. Publish the draft only after every artifact passes the same
+checks. Do not replace an artifact for an existing version; fix the problem,
+increment the version, and create a new release.
+
+Publishing is what switches on in-app updates for the release: installed
+copies of the previous version see it at their next check (within six hours,
+or at once through Settings › Privacy › **Check for updates**).
+
+## Pull a bad release
+
+If a published release turns out to be broken, return it to a draft at once:
+
+```bash
+gh release edit v0.1.3 --draft --repo Git4Agent/mallard-app
+```
+
+GitHub's `latest` then falls back to the previous published release, whose
+`latest.json` names a lower version, so no further copies are offered the bad
+build. Copies that already installed it are not downgraded — the updater only
+moves forward — so ship the fix as the next version.
+
+## Secret rotation
+
+Developer ID certificates are valid for five years. If the certificate or the
+API key is compromised, revoke it in the developer portal or App Store Connect,
+create a replacement, and update the GitHub secrets. Already-notarized releases
+stay valid.

@@ -77,6 +77,8 @@ export interface AppSettings {
   push_codex_children: boolean;
   push_claude_children: boolean;
   credential_redaction_enabled: boolean;
+  /** Scheduled release checks against GitHub; a manual check ignores this. */
+  update_check_enabled: boolean;
   schema: number;
   conversation_file_limit_bytes: number;
   timeline_preview_limit_bytes: number;

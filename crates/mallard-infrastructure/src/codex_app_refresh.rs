@@ -132,7 +132,43 @@ pub fn refresh_offer(
         }
         manual_offer
     }
-    #[cfg(any(test, not(target_os = "macos")))]
+    #[cfg(all(not(test), windows))]
+    {
+        let profile_note = codex_home
+            .filter(|home| !is_default_codex_home(home))
+            .map(|home| {
+                format!(
+                    " Mallard will relaunch it with this project's Codex home ({}).",
+                    home.display()
+                )
+            })
+            .unwrap_or_default();
+        let app = find_installed_windows_app()?;
+        match windows_app_is_running(&app) {
+            Ok(true) => Some(CodexAppRefreshOffer {
+                operation_id,
+                app_kind: CodexAppKind::Codex,
+                app_name: WINDOWS_CODEX_APP_NAME.to_string(),
+                state: CodexAppRefreshState::RestartAvailable,
+                message: format!(
+                    "{WINDOWS_CODEX_APP_NAME} may need a restart to refresh its conversation \
+                     list.{profile_note}"
+                ),
+            }),
+            Ok(false) => None,
+            Err(_) => Some(CodexAppRefreshOffer {
+                operation_id,
+                app_kind: CodexAppKind::Codex,
+                app_name: WINDOWS_CODEX_APP_NAME.to_string(),
+                state: CodexAppRefreshState::ManualRestart,
+                message: format!(
+                    "Restart {WINDOWS_CODEX_APP_NAME} manually if the synced conversation is \
+                     not visible."
+                ),
+            }),
+        }
+    }
+    #[cfg(any(test, not(any(target_os = "macos", windows))))]
     {
         let _ = (operation_id, codex_home);
         None
@@ -174,11 +210,145 @@ pub fn restart_after_pull(
             specification.app_name
         ))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        if app_kind != CodexAppKind::Codex {
+            return Err("Codex App restart adapter is unavailable".to_string());
+        }
+        let app = find_installed_windows_app().ok_or_else(|| {
+            "the reviewed Codex App installation is no longer available".to_string()
+        })?;
+        if !windows_app_is_running(&app)? {
+            return Ok(CodexAppRestartResult {
+                success: true,
+                message: format!(
+                    "{WINDOWS_CODEX_APP_NAME} is already closed; its conversation list will \
+                     refresh next time it opens."
+                ),
+            });
+        }
+        request_windows_app_quit(&app)?;
+        let deadline = Instant::now() + APP_QUIT_TIMEOUT;
+        while Instant::now() < deadline {
+            if !windows_app_is_running(&app)? {
+                return relaunch_windows_app(&app, codex_home);
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        Err(format!(
+            "{WINDOWS_CODEX_APP_NAME} did not finish a graceful quit; Mallard did not force it \
+             closed"
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (app_kind, codex_home);
         Err("automatic Codex App restart is unavailable on this platform".to_string())
     }
+}
+
+#[cfg(windows)]
+const WINDOWS_CODEX_APP_NAME: &str = "Codex App";
+
+/// The Codex desktop app on Windows, located through its `codex://` handler
+/// rather than a fixed install path; its image name drives process checks.
+#[cfg(windows)]
+struct InstalledWindowsApp {
+    executable: PathBuf,
+    image_name: String,
+}
+
+#[cfg(windows)]
+fn find_installed_windows_app() -> Option<InstalledWindowsApp> {
+    let executable = crate::providers::windows_app::scheme_handler_executable("codex").ok()?;
+    let image_name = executable.file_name()?.to_str()?.to_string();
+    Some(InstalledWindowsApp {
+        executable,
+        image_name,
+    })
+}
+
+/// `tasklist` prints matching rows as CSV, or an `INFO:` line when nothing
+/// matches; both exit successfully, so the row itself is the answer.
+#[cfg(windows)]
+fn windows_app_is_running(app: &InstalledWindowsApp) -> Result<bool, String> {
+    let filter = format!("IMAGENAME eq {}", app.image_name);
+    let (success, output) = run_capture_bounded(
+        Command::new("tasklist.exe")
+            .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+        APP_COMMAND_TIMEOUT,
+    )?;
+    if !success {
+        return Err("Codex App running state could not be queried".to_string());
+    }
+    let text = String::from_utf8_lossy(&output);
+    Ok(text.lines().any(|line| {
+        line.trim_start_matches('"')
+            .to_ascii_lowercase()
+            .starts_with(&app.image_name.to_ascii_lowercase())
+    }))
+}
+
+/// `taskkill` without `/F` posts a close request, the Windows equivalent of
+/// an AppleScript `quit`; the app may still refuse or prompt.
+#[cfg(windows)]
+fn request_windows_app_quit(app: &InstalledWindowsApp) -> Result<(), String> {
+    if run_status_bounded(
+        Command::new("taskkill.exe")
+            .args(["/IM", &app.image_name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        APP_COMMAND_TIMEOUT,
+    )? {
+        Ok(())
+    } else {
+        Err(format!(
+            "{WINDOWS_CODEX_APP_NAME} did not accept a graceful quit request"
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn relaunch_windows_app(
+    app: &InstalledWindowsApp,
+    codex_home: &Path,
+) -> Result<CodexAppRestartResult, String> {
+    use crate::providers::windows_app::{display_launch, launch_app};
+    let pinned_home = [("CODEX_HOME", codex_home)];
+    let pinned: &[(&str, &Path)] = if is_default_codex_home(codex_home) {
+        &[]
+    } else {
+        &pinned_home
+    };
+    let manual_guidance = format!(
+        "{WINDOWS_CODEX_APP_NAME} closed, but relaunching it did not complete. Start it \
+         manually, for example: {}",
+        display_launch(&app.executable, pinned, &[])
+    );
+    if launch_app(&app.executable, pinned, &[]).is_err() {
+        return Err(manual_guidance);
+    }
+    let deadline = Instant::now() + APP_QUIT_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(true) = windows_app_is_running(app) {
+            return Ok(CodexAppRestartResult {
+                success: true,
+                message: if pinned.is_empty() {
+                    format!("{WINDOWS_CODEX_APP_NAME} restarted.")
+                } else {
+                    format!(
+                        "{WINDOWS_CODEX_APP_NAME} restarted with this project's Codex home ({}).",
+                        codex_home.display()
+                    )
+                },
+            });
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err(manual_guidance)
 }
 
 /// Relaunch a stopped, validated app bundle. The default `~/.codex` profile
@@ -258,9 +428,9 @@ fn relaunch_mac_app(
 /// Whether this profile home is the one a plain LaunchServices relaunch
 /// would already read. Unresolvable paths compare as non-default so the
 /// pinned-environment launch path is chosen — the safe direction.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn is_default_codex_home(codex_home: &Path) -> bool {
-    let Some(default_home) = dirs::home_dir().map(|home| home.join(".codex")) else {
+    let Some(default_home) = crate::persistence::user_home_dir().map(|home| home.join(".codex")) else {
         return false;
     };
     if codex_home == default_home {
@@ -290,7 +460,7 @@ fn find_installed_mac_app(specification: SupportedMacApp) -> Option<InstalledMac
 #[cfg(target_os = "macos")]
 fn mac_app_candidate_paths(bundle_name: &str) -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("/Applications").join(bundle_name)];
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::persistence::user_home_dir() {
         paths.push(home.join("Applications").join(bundle_name));
     }
     paths
@@ -395,7 +565,7 @@ fn apple_script_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn run_capture_bounded(
     command: &mut Command,
     timeout: Duration,

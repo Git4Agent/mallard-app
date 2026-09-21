@@ -1378,17 +1378,14 @@ fn discover_generic_project_content(
             )?;
             continue;
         }
-        #[cfg(unix)]
+        if crate::persistence::hard_link_count(&meta, entry.path()).is_some_and(|links| links > 1)
         {
-            use std::os::unix::fs::MetadataExt;
-            if meta.nlink() > 1 {
-                add_blocked_project_content_candidate(
-                    discovery,
-                    &relative,
-                    "Hard-linked files are not portable project content",
-                )?;
-                continue;
-            }
+            add_blocked_project_content_candidate(
+                discovery,
+                &relative,
+                "Hard-linked files are not portable project content",
+            )?;
+            continue;
         }
         if meta.len() > MAX_FILE_BYTES {
             add_blocked_project_content_candidate(
@@ -1932,15 +1929,11 @@ fn inspect_candidate_file_with_limit(
             max_file_bytes
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if meta.nlink() > 1 {
-            return Err(format!(
-                "hard-linked file '{}' is not portable",
-                file.display()
-            ));
-        }
+    if crate::persistence::hard_link_count(&meta, file).is_some_and(|links| links > 1) {
+        return Err(format!(
+            "hard-linked file '{}' is not portable",
+            file.display()
+        ));
     }
     let relative = file
         .strip_prefix(canonical_approved_root)

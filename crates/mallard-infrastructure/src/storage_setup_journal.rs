@@ -376,12 +376,12 @@ fn journal_guard(root: &Path) -> Result<JournalGuard, String> {
     if !metadata.file_type().is_file() {
         return Err("storage setup journal lock is not a regular file".to_string());
     }
+    if crate::persistence::open_file_link_count(&file, &metadata).is_some_and(|links| links != 1) {
+        return Err("storage setup journal lock has unsafe hard links".to_string());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.nlink() != 1 {
-            return Err("storage setup journal lock has unsafe hard links".to_string());
-        }
+        use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("secure storage setup journal lock: {}", error))?;
     }

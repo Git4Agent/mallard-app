@@ -349,10 +349,25 @@ pub struct LocalStateRepository {
     root: PathBuf,
 }
 
+/// The current user's home directory. On Unix `dirs` reads `HOME`; on
+/// Windows it asks the known-folder API and ignores `USERPROFILE`, so an
+/// explicit `USERPROFILE` is honoured first there to keep the same override
+/// semantics for tests and restricted environments.
+pub fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        let profile = PathBuf::from(profile);
+        if profile.is_absolute() {
+            return Some(profile);
+        }
+    }
+    dirs::home_dir()
+}
+
 impl LocalStateRepository {
     /// Resolve the machine-global metadata directory from the user's home.
     pub fn from_user_home() -> Result<Self, String> {
-        let home = dirs::home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
+        let home = user_home_dir().ok_or_else(|| "cannot find home directory".to_string())?;
         Self::from_home_dir(home)
     }
 
@@ -396,13 +411,12 @@ impl LocalStateRepository {
         if !metadata.file_type().is_file() {
             return Err("host-operation lock is not a regular file".to_string());
         }
+        if open_file_link_count(&file, &metadata).is_some_and(|links| links != 1) {
+            return Err("host-operation lock has unsafe hard links".to_string());
+        }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
             use std::os::unix::fs::PermissionsExt;
-            if metadata.nlink() != 1 {
-                return Err("host-operation lock has unsafe hard links".to_string());
-            }
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .map_err(|error| format!("secure host-operation lock: {}", error))?;
         }
@@ -2637,6 +2651,55 @@ impl LocalStateRepository {
     }
 }
 
+/// How many directory entries name this regular file's data, or `None`
+/// when the platform cannot say. Hard-linked files are never portable and
+/// shared provider snapshots are excluded from capture on every platform.
+pub(crate) fn hard_link_count(meta: &fs::Metadata, path: &Path) -> Option<u64> {
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = path;
+        Some(meta.nlink())
+    }
+    #[cfg(windows)]
+    {
+        let file = fs::File::open(path).ok()?;
+        windows_file_identity(&file, "hard link")
+            .ok()
+            .map(|(_, _, links)| u64::from(links))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Link count of an already-open regular file; `None` where unknown.
+pub(crate) fn open_file_link_count(file: &fs::File, meta: &fs::Metadata) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = file;
+        Some(meta.nlink())
+    }
+    #[cfg(windows)]
+    {
+        let _ = meta;
+        windows_file_identity(file, "lock")
+            .ok()
+            .map(|(_, _, links)| u64::from(links))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (file, meta);
+        None
+    }
+}
+
 #[cfg(windows)]
 fn windows_file_identity(file: &fs::File, description: &str) -> Result<(u32, u64, u32), String> {
     use std::os::windows::io::AsRawHandle;
@@ -2748,12 +2811,12 @@ pub(crate) fn persistence_guard(root: &Path) -> Result<PersistenceGuard, String>
     if !metadata.file_type().is_file() {
         return Err("project-sync persistence lock is not a regular file".to_string());
     }
+    if open_file_link_count(&file, &metadata).is_some_and(|links| links != 1) {
+        return Err("project-sync persistence lock has unsafe hard links".to_string());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.nlink() != 1 {
-            return Err("project-sync persistence lock has unsafe hard links".to_string());
-        }
+        use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o7777 != 0o600 {
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .map_err(|error| format!("secure project-sync persistence lock: {}", error))?;

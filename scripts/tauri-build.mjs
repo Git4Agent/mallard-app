@@ -66,22 +66,58 @@ function cargoTargetDirectory() {
   });
 }
 
-async function macosDmgPath(buildArgs) {
+// Where Tauri puts this build's bundles, and the `<Product>_<version>_<arch>`
+// stem its DMG carries; the updater archive is renamed to the same stem so
+// the two macOS builds never upload a file of the same name.
+async function bundleLayout(buildArgs) {
   const target = buildTarget(buildArgs);
   const architecture = target === "aarch64-apple-darwin" || (!target && process.arch === "arm64")
     ? "aarch64"
     : "x64";
   const tauriConfig = JSON.parse(await readFile(resolve("src-tauri", "tauri.conf.json"), "utf8"));
   const fileProductName = tauriConfig.productName.replaceAll(" ", "_");
-
-  return join(
+  const bundleDirectory = join(
     await cargoTargetDirectory(),
     ...(target ? [target] : []),
     "release",
     "bundle",
-    "dmg",
-    `${fileProductName}_${tauriConfig.version}_${architecture}.dmg`,
   );
+  return {
+    bundleDirectory,
+    productName: tauriConfig.productName,
+    stem: `${fileProductName}_${tauriConfig.version}_${architecture}`,
+  };
+}
+
+async function macosDmgPath(buildArgs) {
+  const { bundleDirectory, stem } = await bundleLayout(buildArgs);
+  return join(bundleDirectory, "dmg", `${stem}.dmg`);
+}
+
+// Tauri names the macOS updater archive after the product alone. Give it the
+// DMG's stem and require its signature; a build that asked for updater
+// artifacts and produced none must not pass.
+async function stageMacosUpdaterArchive(buildArgs) {
+  const { bundleDirectory, productName, stem } = await bundleLayout(buildArgs);
+  const generated = join(bundleDirectory, "macos", `${productName}.app.tar.gz`);
+  const staged = join(bundleDirectory, "macos", `${stem}.app.tar.gz`);
+  for (const suffix of ["", ".sig"]) {
+    if (!existsSync(`${generated}${suffix}`)) {
+      throw new Error(`Expected updater artifact at ${generated}${suffix}.`);
+    }
+  }
+  for (const suffix of ["", ".sig"]) {
+    await rm(`${staged}${suffix}`, { force: true });
+    await rename(`${generated}${suffix}`, `${staged}${suffix}`);
+  }
+  return staged;
+}
+
+async function requireWindowsUpdaterSignature(buildArgs) {
+  const { bundleDirectory, stem } = await bundleLayout(buildArgs);
+  const signature = join(bundleDirectory, "nsis", `${stem}-setup.exe.sig`);
+  if (!existsSync(signature)) throw new Error(`Expected updater signature at ${signature}.`);
+  return signature;
 }
 
 async function stageCliBinary(buildArgs) {
@@ -133,9 +169,23 @@ async function stageCliBinary(buildArgs) {
   }
 }
 
+// Updater artifacts (`.app.tar.gz`/`-setup.exe` plus a minisign `.sig`) need
+// the private key, so they are requested per build rather than committed in
+// tauri.conf.json: a local build without the key stays an ordinary build, and
+// a release build that lacks it fails closed instead of shipping unsigned.
+function updaterArtifactsRequested() {
+  const hasKey = Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY);
+  if (process.env.MALLARD_REQUIRE_UPDATER_ARTIFACTS === "1" && !hasKey) {
+    throw new Error("MALLARD_REQUIRE_UPDATER_ARTIFACTS needs TAURI_SIGNING_PRIVATE_KEY.");
+  }
+  return hasKey;
+}
+
 function withPackagedCliConfig(buildArgs) {
   if (buildArgs[0] !== "build") return buildArgs;
-  const overlay = JSON.stringify({ bundle: { externalBin: ["binaries/mallard-cli"] } });
+  const bundle = { externalBin: ["binaries/mallard-cli"] };
+  if (updaterArtifactsRequested()) bundle.createUpdaterArtifacts = true;
+  const overlay = JSON.stringify({ bundle });
   const separator = buildArgs.indexOf("--");
   const insertAt = separator === -1 ? buildArgs.length : separator;
   return [
@@ -146,18 +196,71 @@ function withPackagedCliConfig(buildArgs) {
   ];
 }
 
+// Tauri notarizes and staples Mallard.app but not the disk image around it.
+// Notarizing the DMG as well lets Gatekeeper accept the download itself.
+function notarizationCredentials() {
+  const keyId = process.env.APPLE_API_KEY;
+  const issuer = process.env.APPLE_API_ISSUER;
+  const keyPath = process.env.APPLE_API_KEY_PATH;
+  if (!keyId && !issuer && !keyPath) return undefined;
+  if (!keyId || !issuer || !keyPath) {
+    throw new Error("APPLE_API_KEY, APPLE_API_ISSUER, and APPLE_API_KEY_PATH must be set together.");
+  }
+  if (!existsSync(keyPath)) throw new Error(`Expected the App Store Connect API key at ${keyPath}.`);
+  return { keyId, issuer, keyPath };
+}
+
+async function notarizeDmg(dmgPath, { keyId, issuer, keyPath }) {
+  const submission = await capture("xcrun", [
+    "notarytool", "submit", dmgPath,
+    "--key", keyPath, "--key-id", keyId, "--issuer", issuer,
+    "--wait", "--output-format", "json",
+  ]);
+  const status = JSON.parse(submission).status;
+  if (status !== "Accepted") {
+    throw new Error(`Notarization of ${dmgPath} finished with status ${status}.`);
+  }
+  await runChecked("xcrun", ["stapler", "staple", dmgPath]);
+}
+
+// Resolve the overlay first: a release job missing the updater key fails
+// here, before any compilation.
+const tauriArgs = withPackagedCliConfig(args);
 await stageCliBinary(args);
-await runChecked(process.execPath, [tauriCliScript, ...withPackagedCliConfig(args)]);
+await runChecked(process.execPath, [tauriCliScript, ...tauriArgs]);
 
-if (process.env.MALLARD_VERIFY_MACOS_BUNDLE === "1") {
-  if (process.platform !== "darwin") {
-    throw new Error("MALLARD_VERIFY_MACOS_BUNDLE is only supported on macOS release runners.");
-  }
-  if (args[0] !== "build") {
-    throw new Error("MALLARD_VERIFY_MACOS_BUNDLE requires the Tauri build command.");
-  }
+const requireTrusted = process.env.MALLARD_REQUIRE_TRUSTED_MACOS === "1";
+const verifyBundle = process.env.MALLARD_VERIFY_MACOS_BUNDLE === "1";
+const macosBuild = process.platform === "darwin" && args[0] === "build";
+if ((requireTrusted || verifyBundle) && !macosBuild) {
+  throw new Error("MALLARD_REQUIRE_TRUSTED_MACOS and MALLARD_VERIFY_MACOS_BUNDLE need a Tauri build on macOS.");
+}
 
+const credentials = macosBuild ? notarizationCredentials() : undefined;
+if (requireTrusted && !credentials) {
+  throw new Error("MALLARD_REQUIRE_TRUSTED_MACOS needs App Store Connect API credentials.");
+}
+
+const updaterRequested = args[0] === "build" && updaterArtifactsRequested();
+const updaterArchivePath = updaterRequested && macosBuild ? await stageMacosUpdaterArchive(args) : undefined;
+if (updaterRequested && process.platform === "win32") await requireWindowsUpdaterSignature(args);
+
+if (credentials || verifyBundle) {
   const dmgPath = await macosDmgPath(args);
   if (!existsSync(dmgPath)) throw new Error(`Expected macOS DMG at ${dmgPath}.`);
-  await runChecked(process.execPath, [resolve("scripts", "verify-macos-bundle.mjs"), dmgPath]);
+
+  if (credentials) await notarizeDmg(dmgPath, credentials);
+
+  if (verifyBundle) {
+    const target = buildTarget(args);
+    const expectedArch = target === "x86_64-apple-darwin" || (!target && process.arch === "x64")
+      ? "x86_64"
+      : "arm64";
+    await runChecked(process.execPath, [
+      resolve("scripts", "verify-macos-bundle.mjs"),
+      dmgPath,
+      expectedArch,
+      ...(updaterArchivePath ? [updaterArchivePath] : []),
+    ]);
+  }
 }

@@ -9,7 +9,7 @@ pub mod materialization;
 mod timeline_sources;
 
 use super::traits::{
-    shell_quote, AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
+    AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
     MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
     ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
     SessionActionRequest, SessionAdapter, SessionAgentPreview, SessionAnalysis,
@@ -159,7 +159,7 @@ impl SessionAdapter for CodexAdapter {
         canonical_project_root: &str,
     ) -> Result<String, String> {
         crate::session_path_map::validate_pathmap_root("project root", project_root)?;
-        let home = std::env::var("HOME").ok();
+        let home = crate::session_path_map::home_dir_text();
         let mapper = crate::session_path_map::SessionPathMapper::new(
             project_root,
             (canonical_project_root != project_root).then_some(canonical_project_root),
@@ -189,21 +189,25 @@ impl SessionAdapter for CodexAdapter {
     }
 
     fn project_open_commands(&self, home: &Path, project_root: &str) -> Vec<ProjectOpenCommand> {
-        let environment = format!("CODEX_HOME={}", shell_quote(&home.to_string_lossy()));
-        let project = shell_quote(project_root);
+        use crate::providers::launch::TerminalCommand;
+        let cli = || TerminalCommand::new("codex").env("CODEX_HOME", home);
         let mut commands = vec![
             ProjectOpenCommand {
                 label: "Codex — new".to_string(),
-                command: format!("{} codex -C {}", environment, project),
+                command: cli().arg("-C").arg(project_root).display_line(),
             },
             ProjectOpenCommand {
                 label: "Codex — resume".to_string(),
-                command: format!("{} codex resume -C {}", environment, project),
+                command: cli()
+                    .arg("resume")
+                    .arg("-C")
+                    .arg(project_root)
+                    .display_line(),
             },
         ];
         // The desktop app is launched through a deep link, not the CLI, so it
         // needs its own line rather than a variation on the two above.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             if let Some(command) = codex_app_project_open_command(home, Path::new(project_root)) {
                 commands.push(ProjectOpenCommand {

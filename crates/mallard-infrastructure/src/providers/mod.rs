@@ -10,6 +10,7 @@
 pub mod claude;
 pub mod codex;
 pub mod launch;
+pub mod windows_app;
 pub mod registry;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_provider;

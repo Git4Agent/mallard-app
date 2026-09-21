@@ -55,6 +55,11 @@ pub struct AppSettings {
     pub push_claude_children: bool,
     #[serde(default = "default_enabled")]
     pub credential_redaction_enabled: bool,
+    /// Whether the desktop app asks GitHub for the latest published release
+    /// on its own schedule. A manual check ignores this. Not a tuning value:
+    /// toggling it must never purge caches.
+    #[serde(default = "default_enabled")]
+    pub update_check_enabled: bool,
     #[serde(default = "default_schema")]
     pub schema: u32,
     #[serde(default = "default_conversation_file_limit_bytes")]
@@ -74,6 +79,7 @@ impl Default for AppSettings {
             push_codex_children: true,
             push_claude_children: true,
             credential_redaction_enabled: true,
+            update_check_enabled: true,
             conversation_file_limit_bytes: default_conversation_file_limit_bytes(),
             timeline_preview_limit_bytes: DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES,
             comparison_workers: DEFAULT_COMPARISON_WORKERS,
