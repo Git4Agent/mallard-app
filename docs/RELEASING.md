@@ -97,6 +97,13 @@ for the app's agent-assisted workflow. It does not add the CLI to `PATH`, edit a
 PowerShell profile, or modify shell startup configuration. Mallard passes an
 absolute packaged path to an agent instead.
 
+On Windows, **Open in Terminal** opens a new console running the Codex or
+Claude CLI found on `PATH`. **Open in Codex** and **Open in Claude** are
+macOS-only because they pin the profile home into the desktop app; Windows
+shows a message pointing at Open in Terminal. Project roots and conversation
+paths use the Windows path grammar described in
+[`PLAN_WINDOWS_PATH_HANDLING.md`](./PLAN_WINDOWS_PATH_HANDLING.md).
+
 ## Prepare version 0.1.3
 
 The version must match in these files:

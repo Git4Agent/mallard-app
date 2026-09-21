@@ -1,6 +1,6 @@
 //! Safe Codex session actions: desktop-app deep links and Terminal resume.
 
-use crate::providers::launch::shell_quote;
+use crate::providers::launch::{launch_terminal, shell_quote, TerminalCommand};
 use crate::providers::traits::{
     SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
     SessionActionRequest,
@@ -157,8 +157,27 @@ pub(crate) fn launch_codex_app(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (thread_id, project_root, codex_home, before_launch);
-        Err("Open in Codex is currently supported only on macOS".to_string())
+        Err(CODEX_APP_UNAVAILABLE.to_string())
     }
+}
+
+/// The Codex desktop app ships for macOS only; other platforms get the
+/// Terminal action instead of a deep link nothing would answer.
+#[cfg(not(target_os = "macos"))]
+const CODEX_APP_UNAVAILABLE: &str =
+    "Open in Codex needs the Codex desktop app, which is available only on macOS; use Open in Terminal";
+
+/// Windows resolves the CLI from PATH (`codex.exe`, or the npm `codex.cmd`
+/// launcher unwrapped to its packaged native binary) without a shell.
+#[cfg(windows)]
+fn resolve_codex_cli() -> Result<PathBuf, String> {
+    crate::codex_binary::find_binary("codex")
+        .map_err(|_| "Codex CLI is not on PATH; install it or use Open in Codex".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn resolve_codex_cli() -> Result<PathBuf, String> {
+    Err("Open in Terminal is supported only on macOS and Windows".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -196,18 +215,17 @@ fn terminal_resume_command(
     thread_id: &str,
     project_root: &Path,
     codex_home: &Path,
-) -> Result<String, String> {
+) -> Result<TerminalCommand, String> {
     validate_thread_uuid(thread_id)?;
     if !codex_cli.is_absolute() || !project_root.is_absolute() || !codex_home.is_absolute() {
         return Err("Codex CLI, project root, and Codex home must be absolute".to_string());
     }
-    Ok(format!(
-        "CODEX_HOME={} {} resume {} -C {}",
-        shell_quote(&codex_home.to_string_lossy()),
-        shell_quote(&codex_cli.to_string_lossy()),
-        shell_quote(thread_id),
-        shell_quote(&project_root.to_string_lossy())
-    ))
+    Ok(TerminalCommand::new(codex_cli.to_string_lossy())
+        .env("CODEX_HOME", codex_home)
+        .arg("resume")
+        .arg(thread_id)
+        .arg("-C")
+        .arg(project_root.to_string_lossy()))
 }
 
 pub(crate) fn launch_terminal_resume(
@@ -216,19 +234,10 @@ pub(crate) fn launch_terminal_resume(
     codex_home: &Path,
     before_launch: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let codex_cli = resolve_codex_cli()?;
-        let command = terminal_resume_command(&codex_cli, thread_id, project_root, codex_home)?;
-        before_launch(&command);
-        crate::providers::launch::launch_terminal_command(&command)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (thread_id, project_root, codex_home, before_launch);
-        let _ = terminal_resume_command;
-        Err("Open in Terminal is currently supported only on macOS".to_string())
-    }
+    let codex_cli = resolve_codex_cli()?;
+    let command = terminal_resume_command(&codex_cli, thread_id, project_root, codex_home)?;
+    before_launch(&command.display_line());
+    launch_terminal(&command)
 }
 
 /// Open the Codex desktop app reading one profile home, with no thread and
@@ -249,38 +258,28 @@ pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), 
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err("Open in Codex is currently supported only on macOS".to_string())
+        Err(CODEX_APP_UNAVAILABLE.to_string())
     }
 }
 
 /// The Terminal command a Library profile launch runs: the CLI reading this
 /// home, no thread and no `-C` pin — Terminal's own default directory is the
 /// working directory.
-fn codex_home_terminal_command(codex_cli: &Path, codex_home: &Path) -> Result<String, String> {
+fn codex_home_terminal_command(
+    codex_cli: &Path,
+    codex_home: &Path,
+) -> Result<TerminalCommand, String> {
     if !codex_cli.is_absolute() || !codex_home.is_absolute() {
         return Err("Codex CLI and Codex home must be absolute".to_string());
     }
-    Ok(format!(
-        "CODEX_HOME={} {}",
-        shell_quote(&codex_home.to_string_lossy()),
-        shell_quote(&codex_cli.to_string_lossy())
-    ))
+    Ok(TerminalCommand::new(codex_cli.to_string_lossy()).env("CODEX_HOME", codex_home))
 }
 
-/// Open Terminal running the Codex CLI against one profile home.
+/// Open a terminal running the Codex CLI against one profile home.
 pub fn launch_codex_home_terminal(codex_home: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let codex_cli = resolve_codex_cli()?;
-        let command = codex_home_terminal_command(&codex_cli, codex_home)?;
-        crate::providers::launch::launch_terminal_command(&command)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = codex_home;
-        let _ = codex_home_terminal_command;
-        Err("Open in Terminal is currently supported only on macOS".to_string())
-    }
+    let codex_cli = resolve_codex_cli()?;
+    let command = codex_home_terminal_command(&codex_cli, codex_home)?;
+    launch_terminal(&command)
 }
 
 pub(super) fn available_actions(
@@ -360,7 +359,11 @@ mod tests {
             Path::new("/Users/dev/.codex"),
         )
         .unwrap();
-        assert!(command.contains("'/Users/dev/my project'"));
+        assert_eq!(
+            command.shell_line(),
+            "CODEX_HOME='/Users/dev/.codex' '/usr/local/bin/codex' resume \
+             0193b6c1-5352-7b12-9c6e-000000000001 -C '/Users/dev/my project'"
+        );
     }
 
     #[test]
@@ -371,11 +374,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            command,
+            command.shell_line(),
             "CODEX_HOME='/Users/dev/my codex'\\''s home' '/usr/local/bin/codex'"
         );
-        assert!(!command.contains("resume"));
-        assert!(!command.contains("-C"));
+        assert!(command.args.is_empty());
         assert!(
             codex_home_terminal_command(Path::new("codex"), Path::new("/Users/dev/.codex"))
                 .is_err()

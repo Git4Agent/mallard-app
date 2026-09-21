@@ -1606,25 +1606,33 @@ fn xml_unescape(text: &str) -> Option<String> {
     Some(output)
 }
 
-/// Encode an absolute POSIX path as the `file:` URI the current
+/// Encode an absolute path as the `file:` URI the current
 /// `CommandExecutionItem` contract stores. Already-encoded URIs pass
-/// through; a relative or non-POSIX path fails closed.
+/// through; a relative path fails closed. A Windows drive path becomes
+/// `file:///C:/…`, keeping the drive colon unencoded as Node and VS Code do.
 fn path_to_file_uri(path: &str) -> Result<String, String> {
     if path.starts_with("file:") {
         return Ok(path.to_string());
     }
-    if !path.starts_with('/') {
-        return Err(format!(
-            "Codex exec_command_end cwd '{path}' is not an absolute path or file URI"
-        ));
-    }
-    let mut uri = String::with_capacity(path.len() + 8);
+    let (windows, body) = match crate::session_path_map::root_family(path) {
+        Some(crate::session_path_map::RootFamily::Posix) => (false, path.to_string()),
+        Some(crate::session_path_map::RootFamily::Windows) => {
+            (true, format!("/{}", path.replace('\\', "/")))
+        }
+        None => {
+            return Err(format!(
+                "Codex exec_command_end cwd '{path}' is not an absolute path or file URI"
+            ))
+        }
+    };
+    let mut uri = String::with_capacity(body.len() + 8);
     uri.push_str("file://");
-    for byte in path.bytes() {
+    for byte in body.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 uri.push(byte as char);
             }
+            b':' if windows => uri.push(':'),
             other => {
                 uri.push('%');
                 uri.push_str(&format!("{other:02X}"));

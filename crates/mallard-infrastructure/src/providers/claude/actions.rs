@@ -1,6 +1,6 @@
 //! Safe Claude session actions surfaced through the generic action contract.
 
-use crate::providers::launch::{launch_terminal_command, shell_quote};
+use crate::providers::launch::{launch_terminal, shell_quote, TerminalCommand};
 use crate::providers::traits::{
     SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
     SessionActionRequest,
@@ -88,7 +88,7 @@ fn launch_claude_app(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (session_id, claude_home, before_launch);
-        Err("Open in Claude is currently supported only on macOS".to_string())
+        Err(CLAUDE_APP_UNAVAILABLE.to_string())
     }
 }
 
@@ -122,27 +122,46 @@ pub fn launch_claude_home_app(claude_home: &Path) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Err("Open in Claude is currently supported only on macOS".to_string())
+        Err(CLAUDE_APP_UNAVAILABLE.to_string())
     }
 }
+
+/// Only the macOS Claude app accepts a pinned `CLAUDE_CONFIG_DIR` through
+/// `open --env`; a bare `claude://` link elsewhere would read the wrong home.
+#[cfg(not(target_os = "macos"))]
+const CLAUDE_APP_UNAVAILABLE: &str =
+    "Open in Claude is available only on macOS; use Open in Terminal";
 
 /// The Terminal command a Library profile launch runs: the CLI reading this
 /// home, no session and no `cd` — Terminal's own default directory is the
 /// working directory.
-fn claude_home_terminal_command(claude_home: &Path) -> Result<String, String> {
+fn claude_home_terminal_command(claude_home: &Path) -> Result<TerminalCommand, String> {
     if !claude_home.is_absolute() {
         return Err("Claude home must be absolute".to_string());
     }
-    Ok(format!(
-        "CLAUDE_CONFIG_DIR={} claude",
-        shell_quote(&claude_home.to_string_lossy())
-    ))
+    Ok(TerminalCommand::new("claude").env("CLAUDE_CONFIG_DIR", claude_home))
 }
 
-/// Open Terminal running the Claude CLI against one profile home.
+/// Open a terminal running the Claude CLI against one profile home.
 pub fn launch_claude_home_terminal(claude_home: &Path) -> Result<(), String> {
     let command = claude_home_terminal_command(claude_home)?;
-    launch_terminal_command(&command)
+    launch_terminal(&command)
+}
+
+fn claude_resume_terminal_command(
+    session_id: &str,
+    project_root: &Path,
+    claude_home: &Path,
+) -> Result<TerminalCommand, String> {
+    validated_session_id(session_id)?;
+    if !project_root.is_absolute() || !claude_home.is_absolute() {
+        return Err("project root and Claude home must be absolute".to_string());
+    }
+    Ok(TerminalCommand::new("claude")
+        .cwd(project_root)
+        .env("CLAUDE_CONFIG_DIR", claude_home)
+        .arg("--resume")
+        .arg(session_id))
 }
 
 pub(super) fn available_actions(
@@ -185,18 +204,13 @@ pub(super) fn execute_action(
             Ok(SessionActionOutcome::Launched)
         }
         OPEN_IN_TERMINAL => {
-            validated_session_id(request.provider_session_id)?;
-            if !request.project_root.is_absolute() || !request.provider_home.is_absolute() {
-                return Err("project root and Claude home must be absolute".to_string());
-            }
-            let command = format!(
-                "cd {} && CLAUDE_CONFIG_DIR={} claude --resume {}",
-                shell_quote(&request.project_root.to_string_lossy()),
-                shell_quote(&request.provider_home.to_string_lossy()),
-                shell_quote(request.provider_session_id)
-            );
-            (request.before_launch)(&command);
-            launch_terminal_command(&command)?;
+            let command = claude_resume_terminal_command(
+                request.provider_session_id,
+                request.project_root,
+                request.provider_home,
+            )?;
+            (request.before_launch)(&command.display_line());
+            launch_terminal(&command)?;
             Ok(SessionActionOutcome::Launched)
         }
         other => Err(format!("unknown Claude session action '{}'", other)),
@@ -222,9 +236,23 @@ mod tests {
     #[test]
     fn home_launches_pin_the_config_dir_and_nothing_else() {
         let command = claude_home_terminal_command(Path::new("/Users/dev/my claude")).unwrap();
-        assert_eq!(command, "CLAUDE_CONFIG_DIR='/Users/dev/my claude' claude");
-        assert!(!command.contains("--resume"));
-        assert!(!command.contains("cd "));
+        assert_eq!(
+            command.shell_line(),
+            "CLAUDE_CONFIG_DIR='/Users/dev/my claude' claude"
+        );
+        assert!(command.args.is_empty());
+        assert!(command.cwd.is_none());
+        let resume = claude_resume_terminal_command(
+            "0193b6c1-5352-7b12-9c6e-000000000001",
+            Path::new("/Users/dev/my project"),
+            Path::new("/Users/dev/.claude"),
+        )
+        .unwrap();
+        assert_eq!(
+            resume.shell_line(),
+            "cd '/Users/dev/my project' && CLAUDE_CONFIG_DIR='/Users/dev/.claude' claude \
+             --resume 0193b6c1-5352-7b12-9c6e-000000000001"
+        );
         assert!(claude_home_terminal_command(Path::new("relative")).is_err());
         assert!(launch_claude_home_app(Path::new("relative")).is_err());
     }

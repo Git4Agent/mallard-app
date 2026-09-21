@@ -466,35 +466,36 @@ Pull. A Rosetta launch on Apple Silicon is only a smoke test.
 
 ### 3.2 Phase 2b — Windows x64 NSIS (unsigned)
 
-1. **Find out whether it builds.** Run the dry-run workflow for the Windows
-   job first; `npm run test:cli` compiles `mallard-cli`, `mallard-application`,
-   and `mallard-infrastructure` for `x86_64-pc-windows-msvc` before the Tauri
-   build. Expect failures and fix them per the AGENTS.md rule: each
-   Unix-only behaviour gets an explicit `cfg(windows)` implementation or an
-   explicit unsupported error; nothing may report success without running.
-   Known Unix-only code to review:
-   - `/bin/zsh` launches in
-     `crates/mallard-infrastructure/src/providers/codex/actions.rs` and
-     `crates/mallard-infrastructure/src/codex_binary.rs`;
-   - `std::os::unix::fs` (permissions, `MetadataExt`, `symlink`) in
-     `crates/mallard-infrastructure/src/persistence.rs`,
-     `provider_capture.rs`, `storage_setup_journal.rs`,
-     `crates/mallard-application/src/storage_setup.rs`, and
-     `crates/mallard-cli/src/r2_browser_setup.rs`;
-   - `osascript` and `/usr/bin/open` callers are already gated on
-     `target_os = "macos"`.
-2. Keep the existing `publish_windows` job and
+1. **Functional gaps, audited 2026-09-20.** A static audit found all 158
+   Unix-only API uses behind `cfg` gates, so the build was expected to
+   compile, but the product's core feature was blocked by design:
+   `validate_pathmap_root` accepted POSIX roots only, so every conversation
+   Push and Pull failed on a `C:\…` project root; seven sites read `HOME`;
+   `fs::canonicalize` would have leaked `\\?\` roots; Open in Terminal was
+   macOS-only; hard-link checks were Unix-only. All of these are addressed
+   in [`PLAN_WINDOWS_PATH_HANDLING.md`](./PLAN_WINDOWS_PATH_HANDLING.md)
+   (Windows root family and spellings in the path codec, `home_dir_text`,
+   verbatim-prefix stripping, a structured per-platform terminal launcher,
+   cross-platform hard-link detection). Open in Codex/Claude stay macOS-only
+   with a message pointing at Open in Terminal.
+2. **First real build.** Run the dry-run workflow for the Windows job;
+   `npm run test:cli` compiles `mallard-cli`, `mallard-application`, and
+   `mallard-infrastructure` for `x86_64-pc-windows-msvc` before the Tauri
+   build. The `cfg(windows)` branches cannot be compiled from macOS (the
+   AWS SDK's C dependencies need the MSVC headers), so this run is the first
+   compile of that code.
+3. Keep the existing `publish_windows` job and
    `scripts/verify-windows-bundle.ps1`; add the dry-run path
    (`actions/upload-artifact` instead of `gh release upload` on dispatch).
-3. Release notes and `docs/RELEASING.md` state that the installer is
+4. Release notes and `docs/RELEASING.md` state that the installer is
    unsigned, that SmartScreen shows "Windows protected your PC", and how to
    choose **More info → Run anyway**. Do not claim a publisher signature.
-4. Add a "Windows signing (future)" section to `RELEASING.md` describing the
+5. Add a "Windows signing (future)" section to `RELEASING.md` describing the
    intended path without implementing it: Azure Trusted Signing through
    `bundle.windows.signCommand` in `tauri.conf.json`, signing both
    `mallard.exe`, `mallard-cli.exe`, and the NSIS installer with a timestamp,
    verified by `Get-AuthenticodeSignature` returning `Valid`.
-5. `tests/release-config.test.mjs`: keep the existing Windows assertions;
+6. `tests/release-config.test.mjs`: keep the existing Windows assertions;
    add the dry-run assertions.
 
 Acceptance: a clean Windows 11 x64 machine installs from the NSIS artifact,

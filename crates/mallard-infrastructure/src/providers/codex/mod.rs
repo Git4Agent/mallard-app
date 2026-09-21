@@ -159,7 +159,7 @@ impl SessionAdapter for CodexAdapter {
         canonical_project_root: &str,
     ) -> Result<String, String> {
         crate::session_path_map::validate_pathmap_root("project root", project_root)?;
-        let home = std::env::var("HOME").ok();
+        let home = crate::session_path_map::home_dir_text();
         let mapper = crate::session_path_map::SessionPathMapper::new(
             project_root,
             (canonical_project_root != project_root).then_some(canonical_project_root),
