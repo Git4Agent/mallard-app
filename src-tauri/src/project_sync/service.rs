@@ -18739,12 +18739,12 @@ mod tests {
         let mut expected = vec![
             (
                 "Codex — new",
-                "CODEX_HOME='/tmp/custom codex/.codex' codex -C '/tmp/client'\"'\"'s project'"
+                "CODEX_HOME='/tmp/custom codex/.codex' codex -C '/tmp/client'\\''s project'"
                     .to_string(),
             ),
             (
                 "Codex — resume",
-                "CODEX_HOME='/tmp/custom codex/.codex' codex resume -C '/tmp/client'\"'\"'s project'"
+                "CODEX_HOME='/tmp/custom codex/.codex' codex resume -C '/tmp/client'\\''s project'"
                     .to_string(),
             ),
         ];
@@ -18765,12 +18765,12 @@ mod tests {
         expected.extend([
             (
                 "Claude — new",
-                "cd '/tmp/client'\"'\"'s project' && CLAUDE_CONFIG_DIR='/tmp/custom claude/.claude' claude"
+                "cd '/tmp/client'\\''s project' && CLAUDE_CONFIG_DIR='/tmp/custom claude/.claude' claude"
                     .to_string(),
             ),
             (
                 "Claude — resume",
-                "cd '/tmp/client'\"'\"'s project' && CLAUDE_CONFIG_DIR='/tmp/custom claude/.claude' claude --resume"
+                "cd '/tmp/client'\\''s project' && CLAUDE_CONFIG_DIR='/tmp/custom claude/.claude' claude --resume"
                     .to_string(),
             ),
         ]);

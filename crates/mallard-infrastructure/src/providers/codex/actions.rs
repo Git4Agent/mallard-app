@@ -74,17 +74,35 @@ fn codex_app_open_command(codex_home: &Path, deep_link: &str) -> String {
     )
 }
 
-/// The invocation Open-in-Codex performs for a project, rendered as a shell
-/// line. Logs quote this so the command they teach is the one that runs.
+/// The new-thread deep link for a project.
+pub(crate) fn codex_project_deep_link(project_root: &Path) -> String {
+    format!(
+        "codex://threads/new?path={}",
+        percent_encode_uri_component(&project_root.to_string_lossy())
+    )
+}
+
+/// The invocation Open-in-Codex performs for a project, rendered as the
+/// line this platform runs. Logs quote this so the command they teach is
+/// the one that runs. Windows needs the registered handler to render it.
 pub fn codex_app_project_open_command(codex_home: &Path, project_root: &Path) -> Option<String> {
     if !codex_home.is_absolute() || !project_root.is_absolute() {
         return None;
     }
-    let deep_link = format!(
-        "codex://threads/new?path={}",
-        percent_encode_uri_component(&project_root.to_string_lossy())
-    );
-    Some(codex_app_open_command(codex_home, &deep_link))
+    let deep_link = codex_project_deep_link(project_root);
+    #[cfg(windows)]
+    {
+        let executable = crate::providers::windows_app::scheme_handler_executable("codex").ok()?;
+        Some(crate::providers::windows_app::display_launch(
+            &executable,
+            &[("CODEX_HOME", codex_home)],
+            &[deep_link.as_str()],
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(codex_app_open_command(codex_home, &deep_link))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -275,10 +293,7 @@ pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), 
     #[cfg(windows)]
     {
         use crate::providers::windows_app::{launch_app, scheme_handler_executable};
-        let deep_link = format!(
-            "codex://threads/new?path={}",
-            percent_encode_uri_component(&workspace.to_string_lossy())
-        );
+        let deep_link = codex_project_deep_link(workspace);
         let executable = scheme_handler_executable("codex")?;
         launch_app(&executable, &[("CODEX_HOME", codex_home)], &[deep_link.as_str()])
     }

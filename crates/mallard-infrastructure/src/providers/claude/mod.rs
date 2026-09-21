@@ -11,7 +11,7 @@ pub mod publication;
 pub mod subagents;
 
 use super::traits::{
-    shell_quote, MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand,
     ProviderCliLauncher, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
     SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
@@ -236,16 +236,20 @@ impl Default for ClaudeAdapter {
 
 impl SessionAdapter for ClaudeAdapter {
     fn project_open_commands(&self, home: &Path, project_root: &str) -> Vec<ProjectOpenCommand> {
-        let environment = format!("CLAUDE_CONFIG_DIR={}", shell_quote(&home.to_string_lossy()));
-        let project = shell_quote(project_root);
+        use crate::providers::launch::TerminalCommand;
+        let cli = || {
+            TerminalCommand::new("claude")
+                .cwd(Path::new(project_root))
+                .env("CLAUDE_CONFIG_DIR", home)
+        };
         vec![
             ProjectOpenCommand {
                 label: "Claude — new".to_string(),
-                command: format!("cd {} && {} claude", project, environment),
+                command: cli().display_line(),
             },
             ProjectOpenCommand {
                 label: "Claude — resume".to_string(),
-                command: format!("cd {} && {} claude --resume", project, environment),
+                command: cli().arg("--resume").display_line(),
             },
         ]
     }
