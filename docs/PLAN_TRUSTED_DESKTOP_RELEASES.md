@@ -476,8 +476,9 @@ Pull. A Rosetta launch on Apple Silicon is only a smoke test.
    in [`PLAN_WINDOWS_PATH_HANDLING.md`](./PLAN_WINDOWS_PATH_HANDLING.md)
    (Windows root family and spellings in the path codec, `home_dir_text`,
    verbatim-prefix stripping, a structured per-platform terminal launcher,
-   cross-platform hard-link detection). Open in Codex/Claude stay macOS-only
-   with a message pointing at Open in Terminal.
+   desktop-app launches through the registered URL scheme handler,
+   Codex App restart via `tasklist`/`taskkill`, cross-platform hard-link
+   detection).
 2. **First real build.** Run the dry-run workflow for the Windows job;
    `npm run test:cli` compiles `mallard-cli`, `mallard-application`, and
    `mallard-infrastructure` for `x86_64-pc-windows-msvc` before the Tauri

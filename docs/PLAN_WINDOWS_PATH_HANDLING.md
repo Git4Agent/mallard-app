@@ -126,13 +126,21 @@ Per action:
   Claude resume): works on Windows. The Codex CLI resolves through
   `codex_binary::find_binary`, which already handles `codex.exe` and the npm
   `codex.cmd` launcher without a shell; macOS keeps its login-shell lookup.
-- **Open in Codex / Open in Claude**: remain macOS-only with a message that
-  points at Open in Terminal. Both depend on `open --env` pinning the
-  profile home into the desktop app; a bare `codex://`/`claude://` link on
-  Windows would read the wrong home, and the Codex desktop app ships only
-  for macOS.
-- **Codex App refresh/restart**: `refresh_offer` returns no offer off macOS,
-  so nothing is shown; there is no Codex desktop app to restart.
+- **Open in Codex / Open in Claude**: work on Windows. macOS pins the
+  profile home into the app with `open --env`; Windows has no equivalent,
+  so `providers/windows_app.rs` reads the executable the app registered for
+  its URL scheme (`reg query HKCR\codex\shell\open\command`, likewise
+  `claude`) and starts that executable directly with `CODEX_HOME` or
+  `CLAUDE_CONFIG_DIR` set and the deep link as its argument. The handler
+  must be an existing absolute `.exe`; a missing registration reports that
+  the desktop app is not installed. The Codex two-step route (new-thread
+  link, wait for `.codex-global-state.json`, then the thread link) is the
+  same on both platforms.
+- **Codex App refresh/restart**: implemented on Windows for the `codex://`
+  handler's executable. `tasklist /FI "IMAGENAME eq <exe>"` answers whether
+  it is running, `taskkill /IM <exe>` (no `/F`) requests a graceful close,
+  and the relaunch starts the same executable with `CODEX_HOME` pinned for
+  non-default homes. Codex++ has no Windows build and is not offered.
 
 ### 2.6 Links
 
@@ -167,7 +175,8 @@ Per action:
   falls back to the destination root; POSIX behaviour byte-for-byte as
   before.
 - Unit tests in `providers/launch.rs` for both renderings and the `cmd`
-  metacharacter rejections.
+  metacharacter rejections, and in `providers/windows_app.rs` for handler
+  command parsing.
 - `cargo test --workspace` on macOS; `cargo check --target x86_64-pc-windows-msvc`
   is not possible from macOS (C dependencies), so the Windows release dry
   run compiles and runs the CLI tests.
@@ -181,7 +190,7 @@ Per action:
 
 - Rewriting separators in the remainder of a path across families.
 - UNC roots (`\\server\share\proj`) and mapped network drives.
-- Opening the Codex or Claude desktop apps from Windows.
+- Codex++ on Windows.
 - Re-running the TLA+ models for the Windows grammar; the Windows family
   reuses the checked token and escape mechanics and only adds spellings. A
   future formal pass should add the Windows source-word alphabet.

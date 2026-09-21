@@ -6,19 +6,19 @@ use crate::providers::traits::{
     SessionActionRequest,
 };
 use std::path::Path;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::time::{Duration, SystemTime};
 
 pub(super) const OPEN_IN_APP: &str = "codex.open-in-app";
 pub(super) const OPEN_IN_TERMINAL: &str = "codex.open-in-terminal";
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const CODEX_PROJECT_ROUTE_TIMEOUT: Duration = Duration::from_millis(2500);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const CODEX_PROJECT_ROUTE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) fn validate_thread_uuid(value: &str) -> Result<(), String> {
@@ -110,13 +110,13 @@ fn run_codex_app_deep_link(codex_home: &Path, deep_link: &str, target: &str) -> 
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn file_stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.len(), metadata.modified().ok()?))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn wait_for_file_change(path: &Path, initial: Option<(u64, SystemTime)>) {
     let started = std::time::Instant::now();
     while started.elapsed() < CODEX_PROJECT_ROUTE_TIMEOUT {
@@ -154,18 +154,34 @@ pub(crate) fn launch_codex_app(
         run_codex_app_deep_link(codex_home, &deep_links[1], "thread")?;
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler_executable};
+        let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
+        let executable = scheme_handler_executable("codex")?;
+        let env = [("CODEX_HOME", codex_home)];
+
+        // Same two-step route as macOS: the new-thread link selects the
+        // project, the thread link then replaces the composer.
+        let state_path = codex_home.join(".codex-global-state.json");
+        let initial_state = file_stamp(&state_path);
+        before_launch(&display_launch(&executable, &env, &[deep_links[0].as_str()]));
+        launch_app(&executable, &env, &[deep_links[0].as_str()])?;
+        wait_for_file_change(&state_path, initial_state);
+
+        before_launch(&display_launch(&executable, &env, &[deep_links[1].as_str()]));
+        launch_app(&executable, &env, &[deep_links[1].as_str()])
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (thread_id, project_root, codex_home, before_launch);
         Err(CODEX_APP_UNAVAILABLE.to_string())
     }
 }
 
-/// The Codex desktop app ships for macOS only; other platforms get the
-/// Terminal action instead of a deep link nothing would answer.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 const CODEX_APP_UNAVAILABLE: &str =
-    "Open in Codex needs the Codex desktop app, which is available only on macOS; use Open in Terminal";
+    "Open in Codex is supported only on macOS and Windows; use Open in Terminal";
 
 /// Windows resolves the CLI from PATH (`codex.exe`, or the npm `codex.cmd`
 /// launcher unwrapped to its packaged native binary) without a shell.
@@ -256,7 +272,17 @@ pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), 
         );
         run_codex_app_deep_link(codex_home, &deep_link, "workspace")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use crate::providers::windows_app::{launch_app, scheme_handler_executable};
+        let deep_link = format!(
+            "codex://threads/new?path={}",
+            percent_encode_uri_component(&workspace.to_string_lossy())
+        );
+        let executable = scheme_handler_executable("codex")?;
+        launch_app(&executable, &[("CODEX_HOME", codex_home)], &[deep_link.as_str()])
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Err(CODEX_APP_UNAVAILABLE.to_string())
     }

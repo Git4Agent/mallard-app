@@ -85,7 +85,19 @@ fn launch_claude_app(
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler_executable};
+        if !claude_home.is_absolute() {
+            return Err("Claude home must be absolute".to_string());
+        }
+        let deep_link = claude_app_deep_link(session_id)?;
+        let executable = scheme_handler_executable("claude")?;
+        let env = [("CLAUDE_CONFIG_DIR", claude_home)];
+        before_launch(&display_launch(&executable, &env, &[deep_link.as_str()]));
+        launch_app(&executable, &env, &[deep_link.as_str()])
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (session_id, claude_home, before_launch);
         Err(CLAUDE_APP_UNAVAILABLE.to_string())
@@ -120,17 +132,21 @@ pub fn launch_claude_home_app(claude_home: &Path) -> Result<(), String> {
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use crate::providers::windows_app::{launch_app, scheme_handler_executable};
+        let executable = scheme_handler_executable("claude")?;
+        launch_app(&executable, &[("CLAUDE_CONFIG_DIR", claude_home)], &[])
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Err(CLAUDE_APP_UNAVAILABLE.to_string())
     }
 }
 
-/// Only the macOS Claude app accepts a pinned `CLAUDE_CONFIG_DIR` through
-/// `open --env`; a bare `claude://` link elsewhere would read the wrong home.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 const CLAUDE_APP_UNAVAILABLE: &str =
-    "Open in Claude is available only on macOS; use Open in Terminal";
+    "Open in Claude is supported only on macOS and Windows; use Open in Terminal";
 
 /// The Terminal command a Library profile launch runs: the CLI reading this
 /// home, no session and no `cd` — Terminal's own default directory is the
