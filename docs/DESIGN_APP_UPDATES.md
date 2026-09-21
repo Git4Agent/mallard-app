@@ -1,8 +1,9 @@
 # Design: In-App Updates from GitHub Releases
 
 Status: Implemented on `app-updates` (2026-09-20). First release carrying the
-client: v0.1.3. The updater keypair and the two `TAURI_SIGNING_*` secrets are
-a one-time maintainer step (§4) that must precede the v0.1.3 tag.
+client: v0.1.3. The updater keypair was generated and its public key
+(minisign key ID `3DBE1722FCFE006B`) committed on 2026-09-20; the two
+`TAURI_SIGNING_*` secrets (§4) must be in place before the v0.1.3 tag.
 Date: 2026-09-20
 Application: Mallard (Tauri 2.11, `com.hequ.agent-sync`)
 Related: [`RELEASING.md`](./RELEASING.md) (operator steps),
@@ -77,11 +78,11 @@ projects is sent; the request is a plain HTTPS `GET`.
 2. Add the GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's
    contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 3. Paste the printed public key into `plugins.updater.pubkey` in
-   `src-tauri/tauri.conf.json`, replacing the placeholder
-   `REPLACE_WITH_MALLARD_UPDATER_PUBLIC_KEY`. The release-config test only
-   checks the value's shape; a placeholder ships a client that can never
-   verify an update, so this step is on the release checklist in
-   `RELEASING.md`.
+   `src-tauri/tauri.conf.json`. Done for the current key (ID
+   `3DBE1722FCFE006B`); repeat only on rotation. The release-config test only
+   checks the value's shape, so a mismatch between the committed public key
+   and the secret's private key is caught by the dry run's signing step, not
+   by a unit test.
 
 ## 5. Release assets
 
@@ -222,9 +223,10 @@ system browser through `openExternalUrl` (`opener:default` allows https).
   confirmed on a clean Windows 11 machine before v0.1.3 is published. If it
   is blocked, the Windows notice must fall back to a *Download* button that
   opens the release page until Authenticode signing lands.
-- **Placeholder public key.** `tauri.conf.json` ships
-  `REPLACE_WITH_MALLARD_UPDATER_PUBLIC_KEY` until §4 is done; the v0.1.3
-  checklist in `RELEASING.md` requires the real key before tagging.
+- **Secrets before the tag.** The public key is committed; the matching
+  `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+  secrets must exist before the v0.1.3 tag, or every release job fails
+  closed at the wrapper's key check.
 
 ## 10. Verification
 

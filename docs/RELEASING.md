@@ -92,9 +92,9 @@ npm run tauri signer generate -- -w ~/.private_keys/mallard-updater.key
 
 Back up the key file and its password outside the repository. **Losing the
 private key strands every installed copy**: no later release can be trusted
-by the updater and users must reinstall by hand. Paste only the printed
-public key into `tauri.conf.json`, replacing the
-`REPLACE_WITH_MALLARD_UPDATER_PUBLIC_KEY` placeholder.
+by the updater and users must reinstall by hand. Only the printed public key
+goes into `tauri.conf.json` (`plugins.updater.pubkey`); the committed one is
+minisign key ID `3DBE1722FCFE006B`, and it changes only on rotation.
 
 | Secret | Value |
 |---|---|
@@ -148,10 +148,10 @@ The version must match in these files:
 - `src-tauri/tauri.conf.json`
 - `tests/release-config.test.mjs`
 
-Before the first tag that ships the in-app updater, confirm
-`plugins.updater.pubkey` in `src-tauri/tauri.conf.json` is the real public
-key and not the placeholder: a placeholder ships a client that can never
-verify an update.
+Before the first tag that ships the in-app updater, confirm the
+`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets
+exist and belong to the public key committed in `src-tauri/tauri.conf.json`;
+the dry-run workflow's signing step is what proves the pair matches.
 
 Run the release checks before creating a tag:
 

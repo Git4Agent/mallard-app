@@ -53,7 +53,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_MALLARD_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNEQkUxNzIyRkNGRTAwNkIKUldSckFQNzhJaGUrUFozT2dCcmFxVjFOR1p3Rmp1TXc5TzhGUGFQcWFxMnFVNnRLRXhmYnluTWMK",
       "endpoints": [
         "https://github.com/Git4Agent/mallard-app/releases/latest/download/latest.json"
       ],
