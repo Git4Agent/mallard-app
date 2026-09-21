@@ -69,6 +69,14 @@ async function verifyTrustedDmg(dmgPath) {
   await run("xcrun", ["stapler", "validate", dmgPath]);
 }
 
+async function verifyArchitecture(binaryPath, expectedArch) {
+  const { stdout } = await capture("lipo", ["-archs", binaryPath]);
+  const archs = stdout.trim().split(/\s+/);
+  if (archs.length !== 1 || archs[0] !== expectedArch) {
+    throw new Error(`${basename(binaryPath)} is built for ${archs.join(" ")}, expected ${expectedArch}.`);
+  }
+}
+
 async function verifyCliHelp(cliPath) {
   const { stdout, stderr } = await capture(cliPath, ["--help"]);
   const output = `${stdout}\n${stderr}`;
@@ -77,9 +85,12 @@ async function verifyCliHelp(cliPath) {
   }
 }
 
-export async function verifyMacosBundle(dmgPath) {
+export async function verifyMacosBundle(dmgPath, expectedArch) {
   if (process.platform !== "darwin") {
     throw new Error("macOS bundle verification can only run on macOS.");
+  }
+  if (expectedArch !== "arm64" && expectedArch !== "x86_64") {
+    throw new Error("Expected architecture must be arm64 or x86_64.");
   }
 
   await access(dmgPath, constants.R_OK);
@@ -98,6 +109,8 @@ export async function verifyMacosBundle(dmgPath) {
     await access(appPath, constants.R_OK);
     await access(cliPath, constants.R_OK | constants.X_OK);
 
+    await verifyArchitecture(join(appPath, "Contents", "MacOS", "mallard"), expectedArch);
+    await verifyArchitecture(cliPath, expectedArch);
     await run("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appPath]);
     await run("codesign", ["--verify", "--strict", "--verbose=4", cliPath]);
     if (requireTrusted) await verifyTrustedApp(appPath);
@@ -122,7 +135,9 @@ export async function verifyMacosBundle(dmgPath) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  const dmgPath = process.argv[2];
-  if (!dmgPath) throw new Error("Usage: node scripts/verify-macos-bundle.mjs <Mallard.dmg>");
-  await verifyMacosBundle(dmgPath);
+  const [dmgPath, expectedArch] = process.argv.slice(2);
+  if (!dmgPath || !expectedArch) {
+    throw new Error("Usage: node scripts/verify-macos-bundle.mjs <Mallard.dmg> <arm64|x86_64>");
+  }
+  await verifyMacosBundle(dmgPath, expectedArch);
 }

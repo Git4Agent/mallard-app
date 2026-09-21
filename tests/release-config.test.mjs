@@ -141,7 +141,7 @@ test("Mallard CLI is built and staged as a target-specific external binary", asy
   assert.equal(packageConfig.scripts["test:cli"], "cargo test -p mallard-cli");
 });
 
-test("desktop release builds verified Apple Silicon and Windows artifacts", async () => {
+test("desktop release builds verified Apple Silicon, Intel, and Windows artifacts", async () => {
   const [
     tauriConfigSource,
     workflow,
@@ -166,7 +166,9 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   const tauriConfig = JSON.parse(tauriConfigSource);
   const packageConfig = JSON.parse(packageSource);
   const macosJobIndex = workflow.indexOf("  publish_macos:");
+  const intelJobIndex = workflow.indexOf("  publish_macos_intel:");
   const windowsJobIndex = workflow.indexOf("  publish_windows:");
+  const intelJob = workflow.slice(intelJobIndex, windowsJobIndex);
   const windowsJob = workflow.slice(windowsJobIndex);
 
   // Local builds without the certificate stay ad-hoc; CI overrides the
@@ -183,11 +185,23 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   assert.match(infoPlist, /<key>NSAppleEventsUsageDescription<\/key>\s*<string>[^<]+<\/string>/);
   assert.equal(tauriConfig.bundle.windows?.nsis?.installMode, "currentUser");
   assert.ok(macosJobIndex >= 0, "macOS release job is present");
-  assert.ok(windowsJobIndex > macosJobIndex, "Windows release job follows the macOS job");
+  assert.ok(intelJobIndex > macosJobIndex, "Intel release job follows the Apple Silicon job");
+  assert.ok(windowsJobIndex > intelJobIndex, "Windows release job follows the Intel job");
   assert.match(workflow, /--target aarch64-apple-darwin/);
+  assert.match(workflow, /--target x86_64-apple-darwin/);
   assert.match(workflow, /--target x86_64-pc-windows-msvc/);
-  assert.doesNotMatch(workflow, /x86_64-apple-darwin|aarch64-pc-windows|i686-pc-windows/);
+  assert.doesNotMatch(workflow, /universal-apple-darwin|aarch64-pc-windows|i686-pc-windows/);
   assert.match(workflow, /--bundles dmg/);
+  // The Intel job cross-compiles on the Apple Silicon runner and attaches to
+  // the draft that tauri-action created in the Apple Silicon job.
+  assert.match(intelJob, /needs: publish_macos/);
+  assert.match(intelJob, /runs-on: macos-latest/);
+  assert.match(intelJob, /softwareupdate --install-rosetta --agree-to-license/);
+  assert.match(intelJob, /MALLARD_VERIFY_MACOS_BUNDLE: "1"/);
+  assert.match(intelJob, /MALLARD_REQUIRE_TRUSTED_MACOS: "1"/);
+  assert.match(intelJob, /gh release view "\$RELEASE_TAG" .* --json isDraft/);
+  assert.match(intelJob, /gh release upload "\$RELEASE_TAG" "\$\{dmgs\[0\]\}"/);
+  assert.doesNotMatch(intelJob, /--clobber|tauri-action/);
   assert.match(windowsJob, /needs: publish_macos/);
   assert.match(windowsJob, /runs-on: windows-latest/);
   assert.match(windowsJob, /npm run tauri build --/);
@@ -249,6 +263,10 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   assert.match(macosVerifier, /"stapler", "validate", dmgPath/);
   assert.match(macosVerifier, /if \(requireTrusted\) await verifyTrustedApp\(installedApp\)/);
   assert.match(macosVerifier, /"hdiutil", \["verify", dmgPath\]/);
+  assert.match(macosVerifier, /"lipo", \["-archs", binaryPath\]/);
+  assert.match(macosVerifier, /expectedArch !== "arm64" && expectedArch !== "x86_64"/);
+  assert.match(tauriBuildScript, /target === "x86_64-apple-darwin"/);
+  assert.match(tauriBuildScript, /verify-macos-bundle\.mjs"\), dmgPath, expectedArch\]/);
   assert.match(macosVerifier, /"hdiutil", \["attach", "-nobrowse", "-readonly"/);
   assert.match(macosVerifier, /join\(mountPath, "Mallard\.app"\)/);
   assert.match(
@@ -304,6 +322,8 @@ test("desktop release builds verified Apple Silicon and Windows artifacts", asyn
   );
   assert.doesNotMatch(tauriBuildScript, /"bundle",\s*"macos"/);
   assert.match(releaseGuide, /Apple Silicon/i);
+  assert.match(releaseGuide, /x86_64-apple-darwin/);
+  assert.match(releaseGuide, /Rosetta/);
   assert.match(releaseGuide, /Windows x64 NSIS/i);
   assert.match(releaseGuide, /x86_64-pc-windows-msvc/);
   assert.match(releaseGuide, /does not add the CLI to `PATH`/i);

@@ -67,7 +67,7 @@ migration, legacy execution path, or parallel storage-wide catalog.
 
 ### 1. Install Mallard
 
-The fastest path is the packaged Apple Silicon DMG from the
+The fastest path is the packaged macOS DMG (Apple Silicon or Intel) from the
 [latest release](https://github.com/Git4Agent/mallard-app/releases/latest).
 The app is Developer ID signed and notarized, so it opens without a security
 override. The first **Open in Terminal** or Codex App refresh asks for

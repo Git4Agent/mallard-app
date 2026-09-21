@@ -195,6 +195,10 @@ if (credentials || verifyBundle) {
   if (credentials) await notarizeDmg(dmgPath, credentials);
 
   if (verifyBundle) {
-    await runChecked(process.execPath, [resolve("scripts", "verify-macos-bundle.mjs"), dmgPath]);
+    const target = buildTarget(args);
+    const expectedArch = target === "x86_64-apple-darwin" || (!target && process.arch === "x64")
+      ? "x86_64"
+      : "arm64";
+    await runChecked(process.execPath, [resolve("scripts", "verify-macos-bundle.mjs"), dmgPath, expectedArch]);
   }
 }

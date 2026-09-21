@@ -1,12 +1,14 @@
 # Releasing Mallard
 
-Mallard is distributed through GitHub Releases as a Developer ID signed and
-notarized Apple Silicon DMG and an unsigned Windows x64 NSIS installer. A
-pushed `v*` tag starts `.github/workflows/release.yml`. The Apple Silicon job
-builds `aarch64-apple-darwin`, signs, notarizes, verifies, and creates the
-draft release first. Only after that job succeeds does the Windows job build
-`x86_64-pc-windows-msvc`, verify a temporary installation, and upload its
-installer to the same draft.
+Mallard is distributed through GitHub Releases as Developer ID signed and
+notarized Apple Silicon and Intel DMGs and an unsigned Windows x64 NSIS
+installer. A pushed `v*` tag starts `.github/workflows/release.yml`. The Apple
+Silicon job builds `aarch64-apple-darwin`, signs, notarizes, verifies, and
+creates the draft release first. Only after that job succeeds do the other two
+jobs run in parallel: the Intel job cross-compiles `x86_64-apple-darwin` on an
+Apple Silicon runner (Rosetta 2 lets the verifier run the packaged x86_64 CLI)
+and the Windows job builds `x86_64-pc-windows-msvc` and verifies a temporary
+installation. Both upload to the same draft only while it is still a draft.
 
 The same workflow can be started by hand from the Actions tab (**Run
 workflow**, `workflow_dispatch`). That is a dry run: every build, signing,
@@ -75,7 +77,9 @@ metadata and does not claim an Authenticode signature.
 
 ## Install the DMG
 
-1. Download the Apple Silicon DMG from the GitHub Release.
+1. Download the DMG for your Mac from the GitHub Release: `_aarch64.dmg` for
+   Apple Silicon, `_x64.dmg` for Intel. (Apple menu → About This Mac shows
+   which chip you have.)
 2. Open the DMG and drag Mallard to Applications.
 3. Open Mallard from Applications. No security override is required.
 4. The first **Open in Terminal** or Codex App refresh shows a macOS
@@ -132,6 +136,13 @@ npm run tauri build -- --target aarch64-apple-darwin --bundles dmg
 Without the `APPLE_*` variables and without `MALLARD_REQUIRE_TRUSTED_MACOS`,
 the same command produces an ad-hoc signed DMG for local testing only; never
 upload one.
+
+The Intel DMG builds the same way from an Apple Silicon Mac after
+`rustup target add x86_64-apple-darwin`, replacing the target with
+`--target x86_64-apple-darwin`. The verifier then runs the packaged x86_64
+`mallard-cli` under Rosetta 2 and checks with `lipo -archs` that both the app
+and the CLI contain exactly `x86_64`. Output lands under
+`target/x86_64-apple-darwin/release/bundle/dmg/Mallard_0.1.3_x64.dmg`.
 
 Inspect the generated DMG and application by hand if needed:
 
@@ -204,12 +215,15 @@ git tag v0.1.3
 git push origin v0.1.3
 ```
 
-Wait for both release jobs. The Windows job is deliberately ordered after the
-Apple Silicon job so the draft exists before the second artifact is uploaded.
-Inspect the draft release, download and install the DMG on an Apple Silicon
-Mac, and install the NSIS artifact on Windows x64. Publish the draft only after
-both artifacts pass the same checks. Do not replace an artifact for an existing
-version; fix the problem, increment the version, and create a new release.
+Wait for all three release jobs. The Intel and Windows jobs are deliberately
+ordered after the Apple Silicon job so the draft exists before their artifacts
+are uploaded. Inspect the draft release: it must hold exactly
+`Mallard_<version>_aarch64.dmg`, `Mallard_<version>_x64.dmg`, and
+`Mallard_<version>_x64-setup.exe`. Download and install the DMGs on an Apple
+Silicon Mac and an Intel Mac, and install the NSIS artifact on Windows x64.
+Publish the draft only after every artifact passes the same checks. Do not
+replace an artifact for an existing version; fix the problem, increment the
+version, and create a new release.
 
 ## Secret rotation
 
