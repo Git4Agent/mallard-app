@@ -50,5 +50,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_MALLARD_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://github.com/Git4Agent/mallard-app/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

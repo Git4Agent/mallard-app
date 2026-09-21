@@ -25,64 +25,75 @@ test("release version is 0.1.3 in every source", async () => {
   assert.equal(packageLock.packages[""].version, "0.1.3");
 });
 
-test("application contains no automatic updater", async () => {
+// The signed updater was removed in af20e1a because no Apple signing existed
+// and an in-place update to an unnotarized app fails Gatekeeper. Trusted
+// releases restored the precondition; docs/DESIGN_APP_UPDATES.md is the
+// design. These assertions pin the trust boundary, not the UI.
+test("application ships the signed in-app updater", async () => {
   const [
     tauriConfigSource,
     cargoSource,
     libSource,
     capabilitySource,
     packageSource,
-    packageLockSource,
-    appSource,
-    projectSyncSource,
-    projectSidebarSource,
-    testRunnerSource,
+    settingsSource,
+    tauriBuildScript,
+    releaseGuide,
   ] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
     read("src-tauri/Cargo.toml"),
     read("src-tauri/src/lib.rs"),
     read("src-tauri/capabilities/default.json"),
     read("package.json"),
-    read("package-lock.json"),
-    read("src/App.tsx"),
-    read("src/components/project-sync/ProjectSync.tsx"),
-    read("src/components/project-sync/ProjectSidebar.tsx"),
-    read("scripts/run-frontend-integration-tests.mjs"),
+    read("crates/mallard-infrastructure/src/app_settings.rs"),
+    read("scripts/tauri-build.mjs"),
+    read("docs/RELEASING.md"),
   ]);
   const tauriConfig = JSON.parse(tauriConfigSource);
+  const capability = JSON.parse(capabilitySource);
   const packageConfig = JSON.parse(packageSource);
 
-  await assert.rejects(
-    access(new URL("src/components/AppUpdater.tsx", projectUrl)),
-    (error) => error?.code === "ENOENT",
-  );
-  await assert.rejects(
-    access(new URL("src/components/AppUpdateControl.tsx", projectUrl)),
-    (error) => error?.code === "ENOENT",
-  );
-  await assert.rejects(
-    access(new URL("tests/frontend/app-updater.integration.test.tsx", projectUrl)),
-    (error) => error?.code === "ENOENT",
-  );
+  await access(new URL("src/components/AppUpdater.tsx", projectUrl));
+  await access(new URL("tests/frontend/app-updater.integration.test.tsx", projectUrl));
+  await access(new URL("docs/DESIGN_APP_UPDATES.md", projectUrl));
+
+  // One endpoint, on GitHub, over HTTPS, resolved by the "latest" published
+  // release; a draft never reaches an installed copy.
+  assert.deepEqual(tauriConfig.plugins.updater.endpoints, [
+    "https://github.com/Git4Agent/mallard-app/releases/latest/download/latest.json",
+  ]);
+  assert.match(tauriConfig.plugins.updater.pubkey, /^[A-Za-z0-9+/=_-]+$/, "a committed minisign public key");
+  assert.equal(tauriConfig.plugins.updater.windows?.installMode, "passive");
+  // Artifact creation is a per-build request from the wrapper, never a
+  // committed setting: a local build without the private key must still build.
   assert.equal(tauriConfig.bundle.createUpdaterArtifacts, undefined);
-  assert.equal(tauriConfig.plugins?.updater, undefined);
-  assert.equal(packageConfig.dependencies["@tauri-apps/plugin-updater"], undefined);
-  assert.equal(packageConfig.dependencies["@tauri-apps/plugin-process"], undefined);
-  for (const source of [
-    cargoSource,
-    libSource,
-    capabilitySource,
-    packageLockSource,
-    appSource,
-    projectSyncSource,
-    projectSidebarSource,
-    testRunnerSource,
-  ]) {
-    assert.doesNotMatch(
-      source,
-      /updater|AppUpdater|AppUpdateControl|check-for-updates|onBusyChange|tauri-plugin-process|plugin-process|allow-restart/i,
-    );
-  }
+  assert.match(tauriBuildScript, /process\.env\.TAURI_SIGNING_PRIVATE_KEY/);
+  assert.match(tauriBuildScript, /MALLARD_REQUIRE_UPDATER_ARTIFACTS === "1" && !hasKey/);
+  assert.match(tauriBuildScript, /if \(updaterArtifactsRequested\(\)\) bundle\.createUpdaterArtifacts = true;/);
+  // Both macOS builds emit `Mallard.app.tar.gz`; the stem rename keeps them apart.
+  assert.match(tauriBuildScript, /`\$\{productName\}\.app\.tar\.gz`/);
+  assert.match(tauriBuildScript, /`\$\{stem\}\.app\.tar\.gz`/);
+  assert.match(tauriBuildScript, /`\$\{stem\}-setup\.exe\.sig`/);
+  assert.match(tauriBuildScript, /\.\.\.\(updaterArchivePath \? \[updaterArchivePath\] : \[\]\)/);
+
+  assert.match(cargoSource, /^tauri-plugin-updater = "2"$/m);
+  assert.match(cargoSource, /^tauri-plugin-process = "2"$/m);
+  assert.match(libSource, /\.plugin\(tauri_plugin_process::init\(\)\)/);
+  assert.match(libSource, /\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/);
+  assert.ok(capability.permissions.includes("updater:default"));
+  assert.ok(capability.permissions.includes("process:allow-restart"));
+  assert.match(packageConfig.dependencies["@tauri-apps/plugin-updater"], /^\^2/);
+  assert.match(packageConfig.dependencies["@tauri-apps/plugin-process"], /^\^2/);
+
+  // The scheduled check is the user's to switch off, and switching it must
+  // not purge caches like a tuning change would.
+  assert.match(settingsSource, /pub update_check_enabled: bool,/);
+  assert.match(settingsSource, /update_check_enabled: true,/);
+  const tuningDiffers = settingsSource.match(/fn tuning_differs[\s\S]*?\n    \}/)?.[0] ?? "";
+  assert.doesNotMatch(tuningDiffers, /update_check_enabled/);
+
+  assert.match(releaseGuide, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.match(releaseGuide, /latest\.json/);
 });
 
 test("release packaging contains no legacy Codex fork executor", async () => {
@@ -168,8 +179,11 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   const macosJobIndex = workflow.indexOf("  publish_macos:");
   const intelJobIndex = workflow.indexOf("  publish_macos_intel:");
   const windowsJobIndex = workflow.indexOf("  publish_windows:");
+  const manifestJobIndex = workflow.indexOf("  publish_updater_manifest:");
+  const macosJob = workflow.slice(macosJobIndex, intelJobIndex);
   const intelJob = workflow.slice(intelJobIndex, windowsJobIndex);
-  const windowsJob = workflow.slice(windowsJobIndex);
+  const windowsJob = workflow.slice(windowsJobIndex, manifestJobIndex);
+  const manifestJob = workflow.slice(manifestJobIndex);
 
   // Local builds without the certificate stay ad-hoc; CI overrides the
   // identity through APPLE_SIGNING_IDENTITY, which the Tauri CLI reads first.
@@ -213,9 +227,34 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
     /INSTALLER_PATH: \$\{\{ steps\.verify_windows\.outputs\.installer_path \}\}/,
   );
   assert.match(windowsJob, /gh release view .* --json isDraft/);
-  assert.match(windowsJob, /gh release upload \$env:RELEASE_TAG \$env:INSTALLER_PATH/);
+  assert.match(windowsJob, /gh release upload \$env:RELEASE_TAG \$env:INSTALLER_PATH \$signature/);
   assert.doesNotMatch(windowsJob, /--clobber/);
   assert.match(workflow, /releaseDraft: true/);
+
+  // Updater artifacts: every build job signs with the same key, fails closed
+  // without it, and hands its signature to one manifest job that writes
+  // latest.json whole after all three have attached their assets — so no job
+  // uploads a partial manifest and none needs --clobber to repair another's.
+  for (const job of [macosJob, intelJob, windowsJob]) {
+    assert.match(job, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
+    assert.match(job, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}/);
+    assert.match(job, /MALLARD_REQUIRE_UPDATER_ARTIFACTS: "1"/);
+    assert.match(job, /name: updater-sig-(darwin-aarch64|darwin-x86_64|windows-x86_64)/);
+  }
+  assert.doesNotMatch(workflow, /uploadUpdaterJson|updaterJson|--clobber/);
+  assert.match(macosJob, /Mallard_\*_aarch64\.app\.tar\.gz/);
+  assert.match(macosJob, /gh release upload "\$RELEASE_TAG" "\$\{archives\[0\]\}" "\$\{archives\[0\]\}\.sig"/);
+  assert.match(intelJob, /Mallard_\*_x64\.app\.tar\.gz/);
+  assert.match(intelJob, /"\$\{archives\[0\]\}" "\$\{archives\[0\]\}\.sig"/);
+  assert.match(windowsJob, /\$signature = "\$env:INSTALLER_PATH\.sig"/);
+  assert.match(manifestJob, /needs: \[publish_macos, publish_macos_intel, publish_windows\]/);
+  assert.match(manifestJob, /pattern: updater-sig-\*/);
+  assert.match(manifestJob, /node scripts\/build-updater-manifest\.mjs/);
+  assert.match(manifestJob, /gh release view "\$RELEASE_TAG" .* --json isDraft/);
+  assert.match(manifestJob, /--json assets/);
+  assert.match(manifestJob, /gh release upload "\$RELEASE_TAG" latest\.json/);
+  assert.match(manifestJob, /name: updater-manifest/);
+  assert.match(packageConfig.scripts["test:release-config"], /tests\/updater-manifest\.test\.mjs/);
   assert.match(workflow, /MALLARD_VERIFY_MACOS_BUNDLE: "1"/);
   assert.match(workflow, /MALLARD_REQUIRE_TRUSTED_MACOS: "1"/);
   assert.match(workflow, /run: npm run test:cli/);
@@ -241,10 +280,13 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
     assert.doesNotMatch(step, /tagName|releaseDraft|gh release/);
   }
   assert.match(workflow, /uses: actions\/upload-artifact@v4/);
+  // Windows Authenticode signing and Apple ID password notarization are not
+  // configured; the workflow must not pretend otherwise.
   assert.doesNotMatch(
     workflow,
-    /TAURI_SIGNING|WINDOWS_CERTIFICATE|certificateThumbprint|signtool|uploadUpdater|updaterJson|APPLE_ID\b|APPLE_PASSWORD/i,
+    /WINDOWS_CERTIFICATE|certificateThumbprint|signtool|APPLE_ID\b|APPLE_PASSWORD/i,
   );
+  assert.doesNotMatch(workflow, /echo[^\n]*TAURI_SIGNING_PRIVATE_KEY\b/);
   assert.equal(packageConfig.scripts.tauri, "node scripts/tauri-build.mjs");
   assert.match(tauriBuildScript, /verify-macos-bundle\.mjs/);
   // Tauri notarizes the .app; the wrapper notarizes and staples the DMG too.
@@ -266,7 +308,10 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   assert.match(macosVerifier, /"lipo", \["-archs", binaryPath\]/);
   assert.match(macosVerifier, /expectedArch !== "arm64" && expectedArch !== "x86_64"/);
   assert.match(tauriBuildScript, /target === "x86_64-apple-darwin"/);
-  assert.match(tauriBuildScript, /verify-macos-bundle\.mjs"\), dmgPath, expectedArch\]/);
+  assert.match(tauriBuildScript, /verify-macos-bundle\.mjs"\),\s*dmgPath,\s*expectedArch,/);
+  assert.match(macosVerifier, /export async function verifyUpdaterArchive/);
+  assert.match(macosVerifier, /"tar", \["-xzf", archivePath, "-C", extractPath\]/);
+  assert.match(macosVerifier, /if \(updaterArchivePath\) await verifyUpdaterArchive\(updaterArchivePath, expectedArch\);/);
   assert.match(macosVerifier, /"hdiutil", \["attach", "-nobrowse", "-readonly"/);
   assert.match(macosVerifier, /join\(mountPath, "Mallard\.app"\)/);
   assert.match(
@@ -336,5 +381,6 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   assert.match(releaseGuide, /MALLARD_REQUIRE_TRUSTED_MACOS=1/);
   assert.match(releaseGuide, /workflow_dispatch|Run workflow/);
   assert.doesNotMatch(releaseGuide, /Open Anyway/i);
-  assert.doesNotMatch(releaseGuide, /updater|TAURI_SIGNING|latest\.json/i);
+  assert.match(releaseGuide, /Updater signing/);
+  assert.match(releaseGuide, /gh release edit .* --draft/);
 });

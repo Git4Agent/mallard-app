@@ -71,7 +71,10 @@ The fastest path is the packaged macOS DMG (Apple Silicon or Intel) from the
 [latest release](https://github.com/Git4Agent/mallard-app/releases/latest).
 The app is Developer ID signed and notarized, so it opens without a security
 override. The first **Open in Terminal** or Codex App refresh asks for
-Automation permission; allow it.
+Automation permission; allow it. From 0.1.3, Mallard notices newer
+releases on its own and updates in place from **Update and restart**; the
+periodic check can be turned off under Settings › Privacy, where **Check for
+updates** always works.
 
 You will also need Git and a local Codex profile. The default profile is
 normally stored at `~/.codex`.

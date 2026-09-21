@@ -72,8 +72,49 @@ Two environment variables control verification in `scripts/tauri-build.mjs`:
 
 The Windows NSIS installer is currently unsigned. Windows shows a Microsoft
 Defender SmartScreen warning ("Windows protected your PC"); testers choose
-**More info → Run anyway**. The workflow does not produce automatic-update
-metadata and does not claim an Authenticode signature.
+**More info → Run anyway**. The workflow does not claim an Authenticode
+signature; the installer's updater signature (below) is a separate thing.
+
+### Updater signing
+
+Installed copies update themselves from GitHub Releases
+([`DESIGN_APP_UPDATES.md`](./DESIGN_APP_UPDATES.md)). Every updater artifact —
+the macOS `.app.tar.gz` archives and the Windows installer — is signed with a
+minisign key that is separate from Apple signing, and `latest.json` carries
+those signatures. The app verifies them against the public key committed in
+`src-tauri/tauri.conf.json` (`plugins.updater.pubkey`).
+
+One-time setup:
+
+```bash
+npm run tauri signer generate -- -w ~/.private_keys/mallard-updater.key
+```
+
+Back up the key file and its password outside the repository. **Losing the
+private key strands every installed copy**: no later release can be trusted
+by the updater and users must reinstall by hand. Paste only the printed
+public key into `tauri.conf.json`, replacing the
+`REPLACE_WITH_MALLARD_UPDATER_PUBLIC_KEY` placeholder.
+
+| Secret | Value |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | full contents of `mallard-updater.key` (locally, a path to the file also works) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the password chosen at generation; must be set (to the empty string for a passwordless key) or the CLI prompts on a terminal that CI does not have |
+
+The build wrapper requests updater artifacts only when
+`TAURI_SIGNING_PRIVATE_KEY` is set, so a local build without the key is an
+ordinary build. Every release job sets `MALLARD_REQUIRE_UPDATER_ARTIFACTS=1`,
+which turns a missing key into a build failure rather than an unsigned
+release. On macOS the wrapper renames the archive to
+`Mallard_<version>_<aarch64|x64>.app.tar.gz` and, in trusted mode, the
+verifier extracts it and runs the same Gatekeeper and stapler checks on its
+contents as on the DMG.
+
+`latest.json` is written by the `publish_updater_manifest` job after all
+three build jobs have attached their assets, and only to a draft. Publishing
+the draft is what makes
+`https://github.com/Git4Agent/mallard-app/releases/latest/download/latest.json`
+resolve to it; a draft is never offered to users.
 
 ## Install the DMG
 
@@ -107,6 +148,11 @@ The version must match in these files:
 - `src-tauri/tauri.conf.json`
 - `tests/release-config.test.mjs`
 
+Before the first tag that ships the in-app updater, confirm
+`plugins.updater.pubkey` in `src-tauri/tauri.conf.json` is the real public
+key and not the placeholder: a placeholder ships a client that can never
+verify an update.
+
 Run the release checks before creating a tag:
 
 ```bash
@@ -128,14 +174,20 @@ APPLE_TEAM_ID=<TEAMID> \
 APPLE_API_KEY=<KEYID> \
 APPLE_API_ISSUER=<ISSUER> \
 APPLE_API_KEY_PATH=~/.private_keys/AuthKey_<KEYID>.p8 \
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.private_keys/mallard-updater.key)" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<password> \
 MALLARD_VERIFY_MACOS_BUNDLE=1 \
 MALLARD_REQUIRE_TRUSTED_MACOS=1 \
+MALLARD_REQUIRE_UPDATER_ARTIFACTS=1 \
 npm run tauri build -- --target aarch64-apple-darwin --bundles dmg
 ```
 
 Without the `APPLE_*` variables and without `MALLARD_REQUIRE_TRUSTED_MACOS`,
 the same command produces an ad-hoc signed DMG for local testing only; never
-upload one.
+upload one. Without `TAURI_SIGNING_PRIVATE_KEY` no updater archive is
+produced; with it, the build also leaves
+`target/aarch64-apple-darwin/release/bundle/macos/Mallard_0.1.3_aarch64.app.tar.gz`
+and its `.sig`.
 
 The Intel DMG builds the same way from an Apple Silicon Mac after
 `rustup target add x86_64-apple-darwin`, replacing the target with
@@ -215,15 +267,36 @@ git tag v0.1.3
 git push origin v0.1.3
 ```
 
-Wait for all three release jobs. The Intel and Windows jobs are deliberately
+Wait for all four release jobs. The Intel and Windows jobs are deliberately
 ordered after the Apple Silicon job so the draft exists before their artifacts
-are uploaded. Inspect the draft release: it must hold exactly
-`Mallard_<version>_aarch64.dmg`, `Mallard_<version>_x64.dmg`, and
-`Mallard_<version>_x64-setup.exe`. Download and install the DMGs on an Apple
-Silicon Mac and an Intel Mac, and install the NSIS artifact on Windows x64.
-Publish the draft only after every artifact passes the same checks. Do not
-replace an artifact for an existing version; fix the problem, increment the
-version, and create a new release.
+are uploaded, and the manifest job runs after all three. Inspect the draft
+release: it must hold exactly nine assets —
+`Mallard_<version>_aarch64.dmg`, `Mallard_<version>_aarch64.app.tar.gz` and
+its `.sig`, `Mallard_<version>_x64.dmg`, `Mallard_<version>_x64.app.tar.gz`
+and its `.sig`, `Mallard_<version>_x64-setup.exe` and its `.sig`, and
+`latest.json`. A draft without `latest.json` must not be published: installed
+copies would never learn about the release. Download and install the DMGs on
+an Apple Silicon Mac and an Intel Mac, and install the NSIS artifact on
+Windows x64. Publish the draft only after every artifact passes the same
+checks. Do not replace an artifact for an existing version; fix the problem,
+increment the version, and create a new release.
+
+Publishing is what switches on in-app updates for the release: installed
+copies of the previous version see it at their next check (within six hours,
+or at once through Settings › Privacy › **Check for updates**).
+
+## Pull a bad release
+
+If a published release turns out to be broken, return it to a draft at once:
+
+```bash
+gh release edit v0.1.3 --draft --repo Git4Agent/mallard-app
+```
+
+GitHub's `latest` then falls back to the previous published release, whose
+`latest.json` names a lower version, so no further copies are offered the bad
+build. Copies that already installed it are not downgraded — the updater only
+moves forward — so ship the fix as the next version.
 
 ## Secret rotation
 

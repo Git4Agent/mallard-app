@@ -134,10 +134,36 @@ export async function verifyMacosBundle(dmgPath, expectedArch) {
   }
 }
 
+// The updater downloads this archive, not the DMG, and replaces the installed
+// application with its contents. It is bundled after the app is signed and
+// notarized, so it must carry the same trust as the DMG's copy — anything less
+// fails Gatekeeper on the first launch after an update, with no way back.
+export async function verifyUpdaterArchive(archivePath, expectedArch) {
+  await access(archivePath, constants.R_OK);
+  await access(`${archivePath}.sig`, constants.R_OK);
+  const extractPath = await mkdtemp(join(tmpdir(), "mallard-release-updater-"));
+  try {
+    await run("tar", ["-xzf", archivePath, "-C", extractPath]);
+    const appPath = join(extractPath, "Mallard.app");
+    const cliPath = join(appPath, "Contents", "MacOS", "mallard-cli");
+    await access(appPath, constants.R_OK);
+    await access(cliPath, constants.R_OK | constants.X_OK);
+    await verifyArchitecture(join(appPath, "Contents", "MacOS", "mallard"), expectedArch);
+    await verifyArchitecture(cliPath, expectedArch);
+    await run("codesign", ["--verify", "--deep", "--strict", "--verbose=4", appPath]);
+    await run("codesign", ["--verify", "--strict", "--verbose=4", cliPath]);
+    if (requireTrusted) await verifyTrustedApp(appPath);
+    await verifyCliHelp(cliPath);
+  } finally {
+    await rm(extractPath, { recursive: true, force: true });
+  }
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  const [dmgPath, expectedArch] = process.argv.slice(2);
+  const [dmgPath, expectedArch, updaterArchivePath] = process.argv.slice(2);
   if (!dmgPath || !expectedArch) {
-    throw new Error("Usage: node scripts/verify-macos-bundle.mjs <Mallard.dmg> <arm64|x86_64>");
+    throw new Error("Usage: node scripts/verify-macos-bundle.mjs <Mallard.dmg> <arm64|x86_64> [Mallard.app.tar.gz]");
   }
   await verifyMacosBundle(dmgPath, expectedArch);
+  if (updaterArchivePath) await verifyUpdaterArchive(updaterArchivePath, expectedArch);
 }

@@ -6,7 +6,10 @@ Phase 2 pipeline changes (Intel job, architecture check, Windows dry run)
 implemented on the same branch on 2026-09-20; `cargo check` for
 `x86_64-apple-darwin` passes locally and a static audit found every Unix-only
 API behind a `cfg` gate, but the Windows build has still never run. Awaiting
-the dry-run workflow, then the v0.1.3 tag (§2.3, §3). Phase 3 not started.
+the dry-run workflow, then the v0.1.3 tag (§2.3, §3). Phase 3 implemented on
+`app-updates` (2026-09-20) as designed in
+[`DESIGN_APP_UPDATES.md`](./DESIGN_APP_UPDATES.md), which supersedes §4 below;
+the updater keypair (§4.1) remains a manual step before the v0.1.3 tag.
 Date: 2026-09-20
 Application: Mallard (Tauri 2.11, `com.hequ.agent-sync`)
 Supersedes: the distribution and signing sections of
