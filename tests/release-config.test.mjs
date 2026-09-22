@@ -210,6 +210,9 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   // without counting it as one.
   assert.match(workflow, /--bundles app,dmg/);
   assert.doesNotMatch(workflow, /--bundles dmg\b/);
+  // Staging renames the signed archive; the unsigned `.app` left behind would
+  // otherwise be tarred by tauri-action and uploaded under the same name.
+  assert.match(tauriBuildScript, /rm\(join\(bundleDirectory, "macos", `\$\{productName\}\.app`\)/);
   // The Intel job cross-compiles on the Apple Silicon runner and attaches to
   // the draft that tauri-action created in the Apple Silicon job.
   assert.match(intelJob, /needs: publish_macos/);

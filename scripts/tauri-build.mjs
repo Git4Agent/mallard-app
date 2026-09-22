@@ -110,6 +110,16 @@ async function stageMacosUpdaterArchive(buildArgs) {
     await rm(`${staged}${suffix}`, { force: true });
     await rename(`${generated}${suffix}`, `${staged}${suffix}`);
   }
+  // The renamed archive leaves no `Mallard.app.tar.gz` beside the `.app`, and
+  // tauri-action reacts to that by tarring the directory itself and uploading
+  // the result under the very name the signed archive claims. That copy is
+  // unsigned and the staged `.sig` does not cover it, so the bundle directory
+  // must not keep the `.app` once its signed archive exists. The DMG is
+  // already built and verification reads the DMG and the archive.
+  await rm(join(bundleDirectory, "macos", `${productName}.app`), {
+    recursive: true,
+    force: true,
+  });
   return staged;
 }
 
