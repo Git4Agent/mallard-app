@@ -1685,6 +1685,11 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let url = broker_url(ACCOUNT, "mallard-safe");
         let (response_sender, response_receiver) = mpsc::channel();
+        // The injected request must be accepted and answered before the
+        // callback deadline: a connection still in the backlog when the
+        // listener drops is reset, and the reader thread panics instead of
+        // seeing the 403. The listener polls every 25ms, so leave a margin
+        // wide enough for a slow CI scheduler.
         let Err(error) = authorize_with_listener(
             listener,
             &url,
@@ -1700,7 +1705,7 @@ mod tests {
                 });
                 Ok(())
             },
-            Duration::from_millis(125),
+            Duration::from_secs(1),
         ) else {
             panic!("a callback without the browser flow must not return credentials");
         };
