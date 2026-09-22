@@ -387,12 +387,13 @@ mod tests {
         use mallard_application::storage_setup::create_storage_setup_draft;
         let temp = tempfile::tempdir().unwrap();
         let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let saved = create_storage_setup_draft(
-            &repository,
-            StorageProviderRegistry::production(),
-            &provider_key(),
-        )
+        // No build registers Mallard Cloud, so the draft comes from a
+        // registry that holds its adapter alone.
+        let registry = StorageProviderRegistry::from_adapters(vec![std::sync::Arc::new(
+            mallard_infrastructure::storage_providers::managed_cloud::ManagedCloudAdapter,
+        )])
         .unwrap();
+        let saved = create_storage_setup_draft(&repository, &registry, &provider_key()).unwrap();
         let current = draft(&repository, &saved.draft_id, saved.revision, Mode::Create).unwrap();
         assert_eq!(origin_for(&current).unwrap(), default_origin());
         assert!(draft(

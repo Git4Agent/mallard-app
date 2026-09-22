@@ -5,8 +5,8 @@ use super::harness::{
 use super::scope::install_scope;
 use crate::project_sync::service::ThreadSyncState;
 use mallard_domain::{
-    ConversationBlocker, ConversationMaterializationState, ConversationReviewAction,
-    LocalConversationBinding, SessionPresentation, ThreadId,
+    ConversationMaterializationState, ConversationReviewAction, LocalConversationBinding,
+    SessionPresentation, ThreadId,
 };
 use mallard_infrastructure::conversation_codec::{
     analyze_codex_transcript, CODEX_LINEAGE_CODEC_KEY,
@@ -602,11 +602,13 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     let machine = world.repo_fresh.load_bindings().unwrap();
     let binding = machine.active_for(&scope.project_id).unwrap();
     let engine = world.engine();
-    let snapshot = engine.inspect(&world.bundle_id).unwrap();
+    let observation = engine.observe(&world.bundle_id).unwrap();
+    let snapshot = observation.current.unwrap().0;
     let mut bytes = engine.byte_source(&snapshot, None);
     let entries = crate::project_sync::service::thread_entries(
         &world.repo_fresh,
         &snapshot,
+        &observation.mainline,
         &mut bytes,
         &captured,
         binding,
@@ -654,25 +656,24 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
     assert_ne!(origin_thread.thread_id, bound.thread_id);
 
     // A bound pair whose cloud value fails to refold against the local chain
-    // never bootstraps by guessing from titles, forks, or graph shape: it is
-    // Unknown and blocked both ways until a Pull resolves it explicitly.
+    // never bootstraps by guessing from titles, forks, or graph shape, and it
+    // is never blocked either: nothing relates the two copies, so Push asks
+    // for a Pull and Pull keeps both.
     let diverged = entries
         .iter()
         .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t3_id))
         .unwrap();
     assert!(diverged.local_present);
+    assert_eq!(diverged.state, ThreadSyncState::Diverged);
     assert_eq!(
         diverged.push_decision.action,
-        ConversationReviewAction::Blocked
+        ConversationReviewAction::RequirePull
     );
     assert_eq!(
         diverged.pull_decision.action,
-        ConversationReviewAction::Blocked
+        ConversationReviewAction::KeepBoth
     );
-    assert_eq!(
-        diverged.pull_decision.blocker,
-        Some(ConversationBlocker::UnknownEvidence)
-    );
+    assert_eq!(diverged.pull_decision.blocker, None);
     assert_eq!(diverged.provider_thread_id.as_deref(), Some("local-v3"));
 }
 
@@ -915,13 +916,14 @@ fn publish_bound_thread(
             bindings_after,
         };
     apply_conversation_cloud_publication(repository, operation, state, || {
-        engine
-            .publish(request)
-            .map(|published| ConversationCloudPublication {
-                revision: published.snapshot.head.revision,
-                commit_id: published.snapshot.head.commit_id,
-                manifest_sha256: published.snapshot.head.manifest_sha256,
-            })
+        engine.publish(request).map(|published| {
+            let head = published.into_snapshot().head;
+            ConversationCloudPublication {
+                revision: head.revision,
+                commit_id: head.commit_id,
+                manifest_sha256: head.manifest_sha256,
+            }
+        })
     })
     .unwrap();
     assert!(!repository

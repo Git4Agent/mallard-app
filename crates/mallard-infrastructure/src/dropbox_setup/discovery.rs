@@ -258,12 +258,18 @@ mod tests {
         seed(
             &mock,
             "marker:one",
-            vec![(200, json!({"format":"mallard-storage","layout_version":1}))],
+            vec![(
+                200,
+                json!({"format":"mallard-append-storage","layout_version":1}),
+            )],
         );
         seed(
             &mock,
             "marker:two",
-            vec![(200, json!({"format":"mallard-storage","layout_version":2}))],
+            vec![(
+                200,
+                json!({"format":"mallard-append-storage","layout_version":2}),
+            )],
         );
         let scan = run(&mock).unwrap();
         assert!(!scan.partial);
@@ -303,7 +309,10 @@ mod tests {
         seed(
             &mock,
             "marker:one",
-            vec![(200, json!({"format":"mallard-storage","layout_version":1}))],
+            vec![(
+                200,
+                json!({"format":"mallard-append-storage","layout_version":1}),
+            )],
         );
         let scan = run(&mock).unwrap();
         assert!(scan.partial);

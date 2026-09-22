@@ -671,11 +671,17 @@ fn discovery_reads_only_markers_and_revalidates_bucket_identity() {
         }
         state.markers.insert(
             "known".into(),
-            (200, json!({"format":"mallard-storage","layout_version":1})),
+            (
+                200,
+                json!({"format":"mallard-append-storage","layout_version":1}),
+            ),
         );
         state.markers.insert(
             "future".into(),
-            (200, json!({"format":"mallard-storage","layout_version":2})),
+            (
+                200,
+                json!({"format":"mallard-append-storage","layout_version":2}),
+            ),
         );
         state.markers.insert(
             "broken".into(),
@@ -732,7 +738,10 @@ fn discovery_lists_every_jurisdiction_and_leaves_out_one_the_account_cannot_use(
         state.unavailable.push("fedramp".into());
         state.markers.insert(
             "team-eu".into(),
-            (200, json!({"format":"mallard-storage","layout_version":1})),
+            (
+                200,
+                json!({"format":"mallard-append-storage","layout_version":1}),
+            ),
         );
     }
     let scan = mock.discover().unwrap();

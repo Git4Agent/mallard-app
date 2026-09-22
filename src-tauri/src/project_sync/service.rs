@@ -1,8 +1,8 @@
 //! Non-Tauri application boundary for the current project-sync implementation.
 //!
 //! This layer composes provider capture, the bundle engine, and local
-//! persistence. Local-folder and S3-compatible storage use the same immutable
-//! bundle publication and head-CAS protocol.
+//! persistence. Every storage uses the same immutable bundle publication:
+//! a record written last, and a head selected from the stream's records.
 
 use mallard_domain::ConversationWireChildren;
 use mallard_infrastructure::app_settings::AppSettings;
@@ -33,7 +33,7 @@ use mallard_domain::{
     ConversationReviewRow, ConversationRevisionPins, ConversationTailPins, ConversationTargetPins,
     ConversationThread, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
     HostId, KeepBothApply, LocalConversationBinding, LocalProjectId, LocalProjectRegistration,
-    LocalProviderProfileId, LogicalPath, MachineProjectState, MaterializationId,
+    LocalProviderProfileId, LogicalPath, MachineProjectState, Mainline, MaterializationId,
     MaterializationRecord, MaterializationStatus, Materializations, PhysicalMappingState, PlanId,
     PortableConversationTail, PortableOrigin, PreservedProvenance, ProjectBinding,
     ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
@@ -51,8 +51,9 @@ use mallard_domain::{
 };
 use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use mallard_infrastructure::bundle_engine::{
-    absent_scope_pin, BundleBytes, BundleEngine, CapturedBundleFile, FetchProgress, ObjectCache,
-    PublishBundleRequest, PublishExpectation, ScopePublishInput,
+    absent_scope_pin, BundleBytes, BundleEngine, BundleObservation, CapturedBundleFile,
+    FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation, PublishedBundle,
+    ScopePublishInput,
 };
 use mallard_infrastructure::claude_history_tail;
 use mallard_infrastructure::codex_history_graph;
@@ -3262,18 +3263,22 @@ pub(super) fn sibling_bundle_status_with_repository(
     })
 }
 
-/// Verified head + manifest, no payload objects. Every command goes through
-/// this: metadata answers status/readiness/dependency views outright, and
-/// plan/apply/thread-comparison stream just the objects they need through a
-/// [`BundleBytes`] source on top of the returned snapshot.
+/// Verified head + manifest of the selected publication, no payload objects,
+/// with the chain it was selected on. Pull apply streams just the objects it
+/// needs through a [`BundleBytes`] source on top of the returned snapshot,
+/// and reads every saved acceptance against the returned chain, as its
+/// review did.
 fn inspect_from_storage(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     bundle_id: &BundleId,
-) -> Result<(StorageEngine, BundleSnapshot), String> {
+) -> Result<(StorageEngine, BundleSnapshot, Mainline), String> {
     let (_, engine) = storage_engine(repository, storage_id)?;
-    let snapshot = engine.inspect(bundle_id)?;
-    Ok((engine, snapshot))
+    let observation = engine.observe(bundle_id)?;
+    let (snapshot, _) = observation
+        .current
+        .ok_or_else(|| format!("bundle '{}' does not exist", bundle_id))?;
+    Ok((engine, snapshot, observation.mainline))
 }
 
 /// The provider-native session id inside a `<provider>:session:<component>`
@@ -3458,10 +3463,15 @@ fn captured_transcript_source(
 /// Review every conversation of every bound provider, isolating provider
 /// failures: an unreadable profile fails that provider's rows closed and
 /// never blocks another provider's safe review (D8).
+///
+/// `mainline` is the selected chain `snapshot` was read from. A saved
+/// acceptance counts only while the publication it names is on it
+/// (`ConversationCheckpoint::read_on`).
 #[allow(clippy::too_many_arguments)]
 fn thread_review(
     repository: &LocalStateRepository,
     snapshot: Option<&BundleSnapshot>,
+    mainline: &Mainline,
     bytes: &mut dyn BundleBytes,
     views: &[provider_capture::LocalSessionView],
     captured: &provider_capture::CapturedResources,
@@ -3496,6 +3506,7 @@ fn thread_review(
             Some(home) => provider_thread_review(
                 repository,
                 snapshot,
+                mainline,
                 bytes,
                 views,
                 captured,
@@ -4768,6 +4779,7 @@ fn observe_claude_local(
 fn provider_thread_review(
     repository: &LocalStateRepository,
     snapshot: Option<&BundleSnapshot>,
+    mainline: &Mainline,
     bytes: &mut dyn BundleBytes,
     views: &[provider_capture::LocalSessionView],
     captured: &provider_capture::CapturedResources,
@@ -5136,7 +5148,7 @@ fn provider_thread_review(
         .iter()
         .find(|profile| profile.profile_id == profile_id)
         .ok_or_else(|| format!("mapped {} profile disappeared", provider_label))?;
-    let checkpoints: BTreeMap<ThreadId, ConversationCheckpoint> = storage_id
+    let saved_checkpoints: BTreeMap<ThreadId, ConversationCheckpoint> = storage_id
         .and_then(|storage_id| {
             config
                 .links
@@ -5152,6 +5164,14 @@ fn provider_thread_review(
                 })
         })
         .unwrap_or_default();
+    // The review reads every checkpoint against the selected chain: a stale
+    // acceptance is absent for the adoption probe, the evidence and the
+    // pins. Only checkpoint maintenance below works on the saved values, so
+    // that reading never forgets one.
+    let checkpoints: BTreeMap<ThreadId, ConversationCheckpoint> = saved_checkpoints
+        .iter()
+        .map(|(thread_id, checkpoint)| (thread_id.clone(), checkpoint.read_on(mainline)))
+        .collect();
     let (local_threads, suppressed_provider_ids) = build_local_threads(&state)?;
     let bindings_by_thread = document
         .bindings
@@ -5545,7 +5565,7 @@ fn provider_thread_review(
                 else {
                     continue;
                 };
-                let stored = checkpoints.get(thread_id);
+                let stored = saved_checkpoints.get(thread_id);
                 if matches!(
                     stored.map(|checkpoint| &checkpoint.physical),
                     Some(PhysicalMappingState::Detached { .. })
@@ -6876,6 +6896,7 @@ impl LocalTailObservation {
 pub(crate) fn thread_entries(
     repository: &LocalStateRepository,
     snapshot: &BundleSnapshot,
+    mainline: &Mainline,
     bytes: &mut dyn BundleBytes,
     captured: &provider_capture::CapturedResources,
     binding: &ProjectBinding,
@@ -6932,6 +6953,7 @@ pub(crate) fn thread_entries(
     let review = thread_review(
         repository,
         Some(snapshot),
+        mainline,
         bytes,
         &views,
         captured,
@@ -7030,11 +7052,183 @@ fn discover_project_local_read(
     })
 }
 
+/// A confirmed Push that another computer's record outranked afterwards, and
+/// the link it was rolled back on. Announced once, so the window can say so
+/// and the activity log can keep it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutrankedPush {
+    pub local_project_id: LocalProjectId,
+    pub storage_id: StorageId,
+    pub project: String,
+    pub storage: String,
+}
+
+pub fn outranked_push_events() -> &'static tokio::sync::broadcast::Sender<OutrankedPush> {
+    static EVENTS: OnceLock<tokio::sync::broadcast::Sender<OutrankedPush>> = OnceLock::new();
+    EVENTS.get_or_init(|| tokio::sync::broadcast::channel(16).0)
+}
+
+/// Observe a linked bundle, and settle a Push that was outranked after it was
+/// confirmed.
+///
+/// A Push is confirmed by the listing after its write. Inside the fork window
+/// another computer's earlier-ranked record can still land after that
+/// listing, and the link then holds a publication that is listed and not
+/// selected. That Push is treated as one that never happened. Every scope
+/// base it moved returns to the last selected publication it descends from:
+/// the Push gate let it through only while each writable scope's base digest
+/// equalled that publication's, so this is the base it replaced. Every
+/// session acceptance it saved is forgotten, as Clear storage forgets one:
+/// the read cursor and the mappings to cloud ids stay. The sessions then
+/// compare as not yet pushed, first-contact adoption proves the ones the
+/// storage already holds, and the next Push publishes them under the same
+/// cloud ids.
+///
+/// A record the listing cannot connect to the selected chain is left alone:
+/// that is a stream that was cleared, or cleared and pushed again. Such a
+/// record is stale. Every comparison reads it as absent
+/// (`classify_scope_continuity`, `ConversationCheckpoint::read_on`), and the
+/// next Push or Pull replaces it.
+fn observe_linked_bundle(
+    repository: &LocalStateRepository,
+    engine: &StorageEngine,
+    link: ProjectStorageLink,
+) -> Result<(BundleObservation, ProjectStorageLink), String> {
+    let observation = engine.observe(&link.bundle_id)?;
+    if observation.unselected.is_empty() {
+        return Ok((observation, link));
+    }
+    // Where the chain left each publication this link holds: `None` inside
+    // the map is the virtual root. Once a stream has forked, its unselected
+    // records are listed forever, so only a pin on one of them is examined.
+    let kept = observation
+        .unselected
+        .iter()
+        .map(mallard_domain::RecordName::commit_id)
+        .collect::<BTreeSet<_>>();
+    let mut left_at = BTreeMap::<String, Option<mallard_domain::RecordName>>::new();
+    let accepted_commits = link
+        .conversation_checkpoints
+        .values()
+        .flat_map(BTreeMap::values)
+        .filter_map(|checkpoint| checkpoint.accepted.as_ref())
+        .map(|accepted| accepted.accepted_at_commit_id.as_str());
+    for commit_id in repository_bases(&link)
+        .map(|base| base.commit_id.as_str())
+        .chain(accepted_commits)
+    {
+        if !kept.contains(commit_id) || left_at.contains_key(commit_id) {
+            continue;
+        }
+        if let Some(outranked) = observation
+            .mainline
+            .outranked(&observation.unselected, commit_id)
+        {
+            left_at.insert(commit_id.to_string(), outranked.shared);
+        }
+    }
+    if left_at.is_empty() {
+        return Ok((observation, link));
+    }
+    // The publications the bases return to, read once each.
+    let mut returns_to = BTreeMap::new();
+    for shared in repository_bases(&link)
+        .filter_map(|base| left_at.get(&base.commit_id))
+        .flatten()
+    {
+        if !returns_to.contains_key(shared.commit_id()) {
+            let (snapshot, _) = engine.snapshot_at(&link.bundle_id, shared)?;
+            returns_to.insert(
+                shared.commit_id().to_string(),
+                (
+                    RepositoryBase {
+                        revision: snapshot.head.revision,
+                        commit_id: snapshot.head.commit_id.clone(),
+                        manifest_sha256: snapshot.head.manifest_sha256.clone(),
+                        manifest_size: snapshot.head.manifest_size,
+                    },
+                    snapshot.manifest.scope_coordinates(),
+                ),
+            );
+        }
+    }
+    let ((settled, rolled_back), _) = repository
+        .transact_config(|config| {
+            let Some(current) = config.links.iter_mut().find(|candidate| {
+                candidate.local_project_id == link.local_project_id
+                    && candidate.storage_id == link.storage_id
+                    && candidate.bundle_id == link.bundle_id
+            }) else {
+                return Ok::<_, String>(ConfigMutation::Unchanged((None, false)));
+            };
+            let mut rolled_back = false;
+            let scopes = current.scope_bases.keys().cloned().collect::<Vec<_>>();
+            for scope in scopes {
+                let Some(shared) = left_at.get(&current.scope_bases[&scope].reviewed_in.commit_id)
+                else {
+                    continue;
+                };
+                rolled_back = true;
+                let returned = shared
+                    .as_ref()
+                    .and_then(|shared| returns_to.get(shared.commit_id()))
+                    .and_then(|(reviewed_in, scopes)| Some((reviewed_in, scopes.get(&scope)?)));
+                match returned {
+                    Some((reviewed_in, (scope_revision, scope_sha256))) => {
+                        let base = current
+                            .scope_bases
+                            .get_mut(&scope)
+                            .expect("the scope was just listed");
+                        base.scope_revision = *scope_revision;
+                        base.scope_sha256 = scope_sha256.clone();
+                        base.reviewed_in = reviewed_in.clone();
+                    }
+                    // The scope was first published by the outranked Push.
+                    None => {
+                        current.scope_bases.remove(&scope);
+                    }
+                }
+            }
+            for checkpoint in current
+                .conversation_checkpoints
+                .values_mut()
+                .flat_map(BTreeMap::values_mut)
+            {
+                if checkpoint
+                    .accepted
+                    .as_ref()
+                    .is_some_and(|accepted| left_at.contains_key(&accepted.accepted_at_commit_id))
+                {
+                    rolled_back |= checkpoint.forget_acceptance();
+                }
+            }
+            let settled = (Some(current.clone()), rolled_back);
+            Ok(if rolled_back {
+                ConfigMutation::Changed(settled)
+            } else {
+                ConfigMutation::Unchanged(settled)
+            })
+        })
+        .map_err(config_transaction_error)?;
+    if rolled_back {
+        let (project, storage, _) =
+            project_storage_log_context(repository, &link.local_project_id, &link.storage_id);
+        let _ = outranked_push_events().send(OutrankedPush {
+            local_project_id: link.local_project_id.clone(),
+            storage_id: link.storage_id.clone(),
+            project,
+            storage,
+        });
+    }
+    Ok((observation, settled.unwrap_or(link)))
+}
+
 struct ProjectRemoteRead {
     storage_name: String,
     link: ProjectStorageLink,
     engine: StorageEngine,
     current: Option<BundleSnapshot>,
+    mainline: Mainline,
     remote_continuity: RemoteContinuity,
 }
 
@@ -7057,17 +7251,15 @@ fn load_project_remote_read(
         .map(|storage| storage.name.clone())
         .ok_or_else(|| format!("unknown storage '{}'", storage_id))?;
     let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
-    let current = engine.inspect_optional(&project.bundle_id)?;
-    let remote_continuity = classify_remote_continuity(
-        current.as_ref().map(|snapshot| &snapshot.head),
-        repository_base_from_link(&link).as_ref(),
-        &mut continuity_probe(&engine, &project.bundle_id),
-    );
+    let (observation, link) = observe_linked_bundle(repository, &engine, link)?;
+    let remote_continuity =
+        classify_remote_continuity(&observation.mainline, repository_bases(&link));
     Ok(ProjectRemoteRead {
         storage_name,
         link,
         engine,
-        current,
+        current: observation.current.map(|(snapshot, _)| snapshot),
+        mainline: observation.mainline,
         remote_continuity,
     })
 }
@@ -7091,6 +7283,7 @@ fn build_comparison_from_reads(
         &local.views,
         &remote.engine,
         remote.current.as_ref(),
+        &remote.mainline,
         remote.remote_continuity.clone(),
         on_phase,
         &mallard_infrastructure::app_settings::load_app_settings(repository)?,
@@ -7139,6 +7332,7 @@ fn build_thread_sync_comparison(
     views: &[provider_capture::LocalSessionView],
     engine: &StorageEngine,
     current: Option<&BundleSnapshot>,
+    mainline: &Mainline,
     remote_continuity: RemoteContinuity,
     on_phase: &mut dyn FnMut(&str, Duration),
     settings: &AppSettings,
@@ -7157,6 +7351,7 @@ fn build_thread_sync_comparison(
             thread_review(
                 repository,
                 Some(snapshot),
+                mainline,
                 &mut bytes,
                 views,
                 &captured,
@@ -7175,6 +7370,7 @@ fn build_thread_sync_comparison(
             thread_review(
                 repository,
                 None,
+                mainline,
                 &mut bytes,
                 views,
                 &captured,
@@ -7447,7 +7643,7 @@ fn build_thread_sync_comparison(
     warnings.dedup();
     on_phase("classify threads and build review", phase_started.elapsed());
 
-    let scopes = scope_sync_rows(link, resolved, current);
+    let scopes = scope_sync_rows(link, resolved, current, mainline);
     let reserved_bytes = discovered
         .resources
         .iter()
@@ -7508,6 +7704,7 @@ fn scope_sync_rows(
     link: &ProjectStorageLink,
     resolved: &ResolvedBinding,
     current: Option<&BundleSnapshot>,
+    mainline: &Mainline,
 ) -> Vec<ScopeSyncRow> {
     let mut scope_keys = BTreeSet::new();
     scope_keys.insert(SyncScopeKey::Project);
@@ -7534,6 +7731,7 @@ fn scope_sync_rows(
                     .as_ref()
                     .map(|(revision, digest)| (*revision, digest.as_str())),
                 base,
+                mainline,
             );
             let provider = key.provider_key().cloned();
             let access = match &provider {
@@ -7580,19 +7778,6 @@ pub enum PushDestinationStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         revision: Option<u64>,
     },
-    RemoteHistoryMissing {
-        base_revision: u64,
-    },
-    /// The remote holds a history that does not contain this replica's base:
-    /// the repository was wiped and recreated, or otherwise reset. Blocks
-    /// Push like `RemoteHistoryMissing`; the remedy is a pull (which adopts
-    /// the new history and rewrites the base) or an unlink-and-relink.
-    RemoteHistoryReplaced {
-        base_revision: u64,
-        remote_revision: u64,
-        base_manifest_sha256: String,
-        remote_manifest_sha256: String,
-    },
     RequiresPull {
         reason: PushDestinationPullReason,
         remote_revision: u64,
@@ -7620,52 +7805,24 @@ fn writable_scopes_for_binding(binding: &ProjectBinding) -> BTreeSet<SyncScopeKe
 }
 
 /// Push-side destination status, decided per writable scope so unrelated
-/// provider changes never block each other (D6): repository identity and
-/// global history continuity remain whole-operation blockers, then each
-/// writable scope compares its reviewed base with the verified current
-/// manifest. A remote change in an unbound or unknown provider scope is
-/// carried, not blocking.
+/// provider changes never block each other (D6): each writable scope compares
+/// its reviewed base with the verified current manifest. Ancestry answers
+/// whether the remote moved forward; the scope digest answers whether this
+/// Push's own scopes were touched. A remote change in an unbound or unknown
+/// provider scope is carried, not blocking.
+///
+/// A history that was cleared, or cleared and pushed again, is no blocker of
+/// its own. Its bases are stale and read as absent, so the same rows decide:
+/// a scope the stream no longer holds is a first publication target, and a
+/// scope another computer wrote since is one this computer never reviewed.
+/// A Push onto an empty stream writes its first record.
 fn classify_push_destination(
     current: Option<&BundleSnapshot>,
+    mainline: &Mainline,
     link: &ProjectStorageLink,
     binding: &ProjectBinding,
-    probe: &mut dyn FnMut(&RepositoryBase) -> Result<bool, String>,
 ) -> PushDestinationStatus {
-    let observed_head = current.map(|snapshot| &snapshot.head);
-    let repository_base = repository_base_from_link(link);
-    let continuity = classify_remote_continuity(observed_head, repository_base.as_ref(), probe);
-    match &continuity {
-        RemoteContinuity::RemoteMissing { base_revision } => {
-            return PushDestinationStatus::RemoteHistoryMissing {
-                base_revision: *base_revision,
-            };
-        }
-        RemoteContinuity::Replaced {
-            base_revision,
-            remote_revision,
-        } => {
-            return PushDestinationStatus::RemoteHistoryReplaced {
-                base_revision: *base_revision,
-                remote_revision: *remote_revision,
-                base_manifest_sha256: repository_base
-                    .map(|base| base.manifest_sha256)
-                    .unwrap_or_default(),
-                remote_manifest_sha256: observed_head
-                    .map(|head| head.manifest_sha256.clone())
-                    .unwrap_or_default(),
-            };
-        }
-        RemoteContinuity::Unknown { message } => {
-            return PushDestinationStatus::Unavailable {
-                message: message.clone(),
-            };
-        }
-        RemoteContinuity::Fresh
-        | RemoteContinuity::Unreviewed { .. }
-        | RemoteContinuity::InSync { .. }
-        | RemoteContinuity::Advanced { .. } => {}
-    }
-    let remote_revision = observed_head.map(|head| head.revision);
+    let remote_revision = current.map(|snapshot| snapshot.head.revision);
     // The binding-revision overlay is push policy, not continuity: a base
     // reviewed under an older binding cannot authorize this Push.
     let stale_binding_scopes = writable_scopes_for_binding(binding)
@@ -7697,15 +7854,15 @@ fn classify_push_destination(
                 .as_ref()
                 .map(|(revision, digest)| (*revision, digest.as_str())),
             base,
+            mainline,
         ) {
             ScopeContinuity::Fresh | ScopeContinuity::InSync { .. } => {}
             // The scope disappeared remotely while global lineage held: a
             // pull re-reviews before this replica may republish it.
-            ScopeContinuity::RemoteMissing { .. } => advanced_scopes.push(scope.canonical()),
-            ScopeContinuity::Unreviewed { .. } => unreviewed_scopes.push(scope.canonical()),
-            ScopeContinuity::Advanced { .. } | ScopeContinuity::Replaced { .. } => {
+            ScopeContinuity::RemoteMissing { .. } | ScopeContinuity::Advanced { .. } => {
                 advanced_scopes.push(scope.canonical())
             }
+            ScopeContinuity::Unreviewed { .. } => unreviewed_scopes.push(scope.canonical()),
         }
     }
     if !advanced_scopes.is_empty() {
@@ -7729,52 +7886,9 @@ fn classify_push_destination(
     }
 }
 
-/// Head-end of a sha256 for log and error lines; full digests stay in the
-/// serialized status for the UI.
-fn short_digest(digest: &str) -> &str {
-    digest.get(..8).unwrap_or(digest)
-}
-
-/// Store-read continuity probe over a storage engine. Present with the
-/// recorded digest ⇒ `Ok(true)`; absent or different bytes ⇒ `Ok(false)`;
-/// transport failure ⇒ `Err`, which classifies as `Unknown`. Reads the
-/// store, never a cache — a local copy witnesses nothing about the remote.
-fn continuity_probe<'a>(
-    engine: &'a StorageEngine,
-    bundle_id: &'a BundleId,
-) -> impl FnMut(&RepositoryBase) -> Result<bool, String> + 'a {
-    move |base: &RepositoryBase| {
-        engine
-            .fetch_manifest_version_optional(
-                bundle_id,
-                base.revision,
-                &base.commit_id,
-                base.manifest_size,
-                &base.manifest_sha256,
-            )
-            .map(|manifest| manifest.is_some())
-    }
-}
-
 fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
     match status {
         PushDestinationStatus::Ready { .. } => None,
-        PushDestinationStatus::RemoteHistoryMissing { .. } => Some(
-            "remote history is missing at the configured storage; if this is expected, unlink and relink the storage before pushing again"
-                .to_string(),
-        ),
-        PushDestinationStatus::RemoteHistoryReplaced {
-            base_revision,
-            remote_revision,
-            base_manifest_sha256,
-            remote_manifest_sha256,
-        } => Some(format!(
-            "remote history at this storage was replaced: remote version {} (manifest {}) does not contain this replica's base version {} (manifest {}); pull and review to adopt the new history, or unlink and relink the storage",
-            remote_revision,
-            short_digest(remote_manifest_sha256),
-            base_revision,
-            short_digest(base_manifest_sha256),
-        )),
         // These reach the user verbatim in the Push error banner when the head
         // moves between the review's classification and the publish re-check,
         // so they lead with what happened and what to do; the lineage numbers
@@ -7897,27 +8011,18 @@ pub(super) fn prepare_push_review_with_progress(
 
     let remote = storage_engine_from_state(repository, config, machine, storage_id).and_then(
         |(_, engine)| {
-            let current = engine.inspect_optional(&project.bundle_id)?;
-            Ok((engine, current))
+            let (observation, link) = observe_linked_bundle(repository, &engine, link)?;
+            let current = observation.current.map(|(snapshot, _)| snapshot);
+            Ok((engine, current, observation.mainline, link))
         },
     );
-    // Continuity is classified once per operation — at most one probe read —
-    // then the destination status maps it push-side and the thread
-    // comparison carries it verbatim.
+    // Continuity is classified from the one listing the observation made;
+    // the destination status maps it push-side and the thread comparison
+    // carries it verbatim.
     let (destination_status, remote_continuity) = match &remote {
-        Ok((engine, current)) => {
-            let observed_head = current.as_ref().map(|snapshot| &snapshot.head);
-            let continuity = classify_remote_continuity(
-                observed_head,
-                repository_base_from_link(&link).as_ref(),
-                &mut continuity_probe(engine, &project.bundle_id),
-            );
-            let destination = classify_push_destination(
-                current.as_ref(),
-                &link,
-                &binding,
-                &mut continuity_probe(engine, &project.bundle_id),
-            );
+        Ok((_, current, mainline, link)) => {
+            let continuity = classify_remote_continuity(mainline, repository_bases(link));
+            let destination = classify_push_destination(current.as_ref(), mainline, link, &binding);
             (destination, Some(continuity))
         }
         Err(error) => (
@@ -7940,7 +8045,7 @@ pub(super) fn prepare_push_review_with_progress(
     let mut project_files = None;
     let mut project_files_error = None;
     match &remote {
-        Ok((engine, current)) => {
+        Ok((engine, current, mainline, link)) => {
             if wants_thread_comparison {
                 let phase_started = Instant::now();
                 match build_thread_sync_comparison(
@@ -7948,12 +8053,13 @@ pub(super) fn prepare_push_review_with_progress(
                     local_project_id,
                     storage_id,
                     storage_name.clone(),
-                    &link,
+                    link,
                     &resolved,
                     &discovery,
                     &views,
                     engine,
                     current.as_ref(),
+                    mainline,
                     remote_continuity
                         .clone()
                         .expect("continuity is classified whenever the storage engine opened"),
@@ -7971,7 +8077,7 @@ pub(super) fn prepare_push_review_with_progress(
                     local_project_id,
                     storage_id,
                     &project,
-                    &link,
+                    link,
                     &binding,
                     eligibility.clone(),
                     engine,
@@ -8024,7 +8130,7 @@ pub(super) fn get_push_destination_status_with_repository(
         .project(local_project_id)
         .cloned()
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
-    let link = require_project_link(&config, &project, storage_id)?;
+    let link = require_project_link(&config, &project, storage_id)?.clone();
     let binding = state
         .bindings
         .active_for(local_project_id)
@@ -8036,14 +8142,13 @@ pub(super) fn get_push_destination_status_with_repository(
             )
         })?;
     let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
-    let current = engine.inspect_optional(&project.bundle_id)?;
-    let status = classify_push_destination(
-        current.as_ref(),
-        link,
+    let (observation, link) = observe_linked_bundle(repository, &engine, link)?;
+    Ok(classify_push_destination(
+        observation.snapshot(),
+        &observation.mainline,
+        &link,
         &binding,
-        &mut continuity_probe(&engine, &project.bundle_id),
-    );
-    Ok(status)
+    ))
 }
 
 #[cfg(test)]
@@ -8550,8 +8655,9 @@ fn build_conversation_publication(
     // adoption. An unmapped CreateCloud mints here, at apply: a single
     // attempt, fail-closed against the previous manifest's ids and every
     // binding row's claim; the caller rejects an id resolved twice in one
-    // batch. The head CAS makes the previous-manifest check sound — if the
-    // head moved after observation, the publish itself fails.
+    // batch. List-then-write makes the previous-manifest check sound — if
+    // another publication was selected after observation, the publish itself
+    // stops before its record.
     let live_mapping = local_binding.and_then(|row| row.cloud_thread_id.clone());
     let result_thread_id = match &action.cloud_thread_id {
         Some(reviewed) => {
@@ -9810,7 +9916,7 @@ fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationClo
 }
 
 /// Prove every provider thread can be committed to its reviewed binding
-/// before immutable publication and the remote head CAS.  The binding
+/// before immutable publication and the record write.  The binding
 /// document's global uniqueness check remains the final invariant, but it is
 /// too late to discover an ownership conflict after the cloud commit.
 fn validate_cloud_publication_binding_owners(
@@ -9864,8 +9970,9 @@ fn validate_cloud_publication_binding_owners(
 }
 
 struct ReviewedPublishOutcome {
-    published: bool,
-    snapshot: Option<BundleSnapshot>,
+    /// What the engine stored or compared to; nothing when every selected
+    /// conversation failed to build on an empty stream.
+    publication: Option<PublishedBundle>,
     /// Selected conversations the request could not build; nothing of
     /// theirs was published.
     failures: Vec<PushThreadFailure>,
@@ -9937,15 +10044,13 @@ fn publish_reviewed(
             })
         {
             return Ok(ReviewedPublishOutcome {
-                published: false,
-                snapshot: None,
+                publication: None,
                 failures,
             });
         }
         let outcome = engine.publish_with_progress(request, on_progress, on_phase)?;
         return Ok(ReviewedPublishOutcome {
-            published: outcome.published,
-            snapshot: Some(outcome.snapshot),
+            publication: Some(outcome),
             failures,
         });
     }
@@ -9956,7 +10061,7 @@ fn publish_reviewed(
         publication_state,
         || {
             let outcome = engine.publish_with_progress(request, on_progress, &mut *on_phase)?;
-            let publication = cloud_publication_from_snapshot(&outcome.snapshot);
+            let publication = cloud_publication_from_snapshot(outcome.snapshot());
             *publish_outcome.borrow_mut() = Some(outcome);
             Ok(publication)
         },
@@ -9969,8 +10074,7 @@ fn publish_reviewed(
         .into_inner()
         .ok_or_else(|| "conversation publication produced no bundle result".to_string())?;
     Ok(ReviewedPublishOutcome {
-        published: outcome.published,
-        snapshot: Some(outcome.snapshot),
+        publication: Some(outcome),
         failures,
     })
 }
@@ -10134,7 +10238,12 @@ pub(super) fn push_bundle_reviewed_with_progress(
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
     let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
-    let observed = engine.inspect_optional_with_token(&project.bundle_id)?;
+    // Apply starts: list the stream and select. Everything below is checked
+    // and built against this freshly selected publication, and the record
+    // names it as its parent.
+    let (observation, link) = observe_linked_bundle(repository, &engine, link)?;
+    let mainline = observation.mainline;
+    let observed = observation.current;
     let remote_project_content = observed
         .as_ref()
         .map(|(snapshot, _)| project_content_versions(&snapshot.manifest))
@@ -10202,7 +10311,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let mut reviewed_inventory = None;
     if let Some(review_token) = project_content_review.review_token.as_deref() {
         // The freshness check derives from the same walk instant and the same
-        // observed head as the capture and CAS expectation below.
+        // observed publication as the capture and the record's parent below.
         let inventory = build_project_files_inventory(
             local_project_id,
             storage_id,
@@ -10325,9 +10434,9 @@ pub(super) fn push_bundle_reviewed_with_progress(
     on_phase("capture selected payloads", phase_started.elapsed());
     let destination_status = classify_push_destination(
         observed.as_ref().map(|(snapshot, _)| snapshot),
+        &mainline,
         &link,
         &binding,
-        &mut continuity_probe(&engine, &project.bundle_id),
     );
     if let Some(error) = push_destination_error(&destination_status) {
         return Err(error);
@@ -10354,6 +10463,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             thread_review(
                 repository,
                 Some(snapshot),
+                &mainline,
                 &mut bytes,
                 &views,
                 &capture,
@@ -10372,6 +10482,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             thread_review(
                 repository,
                 None,
+                &mainline,
                 &mut bytes,
                 &views,
                 &capture,
@@ -10444,8 +10555,6 @@ pub(super) fn push_bundle_reviewed_with_progress(
         credential_redaction_enabled,
     )?;
     publish_outcome.failures.extend(stale_children);
-    let was_published = publish_outcome.published;
-    let published_snapshot = publish_outcome.snapshot;
     let thread_results = conversation_push_results(
         &selected_conversations,
         &actioned_resources,
@@ -10453,7 +10562,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         publish_outcome.failures,
     );
     let phase_started = Instant::now();
-    let Some(published_snapshot) = published_snapshot else {
+    let Some(publication) = publish_outcome.publication else {
         return Ok(ProjectOperationResult {
             success: false,
             message: "Nothing published".into(),
@@ -10463,6 +10572,10 @@ pub(super) fn push_bundle_reviewed_with_progress(
             results: thread_results,
         });
     };
+    let was_published = publication.stored();
+    // A stored publication is the selected one: a push whose record ranked
+    // behind another computer's failed above, before any base moved.
+    let published_snapshot = publication.into_snapshot();
     let revision = published_snapshot.head.revision;
     let commit_id = published_snapshot.head.commit_id.clone();
     let manifest_size = published_snapshot.head.manifest_size;
@@ -10491,7 +10604,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             || current.bundle_id != bundle_id
         {
             return Err(
-                "project recipe changed while publishing; remote head was written, refresh before pushing again"
+"project recipe changed while publishing; the push was stored, refresh before pushing again"
                     .to_string(),
             );
         }
@@ -10530,6 +10643,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     }
                 }
             }
+            drop_stale_scope_bases(current_link, &mainline, &published_repository_base);
         }
         let current_link = config
             .links
@@ -10542,7 +10656,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             || current_link.project_content_preferences.revision != expected_preference_revision
         {
             return Err(
-                "project-file choices changed while publishing; remote head was written, refresh before pushing again"
+"project-file choices changed while publishing; the push was stored, refresh before pushing again"
                     .to_string(),
             );
         }
@@ -10641,7 +10755,6 @@ pub(super) fn plan_bundle_restore_with_progress(
     }
     let config = &state.config;
     let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
-    let snapshot = engine.inspect(bundle_id)?;
     if config.project(&binding.local_project_id).is_none() {
         return Err(format!(
             "unknown local project '{}'",
@@ -10651,12 +10764,12 @@ pub(super) fn plan_bundle_restore_with_progress(
     let link = project_link(&config, &binding.local_project_id, storage_id)
         .cloned()
         .ok_or_else(|| "project is not linked to this storage".to_string())?;
-    let repository_base = repository_base_from_link(&link);
-    let remote_continuity = classify_remote_continuity(
-        Some(&snapshot.head),
-        repository_base.as_ref(),
-        &mut continuity_probe(&engine, bundle_id),
-    );
+    let (observation, link) = observe_linked_bundle(repository, &engine, link)?;
+    let mainline = observation.mainline;
+    let (snapshot, _) = observation
+        .current
+        .ok_or_else(|| format!("bundle '{}' does not exist", bundle_id))?;
+    let remote_continuity = classify_remote_continuity(&mainline, repository_bases(&link));
     on_phase("inspect remote head and manifest", phase_started.elapsed());
     let phase_started = Instant::now();
     let identity = &state.host_identity;
@@ -10696,6 +10809,7 @@ pub(super) fn plan_bundle_restore_with_progress(
         let review = thread_review(
             repository,
             Some(&snapshot),
+            &mainline,
             &mut byte_source,
             &views,
             &provider_capture::CapturedResources::default(),
@@ -10772,6 +10886,7 @@ fn build_restore_plan_for_apply(
     resolved: &ResolvedBinding,
     engine: &StorageEngine,
     snapshot: &BundleSnapshot,
+    mainline: &Mainline,
     selected_conversations: &BTreeSet<ResourceId>,
     byte_source: &mut dyn BundleBytes,
     on_phase: &mut dyn FnMut(&str, Duration),
@@ -10848,6 +10963,7 @@ fn build_restore_plan_for_apply(
     let review_actions = thread_review(
         repository,
         Some(snapshot),
+        mainline,
         byte_source,
         &session_views,
         &captured,
@@ -12248,8 +12364,10 @@ fn apply_prepared_pull_conversation(
         let mut checkpoint = accepted_checkpoint.clone();
         checkpoint.generation = generation;
         threads.insert(local_thread_id.clone(), checkpoint);
+        // The base takes the scope coordinates of the reviewed publication.
+        // The scope counter is a per-branch number, so nothing orders by it.
         link.scope_bases.entry(scope.clone()).and_modify(|base| {
-            base.scope_revision = action.pins.revision.scope_revision.max(base.scope_revision);
+            base.scope_revision = action.pins.revision.scope_revision;
             base.scope_sha256 = action.pins.revision.scope_sha256.clone();
             base.reviewed_in = RepositoryBase {
                 revision: action.pins.revision.bundle_revision,
@@ -12494,7 +12612,7 @@ pub(super) fn apply_bundle_restore_with_progress(
     let resolved = current_binding_for_restore_plan(repository, review)?;
     let binding = resolved.binding.clone();
     let selected_conversations = approved_pull_conversation_resources(review, &approved_set);
-    let (engine, snapshot) =
+    let (engine, snapshot, mainline) =
         inspect_from_storage(repository, &review.storage_id, &review.bundle_id)?;
     if snapshot.head.revision != review.revision
         || snapshot.head.commit_id != review.commit_id
@@ -12515,6 +12633,7 @@ pub(super) fn apply_bundle_restore_with_progress(
         &resolved,
         &engine,
         &snapshot,
+        &mainline,
         &selected_conversations,
         &mut byte_source,
         on_phase,
@@ -13020,6 +13139,7 @@ pub(super) fn apply_bundle_restore_with_progress(
                         }
                     }
                 }
+                drop_stale_scope_bases(link, &mainline, &reviewed_in);
             }
             let link = config
                 .links
@@ -13261,8 +13381,7 @@ fn adopt_cloud_metadata_actions(
                     checkpoint.observed_tail = prepared.accepted_local_tail.clone();
                     checkpoint.generation = checkpoint.generation.saturating_add(1);
                     link.scope_bases.entry(scope).and_modify(|base| {
-                        base.scope_revision =
-                            action.pins.revision.scope_revision.max(base.scope_revision);
+                        base.scope_revision = action.pins.revision.scope_revision;
                         base.scope_sha256 = action.pins.revision.scope_sha256.clone();
                         base.reviewed_in = RepositoryBase {
                             revision: action.pins.revision.bundle_revision,
@@ -13597,15 +13716,36 @@ impl ResolvedBinding {
     }
 }
 
-/// The repository-level reviewed base for one project/storage link: the
-/// newest manifest coordinates any scope base was reviewed in. Global
-/// history continuity is classified against this; per-scope continuity is
-/// classified against each scope base separately.
+/// Every publication a scope base of this link was reviewed in. Global
+/// history continuity checks each of them against the selected chain;
+/// per-scope continuity is classified against each scope base separately.
+fn repository_bases(link: &ProjectStorageLink) -> impl Iterator<Item = &RepositoryBase> {
+    link.scope_bases.values().map(|base| &base.reviewed_in)
+}
+
+/// Remove every scope base that was reviewed in a publication off the
+/// selected chain. A Push and a Pull call this in the transaction that saves
+/// their new bases: `saved` is the publication those name, and `mainline` is
+/// the chain it was built on or read from. Comparisons already read a stale
+/// base as absent; removing it here is what ends the cleared-storage notice,
+/// and only an action of the user does it, never a refresh.
+fn drop_stale_scope_bases(
+    link: &mut ProjectStorageLink,
+    mainline: &Mainline,
+    saved: &RepositoryBase,
+) {
+    link.scope_bases.retain(|_, base| {
+        base.reviewed_in.commit_id == saved.commit_id
+            || mainline.contains(base.reviewed_in.revision, &base.reviewed_in.commit_id)
+    });
+}
+
+/// The newest publication any scope base of this link was reviewed in: the
+/// base the status views print and reload.
 fn repository_base_from_link(link: &ProjectStorageLink) -> Option<RepositoryBase> {
-    link.scope_bases
-        .values()
-        .map(|base| base.reviewed_in.clone())
+    repository_bases(link)
         .max_by_key(|reviewed| reviewed.revision)
+        .cloned()
 }
 
 fn project_link<'a>(
@@ -15907,7 +16047,6 @@ mod tests {
         local_storage_config, provider_key as local_provider_key,
     };
 
-    type ContinuityProbe = Box<dyn FnMut(&RepositoryBase) -> Result<bool, String>>;
 
     use crate::storage_catalog::persistence::CatalogStateRepository;
     use crate::sync_tests::thread_variants::harness::{
@@ -16228,13 +16367,44 @@ mod tests {
         drop(guard);
     }
 
-    fn continuity_head(revision: u64, manifest_sha256: &str) -> BundleHead {
+    /// Remove one bundle from a local-folder storage the way a clear does:
+    /// its records first, which unpublishes it, then its manifests and objects.
+    fn wipe_remote_bundle(storage_root: &Path, bundle_id: &BundleId) {
+        let repositories = storage_root.join(".mallard/v1/repositories");
+        std::fs::remove_dir_all(repositories.join("_commits").join(bundle_id.as_str())).unwrap();
+        std::fs::remove_dir_all(repositories.join(bundle_id.as_str())).unwrap();
+    }
+
+    /// The commit at depth `revision` of fixture branch `branch`. Branch 0 is
+    /// the history this replica reviewed; any other branch shares nothing
+    /// with it, like a recreated stream or a sibling that was selected.
+    fn continuity_commit(revision: u64, branch: u64) -> String {
+        format!("commit-{branch:012x}{revision:012x}")
+    }
+
+    /// The selected chain of a stream whose publications 1 to `tip` are all
+    /// on `branch`.
+    fn continuity_mainline(tip: u64, branch: u64) -> Mainline {
+        let mut names = Vec::<mallard_domain::RecordName>::new();
+        for revision in 1..=tip {
+            let token = mallard_domain::PublicationToken::new(
+                continuity_commit(revision, branch),
+                format!("{:064x}", branch * 1_000 + revision),
+            )
+            .unwrap();
+            let parent = names.last().map(|parent| parent.token().clone());
+            names.push(mallard_domain::RecordName::new(revision, token, parent, revision).unwrap());
+        }
+        Mainline::select(names)
+    }
+
+    fn continuity_head_on(revision: u64, manifest_sha256: &str, branch: u64) -> BundleHead {
         BundleHead {
             schema_version: mallard_domain::BUNDLE_SCHEMA,
             bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
             kind: BundleKind::Project,
             revision,
-            commit_id: format!("commit-{}", revision),
+            commit_id: continuity_commit(revision, branch),
             manifest_key: format!("_manifests/{}.json", revision),
             manifest_size: 1,
             manifest_sha256: manifest_sha256.to_string(),
@@ -16242,10 +16412,14 @@ mod tests {
         }
     }
 
+    fn continuity_head(revision: u64, manifest_sha256: &str) -> BundleHead {
+        continuity_head_on(revision, manifest_sha256, 0)
+    }
+
     fn continuity_repository_base(revision: u64, manifest_sha256: &str) -> RepositoryBase {
         RepositoryBase {
             revision,
-            commit_id: format!("commit-{}", revision),
+            commit_id: continuity_commit(revision, 0),
             manifest_sha256: manifest_sha256.to_string(),
             manifest_size: 1,
         }
@@ -16355,120 +16529,11 @@ mod tests {
         }
     }
 
-    /// One fixture per row of the continuity table
-    /// (DESIGN_REMOTE_HISTORY_CONTINUITY.md), asserting the exact verdict and
-    /// that the probe runs only in the revision-ahead arm.
+    /// The Push gate, one assertion per storage-area row of the plan (A1 to
+    /// A7) plus the binding overlay. A cleared or recreated history is no
+    /// state of its own: its bases are stale, and the same rows decide.
     #[test]
-    fn remote_continuity_rows_classify_from_content_witnesses() {
-        let digest_a = "a".repeat(64);
-        let digest_b = "b".repeat(64);
-        let base = continuity_repository_base(3, &digest_a);
-        let mut forbidden: ContinuityProbe =
-            Box::new(|_: &RepositoryBase| panic!("probe must not run for this row"));
-
-        // Row 1 — no head, no base.
-        assert_eq!(
-            classify_remote_continuity(None, None, &mut forbidden),
-            RemoteContinuity::Fresh
-        );
-        // Row 2 — no head, base recorded.
-        assert_eq!(
-            classify_remote_continuity(None, Some(&base), &mut forbidden),
-            RemoteContinuity::RemoteMissing { base_revision: 3 }
-        );
-        // Row 3 — head, no base.
-        assert_eq!(
-            classify_remote_continuity(Some(&continuity_head(3, &digest_a)), None, &mut forbidden),
-            RemoteContinuity::Unreviewed { remote_revision: 3 }
-        );
-        // Row 4 — revisions equal, digests equal.
-        assert_eq!(
-            classify_remote_continuity(
-                Some(&continuity_head(3, &digest_a)),
-                Some(&base),
-                &mut forbidden
-            ),
-            RemoteContinuity::InSync { revision: 3 }
-        );
-        // Row 5 — revisions equal, digests differ: one lineage commits a
-        // revision exactly once, so this is proof of replacement, free.
-        assert_eq!(
-            classify_remote_continuity(
-                Some(&continuity_head(3, &digest_b)),
-                Some(&base),
-                &mut forbidden
-            ),
-            RemoteContinuity::Replaced {
-                base_revision: 3,
-                remote_revision: 3
-            }
-        );
-        // Row 6 — head revision regressed below the base.
-        assert_eq!(
-            classify_remote_continuity(
-                Some(&continuity_head(2, &digest_b)),
-                Some(&base),
-                &mut forbidden
-            ),
-            RemoteContinuity::Replaced {
-                base_revision: 3,
-                remote_revision: 2
-            }
-        );
-
-        // Rows 7 and 8 — revision ahead: the probe decides, exactly once.
-        let mut probe_calls = 0_usize;
-        let mut present = |_: &RepositoryBase| {
-            probe_calls += 1;
-            Ok::<_, String>(true)
-        };
-        assert_eq!(
-            classify_remote_continuity(
-                Some(&continuity_head(5, &digest_b)),
-                Some(&base),
-                &mut present
-            ),
-            RemoteContinuity::Advanced {
-                base_revision: 3,
-                remote_revision: 5
-            }
-        );
-        assert_eq!(probe_calls, 1);
-
-        let mut probe_calls = 0_usize;
-        let mut absent = |_: &RepositoryBase| {
-            probe_calls += 1;
-            Ok::<_, String>(false)
-        };
-        assert_eq!(
-            classify_remote_continuity(
-                Some(&continuity_head(5, &digest_b)),
-                Some(&base),
-                &mut absent
-            ),
-            RemoteContinuity::Replaced {
-                base_revision: 3,
-                remote_revision: 5
-            }
-        );
-        assert_eq!(probe_calls, 1);
-
-        // Probe transport failure claims no verdict.
-        let mut failing = |_: &RepositoryBase| Err::<bool, _>("storage offline".to_string());
-        assert_eq!(
-            classify_remote_continuity(
-                Some(&continuity_head(5, &digest_b)),
-                Some(&base),
-                &mut failing
-            ),
-            RemoteContinuity::Unknown {
-                message: "storage offline".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn push_destination_classification_preserves_remote_history_safety() {
+    fn push_destination_is_decided_by_the_writable_scopes_alone() {
         let digest_a = "a".repeat(64);
         let digest_b = "b".repeat(64);
         let scope_c = "c".repeat(64);
@@ -16487,25 +16552,29 @@ mod tests {
             7,
         )]);
         let empty = continuity_link(vec![]);
+        let nothing = Mainline::default();
+        let on_base = continuity_mainline(3, 0);
         let current = continuity_snapshot(
             continuity_head(3, &digest_a),
             vec![(codex_scope.clone(), 1, &scope_c)],
         );
-        let mut forbidden: ContinuityProbe =
-            Box::new(|_: &RepositoryBase| panic!("probe must not run for this case"));
 
+        // A1: nothing stored, nothing reviewed.
         assert_eq!(
-            classify_push_destination(None, &empty, &binding, &mut forbidden),
+            classify_push_destination(None, &nothing, &empty, &binding),
             PushDestinationStatus::Ready { revision: None }
         );
+        // A3: the storage was cleared and nobody pushed since. The bases are
+        // stale, every writable scope is a first publication target, and the
+        // Push writes the stream's first record. No unlink, no reset.
         assert_eq!(
-            classify_push_destination(None, &reviewed, &binding, &mut forbidden),
-            PushDestinationStatus::RemoteHistoryMissing { base_revision: 3 }
+            classify_push_destination(None, &nothing, &reviewed, &binding),
+            PushDestinationStatus::Ready { revision: None }
         );
-        // Remote data in a writable scope that this replica never reviewed
-        // blocks with the exact blocking scope named.
+        // A4: remote data in a writable scope that this replica never
+        // reviewed blocks with the exact blocking scope named.
         assert_eq!(
-            classify_push_destination(Some(&current), &empty, &binding, &mut forbidden),
+            classify_push_destination(Some(&current), &on_base, &empty, &binding),
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::RemoteWithoutBase,
                 remote_revision: 3,
@@ -16513,15 +16582,10 @@ mod tests {
                 blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
-        // Binding-revision mismatch is push policy and wins before continuity
-        // — and therefore before any probe read is spent.
+        // Binding-revision mismatch is push policy: a base reviewed under an
+        // older binding cannot authorize this Push.
         assert_eq!(
-            classify_push_destination(
-                Some(&current),
-                &reviewed,
-                &continuity_binding(8),
-                &mut forbidden
-            ),
+            classify_push_destination(Some(&current), &on_base, &reviewed, &continuity_binding(8)),
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::BindingChanged,
                 remote_revision: 3,
@@ -16529,41 +16593,40 @@ mod tests {
                 blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
+        // A5, usable base: the freshly selected publication is the one this
+        // replica is based on.
         assert_eq!(
-            classify_push_destination(Some(&current), &reviewed, &binding, &mut forbidden),
+            classify_push_destination(Some(&current), &on_base, &reviewed, &binding),
             PushDestinationStatus::Ready { revision: Some(3) }
         );
-        // Equal revision with a different digest is replacement, no probe.
+        // A5, stale base: the stream was cleared and pushed again, and the
+        // writable scope holds exactly the reviewed content. Identity decides
+        // the history, and content decides the scope.
         assert_eq!(
             classify_push_destination(
                 Some(&continuity_snapshot(
-                    continuity_head(3, &digest_b),
+                    continuity_head_on(3, &digest_b, 1),
                     vec![(codex_scope.clone(), 1, &scope_c)],
                 )),
+                &continuity_mainline(3, 1),
                 &reviewed,
                 &binding,
-                &mut forbidden
             ),
-            PushDestinationStatus::RemoteHistoryReplaced {
-                base_revision: 3,
-                remote_revision: 3,
-                base_manifest_sha256: digest_a.clone(),
-                remote_manifest_sha256: digest_b.clone(),
-            }
+            PushDestinationStatus::Ready { revision: Some(3) }
         );
-        // Revision ahead + base manifest still present + the codex scope
-        // advanced ⇒ a true advance of a writable scope.
-        let mut present = |_: &RepositoryBase| Ok::<_, String>(true);
+        // A6: a descendant of the base in which the codex scope changed: a
+        // true advance of a writable scope, so this Push needs a Pull first.
+        let advanced = classify_push_destination(
+            Some(&continuity_snapshot(
+                continuity_head(4, &digest_b),
+                vec![(codex_scope.clone(), 2, &scope_d)],
+            )),
+            &continuity_mainline(4, 0),
+            &reviewed,
+            &binding,
+        );
         assert_eq!(
-            classify_push_destination(
-                Some(&continuity_snapshot(
-                    continuity_head(4, &digest_b),
-                    vec![(codex_scope.clone(), 2, &scope_d)],
-                )),
-                &reviewed,
-                &binding,
-                &mut present
-            ),
+            advanced,
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::RemoteAdvanced,
                 remote_revision: 4,
@@ -16571,10 +16634,10 @@ mod tests {
                 blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
-        // Revision ahead where only an unbound provider scope changed ⇒ the
+        // A descendant in which only an unbound provider scope changed: the
         // repository advanced but no writable scope did, so a Codex-only
-        // binding may push without pulling the Claude change (D6).
-        let mut present = |_: &RepositoryBase| Ok::<_, String>(true);
+        // binding publishes on the new selection and carries the Claude
+        // change without pulling it (D6).
         assert_eq!(
             classify_push_destination(
                 Some(&continuity_snapshot(
@@ -16584,90 +16647,82 @@ mod tests {
                         (claude_scope.clone(), 5, &scope_e),
                     ],
                 )),
+                &continuity_mainline(4, 0),
                 &reviewed,
                 &binding,
-                &mut present
             ),
             PushDestinationStatus::Ready { revision: Some(4) }
         );
-        // Revision ahead + base manifest gone ⇒ replaced history.
-        let mut absent = |_: &RepositoryBase| Ok::<_, String>(false);
-        let replaced = classify_push_destination(
+        // A7: the stream was cleared and another computer pushed other
+        // content into a writable scope. However far ahead its revision is,
+        // the base is not on the selected chain, so the scope reads as never
+        // reviewed here and a Pull comes first.
+        let recreated = classify_push_destination(
             Some(&continuity_snapshot(
-                continuity_head(4, &digest_b),
+                continuity_head_on(4, &digest_b, 1),
                 vec![(codex_scope.clone(), 2, &scope_d)],
             )),
+            &continuity_mainline(4, 1),
             &reviewed,
             &binding,
-            &mut absent,
         );
         assert_eq!(
-            replaced,
-            PushDestinationStatus::RemoteHistoryReplaced {
-                base_revision: 3,
+            recreated,
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
                 remote_revision: 4,
-                base_manifest_sha256: digest_a.clone(),
-                remote_manifest_sha256: digest_b.clone(),
+                base_revision: None,
+                blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
-        // A probe transport failure fails closed as a storage error.
-        let mut failing = |_: &RepositoryBase| Err::<bool, _>("storage offline".to_string());
+        // The stream was recreated by a computer that wrote only into scopes
+        // this binding does not write: every writable scope is A3, and the
+        // Push is open without a Pull.
         assert_eq!(
             classify_push_destination(
                 Some(&continuity_snapshot(
-                    continuity_head(4, &digest_b),
-                    vec![(codex_scope.clone(), 2, &scope_d)],
+                    continuity_head_on(2, &digest_b, 1),
+                    vec![(claude_scope.clone(), 1, &scope_e)],
                 )),
+                &continuity_mainline(2, 1),
                 &reviewed,
                 &binding,
-                &mut failing
             ),
-            PushDestinationStatus::Unavailable {
-                message: "storage offline".to_string()
-            }
+            PushDestinationStatus::Ready { revision: Some(2) }
+        );
+        // Several scope bases, one of them stale: each scope is decided by
+        // its own base. The stale project base is A3, the codex base is A5.
+        let mut stranded_base = continuity_repository_base(2, &digest_a);
+        stranded_base.commit_id = continuity_commit(2, 9);
+        let stranded = continuity_link(vec![
+            continuity_scope_base(
+                codex_scope.clone(),
+                1,
+                &scope_c,
+                continuity_repository_base(3, &digest_a),
+                7,
+            ),
+            continuity_scope_base(SyncScopeKey::Project, 1, &scope_e, stranded_base, 7),
+        ]);
+        assert_eq!(
+            classify_push_destination(Some(&current), &on_base, &stranded, &binding),
+            PushDestinationStatus::Ready { revision: Some(3) }
         );
 
-        let missing = classify_push_destination(None, &reviewed, &binding, &mut forbidden);
+        // No state asks for an unlink or a reset.
         assert_eq!(
-            serde_json::to_value(&missing).unwrap(),
+            serde_json::to_value(&recreated).unwrap(),
             serde_json::json!({
-                "state": "remote_history_missing",
-                "base_revision": 3,
-            })
-        );
-        let message = push_destination_error(&missing).unwrap();
-        assert!(message.contains("remote history is missing"));
-        assert!(message.contains("unlink and relink"));
-        assert!(!message.contains("deleted"));
-
-        assert_eq!(
-            serde_json::to_value(&replaced).unwrap(),
-            serde_json::json!({
-                "state": "remote_history_replaced",
-                "base_revision": 3,
+                "state": "requires_pull",
+                "reason": "remote_without_base",
                 "remote_revision": 4,
-                "base_manifest_sha256": digest_a,
-                "remote_manifest_sha256": digest_b,
+                "blocking_scopes": ["provider:codex"],
             })
         );
-        let message = push_destination_error(&replaced).unwrap();
-        assert!(message.contains("was replaced"));
-        assert!(message.contains("base version 3"));
-        assert!(message.contains("remote version 4"));
-        assert!(message.contains(&digest_a[..8]));
-        assert!(message.contains(&digest_b[..8]));
-        assert!(message.contains("pull and review"));
-        assert!(message.contains("unlink and relink"));
+        let message = push_destination_error(&recreated).unwrap();
+        assert!(message.contains("never been reviewed on this computer"));
+        assert!(!message.contains("unlink"));
 
-        let advanced = classify_push_destination(
-            Some(&continuity_snapshot(
-                continuity_head(4, &digest_b),
-                vec![(codex_scope.clone(), 2, &scope_d)],
-            )),
-            &reviewed,
-            &binding,
-            &mut |_: &RepositoryBase| Ok::<_, String>(true),
-        );
         let message = push_destination_error(&advanced).unwrap();
         assert!(message.contains("base version 3"));
         assert!(message.contains("remote version 4"));
@@ -16741,7 +16796,7 @@ mod tests {
     ) -> BundleReadiness {
         let resolved = require_current_binding(repo, binding).unwrap();
         assert_eq!(&resolved.binding.bundle_id, bundle_id);
-        let (_, snapshot) = inspect_from_storage(repo, storage_id, bundle_id).unwrap();
+        let (_, snapshot, _) = inspect_from_storage(repo, storage_id, bundle_id).unwrap();
         bundle_readiness_for_snapshot(repo, &resolved, &snapshot).unwrap()
     }
 
@@ -17279,7 +17334,7 @@ mod tests {
                 observed_publish_expectation(&engine, &project.bundle_id),
             ))
             .unwrap();
-        let snapshot = published.snapshot;
+        let snapshot = published.into_snapshot();
         record_reviewed_scope_bases(repo, project, binding, storage_id, &snapshot, 12);
         (snapshot, t1, t11, t111)
     }
@@ -17564,7 +17619,7 @@ mod tests {
                 PublishExpectation::Match(Box::new(initial.clone()), head_token),
             ))
             .unwrap()
-            .snapshot;
+            .into_snapshot();
         // The repository head and scope were explicitly reviewed, while the
         // per-thread accepted checkpoint remains the common first-Push base.
         record_reviewed_scope_bases(&repo, &project, &binding, &storage_id, &remote, 20);
@@ -17690,12 +17745,18 @@ mod tests {
             .iter()
             .find(|entry| entry.cloud_thread_id.as_ref() == Some(&t111))
             .unwrap();
-        assert_eq!(tip.push_decision.action, ConversationReviewAction::Blocked);
+        // S4: the pair has no acceptance, and the stored copy is another
+        // branch that adoption cannot prove. Nothing is replaced and nothing
+        // is blocked: Push asks for a Pull, and Pull keeps both copies.
+        assert_eq!(tip.state, ThreadSyncState::Diverged);
         assert_eq!(
-            tip.push_decision.blocker,
-            Some(ConversationBlocker::UnknownEvidence)
+            tip.push_decision.action,
+            ConversationReviewAction::RequirePull
         );
+        assert_eq!(tip.push_decision.blocker, None);
         assert!(!tip.push_decision.selectable);
+        assert_eq!(tip.pull_decision.action, ConversationReviewAction::KeepBoth);
+        assert!(tip.pull_decision.selectable);
         let fresh = comparison
             .entries
             .iter()
@@ -17710,7 +17771,7 @@ mod tests {
             !recommended_review_recipe(&review, &storage_id)
                 .entries
                 .contains_key(&tip.resource_id),
-            "blocked review rows must not enter the selected recipe"
+            "a row that needs a Pull must not enter the selected recipe"
         );
         assert!(!repo.root().join("conversation_push_plans").exists());
 
@@ -19613,11 +19674,11 @@ mod tests {
         let store = LocalObjectStore::open(&storage_root).unwrap();
         let repository_key = repository_object_key(
             &BundleId::parse("11111111111111111111111111111111").unwrap(),
-            "_head.json",
+            "_manifests/1-commit-a.json",
         )
         .unwrap();
         let library_key =
-            library_object_key("library-22222222222222222222222222222222", "_head.json").unwrap();
+            library_object_key("library-22222222222222222222222222222222", "_tag.json").unwrap();
         store.put_immutable(&repository_key, b"repository").unwrap();
         store.put_immutable(&library_key, b"library").unwrap();
         std::fs::write(storage_root.join("keep.txt"), b"user data").unwrap();
@@ -20118,8 +20179,35 @@ mod tests {
         assert_eq!(repeat_base.manifest_size, snapshot.head.manifest_size);
     }
 
+    /// The cloud id every stored session of `snapshot` has, by provider id.
+    fn stored_cloud_ids(snapshot: &BundleSnapshot) -> BTreeMap<Option<String>, CloudThreadId> {
+        snapshot
+            .manifest
+            .all_conversations()
+            .map(|(_, cloud_id, thread)| (thread.source_thread_id.clone(), cloud_id.clone()))
+            .collect()
+    }
+
+    /// The comparison row of one local provider session.
+    fn comparison_entry<'a>(
+        comparison: &'a ThreadSyncComparison,
+        provider_thread_id: &str,
+    ) -> &'a ThreadSyncEntry {
+        comparison
+            .entries
+            .iter()
+            .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_thread_id))
+            .unwrap_or_else(|| panic!("no comparison row for '{provider_thread_id}'"))
+    }
+
+    /// Story 1, with rows S1 and A3: another computer cleared the storage and
+    /// nobody has pushed since. This computer's bases and acceptance name a
+    /// history the storage no longer has. They are read as absent and never
+    /// deleted by a refresh. Push is open, every session is a new task under
+    /// the cloud id it already has, and one Push writes the stream's first
+    /// record. No unlink, no reset and no Pull.
     #[test]
-    fn missing_remote_history_requires_an_explicit_unlink_before_republishing() {
+    fn a_cleared_storage_is_pushed_again_without_an_unlink_or_a_reset() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("missing-history-store").unwrap();
@@ -20129,38 +20217,71 @@ mod tests {
         let project_root = temp.path().join("project");
         let codex_home = temp.path().join("codex-home");
         bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
-        write_codex_session(
-            &codex_home,
-            "019f7500-0000-7000-8000-0000000000bc",
-            &project_root,
-        );
+        let session = "019f7500-0000-7000-8000-0000000000bc";
+        write_codex_session(&codex_home, session, &project_root);
 
         let first =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
         assert_eq!(first.revision, Some(2));
-        let reviewed = reviewed_link_state(&repo, &project.local_project_id, &storage_id);
-        let prepared_before_remote_loss =
-            prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
-                .unwrap();
-        assert_eq!(
-            prepared_before_remote_loss.destination_status,
-            PushDestinationStatus::Ready { revision: Some(2) }
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let cloud_ids_before = stored_cloud_ids(
+            engine
+                .observe(&project.bundle_id)
+                .unwrap()
+                .snapshot()
+                .unwrap(),
         );
+        assert_eq!(cloud_ids_before.len(), 1);
+        let saved_link = |repo: &LocalStateRepository| {
+            let config = repo.load_config().unwrap();
+            project_link(&config, &project.local_project_id, &storage_id)
+                .unwrap()
+                .clone()
+        };
+        let reviewed = saved_link(&repo);
+        assert!(reviewed
+            .conversation_checkpoints
+            .values()
+            .flat_map(BTreeMap::values)
+            .all(|checkpoint| checkpoint.accepted.is_some()));
 
-        let repository_root = storage_root
-            .join(".mallard/v1/repositories")
-            .join(project.bundle_id.as_str());
-        std::fs::remove_dir_all(&repository_root).unwrap();
+        wipe_remote_bundle(&storage_root, &project.bundle_id);
 
-        let error =
-            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap_err();
-        assert!(error.contains("remote history is missing"));
+        // The refresh reports the missing history and decides every row
+        // without the stale records. It deletes none of them: a short
+        // listing looks the same as a clear.
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::RemoteMissing { base_revision: 2 }
+        );
+        let entry = comparison_entry(&comparison, session);
+        assert_eq!(entry.push_decision.blocker, None);
+        assert_eq!(
+            entry.push_decision.action,
+            ConversationReviewAction::CreateCloud
+        );
+        assert_eq!(
+            entry.pull_decision.action,
+            ConversationReviewAction::ReportLocalOnly
+        );
+        assert!(comparison
+            .scopes
+            .iter()
+            .all(|scope| scope.continuity == ScopeContinuity::Fresh));
+        assert_eq!(saved_link(&repo), reviewed);
+
         let context =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         assert_eq!(
             context.destination_status,
-            PushDestinationStatus::RemoteHistoryMissing { base_revision: 2 }
+            PushDestinationStatus::Ready { revision: None }
         );
         assert_eq!(
             get_push_destination_status_with_repository(
@@ -20171,23 +20292,251 @@ mod tests {
             .unwrap(),
             context.destination_status
         );
+        assert_eq!(saved_link(&repo).scope_bases, reviewed.scope_bases);
 
-        let retained = reviewed_link_state(&repo, &project.local_project_id, &storage_id);
-        assert_eq!(retained, reviewed);
-
-        assert!(
-            remove_project_link_with_repository(&repo, &project.local_project_id, &storage_id,)
-                .unwrap()
+        // One Push recreates the storage: the first record of the new
+        // history carries the content, under the cloud id the session had.
+        let republished =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert!(republished.success, "{}", republished.message);
+        assert_eq!(republished.revision, Some(1));
+        let observation = engine.observe(&project.bundle_id).unwrap();
+        assert_eq!(observation.mainline.names().len(), 1);
+        assert_eq!(
+            stored_cloud_ids(observation.snapshot().unwrap()),
+            cloud_ids_before
         );
-        save_project_link_with_repository(
+
+        // The next refresh reads in sync, and no record of the old history
+        // is left on the link.
+        let settled = get_project_thread_sync_comparison_with_repository(
             &repo,
-            SaveProjectLinkRequest {
-                local_project_id: project.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
+            &project.local_project_id,
+            &storage_id,
         )
         .unwrap();
+        assert_eq!(
+            settled.remote_continuity,
+            RemoteContinuity::InSync { revision: 1 }
+        );
+        assert_eq!(
+            comparison_entry(&settled, session).state,
+            ThreadSyncState::Synced
+        );
+        let link = saved_link(&repo);
+        assert!(repository_bases(&link).all(|base| observation
+            .mainline
+            .contains(base.revision, &base.commit_id)));
+        assert!(link
+            .conversation_checkpoints
+            .values()
+            .flat_map(BTreeMap::values)
+            .filter_map(|checkpoint| checkpoint.accepted.as_ref())
+            .all(|accepted| observation
+                .mainline
+                .contains_commit(&accepted.accepted_at_commit_id)));
+    }
+
+    /// The record names of one bundle's stream at `revision`, as the storage
+    /// folder holds them.
+    fn record_names_at(
+        storage_root: &Path,
+        bundle_id: &BundleId,
+        revision: u64,
+    ) -> Vec<mallard_domain::RecordName> {
+        let stream = storage_root
+            .join(".mallard/v1/repositories/_commits")
+            .join(bundle_id.as_str());
+        let mut names = std::fs::read_dir(stream)
+            .unwrap()
+            .filter_map(|entry| {
+                mallard_domain::RecordName::parse(entry.unwrap().file_name().to_str()?)
+            })
+            .filter(|name| name.revision() == revision)
+            .collect::<Vec<_>>();
+        names.sort_by_key(|name| name.file_name());
+        names
+    }
+
+    /// Another computer's publication on `parent`, or a first publication
+    /// when there is none: the content of `content_of` carried byte for byte
+    /// under its own commit id, in a record that claims `created_at_ms`.
+    fn plant_publication(
+        storage_root: &Path,
+        bundle_id: &BundleId,
+        content_of: &mallard_domain::RecordName,
+        parent: Option<&mallard_domain::RecordName>,
+        commit_id: &str,
+        created_at_ms: u64,
+    ) -> mallard_domain::RecordName {
+        let repositories = storage_root.join(".mallard/v1/repositories");
+        let stream = repositories.join("_commits").join(bundle_id.as_str());
+        let bundle = repositories.join(bundle_id.as_str());
+        // A manifest's bytes are its one canonical serialization, so this
+        // one is written from the typed manifest, like any writer's.
+        let mut manifest: BundleManifest = serde_json::from_slice(
+            &std::fs::read(bundle.join(format!(
+                "_manifests/{}-{}.json",
+                content_of.revision(),
+                content_of.commit_id()
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        manifest.revision = parent.map_or(1, |parent| parent.revision() + 1);
+        manifest.commit_id = commit_id.to_string();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_key = format!("_manifests/{}-{commit_id}.json", manifest.revision);
+        std::fs::write(bundle.join(&manifest_key), &manifest_bytes).unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(stream.join(content_of.file_name())).unwrap())
+                .unwrap();
+        let fields = record.as_object_mut().unwrap();
+        fields.remove("previous_commit_id");
+        fields.remove("previous_record_sha256");
+        if let Some(parent) = parent {
+            record["previous_commit_id"] = serde_json::json!(parent.commit_id());
+            record["previous_record_sha256"] = serde_json::json!(parent.token().record_sha256());
+        }
+        record["revision"] = serde_json::json!(manifest.revision);
+        record["commit_id"] = serde_json::json!(commit_id);
+        record["created_at_ms"] = serde_json::json!(created_at_ms);
+        record["manifest_key"] = serde_json::json!(manifest_key);
+        record["manifest_sha256"] = serde_json::json!(mallard_domain::sha256_hex(&manifest_bytes));
+        record["manifest_size"] = serde_json::json!(manifest_bytes.len());
+        let record_bytes = serde_json::to_vec(&record).unwrap();
+        let name = mallard_domain::RecordName::new(
+            manifest.revision,
+            mallard_domain::PublicationToken::new(
+                commit_id.to_string(),
+                mallard_domain::sha256_hex(&record_bytes),
+            )
+            .unwrap(),
+            parent.map(|parent| parent.token().clone()),
+            created_at_ms,
+        )
+        .unwrap();
+        std::fs::write(stream.join(name.file_name()), &record_bytes).unwrap();
+        name
+    }
+
+    /// Another computer's publication on `parent`, carrying the parent's
+    /// content: a sibling of whatever this computer publishes on it.
+    fn plant_rival_publication(
+        storage_root: &Path,
+        bundle_id: &BundleId,
+        parent: &mallard_domain::RecordName,
+        rival_commit: &str,
+        created_at_ms: u64,
+    ) -> mallard_domain::RecordName {
+        plant_publication(
+            storage_root,
+            bundle_id,
+            parent,
+            Some(parent),
+            rival_commit,
+            created_at_ms,
+        )
+    }
+
+    /// Two computers push on the same version within seconds. The other
+    /// one's record ranks first and lands between this push's listing and
+    /// its write, so the listing after the write selects it. This push fails
+    /// as a whole: no base, checkpoint, binding or receipt moves, the storage
+    /// reads as an ordinary advanced one, and the next Push publishes the
+    /// same session. Nothing is held and nothing needs a reset.
+    #[test]
+    fn a_push_that_loses_the_fork_window_fails_whole_and_the_next_push_publishes_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("fork-window-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let session_path = |session_id: &str| {
+            codex_home
+                .join("sessions/2026/07/22")
+                .join(format!("rollout-{session_id}.jsonl"))
+        };
+        let accepted_session = "019f7500-0000-7000-8000-0000000000c1";
+        write_codex_session(&codex_home, accepted_session, &project_root);
+        let first =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(first.revision, Some(2));
+
+        // A second session, first published by the push that loses.
+        let new_session = "019f7500-0000-7000-8000-0000000000c2";
+        write_codex_session(&codex_home, new_session, &project_root);
+        let session_bytes = std::fs::read(session_path(new_session)).unwrap();
+        let local_sync_state = || {
+            (
+                repo.load_config().unwrap(),
+                repo.load_conversation_bindings().unwrap(),
+                repo.load_materializations().unwrap(),
+            )
+        };
+        let before = local_sync_state();
+
+        // This push's record is built after the version it publishes on, so
+        // a rival that claims the millisecond after that version ranks first.
+        std::thread::sleep(Duration::from_millis(5));
+        let rival_commit = format!("commit-{}", "e".repeat(24));
+        use mallard_infrastructure::storage_core::publication::test_support;
+        test_support::before_next_record_request({
+            let (storage_root, bundle_id) = (storage_root.clone(), project.bundle_id.clone());
+            let rival_commit = rival_commit.clone();
+            move || {
+                let parent = record_names_at(&storage_root, &bundle_id, 2).remove(0);
+                plant_rival_publication(
+                    &storage_root,
+                    &bundle_id,
+                    &parent,
+                    &rival_commit,
+                    parent.created_at_ms() + 1,
+                );
+            }
+        });
+        let error =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap_err();
+        assert_eq!(
+            error,
+            mallard_infrastructure::storage_core::publication::REMOTE_CHANGED
+        );
+
+        // Nothing local moved, and both records are in the storage.
+        assert_eq!(local_sync_state(), before);
+        assert_eq!(
+            std::fs::read(session_path(new_session)).unwrap(),
+            session_bytes
+        );
+        assert_eq!(
+            record_names_at(&storage_root, &project.bundle_id, 3).len(),
+            2
+        );
+
+        // The base is an ancestor of the selected publication: an ordinary
+        // advanced storage. No row is held, and Push is open.
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Advanced {
+                base_revision: 2,
+                remote_revision: 3
+            }
+        );
+        assert_eq!(comparison.entries.len(), 2);
+        assert!(comparison
+            .entries
+            .iter()
+            .all(|entry| entry.push_decision.blocker.is_none()));
         assert_eq!(
             get_push_destination_status_with_repository(
                 &repo,
@@ -20195,21 +20544,362 @@ mod tests {
                 &storage_id,
             )
             .unwrap(),
-            PushDestinationStatus::Ready { revision: Some(1) }
+            PushDestinationStatus::Ready { revision: Some(3) }
         );
 
+        // Pushing again publishes the session on the selected publication.
         let republished =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
-        assert_eq!(republished.revision, Some(2));
+        assert_eq!(republished.revision, Some(4), "{}", republished.message);
+        assert!(republished.success);
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let observation = engine.observe(&project.bundle_id).unwrap();
+        assert_eq!(observation.mainline.names()[2].commit_id(), rival_commit);
+        assert_eq!(
+            observation
+                .snapshot()
+                .unwrap()
+                .manifest
+                .all_conversations()
+                .count(),
+            2
+        );
+        // The record that was not selected is still in the storage, on no
+        // selected chain.
+        let kept = record_names_at(&storage_root, &project.bundle_id, 3)
+            .into_iter()
+            .find(|name| name.commit_id() != rival_commit)
+            .unwrap();
+        assert!(!observation.mainline.contains(3, kept.commit_id()));
+        assert_eq!(
+            std::fs::read(session_path(new_session)).unwrap(),
+            session_bytes
+        );
     }
 
-    /// The two-replica incident from DESIGN_REMOTE_HISTORY_CONTINUITY.md:
-    /// replica A loses the remote, unlinks, relinks, and republishes under
-    /// the same bundle id. Replica B — simulated by restoring the pre-wipe
-    /// base — must see the recreated history as replaced on every surface,
-    /// be blocked from pushing, and be healed by an ordinary pull.
+    /// The events `outranked_push_events` announced for one project so far.
+    fn outranked_events_for(
+        events: &mut tokio::sync::broadcast::Receiver<OutrankedPush>,
+        project: &LocalProjectRegistration,
+    ) -> usize {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.local_project_id == project.local_project_id)
+            .count()
+    }
+
+    /// The one loss that cannot fail the Push: the other computer listed
+    /// before this one's record was visible, and its earlier-ranked record
+    /// lands after this Push was confirmed. Only the fork window allows it.
+    /// The next refresh treats that Push as one that never happened: the
+    /// bases return to the publication both computers share, the acceptance
+    /// it recorded is forgotten with its read cursor kept, and the window is
+    /// told once. A plain Push then publishes the same sessions under the
+    /// same cloud ids. No Pull and no reset are needed, and the outranked
+    /// publication stays in the storage.
     #[test]
-    fn replaced_remote_history_blocks_push_on_every_surface_and_pull_heals_it() {
+    fn a_push_outranked_after_it_was_confirmed_is_rolled_back_and_pushes_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("fork-window-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let mut events = outranked_push_events().subscribe();
+        let sessions = codex_home.join("sessions/2026/07/22");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let continued = "019f7500-0000-7000-8000-0000000000d1";
+        let created = "019f7500-0000-7000-8000-0000000000d2";
+        let session_path = |id: &str| sessions.join(format!("rollout-{id}.jsonl"));
+        let write_session = |id: &str, messages: &[(&str, &str, &str)]| {
+            std::fs::write(
+                session_path(id),
+                command_test_transcript(id, &project_root, messages),
+            )
+            .unwrap();
+        };
+        let cloud_ids = |snapshot: &BundleSnapshot| {
+            snapshot
+                .manifest
+                .all_conversations()
+                .map(|(_, cloud_id, thread)| (thread.source_thread_id.clone(), cloud_id.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        // Version 2 holds one session and stays selected for good.
+        write_session(continued, &[("base", "user", "base")]);
+        let first =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(first.revision, Some(2));
+
+        // That session continues and a second one starts. The Push is
+        // confirmed: its record is the only child of version 2.
+        write_session(
+            continued,
+            &[("base", "user", "base"), ("next", "user", "continued here")],
+        );
+        write_session(created, &[("fresh", "user", "a new session")]);
+        let local_bytes = [continued, created].map(|id| std::fs::read(session_path(id)).unwrap());
+        let mine =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(mine.revision, Some(3));
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let pushed = engine.observe(&project.bundle_id).unwrap();
+        let pushed_ids = cloud_ids(pushed.snapshot().unwrap());
+        assert_eq!(pushed_ids.len(), 2);
+
+        // The other computer's record becomes visible only now: a sibling on
+        // version 2, built a second earlier, that changed nothing this
+        // computer's scope holds.
+        let mine_name = record_names_at(&storage_root, &project.bundle_id, 3).remove(0);
+        let rival_commit = format!("commit-{}", "e".repeat(24));
+        plant_rival_publication(
+            &storage_root,
+            &project.bundle_id,
+            &record_names_at(&storage_root, &project.bundle_id, 2).remove(0),
+            &rival_commit,
+            mine_name.created_at_ms() - 1_000,
+        );
+        assert_eq!(outranked_events_for(&mut events, &project), 0);
+
+        // The refresh rolls the link back to version 2: an ordinary advanced
+        // storage, with both sessions waiting to be pushed and nothing held.
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Advanced {
+                base_revision: 2,
+                remote_revision: 3
+            }
+        );
+        let push_action = |provider_thread_id: &str| {
+            let entry = comparison
+                .entries
+                .iter()
+                .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_thread_id))
+                .unwrap();
+            assert_eq!(entry.push_decision.blocker, None);
+            entry.push_decision.action
+        };
+        assert_eq!(comparison.entries.len(), 2);
+        // The storage still holds the continued session's first version, and
+        // first-contact adoption proves it is a prefix of the local one.
+        assert_eq!(push_action(continued), ConversationReviewAction::Publish);
+        assert_eq!(push_action(created), ConversationReviewAction::CreateCloud);
+        assert_eq!(outranked_events_for(&mut events, &project), 1);
+        let link = repo.load_config().unwrap();
+        let link = project_link(&link, &project.local_project_id, &storage_id).unwrap();
+        assert!(repository_bases(link).all(|base| base.revision == 2));
+        // The forget rule, as Clear storage applies it: both checkpoints
+        // stay with their cursor and mapping, and neither keeps an acceptance
+        // of the outranked Push.
+        let checkpoints = link
+            .conversation_checkpoints
+            .values()
+            .flat_map(BTreeMap::values)
+            .collect::<Vec<_>>();
+        assert_eq!(checkpoints.len(), 2);
+        assert!(checkpoints.iter().all(|checkpoint| {
+            checkpoint.accepted.is_none()
+                && checkpoint.accepted_local_tail.is_none()
+                && matches!(checkpoint.physical, PhysicalMappingState::Ready { .. })
+        }));
+        assert_eq!(
+            get_push_destination_status_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap(),
+            PushDestinationStatus::Ready { revision: Some(3) }
+        );
+
+        // Pushing again publishes both sessions on the selected version,
+        // under the cloud ids the outranked Push gave them.
+        let republished =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(republished.revision, Some(4), "{}", republished.message);
+        assert!(republished.success);
+        let observation = engine.observe(&project.bundle_id).unwrap();
+        assert_eq!(observation.mainline.names()[2].commit_id(), rival_commit);
+        assert_eq!(cloud_ids(observation.snapshot().unwrap()), pushed_ids);
+        let settled = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            settled.remote_continuity,
+            RemoteContinuity::InSync { revision: 4 }
+        );
+        assert!(settled
+            .entries
+            .iter()
+            .all(|entry| entry.push_decision.action == ConversationReviewAction::NoChanges));
+        // It was said once. The outranked publication is still in the
+        // storage, and nothing local was touched.
+        assert_eq!(outranked_events_for(&mut events, &project), 0);
+        assert_eq!(observation.unselected, [mine_name]);
+        assert_eq!(
+            [continued, created].map(|id| std::fs::read(session_path(id)).unwrap()),
+            local_bytes
+        );
+    }
+
+    /// The first Push of a project is outranked: the publication both
+    /// computers share is the registration, which holds no scope, so the
+    /// scope base is removed instead of returned, and the session is
+    /// published again under its cloud id.
+    #[test]
+    fn an_outranked_first_push_loses_its_scope_base_and_pushes_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("fork-window-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        write_codex_session(
+            &codex_home,
+            "019f7500-0000-7000-8000-0000000000bf",
+            &project_root,
+        );
+        let mine =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(mine.revision, Some(2));
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let pushed = engine.observe(&project.bundle_id).unwrap();
+        let pushed_id = pushed
+            .snapshot()
+            .unwrap()
+            .manifest
+            .all_conversations()
+            .map(|(_, cloud_id, _)| cloud_id.clone())
+            .next()
+            .unwrap();
+
+        let mine_name = record_names_at(&storage_root, &project.bundle_id, 2).remove(0);
+        plant_rival_publication(
+            &storage_root,
+            &project.bundle_id,
+            &record_names_at(&storage_root, &project.bundle_id, 1).remove(0),
+            &format!("commit-{}", "e".repeat(24)),
+            mine_name.created_at_ms() - 1_000,
+        );
+
+        // Revision order would have called this in sync: both are version 2.
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Unreviewed { remote_revision: 2 }
+        );
+        assert_eq!(comparison.entries.len(), 1);
+        assert_eq!(
+            comparison.entries[0].push_decision.action,
+            ConversationReviewAction::CreateCloud
+        );
+        let republished =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert_eq!(republished.revision, Some(3), "{}", republished.message);
+        let observation = engine.observe(&project.bundle_id).unwrap();
+        assert_eq!(
+            observation
+                .snapshot()
+                .unwrap()
+                .manifest
+                .all_conversations()
+                .map(|(_, cloud_id, _)| cloud_id.clone())
+                .collect::<Vec<_>>(),
+            [pushed_id]
+        );
+    }
+
+    /// A base the listing cannot connect to the selected chain proves no
+    /// lost race: the stream was cleared and another computer pushed again
+    /// while an interrupted clear left this computer's record behind. Nothing
+    /// is rolled back, and the link reads `Replaced` as it always did.
+    #[test]
+    fn a_base_left_behind_by_an_interrupted_clear_is_not_rolled_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("interrupted-clear-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let mut events = outranked_push_events().subscribe();
+        write_codex_session(
+            &codex_home,
+            "019f7500-0000-7000-8000-0000000000e1",
+            &project_root,
+        );
+        push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        let before = repo.load_config().unwrap();
+
+        // The clear deleted the first record and stopped; another computer
+        // then published a first version of its own.
+        let old_root = record_names_at(&storage_root, &project.bundle_id, 1).remove(0);
+        plant_publication(
+            &storage_root,
+            &project.bundle_id,
+            &old_root,
+            None,
+            &format!("commit-{}", "c".repeat(24)),
+            old_root.created_at_ms() + 60_000,
+        );
+        std::fs::remove_file(
+            storage_root
+                .join(".mallard/v1/repositories/_commits")
+                .join(project.bundle_id.as_str())
+                .join(old_root.file_name()),
+        )
+        .unwrap();
+
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Replaced {
+                base_revision: 2,
+                remote_revision: 1
+            }
+        );
+        let after = repo.load_config().unwrap();
+        assert_eq!(
+            project_link(&after, &project.local_project_id, &storage_id),
+            project_link(&before, &project.local_project_id, &storage_id)
+        );
+        assert_eq!(outranked_events_for(&mut events, &project), 0);
+    }
+
+    /// Story 2 on one storage area, rows A7 and A5: the storage was cleared
+    /// and pushed again with other content. The replica whose bases name the
+    /// cleared history reads the area as never reviewed here. It is asked
+    /// for a Pull, never for an unlink or a reset, and an ordinary Pull
+    /// replaces the stale bases.
+    #[test]
+    fn a_recreated_storage_asks_for_a_pull_and_the_pull_replaces_the_stale_bases() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("replaced-history-store").unwrap();
@@ -20231,37 +20921,23 @@ mod tests {
         let (pre_wipe_base, pre_wipe_scopes) =
             reviewed_link_state(&repo, &project.local_project_id, &storage_id);
 
-        // The wipe, then replica A's sanctioned recovery: unlink (drops the
-        // base), relink, republish — same bundle id, brand-new lineage.
-        let repository_root = storage_root
-            .join(".mallard/v1/repositories")
-            .join(project.bundle_id.as_str());
-        std::fs::remove_dir_all(&repository_root).unwrap();
-        assert!(
-            remove_project_link_with_repository(&repo, &project.local_project_id, &storage_id,)
-                .unwrap()
+        // The clear, then one more session and a plain Push: the same bundle
+        // id, a brand-new history that starts again at version 1.
+        wipe_remote_bundle(&storage_root, &project.bundle_id);
+        write_codex_session(
+            &codex_home,
+            "019f7500-0000-7000-8000-0000000000b0",
+            &project_root,
         );
-        save_project_link_with_repository(
-            &repo,
-            SaveProjectLinkRequest {
-                local_project_id: project.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
-        )
-        .unwrap();
         let recreated =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
-        assert_eq!(recreated.revision, Some(2));
+        assert_eq!(recreated.revision, Some(1), "{}", recreated.message);
         let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
         let recreated_head = engine.inspect(&project.bundle_id).unwrap().head;
-        assert_ne!(
-            recreated_head.manifest_sha256, pre_wipe_base.manifest_sha256,
-            "the recreated lineage must not reproduce the wiped manifest"
-        );
+        assert_ne!(recreated_head.commit_id, pre_wipe_base.commit_id);
 
-        // Replica B: same binding, but its recorded bases name the wiped
-        // lineage.
+        // The other replica: same binding, but its recorded bases name the
+        // cleared history.
         repo.mutate_config(|config| {
             config
                 .links
@@ -20276,21 +20952,21 @@ mod tests {
         })
         .unwrap();
 
-        // Push review blocks with the replaced-history status (row 5: equal
-        // revisions, different digests — no probe read needed)...
+        // The Push review asks for a Pull of the area it writes...
         let context =
             prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap();
         assert_eq!(
             context.destination_status,
-            PushDestinationStatus::RemoteHistoryReplaced {
-                base_revision: 2,
-                remote_revision: 2,
-                base_manifest_sha256: pre_wipe_base.manifest_sha256.clone(),
-                remote_manifest_sha256: recreated_head.manifest_sha256.clone(),
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
+                remote_revision: 1,
+                base_revision: None,
+                blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
-        // ...the comparison shown by refresh carries the same continuity...
+        // ...the comparison shown by refresh names the cleared history, which
+        // is what the standing notice reads...
         assert_eq!(
             context
                 .thread_comparison
@@ -20299,7 +20975,7 @@ mod tests {
                 .remote_continuity,
             RemoteContinuity::Replaced {
                 base_revision: 2,
-                remote_revision: 2
+                remote_revision: 1
             }
         );
         let comparison = get_project_thread_sync_comparison_with_repository(
@@ -20312,16 +20988,26 @@ mod tests {
             comparison.remote_continuity,
             RemoteContinuity::Replaced {
                 base_revision: 2,
-                remote_revision: 2
+                remote_revision: 1
             }
         );
-        // ...and the push preflight fails with the same diagnosis.
+        assert!(comparison
+            .scopes
+            .iter()
+            .any(|scope| scope.scope == "provider:codex"
+                && scope.continuity == ScopeContinuity::Unreviewed { remote_revision: 1 }));
+        // ...and the push preflight fails with the same answer.
         let error =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap_err();
-        assert!(error.contains("was replaced"), "got: {error}");
+        assert!(
+            error.contains("never been reviewed on this computer"),
+            "got: {error}"
+        );
         assert!(error.contains("pull and review"), "got: {error}");
+        assert!(!error.contains("unlink"), "got: {error}");
 
-        // The pull plan carries the verdict, and applying it heals the base.
+        // The pull plan carries the verdict, and applying it replaces every
+        // base of the cleared history.
         let binding = repo
             .load_bindings()
             .unwrap()
@@ -20335,7 +21021,7 @@ mod tests {
             plan.remote_continuity,
             Some(RemoteContinuity::Replaced {
                 base_revision: 2,
-                remote_revision: 2
+                remote_revision: 1
             })
         );
         ProjectSyncService::new(&repo)
@@ -20354,7 +21040,7 @@ mod tests {
                 &storage_id,
             )
             .unwrap(),
-            PushDestinationStatus::Ready { revision: Some(2) }
+            PushDestinationStatus::Ready { revision: Some(1) }
         );
         assert_eq!(
             get_project_thread_sync_comparison_with_repository(
@@ -20364,16 +21050,662 @@ mod tests {
             )
             .unwrap()
             .remote_continuity,
-            RemoteContinuity::InSync { revision: 2 }
+            RemoteContinuity::InSync { revision: 1 }
+        );
+        let (_, healed_scopes) = reviewed_link_state(&repo, &project.local_project_id, &storage_id);
+        assert!(healed_scopes
+            .values()
+            .all(|base| base.reviewed_in.commit_id == recreated_head.commit_id));
+    }
+
+    /// Two computers on one storage: two local projects of one bundle, each
+    /// with its own project folder and its own Codex home.
+    struct TwoComputers {
+        _temp: tempfile::TempDir,
+        repo: LocalStateRepository,
+        storage_id: StorageId,
+        storage_root: PathBuf,
+        bundle_id: BundleId,
+        a: TestComputer,
+        b: TestComputer,
+    }
+
+    struct TestComputer {
+        project: LocalProjectRegistration,
+        root: PathBuf,
+        codex: PathBuf,
+        binding: ProjectBinding,
+    }
+
+    impl TwoComputers {
+        fn new(storage: &str) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = repository(&temp);
+            let storage_id = StorageId::parse(storage).unwrap();
+            let storage_root = temp.path().join("store");
+            add_local_storage(&repo, &storage_id, &storage_root);
+            let bundle_id = BundleId::parse("5eaf00d5eaf00d5eaf00d5eaf00d5eaf").unwrap();
+            let computer = |name: &str| {
+                let project = register_local_project_with_repository(
+                    &repo,
+                    RegisterLocalProjectRequest {
+                        display_name: format!("Project on {name}"),
+                        repository_fingerprint: Some("a".repeat(64)),
+                        bundle_id: Some(bundle_id.clone()),
+                    },
+                )
+                .unwrap();
+                let root = temp.path().join(format!("project-{name}"));
+                let codex = temp.path().join(format!("codex-{name}"));
+                let binding =
+                    bind_and_link_test_replica(&repo, &project, &storage_id, &root, &codex);
+                TestComputer {
+                    project,
+                    root,
+                    codex,
+                    binding,
+                }
+            };
+            let a = computer("a");
+            let b = computer("b");
+            Self {
+                _temp: temp,
+                repo,
+                storage_id,
+                storage_root,
+                bundle_id,
+                a,
+                b,
+            }
+        }
+
+        fn push(&self, computer: &TestComputer) -> ProjectOperationResult {
+            push_bundle_with_repository(
+                &self.repo,
+                &computer.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap()
+        }
+
+        fn compare(&self, computer: &TestComputer) -> ThreadSyncComparison {
+            get_project_thread_sync_comparison_with_repository(
+                &self.repo,
+                &computer.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap()
+        }
+
+        fn push_status(&self, computer: &TestComputer) -> PushDestinationStatus {
+            get_push_destination_status_with_repository(
+                &self.repo,
+                &computer.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap()
+        }
+
+        fn plan_pull(&self, computer: &TestComputer) -> RestorePlan {
+            ProjectSyncService::new(&self.repo)
+                .plan_bundle_restore(&self.storage_id, &self.bundle_id, &computer.binding)
+                .unwrap()
+        }
+
+        /// Pull every conversation row of `plan` that carries an action.
+        fn pull_conversations(&self, plan: &RestorePlan) -> RestoreResult {
+            let result = ProjectSyncService::new(&self.repo)
+                .apply_bundle_restore(
+                    plan,
+                    plan.conversation_review
+                        .iter()
+                        .filter_map(|row| row.action_id.clone())
+                        .collect(),
+                )
+                .unwrap();
+            assert!(
+                result.success,
+                "{} — failed: {:?}",
+                result.message, result.failed_actions
+            );
+            result
+        }
+
+        fn link(&self, computer: &TestComputer) -> ProjectStorageLink {
+            let config = self.repo.load_config().unwrap();
+            project_link(
+                &config,
+                &computer.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap()
+            .clone()
+        }
+
+        /// The rollout this computer holds for one stored session.
+        fn rollout_of(&self, computer: &TestComputer, cloud_thread_id: &CloudThreadId) -> PathBuf {
+            let row = self
+                .repo
+                .load_conversation_bindings()
+                .unwrap()
+                .bindings
+                .into_iter()
+                .find(|row| {
+                    row.local_project_id == computer.project.local_project_id
+                        && row.cloud_thread_id.as_ref() == Some(cloud_thread_id)
+                })
+                .expect("the computer holds the stored session");
+            let checkpoint = self.link(computer).conversation_checkpoints
+                [&SyncScopeKey::Provider(codex_key())][&row.thread_id]
+                .clone();
+            let PhysicalMappingState::Ready { root_mapping, .. } = checkpoint.physical else {
+                panic!("the session has no ready mapping");
+            };
+            PathBuf::from(root_mapping.root_path)
+        }
+
+        fn stored_cloud_ids(&self) -> BTreeMap<Option<String>, CloudThreadId> {
+            let (_, engine) = storage_engine(&self.repo, &self.storage_id).unwrap();
+            stored_cloud_ids(engine.observe(&self.bundle_id).unwrap().snapshot().unwrap())
+        }
+    }
+
+    /// Continue a Codex rollout by one user turn, as the provider would.
+    fn append_codex_user_turn(path: &Path, id: &str, text: &str) {
+        use std::io::Write as _;
+        let ordinal = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .next_back()
+            .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .and_then(|record| record.get("ordinal").and_then(serde_json::Value::as_u64))
+            .unwrap()
+            + 1;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &serde_json::json!({
+                "ordinal": ordinal,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "id": id,
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}]
+                }
+            }),
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+    }
+
+    /// Story 2 with rule 0 and rows S4, A7 and S1. Both computers hold one
+    /// session. The storage is cleared, and computer B pushes again with the
+    /// session continued. Computer A's acceptance names the cleared history
+    /// and still equals its local copy, so against that stale record B's
+    /// longer copy would read as a plain update and be installed over A's
+    /// own. The record is ignored instead: nothing relates the two copies,
+    /// Push asks for a Pull, and Pull keeps both. No row reads "Can't sync",
+    /// and nothing asks for an unlink or a reset.
+    #[test]
+    fn a_stale_acceptance_never_reads_a_recreated_session_as_a_plain_update() {
+        let world = TwoComputers::new("recreated-session-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000e1";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let cloud_ids = world.stored_cloud_ids();
+        let cloud_thread_id = cloud_ids[&Some(session.to_string())].clone();
+
+        // B pulls the session: both computers now hold it, accepted in
+        // version 2.
+        world.pull_conversations(&world.plan_pull(b));
+        let b_rollout = world.rollout_of(b, &cloud_thread_id);
+        let accepted_before = world.link(a);
+
+        // The storage is cleared, B continues the session and pushes again:
+        // story 1 on B, under the cloud id the session already had.
+        wipe_remote_bundle(&world.storage_root, &world.bundle_id);
+        append_codex_user_turn(&b_rollout, "message-b-continued", "continued on B");
+        assert_eq!(
+            world.push_status(b),
+            PushDestinationStatus::Ready { revision: None }
+        );
+        let recreated = world.push(b);
+        assert!(recreated.success, "{}", recreated.message);
+        assert_eq!(recreated.revision, Some(1));
+        assert_eq!(
+            world.stored_cloud_ids().into_values().collect::<Vec<_>>(),
+            vec![cloud_thread_id.clone()],
+            "B's copy carries the provider id B minted, under the same cloud id"
+        );
+
+        // A: the history was replaced, and its area holds other content.
+        let comparison = world.compare(a);
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Replaced {
+                base_revision: 2,
+                remote_revision: 1
+            }
+        );
+        assert_eq!(
+            world.push_status(a),
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
+                remote_revision: 1,
+                base_revision: None,
+                blocking_scopes: vec!["provider:codex".to_string()],
+            }
+        );
+        // Rule 0: A's saved acceptance still equals its local copy, and the
+        // stored copy has more turns. It is S4, never "Update this task".
+        let row = comparison_entry(&comparison, session);
+        assert_eq!(row.state, ThreadSyncState::Diverged);
+        assert_eq!(
+            row.push_decision.action,
+            ConversationReviewAction::RequirePull
+        );
+        assert_eq!(row.pull_decision.action, ConversationReviewAction::KeepBoth);
+        assert!(row.pull_decision.selectable);
+        assert!(comparison
+            .entries
+            .iter()
+            .all(
+                |entry| entry.push_decision.action != ConversationReviewAction::Blocked
+                    && entry.pull_decision.action != ConversationReviewAction::Blocked
+            ));
+        // Comparing forgot nothing.
+        assert_eq!(world.link(a), accepted_before);
+
+        // The Pull installs the stored session and keeps A's copy.
+        let plan = world.plan_pull(a);
+        let keep_both = plan
+            .conversation_review
+            .iter()
+            .find(|row| row.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .unwrap();
+        assert_eq!(keep_both.action, ConversationReviewAction::KeepBoth);
+        let pulled = world.pull_conversations(&plan);
+        assert_eq!(pulled.preserved_threads.len(), 1);
+        let a_source = a
+            .codex
+            .join(format!("sessions/2026/07/22/rollout-{session}.jsonl"));
+        assert_eq!(
+            std::fs::read(&a_source).unwrap(),
+            command_test_transcript(session, &a.root, &[("message-test", "user", "hello")]),
+            "keep both never touches the local copy"
+        );
+        let installed = std::fs::read_to_string(world.rollout_of(a, &cloud_thread_id)).unwrap();
+        assert!(installed.contains("continued on B"));
+
+        // Afterwards A is an ordinary replica of the new history: Push is
+        // open, the stored session is in sync, and the preserved copy is a
+        // new task that the next Push uploads.
+        let settled = world.compare(a);
+        assert_eq!(
+            settled.remote_continuity,
+            RemoteContinuity::InSync { revision: 1 }
+        );
+        assert_eq!(
+            world.push_status(a),
+            PushDestinationStatus::Ready { revision: Some(1) }
+        );
+        assert!(settled
+            .entries
+            .iter()
+            .all(|entry| entry.push_decision.action != ConversationReviewAction::Blocked));
+        let stored_row = settled
+            .entries
+            .iter()
+            .find(|entry| entry.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .unwrap();
+        assert_eq!(stored_row.state, ThreadSyncState::Synced);
+        let preserved_row = comparison_entry(&settled, session);
+        assert_eq!(
+            preserved_row.push_decision.action,
+            ConversationReviewAction::CreateCloud
+        );
+        let link = world.link(a);
+        let (_, engine) = storage_engine(&world.repo, &world.storage_id).unwrap();
+        let mainline = engine.observe(&world.bundle_id).unwrap().mainline;
+        assert!(
+            repository_bases(&link).all(|base| mainline.contains(base.revision, &base.commit_id))
+        );
+
+        let uploaded = world.push(a);
+        assert!(uploaded.success, "{}", uploaded.message);
+        assert_eq!(uploaded.revision, Some(2));
+        assert_eq!(world.stored_cloud_ids().len(), 2);
+    }
+
+    /// Rows S2 and S3 under a stale record. Both computers hold one session,
+    /// the storage is cleared, and computer A pushes again. Computer B's
+    /// acceptance names the cleared history, so it is ignored, and the stored
+    /// copy is proven from its content instead: an equal copy reads "Mark
+    /// synced", and an earlier version reads "Update storage". Nothing is
+    /// blocked, and nothing asks for a reset.
+    #[test]
+    fn an_equal_or_an_earlier_stored_copy_is_proven_from_content_under_a_stale_record() {
+        let world = TwoComputers::new("adopted-session-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000e2";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let cloud_thread_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        world.pull_conversations(&world.plan_pull(b));
+        let b_rollout = world.rollout_of(b, &cloud_thread_id);
+
+        // The clear, then story 1 on A: the same session under the same
+        // cloud id, and one more session, so that the area's content differs
+        // from what B reviewed whatever the clock says.
+        wipe_remote_bundle(&world.storage_root, &world.bundle_id);
+        write_codex_session(&a.codex, "019f7500-0000-7000-8000-0000000000e3", &a.root);
+        let recreated = world.push(a);
+        assert!(recreated.success, "{}", recreated.message);
+        assert_eq!(recreated.revision, Some(1));
+        let saved = world.link(b);
+        assert!(saved
+            .conversation_checkpoints
+            .values()
+            .flat_map(BTreeMap::values)
+            .all(|checkpoint| checkpoint.accepted.is_some()));
+
+        // S2: B's copy equals the stored one.
+        let row_of = |comparison: &ThreadSyncComparison| {
+            comparison
+                .entries
+                .iter()
+                .find(|entry| entry.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+                .cloned()
+                .unwrap()
+        };
+        let equal = row_of(&world.compare(b));
+        assert_eq!(equal.state, ThreadSyncState::Synced);
+        assert_eq!(
+            equal.push_decision.action,
+            ConversationReviewAction::NoChanges
+        );
+        assert_eq!(
+            equal.pull_decision.action,
+            ConversationReviewAction::AdoptCloudMetadata
+        );
+        assert!(equal.pull_decision.selectable);
+
+        // S3: B continues the session, so the stored copy is an earlier
+        // version of it.
+        append_codex_user_turn(&b_rollout, "message-b-continued", "continued on B");
+        let earlier = row_of(&world.compare(b));
+        assert_eq!(earlier.state, ThreadSyncState::LocalAhead);
+        assert_eq!(
+            earlier.push_decision.action,
+            ConversationReviewAction::Publish
+        );
+        assert!(earlier.push_decision.selectable);
+        assert_eq!(
+            earlier.pull_decision.action,
+            ConversationReviewAction::ReportPushEligible
+        );
+        // The proof is for this review only: comparing saved nothing.
+        assert_eq!(world.link(b), saved);
+
+        // B's area holds content it never reviewed in this history (A7), so
+        // a Pull comes first. It has nothing to install for this session: the
+        // row only reports "Ready to push". Then B updates the storage with
+        // its complete session under the same cloud id.
+        assert_eq!(
+            world.push_status(b),
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
+                remote_revision: 1,
+                base_revision: None,
+                blocking_scopes: vec!["provider:codex".to_string()],
+            }
+        );
+        let plan = world.plan_pull(b);
+        let reported = plan
+            .conversation_review
+            .iter()
+            .find(|row| row.cloud_thread_id.as_ref() == Some(&cloud_thread_id))
+            .unwrap();
+        assert_eq!(
+            reported.action,
+            ConversationReviewAction::ReportPushEligible
+        );
+        assert_eq!(reported.action_id, None);
+        world.pull_conversations(&plan);
+        assert_eq!(
+            world.push_status(b),
+            PushDestinationStatus::Ready { revision: Some(1) }
+        );
+        let updated = world.push(b);
+        assert!(updated.success, "{}", updated.message);
+        assert_eq!(updated.revision, Some(2));
+        let stored = world.stored_cloud_ids();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.values().any(|id| id == &cloud_thread_id));
+        assert_eq!(row_of(&world.compare(b)).state, ThreadSyncState::Synced);
+
+        // A's record names the new history, so it is usable: S8.
+        let continued_elsewhere = row_of(&world.compare(a));
+        assert_eq!(continued_elsewhere.state, ThreadSyncState::StorageAhead);
+        assert_eq!(
+            continued_elsewhere.pull_decision.action,
+            ConversationReviewAction::MaterializeCloud
         );
     }
 
-    /// Revision-ahead disambiguation: a recreated lineage that overtook
-    /// the base classifies `Replaced` (probe misses the wiped manifest),
-    /// while a base from the live lineage classifies a plain advance (probe
-    /// finds its manifest still present).
+    /// The records of one bundle's stream, moved aside and brought back: a
+    /// listing that was short for a while, as a folder storage inside a sync
+    /// product reads before it has finished downloading.
+    struct HiddenStream {
+        stream: PathBuf,
+        aside: PathBuf,
+    }
+
+    impl HiddenStream {
+        fn hide(storage_root: &Path, bundle_id: &BundleId) -> Self {
+            let stream = storage_root
+                .join(".mallard/v1/repositories/_commits")
+                .join(bundle_id.as_str());
+            let aside = storage_root.join("records-not-listed-yet");
+            std::fs::rename(&stream, &aside).unwrap();
+            Self { stream, aside }
+        }
+
+        /// The old records show up again, next to whatever was written
+        /// while they were not listed.
+        fn reveal(self) {
+            std::fs::create_dir_all(&self.stream).unwrap();
+            for entry in std::fs::read_dir(&self.aside).unwrap() {
+                let entry = entry.unwrap();
+                std::fs::rename(entry.path(), self.stream.join(entry.file_name())).unwrap();
+            }
+            std::fs::remove_dir(&self.aside).unwrap();
+        }
+    }
+
+    /// Story 4, nothing done: the storage only looked empty. Every record is
+    /// ignored while its publication is not listed, none is deleted, and
+    /// when the listing is complete again the link reads exactly as before.
     #[test]
-    fn replaced_history_that_overtook_the_base_is_distinguished_from_an_advance() {
+    fn a_listing_that_was_short_for_a_while_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("short-listing-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let session = "019f7500-0000-7000-8000-0000000000f1";
+        write_codex_session(&codex_home, session, &project_root);
+        assert_eq!(
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .revision,
+            Some(2)
+        );
+        let compare = || {
+            get_project_thread_sync_comparison_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap()
+        };
+        let saved_link = || {
+            let config = repo.load_config().unwrap();
+            project_link(&config, &project.local_project_id, &storage_id)
+                .unwrap()
+                .clone()
+        };
+        let before = compare();
+        assert_eq!(
+            before.remote_continuity,
+            RemoteContinuity::InSync { revision: 2 }
+        );
+        assert_eq!(
+            comparison_entry(&before, session).state,
+            ThreadSyncState::Synced
+        );
+        let link_before = saved_link();
+
+        let hidden = HiddenStream::hide(&storage_root, &project.bundle_id);
+        let short = compare();
+        assert_eq!(
+            short.remote_continuity,
+            RemoteContinuity::RemoteMissing { base_revision: 2 }
+        );
+        assert_eq!(
+            comparison_entry(&short, session).push_decision.action,
+            ConversationReviewAction::CreateCloud
+        );
+        assert_eq!(saved_link(), link_before);
+
+        hidden.reveal();
+        let after = compare();
+        assert_eq!(after.remote_continuity, before.remote_continuity);
+        assert_eq!(after.scopes, before.scopes);
+        let (row_before, row_after) = (
+            comparison_entry(&before, session),
+            comparison_entry(&after, session),
+        );
+        assert_eq!(row_after.state, row_before.state);
+        assert_eq!(row_after.push_decision, row_before.push_decision);
+        assert_eq!(row_after.pull_decision, row_before.pull_decision);
+        assert_eq!(saved_link(), link_before);
+    }
+
+    /// Story 4, pushed, which is also R4 after the fact: the storage only
+    /// looked empty, and this computer pushed a second first version. When
+    /// the real history is listed again, its earlier first version is
+    /// selected, and this Push is rolled back as one that never happened
+    /// (R3). The area then holds content this computer never reviewed (A4):
+    /// one Pull, in which the session it already has reads "Mark synced".
+    #[test]
+    fn a_push_onto_a_storage_that_only_looked_empty_is_rolled_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("looked-empty-store").unwrap();
+        let storage_root = temp.path().join("store");
+        add_local_storage(&repo, &storage_id, &storage_root);
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let codex_home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &codex_home);
+        let mut events = outranked_push_events().subscribe();
+        let session = "019f7500-0000-7000-8000-0000000000f2";
+        write_codex_session(&codex_home, session, &project_root);
+        assert_eq!(
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .revision,
+            Some(2)
+        );
+
+        let hidden = HiddenStream::hide(&storage_root, &project.bundle_id);
+        let second_first =
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
+        assert!(second_first.success, "{}", second_first.message);
+        assert_eq!(second_first.revision, Some(1));
+        let second_first_name = record_names_at(&storage_root, &project.bundle_id, 1).remove(0);
+        hidden.reveal();
+        assert_eq!(
+            record_names_at(&storage_root, &project.bundle_id, 1).len(),
+            2
+        );
+        assert_eq!(outranked_events_for(&mut events, &project), 0);
+
+        // The refresh selects the real history and rolls the link back. The
+        // second first version shares no publication with it, so every base
+        // goes, and the acceptance it saved is forgotten with its cursor kept.
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+        )
+        .unwrap();
+        assert_eq!(outranked_events_for(&mut events, &project), 1);
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Unreviewed { remote_revision: 2 }
+        );
+        let config = repo.load_config().unwrap();
+        let link = project_link(&config, &project.local_project_id, &storage_id).unwrap();
+        assert!(link.scope_bases.is_empty());
+        let checkpoints = link
+            .conversation_checkpoints
+            .values()
+            .flat_map(BTreeMap::values)
+            .collect::<Vec<_>>();
+        assert_eq!(checkpoints.len(), 1);
+        assert!(checkpoints[0].accepted.is_none());
+        assert!(checkpoints[0].accepted_local_tail.is_none());
+        assert!(matches!(
+            checkpoints[0].physical,
+            PhysicalMappingState::Ready { .. }
+        ));
+        assert_eq!(
+            get_push_destination_status_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap(),
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
+                remote_revision: 2,
+                base_revision: None,
+                blocking_scopes: vec!["provider:codex".to_string()],
+            }
+        );
+        // S2: the stored session is proven equal from its content.
+        let row = comparison_entry(&comparison, session);
+        assert_eq!(row.state, ThreadSyncState::Synced);
+        assert_eq!(
+            row.pull_decision.action,
+            ConversationReviewAction::AdoptCloudMetadata
+        );
+        // The record that was not selected stays in the storage, unused.
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let observation = engine.observe(&project.bundle_id).unwrap();
+        assert!(!observation
+            .mainline
+            .contains_commit(second_first_name.commit_id()));
+        assert!(observation
+            .unselected
+            .iter()
+            .any(|name| name == &second_first_name));
+    }
+
+    /// Identity decides the history, never a revision: a recreated history
+    /// that overtook the base reads as never reviewed here (A7), while a base
+    /// from the live history reads as a plain advance (A6).
+    #[test]
+    fn a_recreated_history_reads_as_unreviewed_and_a_live_one_as_advanced() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("overtaken-history-store").unwrap();
@@ -20389,61 +21721,56 @@ mod tests {
         let first =
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id).unwrap();
         assert_eq!(first.revision, Some(2));
-        let (pre_wipe_base, pre_wipe_scopes) =
+        let (_, pre_wipe_scopes) =
             reviewed_link_state(&repo, &project.local_project_id, &storage_id);
 
-        // Wipe and recreate under the same bundle id.
-        std::fs::remove_dir_all(
-            storage_root
-                .join(".mallard/v1/repositories")
-                .join(project.bundle_id.as_str()),
-        )
-        .unwrap();
-        assert!(
-            remove_project_link_with_repository(&repo, &project.local_project_id, &storage_id,)
-                .unwrap()
+        // Clear, and push again under the same bundle id.
+        wipe_remote_bundle(&storage_root, &project.bundle_id);
+        write_codex_session(
+            &codex_home,
+            "019f7500-0000-7000-8000-0000000000b1",
+            &project_root,
         );
-        save_project_link_with_repository(
-            &repo,
-            SaveProjectLinkRequest {
-                local_project_id: project.local_project_id.clone(),
-                storage_id: storage_id.clone(),
-                pinned: true,
-            },
-        )
-        .unwrap();
         assert_eq!(
             push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
                 .unwrap()
                 .revision,
-            Some(2)
+            Some(1)
+        );
+        assert_eq!(
+            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+                .revision,
+            Some(1),
+            "a push without changes publishes nothing"
         );
         let (_, new_lineage_scopes) =
             reviewed_link_state(&repo, &project.local_project_id, &storage_id);
 
-        // Grow the session so the new lineage overtakes the base revision.
-        std::fs::write(
-            codex_home
-                .join("sessions/2026/07/22")
-                .join(format!("rollout-{}.jsonl", session_id)),
-            command_test_transcript(
-                session_id,
-                &project_root,
-                &[
-                    ("message-test", "user", "hello"),
-                    ("message-more", "user", "and more"),
-                ],
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
-                .unwrap()
-                .revision,
-            Some(3)
-        );
+        // Grow the session twice so the new history overtakes the base.
+        let messages = [
+            ("message-test", "user", "hello"),
+            ("message-more", "user", "and more"),
+            ("message-most", "user", "and even more"),
+        ];
+        for (revision, turns) in [(2, 2), (3, 3)] {
+            std::fs::write(
+                codex_home
+                    .join("sessions/2026/07/22")
+                    .join(format!("rollout-{}.jsonl", session_id)),
+                command_test_transcript(session_id, &project_root, &messages[..turns]),
+            )
+            .unwrap();
+            assert_eq!(
+                push_bundle_with_repository(&repo, &project.local_project_id, &storage_id)
+                    .unwrap()
+                    .revision,
+                Some(revision)
+            );
+        }
 
-        // A base from the wiped lineage: the probe misses ⇒ replaced.
+        // A base from the cleared history, at a lower revision than the
+        // selected publication: not on the chain, so never reviewed here.
         repo.mutate_config(|config| {
             config
                 .links
@@ -20457,8 +21784,6 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
-        let live_head = engine.inspect(&project.bundle_id).unwrap().head;
         assert_eq!(
             get_push_destination_status_with_repository(
                 &repo,
@@ -20466,16 +21791,16 @@ mod tests {
                 &storage_id,
             )
             .unwrap(),
-            PushDestinationStatus::RemoteHistoryReplaced {
-                base_revision: 2,
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
                 remote_revision: 3,
-                base_manifest_sha256: pre_wipe_base.manifest_sha256.clone(),
-                remote_manifest_sha256: live_head.manifest_sha256.clone(),
+                base_revision: None,
+                blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
 
-        // A base from the live lineage: the probe finds its manifest still
-        // present ⇒ an ordinary advance that a pull fast-forwards.
+        // A base from the live history: an ordinary advance that a pull
+        // fast-forwards.
         repo.mutate_config(|config| {
             config
                 .links
@@ -20499,7 +21824,7 @@ mod tests {
             PushDestinationStatus::RequiresPull {
                 reason: PushDestinationPullReason::RemoteAdvanced,
                 remote_revision: 3,
-                base_revision: Some(2),
+                base_revision: Some(1),
                 blocking_scopes: vec!["provider:codex".to_string()],
             }
         );
@@ -20672,13 +21997,16 @@ mod tests {
         let home = temp.path().join("codex-home");
         bind_and_link_test_replica(&repo, &project, &storage_id, &root, &home);
         write_codex_session(&home, "019f7500-0000-7000-8000-0000000000ab", &root);
-        let head_key = mallard_infrastructure::storage_core::repository_object_key(
-            &project.bundle_id,
-            "_head.json",
-        )
-        .unwrap();
-        let head_path = store_root.join(head_key.as_str());
-        let head_bytes = std::fs::read(&head_path).unwrap();
+        // A refresh observes the remote by listing the bundle's stream. A
+        // regular file where the stream's folder was fails every listing.
+        let stream_dir = store_root
+            .join(".mallard/v1/repositories/_commits")
+            .join(project.bundle_id.as_str());
+        let parked = store_root.join("parked-stream");
+        let break_stream = || {
+            std::fs::rename(&stream_dir, &parked).unwrap();
+            std::fs::write(&stream_dir, b"not a folder").unwrap();
+        };
         let mut events = Vec::new();
         refresh_project_activity_with_progress(
             &repo,
@@ -20690,8 +22018,8 @@ mod tests {
                 if matches!(event, ProjectActivityRefreshEvent::Activity { .. })
                     && events.len() == 1
                 {
-                    // Any second head read, including comparison, would now fail.
-                    std::fs::write(&head_path, b"invalid head after remote Activity").unwrap();
+                    // Any second observation, including comparison, would now fail.
+                    break_stream();
                 }
                 events.push(event);
                 Ok(())
@@ -20714,7 +22042,8 @@ mod tests {
             remote.sessions[0].resource_id,
             comparison.entries[0].conversation_resource_id.as_str()
         );
-        std::fs::write(&head_path, &head_bytes).unwrap();
+        std::fs::remove_file(&stream_dir).unwrap();
+        std::fs::rename(&parked, &stream_dir).unwrap();
 
         // Break storage only after local rows arrive. They must survive failure.
         events.clear();
@@ -20730,7 +22059,7 @@ mod tests {
                         event,
                         ProjectActivityRefreshEvent::Activity { .. }
                     ));
-                    std::fs::write(&head_path, b"unavailable head").unwrap();
+                    break_stream();
                 }
                 events.push(event);
                 Ok(())
@@ -21485,6 +22814,7 @@ mod tests {
             thread_review(
                 &fixture.repo,
                 None,
+                &Mainline::default(),
                 &mut EmptyBundleBytes,
                 &local.views,
                 &captured,
@@ -24788,7 +26118,7 @@ mod tests {
     /// local thread (StorageOnly) — because a synced row plans nothing
     /// either way and would assert nothing; the two controls below fail if
     /// that ever stops being true. The doctored manifest is produced
-    /// through the real engine under head CAS, so every other invariant
+    /// through the real engine and its record write, so every other invariant
     /// stays intact. Apply-stage stamp checks are the fail-closed boundary
     /// (see the push and pull `redaction_ruleset_mismatch` gates); this
     /// test pins the review-stage half that keeps blocked rows out of
@@ -25327,8 +26657,9 @@ mod tests {
         bundle_id: &BundleId,
     ) -> PublishExpectation {
         engine
-            .inspect_optional_with_token(bundle_id)
+            .observe(bundle_id)
             .unwrap()
+            .current
             .map(|(snapshot, token)| PublishExpectation::Match(Box::new(snapshot), token))
             .unwrap_or(PublishExpectation::Absent)
     }
@@ -25510,13 +26841,7 @@ mod tests {
 
         // A link without a registration claim is still offered the sibling.
         // Delete B's claim from the storage filesystem.
-        let store_root = temp.path().join("store");
-        std::fs::remove_dir_all(
-            store_root
-                .join(".mallard/v1/repositories")
-                .join(large.as_str()),
-        )
-        .unwrap();
+        wipe_remote_bundle(&temp.path().join("store"), &large);
         assert!(matches!(
             sibling_bundle_status_with_repository(&repo, &project_b.local_project_id, &storage_id)
                 .unwrap(),
@@ -25978,7 +27303,7 @@ mod tests {
                 observed_publish_expectation(&engine, &project.bundle_id),
             ))
             .unwrap();
-        assert_eq!(published.snapshot.manifest.all_conversations().count(), 2);
+        assert_eq!(published.snapshot().manifest.all_conversations().count(), 2);
 
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -26133,6 +27458,7 @@ mod tests {
             provider_thread_review(
                 &repo,
                 None,
+                &Mainline::default(),
                 &mut EmptyBundleBytes,
                 &local.views,
                 &captured,
@@ -26279,7 +27605,9 @@ mod tests {
             &project_root,
         );
 
-        let snapshot = engine.inspect(&project.bundle_id).unwrap();
+        let observation = engine.observe(&project.bundle_id).unwrap();
+        let mainline = observation.mainline;
+        let snapshot = observation.current.unwrap().0;
         let resolved = resolve_project_binding(&repo, &binding).unwrap();
         let capture_request = capture_request_for_binding(&repo, &binding).unwrap();
         let (discovery, views) = super::super::session_watch_service::session_watch_service()
@@ -26321,6 +27649,7 @@ mod tests {
             thread_review(
                 &repo,
                 Some(&snapshot),
+                &mainline,
                 &mut bytes,
                 &views,
                 &captured,
@@ -26352,6 +27681,7 @@ mod tests {
         let review = thread_review(
             &repo,
             Some(&snapshot),
+            &mainline,
             &mut bytes,
             &views,
             &captured,
@@ -26430,6 +27760,7 @@ mod tests {
             &resolved,
             &apply_engine,
             &snapshot,
+            &mainline,
             &selected,
             &mut apply_bytes,
             &mut |_, _| {},
@@ -26490,6 +27821,7 @@ mod tests {
         let review = thread_review(
             &repo,
             Some(&oversized_snapshot),
+            &mainline,
             &mut bytes,
             &views,
             &captured,

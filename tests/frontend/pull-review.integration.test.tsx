@@ -153,7 +153,6 @@ function renderReview(
       error={error}
       onApply={() => undefined}
       onBack={() => undefined}
-      onUnlinkStorage={() => undefined}
       onResetMetadata={onResetMetadata}
     />,
   );
@@ -171,15 +170,15 @@ test("the review opens with nothing ticked and its primary says so", () => {
   assert.doesNotMatch(footer, />Pull<\/button>|Pull \d+<\/button>/);
 });
 
-test("a replacement storage history offers unlinking without gating Pull", () => {
+test("a Pull of a storage that was cleared and pushed again is an ordinary first Pull", () => {
   const html = renderReview({
     ...restorePlan,
     remote_continuity: { state: "replaced", base_revision: 1, remote_revision: 2 },
   });
 
-  assert.match(html, /<strong class="notice-lead">Storage history changed<\/strong>/);
-  assert.match(html, /Local storage 1 was reset/);
-  assert.match(html, /Unlink storage…/);
+  // No banner about the storage's history, and no unlink or reset verb.
+  assert.doesNotMatch(html, /Storage history changed|was reset|Another computer cleared/);
+  assert.doesNotMatch(html, /Unlink storage/);
   assert.match(html, /sync-pull-apply-button/);
   const primary = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[\s\S]*?<\/button>/)?.[0] ?? "";
   assert.match(primary, /data-thread-status="cloud-outstanding"/);
@@ -822,7 +821,10 @@ test("automatic metadata acceptance excludes file changes and hidden blockers", 
   assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow("adopt_cloud_metadata")] }), false);
   assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [conversationRow("no_changes", null, "busy")] }), false);
   assert.equal(canAcceptPullMetadata({ ...base, conversation_review: [{ ...conversationRow("no_changes"), blocked_reason: "Missing profile" }] }), false);
-  assert.equal(canAcceptPullMetadata({ ...base, remote_continuity: { state: "replaced", base_revision: 1, remote_revision: 2 } }), false);
+  // A cleared or recreated storage is an ordinary first Pull; only a storage
+  // that could not be listed claims no verdict.
+  assert.equal(canAcceptPullMetadata({ ...base, remote_continuity: { state: "replaced", base_revision: 1, remote_revision: 2 } }), true);
+  assert.equal(canAcceptPullMetadata({ ...base, remote_continuity: { state: "unknown", message: "offline" } }), false);
   for (const kind of [
     { kind: "write_file", logical_path: "state/provider/memory.md" },
     { kind: "write_project_file", logical_path: "project/note.md", mode: 420, source_mtime: 1 },

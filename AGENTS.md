@@ -159,8 +159,14 @@ Treat safety behavior as part of the product contract:
 - Keep credentials, checkout paths, provider-home paths, local exclusions,
   restore plans, receipts, backups, and trust decisions out of portable
   manifests.
-- Push publication must remain immutable and SHA-256 verified; mutable heads
-  require compare-and-swap semantics.
+- Push publication must remain immutable and SHA-256 verified. There is no
+  mutable head: a publication record is written last, with list-then-write,
+  and the current snapshot is selected from the stream's record names. A
+  storage provider needs only put, get, and list. A Push whose record is not
+  selected has failed: keep every local acceptance (bases, checkpoints,
+  receipts, Library accepted state) after the publish call returns. Observe a
+  linked bundle only through `observe_linked_bundle`, which first rolls back
+  a Push that was outranked after it was confirmed.
 - Pull and dependency apply operations must remain plan-based and explicitly
   approved. Keep revision, digest, and expiry checks intact.
 - Deletion is opt-in. File deletion must verify the expected local digest;

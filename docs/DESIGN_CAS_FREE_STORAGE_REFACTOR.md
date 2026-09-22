@@ -1,12 +1,19 @@
 # Mallard: CAS-free storage publication — implementation plan
 
-- Status: Planned; not implemented
-- Last reviewed: September 19, 2026
-- Scope: the desktop app — both sync engines, the Local, S3/R2 and Dropbox stores, and the Push outcome copy. Mallard Cloud follows in its own plan (section 14)
+- Status: Implemented, steps 1 to 7 and the automated part of step 8; the live
+  two-machine pass on R2 and on Dropbox (step 8) is still to be run and recorded.
+  Step 9, the claim of decision 11 and section 7.2, and step 10, the decision of
+  September 22 that recovery is a user action (decision 12), are planned and not
+  implemented. Step 10 withdraws the write retries of section 7.2. The rest of
+  decision 12, which withdraws the rollback of section 9.4 and the Library reset
+  at load, is steps 11 to 13 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`; they need
+  no claims
+- Last reviewed: September 22, 2026
+- Scope: the desktop app — both sync engines, the Local, S3/R2 and Dropbox stores, and the Push error copy. Mallard Cloud follows in its own plan (section 14)
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
 - Deployment assumption: no deployed user state must be preserved; the owner clears `~/.mallard` and the test storages before acceptance testing
 - Schemas: every schema and layout number stays `1`
-- Related: `CAS_FREE_STORAGE_REFACTOR_EVALUATION_2026-09-18.md` (how each decision was reached), `DESIGN_REMOTE_HISTORY_CONTINUITY.md` (its rows 1 to 8 are replaced by section 9)
+- Related: `CAS_FREE_STORAGE_REFACTOR_EVALUATION_2026-09-18.md` (how each decision was reached), `DESIGN_REMOTE_HISTORY_CONTINUITY.md` (design history; its rows 1 to 8 are replaced by section 9), `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` (what a cleared or recreated storage and a stale record do; it changed sections 7.2, 9.1, 9.2, 11, 12, 13 and 16), `PLAN_PULL_PINNED_VERSION.md` (the Pull side; the claim of section 7.2 removes its rows T3, Q3, Q4 and G2 on S3/R2 and Dropbox)
 
 Code locations are collected in *Source pointers* at the end, not in the body.
 
@@ -20,7 +27,9 @@ for that reason.
 After this change a provider needs three operations for ordinary sync: **write
 bytes at a key, read a key, list a prefix.** There is no mutable head. The
 current snapshot of a bundle is derived, by shared code, from immutable records
-that every Push already writes.
+that every Push already writes. A provider that can also refuse a second write
+of a key gives its users one thing more, a listed version that can never lose
+(decision 11); one that cannot still runs everything.
 
 Decisions, all final:
 
@@ -30,10 +39,13 @@ Decisions, all final:
    index are deleted.
 2. **Earliest sibling wins.** When two records name the same parent, the one
    with the smallest `(created_at_ms, commit_id, record_sha256)` is selected.
-   The other is kept and not selected.
+   The other is kept and not selected, and the Push that wrote it failed
+   (section 7.3).
 3. **List, then write.** A record is written only right after a listing that
-   shows its parent selected and childless. This is the limit on late-written
-   records (section 7.2).
+   shows its parent selected and childless. This removes the writer that keeps
+   a record and sends it later; it narrows the fork window and does not bound
+   it, because a writer can pause between the check and the send (section
+   7.2).
 4. **Refresh is one listing of one stream.** A record's name carries its graph
    facts, so the head is selected without reading records. An unchanged
    selection reads nothing else.
@@ -43,19 +55,46 @@ Decisions, all final:
 6. **Record names are `<commit_id>-<sha256>`.** The same id with different bytes
    is two publications, not a conflict. No state blocks a stream.
 7. **No storage UID.** A storage is its provider destination, as today.
-8. **Losing publications are kept. There is no archive UI in this release.**
+8. **A losing Push counts as not made, and recovery is the user's.** Its
+   record is kept in the storage and never selected. If it loses while it runs,
+   it fails with `RemoteChanged` and nothing local is accepted. If another
+   computer's record outranks it after it was confirmed, the next refresh
+   reports that this computer's last publication is no longer on the selected
+   history, and changes nothing: no base moves, no acceptance is forgotten,
+   nothing is republished (section 9.4). The user compares again and pushes
+   again. Nothing is reset by hand either. There is no archive UI in this
+   release.
 9. **No legacy handling of any kind.**
 10. **Desktop first.** Mallard Cloud is not offered by these builds.
+11. **Claim, then write.** On a store whose server refuses a write to a key
+    that already holds other bytes, in the same request, a Push writes a
+    create-only **claim** under its parent's token before it writes its record.
+    A parent then has one child, and a listed version is final while the
+    storage's claims and records are intact (section 12). The claim changes no
+    selection rule and is never listed or read by a refresh. S3/R2 and Dropbox
+    are such stores; the local store is not, writes no claim, and decisions 2,
+    3 and 8 do the whole job there (section 7.2).
+12. **Recovery is a user action.** A failed Push stops. A Push sends one claim
+    request and one record request; nothing is retried, resent after a
+    restart, or finished on another computer's behalf. A request whose outcome
+    is unknown is reported as `OutcomeUnknown` after a read-only check. A
+    confirmed Push that later loses is reported, and nothing local moves: no
+    base returns to an ancestor, no acceptance is forgotten, no Library state
+    is reset, nothing is republished. A stale base or acceptance is kept and
+    read as absent, so it never reports a session as synchronized and never
+    lets a Push through without a fresh comparison and the user's approval. A
+    claim whose record is missing is finished only when the user asks
+    (sections 7.3, 9.4 and 13).
 
 ## 2. What stays exactly as it is
 
 | Area | Unchanged |
 |---|---|
-| Transport | The `ObjectStore` trait apart from the three changes of section 10 (`compare_and_swap` removed, `put_record` and `list_keys` added), `ObjectKey` and `ObjectPrefix` validation, the blocking execution model, verified staged reads, the shared-store wrapper and connection health |
+| Transport | The `ObjectStore` trait apart from the changes of section 10 (`compare_and_swap` removed; `put_record`, `list_keys`, `supports_claims` and `put_claim` added), `ObjectKey` and `ObjectPrefix` validation, the blocking execution model, verified staged reads, the shared-store wrapper and connection health |
 | Remote objects | `_objects/<sha256>` and `_manifests/<revision>-<commit_id>.json`, for bundles and for the Library |
 | Portable schemas | `BundleManifest` and `LibraryResourceManifest`, including `revision`, `commit_id` and each file entry's `object_key` |
 | Local state | `RepositoryBase`, `ScopeBase`, `MaterializationRecord`, `ConversationApplyReceipt`, `AcceptedConversationVersion`, `LibraryHeadCoordinate`, and every file under `~/.mallard` |
-| IPC and TypeScript | `BundleSnapshot`, `RestorePlan`, `PullReview`, `ConversationRevisionPins`, `PushDestinationStatus`, `RemoteContinuity`, `ScopeContinuity`, and their mirrors |
+| IPC and TypeScript | `BundleSnapshot`, `RestorePlan`, `PullReview`, `ConversationRevisionPins`, `PushDestinationStatus`, `RemoteContinuity`, `ScopeContinuity`, and their mirrors. Step 12 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` adds one variant, `RemoteContinuity::Displaced` (section 9.1); no field changes shape |
 | Engine logic | Manifest construction, the scope mutation firewall, the apply-time rebase, restore planning and apply, payload reads, the object cache, deduplication against the parent manifest |
 | Storage identity | The adapter's destination coordinates, the rule that one destination is one storage, discovery by one fixed-key marker read, settings locked for life |
 | Storage clear | In place: it keeps the marker and resets local link state |
@@ -105,6 +144,9 @@ Nothing else in the app knows that an older format existed.
   _storage.json
   v1/
     repositories/
+      _claims/                               one claim per claimed parent, and nothing else
+        <bundle_id>/
+          <parent token, or root>.json
       _commits/                              every project record, and nothing else
         <bundle_id>/
           <record name>
@@ -114,6 +156,7 @@ Nothing else in the app knows that an older format existed.
     library/
       <repository_id>/
         _tag.json
+        _claims/<parent token, or root>.json
         _commits/<record name>
         _manifests/<revision>-<commit_id>.json
         _objects/<sha256>
@@ -130,6 +173,12 @@ coordinates.
 
 A **stream** is one bundle or one Library repository. Streams never compete
 with one another.
+
+A claim lives beside the records and never among them: `_claims/` is not under
+`_commits/`, so no record listing returns one and no refresh sees one. Its name
+is the parent it claims, the parent's token or the word `root`; its bytes are
+the record of that parent's child, exactly as written under `_commits/`
+(section 7.2). Only S3/R2 and Dropbox hold claims.
 
 ### 4.3 Record names
 
@@ -249,6 +298,9 @@ selected = last(mainline), or none
   candidate.
 - A local pin names a publication by `commit_id`. If a listing ever holds two
   tokens with that id, the pin resolves to the earlier-ranked one.
+- A claim takes no part in selection. On every store the head is selected from
+  record names alone; the claim only decides which record can be written
+  (section 7.2).
 
 The same listing gives every device the same mainline. Devices converge as soon
 as their listings agree.
@@ -275,13 +327,17 @@ as their listings agree.
 6. **Build the record** in memory: a new `commit_id`, the parent token from
    step 2, `revision`, `created_at_ms`, origin, the manifest reference, the
    summary.
-7. **List, then write** (section 7.2).
-8. **Stored:** advance the local bases to the stored publication, as a Push
-   does today, select again, and report whether it is the selected one.
+7. **List, claim, write, then list again** and select (section 7.2).
+8. **Stored:** the listing after the write selects this record, on every
+   store. Advance the local bases to it, as a Push does today. If the claim is
+   taken, the Push failed with `RemoteChanged` or `PushUnfinished`; if that
+   listing does not select this record, with `RemoteChanged`. Nothing local
+   moves either way (section 7.3).
 
 Registering an empty project is the same flow with no parent and the existing
 registration manifest. If the stream already has a selected publication, the
-registration returns it and writes nothing, as it does today.
+registration returns it and writes nothing, as it does today. A registration
+that loses the fork window returns the established one the same way.
 
 ### 7.2 List, then write
 
@@ -293,50 +349,135 @@ removes that writer.
 Every attempt to write a record is the second half of one step:
 
 1. List the stream and select. If the listing already holds this record's
-   token, an earlier attempt landed: the outcome is `Stored`.
+   token, the record landed: the outcome is `Stored` when the listing selects
+   it, and `RemoteChanged` when it selects another computer's record.
 2. Continue only if the selected publication is the record's parent, which
    means the parent has no child. For a first publication, continue only if the
-   stream is empty. Otherwise stop with `RemoteChanged`; nothing is written.
-3. Send the record, once.
+   stream selects nothing. A listed record that connects to no chain does not
+   count: a Push whose parent was cleared under it leaves one behind and fails,
+   an interrupted clear leaves some, and the stream must still take its next
+   first version (`PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, R5). Otherwise stop
+   with `RemoteChanged`; nothing is written.
+3. **Claim the parent**, on a store with claims (S3/R2 and Dropbox). Write the
+   record's bytes, create-only, at `_claims/<parent token, or root>.json`. The
+   store answers in one request. The key was free: the claim is **mine**. The
+   key holds other bytes: the claim is **taken**, and the Push stops before it
+   writes its record. Read the claim; its bytes are the record that was claimed.
+   When the listing of step 1 holds that record, another computer got in first:
+   `RemoteChanged`. When it does not, that push did not finish:
+   `PushUnfinished`, and finishing it is the user's (section 7.3). Nothing
+   sends that record by itself, and nothing deletes or reassigns the claim. One
+   case needs no user: the claim holds this computer's own record, for the same
+   content on the same parent, from an earlier attempt whose record request
+   failed. Then this Push writes that record instead of the one it built and
+   goes on; it is the same publication, and the local save is this Push's. Same
+   content means the same scope digests, read from that record's manifest. A
+   store without claims skips this step.
+4. Send the record, once, then list again: `Stored` when that listing selects
+   the record, on every store. The claim proves that the parent has no other
+   child; it does not prove that the parent is still there. A clear between the
+   claim and the record deletes the parent, the record lands as an orphan that
+   nothing selects, and only the listing shows it (section 12).
 
 Four details make this hold on a laptop:
 
-- **Every attempt lists first.** A retry is a new attempt, never a resend.
+- **One attempt.** A Push lists first, and lists again when its listing has
+  gone stale, then sends its claim once and its record once. It never sends
+  either twice, and it never resends after a restart.
 - **The listing is fresh.** If more than ten seconds of wall-clock time passed
   since the listing answered, list again before sending. The monotonic clock is
   not enough: on macOS it stands still while the machine sleeps.
-- **The write is one request.** `put_record` never retries inside the
-  transport, because a transport retry is an attempt without a listing. A
-  request that stalls dies with its connection, which the provider drops within
-  about a minute.
+- **The write is one request.** `put_record` and `put_claim` never retry
+  inside the transport, because a transport retry is an attempt without a
+  listing. A request that stalls dies with its connection. A request that has
+  not started yet does not, which is the gap below.
 - **Nothing is kept.** No journal, no outbox, no resend after a restart. Push
   stays stateless, as it is today.
 
-The limit this gives:
+**What this narrows, and what it does not.** A sibling of a publication can be
+written only by a computer whose listing predates the publication's
+visibility. In practice that listing is at most ten seconds old when the record
+is sent and the request takes a second, so a fork needs two computers pushing
+within the same seconds, and a laptop that slept three days between building
+its record and listing sees a child and stops. But the freshness check and the
+send are two steps. A computer can pass the check and pause before its request
+leaves, in a sleep or a suspended process, and come back minutes or days later
+with a record whose stamp is older than everything pushed since; nothing in the
+protocol stops that request, and a store without claims has no server-side
+check to refuse it. A folder shared through a sync product is the same case
+without the pause: a replica that was offline delivers its record when it
+reconnects, however late. **On a store without claims the fork window has no
+bound.** The listing lag of such a folder is unbounded too.
 
-```text
-fork window = the store's listing lag + 10 s listing freshness + one record request
-```
+What holds there is convergence, not finality. Every computer selects the same
+mainline from the same names. A late record with the earlier stamp is selected
+and displaces its sibling and everything built on it; every computer whose
+bases sit on the displaced branch is told so at its next refresh (section
+9.4), whenever that is, and compares and pushes again. Nothing is lost, and
+nothing moves by itself. The writer of a losing record learns it from the
+listing after its write, and its Push fails (section 7.3). Finality, a listed
+version that can never lose, needs the claim, and only S3/R2 and Dropbox have
+it, while their claims are intact (section 12).
 
-A sibling of a publication can be written only inside that window after the
-publication became visible. The listing lag is zero on the current stores, so
-the window is a few seconds in practice and about a minute if a request stalls.
-**Outside it, selection is final.** The bound does not depend on any clock being
-right, on the age of a record's timestamp, or on how long a machine slept: a
-laptop that slept three days lists, sees a child, and stops. A store with a
-lagging listing widens the window by its stated lag and changes nothing else.
+**The claim closes the window.** S3/R2 and Dropbox refuse a write to a key
+that already holds other bytes, in the same request. The claim is the one key
+two computers reach with different bytes, `_claims/<parent>.json`, and the
+store admits exactly one of them. So a parent has at most one child, a listed
+version has no sibling, and selection is final, whatever the listing lag, the
+clock, or the age of the listing that admitted it: a stale listing costs a
+taken claim, never a second child, and a writer that pauses after its listing
+finds its claim taken when it wakes. A version that a Pull review pinned cannot
+lose afterwards (`PLAN_PULL_PINNED_VERSION.md`, T3 and Q4), and a confirmed
+Push cannot be outranked (section 9.4). All of it holds while the storage's
+claims and records are intact; an interrupted clear can remove a claim, and
+section 12 says what follows.
 
-Inside the window the earlier-ranked sibling wins, and the other is kept and
-not selected, together with anything built on it in those seconds.
+The claim goes before the record because a record written first would be
+listed, and the selector reads names: it would rank the loser against the
+winner as if there were no claim. The claim's bytes are the record because a
+writer can die between its claim and its record, and its parent would stay
+claimed. The next Push onto that parent, from any computer, finds the claim
+taken and the record absent, and stops: `PushUnfinished`. Finishing that push,
+which writes the record the claim holds, is a user action from the Push review
+(section 13); nothing finishes it by itself, and nothing deletes or reassigns
+the claim. Once finished, the writer that abandoned it is in the state of a
+Push whose record arrived while its local save never ran, L3 of
+`PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`: its areas read `Advanced` and hold its
+own content, a session it continued reads "Keep both", and a session it
+published for the first time appears twice until the mapping is recreated from
+the manifest it published (that plan's section 9). The record's name is read from its bytes, the five graph
+facts a name repeats and the digest of the bytes, and a claim whose bytes are
+not a record of that parent is an integrity error for that parent, like a
+record whose bytes do not match its name: nothing selects differently because
+of it, and only a clear removes it.
+
+A Push on a store with claims makes one request more than today: listing,
+claim, record, listing. The listing after the write stays, because the claim
+answers one question, whether another computer got in first, and not the other
+one the listing answers, whether the parent still exists. Its taken path reads
+the claim once and sends at most one record. A refresh never lists or reads a
+claim.
+
+The local store writes no claim, and `supports_claims` says so. Nothing
+arbitrates a folder: two computers that share one through a sync product would
+each create the claim in their own copy, and a network share promises no
+create-only write. There selection converges and is never final: the report
+of section 9.4, at any later refresh, and the user's next Push are the way
+back. The Library claims the same way, under `library/<repository_id>/_claims/`
+(section 11).
 
 ### 7.3 Outcomes and failures
 
 `PublishedBundle { published, snapshot }` and the Library's equivalent become:
 
 ```text
-Stored   { snapshot, selected: bool }
+Stored   { snapshot }
 NoChange { snapshot }
 ```
+
+`Stored` means written and selected. A record that is written and not selected
+is not an outcome: it is the `RemoteChanged` error, raised by the shared
+`write_record`, so both engines fail the same way.
 
 Errors: `RemoteChanged` replaces every CAS-conflict string, and
 `OutcomeUnknown` is reported when the storage cannot be reached after the
@@ -346,12 +487,19 @@ record was sent.
 |---|---|
 | Before the record is sent | Nothing is published. Objects and the manifest are unreferenced residue |
 | The listing before the write shows another child or another selection | `RemoteChanged`. Nothing is written. The user compares again |
-| The machine sleeps between the listing and the write | The listing is older than ten seconds, so the attempt lists again |
-| The record was sent and no acknowledgment arrived | List. Present is `Stored`. Absent is another attempt, which lists first |
-| The storage cannot be reached after sending | `OutcomeUnknown`. Nothing is persisted; the next refresh shows whether it arrived |
-| The app quits or crashes | Nothing is resent. The next Push builds a new record |
+| The claim is taken, and the listing holds its record | `RemoteChanged` before the record is sent: another computer got in first. Nothing is written. The user compares again |
+| The claim is taken, and its record is not listed | `PushUnfinished`: a push onto this version did not finish, this computer's own or another's. Nothing is written, and nothing finishes it by itself. The Push review offers *Finish that push*, which writes the record the claim holds, once, then lists and reports Finished, `RemoteChanged` or `OutcomeUnknown`; the user compares again (section 13). When the claim holds this computer's own record for the same content on the same parent, the Push writes that record as its own and goes on |
+| The claim request is not acknowledged | A read-only check: read the claim key. This computer's bytes: the claim is its own, and the Push goes on to the record. Other bytes: taken. Absent: `OutcomeUnknown`; the request may still land, and nothing is sent again |
+| The storage is cleared between the claim and the record | The record lands as an orphan: its parent is gone. The listing after the write does not select it, the Push fails with `RemoteChanged`, and nothing local moves; the next refresh reads the cleared storage. When that listing came before the clear reached the record, the Push was confirmed and its records are stale, as R5 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` already says |
+| This computer's claim landed and its record never did | Its next Push finds its own claim taken. Same content on the same parent: it writes that record as its own, and its local save is this Push's; no L3. Other content: `PushUnfinished`, nothing written; *Finish that push* writes the earlier record, and this computer is then in L3 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` for the sessions of that earlier push. When another computer finished it first, this computer's Push gate reads `Advanced` before any claim, and the same L3 applies |
+| The machine sleeps between the listing and the write | The listing is older than ten seconds, so the attempt lists again. On a store with claims a stale listing could only end in a taken claim |
+| The record was sent and no acknowledgment arrived | One listing, read-only. Present and selected: `Stored`. Present and not selected: `RemoteChanged`. Absent: `OutcomeUnknown`; the request may still land, and nothing is sent again. The next refresh shows whether it arrived: an arrived record reads `Advanced` with equal content, and the sessions of that push are L3 |
+| The record request fails outright: a store error, a refused connection | The Push fails with the store's error. Nothing is resent. On a store with claims the claim stays: the next Push with the same content writes the claimed record as its own; with other content it reads `PushUnfinished` |
+| The storage cannot be reached after sending | `OutcomeUnknown`. Nothing is persisted and nothing is resent; the next refresh shows whether it arrived |
+| The app quits or crashes | Nothing is resent, and nothing on disk names the attempt. The next Push builds a new record, and on a store with claims meets its own claim as above |
 | Stored, but the local bases were not saved | The next refresh reads `Advanced` with content equal to local; a Pull review with nothing to apply advances the bases |
-| Stored, not selected | Bases stay on the stored publication. The next refresh reads `Replaced`: Pull and review, then Push again (section 13) |
+| The listing after the write selects another computer's record (a store without claims) | `RemoteChanged`. The Push failed as a whole: no base, checkpoint, binding, receipt or Library accepted state moves, because every one of them is saved only after the publish call returns. The record is kept and never selected. The user compares again, reads `Advanced`, and pushes again; the sessions are published then, because they were never accepted |
+| Another computer's earlier-ranked record becomes visible after this Push was confirmed | On S3/R2 and Dropbox: only after an interrupted clear removed the claim (section 12). On the local store: whenever the other computer listed before this record was visible, however late its record lands, from a pause after its listing or a replica that was offline (section 7.2). The Push was confirmed and is not reported as failed. The next refresh, whenever it is, reports `Displaced` and changes nothing; the user compares again and pushes again (section 9.4) |
 
 Keep local single-flight per stream. It is a local convenience, not the
 distributed exclusion. The Library apply path has no local lock today, because
@@ -380,12 +528,14 @@ its object cache. Steps 4 and 5 produce the same `BundleSnapshot` that
 | Selection changed, or the first refresh after a restart | listing + record + manifest | head + manifest |
 | Remote is ahead of this replica's base | no extra read | 1 uncached probe of the base manifest on every refresh |
 | Re-reading a pinned base manifest | 1 read by key | 1 read by key |
-| Push apply, after the uploads | listing + record write | head CAS, tag read, tag CAS in up to four rounds |
+| Push apply, after the uploads | listing + claim + record write + listing on S3/R2 and Dropbox; listing + record write + listing on the local store | head CAS, tag read, tag CAS in up to four rounds |
 | Library scope page | listing + record + tag + manifest; the record is cached while the selection is unchanged | head + tag + manifest |
 
 Remote reads happen per user action, as today. There is no background polling.
 Nothing is persisted for discovery: no index, cursor, or scan state. The
-process caches the last listing's names and the records it has read.
+process caches the last listing's names and the records it has read. No
+refresh, review or discovery lists or reads a claim: `_claims/` is beside
+`_commits/`, not under it.
 
 Every record listing asks for keys only (`list_keys`, section 10). A record's
 name already carries its digest, so a listing never needs an ETag. This matters
@@ -432,6 +582,7 @@ order to identity and ancestry.
 | no base, and a publication is selected | `Unreviewed` |
 | the base is the selected publication | `InSync` |
 | the base is an ancestor of the selected publication | `Advanced` |
+| the base is not on the chain, its record is listed, and its parents lead to the chain | `Displaced` |
 | any other base | `Replaced` |
 | the listing failed | `Unknown` |
 
@@ -440,17 +591,44 @@ order to identity and ancestry.
   walk needs no record read and no probe.
 - When a link holds several scope bases, continuity is `Replaced` if any of
   them is neither the selected publication nor one of its ancestors.
-- `Replaced` covers a cleared or recreated stream and a lost race inside the
-  fork window. The existing remedy serves both: Pull and review, then Push.
+- `Replaced` means a cleared or recreated stream: the base is not listed, or
+  no listed record connects it to the selected chain. `RemoteMissing` means a
+  cleared stream that nobody has pushed to since. `Displaced` means another
+  computer's record outranked the publication the base was reviewed in; the
+  storage was not cleared (section 9.4). None of them blocks anything: they
+  only drive the standing notices of section 13
+  (`PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, section 5). `Displaced` is the one
+  addition to `RemoteContinuity` and its TypeScript mirror.
+- A Push that another computer's outranks while it runs fails and moves no
+  base (section 7.3). One outranked after it was confirmed reads `Displaced`:
+  its bases are stale and are read as absent, like a cleared history's, and
+  nothing is written (section 9.4).
 
-| Scope digest in the selected manifest | `ScopeContinuity` |
-|---|---|
-| equals the scope base digest | `InSync` |
-| differs, and the repository is `Advanced` | `Advanced` |
-| differs otherwise | `Replaced` |
+A scope base is **usable** while the publication it was reviewed in is on the
+selected chain, and **stale** otherwise. A stale base is read as if it were not
+recorded. It is never deleted at a refresh: a short listing looks the same as a
+clear, and the base is usable again when its publication is listed again. The
+Push or the Pull that saves new bases removes the stale ones in the same
+transaction.
+
+| The scope in the selected manifest | Scope base | `ScopeContinuity` |
+|---|---|---|
+| absent | none, or stale | `Fresh` |
+| absent | usable | `RemoteMissing` |
+| present | none | `Unreviewed` |
+| present, with the base digest | usable or stale | `InSync` |
+| present, with another digest | usable | `Advanced` |
+| present, with another digest | stale | `Unreviewed` |
 
 `scope_revision` stays in the manifest and in `ScopeBase` as a per-branch
 counter for display. Nothing compares it.
+
+A session acceptance follows the same rule, by the commit it was accepted in:
+while that publication is on the selected chain the acceptance is compared
+against, and otherwise it is read as absent, with the acceptance of its
+subagents. First-contact adoption then proves an equal or an earlier stored
+copy from its content, and a stored copy it cannot prove classifies
+`Divergent`: Push asks for a Pull, and Pull keeps both copies.
 
 ### 9.2 Push gate at apply
 
@@ -459,11 +637,14 @@ counter for display. Nothing compares it.
 | the one this replica is based on | publish on it |
 | a descendant, and every writable scope still has this replica's base digest | publish on the new one; carry the other scopes from it |
 | a descendant, and a writable scope changed | `RequiresPull` |
-| not a descendant, or the stream is empty while a base is recorded | `Replaced` or `RemoteMissing`; stop |
+| none: the stream lists empty | publish the stream's first record; every writable scope is `Fresh` |
+| not a descendant, and every writable scope is `Fresh` or `InSync` | publish on it; carry the other scopes from it |
+| not a descendant, and a writable scope holds other content | `RequiresPull`: the scope was never reviewed in this history |
 
 Ancestry answers whether the remote moved forward. The scope digest answers
-whether this Push's own scopes were touched. This is today's gate with ancestry
-in place of revision order.
+whether this Push's own scopes were touched. The gate is the scope table of
+section 9.1 and nothing else: a cleared or recreated history is no state of its
+own, and no case asks for an unlink or a reset.
 
 The writable scopes are `project` plus one scope per provider this computer has
 bound, whatever the review ticked. A publication replaces a writable scope as a
@@ -490,6 +671,88 @@ it has today (section 11).
 Pull apply still requires the selected publication to be the reviewed one. The
 local mutation is always of the exact reviewed bytes.
 
+### 9.4 A Push outranked after it was confirmed
+
+On S3/R2 and Dropbox this cannot happen while the storage's claims are intact:
+the parent of a confirmed Push was claimed, so no sibling can land after it
+(section 7.2). An interrupted clear can remove that claim while keeping the
+parent and its records, and a delayed writer can then displace the confirmed
+Push there too (section 12). On the local store, which writes no claim, it can
+happen at any later time (section 7.2).
+
+A Push there is confirmed by the listing after its write. Another computer's
+record can still land after that listing, usually within seconds and in
+principle at any later time: that computer listed before this record was
+visible, then paused or was offline, and its record carries the earlier
+timestamp. The confirmed Push then holds a publication that is listed and not
+selected, and its local bases and acceptances describe a history nobody
+selects. A loss found later is not a failure of that Push: the Push was
+confirmed, and the report says so.
+
+The storage proves the case by itself. The base's record is listed, it is not
+on the selected chain, and walking its parent names over listed records reaches
+the chain. Ranks never change, and records are deleted only by a clear, so the
+verdict is final; a lagging listing can hide records but cannot produce it. A
+base that no listed record connects to the chain is a cleared or recreated
+stream, `Replaced`, or what an interrupted clear left behind; this one is
+`Displaced`. Both are stale bases, and both are read the same way.
+
+**Nothing is rolled back.** Recovery is a user action (decision 12). The refresh
+that finds a base reviewed in a displaced publication reports `Displaced` and
+changes nothing: no base returns to a shared ancestor, no acceptance is
+forgotten, no Library accepted state is reset, nothing is republished. The
+saved state stays exactly as it is and is read by the rule of section 9.1: a
+base or an acceptance whose publication is not on the selected chain is read as
+absent.
+
+| Local state | While `Displaced` |
+|---|---|
+| A scope base reviewed in a displaced publication | Kept. Read as absent, except that equal content is still `InSync`. Replaced by the next Push or Pull that saves bases, which removes the stale ones in the same transaction |
+| A session checkpoint accepted at a displaced publication | Kept. Read as absent, with the acceptance of its subagents. Replaced by the next Push or Pull that saves an acceptance |
+| Session-to-cloud-id mappings, recipes, preferences, receipts | Unchanged |
+
+What the displaced computer then reads, with nothing written:
+
+- An area whose reviewed content the selected history holds exactly reads
+  `InSync`. Every other area it holds a base for reads `Unreviewed`, whether
+  the winner changed it or it holds this computer's displaced content. Push is
+  blocked while a writable area is `Unreviewed`: a Pull review comes first.
+- In that Pull review a file this computer changed on the displaced branch
+  reads "Replace file · keeps local copy", because there is no usable base.
+  Left unticked it stays as it is, the Pull still marks the area as reviewed,
+  and the next Push publishes it onto the selected history. Ticked, the stored
+  version is written and this computer's version is kept beside it.
+- A session accepted on the displaced branch is proved from content: an equal
+  or earlier stored copy reads "Mark synced" or "Update storage", a longer or
+  different one "Keep both", and a session the storage never had "Publish new
+  task", under the cloud id it already has. A stale acceptance never reports a
+  session as synchronized.
+- The Push that follows is a new publication onto the selected history, under
+  the existing gate and Pull-review rules, from a fresh comparison the user
+  approves. Nothing about it is automatic.
+
+**Every reader of a base asks whether it is usable.** The scope classifier and
+the checkpoint reader already do. Two more readers open a base's manifest by
+its coordinates: the files review's per-file states and the Pull planner's
+per-file base digests. For a cleared base that manifest is gone and both fall
+back safely; for a displaced base it still exists, and reading it would let a
+file this computer changed on the displaced branch pass as changed only in the
+storage and be replaced plainly, with a backup but without the user's choice.
+Both readers take the base through the same usability rule first and read
+nothing from a stale one. This is what "preserved metadata must not authorize
+an unsafe operation" means here.
+
+A third computer that pulled the displaced publication reads the same way and
+converges on the same cloud ids. The Library follows the same rule: an accepted
+head that is not on the selected chain is read as absent, and nothing is reset
+at load (section 11).
+
+The state is told by one standing notice in the project activity notice zone
+while the comparison reports `Displaced` (section 13), and it goes away when a
+Push or a Pull has replaced the stale bases. There is no window event, no
+shell notice and no rollback transaction: `observe_linked_bundle` classifies
+and writes nothing.
+
 ## 10. Store contract and per-store work
 
 | Member | After |
@@ -500,6 +763,8 @@ local mutation is always of the exact reviewed bytes.
 | `compare_and_swap` and its types | Removed |
 | `list` | Same signature. It skips and logs a name it cannot represent instead of failing the listing. A completed write is visible to every later listing of that prefix, or the adapter states its worst-case lag. After the cut only storage clear calls it, because clear deletes exactly the ETag it listed |
 | `list_keys` — new | The same listing without ETags. Every record listing uses it: refresh, list-then-write, and bundle discovery. The default forwards to `list` and drops the ETags, which is free on S3/R2 and Dropbox, where the ETag arrives in the listing response. The local store overrides it |
+| `supports_claims` — new | Whether the store's server refuses a write to a key that already holds other bytes, in the same request. `true` on S3/R2 and Dropbox. `false` by default, on the local store, and on any store whose exclusivity is not proved |
+| `put_claim` — new | One create-only request at the claim key, no transport retry. Answers **mine** when the key was free or already held these bytes, and **taken**, with the bytes found, otherwise. Used only for the claim. The default is an error; callers ask `supports_claims` first |
 | `delete`, `supports_conditional_delete`, `clear_managed_data` | Unchanged; the clear order changes (section 12) |
 
 A plain write is enough because no conforming writer ever writes different
@@ -513,16 +778,22 @@ bytes to the same key:
 | `.mallard/_storage.json` | Constant bytes |
 | the Library's `_tag.json` | Drop its `created_at`, so the bytes are constant too |
 
+The claim is the one key two writers reach with different bytes, and that is
+its purpose: the store refuses the second in the same request. It is the only
+conditional write left, and only S3/R2 and Dropbox make it.
+
 | Store | Work |
 |---|---|
-| Local folder | Delete `compare_and_swap`. `put_record` is `put_immutable`. `list_keys` walks the prefix and returns names without opening a listed file; `list` keeps hashing, for clear. Reads, the lock and no-follow access are unchanged |
-| S3/R2 | Delete `compare_and_swap`, the `If-Match` branch and the ambiguous-CAS resolution. `put_record` runs with SDK retries off; the client is built with the SDK default of three attempts today. `list` skips and logs a key it cannot parse. The capability probe loses two stages |
-| Dropbox | Delete `compare_and_swap` and the update-by-revision write mode. `put_record` is one `files/upload` request, not a session start plus a batch commit with Mallard's code in between. `list` skips and logs a non-canonical or conflicted-copy path. The setup probe loses its update and stale-revision checks |
-| Shared wrapper | Its forwarding methods shrink with the trait |
+| Local folder | Delete `compare_and_swap`. `put_record` is `put_immutable`. `list_keys` walks the prefix and returns names without opening a listed file; `list` keeps hashing, for clear. Reads, the lock and no-follow access are unchanged. It writes no claim: `supports_claims` is false |
+| S3/R2 | Delete `compare_and_swap`, the `If-Match` branch and the ambiguous-CAS resolution. `put_record` runs with SDK retries off; the client is built with the SDK default of three attempts today. `list` skips and logs a key it cannot parse. The capability probe loses two stages. `put_claim` is the create-only put `put_immutable` already uses (`If-None-Match: *`), with SDK retries off; on a precondition failure one read tells this attempt's own bytes (mine) from another's (taken, with those bytes) |
+| Dropbox | Delete `compare_and_swap` and the update-by-revision write mode. `put_record` is one `files/upload` request, not a session start plus a batch commit with Mallard's code in between. `list` skips and logs a non-canonical or conflicted-copy path. The setup probe loses its update and stale-revision checks. `put_claim` is `put_record` at the claim key: `files/upload` in add mode without strict conflict answers identical bytes as written (mine) and other bytes as a conflict (taken); one download then returns them |
+| Shared wrapper | Its forwarding methods shrink with the trait, and forward `supports_claims` and `put_claim` |
 | Mallard Cloud | Unregistered (section 14) |
 
 A setup probe tests a write, a verified read-back, and that a listing taken
-right after the write returns it.
+right after the write returns it. On a store with claims it also writes other
+bytes to a key it just wrote and expects the refusal: a destination that
+overwrites cannot be set up as a store with claims.
 
 ## 11. Library engine
 
@@ -537,21 +808,38 @@ shared module for names, selection and list-then-write.
   review was computed from, and otherwise stops with its existing "changed after
   review" refusal. The Library does not rebase across a remote change, exactly
   as today.
-- Continuity replaces the numeric rewind check with ancestry. The checks for a
-  disappeared repository, a changed storage identity and a foreign repository
-  id stay.
+- Continuity replaces the numeric rewind check with ancestry. A repository
+  that lists empty holds no chain, so an accepted head is not on it: it reads
+  replaced like any other cleared repository, the page loads, and one Push
+  repopulates it. The checks for a changed storage identity and a foreign
+  repository id stay.
 - Apply takes a local single-flight lock per repository.
-- The per-resource accepted state advances on Push, and a row whose accepted
-  copy is absent from the selected manifest is not selectable for Push today.
-  When a link's accepted head is neither the selected publication nor one of
-  its ancestors, reset that link's accepted state the way storage clear
-  already does, so its rows can be pushed again.
+- A Library record claims its parent the same way, at
+  `library/<repository_id>/_claims/<parent token, or root>.json`, through the
+  same shared module. The lock stays: the claim is the exclusion between
+  computers, the lock the one between two windows of one app.
+- The per-resource accepted state advances on a Push that was stored, which
+  means written and selected. A Push that loses the fork window, or finds the
+  claim taken, fails with `RemoteChanged` before the accepted state is saved,
+  and the next review offers its rows again.
+- A row whose accepted copy is absent from the selected manifest is not
+  selectable for Push today. When a link's accepted head is neither the
+  selected publication nor one of its ancestors, the page reads the accepted
+  state as absent and writes nothing: every row compares as unreviewed and
+  goes through the Pull choice, and the next Push saves a new accepted state.
+  This serves a cleared or recreated repository (B1 and B2 of
+  `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, whose reset at load it replaces) and a
+  Push that was outranked after it was confirmed: the Library's counterpart of
+  section 9.4. Nothing is reset by the page (decision 12).
 
 ## 12. Storage clear
 
 Clear stays in place: it keeps the marker, deletes both namespaces, and resets
-local link state. Other devices then read `RemoteMissing` or `Replaced` and
-recover through Pull and Push.
+local link state. Other devices then read `RemoteMissing` or `Replaced`. Their
+bases and their session acceptance are stale, are read as absent, and they
+recover by pushing again, after a Pull when another computer already pushed
+into an area they write (`PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`). Nothing asks
+them for an unlink or a reset.
 
 One change: **records go first.** Clear `repositories/_commits` before the rest
 of `repositories`; inside a Library repository `_commits/` already sorts before
@@ -559,33 +847,88 @@ of `repositories`; inside a Library repository `_commits/` already sorts before
 publications are deleted first. Once they are gone every other record is
 disconnected from the root and the stream selects nothing, while every manifest
 and object still exists. An interrupted clear therefore never leaves a selected
-record pointing at deleted data. A writer racing the clear is stopped by
-list-then-write, or leaves an orphan the next pass deletes; the loop already
-repeats until a listing is empty.
+record pointing at deleted data. A writer racing the clear whose parent is
+already gone is stopped by list-then-write, or leaves an orphan the next pass
+deletes; the loop already repeats until a listing is empty. An orphan that
+lands after the last pass stays in the storage and is never selected. It does
+not close the stream: a first publication needs a stream that selects nothing,
+not an empty listing (section 7.2).
+
+**Claims go before records.** A Push writes its claim before its record, so
+the clear removes them in the opposite order: `repositories/_claims` first,
+then `repositories/_commits`, then the rest of `repositories`; inside a Library
+repository `_claims/` already sorts before `_commits/`. An interrupted clear
+then leaves records without claims. For the tip that is harmless: nobody has
+claimed it, and the next Push does. For a parent that already has a child it
+is not: a delayed writer that listed that parent childless before its child
+was visible, and paused since (section 7.2), can claim it again, write an
+earlier-stamped sibling, and be confirmed; the child's computer reads
+`Displaced` at its next refresh (section 9.4). So the claim's guarantee holds
+while the storage's claims and records are intact, and an interrupted clear
+reopens the local store's window on a store with claims until the clear is
+retried, which an interrupted clear asks for. No retry and no rollback prevents
+that race; recovery is the user's, as everywhere (decision 12). An interrupted
+clear does not leave a claim without its record, which would make the next
+first Push finish a version whose data the clear deleted, unless a Push raced
+the clear and the clear was also interrupted before its `repositories` pass;
+the retry sweeps that claim first. A claim that lands during a clear that
+finishes is swept by the `repositories` pass, which follows the records pass
+and loops until its listing is empty; one that lands after that pass belongs
+to a record that lands after it too.
+
+**What a clear does to the claim's guarantee.** The claim guarantees one child
+per parent among the records the storage holds; it says nothing about a parent
+the clear removed. A Push that claimed its parent before the clear and wrote
+its record after it lands an orphan: the parent is gone, nothing selects the
+record, and the listing after the write reports `RemoteChanged` with nothing
+local moved. When that listing came before the clear reached the record, the
+Push was confirmed and its records are stale afterwards, which is R5 of
+`PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` and ends in story 1 or 2. This is why the
+listing after the write stays on a store with claims (section 7.2). After the
+clear the guarantee starts again with the next first version: its claim of
+`root` is fresh, because the claims pass ran first, and an orphan the clear
+left behind has no claim and takes no child, because its parent is not listed.
 
 One case remains: a first publication written in the one-request gap right after
 a clear finishes can reference objects the clear deleted. That stream reads
-`Unavailable` until it is cleared again. The clear dialog already says to stop
-sync on all machines first.
+`Unavailable` until it is cleared again. Its claim landed in the same gap. The
+clear dialog already says to stop sync on all machines first.
 
 ## 13. What the user sees
 
-Losing publications stay in the storage. Nothing lists them, restores them, or
-counts them in the UI in this release. The losing computer still holds the same
-content locally, and the existing `Replaced` flow republishes it: Pull and
-review, then Push again. An archive browser can be added later without any
-storage change, because nothing is deleted.
+Losing records stay in the storage. Nothing lists them, restores them, or
+counts them in the UI in this release. The Push that wrote one failed, so the
+losing computer accepted nothing and still holds the same content locally: it
+compares again and pushes again. An archive browser can be added later without
+any storage change, because nothing is deleted.
 
-The only user-visible changes are three notices in existing surfaces. The notice component prints the severity word itself, so the copy never names it:
+The only user-visible changes are five texts in existing surfaces. The notice
+component prints the severity word itself, so the copy never names it:
 
 | When | Copy |
 |---|---|
-| `RemoteChanged` | "The storage changed while pushing. Compare again." It replaces the CAS-conflict message in the Push review error banner |
-| `Stored` with `selected: false` | The Push outcome notice at its warning tone, titled "Pushed, not current": "Another computer's push was selected first. This one is kept in the storage. Pull and review, then push again." It offers the existing Open Pull review action |
-| `OutcomeUnknown` | "Couldn't confirm the push. Refresh to see whether it arrived." |
+| `RemoteChanged` | "The storage changed while pushing. Compare again." in the Push review error banner. It replaces the CAS-conflict message. It covers every way another computer can get in first: the listing before the write shows its record, its claim is already there, or, on the local store, the listing after the write selects it |
+| `OutcomeUnknown` | "Couldn't confirm the push. Refresh to see whether it arrived." in the Push review error banner |
+| `Displaced`: a confirmed Push, or a Pull, was outranked afterwards (section 9.4) | "Another computer pushed to <storage> first. This computer's last push is no longer part of its history. Compare again.", or "last pull" when the newest stale base was saved by a Pull. A standing note in the project activity notice zone, without an action, while the comparison reports `Displaced`. It replaces the one-time shell notice and its window event |
+| `PushUnfinished` | "A push to <storage> did not finish. Finish it, then compare again." in the Push review error banner, with the action *Finish that push*. When the unfinished push is this computer's own: "This computer's earlier push to <storage> did not finish. Finish it, then compare again." The action writes the record the claim holds, once, lists, and the banner then reads "Finished. Compare again.", or the `RemoteChanged` or `OutcomeUnknown` sentence. The Library Push review has the same banner and action |
 
-The `Replaced`, `RemoteMissing`, `Advanced` and `Unreviewed` banners keep their
-copy and their gates. "Version N" keeps printing the revision.
+A claim taken by a record the listing holds fails with the `RemoteChanged`
+sentence; one taken by a record that is not listed has its own row above.
+
+There is no "stored, not selected" outcome: the Push result and the Library
+push outcome keep the shape they had before this plan, and gain the
+`PushUnfinished` failure. No notice rides a window event: the
+`project-sync-push-outranked` event, its forwarder and the shell notice go
+with the rollback (section 9.4).
+
+The `Advanced` and `Unreviewed` banners keep their copy and their gates.
+"Version N" keeps printing the revision. `Replaced`, `RemoteMissing` and
+`Displaced` gate nothing. While the comparison reports one of them, the project
+activity notice zone carries one standing note without an action: "Another
+computer cleared <storage>. Push again." while Push is open, "Another computer
+cleared <storage>. Pull, then push again." when a Pull comes first, and the
+`Displaced` sentence of the table above. The Pull review shows no note about
+any of them. `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` holds every case.
 
 ## 14. Mallard Cloud
 
@@ -627,6 +970,8 @@ own tests green.
 | 6. Stores | Delete `compare_and_swap` and its types from the trait and every implementation, including the managed store and the three test wrappers; `put_record` on S3 and Dropbox; the local store's `list_keys`; relaxed listings; trimmed probes; the clear order; the marker constant | The three store suites pass; the fake S3 servers and the Dropbox mock no longer emulate conditional overwrite; a foreign name does not fail a listing |
 | 7. Copy | The three notices of section 13 and their frontend tests. Copy only, in existing surfaces; show them in a static specimen before wiring, as usual | Frontend suite and type check pass |
 | 8. Gate | Request-count tests, provider parity on Local, R2 and Dropbox, a live two-machine pass on R2 and on Dropbox after a wipe, and the documentation (the agent guide's sentence that mutable heads require compare-and-swap, the README, the continuity design) | Section 16 is green and the live pass is recorded |
+| 9. Claims | `supports_claims` and `put_claim` on the trait with their defaults, forwarded by the shared wrapper and the test wrappers; `put_claim` on S3/R2 and Dropbox; the plain test store's claim, exclusive in memory, switchable off, with a fault before the claim request; in the shared module: the claim key of a stream, the record name read from record bytes, the claim step before the record request, the two outcomes of a taken claim and the own-record case; the listing after the write stays as it is; the claims pass in clear; the probe stage; `CURRENT_METADATA_LAYOUT.md`, the README and the agent guide | The rows of section 16 marked *claim* pass on the plain store with claims and on the S3 and Dropbox fakes; request counts read listing, claim, record, listing on a store with claims and today's three on the local store; the live two-machine pass on R2 and on Dropbox shows one child per version after simultaneous Pushes, and one `_claims` object per version |
+| 10. Recovery is a user action | Decision 12, the publishing part. In the shared module: one claim request and one record request, no `MAX_RECORD_REQUESTS` loop; the read-only checks after an unacknowledged claim or record; `OutcomeUnknown` on absent; `PushUnfinished`. The *Finish that push* command and banner action in both Push reviews. The `PushUnfinished` copy of section 13 in the static specimen first. The rest of decision 12 needs no claims and is steps 11 to 13 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, which can land before step 9: the usability rule on the two base readers that open a manifest, `RemoteContinuity::Displaced` and its standing notice in place of the rollback, and the Library read rule in place of the reset at load | The rows of section 16 marked *no recovery* pass, except "Displaced after the Push was confirmed", "Stale acceptance cannot bypass review" and "Library: accepted head off the chain", which that plan's steps 11 to 13 carry: at most one claim and one record request per Push in every outcome; the finish action writes once and only when invoked; the frontend suite asserts the `PushUnfinished` texts of section 13 |
 
 ## 16. Tests
 
@@ -641,20 +986,24 @@ own tests green.
 | Same `commit_id`, different bytes | Two publications with two names, ranked normally; nothing blocks the stream |
 | Record bytes do not match the digest in the name, or fields disagree with the name | `IntegrityError` for that publication when it is read; selection does not move |
 | Parent missing from the listing | The child is never selected, and connects when the parent appears |
-| Earlier-ranked sibling inside the fork window | The later one is kept and not selected; local files and sessions are untouched |
+| Earlier-ranked sibling inside the fork window | The later one is kept and not selected, and its Push fails with `RemoteChanged`; local files and sessions are untouched |
 | Writer sleeps between building a record and writing it | On wake it lists, sees a child, and ends with `RemoteChanged`; nothing is written |
+| Writer pauses after the freshness check, store without claims | On the plain store: A lists and passes the check; the hook that fires before its record request advances the fake wall clock by an hour and lands B's later-stamped record with a child built on it, confirmed on B's side. A's send goes through, A's earlier-stamped record is selected, and B's branch is displaced. B's next refresh reads `Displaced` and changes nothing; B compares and pushes again by hand, and so does the third computer on B's branch. The test states what the window does not bound and that nothing recovers by itself |
 | Listing older than ten wall-clock seconds | The attempt lists again; a monotonic-only check is shown not to catch a simulated sleep |
-| Record write fails in the transport | One request, no automatic retry; the next attempt lists first |
-| App restarts with a Push in flight | Nothing is resent; no pending record exists on disk |
-| Acknowledgment lost | One listing settles it; a repeat writes identical bytes to the same name |
+| Record write fails in the transport (no recovery) | One request, no automatic retry; the Push fails with the store's error; nothing local moves; on a store with claims the claim stays. A second Push is the user's, and with the same content it writes the claimed record |
+| App restarts with a Push in flight (no recovery) | Nothing is resent; no pending record or claim exists on disk; a claim it left in the storage is met by the next Push through the claim alone |
+| Acknowledgment lost (no recovery) | One read-only listing: present and selected is `Stored`, present and not selected `RemoteChanged`, absent `OutcomeUnknown`; no second request; a record that lands later is found by the next refresh |
 | Crash after each publish step | Objects and a manifest without a record never appear as history |
 | No-op while the remote changes | Nothing is written; the compared publication is returned |
-| Stored, not selected | `selected: false`; bases stay; the next refresh reads `Replaced`; Pull then Push recovers; Library rows are pushable again |
+| Written, not selected | `RemoteChanged` from `write_record`, and again from a repeat, which sends nothing. No base, checkpoint, binding, receipt or Library accepted state moves; the next refresh reads `Advanced`; the next Push publishes the same sessions; Library rows are offered again. A registration returns the established one |
+| Displaced after the Push was confirmed (no recovery) | The next refresh reads `Displaced`. The link's saved state is byte-identical before and after: no base moved, no acceptance forgotten, no event, no write; the outranked record stays. The comparison reads the displaced areas `Unreviewed` and the untouched ones `InSync`, the sessions by adoption, Push `RequiresPull`; the Pull review reads the displaced files "keeps local copy"; left unticked, the Pull marks the area reviewed and the next Push publishes them under the same cloud ids. The standing notice shows, and goes away after that Push. The Library link is read as absent and not reset |
+| Stale acceptance cannot bypass review (no recovery) | With a displaced or a cleared base: the session review never reports a session synchronized from the stale acceptance, S2 and S3 come from the content proof and S4 from `Divergent`; the Push gate reads the displaced areas `Unreviewed` and returns `RequiresPull`; a Pull review built while displaced reads a file this computer changed on the displaced branch "keeps local copy", never a plain replace, although its base manifest still exists; the files review's per-file states read it as diverged, not storage-ahead |
+| A base an interrupted clear left behind | Listed, not selected, and not connected to the chain: nothing is rolled back, no event, the link reads `Replaced`, and the base is read as absent |
 | Refresh, nothing changed | Exactly one listing request |
 | Cold start | Listing, selected record, manifest; nothing was persisted |
 | Remote ahead of the base | `Advanced` from the ancestor walk; no probe read |
-| Continuity rows | One fixture per row of section 9.1, including a sibling branch with a greater revision (`Replaced`, never `Advanced`) and a cleared stream that is pushed again |
-| Push gate | Disjoint scope advanced: published on the new selection with that scope carried byte for byte. Same scope changed: `RequiresPull`. Base not an ancestor: `Replaced` |
+| Continuity rows | One fixture per row of section 9.1, including a sibling branch with a greater revision (`Replaced`, never `Advanced`), a cleared stream that is pushed again, and one scope fixture per row A1 to A7 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` |
+| Push gate | Disjoint scope advanced: published on the new selection with that scope carried byte for byte. Same scope changed: `RequiresPull`. Stream cleared: `Ready`, and the Push writes the first record. Stream recreated: `Ready` or `RequiresPull` by its writable scopes, never an unlink |
 | Library apply after a remote change | Any other selected publication than the reviewed one stops the apply with "changed after review"; nothing is written |
 | Pull apply | A different selected publication than the reviewed one requires another review |
 | Failed page or expired cursor | Fails the refresh; never an empty stream |
@@ -664,11 +1013,28 @@ own tests green.
 | Bundle discovery | The `_commits/` listing plus the tip records reproduce today's summary rows; no payload key is listed |
 | Marker | Two first writers converge on identical bytes |
 | Remote writes | No `_head.json`, no `_tags/`, no flag or moved object is ever written |
-| Clear | Records go first; an interrupted clear leaves streams that select nothing; a racing writer ends with `RemoteChanged` |
+| Clear | Records go first; an interrupted clear leaves streams that select nothing; a writer racing it on a parent that is gone ends with `RemoteChanged`, and the stream still takes a first version afterwards |
 | Library double Apply | The lock stops the second; one record is written |
 | Setup probes | R2 and Dropbox setup pass without any conditional-overwrite stage |
 | Provider parity | The same record set selects the same mainline on Local, S3/R2 and Dropbox |
 | Large history | Listing cost is measured; a budget reports an incomplete view and never truncates silently |
+| Claim: two writers, same parent | The second claim is refused in one request; its record is never written; that Push fails with `RemoteChanged`; the listing holds one child of the parent, on the S3 fake, the Dropbox mock and the plain store with claims |
+| Claim: two first versions | One `root` claim, one first version; the other Push fails before it writes |
+| Claim: the writer dies between its claim and its record (no recovery) | The next Push onto that parent, from another computer, writes nothing and fails with `PushUnfinished`; one claim request, no record request. *Finish that push* writes the claimed record once, lists, and reports Finished; the next comparison shows that version with the dead writer's commit id and origin. The dead writer then reads `Advanced` with its own content; a session it continued reads "Keep both" and a first-published one appears twice (L3) |
+| Claim: the same computer, after its claim landed and its record did not | Same content on the same parent: the next Push writes the claimed record as its own, one record request, `Stored`, and its local save is this Push's; no L3. Other content: `PushUnfinished`, nothing written; *Finish that push* writes the earlier record, and the sessions of that earlier push are L3 |
+| Claim: the claim request is not acknowledged (no recovery) | One read of the claim key and no second claim request: this computer's bytes and the Push goes on; other bytes and it is taken; absent and the Push ends with `OutcomeUnknown` |
+| Claim: the record request fails after the claim (no recovery) | One record request; the Push fails with the store's error; the claim stays; nothing local moves. The next Push with the same content writes the claimed record as its own |
+| Claim: request count | On a store with claims a Push makes one listing, one claim, one record request and one listing, and in no outcome more than one claim or one record request; the local store makes today's three |
+| Claim: the storage is cleared between the claim and the record | A lists, claims its parent, and the plain store is cleared before A's record request. A's record lands as an orphan; the listing after the write does not select it; A fails with `RemoteChanged`; no base, checkpoint, acceptance or receipt moves; A's next refresh reads the cleared storage and story 1 or 2 follows. A second variant clears after A's confirming listing: A was confirmed, its records read as stale, R5 |
+| Claim: a stale listing | A listing older than the sibling's claim ends in a taken claim, never in a second child |
+| Claim: not a record, or another parent's record | The Push onto that parent fails with an integrity error, not `RemoteChanged`; nothing is written; selection does not move |
+| Claim: never read by a refresh | Refresh, review, the Pull apply and bundle discovery make no request under `_claims/` |
+| Claim: the local store | Writes none; its Push is unchanged; the fork-window tests stay on the plain store without claims and still pass |
+| Claim: clear | `_claims` goes before `_commits`; an interrupted clear after the claims pass leaves records without claims and the next Push claims the tip; a claim that lands during the clear is swept by the `repositories` pass; after a clear `root` can be claimed again |
+| Claim: interrupted clear, then a delayed writer (no recovery) | The clear is interrupted after its claims pass with the chain intact. A writer that listed the tip's parent childless before the tip was visible claims it, writes an earlier-stamped sibling, and is `Stored`. The tip's computer reads `Displaced` at its next refresh, nothing is rolled back, and it compares and pushes again. The clear's retry sweeps the stale claims first |
+| Library: accepted head off the chain (no recovery) | The page loads and writes nothing; every row compares as unreviewed and goes through the Pull choice; a Push saves a new accepted state. One fixture for a cleared repository and one for a displaced head |
+| Claim: setup probe | The S3 and Dropbox probes refuse a destination that overwrites a key |
+| Claim: Library | The same rows on the resource engine; a taken claim ends before the accepted state is saved |
 
 Existing transcript, owned-subagent, scope-firewall, deletion, secret-handling,
 destination-isolation, key-validation and frontend review regressions run
@@ -678,7 +1044,10 @@ Release condition:
 
 > A store that offers only put, get and list, with plain overwrite and no
 > conditional write, runs project and Library publication, refresh, review and
-> restore. The existing stores run that same engine.
+> restore. The existing stores run that same engine. A store that also refuses
+> a second write of a key runs the claim on top of it, and a version listed
+> there never loses while its claims are intact. No operation retries a write,
+> resends after a restart, or changes sync metadata without the user.
 
 ## 17. Not in this plan
 
@@ -694,10 +1063,21 @@ Release condition:
   read is hash-verified.
 - Mallard Cloud, Feishu, and any other new provider.
 - Resource-level merging of racing publications.
+- A claim on the local store, or any test of a folder's exclusivity: a folder a
+  sync product shares would take two claims, and a network share promises no
+  create-only write. Its fork window stays.
+- Deleting or reassigning a claim. Like a losing record, a claim leaves the
+  storage only with a clear; an unfinished push is finished by the user or left
+  as it is.
+- Recreating the local save of a push whose record arrived without it, L3 of
+  `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`. Its own plan.
+- A storage generation, an epoch, or any locking protocol. Recovery is a user
+  action, and the storage layout stays.
 
 ## Source pointers
 
-Line numbers are from the working tree on September 18, 2026.
+Line numbers are from the working tree on September 18, 2026; the rows under
+*Claims* from September 22, 2026.
 
 | Subject | Location |
 |---|---|
@@ -725,3 +1105,31 @@ Line numbers are from the working tree on September 18, 2026.
 | Tests that assert CAS conflicts or stale writers | `storage_parity.rs:85`, `:370`, `:668`; `src-tauri/tests/support/catalog_flow.rs:1130`, `:1185`, `:1423`, `:1499` |
 | The agent guide's compare-and-swap sentence | `AGENTS.md:162-163` |
 | `Instant` on macOS reads `CLOCK_UPTIME_RAW` | Rust 1.95 `library/std/src/sys/time/unix.rs:62-67` |
+
+*Claims*
+
+| Subject | Location |
+|---|---|
+| `write_record_at`: the list-then-write loop, where the claim goes before the record request; the view synthesized after an acknowledged write; `verify_record` | `crates/mallard-infrastructure/src/storage_core/publication.rs:425-486`, `:447-453`, `:333-341` |
+| `RecordStream` and its key constructor; `list_record_keys`; `admits` | `publication.rs:72-102`, `:199-222`, `:151-153` |
+| `RecordName::new`; the five graph fields both records carry under the same names | `crates/mallard-domain/src/publication.rs:112-143`; `crates/mallard-infrastructure/src/bundle_engine.rs:485-507`; `src-tauri/src/storage_catalog/domain.rs:825-841` |
+| Trait: `put_immutable`, `put_record`, `supports_conditional_delete`, `list_keys`; the shared wrapper's forwards | `crates/mallard-infrastructure/src/storage_core/object_store.rs:239-265`, `:267-271`, `:306-317`; `storage_core/mod.rs:498-530` |
+| S3/R2: `put_absent_async` (`If-None-Match: *`, retries off), `put_record_async`; the fake's create-only check | `crates/mallard-infrastructure/src/storage_core/s3_store.rs:609-648`, `:693-706`, `:2290-2300` |
+| Dropbox: `upload_record` (add mode, not strict), `put_record`; `get_metadata` as a download; the mock's add-mode conflict | `crates/mallard-infrastructure/src/storage_core/dropbox_store/upload.rs:138-167`; `dropbox_store.rs:950-963`, `:638-652`; `dropbox_store/mock.rs:228-250` |
+| Clear: the pass order | `crates/mallard-infrastructure/src/storage_core/mod.rs:151-216` and `:195-200` |
+| Plain test store: `put_record` and its faults | `crates/mallard-infrastructure/src/storage_core/plain_store.rs:185-215` |
+| Library key constructor | `crates/mallard-infrastructure/src/storage_core/mod.rs:304` |
+
+*Recovery is a user action*
+
+| Subject | Location |
+|---|---|
+| The rollback: `observe_linked_bundle` and its transaction; `outranked_push_events`; the event constant and its forwarder; the app hook | `src-tauri/src/project_sync/service.rs:7092-7220`, `:7066`; `src-tauri/src/project_sync/config_watcher.rs:31`, `:89`; `src-tauri/src/lib.rs:159` |
+| The three rollback tests to rewrite as `Displaced` tests | `src-tauri/src/project_sync/service.rs:20600`, `:20762`, `:20837` |
+| `Mainline::outranked` and `Outranked.shared`; `BundleEngine::snapshot_at` | `crates/mallard-domain/src/publication.rs:291-335`; `crates/mallard-infrastructure/src/bundle_engine.rs:746` |
+| The shell notice and its listener; the event type | `src/components/project-sync/syncOutcome.ts:69`; `src/components/project-sync/ProjectSync.tsx:1399-1402`; `src/types.ts:954` |
+| The Library reset at load | `src-tauri/src/storage_catalog/service.rs:1050-1062` |
+| Base readers that open the base manifest: the files review's per-file states; the Pull planner's per-file base digests; the preservation rule they feed | `src-tauri/src/project_sync/service.rs:2348`, `:2708-2742`; `crates/mallard-infrastructure/src/bundle_engine.rs:5034-5057` |
+| Base readers that already filter, through `classify_scope_continuity` | `src-tauri/src/project_sync/service.rs:7728`, `:7851`; `crates/mallard-domain/src/lib.rs:931-956` |
+| What marks an area reviewed after a Pull with unticked rows | `src-tauri/src/project_sync/service.rs:13472` |
+| The retry loop and its constants | `crates/mallard-infrastructure/src/storage_core/publication.rs:35-37`, `:441-486` |

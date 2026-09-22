@@ -121,8 +121,6 @@ export type StorageNotice = {
   storageId: string;
 } & (
   | { kind: "requires_pull"; copy: PullRequiredCopy }
-  | { kind: "remote_missing"; baseRevision: number | null }
-  | { kind: "remote_replaced"; baseRevision: number | null }
   | { kind: "action_failed"; action: "push" | "pull"; message: string }
   /** A finished Push or Pull; the flow has already closed behind it. */
   | { kind: "outcome"; outcome: SyncOutcome }
@@ -2846,10 +2844,13 @@ export default function ProjectLinksWorkspace({
                       // neither, it has nothing to frame.
                       if (!activeNotice && !reviewOpen && !activeSibling) return null;
 
-                      /* The four gates form a discriminated union, so at most
-                       * one is present in the shared notice box.
+                      /* The gates form a discriminated union, so at most one
+                       * is present in the shared notice box. A storage that
+                       * another computer cleared is not one of them: it stops
+                       * no Push and no Pull, and the activity list below
+                       * carries its standing note.
                        *
-                       * All four are events without exception: ProjectSync
+                       * All of them are events without exception: ProjectSync
                        * initialises the notice at null and only ever sets it
                        * inside the Push and Pull handlers, so none of them can
                        * be on screen when the card first renders. Each one is
@@ -2879,65 +2880,6 @@ export default function ProjectLinksWorkspace({
                               >
                                 <Icon name="download" size={13} />
                                 Open Pull review
-                              </button>
-                            </div>
-                          ),
-                        });
-                      }
-                      if (activeNotice?.kind === "remote_missing") {
-                        gateNotices.push({
-                          key: "remote-missing",
-                          /* Nothing failed or was lost locally. Push is held
-                             until the user resolves the missing remote history. */
-                          severity: "warning",
-                          title: "Remote history is missing",
-                          message: `${storage.name || "This storage"} no longer holds this project's sync history, so Push is paused. If this is expected, unlink and link the storage again.`,
-                          action: (
-                            <div className="sync-sync-review-recovery-actions">
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                disabled={noticeActionsDisabled}
-                                onClick={() => onOpenStorage(storage.storage_id)}
-                              >
-                                Storage details
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost danger"
-                                disabled={noticeActionsDisabled}
-                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.storage_id))}
-                              >
-                                Unlink storage…
-                              </button>
-                            </div>
-                          ),
-                        });
-                      }
-                      if (activeNotice?.kind === "remote_replaced") {
-                        gateNotices.push({
-                          key: "remote-replaced",
-                          severity: "warning",
-                          title: "Storage history changed",
-                          message: `${storage.name || "This storage"} holds a different sync history than this project last synced${activeNotice.baseRevision != null ? ` (version ${activeNotice.baseRevision})` : ""}. Review & adopt pulls the new history; unlinking doesn't delete files.`,
-                          action: (
-                            <div className="sync-sync-review-recovery-actions">
-                              <button
-                                type="button"
-                                className="btn btn-ghost danger"
-                                disabled={noticeActionsDisabled}
-                                onClick={() => void run(`unlink:${actionPrefix}`, () => onUnlinkStorage(project.local_project_id, storage.storage_id))}
-                              >
-                                Unlink storage…
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                disabled={noticeActionsDisabled}
-                                onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.storage_id))}
-                              >
-                                <Icon name="download" size={13} />
-                                Review &amp; adopt
                               </button>
                             </div>
                           ),
@@ -3150,12 +3092,6 @@ export default function ProjectLinksWorkspace({
                 refreshEpoch={historyRefreshEpoch}
                 activeStorageId={activeStorageId}
                 activeStorageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name ?? null}
-                onUnlinkStorage={activeStorageId ? () => {
-                  void run(
-                    `unlink:${activeProject.local_project_id}:${activeStorageId}`,
-                    () => onUnlinkStorage(activeProject.local_project_id, activeStorageId),
-                  );
-                } : undefined}
                 continuityActionBusy={busy || !!runningAction}
                 onHeaderModelChange={handleActivityHeaderChange}
                 onChooseAgentProfile={() => {

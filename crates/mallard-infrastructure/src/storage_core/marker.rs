@@ -1,7 +1,9 @@
 //! The storage layout marker at `.mallard/_storage.json`.
 //!
 //! Both protocols verify the marker before touching a storage; whichever
-//! writer arrives first creates it idempotently.
+//! writer arrives first creates it. The marker's bytes are constant, so
+//! concurrent first writers write identical bytes and creation is idempotent
+//! without any exclusivity.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +11,7 @@ use super::{
     parse_json_bytes, ObjectKey, ObjectStore, MAX_STORAGE_MARKER_BYTES, STORAGE_MARKER_KEY,
 };
 
-pub(crate) const STORAGE_MARKER_FORMAT: &str = "mallard-storage";
+pub(crate) const STORAGE_MARKER_FORMAT: &str = "mallard-append-storage";
 pub(crate) const STORAGE_LAYOUT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -54,8 +56,8 @@ impl StorageMarker {
 }
 
 /// Verify the storage marker, creating it when the storage is new. Safe under
-/// concurrent first writers: the immutable put tolerates an identical marker
-/// and the read-back re-validates whatever actually landed.
+/// concurrent first writers: every one of them writes the same constant
+/// bytes, and the read-back re-validates whatever actually landed.
 pub fn ensure_storage_marker<S: ObjectStore + ?Sized>(store: &S) -> Result<(), String> {
     let key = ObjectKey::parse(STORAGE_MARKER_KEY)?;
     if let Some(stored) = store.get_metadata(&key, MAX_STORAGE_MARKER_BYTES)? {
@@ -98,11 +100,45 @@ mod tests {
 
         fs::write(
             &marker_path,
-            br#"{"format":"mallard-storage","layout_version":2}"#,
+            br#"{"format":"mallard-append-storage","layout_version":2}"#,
         )
         .unwrap();
         let error = ensure_storage_marker(&store).unwrap_err();
         assert!(error.contains("layout version 2"));
+    }
+
+    #[test]
+    fn two_first_writers_converge_on_identical_marker_bytes() {
+        use super::super::plain_store::PlainStore;
+        let storage = PlainStore::default();
+        let (first, second) = (storage.clone(), storage.clone());
+        ensure_storage_marker(&first).unwrap();
+        let key = ObjectKey::parse(STORAGE_MARKER_KEY).unwrap();
+        let written = first.get_metadata(&key, 4096).unwrap().unwrap().bytes;
+        // The second writer did not see the first one's marker: on a store
+        // with plain overwrite it writes again, and nothing changes.
+        storage.remove(&key);
+        ensure_storage_marker(&second).unwrap();
+        assert_eq!(
+            second.get_metadata(&key, 4096).unwrap().unwrap().bytes,
+            written
+        );
+        assert_eq!(
+            written,
+            br#"{"format":"mallard-append-storage","layout_version":1}"#
+        );
+        assert_eq!(
+            classify_storage_marker(&written),
+            (MarkerState::Storage, Some("layout 1".to_string()))
+        );
+        assert_eq!(
+            classify_storage_marker(br#"{"format":"mallard-append-storage","layout_version":2}"#).0,
+            MarkerState::Unsupported
+        );
+        assert_eq!(
+            classify_storage_marker(br#"{"format":"something-else","layout_version":1}"#).0,
+            MarkerState::Invalid
+        );
     }
 }
 
@@ -126,7 +162,7 @@ pub fn classify_storage_marker(bytes: &[u8]) -> (MarkerState, Option<String>) {
         return (MarkerState::Storage, layout);
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
-    if value["format"] == "mallard-storage" {
+    if value["format"] == STORAGE_MARKER_FORMAT {
         (MarkerState::Unsupported, layout)
     } else {
         (MarkerState::Invalid, None)

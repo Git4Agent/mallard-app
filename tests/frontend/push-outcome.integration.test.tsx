@@ -7,7 +7,11 @@ import type {
   ThreadSyncDecision,
   ThreadSyncEntry,
 } from "../../src/types";
-import { buildPushOutcome } from "../../src/components/project-sync/syncOutcome";
+import { readFileSync } from "node:fs";
+import { renderToStaticMarkup } from "react-dom/server";
+import Notice from "../../src/components/notice/Notice";
+import { buildPushOutcome, pushOutrankedNotice } from "../../src/components/project-sync/syncOutcome";
+import { storageAccessErrorMessage } from "../../src/storageError";
 
 function decision(action: ConversationReviewAction, selectable: boolean): ThreadSyncDecision {
   return { action, selectable };
@@ -147,4 +151,45 @@ test("a push with nothing to report keeps its plain face", () => {
   assert.equal(outcome.defaultOpen, false);
   assert.deepEqual(outcome.rows.map((row) => row.status), ["synced", "synced"]);
   assert.ok(!outcome.stats.some((stat) => stat.label === "not pushed"));
+});
+
+test("a changed storage and an unconfirmed push reach the Push review banner word for word", () => {
+  // The backend sends these two sentences as the Push error. Nothing between
+  // the command and the banner may rewrite them, and the banner prints the
+  // severity word itself, so neither sentence names one.
+  const storage = { provider_label: "Cloudflare R2" };
+  for (const sentence of [
+    "The storage changed while pushing. Compare again.",
+    "Couldn't confirm the push. Refresh to see whether it arrived.",
+  ]) {
+    assert.equal(storageAccessErrorMessage(storage, sentence), sentence);
+    assert.equal(storageAccessErrorMessage(storage, new Error(sentence)), sentence);
+    assert.doesNotMatch(sentence, /\b(error|warning|note|done)\b/i);
+    const markup = renderToStaticMarkup(
+      <Notice severity="danger" timing="blocking" className="sync-pull-error">{sentence}</Notice>,
+    );
+    assert.ok(markup.includes(sentence.replace("'", "&#x27;")), markup);
+    assert.match(markup, /Error/);
+  }
+});
+
+test("a push outranked after it was confirmed is said once, in one short sentence", () => {
+  const sentence = pushOutrankedNotice("Attic R2");
+  assert.equal(sentence, "Another computer pushed to Attic R2 first. Push again.");
+  assert.equal(
+    pushOutrankedNotice(undefined),
+    "Another computer pushed to this storage first. Push again.",
+  );
+  // The shell notice prints the severity word itself, so the copy names none.
+  assert.doesNotMatch(sentence, /\b(error|warning|note|done)\b/i);
+  const markup = renderToStaticMarkup(
+    <Notice severity="warning" timing="progress">{sentence}</Notice>,
+  );
+  assert.ok(markup.includes(sentence), markup);
+  assert.match(markup, /Warning/);
+  // The backend rolls the link back during a refresh and announces it; the
+  // shell says it through its one notice, at the attention tone.
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /listen<PushOutrankedEvent>\("project-sync-push-outranked"/);
+  assert.match(shell, /pushOutrankedNotice\(storage\?\.name\), tone: "attention"/);
 });

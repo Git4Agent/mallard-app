@@ -163,5 +163,5 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
             resurrected.head_token,
         ),
     );
-    assert!(!engine.publish(fixed_point).unwrap().published);
+    assert!(!engine.publish(fixed_point).unwrap().stored());
 }

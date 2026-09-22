@@ -100,7 +100,12 @@ mod tests {
     fn prepare_pins_the_account_refuses_duplicates_and_keeps_the_token_out_of_listings() {
         let temp = tempfile::tempdir().unwrap();
         let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let registry = StorageProviderRegistry::production();
+        // No build registers Mallard Cloud, so the flow runs over a registry
+        // that holds its adapter alone.
+        let registry = &StorageProviderRegistry::from_adapters(vec![std::sync::Arc::new(
+            mallard_infrastructure::storage_providers::managed_cloud::ManagedCloudAdapter,
+        )])
+        .unwrap();
         let draft = create_storage_setup_draft(&repository, registry, &provider_key()).unwrap();
         let operation = begin_storage_draft_operation(
             &repository,

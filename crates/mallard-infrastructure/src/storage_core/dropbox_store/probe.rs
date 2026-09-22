@@ -79,7 +79,6 @@ impl DropboxObjectStore {
     async fn probe_write(
         &self,
         path: &str,
-        mode: Value,
         bytes: &[u8],
         journal: &mut dyn StorageProbeJournal,
     ) -> Result<Metadata> {
@@ -87,17 +86,9 @@ impl DropboxObjectStore {
         // If a response is lost, cleanup refuses the unrecorded revision.
         let recovery = journal.recovery().clone();
         journal.checkpoint(recovery).map_err(|_| Error::Local)?;
-        let metadata = self
-            .upload(path, mode, Bytes::copy_from_slice(bytes))
-            .await?;
+        let metadata = self.upload(path, Bytes::copy_from_slice(bytes)).await?;
         checkpoint(journal, Some(metadata.rev.clone()), bytes)?;
         Ok(metadata)
-    }
-    async fn require_conflict(&self, path: &str, mode: Value, bytes: &[u8]) -> Result<()> {
-        match self.upload(path, mode, Bytes::copy_from_slice(bytes)).await {
-            Err(Error::Conflict) => Ok(()),
-            _ => Err(Error::Cleanup),
-        }
     }
     pub(crate) fn probe(
         &self,
@@ -111,65 +102,16 @@ impl DropboxObjectStore {
                 return Err(Error::Cleanup);
             }
             checkpoint(journal, None, b"")?;
+            // What publication needs: a write, a verified read-back, and a
+            // listing taken right after the write that returns it. Storage
+            // clear needs the revision-checked delete.
             let result: Result<()> = async {
-                let first = self
-                    .probe_write(&path, json!({".tag":"add"}), b"mallard-probe-a", journal)
-                    .await?;
-                self.require_conflict(&path, json!({".tag":"add"}), b"mallard-probe-a")
-                    .await?;
-                let second = self
-                    .probe_write(
-                        &path,
-                        json!({".tag":"update","update":first.rev}),
-                        b"mallard-probe-b",
-                        journal,
-                    )
-                    .await?;
-                if first.rev == second.rev {
-                    return Err(Error::Invalid);
-                }
-                self.require_conflict(
-                    &path,
-                    json!({".tag":"update","update":first.rev}),
-                    b"mallard-probe-b",
-                )
-                .await?;
+                let written = self.probe_write(&path, b"mallard-probe-a", journal).await?;
                 let Some((_, read, hash)) = self.download(&path, 1024).await? else {
                     return Err(Error::Integrity);
                 };
-                if read.rev != second.rev || hash != sha256_hex(b"mallard-probe-b") {
+                if read.rev != written.rev || hash != sha256_hex(b"mallard-probe-a") {
                     return Err(Error::Integrity);
-                }
-                if !matches!(
-                    self.delete_path(&path, &first.rev).await?,
-                    DeleteOutcome::Conflict { .. }
-                ) {
-                    return Err(Error::Invalid);
-                }
-                if self.delete_path(&path, &second.rev).await? != DeleteOutcome::Deleted {
-                    return Err(Error::Invalid);
-                }
-                checkpoint(journal, None, b"")?;
-                self.require_conflict(
-                    &path,
-                    json!({".tag":"update","update":second.rev}),
-                    b"mallard-probe-b",
-                )
-                .await?;
-                let third = self
-                    .probe_write(&path, json!({".tag":"add"}), b"mallard-probe-c", journal)
-                    .await?;
-                self.require_conflict(
-                    &path,
-                    json!({".tag":"update","update":second.rev}),
-                    b"mallard-probe-c",
-                )
-                .await?;
-                if !matches!(
-                    self.delete_path(&path, &second.rev).await?,
-                    DeleteOutcome::Conflict { .. }
-                ) {
-                    return Err(Error::Invalid);
                 }
                 let parent = path.rsplit_once('/').ok_or(Error::Invalid)?.0;
                 let page = self
@@ -181,8 +123,14 @@ impl DropboxObjectStore {
                 let entries = page["entries"].as_array().ok_or(Error::Invalid)?;
                 if !entries
                     .iter()
-                    .any(|e| e["path_lower"] == path && e["rev"] == third.rev)
+                    .any(|e| e["path_lower"] == path && e["rev"] == written.rev)
                 {
+                    return Err(Error::Invalid);
+                }
+                if !matches!(
+                    self.delete_path(&path, "0123456789abcdef").await?,
+                    DeleteOutcome::Conflict { .. }
+                ) {
                     return Err(Error::Invalid);
                 }
                 Ok(())

@@ -526,8 +526,9 @@ fn replay_child_wire_to_dropbox(
     engine: &BundleEngine<mallard_infrastructure::storage_core::dropbox_store::DropboxObjectStore>,
 ) -> (usize, u64) {
     let observed = engine
-        .inspect_optional_with_token(&source.manifest.bundle.bundle_id)
-        .unwrap();
+        .observe(&source.manifest.bundle.bundle_id)
+        .unwrap()
+        .current;
     let previous = observed.as_ref().map(|_| {
         engine
             .inspect(&source.manifest.bundle.bundle_id)

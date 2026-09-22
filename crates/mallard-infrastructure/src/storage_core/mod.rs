@@ -12,6 +12,9 @@ pub mod dropbox_store;
 pub mod local_store;
 pub mod marker;
 pub mod object_store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod plain_store;
+pub mod publication;
 pub mod s3_store;
 
 pub use connection::{
@@ -22,8 +25,8 @@ pub use local_store::LocalObjectStore;
 pub use marker::{ensure_storage_marker, StorageMarker, MarkerState, classify_storage_marker};
 pub(crate) use object_store::sha256_reader;
 pub use object_store::{
-    CasExpectation, CasOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore,
-    StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
+    DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome, StoreKeyPage,
+    StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
 };
 pub use s3_store::{
     R2CapabilityProbeError, R2CapabilityProbeErrorKind, R2CapabilityProbeReceipt,
@@ -41,14 +44,15 @@ use tokio::runtime::Handle;
 pub const MALLARD_ROOT: &str = ".mallard";
 pub const STORAGE_MARKER_KEY: &str = ".mallard/_storage.json";
 pub const REPOSITORY_PREFIX: &str = ".mallard/v1/repositories";
-/// Flat discovery namespace: one tag object per bundle. Listing it costs
-/// bundle count, never payload-object count, so tags live beside the bundle
-/// prefixes rather than inside them. `_tags` can never collide with a bundle
-/// component because bundle IDs are exactly 32 hex characters.
-pub const REPOSITORY_TAGS_PREFIX: &str = ".mallard/v1/repositories/_tags";
+/// Flat record namespace: every project publication record, and nothing
+/// else. Listing `_commits/<bundle_id>` returns one stream, which is what a
+/// refresh needs; listing `_commits` returns every project stream's records
+/// and no payload key, which is what bundle discovery needs. `_commits` can
+/// never collide with a bundle component because bundle IDs are exactly 32
+/// hex characters.
+pub const REPOSITORY_COMMITS_PREFIX: &str = ".mallard/v1/repositories/_commits";
 pub const LIBRARY_PREFIX: &str = ".mallard/v1/library";
 pub const LOCAL_STORAGE_LOCK: &str = ".storage.lock";
-pub const HEAD_FILE: &str = "_head.json";
 pub const TAG_FILE: &str = "_tag.json";
 pub const MAX_STORAGE_MARKER_BYTES: u64 = 4 * 1024;
 pub(crate) const MAX_LIST_PAGE: usize = 10_000;
@@ -127,6 +131,12 @@ impl ObjectPrefix {
 /// Delete every Mallard repository and Library object while retaining the
 /// storage marker and every object outside Mallard's two managed namespaces.
 /// Repeated first-page deletion avoids cursor gaps as the key set shrinks.
+///
+/// Records go first. Their names sort by depth, so a stream's first
+/// publications are deleted first; once they are gone every other record is
+/// disconnected from the root and the stream selects nothing, while every
+/// manifest and object still exists. An interrupted clear therefore never
+/// leaves a selected record pointing at deleted data.
 pub fn clear_managed_storage_data<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<ManagedStorageClearResult, String> {
@@ -183,7 +193,10 @@ fn clear_managed_data_with<S: ObjectStore + ?Sized>(
         Ok(deleted - before)
     };
     let result = (|| {
-        let repository_objects_deleted = clear_prefix(REPOSITORY_PREFIX)?;
+        // Inside a Library repository `_commits/` already sorts before
+        // `_manifests/` and `_objects/`, so its records go first too.
+        let record_objects_deleted = clear_prefix(REPOSITORY_COMMITS_PREFIX)?;
+        let repository_objects_deleted = record_objects_deleted + clear_prefix(REPOSITORY_PREFIX)?;
         let library_objects_deleted = clear_prefix(LIBRARY_PREFIX)?;
         Ok(ManagedStorageClearResult {
             repository_objects_deleted,
@@ -243,9 +256,7 @@ fn validate_relative_object_key_characters(value: &str, label: &str) -> Result<(
 
 pub(crate) fn validate_bundle_relative_object_key(value: &str) -> Result<(), String> {
     validate_relative_object_key_characters(value, "bundle-relative object key")?;
-    if !(value == HEAD_FILE
-        || value.starts_with("_manifests/")
-        || value.starts_with("_commits/")
+    if !(value.starts_with("_manifests/")
         || value.starts_with("_objects/")
         || value.starts_with("_uploads/"))
     {
@@ -255,22 +266,17 @@ pub(crate) fn validate_bundle_relative_object_key(value: &str) -> Result<(), Str
 }
 
 /// The only constructor for repository object keys. The relative part must
-/// stay inside the bundle namespace allowlist; discovery tags are not
-/// bundle-relative — they have their own constructor below.
+/// stay inside the bundle namespace allowlist; publication records are not
+/// bundle-relative — `publication::RecordStream` builds their keys in the
+/// flat record namespace.
 pub fn repository_object_key(bundle_id: &BundleId, relative: &str) -> Result<ObjectKey, String> {
     validate_bundle_relative_object_key(relative)?;
     ObjectKey::parse(format!("{}/{}/{}", REPOSITORY_PREFIX, bundle_id, relative))
 }
 
-/// The only constructor for one bundle's discovery tag key.
-pub fn repository_tag_key(bundle_id: &BundleId) -> Result<ObjectKey, String> {
-    ObjectKey::parse(format!("{}/{}.json", REPOSITORY_TAGS_PREFIX, bundle_id))
-}
-
 fn validate_library_relative_object_key(value: &str) -> Result<(), String> {
     validate_relative_object_key_characters(value, "library-relative object key")?;
-    if !(value == HEAD_FILE
-        || value == TAG_FILE
+    if !(value == TAG_FILE
         || value.starts_with("_manifests/")
         || value.starts_with("_commits/")
         || value.starts_with("_objects/"))
@@ -317,6 +323,9 @@ pub(crate) fn parse_json_reader<T: for<'de> Deserialize<'de>>(
 pub struct ConfiguredObjectStore {
     inner: Arc<dyn ObjectStore>,
     storage_id: StorageId,
+    /// Lives and dies with the opened store: an edited configuration or a
+    /// forgotten storage starts from nothing listed and nothing read.
+    publications: Arc<publication::PublicationCache>,
 }
 
 /// One opened store per storage configuration for the life of the process,
@@ -417,6 +426,7 @@ impl ConfiguredObjectStore {
         Ok(Self {
             inner,
             storage_id: config.id.clone(),
+            publications: Arc::default(),
         })
     }
 
@@ -485,13 +495,8 @@ impl ObjectStore for ConfiguredObjectStore {
         self.guarded(|store| store.put_many(objects))
     }
 
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        self.guarded(|store| store.compare_and_swap(key, expectation, bytes))
+    fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
+        self.guarded(|store| store.put_record(key, bytes))
     }
 
     fn supports_conditional_delete(&self) -> bool {
@@ -513,6 +518,19 @@ impl ObjectStore for ConfiguredObjectStore {
         limit: usize,
     ) -> Result<StoreListPage, String> {
         self.guarded(|store| store.list(prefix, cursor, limit))
+    }
+
+    fn list_keys(
+        &self,
+        prefix: &ObjectPrefix,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<StoreKeyPage, String> {
+        self.guarded(|store| store.list_keys(prefix, cursor, limit))
+    }
+
+    fn publication_cache(&self) -> Option<&publication::PublicationCache> {
+        Some(&self.publications)
     }
 
     fn local_root(&self) -> Option<&std::path::Path> {
@@ -551,15 +569,34 @@ mod tests {
     }
 
     #[test]
-    fn discovery_tags_live_in_the_flat_namespace_only() {
+    fn publication_records_live_in_the_flat_namespace_only() {
         let id = bundle_id(7);
+        let stream = publication::RecordStream::project(&id).unwrap();
+        let name = mallard_domain::RecordName::new(
+            1,
+            mallard_domain::PublicationToken::new(
+                format!("commit-{}", "a".repeat(24)),
+                "b".repeat(64),
+            )
+            .unwrap(),
+            None,
+            5,
+        )
+        .unwrap();
         assert_eq!(
-            repository_tag_key(&id).unwrap().as_str(),
-            format!(".mallard/v1/repositories/_tags/{}.json", id)
+            stream.key(&name).unwrap().as_str(),
+            format!(
+                ".mallard/v1/repositories/_commits/{}/{}",
+                id,
+                name.file_name()
+            )
         );
-        // The per-bundle namespace no longer admits a tag object.
+        // The per-bundle namespace admits neither a record nor a head, and
+        // no tag object exists anywhere.
+        assert!(repository_object_key(&id, &format!("_commits/{}", name.file_name())).is_err());
+        assert!(repository_object_key(&id, "_head.json").is_err());
         assert!(repository_object_key(&id, TAG_FILE).is_err());
-        assert!(ObjectPrefix::parse(REPOSITORY_TAGS_PREFIX).is_ok());
+        assert!(ObjectPrefix::parse(REPOSITORY_COMMITS_PREFIX).is_ok());
     }
 
     #[test]
@@ -570,9 +607,9 @@ mod tests {
         assert!(
             library_object_key(library_id, &format!("repositories/{}/_head.json", id)).is_err()
         );
-        let repository = repository_object_key(&id, HEAD_FILE).unwrap();
+        let repository = repository_object_key(&id, "_manifests/1-commit-a.json").unwrap();
         assert!(repository.as_str().starts_with(REPOSITORY_PREFIX));
-        let library = library_object_key(library_id, HEAD_FILE).unwrap();
+        let library = library_object_key(library_id, TAG_FILE).unwrap();
         assert!(library.as_str().starts_with(LIBRARY_PREFIX));
         assert!(!library.as_str().starts_with(REPOSITORY_PREFIX));
     }
@@ -581,14 +618,15 @@ mod tests {
     fn library_keys_are_per_resource_and_legacy_catalog_listing_stays_closed() {
         let repository_id = "library-0123456789abcdef0123456789abcdef";
         assert_eq!(
-            library_object_key(repository_id, HEAD_FILE)
+            library_object_key(repository_id, TAG_FILE)
                 .unwrap()
                 .as_str(),
-            ".mallard/v1/library/library-0123456789abcdef0123456789abcdef/_head.json"
+            ".mallard/v1/library/library-0123456789abcdef0123456789abcdef/_tag.json"
         );
-        assert!(library_object_key(repository_id, TAG_FILE).is_ok());
+        // No head object exists: the selected record is the publication.
+        assert!(library_object_key(repository_id, "_head.json").is_err());
         assert!(library_object_key(repository_id, "_objects/../escape").is_err());
-        assert!(library_object_key("catalog-0123456789abcdef0123456789abcdef", HEAD_FILE).is_err());
+        assert!(library_object_key("catalog-0123456789abcdef0123456789abcdef", TAG_FILE).is_err());
         assert!(ObjectPrefix::parse(LIBRARY_PREFIX).is_ok());
         assert!(ObjectPrefix::parse(".mallard/v1/catalog").is_err());
     }
@@ -693,9 +731,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("storage");
         let store = LocalObjectStore::open(&root).unwrap();
-        let repository = repository_object_key(&bundle_id(11), HEAD_FILE).unwrap();
+        let repository =
+            repository_object_key(&bundle_id(11), "_manifests/1-commit-a.json").unwrap();
         let library =
-            library_object_key("library-0123456789abcdef0123456789abcdef", HEAD_FILE).unwrap();
+            library_object_key("library-0123456789abcdef0123456789abcdef", TAG_FILE).unwrap();
         store.put_immutable(&repository, b"repository").unwrap();
         store.put_immutable(&library, b"library").unwrap();
         ensure_storage_marker(&store).unwrap();
@@ -712,5 +751,169 @@ mod tests {
         let second_clear = clear_managed_storage_data(&store).unwrap();
         assert_eq!(second_clear.repository_objects_deleted, 0);
         assert_eq!(second_clear.library_objects_deleted, 0);
+    }
+
+    /// Deletes through to the local store and stops after a fixed number.
+    struct InterruptedClear {
+        inner: LocalObjectStore,
+        deletes_left: Mutex<usize>,
+        deleted: Mutex<Vec<String>>,
+    }
+
+    impl ObjectStore for InterruptedClear {
+        fn get_metadata(
+            &self,
+            key: &ObjectKey,
+            max_bytes: u64,
+        ) -> Result<Option<StoredMetadata>, String> {
+            self.inner.get_metadata(key, max_bytes)
+        }
+
+        fn stage_verified(
+            &self,
+            key: &ObjectKey,
+            expected: &ExpectedObject,
+        ) -> Result<StageOutcome, String> {
+            self.inner.stage_verified(key, expected)
+        }
+
+        fn put_immutable(
+            &self,
+            key: &ObjectKey,
+            bytes: &[u8],
+        ) -> Result<ImmutablePutOutcome, String> {
+            self.inner.put_immutable(key, bytes)
+        }
+
+        fn supports_conditional_delete(&self) -> bool {
+            true
+        }
+
+        fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
+            let mut left = self.deletes_left.lock().unwrap();
+            if *left == 0 {
+                return Err("the clear was interrupted".to_string());
+            }
+            *left -= 1;
+            self.deleted.lock().unwrap().push(key.as_str().to_string());
+            self.inner.delete(key, expected_etag)
+        }
+
+        fn list(
+            &self,
+            prefix: &ObjectPrefix,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<StoreListPage, String> {
+            self.inner.list(prefix, cursor, limit)
+        }
+    }
+
+    #[test]
+    fn clear_deletes_records_first_so_an_interrupted_clear_selects_nothing() {
+        use mallard_domain::{PublicationToken, RecordName};
+        let temp = tempfile::tempdir().unwrap();
+        let inner = LocalObjectStore::open(temp.path().join("storage")).unwrap();
+        ensure_storage_marker(&inner).unwrap();
+        let id = bundle_id(12);
+        let stream = publication::RecordStream::project(&id).unwrap();
+        let record = |revision: u64, parent: Option<&RecordName>| {
+            let bytes = format!("record {revision}").into_bytes();
+            let name = RecordName::new(
+                revision,
+                PublicationToken::new(
+                    format!("commit-{revision:024x}"),
+                    mallard_domain::sha256_hex(&bytes),
+                )
+                .unwrap(),
+                parent.map(|parent| parent.token().clone()),
+                revision,
+            )
+            .unwrap();
+            (name, bytes)
+        };
+        let (first, first_bytes) = record(1, None);
+        let (second, second_bytes) = record(2, Some(&first));
+        publication::write_record(&inner, &stream, &first, &first_bytes).unwrap();
+        publication::write_record(&inner, &stream, &second, &second_bytes).unwrap();
+        let manifest = repository_object_key(&id, "_manifests/2-commit-a.json").unwrap();
+        let object = repository_object_key(&id, &format!("_objects/{}", "a".repeat(64))).unwrap();
+        inner.put_immutable(&manifest, b"manifest").unwrap();
+        inner.put_immutable(&object, b"payload").unwrap();
+        let library_repository = "library-0123456789abcdef0123456789abcdef";
+        let library_stream = publication::RecordStream::library(library_repository).unwrap();
+        publication::write_record(&inner, &library_stream, &first, &first_bytes).unwrap();
+        inner
+            .put_immutable(
+                &library_object_key(library_repository, "_manifests/1-commit-a.json").unwrap(),
+                b"library manifest",
+            )
+            .unwrap();
+
+        // The clear dies after one delete: the stream's first publication is
+        // gone, so the stream selects nothing, and every manifest and object
+        // a record could have pointed at is still there.
+        let store = InterruptedClear {
+            inner,
+            deletes_left: Mutex::new(1),
+            deleted: Mutex::new(Vec::new()),
+        };
+        let error = clear_managed_storage_data(&store).unwrap_err();
+        assert!(error.contains("retry Clear storage data"), "{error}");
+        assert_eq!(
+            store.deleted.lock().unwrap().as_slice(),
+            [stream.key(&first).unwrap().as_str().to_string()]
+        );
+        let interrupted = publication::list_stream(&store.inner, &stream).unwrap();
+        assert!(interrupted.holds(second.token()));
+        assert!(interrupted.mainline().is_empty());
+        assert!(store.inner.get_metadata(&manifest, 64).unwrap().is_some());
+        assert!(store.inner.get_metadata(&object, 64).unwrap().is_some());
+        // A writer racing the clear is stopped by list-then-write: nothing
+        // is built on a record that connects to no chain.
+        let (racing, racing_bytes) = record(3, Some(&second));
+        assert_eq!(
+            publication::write_record(&store.inner, &stream, &racing, &racing_bytes).unwrap_err(),
+            publication::REMOTE_CHANGED
+        );
+        // The stream selects nothing, so it takes a first version again: an
+        // interrupted clear never leaves a storage nobody can push to. The
+        // new history connects to none of the leftovers.
+        let restart_bytes = b"record restart".to_vec();
+        let restart = RecordName::new(
+            1,
+            PublicationToken::new(
+                format!("commit-{:024x}", 99),
+                mallard_domain::sha256_hex(&restart_bytes),
+            )
+            .unwrap(),
+            None,
+            99,
+        )
+        .unwrap();
+        let restarted =
+            publication::write_record(&store.inner, &stream, &restart, &restart_bytes).unwrap();
+        assert_eq!(restarted.mainline().selected(), Some(&restart));
+        assert!(!restarted.mainline().contains_token(second.token()));
+
+        // The retry finishes: records, then payloads, then the Library, whose
+        // records sort before its manifests.
+        *store.deletes_left.lock().unwrap() = usize::MAX;
+        store.deleted.lock().unwrap().clear();
+        let result = clear_managed_storage_data(&store).unwrap();
+        assert_eq!(result.repository_objects_deleted, 4);
+        assert_eq!(result.library_objects_deleted, 2);
+        let deleted = store.deleted.lock().unwrap().clone();
+        assert_eq!(
+            deleted,
+            [
+                stream.key(&restart).unwrap().as_str().to_string(),
+                stream.key(&second).unwrap().as_str().to_string(),
+                manifest.as_str().to_string(),
+                object.as_str().to_string(),
+                library_stream.key(&first).unwrap().as_str().to_string(),
+                format!(".mallard/v1/library/{library_repository}/_manifests/1-commit-a.json"),
+            ]
+        );
     }
 }

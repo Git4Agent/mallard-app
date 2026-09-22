@@ -598,8 +598,11 @@ test("blocked destinations gate before review and publish failures recheck the d
   );
   assert.match(
     publishProject,
-    /catch \(reason\)[\s\S]*getPushDestinationStatus\([\s\S]*destinationStatus\.state === "remote_history_missing"[\s\S]*destinationStatus\.state === "remote_history_replaced"[\s\S]*destinationStatus\.state === "requires_pull"[\s\S]*setPendingPush\(null\)/,
+    /catch \(reason\)[\s\S]*getPushDestinationStatus\([\s\S]*destinationStatus\.state === "requires_pull"[\s\S]*setPendingPush\(null\)/,
   );
+  // A cleared or recreated storage is no Push state of its own: the gate
+  // answers ready or requires_pull, and nothing asks for an unlink.
+  assert.doesNotMatch(source, /remote_history_missing|remote_history_replaced/);
 });
 
 test("the pull-required sentence counts the conversations a Pull would bring", () => {

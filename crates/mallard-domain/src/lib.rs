@@ -844,8 +844,8 @@ impl BundleRecipe {
 
 /// The repository-level manifest coordinates a reviewed scope base was
 /// established against. It lets status views reload the exact historical
-/// manifest after the storage head advances, and names the manifest the
-/// continuity probe checks for lineage membership.
+/// manifest after the selected publication moves on, and names the
+/// publication that continuity looks for on the selected chain.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RepositoryBase {
     pub revision: u64,
@@ -892,75 +892,73 @@ impl ScopeBase {
     }
 }
 
-/// Scope-level continuity between one reviewed scope base and the verified
-/// current manifest. No probe is needed: global repository continuity has
-/// already established lineage, and scope revisions are internal to it.
+/// Scope-level continuity between one reviewed scope base and the scope the
+/// selected publication's verified manifest holds.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ScopeContinuity {
-    /// No remote scope and no reviewed base: first publication target.
+    /// No remote scope and no usable base: first publication target.
     Fresh,
-    /// A base is recorded but the current manifest has no such scope.
+    /// A usable base is recorded but the current manifest has no such scope.
     RemoteMissing { base_revision: u64 },
-    /// The remote scope exists but this replica never reviewed it.
+    /// The remote scope exists and this replica holds no usable base for it:
+    /// it never reviewed the scope, or it reviewed it in a history the stream
+    /// no longer has.
     Unreviewed { remote_revision: u64 },
     /// The remote scope is exactly the reviewed base.
     InSync { revision: u64 },
-    /// The remote scope advanced past the reviewed base.
+    /// The remote scope changed on the history this replica reviewed.
     Advanced {
-        base_revision: u64,
-        remote_revision: u64,
-    },
-    /// The remote scope no longer extends the reviewed base.
-    Replaced {
         base_revision: u64,
         remote_revision: u64,
     },
 }
 
-/// Classify one scope's continuity from the verified current manifest's
-/// scope coordinates and the recorded scope base.
+/// Classify one scope's continuity from the selected manifest's scope
+/// coordinates and the recorded scope base.
+///
+/// A base counts while the publication it was reviewed in is the selected
+/// one or one of its ancestors: what the stream holds now was then built on
+/// what this replica reviewed. A base reviewed in any other publication is
+/// stale, because the stream was cleared or recreated, and it is read as if
+/// it were not recorded. It is never deleted here: a short listing looks the
+/// same as a clear, and the base counts again when its publication is listed
+/// again. One thing outlives the history: a scope that still has exactly the
+/// reviewed content is in sync, whoever wrote it.
+///
+/// `scope_revision` is a per-branch counter for display, and siblings share
+/// it, so nothing orders by it.
 pub fn classify_scope_continuity(
     remote: Option<(u64, &str)>,
     base: Option<&ScopeBase>,
+    mainline: &Mainline,
 ) -> ScopeContinuity {
-    match (remote, base) {
+    if let (Some((remote_revision, remote_sha256)), Some(base)) = (remote, base) {
+        if remote_sha256 == base.scope_sha256 {
+            return ScopeContinuity::InSync {
+                revision: remote_revision,
+            };
+        }
+    }
+    let usable = base
+        .filter(|base| mainline.contains(base.reviewed_in.revision, &base.reviewed_in.commit_id));
+    match (remote, usable) {
         (None, None) => ScopeContinuity::Fresh,
         (None, Some(base)) => ScopeContinuity::RemoteMissing {
             base_revision: base.scope_revision,
         },
         (Some((remote_revision, _)), None) => ScopeContinuity::Unreviewed { remote_revision },
-        (Some((remote_revision, remote_sha256)), Some(base)) => {
-            if remote_revision == base.scope_revision {
-                if remote_sha256 == base.scope_sha256 {
-                    ScopeContinuity::InSync {
-                        revision: remote_revision,
-                    }
-                } else {
-                    ScopeContinuity::Replaced {
-                        base_revision: base.scope_revision,
-                        remote_revision,
-                    }
-                }
-            } else if remote_revision < base.scope_revision {
-                ScopeContinuity::Replaced {
-                    base_revision: base.scope_revision,
-                    remote_revision,
-                }
-            } else {
-                ScopeContinuity::Advanced {
-                    base_revision: base.scope_revision,
-                    remote_revision,
-                }
-            }
-        }
+        (Some((remote_revision, _)), Some(base)) => ScopeContinuity::Advanced {
+            base_revision: base.scope_revision,
+            remote_revision,
+        },
     }
 }
 
-/// Repository-level continuity between this replica's recorded sync base and
-/// the observed bundle head — rows 1–8 of DESIGN_REMOTE_HISTORY_CONTINUITY.md.
-/// Computed by every plan phase and surfaced by Refresh, Pull review, and
-/// Push review. Advisory: it gates and explains, never mutates.
+/// Repository-level continuity between this replica's recorded sync bases
+/// and the selected publication of the stream. Computed by every plan phase
+/// and surfaced by Refresh, Pull review, and Push review. Advisory: it gates
+/// and explains, never mutates.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RemoteContinuity {
@@ -970,73 +968,64 @@ pub enum RemoteContinuity {
     RemoteMissing { base_revision: u64 },
     /// Remote history exists but this replica has never reviewed a base.
     Unreviewed { remote_revision: u64 },
-    /// The head names exactly the manifest this replica last synced.
+    /// The selected publication is the one this replica last synced.
     InSync { revision: u64 },
-    /// The recorded base is still part of the remote history; a pull
+    /// The recorded base is an ancestor of the selected publication; a pull
     /// fast-forwards onto it.
     Advanced {
         base_revision: u64,
         remote_revision: u64,
     },
-    /// The remote no longer contains the recorded base: the history this
-    /// replica synced was replaced, not extended.
+    /// A recorded base is neither the selected publication nor one of its
+    /// ancestors, and the listing cannot connect it to the selected chain:
+    /// the stream was cleared or recreated. A Push that another computer's
+    /// outranks never reads this: while it runs it fails and moves no base,
+    /// and after it was confirmed the link is rolled back to the publication
+    /// both share before continuity is classified (`Mainline::outranked`).
     Replaced {
         base_revision: u64,
         remote_revision: u64,
     },
-    /// The probe could not reach the store; no verdict is claimed.
+    /// The stream could not be listed; no verdict is claimed.
     Unknown { message: String },
 }
 
-/// Classify remote history continuity from content witnesses alone.
-///
-/// The probe runs only in the revision-ahead arm and must read the store —
-/// never a local cache, whose contents witness nothing about the remote —
-/// reporting whether the base manifest is still present with exactly the
-/// recorded digest. Every other row is decided for free: equal revisions
-/// with different digests cannot share a lineage (a lineage commits each
-/// revision exactly once), and revisions never regress within one.
-pub fn classify_remote_continuity(
-    observed_head: Option<&BundleHead>,
-    base: Option<&RepositoryBase>,
-    probe: &mut dyn FnMut(&RepositoryBase) -> Result<bool, String>,
+/// Classify remote history continuity by identity and ancestry, never by
+/// revision order: two sibling publications share a revision, and a losing
+/// branch can be longer than the selected one. `bases` is every publication
+/// a scope base of the link was reviewed in; the newest of them is the one
+/// the verdict reports.
+pub fn classify_remote_continuity<'a>(
+    mainline: &Mainline,
+    bases: impl IntoIterator<Item = &'a RepositoryBase>,
 ) -> RemoteContinuity {
-    match (observed_head, base) {
+    let bases = bases.into_iter().collect::<Vec<_>>();
+    let newest = bases.iter().max_by_key(|base| base.revision);
+    match (mainline.selected(), newest) {
         (None, None) => RemoteContinuity::Fresh,
         (None, Some(base)) => RemoteContinuity::RemoteMissing {
             base_revision: base.revision,
         },
-        (Some(head), None) => RemoteContinuity::Unreviewed {
-            remote_revision: head.revision,
+        (Some(selected), None) => RemoteContinuity::Unreviewed {
+            remote_revision: selected.revision(),
         },
-        (Some(head), Some(base)) => {
-            if head.revision == base.revision {
-                if head.manifest_sha256 == base.manifest_sha256 {
-                    RemoteContinuity::InSync {
-                        revision: head.revision,
-                    }
-                } else {
-                    RemoteContinuity::Replaced {
-                        base_revision: base.revision,
-                        remote_revision: head.revision,
-                    }
-                }
-            } else if head.revision < base.revision {
+        (Some(selected), Some(newest)) => {
+            let continuous = bases
+                .iter()
+                .all(|base| mainline.contains(base.revision, &base.commit_id));
+            if !continuous {
                 RemoteContinuity::Replaced {
-                    base_revision: base.revision,
-                    remote_revision: head.revision,
+                    base_revision: newest.revision,
+                    remote_revision: selected.revision(),
+                }
+            } else if newest.revision == selected.revision() {
+                RemoteContinuity::InSync {
+                    revision: selected.revision(),
                 }
             } else {
-                match probe(base) {
-                    Ok(true) => RemoteContinuity::Advanced {
-                        base_revision: base.revision,
-                        remote_revision: head.revision,
-                    },
-                    Ok(false) => RemoteContinuity::Replaced {
-                        base_revision: base.revision,
-                        remote_revision: head.revision,
-                    },
-                    Err(message) => RemoteContinuity::Unknown { message },
+                RemoteContinuity::Advanced {
+                    base_revision: newest.revision,
+                    remote_revision: selected.revision(),
                 }
             }
         }
@@ -4797,9 +4786,9 @@ impl ResolvedManifest {
 }
 
 /// A portable repository manifest composed of independently revisioned sync
-/// scopes. The manifest-level revision and commit identify one global CAS
-/// publication; each scope carries its own revision and content digest so
-/// unrelated providers never block each other.
+/// scopes. The manifest-level commit identifies one publication and the
+/// revision is its depth; each scope carries its own revision and content
+/// digest so unrelated providers never block each other.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BundleManifest {
     pub schema_version: u32,
@@ -5739,6 +5728,7 @@ mod conversation_tail_relation;
 pub mod keys;
 pub mod portable;
 pub mod provider_config;
+pub mod publication;
 pub mod secrets;
 mod subagents;
 
@@ -5754,6 +5744,7 @@ pub use portable::{
     TombstoneTargetPrimitive,
 };
 pub use provider_config::{AgentProviderConfig, CatalogProviderConfig, StorageProviderConfig};
+pub use publication::{Mainline, Outranked, PublicationToken, RecordName};
 pub use secrets::{SecretMap, SecretOperation, SecretValue};
 
 pub use conversation_reconciliation::{

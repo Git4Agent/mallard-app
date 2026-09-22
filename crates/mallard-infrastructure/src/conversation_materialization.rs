@@ -106,10 +106,10 @@ pub fn apply_conversation_cloud_publication(
 
 /// Publish a reviewed set of Push conversation actions while the command
 /// orchestrator holds the host-operation guard across generic and
-/// conversation publication. Candidate objects, the immutable manifest, and
-/// the candidate commit are already uploaded (orphan-safe) by the caller;
-/// this function advances the head once by CAS and installs the local
-/// after-states during the same attempt.
+/// conversation publication. The caller's `publish` uploads the candidate
+/// objects and the immutable manifest (orphan-safe) and writes the record
+/// that publishes them, once; this function installs the local after-states
+/// during the same attempt.
 pub fn apply_conversation_cloud_publications_locked(
     repository: &LocalStateRepository,
     operations: Vec<ConversationApplyOperation>,

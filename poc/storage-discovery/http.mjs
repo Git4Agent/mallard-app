@@ -101,7 +101,7 @@ export function markerState(bytes) {
   let marker;
   try { marker = json(bytes); }
   catch { return "invalid_marker"; }
-  if (marker.format !== "mallard-storage"
+  if (marker.format !== "mallard-append-storage"
     || !Number.isInteger(marker.layout_version)
     || marker.layout_version < 0 || marker.layout_version > 0xffffffff) return "invalid_marker";
   return marker.layout_version === 1 ? "mallard_storage" : "unsupported_layout";

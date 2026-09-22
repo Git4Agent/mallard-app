@@ -197,12 +197,49 @@ fn canonical_policy_covers_each_verified_relation_and_persists_only_mutations() 
     }
 }
 
+/// S4: both copies exist and no accepted pins relate them, because the
+/// acceptance is missing or stale and adoption could not prove the stored copy
+/// equal to or an earlier part of the local one. Nothing is replaced: Push
+/// asks for a Pull, and Pull keeps both. The plan check accepts that action
+/// on pins that carry no acceptance.
+#[test]
+fn a_pair_without_an_acceptance_keeps_both_instead_of_blocking() {
+    let local = whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-c", "local")]);
+    let cloud = whole_tail(&[("m-a", "one"), ("m-b", "two"), ("m-d", "cloud")]);
+    let verified = evidence_of(None, Some(&local), Some(&cloud)).unwrap();
+    assert_eq!(
+        compare_conversation_tail(&verified),
+        TailClassification::Divergent
+    );
+    let classified = ClassifiedThread::new(
+        TailClassification::Divergent,
+        ConversationCapabilities::default(),
+    );
+    assert_eq!(
+        classified.decision(ConversationPlanDirection::Push).action,
+        ConversationReviewAction::RequirePull
+    );
+    let pull = classified.decision(ConversationPlanDirection::Pull);
+    assert_eq!(pull.action, ConversationReviewAction::KeepBoth);
+    assert!(pull.selectable);
+
+    let (action, current) = reviewed_action_with_tails(
+        ConversationPlanActionType::KeepBoth,
+        None,
+        Some(local),
+        Some(cloud),
+    );
+    assert!(action.pins.tail.accepted.is_none());
+    action.validate().unwrap();
+    validate_conversation_action_pins(&action, &current).unwrap();
+}
+
 #[test]
 fn malformed_evidence_is_a_typed_blocker_not_a_classifier_state() {
     let tail = whole_tail(&[("m-a", "one")]);
     assert_eq!(
-        evidence_of(None, Some(&tail), Some(&tail)),
-        Err(TailEvidenceBlocker::UnacceptedOverlap)
+        evidence_of(Some(&tail), None, Some(&tail)),
+        Err(TailEvidenceBlocker::ExpectedSideMissing)
     );
     let decision = default_conversation_decision(
         ConversationPlanDirection::Pull,

@@ -9,8 +9,8 @@ use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
 use super::object_store::{
-    CasExpectation, CasOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore,
-    StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
+    DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome, StoreKeyPage,
+    StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
 };
 use super::{
     sha256_reader, ObjectKey, ObjectPrefix, LOCAL_STORAGE_LOCK, MALLARD_ROOT, MAX_LIST_PAGE,
@@ -233,6 +233,88 @@ impl LocalObjectStore {
             .map_err(|e| format!("publish object '{}': {}", key, e.error))?;
         Ok(())
     }
+    /// One sorted page of the keys under `prefix`, from directory entries
+    /// alone. A name that cannot be a Mallard key is skipped and reported.
+    fn walk_keys(
+        &self,
+        prefix: &ObjectPrefix,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<StoreKeyPage, String> {
+        if limit == 0 || limit > MAX_LIST_PAGE {
+            return Err(format!(
+                "list limit must be between 1 and {}",
+                MAX_LIST_PAGE
+            ));
+        }
+        if let Some(cursor) = cursor {
+            ObjectKey::parse(cursor.to_string())?;
+        }
+        let empty = StoreKeyPage {
+            keys: Vec::new(),
+            next_cursor: None,
+        };
+        let namespace_root = self.root.join(prefix.as_str());
+        let namespace_meta = match fs::symlink_metadata(&namespace_root) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(empty),
+            Err(error) => {
+                return Err(format!(
+                    "inspect local Mallard repository namespace '{}': {}",
+                    namespace_root.display(),
+                    error
+                ))
+            }
+        };
+        if namespace_meta.file_type().is_symlink() || !namespace_meta.is_dir() {
+            return Err(format!(
+                "local Mallard repository namespace '{}' must be a real directory",
+                namespace_root.display()
+            ));
+        }
+
+        let mut keys = Vec::new();
+        for entry in WalkDir::new(&namespace_root)
+            .follow_links(false)
+            .into_iter()
+        {
+            let entry = entry.map_err(|e| format!("walk local bundle store: {}", e))?;
+            if entry.depth() == 0 {
+                continue;
+            }
+            if entry.file_type().is_symlink() {
+                return Err(format!(
+                    "symlink '{}' is forbidden in local bundle storage",
+                    entry.path().display()
+                ));
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Ok(relative) = normalized_relative_path(&self.root, entry.path()) else {
+                super::publication::report_ignored_name(&entry.path().to_string_lossy());
+                continue;
+            };
+            if relative.contains("/.tmp") {
+                continue;
+            }
+            if relative == prefix.as_str() || relative.starts_with(&format!("{}/", prefix.as_str()))
+            {
+                let Ok(key) = ObjectKey::parse(relative.clone()) else {
+                    super::publication::report_ignored_name(&relative);
+                    continue;
+                };
+                if cursor.is_none_or(|cursor| key.as_str() > cursor) {
+                    keys.push(key);
+                }
+            }
+        }
+        keys.sort();
+        let has_more = keys.len() > limit;
+        keys.truncate(limit);
+        let next_cursor = has_more.then(|| keys.last().unwrap().as_str().to_string());
+        Ok(StoreKeyPage { keys, next_cursor })
+    }
 }
 
 impl ObjectStore for LocalObjectStore {
@@ -267,27 +349,6 @@ impl ObjectStore for LocalObjectStore {
         }
         self.write_atomic_unlocked(key, bytes)?;
         Ok(ImmutablePutOutcome::Written)
-    }
-
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        let _guard = self.lock()?;
-        let current_etag = self.current_etag_unlocked(key)?;
-        let matches = match expectation {
-            CasExpectation::Absent => current_etag.is_none(),
-            CasExpectation::Match(expected) => current_etag.as_ref() == Some(expected),
-        };
-        if !matches {
-            return Ok(CasOutcome::Conflict { current_etag });
-        }
-        self.write_atomic_unlocked(key, bytes)?;
-        Ok(CasOutcome::Written {
-            etag: sha256_hex(bytes),
-        })
     }
 
     fn supports_conditional_delete(&self) -> bool {
@@ -340,78 +401,12 @@ impl ObjectStore for LocalObjectStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreListPage, String> {
-        if limit == 0 || limit > MAX_LIST_PAGE {
-            return Err(format!(
-                "list limit must be between 1 and {}",
-                MAX_LIST_PAGE
-            ));
-        }
-        if let Some(cursor) = cursor {
-            ObjectKey::parse(cursor.to_string())?;
-        }
-        let namespace_root = self.root.join(prefix.as_str());
-        let namespace_meta = match fs::symlink_metadata(&namespace_root) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(StoreListPage {
-                    entries: Vec::new(),
-                    next_cursor: None,
-                })
-            }
-            Err(error) => {
-                return Err(format!(
-                    "inspect local Mallard repository namespace '{}': {}",
-                    namespace_root.display(),
-                    error
-                ))
-            }
-        };
-        if namespace_meta.file_type().is_symlink() || !namespace_meta.is_dir() {
-            return Err(format!(
-                "local Mallard repository namespace '{}' must be a real directory",
-                namespace_root.display()
-            ));
-        }
-
         let _guard = self.lock()?;
-        let mut keys = Vec::new();
-        for entry in WalkDir::new(&namespace_root)
-            .follow_links(false)
-            .into_iter()
-        {
-            let entry = entry.map_err(|e| format!("walk local bundle store: {}", e))?;
-            if entry.depth() == 0 {
-                continue;
-            }
-            if entry.file_type().is_symlink() {
-                return Err(format!(
-                    "symlink '{}' is forbidden in local bundle storage",
-                    entry.path().display()
-                ));
-            }
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let relative = normalized_relative_path(&self.root, entry.path())?;
-            if relative.contains("/.tmp") {
-                continue;
-            }
-            if relative == prefix.as_str() || relative.starts_with(&format!("{}/", prefix.as_str()))
-            {
-                let key = ObjectKey::parse(relative)?;
-                if cursor.is_none_or(|cursor| key.as_str() > cursor) {
-                    keys.push(key);
-                }
-            }
-        }
-        keys.sort();
-        let has_more = keys.len() > limit;
-        keys.truncate(limit);
-        let next_cursor = has_more.then(|| keys.last().unwrap().as_str().to_string());
+        let page = self.walk_keys(prefix, cursor, limit)?;
         // The revision of a local object is its content digest, computed
         // under the same lock that guards deletion.
-        let mut entries = Vec::with_capacity(keys.len());
-        for key in keys {
+        let mut entries = Vec::with_capacity(page.keys.len());
+        for key in page.keys {
             let etag = self
                 .current_etag_unlocked(&key)?
                 .ok_or_else(|| format!("listed object '{}' disappeared", key))?;
@@ -419,8 +414,19 @@ impl ObjectStore for LocalObjectStore {
         }
         Ok(StoreListPage {
             entries,
-            next_cursor,
+            next_cursor: page.next_cursor,
         })
+    }
+
+    /// Names only: no listed file is opened, read, or hashed. Record listings
+    /// run on every refresh, and a record's name already carries its digest.
+    fn list_keys(
+        &self,
+        prefix: &ObjectPrefix,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<StoreKeyPage, String> {
+        self.walk_keys(prefix, cursor, limit)
     }
 
     fn local_root(&self) -> Option<&Path> {
@@ -538,7 +544,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_store_enforces_immutable_objects_and_head_cas() {
+    fn local_store_keeps_its_native_immutable_write() {
         let temp = tempfile::tempdir().unwrap();
         let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
         let key = ObjectKey::parse(format!(
@@ -555,35 +561,58 @@ mod tests {
             ImmutablePutOutcome::AlreadyPresent
         );
         assert!(store.put_immutable(&key, b"two").is_err());
-
-        let head =
-            ObjectKey::parse(format!(".mallard/v1/repositories/{:032x}/_head.json", 1)).unwrap();
-        let first = store
-            .compare_and_swap(&head, &CasExpectation::Absent, b"first")
-            .unwrap();
-        let CasOutcome::Written { etag } = first else {
-            panic!("initial CAS did not write")
-        };
-        assert!(matches!(
-            store
-                .compare_and_swap(&head, &CasExpectation::Absent, b"lost")
-                .unwrap(),
-            CasOutcome::Conflict { .. }
-        ));
-        assert!(matches!(
-            store
-                .compare_and_swap(&head, &CasExpectation::Match(etag), b"second")
-                .unwrap(),
-            CasOutcome::Written { .. }
-        ));
+        // A record is written the same way: its name holds its digest, so a
+        // repeat finds identical bytes.
+        assert_eq!(
+            store.put_record(&key, b"one").unwrap(),
+            ImmutablePutOutcome::AlreadyPresent
+        );
         assert_eq!(
             store
-                .get_metadata(&head, MAX_STORAGE_MARKER_BYTES)
+                .get_metadata(&key, MAX_STORAGE_MARKER_BYTES)
                 .unwrap()
                 .unwrap()
                 .bytes,
-            b"second"
+            b"one"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listing_keys_opens_no_listed_file_and_skips_names_that_are_not_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let store = LocalObjectStore::open(&root).unwrap();
+        let prefix = ObjectPrefix::parse(format!(
+            "{}/{:032x}",
+            super::super::REPOSITORY_COMMITS_PREFIX,
+            7
+        ))
+        .unwrap();
+        let mut expected = Vec::new();
+        for name in ["a.json", "b.json", "c.json"] {
+            let key = ObjectKey::parse(format!("{}/{}", prefix.as_str(), name)).unwrap();
+            store.put_immutable(&key, name.as_bytes()).unwrap();
+            // The record files cannot be opened at all.
+            fs::set_permissions(root.join(key.as_str()), fs::Permissions::from_mode(0o000))
+                .unwrap();
+            expected.push(key);
+        }
+        // A control character cannot be part of a Mallard key.
+        fs::write(root.join(prefix.as_str()).join("bad\u{7}name"), b"x").unwrap();
+
+        let page = store.list_keys(&prefix, None, 2).unwrap();
+        assert_eq!(page.keys, expected[..2]);
+        let rest = store
+            .list_keys(&prefix, page.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(rest.keys, expected[2..]);
+        assert_eq!(rest.next_cursor, None);
+        // The revision listing reads every file, so it cannot answer here.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(store.list(&prefix, None, 10).is_err());
+        }
     }
 
     #[test]
@@ -599,12 +628,10 @@ mod tests {
         store.put_immutable(&repository_key, b"repo").unwrap();
         let library_key = super::super::library_object_key(
             "library-0123456789abcdef0123456789abcdef",
-            "_head.json",
+            "_tag.json",
         )
         .unwrap();
-        store
-            .compare_and_swap(&library_key, &CasExpectation::Absent, b"library")
-            .unwrap();
+        store.put_immutable(&library_key, b"library").unwrap();
 
         let page = store
             .list(

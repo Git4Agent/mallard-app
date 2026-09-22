@@ -1328,13 +1328,8 @@ impl LocalStateRepository {
                 .conversation_checkpoints
                 .values_mut()
                 .flat_map(|threads| threads.values_mut())
-                .filter_map(|checkpoint| {
-                    checkpoint.accepted.take().map(|_| {
-                        checkpoint.accepted_local_tail = None;
-                        checkpoint.accepted_subagents.clear();
-                        checkpoint.generation = checkpoint.generation.saturating_add(1);
-                    })
-                })
+                .map(mallard_domain::ConversationCheckpoint::forget_acceptance)
+                .filter(|forgot| *forgot)
                 .count() as u64;
             conversation_acceptances_removed =
                 conversation_acceptances_removed.saturating_add(acceptances_removed);

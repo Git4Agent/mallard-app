@@ -11,6 +11,8 @@ pub(super) struct State {
     pub(super) entries: BTreeMap<String, (Metadata, Vec<u8>)>,
     pub(super) revision: u64,
     pub(super) uploads: usize,
+    /// Paths written by one direct `files/upload` request each.
+    pub(super) direct_uploads: Vec<String>,
     upload_bodies: Vec<(String, usize)>,
     pub(super) requests: usize,
     pub(super) routes: BTreeMap<String, usize>,
@@ -221,7 +223,55 @@ async fn serve(
             }
         }
         "files/create_folder_v2" => panic!("obsolete folder creation route"),
-        "files/upload" => panic!("obsolete direct upload route"),
+        // One request for one publication record.
+        "files/upload" => {
+            assert_eq!(args["mode"], json!({".tag":"add"}));
+            assert_eq!(args["autorename"], false);
+            assert_eq!(args["mute"], true);
+            assert_eq!(args["strict_conflict"], false);
+            assert_eq!(args["content_hash"], content_hash(&bytes));
+            state.uploads += 1;
+            state.direct_uploads.push(path.clone());
+            if std::mem::take(&mut state.fail_upload) {
+                reply(503, json!({"private_response":"must never escape"}))
+            } else if has_file_ancestor(&state.entries, &path) {
+                reply(
+                    409,
+                    json!({"error":{".tag":"path","reason":{".tag":"conflict","conflict":{".tag":"file_ancestor"}},"upload_session_id":""}}),
+                )
+            } else if let Some((existing, stored)) = state.entries.get(&path) {
+                // Not strict: identical contents are not a conflict.
+                if existing.kind == "file" && stored.as_slice() == bytes.as_ref() {
+                    reply(200, file_response(existing))
+                } else {
+                    reply(
+                        409,
+                        json!({"error":{".tag":"path","reason":{".tag":"conflict","conflict":{".tag":"file"}},"upload_session_id":""}}),
+                    )
+                }
+            } else {
+                for ancestor in ancestors(&path) {
+                    let m = folder(&ancestor);
+                    state.entries.entry(ancestor).or_insert((m, vec![]));
+                }
+                state.revision += 1;
+                let metadata = Metadata {
+                    kind: "file".into(),
+                    name: path.rsplit('/').next().unwrap().into(),
+                    path_lower: path.clone(),
+                    rev: format!("{:09x}", state.revision),
+                    id: format!("id:{}", state.revision),
+                    size: bytes.len() as u64,
+                    content_hash: content_hash(&bytes),
+                    is_downloadable: Some(true),
+                    symlink_info: None,
+                };
+                state
+                    .entries
+                    .insert(path, (metadata.clone(), bytes.to_vec()));
+                reply(200, file_response(&metadata))
+            }
+        }
         "files/upload_session/start" => {
             assert_eq!(args["close"], true);
             assert!(args.get("session_type").is_none());
@@ -274,14 +324,9 @@ async fn serve(
                     results.push(json!({".tag":"failure","failure":{".tag":"path","path":{".tag":"conflict","conflict":{".tag":"file_ancestor"}}}}));
                     continue;
                 }
-                let mode = &commit["mode"];
-                let allowed = match state.entries.get(&path) {
-                    None => mode[".tag"] == "add",
-                    Some((m, _)) => {
-                        m.kind == "file" && mode[".tag"] == "update" && mode["update"] == m.rev
-                    }
-                };
-                if !allowed {
+                // Every write creates its path; nothing updates by revision.
+                assert_eq!(commit["mode"], json!({".tag":"add"}));
+                if state.entries.contains_key(&path) {
                     results.push(json!({".tag":"failure","failure":{".tag":"path","path":{".tag":"conflict","conflict":{".tag":"file"}}}}));
                     continue;
                 }

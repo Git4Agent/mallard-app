@@ -4,7 +4,7 @@ import { MARKER_KEY } from "./http.mjs";
 
 export const ACCOUNT = "0123456789abcdef0123456789abcdef";
 export const TOKEN = "poc-secret-canary";
-export const MARKER = { format: "mallard-storage", layout_version: 1 };
+export const MARKER = { format: "mallard-append-storage", layout_version: 1 };
 export const jsonResponse = (value, status = 200) => new Response(JSON.stringify(value), { status });
 
 export function createMock() {

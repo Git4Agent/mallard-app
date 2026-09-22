@@ -14,8 +14,8 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
- * Object-store transport failures arrive as AWS SDK prose — "S3 conditional
- * put 'bundles/…': dispatch failure: io error" — which names no fix. The
+ * Object-store transport failures arrive as AWS SDK prose — "S3 put
+ * 'bundles/…': dispatch failure: io error" — which names no fix. The
  * prose can sit behind a caller's prefix ("register the repo in 'X': S3 …"),
  * so it is matched anywhere in the message. When the shape matches, say the
  * cause and the next step instead, naming the storage by the label its
@@ -46,7 +46,7 @@ export type StorageFailureKind = "unreachable" | "credentials" | "missing_bucket
 
 /** The cause an S3-shaped failure names, or null when the text is not one. */
 export function storageFailureKind(message: string): StorageFailureKind | null {
-  if (!/\bS3 (?:get|body|conditional put|list|delete|head)\b/i.test(message)) return null;
+  if (!/\bS3 (?:get|body|put|record put|list|delete|head)\b/i.test(message)) return null;
   if (/no such bucket|nosuchbucket/i.test(message)) return "missing_bucket";
   if (/access denied|accessdenied|credentials?|invalid access key|invalidaccesskeyid|signature|forbidden|unauthorized/i.test(message)) {
     return "credentials";

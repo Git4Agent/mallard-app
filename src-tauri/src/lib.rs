@@ -155,6 +155,8 @@ pub fn run() {
                 .map_err(std::io::Error::other)?;
             app.manage(std::sync::Mutex::new(watcher));
             project_sync::config_watcher::start_connection_forwarder(app.handle().clone());
+            project_sync::config_watcher::start_ignored_name_forwarder(app.handle().clone());
+            project_sync::config_watcher::start_outranked_push_forwarder(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

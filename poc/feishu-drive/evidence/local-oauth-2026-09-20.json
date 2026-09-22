@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-20",
+  "mode": "live_local_oauth_setup",
+  "production_ready": false,
+  "local_callback_approved": true,
+  "local_callback_registered": true,
+  "memory_only_app_secret_use_approved": true,
+  "browser_form_post": {
+    "status": "blocked",
+    "error": "ERR_BLOCKED_BY_CLIENT",
+    "synthetic_credentials_reproduce": true,
+    "block_source": "unknown"
+  },
+  "independent_local_http_check": {
+    "http_status": 200,
+    "ready": true,
+    "authorization_started": false,
+    "finished": false
+  },
+  "direct_oauth_exchange_ran": false,
+  "drive_api_writes": 0,
+  "local_oauth_tests_passed": 7,
+  "browser_security_settings_changed": false,
+  "local_process_stopped": true,
+  "credentials_recorded": false
+}

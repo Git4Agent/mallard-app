@@ -3,8 +3,9 @@
 //! Objects are plain files under a local root directory (`<root>/<bucket>/
 //! <key>`), so tests can assert the published cloud layout by reading the
 //! filesystem directly. Implements exactly the surface `lib.rs` uses:
-//! GET/PUT/DELETE object, conditional PUT via `If-Match` / `If-None-Match: *`,
-//! and ListObjectsV2 with delimiter grouping. ETags are the sha256 of the
+//! GET/PUT/DELETE object, create-only PUT via `If-None-Match: *`, and
+//! ListObjectsV2 with delimiter grouping. It has no conditional overwrite: a
+//! PUT that names a revision is refused, which proves nothing asks for one. ETags are the sha256 of the
 //! object bytes. Requests are serialized under one lock; auth is ignored.
 
 use bytes::Bytes;
@@ -27,7 +28,6 @@ use sha2::{Digest, Sha256};
 pub struct RequestRecord {
     pub method: String,
     pub key: String,
-    pub conditional: bool,
 }
 
 #[derive(Default)]
@@ -268,7 +268,6 @@ async fn handle(
     };
     let bucket_dir = root.join(&bucket);
     let object_path = bucket_dir.join(&key);
-    let conditional = if_match.is_some() || if_none_match.is_some();
 
     let response = {
         let mut log = state.log.lock().unwrap();
@@ -290,21 +289,13 @@ async fn handle(
                 }
                 Err(_) => xml_error(StatusCode::NOT_FOUND, "NoSuchKey"),
             },
+            (&Method::PUT, false) if if_match.is_some() => {
+                xml_error(StatusCode::NOT_IMPLEMENTED, "NotImplemented")
+            }
             (&Method::PUT, false) => {
-                let mut fail = false;
-                let current = fs::read(&object_path).ok();
-                if conditional {
-                    if let Some(expected) = &if_match {
-                        let expected = expected.trim().trim_matches('"');
-                        fail = current
-                            .as_ref()
-                            .is_none_or(|data| sha256_bytes(data) != expected);
-                    }
-                    if if_none_match.as_deref().map(str::trim) == Some("*") && current.is_some() {
-                        fail = true;
-                    }
-                }
-                if fail {
+                let taken =
+                    if_none_match.as_deref().map(str::trim) == Some("*") && object_path.is_file();
+                if taken {
                     xml_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed")
                 } else {
                     if let Some(parent) = object_path.parent() {
@@ -337,7 +328,6 @@ async fn handle(
         log.push(RequestRecord {
             method: method.to_string(),
             key: key.clone(),
-            conditional,
         });
         response
     };

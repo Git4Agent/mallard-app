@@ -151,18 +151,6 @@ pub enum StageOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CasExpectation {
-    Absent,
-    Match(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CasOutcome {
-    Written { etag: String },
-    Conflict { current_etag: Option<String> },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImmutablePutOutcome {
     Written,
     AlreadyPresent,
@@ -188,6 +176,13 @@ impl StoreListPage {
     }
 }
 
+/// One page of a listing that carries keys only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreKeyPage {
+    pub keys: Vec<ObjectKey>,
+    pub next_cursor: Option<String>,
+}
+
 /// The outcome of one conditional delete. There is no unconditional
 /// variant: every deletion names the revision it listed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,7 +192,9 @@ pub enum DeleteOutcome {
     Conflict { current_etag: String },
 }
 
-/// The narrow transport contract required by both storage protocols.
+/// The narrow transport contract required by both storage protocols. A
+/// provider needs three operations for ordinary sync: write bytes at a key,
+/// read a key, list a prefix. There is no conditional write.
 pub trait ObjectStore: Send + Sync {
     fn managed_cloud(&self) -> Option<&crate::managed_cloud::ManagedObjectStore> {
         None
@@ -239,6 +236,11 @@ pub trait ObjectStore: Send + Sync {
             .collect()
     }
 
+    /// Store one object. No conforming writer ever writes different bytes to
+    /// the same key: payloads are content-addressed, a manifest's key holds a
+    /// commit id minted per publication, a record's name holds the digest of
+    /// its bytes, and the marker and the Library tag are constant. A plain
+    /// write is therefore enough; a store may keep a native create-only write.
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String>;
 
     /// Store several immutable objects; outcomes line up with `objects`.
@@ -253,12 +255,14 @@ pub trait ObjectStore: Send + Sync {
             .collect()
     }
 
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String>;
+    /// Write one publication record: one request, with no retry inside the
+    /// transport. Every attempt to write a record follows a listing of its
+    /// stream, and a transport retry would be an attempt without one. A
+    /// record's name contains the digest of its bytes, so a key that is
+    /// already taken holds these bytes.
+    fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
+        self.put_immutable(key, bytes)
+    }
 
     /// Whether this store can atomically delete only the object revision that
     /// the caller names. Stores return false unless this behavior is proved.
@@ -283,13 +287,41 @@ pub trait ObjectStore: Send + Sync {
     }
 
     /// Bounded, deterministic listing. Every entry carries the object's
-    /// current opaque revision so a caller can delete exactly what it saw.
+    /// current opaque revision so a caller can delete exactly what it saw;
+    /// only storage clear needs that, and everything else lists keys. A name
+    /// the store cannot represent as a key is skipped and reported, never a
+    /// failed listing. A completed write is visible to every later listing of
+    /// its prefix.
     fn list(
         &self,
         prefix: &ObjectPrefix,
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreListPage, String>;
+
+    /// `list` without revisions. Every record listing uses it: a record's
+    /// name already carries its digest, so refresh, list-then-write, and
+    /// bundle discovery never need one. A store whose `list` pays per entry
+    /// for a revision overrides this.
+    fn list_keys(
+        &self,
+        prefix: &ObjectPrefix,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<StoreKeyPage, String> {
+        let page = self.list(prefix, cursor, limit)?;
+        Ok(StoreKeyPage {
+            keys: page.entries.into_iter().map(|entry| entry.key).collect(),
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    /// What this process has listed and read of the store's publication
+    /// streams. The shared store keeps one for its lifetime; a bare store
+    /// keeps none and reads every time.
+    fn publication_cache(&self) -> Option<&super::publication::PublicationCache> {
+        None
+    }
 
     /// Used only for local isolation checks; remote stores return `None`.
     fn local_root(&self) -> Option<&Path> {

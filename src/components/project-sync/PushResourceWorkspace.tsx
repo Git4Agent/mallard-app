@@ -72,7 +72,6 @@ interface Props {
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
-  onUnlinkStorage?: () => void;
   onResetMetadata?: () => void;
 }
 
@@ -567,7 +566,6 @@ export default function PushResourceWorkspace({
   onClose,
   onPush,
   onPull,
-  onUnlinkStorage,
   onResetMetadata,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
@@ -937,7 +935,6 @@ export default function PushResourceWorkspace({
                     commitSelection(next);
                   }}
                   onReviewPull={onPull}
-                  onUnlinkStorage={onUnlinkStorage}
                   continuityActionBusy={busy}
                   comparisonOverride={threadComparison}
                 />

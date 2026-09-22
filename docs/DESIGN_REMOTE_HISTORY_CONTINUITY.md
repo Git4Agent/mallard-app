@@ -1,7 +1,33 @@
 # Design: Remote history continuity
 
-- Status: Implemented
-- Last reviewed: August 6, 2026
+- Status: Design history. The continuity states are current; their
+  classification is superseded by section 9 of
+  [DESIGN_CAS_FREE_STORAGE_REFACTOR.md](DESIGN_CAS_FREE_STORAGE_REFACTOR.md),
+  and their gates, their banners and the explicit-unlink rule are superseded by
+  [PLAN_CLEARED_STORAGE_PUSH_AGAIN.md](PLAN_CLEARED_STORAGE_PUSH_AGAIN.md)
+- Last reviewed: September 20, 2026
+
+> **Superseded classification.** Since the CAS-free storage cutover there is
+> no stored head and no probe read. Continuity is decided by identity and
+> ancestry over the selected chain of publication records, never by revision
+> order and never by a store read of the base manifest — `Advanced` means the
+> base is an ancestor of the selected publication, and `Replaced` means it is
+> on no selected chain (a cleared or recreated stream; a push that is
+> outranked fails or is rolled back, and never reads `Replaced`). Read rows 1
+> to 8, the probe, and its cache rules as design history.
+
+> **Superseded gates and recovery.** `RemoteMissing` and `Replaced` no longer
+> block a Push, and nothing asks for an unlink, a relink or a reset. A sync
+> record that names a publication off the selected chain is stale: it is read
+> as absent and never deleted at a refresh. A cleared storage is pushed again;
+> a recreated one is pulled first only when another computer wrote into an
+> area this computer writes. The Push states `remote_history_missing` and
+> `remote_history_replaced`, the scope state `replaced`, the "Storage history
+> changed" banners and their Unlink verb are removed. One standing note
+> replaces them: "Another computer cleared <storage>. Push again." or
+> "… Pull, then push again." Read the gates, the banners and the
+> explicit-unlink rule below as design history.
+
 - Scope: repository-level continuity classification between a replica's
   recorded sync base and the observed bundle head, computed in the shared
   plan phase and surfaced by Refresh, Pull review, and Push review

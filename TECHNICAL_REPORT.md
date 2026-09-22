@@ -54,10 +54,11 @@ The main implementation boundaries are:
 | `src/components/project-sync/` | Setup, inventory, Push/Pull review, project-file tree, readiness, and storage UI. |
 | `project_sync/domain.rs` | Current IDs, schemas, validation rules, manifests, actions, plans, and receipts. |
 | `project_sync/provider_capture.rs` | Provider adapters, generic project scanner, filters, stable identities, and capture. |
-| `project_sync/bundle_engine.rs` | Object-key validation, immutable publication, head CAS, tempfile-backed verified-body access, restore planning, streamed backups, and apply. |
+| `project_sync/bundle_engine.rs` | Object-key validation, immutable publication ending in the record write, head selection over a stream's records, tempfile-backed verified-body access, restore planning, streamed backups, and apply. |
 | `project_sync/commands.rs` | Tauri command boundary and cross-document transactions. |
 | `project_sync/persistence.rs` | Bounded, atomic machine-local JSON persistence. |
-| `project_sync/s3_store.rs` | S3/R2 transport with conditional writes, chunk-to-tempfile verified downloads, per-chunk inactivity timeouts, and bounded pagination. |
+| `project_sync/s3_store.rs` | S3/R2 transport with create-only writes, a single-request record write with SDK retries off, chunk-to-tempfile verified downloads, per-chunk inactivity timeouts, and bounded pagination. |
+| `storage_core/publication.rs` | Shared by both engines: list a stream, select its current publication from record names, read and verify a record, and list-then-write. |
 | `activity_log.rs` | Sanitized local JSONL activity history and retention. |
 
 ## 3. Core domain model
@@ -187,27 +188,48 @@ Local-folder and S3/R2 storage share one key layout:
 .mallard/
 |-- .storage.lock                       # local-folder storage only
 |-- _storage.json
-`-- v1/repositories/<bundle-id>/
-    |-- _tag.json
-    |-- _head.json
-    |-- _objects/<payload-sha256>
-    |-- _manifests/<revision>-<commit-id>.json
-    |-- _commits/<revision>-<commit-id>.json
-    `-- _uploads/                         # reserved; not written
+`-- v1/repositories/
+    |-- _commits/<bundle-id>/<record name>   # every project record, nothing else
+    `-- <bundle-id>/
+        |-- _objects/<payload-sha256>
+        |-- _manifests/<revision>-<commit-id>.json
+        `-- _uploads/                         # reserved; not written
 ```
 
 `_storage.json` identifies the root as
-`{"format":"mallard-storage","layout_version":1}`. `_head.json` is the
-only authoritative mutable bundle pointer. It stores schema version 1, bundle
-identity, revision, commit ID, manifest key, manifest SHA-256, and update
-time. It also stores the required nonzero `manifest_size`, which is the exact
-byte length of the one serialized immutable manifest representation.
+`{"format":"mallard-append-storage","layout_version":1}`. Its bytes are
+constant, so concurrent first writers write identical bytes.
+
+Every object is immutable and no conforming writer ever writes different
+bytes to the same key, so a provider needs only put, get, and list. There is
+no `_head.json` and no tag: the **publication record** is the only thing that
+publishes a snapshot, and it is written last. A record name carries its graph
+facts,
+
+```text
+<revision:010>.<commit_id>-<record_sha256>.<parent token | root>.<created_at_ms:013>.json
+```
+
+so the current publication of a bundle is selected from the names of one
+listing of `_commits/<bundle-id>/` without reading a record: starting at the
+virtual root, the child with the smallest `(created_at_ms, commit_id,
+record_sha256)` is taken until a publication has none. Every listed record
+that is not on that chain is kept and not selected; nothing marks, moves, or
+deletes it. A name outside the grammar (`.DS_Store`, a sync client's
+conflicted copy) is ignored and written to the activity log.
+
+The record stores schema version 1, bundle identity, revision (its depth, and
+the number the UI prints), commit ID, the parent's token, `created_at_ms`, the
+manifest key, manifest SHA-256 and the required nonzero `manifest_size`, the
+file delta counts, the publishing origin, and a `summary` with every fact
+bundle discovery shows. `BundleHead` is the in-memory view of the selected
+record. When a record is read its bytes must hash to the digest in its name
+and its fields must equal the facts in its name; a failure is an error for
+that publication and never moves selection to another one.
 
 Current and historical manifest reads stage against both the recorded size
 and SHA-256 before parsing. `manifest_size` has no default and is not inferred
-from S3 `Content-Length`, an additional `HEAD`, or received bytes. State that
-predates the field is rejected under the schema-1 clean cutover; it is not
-migrated.
+from S3 `Content-Length`, an additional `HEAD`, or received bytes.
 
 Each immutable schema-1 manifest is a complete live snapshot containing:
 
@@ -222,10 +244,7 @@ Each immutable schema-1 manifest is a complete live snapshot containing:
 
 A file entry stores its owner resource ID, SHA-256, byte size, source mtime,
 safe mode, and immutable object key. A directory entry stores its resource ID,
-safe mode, and source mtime and owns no byte object. A commit record points to
-the manifest, links the previous commit ID, and records file delta counts.
-`_tag.json` is a derived listing hint; failure to refresh it after a successful
-head CAS does not invalidate the revision.
+safe mode, and source mtime and owns no byte object.
 
 Remote metadata can contain selected conversations and user-authored project
 content. It does not contain checkout paths, provider-home paths, local
@@ -360,19 +379,64 @@ Push executes in this order:
    and insert required directory ancestors.
 5. Capture exactly the final recipe. Selected content is revalidated,
    re-read, size-bounded, and hashed.
-6. Compare the current remote head with the local `RecipeBase`. A missing,
-   unknown, stale, or binding-mismatched base blocks publication.
-7. Upload selected file objects, then the immutable manifest and commit.
-8. Compare-and-swap `_head.json` once from the Apply-time ETag to the new
-   revision.
-9. Best-effort refresh `_tag.json`.
+6. List the bundle's stream and select. The Push gate runs against the
+   freshly selected publication by identity and ancestry, never by revision
+   order, and it is decided per writable scope. A scope base counts while the
+   publication it was reviewed in is on the selected chain; otherwise it is
+   stale and read as absent. The Push goes on when every writable scope is
+   absent from the storage without a usable base, or holds exactly the
+   reviewed content. A writable scope that changed on the reviewed history,
+   or that holds content this replica never reviewed in this history,
+   requires a Pull. A storage that was cleared is therefore pushed again, and
+   a recreated one is pulled first only when another computer wrote into a
+   scope this replica writes; nothing asks for an unlink or a reset. A
+   binding-mismatched base blocks publication.
+7. Upload selected file objects, then the immutable manifest.
+8. Build the publication record in memory and write it with list-then-write:
+   list the stream, continue only if the record's parent is the selected
+   publication and therefore childless (a stream that selects nothing for a
+   first publication), and send the record once. A listing older than ten
+   wall-clock seconds is taken again before sending; a retry is a new
+   attempt that lists first, never a resend; nothing is journaled.
+9. List once more. The Push goes on only if that listing selects this record;
+   if it selects another computer's, the Push fails with `RemoteChanged`.
 10. Guardedly update machine-local metadata.
 
-Publication writes immutable objects before the mutable head. A failed CAS can
-leave unreachable upload/manifest/commit objects, but readers cannot observe a
-partial revision. Local-folder storage serializes publication with
-`.mallard/.storage.lock`. S3/R2 uses `If-None-Match` or `If-Match`; an
-ambiguous response is resolved by rereading the head and comparing bytes.
+Publication writes immutable objects before the record. A Push that stops
+before its record leaves unreferenced objects and a manifest, and readers
+cannot observe a partial revision. The write path ends in one of: `Stored`
+(written and selected), `NoChange`, `RemoteChanged` when another computer
+published on the same parent first (compare again), or `OutcomeUnknown` when
+the storage cannot be listed after the record was sent. `RemoteChanged` has
+two causes: the listing before the write shows another child or another
+selection and nothing is written, or the listing after the write selects the
+other computer's record and this one stays in the storage, never selected.
+Either way the Push failed as a whole and no machine-local metadata moved.
+A sibling of a publication can be written only inside the fork window — the
+store's listing lag, the ten-second listing freshness, and one record request
+— after that publication became visible; outside it selection is final. The
+earlier-ranked sibling is selected and the other is kept; the losing replica's
+Push failed, so it reads `Advanced` on its next refresh and pushes again. A
+sibling that becomes visible only after a Push was confirmed is settled by the
+next observation: the link's scope bases return to the last selected
+publication both branches share, the session acceptance saved at the
+outranked publication is forgotten with its read cursor kept, the window says
+so once, and the next Push publishes the same content under the same cloud
+ids. `Replaced` is left for a stream that was cleared or recreated, and
+`RemoteMissing` for one that was cleared and not pushed to since. Neither
+blocks anything. A scope base or a session acceptance that names a
+publication off the selected chain is stale: every comparison reads it as
+absent, no refresh deletes it, and the Push or the Pull that saves new bases
+removes the stale ones. A session whose acceptance is stale or missing is
+compared from content: a storage without the session takes it under the cloud
+id it already has; an equal or an earlier stored copy is proven by
+first-contact adoption; a longer or a different stored copy is never
+replaced, Push asks for a Pull, and Pull keeps both copies. While a history
+reads cleared, the activity page carries one standing note, "Another computer
+cleared <storage>. Push again." or "… Pull, then push again."
+Local-folder storage serializes its own writes with `.mallard/.storage.lock`.
+S3/R2 writes create-only with `If-None-Match: *`; the record write runs with
+SDK retries off. Dropbox writes a record with one `files/upload` request.
 
 ### Successful Push: remote update
 
@@ -384,7 +448,7 @@ for removal.
 
 ### Successful Push: local update
 
-After head publication, one guarded config mutation:
+After the record is stored, one guarded config mutation:
 
 - saves the destination recipe on the project/storage link;
 - updates the link's exact exclusion set and increments its preference
@@ -393,9 +457,9 @@ After head publication, one guarded config mutation:
   manifest hash, recipe revision, binding revision, and Push timestamp; and
 - increments the project/config revisions.
 
-Scan, cancel, capture failure, upload failure, and head-CAS conflict do not
+Scan, cancel, capture failure, upload failure, and a changed remote do not
 change the saved recipe or exclusions. There is one unavoidable distributed
-boundary: if the remote head succeeds and the later guarded local mutation
+boundary: if the record is stored and the later guarded local mutation
 detects a local revision race, the remote revision remains valid while the
 command reports that local state must be refreshed.
 
@@ -414,8 +478,8 @@ thread failed, and the message reports the count. Nothing about a failed
 thread is stored: the next Compare classifies it from its unmoved pins and
 offers it again.
 
-Failures whose inputs are shared (storage transport, the head
-compare-and-swap, config and binding loads, provider availability, and batch
+Failures whose inputs are shared (storage transport, a changed remote at the
+record write, config and binding loads, provider availability, and batch
 invariants) still stop the whole Push before publication.
 
 ## 9. Explicit removal and tombstones
@@ -534,8 +598,8 @@ case-insensitive path collisions.
 SHA-256 binds:
 
 - each uploaded file object to its manifest entry;
-- the exact serialized manifest size and SHA-256 to `_head.json`, with the
-  digest also retained by the commit record;
+- the exact serialized manifest size and SHA-256 to the publication record,
+  and the record's own bytes to the digest in its name;
 - reviewed local/storage/base content comparisons; and
 - warning acknowledgement and Push review tokens.
 
@@ -553,16 +617,18 @@ safe lexical join, resolves prospective canonical paths, and inspects every
 existing ancestor without following symlinks. Writes never use a remote
 absolute path.
 
-Head CAS provides single-winner publication. A pusher must hold the exact
-reviewed `RecipeBase`, and a Pull review must still match the current head.
-The immutable commit chain retains published history, while stale writers fail
-and must inspect/review again.
+List-then-write and earliest-sibling selection provide single-selection
+publication without a conditional write. A pusher's base must be the selected
+publication or one of its ancestors, and a Pull review must still match the
+selected publication. The hash-linked record chain retains published history,
+including publications that were not selected, while a writer that lists a
+child under its parent stops and must inspect/review again.
 
 A local storage directory must not overlap `~/.mallard`, a project checkout,
 a provider profile, or another configured local storage. Filesystem lock files
-protect writers that see the same local filesystem; sync services such as
-iCloud or Dropbox do not provide a reliable distributed lock for simultaneous
-multi-machine Push.
+protect writers that see the same local filesystem. No distributed lock is
+needed for simultaneous multi-machine Push: two racing records are both kept,
+every computer selects the same one, and the Push that wrote the other fails.
 
 ## 12. Current limits
 

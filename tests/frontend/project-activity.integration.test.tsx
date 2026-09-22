@@ -1322,33 +1322,67 @@ test("activity content renders commit and session rows without repeating project
   assert.doesNotMatch(html, /Load chat history|sync-history-chat-details/);
 });
 
-test("changed storage history explains the recovery path and exposes only unlink", () => {
-  const html = renderToStaticMarkup(
+test("a storage another computer cleared shows one standing note with no unlink and no reset", () => {
+  const writable = (scope: string, continuity: ThreadSyncComparison["scopes"][number]["continuity"]) => (
+    { scope, access: "bound_ready" as const, continuity }
+  );
+  const render = (comparison: ThreadSyncComparison, selectionMode?: "push" | "pull") => renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
       activity={activity}
-      comparison={emptyComparison({
-        revision: 2,
-        base_revision: 1,
-        remote_continuity: {
-          state: "replaced",
-          base_revision: 1,
-          remote_revision: 2,
-        },
-      })}
-      onUnlinkStorage={() => undefined}
+      comparison={comparison}
+      selectionMode={selectionMode}
     />,
   );
 
-  assert.match(html, />Storage history changed</);
-  assert.match(html, /sync history in Local storage 1 is different from the one Mallard last synced for this project \(version 1\)/);
-  assert.match(html, /sync data in that storage was deleted and created again/);
-  assert.match(html, /session statuses below use the replacement/);
-  assert.match(html, /Unlinking does not delete files/);
-  assert.match(html, /saved only in the previous storage history cannot be recovered from this machine/);
-  assert.doesNotMatch(html, />Pull and review<\/button>/);
-  assert.match(html, />Unlink storage<\/button>/);
-  assert.doesNotMatch(html, /Remote history was replaced/);
+  // Story 1: nobody pushed since the clear, so every area this computer
+  // writes is a first publication target and Push is open.
+  const cleared = emptyComparison({
+    base_revision: 2,
+    remote_continuity: { state: "remote_missing", base_revision: 2 },
+    scopes: [writable("project", { state: "fresh" }), writable("provider:codex", { state: "fresh" })],
+  });
+  const openHtml = render(cleared);
+  assert.match(openHtml, /Another computer cleared Local storage 1\. Push again\./);
+  // Standing content in the warning tone: a named region, never an alert.
+  assert.match(openHtml, /class="notice warning[^"]*" role="region" aria-label="Notes about this project activity"/);
+  // The Push review shows the same note above its list.
+  assert.match(render(cleared, "push"), /Another computer cleared Local storage 1\. Push again\./);
+
+  // Story 2: another computer pushed into an area this computer writes, so a
+  // Pull comes first. An area this computer only views never decides that.
+  const recreated = emptyComparison({
+    revision: 1,
+    base_revision: 2,
+    remote_continuity: { state: "replaced", base_revision: 2, remote_revision: 1 },
+    scopes: [
+      writable("project", { state: "fresh" }),
+      writable("provider:codex", { state: "unreviewed", remote_revision: 1 }),
+    ],
+  });
+  assert.match(render(recreated), /Another computer cleared Local storage 1\. Pull, then push again\./);
+  const elsewhere = emptyComparison({
+    revision: 1,
+    base_revision: 2,
+    remote_continuity: { state: "replaced", base_revision: 2, remote_revision: 1 },
+    scopes: [
+      writable("project", { state: "fresh" }),
+      writable("provider:codex", { state: "in_sync", revision: 1 }),
+      { scope: "provider:claude", provider: "claude", access: "view_only", continuity: { state: "unreviewed", remote_revision: 1 } },
+    ],
+  });
+  assert.match(render(elsewhere), /Another computer cleared Local storage 1\. Push again\./);
+
+  // The Pull review is an ordinary first Pull: no note.
+  assert.doesNotMatch(render(recreated, "pull"), /Another computer cleared/);
+  // A storage whose history this computer is on has nothing to say.
+  assert.doesNotMatch(render(emptyComparison()), /Another computer cleared/);
+
+  // No state asks for an unlink or a reset, and the note has no action.
+  for (const html of [openHtml, render(recreated)]) {
+    assert.doesNotMatch(html, /Unlink storage|Storage history changed|Reset local sync|unlink/i);
+    assert.doesNotMatch(html, /Another computer cleared[^<]*<\/p>\s*<button/);
+  }
 });
 
 test("commit hashes remain plain text without a GitHub remote", () => {

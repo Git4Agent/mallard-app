@@ -1215,61 +1215,254 @@ fn duplicate_threads_across_scopes_are_rejected() {
     assert!(manifest.validate().unwrap_err().contains("multiple scopes"));
 }
 
+/// One record name per step: `(commit byte, parent index, created_at_ms)`.
+/// A parent index of `None` makes a first publication.
+fn record_names(steps: &[(u8, Option<usize>, u64)]) -> Vec<RecordName> {
+    let mut names = Vec::<RecordName>::new();
+    for (id, parent, created_at_ms) in steps {
+        let token = PublicationToken::new(
+            format!("commit-{}", format!("{id:02x}").repeat(12)),
+            format!("{id:02x}").repeat(32),
+        )
+        .unwrap();
+        let parent = parent.map(|index| &names[index]);
+        names.push(
+            RecordName::new(
+                parent.map_or(1, |parent| parent.revision() + 1),
+                token,
+                parent.map(|parent| parent.token().clone()),
+                *created_at_ms,
+            )
+            .unwrap(),
+        );
+    }
+    names
+}
+
+fn repository_base_at(name: &RecordName) -> RepositoryBase {
+    RepositoryBase {
+        revision: name.revision(),
+        commit_id: name.commit_id().to_string(),
+        manifest_sha256: "b".repeat(64),
+        manifest_size: 10,
+    }
+}
+
+#[test]
+fn remote_continuity_covers_every_decision_row_by_identity_and_ancestry() {
+    // 1 -> 2 -> 3 is selected; 4 -> 5 -> 6 -> 7 is a later-ranked sibling
+    // branch of 1 that runs deeper than the selected chain.
+    let names = record_names(&[
+        (1, None, 10),
+        (2, Some(0), 20),
+        (3, Some(1), 30),
+        (4, Some(0), 25),
+        (5, Some(3), 26),
+        (6, Some(4), 27),
+        (7, Some(5), 28),
+    ]);
+    let mainline = Mainline::select(names.iter().cloned());
+    assert_eq!(mainline.selected(), Some(&names[2]));
+    let empty = Mainline::default();
+    let base = |index: usize| repository_base_at(&names[index]);
+
+    assert_eq!(
+        classify_remote_continuity(&empty, []),
+        RemoteContinuity::Fresh
+    );
+    assert_eq!(
+        classify_remote_continuity(&empty, [&base(1)]),
+        RemoteContinuity::RemoteMissing { base_revision: 2 }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, []),
+        RemoteContinuity::Unreviewed { remote_revision: 3 }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(2)]),
+        RemoteContinuity::InSync { revision: 3 }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(0)]),
+        RemoteContinuity::Advanced {
+            base_revision: 1,
+            remote_revision: 3
+        }
+    );
+    // Several scope bases: every one of them must be on the selected chain,
+    // and the newest is the one reported.
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(0), &base(2)]),
+        RemoteContinuity::InSync { revision: 3 }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(1), &base(0)]),
+        RemoteContinuity::Advanced {
+            base_revision: 2,
+            remote_revision: 3
+        }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(2), &base(3)]),
+        RemoteContinuity::Replaced {
+            base_revision: 3,
+            remote_revision: 3
+        }
+    );
+
+    // A base on the losing sibling branch: same depth as a selected
+    // ancestor, and then deeper than the selected publication itself.
+    // Revision order would call the first one advanced.
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(3)]),
+        RemoteContinuity::Replaced {
+            base_revision: 2,
+            remote_revision: 3
+        }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, [&base(6)]),
+        RemoteContinuity::Replaced {
+            base_revision: 5,
+            remote_revision: 3
+        }
+    );
+
+    // The selected chain runs deeper than a base on the losing branch: a
+    // greater remote revision is still not an advance.
+    let deeper = record_names(&[
+        (1, None, 10),
+        (2, Some(0), 20),
+        (3, Some(1), 30),
+        (4, Some(2), 40),
+        (8, Some(0), 21),
+    ]);
+    assert_eq!(
+        classify_remote_continuity(
+            &Mainline::select(deeper.iter().cloned()),
+            [&repository_base_at(&deeper[4])]
+        ),
+        RemoteContinuity::Replaced {
+            base_revision: 2,
+            remote_revision: 4
+        }
+    );
+
+    // A cleared stream that is pushed again restarts at revision 1 under a
+    // new commit id: the old base is on no chain of it.
+    let recreated = record_names(&[(9, None, 50)]);
+    assert_eq!(
+        classify_remote_continuity(&Mainline::select(recreated), [&base(0)]),
+        RemoteContinuity::Replaced {
+            base_revision: 1,
+            remote_revision: 1
+        }
+    );
+}
+
 #[test]
 fn scope_continuity_covers_every_decision_row() {
-    let base = ScopeBase {
+    let names = record_names(&[(1, None, 10), (2, Some(0), 20), (3, Some(0), 21)]);
+    let mainline = Mainline::select(names.iter().cloned());
+    assert_eq!(mainline.selected(), Some(&names[1]));
+    let base_reviewed_in = |name: &RecordName| ScopeBase {
         scope: SyncScopeKey::Provider(provider("codex")),
         scope_revision: 3,
         scope_sha256: "a".repeat(64),
-        reviewed_in: RepositoryBase {
-            revision: 5,
-            commit_id: "commit-5".to_string(),
-            manifest_sha256: "b".repeat(64),
-            manifest_size: 10,
-        },
+        reviewed_in: repository_base_at(name),
         binding_revision: 1,
         last_pull_at: None,
         last_push_at: None,
     };
+    // A usable base was reviewed in a publication on the selected chain. A
+    // stale one was reviewed in a publication that is not: here a sibling
+    // that was not selected, below a stream that was cleared.
+    let usable = base_reviewed_in(&names[0]);
+    let stale = base_reviewed_in(&names[2]);
     let digest = "a".repeat(64);
     let other = "c".repeat(64);
+    // A1: absent, no base.
     assert_eq!(
-        classify_scope_continuity(None, None),
+        classify_scope_continuity(None, None, &mainline),
         ScopeContinuity::Fresh
     );
+    // A2: absent, usable base.
     assert_eq!(
-        classify_scope_continuity(None, Some(&base)),
+        classify_scope_continuity(None, Some(&usable), &mainline),
         ScopeContinuity::RemoteMissing { base_revision: 3 }
     );
+    // A3: absent, stale base. The base is read as if it were not recorded.
     assert_eq!(
-        classify_scope_continuity(Some((4, &digest)), None),
+        classify_scope_continuity(None, Some(&stale), &mainline),
+        ScopeContinuity::Fresh
+    );
+    // A4: present, no base.
+    assert_eq!(
+        classify_scope_continuity(Some((4, &digest)), None, &mainline),
         ScopeContinuity::Unreviewed { remote_revision: 4 }
     );
+    // A5: present with the reviewed content, whatever the base's history.
     assert_eq!(
-        classify_scope_continuity(Some((3, &digest)), Some(&base)),
+        classify_scope_continuity(Some((3, &digest)), Some(&usable), &mainline),
         ScopeContinuity::InSync { revision: 3 }
     );
     assert_eq!(
-        classify_scope_continuity(Some((4, &other)), Some(&base)),
+        classify_scope_continuity(Some((3, &digest)), Some(&stale), &mainline),
+        ScopeContinuity::InSync { revision: 3 }
+    );
+    // A6: present with other content, usable base.
+    assert_eq!(
+        classify_scope_continuity(Some((4, &other)), Some(&usable), &mainline),
         ScopeContinuity::Advanced {
             base_revision: 3,
             remote_revision: 4
         }
     );
+    // The scope counter is a per-branch number, so a changed digest on the
+    // reviewed history is an advance whatever the counter says.
     assert_eq!(
-        classify_scope_continuity(Some((3, &other)), Some(&base)),
-        ScopeContinuity::Replaced {
-            base_revision: 3,
-            remote_revision: 3
-        }
-    );
-    assert_eq!(
-        classify_scope_continuity(Some((2, &digest)), Some(&base)),
-        ScopeContinuity::Replaced {
+        classify_scope_continuity(Some((2, &other)), Some(&usable), &mainline),
+        ScopeContinuity::Advanced {
             base_revision: 3,
             remote_revision: 2
         }
     );
+    // A7: present with other content, stale base. It reads as never
+    // reviewed, even at a greater counter.
+    assert_eq!(
+        classify_scope_continuity(Some((9, &other)), Some(&stale), &mainline),
+        ScopeContinuity::Unreviewed { remote_revision: 9 }
+    );
+
+    // A cleared stream lists empty: every base is stale, and every scope is
+    // a first publication target again.
+    let cleared = Mainline::default();
+    assert_eq!(
+        classify_scope_continuity(None, Some(&usable), &cleared),
+        ScopeContinuity::Fresh
+    );
+    // A cleared stream that was pushed again restarts at revision 1 under a
+    // new commit id.
+    let recreated = Mainline::select(record_names(&[(9, None, 50)]));
+    assert_eq!(
+        classify_scope_continuity(None, Some(&usable), &recreated),
+        ScopeContinuity::Fresh
+    );
+    assert_eq!(
+        classify_scope_continuity(Some((1, &other)), Some(&usable), &recreated),
+        ScopeContinuity::Unreviewed { remote_revision: 1 }
+    );
+}
+
+#[test]
+fn mainline_finds_a_publication_by_commit_id_alone() {
+    let names = record_names(&[(1, None, 10), (2, Some(0), 20), (3, Some(0), 21)]);
+    let mainline = Mainline::select(names.iter().cloned());
+    assert!(mainline.contains_commit(names[0].commit_id()));
+    assert!(mainline.contains_commit(names[1].commit_id()));
+    // Listed and not selected.
+    assert!(!mainline.contains_commit(names[2].commit_id()));
+    assert!(!Mainline::default().contains_commit(names[0].commit_id()));
 }
 
 #[test]
@@ -2098,16 +2291,22 @@ fn compare_conversation_tail_covers_every_relation_row() {
         );
     }
 
-    // Ambiguous absence and invalid sides never become classifier input.
-    assert_eq!(
-        try_dual_tail_evidence(
-            ConfirmedAbsent,
-            ConfirmedAbsent,
-            Present(t5.clone()),
-            Present(t5.clone()),
-        ),
-        Err(TailEvidenceBlocker::UnacceptedOverlap)
-    );
+    // A pair without accepted pins is one that first-contact adoption could
+    // not prove: nothing relates the two copies, so neither replaces the
+    // other. Even equal values stay unproven here; adoption is what proves
+    // them, and it passes its proof as the accepted pins.
+    for cloud in [t5.clone(), t4.clone()] {
+        assert_eq!(
+            compare_conversation_tail(&tail_evidence(
+                ConfirmedAbsent,
+                Present(t5.clone()),
+                Present(cloud)
+            )),
+            TailClassification::Divergent
+        );
+    }
+
+    // Invalid sides never become classifier input.
     assert_eq!(
         try_dual_tail_evidence(
             Present(t4.clone()),
@@ -2306,6 +2505,82 @@ fn fixed_checkpoint(chain: &[CanonicalConversationMessage]) -> ConversationCheck
         prefix_witness: conversation_prefix_witness(chain, 3).unwrap(),
         binding_revision: 7,
     }
+}
+
+#[test]
+fn a_stale_acceptance_is_read_as_absent_and_never_forgotten_by_reading() {
+    let chain = tail_chain();
+    let names = record_names(&[(1, None, 10), (2, Some(0), 20), (3, Some(0), 21)]);
+    let mainline = Mainline::select(names.iter().cloned());
+    let accepted_in = |name: &RecordName| {
+        let mut checkpoint = fixed_checkpoint(&chain);
+        checkpoint.accepted.as_mut().unwrap().accepted_at_commit_id = name.commit_id().to_string();
+        checkpoint.accepted_subagents.insert(
+            SubagentKey::parse("child-call").unwrap(),
+            AcceptedSubagentState {
+                local: SubagentContentState {
+                    message_count: 2,
+                    sha256: "a".repeat(64),
+                },
+                normalized: SubagentContentState {
+                    message_count: 2,
+                    sha256: "b".repeat(64),
+                },
+            },
+        );
+        checkpoint.validate().unwrap();
+        checkpoint
+    };
+
+    // Accepted in a publication on the selected chain: read as saved.
+    let usable = accepted_in(&names[0]);
+    assert_eq!(usable.read_on(&mainline), usable);
+
+    // Accepted in a publication that is listed and not selected, or that is
+    // not listed at all: the acceptance and its subagents read as absent,
+    // and the cursor, the mapping and the generation are untouched.
+    let stale = accepted_in(&names[2]);
+    for chain_read in [&mainline, &Mainline::default()] {
+        let saved = if chain_read.is_empty() {
+            &usable
+        } else {
+            &stale
+        };
+        let read = saved.read_on(chain_read);
+        assert!(read.accepted.is_none());
+        assert!(read.accepted_local_tail.is_none());
+        assert!(read.accepted_subagents.is_empty());
+        assert_eq!(read.generation, saved.generation);
+        assert_eq!(read.observed_tail, saved.observed_tail);
+        assert_eq!(read.physical, saved.physical);
+        assert_eq!(read.prefix_witness, saved.prefix_witness);
+        read.validate().unwrap();
+    }
+    // Reading decides again every time: the saved checkpoint counts again
+    // when its publication is listed again.
+    assert_eq!(usable.read_on(&Mainline::default()).accepted, None);
+    assert_eq!(usable.read_on(&mainline), usable);
+}
+
+#[test]
+fn forgetting_an_acceptance_keeps_the_cursor_and_moves_the_generation() {
+    let chain = tail_chain();
+    let mut checkpoint = fixed_checkpoint(&chain);
+    let before = checkpoint.clone();
+    assert!(checkpoint.forget_acceptance());
+    assert!(checkpoint.accepted.is_none());
+    assert!(checkpoint.accepted_local_tail.is_none());
+    assert!(checkpoint.accepted_subagents.is_empty());
+    assert_eq!(checkpoint.generation, before.generation + 1);
+    assert_eq!(checkpoint.observed_tail, before.observed_tail);
+    assert_eq!(checkpoint.physical, before.physical);
+    assert_eq!(checkpoint.prefix_witness, before.prefix_witness);
+    assert_eq!(checkpoint.binding_revision, before.binding_revision);
+    checkpoint.validate().unwrap();
+    // Nothing left to forget: the generation does not move again.
+    let forgotten = checkpoint.clone();
+    assert!(!checkpoint.forget_acceptance());
+    assert_eq!(checkpoint, forgotten);
 }
 
 #[test]
@@ -2887,13 +3162,18 @@ fn plan_actions_validate_relation_action_and_pins() {
         .unwrap_err()
         .contains("disagrees with its tail evidence"));
 
-    // Ambiguous unaccepted overlap cannot enter a plan.
+    // A pair without an acceptance reads Divergent: a publishing action
+    // cannot carry it, so a stored copy is never replaced unproven.
     let mut extra_cloud_pin = push_action("action-2", "codex", "profile-codex", "2");
     extra_cloud_pin.pins.tail.cloud = Some(t5.clone());
+    assert_eq!(
+        extra_cloud_pin.pins.tail.classification(),
+        Ok(TailClassification::Divergent)
+    );
     assert!(extra_cloud_pin
         .validate()
         .unwrap_err()
-        .contains("tail evidence is invalid"));
+        .contains("disagrees with its tail evidence"));
 
     // Publishing actions carry the raw range pin.
     let mut no_raw_range = push_action("action-3", "codex", "profile-codex", "3");

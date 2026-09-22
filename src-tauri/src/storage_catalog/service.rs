@@ -40,8 +40,9 @@ use super::profiles::{
 };
 use super::registry::{CatalogCapability, CatalogCapabilityDescriptor, CatalogRegistry};
 use super::resource_engine::{
-    head_coordinate, storage_identity_for_config, verify_library_continuity, LibraryResourceEngine,
-    ObservedLibraryHead, PublishLibraryResourceRequest,
+    head_coordinate, storage_identity_for_config, verify_library_continuity, LibraryContinuity,
+    LibraryResourceEngine, ObservedLibraryHead, PublishLibraryResourceRequest,
+    PublishedLibraryResource,
 };
 use super::resource_planning::{
     build_resource_fork_plan, build_scope_pull_plan, build_scope_push_plan, conflicting_claim_pins,
@@ -1027,7 +1028,7 @@ fn resolve_scope_workspace(
         Some(storage_id) => Some(storage_for(state, storage_id)?),
         None => None,
     };
-    let link = storage
+    let mut link = storage
         .as_ref()
         .and_then(|storage| links.link_for(scope_id, &storage.id))
         .cloned();
@@ -1046,13 +1047,19 @@ fn resolve_scope_workspace(
     let mut manifest = None;
     if let Some(storage) = &storage {
         let engine = engine_for(storage)?;
-        observed = engine.read_head(&repository_id)?;
-        verify_library_continuity(
+        let (mainline, selected) = engine.observe(&repository_id)?;
+        observed = selected;
+        let continuity = verify_library_continuity(
             link.as_ref().and_then(|link| link.accepted_head.as_ref()),
-            observed.as_ref().map(|observed| &observed.head),
+            &mainline,
             &repository_id,
             &storage_identity_for_config(storage)?,
         )?;
+        if continuity == LibraryContinuity::Replaced {
+            if let Some(stale) = link.take() {
+                link = Some(reset_accepted_state(catalog, &stale)?);
+            }
+        }
         if let Some(observed) = &observed {
             // The tag freezes the coordinate; read_tag validates the
             // derivation, so a repository written under a foreign identity
@@ -1090,6 +1097,32 @@ fn resolve_scope_workspace(
         link,
         observed,
         manifest,
+    })
+}
+
+/// The accepted publication is on no selected chain: the repository was
+/// cleared and pushed again, or the accepted push was outranked after it was
+/// confirmed, which only the fork window allows. The accepted state no
+/// longer describes this storage, so it is reset the way a storage clear
+/// resets it, and the link's rows compare as unreviewed and can be pushed
+/// again.
+fn reset_accepted_state(
+    catalog: &CatalogStateRepository,
+    stale: &CatalogScopeLink,
+) -> Result<CatalogScopeLink, String> {
+    catalog.mutate_scope_links(|document| {
+        let link = document
+            .links
+            .iter_mut()
+            .find(|link| link.link_id == stale.link_id)
+            .ok_or("the scope link disappeared while it was being reset")?;
+        if link.revision == stale.revision {
+            link.accepted_head = None;
+            link.accepted_resources.clear();
+            link.revision = link.revision.saturating_add(1);
+            link.updated_at = link.updated_at.max(now_secs());
+        }
+        Ok(link.clone())
     })
 }
 
@@ -1370,9 +1403,9 @@ fn read_storage_repository(
     };
     let Some(observed) = observed else {
         return tag.map(|_| {
-            // A tag with no head is what a failed first publish leaves
+            // A tag with no publication is what a failed first publish leaves
             // behind; say so rather than passing it off as absent.
-            refusal("the stored repository has a discovery tag but no head".to_string())
+            refusal("the stored repository has a discovery tag but no publication".to_string())
         });
     };
     let Some((tag, _)) = tag else {
@@ -1724,6 +1757,9 @@ fn apply_push_with_repositories(
         });
     }
 
+    // Local single-flight per repository: a second Apply of this review must
+    // not list the same childless parent and write a sibling record.
+    let _publication = catalog.acquire_publication_lock(&plan.storage_id, &plan.repository_id)?;
     let workspace = resolve_scope_workspace(
         registry,
         state,
@@ -1819,18 +1855,10 @@ fn apply_push_with_repositories(
 
     let engine = engine_for(storage)?;
     let repository_id = link.repository_id.clone();
-    let tag = match engine.read_tag(&repository_id)? {
-        Some((tag, _)) => tag,
-        None => LibraryResourceTag::new(
-            &workspace.scope.coordinate(),
-            repository_id.clone(),
-            link.created_at,
-        ),
-    };
     let host = state.load_or_create_host_identity()?;
     let published = engine.publish(PublishLibraryResourceRequest {
         repository_id: repository_id.clone(),
-        tag,
+        tag: LibraryResourceTag::new(&workspace.scope.coordinate(), repository_id.clone()),
         observed: workspace.observed.clone(),
         resources,
         payloads,
@@ -1846,14 +1874,16 @@ fn apply_push_with_repositories(
         updated_at: now,
     })?;
 
-    let coordinate = head_coordinate(&published.head, &storage_identity);
+    // A stored publication is the selected one: a push whose record ranked
+    // behind another computer's failed above, before any accepted state moved.
+    let coordinate = head_coordinate(published.head(), &storage_identity);
     // Accepted bases come from the manifest that actually landed, which on
     // the no-op path is the previous manifest already holding this content.
     let accepted: Vec<(CatalogResourceId, String)> = selected_records
         .iter()
         .map(|(resource_id, _)| {
             let entry = published
-                .manifest
+                .manifest()
                 .resources
                 .get(*resource_id)
                 .ok_or("the published manifest lost a selected resource")?;
@@ -1884,14 +1914,16 @@ fn apply_push_with_repositories(
         Ok(())
     })?;
     plan_store::discard(catalog.root(), &plan_id);
+    let revision = published.head().revision;
     Ok(CatalogScopePushOutcomeDto {
         plan_id,
-        published: published.published,
-        revision: Some(published.head.revision),
-        message: if published.published {
-            format!("Published version {}", published.head.revision)
-        } else {
-            "The linked storage already had this content".to_string()
+        published: published.stored(),
+        revision: Some(revision),
+        message: match published {
+            PublishedLibraryResource::Stored { .. } => format!("Published version {}", revision),
+            PublishedLibraryResource::NoChange { .. } => {
+                "The linked storage already had this content".to_string()
+            }
         },
     })
 }
@@ -3538,6 +3570,275 @@ mod tests {
             .is_none());
     }
 
+    fn stored_records(fixture: &LibraryFixture, repository_id: &str) -> usize {
+        fs::read_dir(
+            fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(repository_id)
+                .join("_commits"),
+        )
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_second_apply_of_one_review_is_stopped_and_one_record_is_written() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
+        let plan = prepare_push(&fixture, &row.scope.scope_id, &fixture.storage.id);
+        let selected = vec![resource_id_of(&plan, "review")];
+        let repository_id = plan.repository_id.as_str().to_string();
+
+        // The first Apply is still running: the second is refused at once,
+        // before it lists the storage, and writes nothing.
+        let running = fixture
+            .catalog
+            .acquire_publication_lock(&plan.storage_id, &plan.repository_id)
+            .unwrap();
+        let error = apply_push(&fixture, &plan, selected.clone()).unwrap_err();
+        assert!(error.contains("already in progress"), "{error}");
+        assert_eq!(stored_records(&fixture, &repository_id), 0);
+        drop(running);
+
+        assert!(
+            apply_push(&fixture, &plan, selected.clone())
+                .unwrap()
+                .published
+        );
+        // The review was consumed by the Apply that ran, so a repeat has
+        // nothing to apply; exactly one record exists.
+        assert!(apply_push(&fixture, &plan, selected).is_err());
+        assert_eq!(stored_records(&fixture, &repository_id), 1);
+    }
+
+    /// Another computer's publication on the repository's one record: the
+    /// same resources under its own commit id, in a record that claims the
+    /// millisecond after its parent.
+    fn plant_rival_library_publication(repository: &Path) {
+        use super::super::domain::{
+            library_manifest_relative_key, sha256_hex, CatalogCommitId, LibraryResourceCommit,
+            LibraryResourceManifest,
+        };
+        let parent_file = fs::read_dir(repository.join("_commits"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        let parent_name = mallard_domain::RecordName::parse(&parent_file).unwrap();
+        let mut commit: LibraryResourceCommit = serde_json::from_slice(
+            &fs::read(repository.join("_commits").join(&parent_file)).unwrap(),
+        )
+        .unwrap();
+        let mut manifest: LibraryResourceManifest =
+            serde_json::from_slice(&fs::read(repository.join(&commit.manifest_key)).unwrap())
+                .unwrap();
+        let rival = CatalogCommitId::generate().unwrap();
+        manifest.revision += 1;
+        manifest.commit_id = rival.clone();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_key = library_manifest_relative_key(manifest.revision, &rival);
+        fs::write(repository.join(&manifest_key), &manifest_bytes).unwrap();
+        commit.previous_commit_id = Some(commit.commit_id.clone());
+        commit.previous_record_sha256 = Some(parent_name.token().record_sha256().to_string());
+        commit.revision = manifest.revision;
+        commit.commit_id = rival.clone();
+        commit.created_at_ms += 1;
+        commit.manifest_key = manifest_key;
+        commit.manifest_sha256 = sha256_hex(&manifest_bytes);
+        commit.manifest_size = manifest_bytes.len() as u64;
+        let record_bytes = serde_json::to_vec(&commit).unwrap();
+        let name = mallard_domain::RecordName::new(
+            commit.revision,
+            mallard_domain::PublicationToken::new(rival.as_str(), sha256_hex(&record_bytes))
+                .unwrap(),
+            Some(parent_name.token().clone()),
+            commit.created_at_ms,
+        )
+        .unwrap();
+        fs::write(
+            repository.join("_commits").join(name.file_name()),
+            &record_bytes,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_push_that_loses_the_fork_window_fails_and_accepts_nothing() {
+        use mallard_infrastructure::storage_core::publication::{test_support, REMOTE_CHANGED};
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let link_of = |fixture: &LibraryFixture| {
+            fixture
+                .catalog
+                .load_scope_links()
+                .unwrap()
+                .link_for(&scope_id, &fixture.storage.id)
+                .cloned()
+                .unwrap()
+        };
+        let accepted = link_of(&fixture);
+        assert!(accepted.accepted_head.is_some());
+        let repository_id = accepted.repository_id.as_str().to_string();
+
+        // A second skill is pushed while another computer pushes on the same
+        // version. The other one's record ranks first and lands between this
+        // push's listing and its write.
+        let second = fixture.skill_path.parent().unwrap().join("second");
+        fs::create_dir_all(&second).unwrap();
+        fs::write(
+            second.join("SKILL.md"),
+            b"---\nname: second\n---\nA second skill.\n",
+        )
+        .unwrap();
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        let selected = vec![resource_id_of(&plan, "second")];
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        test_support::before_next_record_request({
+            let repository = fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(&repository_id);
+            move || plant_rival_library_publication(&repository)
+        });
+        let error = apply_push(&fixture, &plan, selected).unwrap_err();
+
+        // The push failed as a whole: both records are in the storage, and
+        // the link accepted nothing.
+        assert_eq!(error, REMOTE_CHANGED);
+        assert_eq!(stored_records(&fixture, &repository_id), 3);
+        assert_eq!(link_of(&fixture), accepted);
+
+        // The accepted head is an ancestor of the selected publication, so
+        // nothing is reset. The next review offers the row again, and the
+        // push lands on the selected publication.
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        assert_eq!(link_of(&fixture), accepted);
+        let offered = plan.push_row(&resource_id_of(&plan, "second")).unwrap();
+        assert!(offered.row.selectable, "{:?}", offered.row.blocked_reason);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let (head, manifest) = engine_for(&fixture.storage)
+            .unwrap()
+            .inspect(&plan.repository_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.head.revision, 3);
+        assert_eq!(manifest.resources.len(), 2);
+        assert_eq!(stored_records(&fixture, &repository_id), 4);
+    }
+
+    #[test]
+    fn an_accepted_push_on_no_selected_chain_resets_the_link_and_its_rows_push_again() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let links = fixture.catalog.load_scope_links().unwrap();
+        let accepted = links.link_for(&scope_id, &fixture.storage.id).unwrap();
+        assert!(accepted.accepted_head.is_some());
+        let repository_id = accepted.repository_id.as_str().to_string();
+
+        // The repository is cleared and another computer pushes its own
+        // skill: a new history that does not contain this computer's push.
+        // A push outranked after it was confirmed reads the same way.
+        fs::remove_dir_all(
+            fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(&repository_id),
+        )
+        .unwrap();
+        let other = sibling_machine(&fixture, "other-user", b"unused");
+        fs::remove_dir_all(&other.skill_path).unwrap();
+        let extra = other.user_home.join("codex-home/skills/extra");
+        fs::create_dir_all(&extra).unwrap();
+        fs::write(
+            extra.join("SKILL.md"),
+            b"---\nname: extra\n---\nAnother computer's skill.\n",
+        )
+        .unwrap();
+        let other_row = skill_scope(&other);
+        link_scope(&other, &other_row.scope.scope_id, &other.storage.id, 4);
+        push_all(&other, &other_row.scope.scope_id, &other.storage.id);
+
+        // The page still loads. The accepted state no longer describes this
+        // storage, so it is reset the way a storage clear resets it.
+        page(&fixture, &scope_id, Some(&fixture.storage.id)).unwrap();
+        let links = fixture.catalog.load_scope_links().unwrap();
+        let reset = links.link_for(&scope_id, &fixture.storage.id).unwrap();
+        assert!(reset.accepted_head.is_none());
+        assert!(reset.accepted_resources.is_empty());
+        assert!(reset.revision > accepted.revision);
+
+        // Its rows can be pushed again, on the selected publication.
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        let review = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
+        assert!(review.row.selectable, "{:?}", review.row.blocked_reason);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let engine = engine_for(&fixture.storage).unwrap();
+        let repository = plan.repository_id.clone();
+        let (head, manifest) = engine.inspect(&repository).unwrap().unwrap();
+        assert_eq!(head.head.revision, 2);
+        assert_eq!(manifest.resources.len(), 2);
+    }
+
+    /// B1: the repository was cleared, and nobody has pushed since. The page
+    /// loads instead of refusing, the accepted state is reset as for any
+    /// replaced history, a local row is selectable, and one Push repopulates
+    /// the repository from its first version.
+    #[test]
+    fn a_cleared_library_repository_loads_and_one_push_repopulates_it() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let links = fixture.catalog.load_scope_links().unwrap();
+        let accepted = links.link_for(&scope_id, &fixture.storage.id).unwrap();
+        assert!(accepted.accepted_head.is_some());
+        let repository_id = accepted.repository_id.as_str().to_string();
+
+        fs::remove_dir_all(
+            fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(&repository_id),
+        )
+        .unwrap();
+        assert_eq!(stored_records(&fixture, &repository_id), 0);
+
+        page(&fixture, &scope_id, Some(&fixture.storage.id)).unwrap();
+        let links = fixture.catalog.load_scope_links().unwrap();
+        let reset = links.link_for(&scope_id, &fixture.storage.id).unwrap();
+        assert!(reset.accepted_head.is_none());
+        assert!(reset.accepted_resources.is_empty());
+        assert!(reset.revision > accepted.revision);
+
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        let review = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
+        assert!(review.row.selectable, "{:?}", review.row.blocked_reason);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let engine = engine_for(&fixture.storage).unwrap();
+        let (head, manifest) = engine.inspect(&plan.repository_id).unwrap().unwrap();
+        assert_eq!(head.head.revision, 1);
+        assert_eq!(manifest.resources.len(), 1);
+        assert_eq!(stored_records(&fixture, &repository_id), 1);
+        let links = fixture.catalog.load_scope_links().unwrap();
+        assert!(links
+            .link_for(&scope_id, &fixture.storage.id)
+            .unwrap()
+            .accepted_head
+            .is_some());
+    }
+
     #[test]
     fn unrelated_local_changes_do_not_stale_a_push_review() {
         let fixture = library_fixture();
@@ -3707,7 +4008,7 @@ mod tests {
         engine
             .publish(PublishLibraryResourceRequest {
                 repository_id: repository_id.clone(),
-                tag: LibraryResourceTag::new(&codex_pets(2), repository_id.clone(), 1),
+                tag: LibraryResourceTag::new(&codex_pets(2), repository_id.clone()),
                 observed: None,
                 resources: BTreeMap::from([(
                     resource_id.clone(),

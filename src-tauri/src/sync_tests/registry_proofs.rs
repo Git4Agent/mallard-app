@@ -376,10 +376,8 @@ fn registering_a_portable_coordinate_writes_nothing_and_publishing_at_it_preserv
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     assert!(
-        rewritten
-            .iter()
-            .all(|key| key.contains("/_head.json") || key.contains("/_tags/")),
-        "only the CAS head and the bundle tag record moved; every old object is byte-identical: {rewritten:?}"
+        rewritten.is_empty(),
+        "a publication only adds objects; every old object is byte-identical: {rewritten:?}"
     );
     assert!(
         after.len() > before.len(),

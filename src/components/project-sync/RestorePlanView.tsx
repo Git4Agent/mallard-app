@@ -47,7 +47,6 @@ interface Props {
   /** Rebuilds the plan against the storage's current head — the files
    *  page's Rescan. */
   onRefreshPlan?: () => void;
-  onUnlinkStorage?: () => void;
   onResetMetadata?: () => void;
   /**
    * Mirrors the footer primary out to the host, so the storage-card Pull
@@ -221,7 +220,6 @@ export default function RestorePlanView({
   onApply,
   onBack,
   onRefreshPlan,
-  onUnlinkStorage,
   onResetMetadata,
   onPrimaryChange,
 }: Props) {
@@ -363,9 +361,10 @@ export default function RestorePlanView({
     warningSteps.add("project_files");
   }
   const conversationIds = pullSelectableResourceIds(conversationItems);
-  const storageReplacedGate = plan.remote_continuity?.state === "replaced";
   /* The banner zone that heads the review scroll. Both messages can be on
-     screen at once, so they share one box at the loudest rung present. */
+     screen at once, so they share one box at the loudest rung present. A Pull
+     of a storage that was cleared and pushed again is an ordinary first Pull,
+     so nothing here speaks about the storage's history. */
   const banners: NoticeItem[] = [];
   if (plan.conversation_review.some((row) => row.stored_without_credential_redaction)) {
     banners.push({
@@ -373,21 +372,6 @@ export default function RestorePlanView({
       severity: "warning",
       title: "Stored without credential redaction",
       message: "This review includes sessions that can contain API keys, tokens, and passwords.",
-    });
-  }
-  if (storageReplacedGate) {
-    banners.push({
-      key: "storage-replaced",
-      severity: "warning",
-      title: "Storage history changed",
-      message: `${storageName || "This storage"} was reset. Pulling adopts its new history; local content is backed up first.`,
-      action: onUnlinkStorage
-        ? (
-          <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={busy}>
-            Unlink storage…
-          </button>
-        )
-        : undefined,
     });
   }
   if (error) {
@@ -405,13 +389,12 @@ export default function RestorePlanView({
         : undefined,
     });
   }
-  /* The replaced-history gate comes from the plan and appears on the first
-     render — standing content, and a
-     named region rather than a live one. The error is the opposite: the review
-     always mounts with `error` null (the host clears it before it plans, and
-     even the supporting-check failure lands after the plan is handed over), so
-     an error that is present arrived after an action and stops the flow. One
-     present error re-times the whole box. */
+  /* The redaction note comes from the plan and appears on the first render —
+     standing content, and a named region rather than a live one. The error is
+     the opposite: the review always mounts with `error` null (the host clears
+     it before it plans, and even the supporting-check failure lands after the
+     plan is handed over), so an error that is present arrived after an action
+     and stops the flow. One present error re-times the whole box. */
   const bannerTiming: NoticeTiming = error
     ? { timing: "blocking" }
     : { timing: "standing", label: "Notes about this Pull review" };
@@ -518,7 +501,6 @@ export default function RestorePlanView({
                     resourceIds.forEach((resourceId) => next.delete(resourceId));
                     return next;
                   })}
-                  onUnlinkStorage={onUnlinkStorage}
                   continuityActionBusy={busy}
                   onReviewListReadyChange={setReviewListReady}
                 />

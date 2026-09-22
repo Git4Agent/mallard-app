@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     hex_lower, update_length_prefixed, update_optional_length_prefixed,
-    validate_conversation_chain, validate_sha256, CanonicalConversationMessage, MessageId,
-    MAX_FILES,
+    validate_conversation_chain, validate_sha256, CanonicalConversationMessage, Mainline,
+    MessageId, MAX_FILES,
 };
 
 pub const PORTABLE_TAIL_CODEC_V1: &str = "mallard-codex-portable-tail-v1";
@@ -335,7 +335,7 @@ impl PortableConversationTail {
 
 /// The accepted cloud version for one destination: integrity/provenance
 /// witnesses plus the accepted portable tail.  The commit/manifest pair is
-/// immutable provenance for ancestry proofs, never the CAS base.
+/// immutable provenance for ancestry proofs, never the publication's parent.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptedConversationVersion {
@@ -562,6 +562,44 @@ pub struct ConversationCheckpoint {
 }
 
 impl ConversationCheckpoint {
+    /// Forget what was accepted with this destination, and keep the read
+    /// cursor and the physical mapping. They are what tells a preserved
+    /// provider alias from a newly discovered local session, so a session
+    /// whose acceptance is forgotten compares as not yet synced, never as
+    /// new. Returns whether there was an acceptance to forget.
+    pub fn forget_acceptance(&mut self) -> bool {
+        if self.accepted.take().is_none() {
+            return false;
+        }
+        self.accepted_local_tail = None;
+        self.accepted_subagents.clear();
+        self.generation = self.generation.saturating_add(1);
+        true
+    }
+
+    /// This checkpoint as one session review reads it. An acceptance counts
+    /// only while the publication it was accepted in is on the selected
+    /// chain. After the stream was cleared or recreated, the stored copy can
+    /// come from another computer's own branch of the session, and against a
+    /// stale acceptance that copy can read as a plain update. A stale
+    /// acceptance is therefore read as absent, with the acceptance of its
+    /// subagents. Nothing is forgotten durably: the generation does not
+    /// move, and the saved checkpoint counts again when its publication is
+    /// listed again.
+    pub fn read_on(&self, mainline: &Mainline) -> Self {
+        let mut read = self.clone();
+        if read
+            .accepted
+            .as_ref()
+            .is_some_and(|accepted| !mainline.contains_commit(&accepted.accepted_at_commit_id))
+        {
+            read.accepted = None;
+            read.accepted_local_tail = None;
+            read.accepted_subagents.clear();
+        }
+        read
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         crate::subagents::validate_subagent_map(&self.accepted_subagents)?;
         if self.accepted.is_none() && !self.accepted_subagents.is_empty() {

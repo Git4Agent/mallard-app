@@ -447,7 +447,7 @@ test("connection failures use actionable storage language named after the provid
   );
   // The first storage write a new user makes fails behind a prefix.
   assert.equal(
-    storageAccessErrorMessage(cloudSummary(), "register the repo in 'Cloud storage': S3 conditional put 'bundles/x': dispatch failure: io error"),
+    storageAccessErrorMessage(cloudSummary(), "register the repo in 'Cloud storage': S3 put 'bundles/x': dispatch failure: io error"),
     "Couldn’t reach Cloud A. Check the network and try again.",
   );
   assert.equal(

@@ -205,8 +205,10 @@ A configuration change after the confirmation opens stops the operation.
 Local sync metadata resets only after remote deletion succeeds. If clear
 fails, the error reports confirmed or possible partial deletion. Use
 **Clear storage data** again to delete the remaining objects. There is no
-automatic retry of the whole clear operation. Schema and storage layout
-versions remain 1.
+automatic retry of the whole clear operation. Other computers need no unlink
+and no reset afterwards: they push again, after a Pull when another computer
+already pushed into an area they write. Schema and storage layout versions
+remain 1.
 
 Credentials and machine-specific paths are stored only in Mallard's local
 metadata under `~/.mallard/`; they are never uploaded inside a portable
@@ -403,9 +405,28 @@ Mallard is a Tauri 2 desktop application. React, TypeScript, and Vite provide
 the review-focused interface; Rust handles discovery, validation, hashing,
 safe filesystem operations, local persistence, and S3/R2 transport.
 
-Local-folder and R2 storage share the same versioned bundle model. A mutable
-head points to immutable manifests and uploaded objects, with SHA-256 checks
-and compare-and-swap publication protecting concurrent updates.
+Every storage shares the same versioned bundle model, and a storage needs
+only three operations: write bytes at a key, read a key, list a prefix. A Push
+writes immutable payload objects, an immutable manifest, and last an immutable
+publication record. There is no mutable head: the current version is selected
+from the names of those records, the same way on every computer, with SHA-256
+checks on everything read. When two computers push on the same version within
+seconds, the earlier record is selected. The other Push counts as not made:
+it fails, or, if it had already been confirmed, the next refresh rolls it
+back and says so. Pushing again publishes the same content, and the losing
+record is kept in the storage and never selected.
+
+A storage that another computer cleared never asks for an unlink or a reset.
+What this computer wrote down about its last sync names a history the storage
+no longer has, so Mallard ignores it without deleting it and compares directly.
+Push is open when nobody has pushed since, and one Push recreates the storage
+under the ids the sessions already had. When another computer pushed first into
+an area this computer also writes, a Pull comes first. A session both computers
+hold is matched from its content: an equal copy is marked as synced, an earlier
+stored version is updated by Push, and a longer or a different stored copy is
+never replaced. Pull then keeps both copies. The activity page says which case
+applies: "Another computer cleared <storage>. Push again." or "… Pull, then
+push again."
 
 See [TECHNICAL_REPORT.md](./TECHNICAL_REPORT.md) for the current schemas,
 storage layout, sync semantics, and implementation boundaries.

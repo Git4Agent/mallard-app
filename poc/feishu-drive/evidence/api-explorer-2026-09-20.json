@@ -1,0 +1,25 @@
+{
+  "date": "2026-09-20",
+  "mode": "live_api_explorer_authorization",
+  "production_ready": false,
+  "app_published": false,
+  "approved_user_scopes": [
+    "space:document:retrieve",
+    "space:folder:create",
+    "drive:file:upload",
+    "drive:file:download",
+    "auth:user.id:read"
+  ],
+  "trusted_explorer_redirect_added": true,
+  "consent_submitted": true,
+  "token_exchange": {
+    "http_status": 200,
+    "wrapper_code": 20021,
+    "service_status": 1108012,
+    "message": "invalid client auth method",
+    "visible_token_present": false
+  },
+  "fresh_tab_reproduced": true,
+  "drive_api_writes": 0,
+  "credentials_recorded": false
+}

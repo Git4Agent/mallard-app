@@ -51,7 +51,9 @@ export interface PullReviewApplyResult {
 /** Inspect the complete plan, including rows hidden from the file review. */
 export function canAcceptPullMetadata(plan: PullReview): boolean {
   if (plan.actions.length > 0) return false;
-  if (["replaced", "unknown", "remote_missing"].includes(plan.remote_continuity?.state ?? "")) return false;
+  // A cleared or recreated storage is an ordinary first Pull; only a storage
+  // that could not be listed claims no verdict.
+  if (plan.remote_continuity?.state === "unknown") return false;
   return plan.conversation_review.every((row) => {
     if (row.blocker || row.blocked_reason) return false;
     switch (row.action) {

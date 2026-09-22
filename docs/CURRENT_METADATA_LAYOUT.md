@@ -31,9 +31,11 @@ for the Library. A Library repository id is derived, never minted:
 `library-` + the first 32 hex of a domain-tagged digest over the provider and
 kind tokens, so every replica that syncs the same kind converges on the same
 repository. Local project, storage, host, replica, profile, and link IDs do
-not appear in portable documents. A mutable head points to an immutable
-manifest, commit record, and content-addressed payload objects; the Library
-manifest maps resource ids to their published entries.
+not appear in portable documents. There is no mutable head: an immutable
+publication record, written last, points to an immutable manifest and
+content-addressed payload objects, and the current publication is selected
+from the names of a stream's records. The Library manifest maps resource ids
+to their published entries.
 
 All active local and portable schemas are version 1. Compatibility is a clean
 cutover: there is no backward-compatibility support, migration, legacy
@@ -502,27 +504,38 @@ The local-folder and S3/R2 adapters expose the same object keys:
     |-- _storage.json
     `-- v1/
         |-- repositories/
+        |   |-- _commits/                     # every project record, nothing else
+        |   |   `-- <bundle-id>/
+        |   |       `-- <record name>
         |   `-- <bundle-id>/
-        |       |-- _head.json
-        |       |-- _tag.json
         |       |-- _objects/
         |       |   `-- <payload-sha256>
         |       |-- _manifests/
         |       |   `-- <revision>-<commit-id>.json
-        |       |-- _commits/
-        |       |   `-- <revision>-<commit-id>.json
         |       `-- _uploads/                 # reserved for project bundles
         `-- library/
             `-- <kind-repository-id>/
-                |-- _tag.json                 # immutable, create-only discovery
-                |-- _head.json                # authoritative CAS pointer
-                |-- _objects/
-                |   `-- <payload-sha256>
+                |-- _tag.json                 # constant bytes, discovery only
+                |-- _commits/
+                |   `-- <record name>
                 |-- _manifests/
                 |   `-- <revision>-<commit-id>.json
-                `-- _commits/
-                    `-- <revision>-<commit-id>.json
+                `-- _objects/
+                    `-- <payload-sha256>
 ```
+
+Every object is immutable, and no conforming writer ever writes different
+bytes to the same key: payloads are content-addressed, a manifest's key holds
+a commit id minted per publication, a record's name holds the digest of its
+bytes, and the marker and the Library tag are constant. A provider therefore
+needs three operations: write bytes at a key, read a key, list a prefix.
+There is no `_head.json` and no `_tags/` namespace.
+
+Project records live in one flat namespace beside the bundle folders. Listing
+`_commits/<bundle-id>/` returns one stream, which is what a refresh needs;
+listing `_commits/` returns every project stream's records and no payload
+key, which is what bundle discovery needs. Library records stay inside each
+repository, because the Library never enumerates repositories.
 
 The `repositories/` and `library/` constructors are closed and mutually
 isolated. The removed `.mallard/v1/catalog/` namespace is rejected by the
@@ -538,57 +551,87 @@ that older upload-tree shape. Library resources never use `_uploads/`.
 `.mallard/_storage.json` is immutable and contains:
 
 ```json
-{"format":"mallard-storage","layout_version":1}
+{"format":"mallard-append-storage","layout_version":1}
 ```
+
+The bytes are constant, so concurrent first writers write identical bytes and
+creation is idempotent without any exclusivity.
 
 Opening either backend verifies this marker before reading or publishing
 repositories.
 
-### 5.2 Project bundle mutable head
+### 5.2 Project bundle publication record and head selection
 
-`_head.json` is the only authoritative mutable pointer for a bundle. Its
-schema-1 fields are:
+The publication record is the only thing that publishes a snapshot, and it is
+written last. Its object name carries its graph facts:
+
+```text
+<revision>.<commit_id>-<record_sha256>.<parent>.<created_at_ms>.json
+
+revision         10 digits, zero-padded; the depth, and the printed version
+commit_id        commit- plus 24 lowercase hexadecimal characters
+record_sha256    SHA-256 of the record's exact bytes
+parent           <parent commit_id>-<parent record_sha256>, or the word root
+created_at_ms    13 digits, zero-padded
+```
+
+`<commit_id>-<record_sha256>` is a publication's token. A name is lowercase
+`[a-z0-9.-]`, at most 223 bytes, and names sort by depth. A name outside the
+grammar (`.DS_Store`, a sync client's conflicted copy) is ignored and written
+to the activity log; it is never a record.
+
+The current publication of a stream is selected from the names of one
+listing, without reading a record: starting at the virtual root, the child
+with the smallest `(created_at_ms, commit_id, record_sha256)` is taken until
+a publication has none. A record whose parent is not listed is never reached.
+Every listed record that is not on that chain is kept and not selected;
+nothing marks, moves, or deletes it. The same listing gives every computer
+the same selection.
+
+The record's schema-1 fields are:
 
 ```text
 schema_version
 bundle_id
-kind                         # currently only "project"
 revision
 commit_id
-manifest_key                 # relative _manifests/... key
+optional previous_commit_id       # both absent for a first publication,
+optional previous_record_sha256   # both present otherwise: the parent token
+created_at_ms                     # taken when the record is built; ranks siblings
+manifest_key                      # relative _manifests/... key
 manifest_sha256
-manifest_size                # exact serialized manifest byte length
-updated_at
+manifest_size                     # exact serialized manifest byte length
+added_files
+changed_files
+removed_files
+published_by_origin
+summary                           # display_name, kind, resources, files,
+                                  # registration_only, providers,
+                                  # optional repository_fingerprint
 ```
 
-Readers first load the bounded head metadata, then stage the referenced
-immutable manifest using both `manifest_size` and `manifest_sha256`. Parsing
-starts only after exact-size and digest verification. The parsed bundle, kind,
-revision, and commit identities must then agree with the head.
+`BundleHead` is the in-memory view of the selected record, field for field;
+it is never a stored object. Readers list the stream, select, read the
+selected record (at most 64 KiB) and verify that its bytes hash to the digest
+in its name and that its fields equal the facts in its name, then stage the
+referenced immutable manifest using both `manifest_size` and
+`manifest_sha256`. Parsing starts only after exact-size and digest
+verification. A selected record or manifest that cannot be read or fails
+verification is an error for that publication; selection never moves to
+another candidate. An unchanged selection costs the one listing: the process
+remembers the records it has read.
 
 `manifest_size` is a required nonzero schema-1 field. It has no default and is
 not inferred from S3 `Content-Length`, an extra `HEAD` request, or received
-bytes. Existing state without the field is unsupported and must be cleared;
-there is no migration or compatibility reader.
+bytes.
 
-### 5.3 Project bundle discovery tag
+### 5.3 Project bundle discovery
 
-`_tag.json` is a mutable, non-authoritative listing summary:
-
-```text
-schema_version
-bundle_id
-display_name
-kind
-revision
-updated_at
-resources
-files
-```
-
-It is refreshed with CAS after a successful head update. The refresh is
-best-effort, so a tag may lag the authoritative head. Remote repository
-listing currently discovers `_tag.json` objects and sorts them by bundle ID.
+Bundle discovery lists `.mallard/v1/repositories/_commits` once, groups the
+names by bundle id, selects each stream, and reads those records through the
+store's bounded-concurrency metadata fetch. The listing rows come from each
+record's `summary`, so discovery never reads a manifest and is exactly as
+fresh as the publication it shows.
 
 ### 5.4 Project bundle immutable manifest
 
@@ -645,7 +688,7 @@ File tombstones may carry the last known SHA-256.
 
 Each Library repository contains exactly one typed resource and advances
 independently from every other Library resource and project bundle. Its
-immutable `_tag.json` contains:
+`_tag.json` holds constant bytes derived from the coordinate alone:
 
 ```text
 schema_version
@@ -657,24 +700,25 @@ resource_id
 stable_identity_sha256
 display_name
 optional scope_label
-created_at
 ```
 
 The tag is listing metadata only. Opening a remote choice verifies the tag,
-head, manifest, resource identity, exact sizes, hashes, and objects. The
-Library `_head.json` pins the resource repository, revision, commit,
-manifest key, manifest SHA-256, exact manifest size, and update time.
+the selected record, the manifest, resource identity, exact sizes, hashes, and
+objects. The Library publication record uses the project record's name
+grammar and protocol fields (it needs no `summary`), and
+`LibraryResourceHead` is the in-memory view of the selected record.
 
 The immutable manifest records the repository/revision/commit coordinates,
 capture version, privacy-preserving publisher origin, and the repository's
 complete resource set: a map from resource id to a published entry holding
 one closed `CatalogResource` — Agent Skill, plugin install intent, Codex pet
 v1, or Codex pet v2 — and its update time. Every entry must belong to the
-repository's own (provider, kind) derivation. The immutable commit records
-the same manifest coordinates, previous commit when present, and publisher
-origin. The head is the only visibility boundary and advances with
-compare-and-swap; a push publishes the observed set plus the reviewed
-upserts, so it can never delete another replica's resources.
+repository's own (provider, kind) derivation. The record is the only
+visibility boundary and is written last, with list-then-write; a push
+publishes the selected set plus the reviewed upserts, so it can never delete
+another replica's resources. The Library does not rebase: Apply requires the
+selected publication to be the one the review was computed from, and takes a
+local single-flight lock per repository.
 
 Plugin resources contain semantic provider-native installation intent and no
 payload directory. Skills store their bounded regular-file tree; pets store
@@ -684,7 +728,11 @@ the desired v1 or v2 row explicitly; Mallard performs no format conversion
 or combined implicit selection.
 
 Machine-local scope links hold provider paths, storage IDs, the accepted head
-continuity pin, and per-resource accepted content bases. Portable Library
+continuity pin, and per-resource accepted content bases. Continuity is
+ancestry: an accepted publication that is neither the selected one nor one of
+its ancestors resets the link's accepted state, the way a storage clear does,
+so its rows can be pushed again. A repository that lists empty holds no chain,
+so it reads the same way: the page loads, and one Push repopulates it. Portable Library
 documents contain none of those machine-local values. Pull reviews pin
 cross-storage claims per item; a target claimed at another digest can only be
 preserved as a named semantic copy, explicitly overwritten with
@@ -818,59 +866,99 @@ types, and eager planning/apply wrappers do not exist.
 There is no generic 512 MiB payload-object ceiling. Resource-specific capture
 limits and aggregate capture budgets still apply where listed below.
 
-### 5.9 Project bundle immutable commit record
-
-Each `_commits/<revision>-<commit-id>.json` stores:
-
-```text
-schema_version
-bundle_id
-revision
-commit_id
-manifest_key
-manifest_sha256
-created_at
-optional previous_commit_id
-added_files
-changed_files
-removed_files
-published_by_origin
-```
-
-The commit record is historical metadata. The head remains the authoritative
-visibility boundary.
-
 ## 6. Publication and consistency model
 
 One publication performs:
 
-1. Validate the request and the exact expected head.
+1. Validate the request and the exact observed publication: apply lists the
+   stream and selects, and everything is checked and built against it.
 2. Verify every retained file still has its reviewed immutable object.
-3. Detect a semantic no-op and write nothing if the snapshot is unchanged.
-4. Write new content-addressed payload objects immutably.
+3. Detect a semantic no-op, prove with one listing that the compared
+   publication is still selected, and write nothing.
+4. Write new content-addressed payload objects.
 5. Serialize the immutable manifest once, record its exact byte length and
-   SHA-256, and write it immutably.
-6. Write the immutable commit record.
-7. Compare-and-swap `_head.json` with the same manifest size and hash.
-8. Best-effort compare-and-swap `_tag.json`.
-9. Commit the corresponding local bindings and reviewed base.
+   SHA-256, and write it.
+6. Build the publication record in memory: a new commit id, the parent token
+   from step 1, the revision, `created_at_ms`, the origin, the manifest
+   reference, the summary. It is never written to local disk and never
+   outlives the operation.
+7. List, then write: list the stream; if the listing already holds this
+   record's token an earlier attempt landed; continue only if the selected
+   publication is the record's parent, which means the parent has no child
+   (an empty stream for a first publication), otherwise stop with
+   `RemoteChanged` and nothing written; send the record, once. A listing
+   older than ten wall-clock seconds is taken again before sending, because
+   the monotonic clock stands still while a laptop sleeps. The record write
+   is one request with no retry inside the transport; a retry is a new
+   attempt that lists first.
+8. List once more. If that listing selects this record, commit the
+   corresponding local bindings and reviewed base. If it selects another
+   computer's record, stop with `RemoteChanged`: the publication failed as a
+   whole, nothing local is committed, and the record stays in the storage,
+   never selected.
 
-For one Library scope link, the same immutable-object and CAS ordering
-applies to exactly one `library/<kind-repository-id>/` head. Its create-only
-tag is written once, and only that link's accepted head and the reviewed
-rows' accepted bases advance after publication succeeds. A concurrent head
-change makes the reviewed plan stale or is resolved by verified read-back;
-it never silently advances an unreviewed resource.
+A sibling of a publication can be written only inside the fork window — the
+store's listing lag, the ten-second listing freshness, and one record request
+— after that publication became visible. Outside it, selection is final.
+Inside it the earlier-ranked sibling is selected and the other is kept and
+not selected. Its writer reads that from the listing of step 8 and fails, so
+its base stays on the shared parent: the next refresh reads `Advanced`, and
+the next Push publishes the same content.
 
-Local-folder CAS is serialized by `.mallard/.storage.lock`; its ETag is the
-SHA-256 of the current bytes. S3/R2 uses service ETags with
-`If-None-Match: *` for creation and `If-Match` for replacement. Ambiguous S3
-responses are resolved by reading the object back.
+Only a sibling that becomes visible after step 8 already selected this record
+leaves local state on an unselected record. Every command that observes the
+bundle settles that first. The record is listed, it is not selected, and its
+parent names lead over listed records to a selected publication whose selected
+child is another record; ranks never change, so that verdict is final. The
+link is rolled back in one local transaction: each scope base reviewed in the
+outranked publication returns to that shared publication (or is removed when
+the shared publication lacks the scope), and each session acceptance saved
+there is forgotten the way a storage clear forgets one: the checkpoint keeps
+its read cursor and its physical mapping, and the local-to-cloud conversation
+mappings stay. The link then reads `Advanced`, first-contact adoption re-proves
+the sessions the storage already holds, and the next Push publishes the same
+content under the same cloud ids.
 
-If publication fails before head CAS, immutable objects, manifests, or commits
-may remain unreachable. Readers cannot see them as a revision because the
-head did not move. The current object-store interface has no delete operation,
-so there is no active remote garbage collector for those orphans.
+A record that no listed record connects to the selected chain is left alone:
+that is a stream that was cleared (`RemoteMissing`), or cleared and pushed
+again (`Replaced`). Such a record is **stale**. A scope base
+(`reviewed_in`) and a session acceptance (`accepted_at_commit_id`) count only
+while the publication they name is on the selected chain; a stale one is read
+as absent by every comparison and is never deleted at a refresh, because a
+short listing looks the same as a clear. A stale scope base makes an absent
+scope `Fresh` and a changed one `Unreviewed`; a scope that still has exactly
+the reviewed content stays `InSync`. A stale acceptance makes the session
+compare from content: absent from the storage it is published under the cloud
+id it already has, an equal or an earlier stored copy is proven by
+first-contact adoption, and a longer or a different stored copy is kept next
+to the local one by Pull ("Keep both"), never replaced. The Push or the Pull
+that saves new bases removes every stale scope base of the link in the same
+transaction; a stale acceptance is replaced when its session is next pushed or
+pulled. No document changes shape for any of this.
+
+For one Library scope link, the same ordering applies to exactly one
+`library/<kind-repository-id>/` stream. Only that link's accepted head and
+the reviewed rows' accepted bases advance after publication succeeds. A
+selection that changed after review makes the reviewed plan stale; it never
+silently advances an unreviewed resource.
+
+Local-folder writes are serialized by `.mallard/.storage.lock`. S3/R2 writes
+create-only with `If-None-Match: *`, and the record write runs with SDK
+retries off. Dropbox writes a record with one `files/upload` request. None of
+them overwrites by revision, and a provider with plain overwrite and no
+conditional write runs the same engine.
+
+If publication stops before the record is sent, immutable objects and a
+manifest may remain unreferenced. Readers cannot see them as a revision
+because no record names them. There is no remote garbage collector.
+
+Storage clear keeps the marker and deletes records first:
+`repositories/_commits` before the rest of `repositories`, and inside a
+Library repository `_commits/` already sorts before `_manifests/` and
+`_objects/`. Record names sort by depth, so a stream's first publications go
+first; once they are gone the stream selects nothing while every manifest and
+object still exists, so an interrupted clear never leaves a selected record
+pointing at deleted data.
 
 ## 7. What crosses the machine boundary
 
@@ -980,11 +1068,18 @@ are authoritative.
   intent payloads, provider-side stages, backups, recovery phases, journaled
   whole-document installs, and journal cleanup.
 - [`bundle_engine.rs`](../crates/mallard-infrastructure/src/bundle_engine.rs):
-  portable keys, marker/head/tag/manifest/commit formats, immutable objects,
-  CAS, lazy verified-body access, restore plans, streamed apply, and backups.
+  portable keys, manifest and publication-record formats, immutable objects,
+  head selection, lazy verified-body access, restore plans, streamed apply,
+  and backups.
+- [`storage_core/publication.rs`](../crates/mallard-infrastructure/src/storage_core/publication.rs):
+  stream listing, selection over record names, verified record reads,
+  list-then-write, and the process memory of listings and records.
+- [`mallard-domain/src/publication.rs`](../crates/mallard-domain/src/publication.rs):
+  record-name grammar, publication tokens, the mainline selector, and the
+  ancestor test.
 - [`s3_store.rs`](../crates/mallard-infrastructure/src/storage_core/s3_store.rs):
-  S3/R2 ETag, conditional-write, chunk-to-tempfile staging, inactivity
-  timeout, and pagination behavior.
+  S3/R2 create-only writes, the single-request record write, chunk-to-tempfile
+  staging, inactivity timeout, and pagination behavior.
 - [`project_activity.rs`](../crates/mallard-infrastructure/src/project_activity.rs):
   local-only activity cache and provider session scanning through the
   registered adapters.
@@ -994,8 +1089,8 @@ are authoritative.
   Library resource identities, strict schemas, scopes, scope links, claims,
   and scope-level plans.
 - [`storage_catalog/resource_engine.rs`](../src-tauri/src/storage_catalog/resource_engine.rs):
-  Library set-manifest publication, immutable objects/manifests/commits,
-  verified reads, head CAS, and continuity checks.
+  Library set-manifest publication, immutable objects/manifests/records,
+  verified reads, list-then-write, and ancestry continuity.
 - [`storage_catalog/persistence.rs`](../src-tauri/src/storage_catalog/persistence.rs):
   independent bounded Library state, quarantine, target locks, and backups.
 - [`storage_catalog/resource_commands.rs`](../src-tauri/src/storage_catalog/resource_commands.rs):

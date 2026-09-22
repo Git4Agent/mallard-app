@@ -267,13 +267,17 @@ export interface ScopeBase {
   last_push_at?: number | null;
 }
 
+/**
+ * One sync scope against its reviewed base. A base reviewed in a history the
+ * storage no longer has is read as absent, so a cleared or recreated storage
+ * shows here as `fresh` or `unreviewed`, never as a state of its own.
+ */
 export type ScopeContinuity =
   | { state: "fresh" }
   | { state: "remote_missing"; base_revision: number }
   | { state: "unreviewed"; remote_revision: number }
   | { state: "in_sync"; revision: number }
-  | { state: "advanced"; base_revision: number; remote_revision: number }
-  | { state: "replaced"; base_revision: number; remote_revision: number };
+  | { state: "advanced"; base_revision: number; remote_revision: number };
 
 export interface ProjectStorageLink {
   managed_cloud_repository_id?: string | null;
@@ -947,6 +951,13 @@ export interface StorageConnectionChangedEvent {
   storage_id: string;
 }
 
+/** A push this computer had confirmed was outranked by another computer's
+ *  and rolled back on this link; pushing again publishes it. */
+export interface PushOutrankedEvent {
+  local_project_id: string;
+  storage_id: string;
+}
+
 export type ResourceSyncState =
   | "synced"
   | "local_only"
@@ -1056,17 +1067,6 @@ export type PushDestinationStatus =
   | {
     state: "ready";
     revision?: number;
-  }
-  | {
-    state: "remote_history_missing";
-    base_revision: number;
-  }
-  | {
-    state: "remote_history_replaced";
-    base_revision: number;
-    remote_revision: number;
-    base_manifest_sha256: string;
-    remote_manifest_sha256: string;
   }
   | {
     state: "requires_pull";

@@ -58,19 +58,21 @@ pub fn publish_with_head<S: ObjectStore>(
     request: PublishBundleRequest,
 ) -> Result<PublishedFixture, String> {
     let outcome = engine.publish(request)?;
+    let published = outcome.stored();
+    let snapshot = outcome.into_snapshot();
     let (_, head_token) = engine
-        .read_head(&outcome.snapshot.head.bundle_id)?
-        .ok_or_else(|| "published bundle has no authoritative head".to_string())?;
-    if head_token.revision != outcome.snapshot.head.revision
-        || head_token.commit_id != outcome.snapshot.head.commit_id
-        || head_token.manifest_sha256 != outcome.snapshot.head.manifest_sha256
-        || head_token.manifest_size != outcome.snapshot.head.manifest_size
+        .read_head(&snapshot.head.bundle_id)?
+        .ok_or_else(|| "published bundle has no selected publication".to_string())?;
+    if head_token.revision != snapshot.head.revision
+        || head_token.commit_id != snapshot.head.commit_id
+        || head_token.manifest_sha256 != snapshot.head.manifest_sha256
+        || head_token.manifest_size != snapshot.head.manifest_size
     {
-        return Err("published snapshot does not match authoritative head".to_string());
+        return Err("published snapshot does not match the selected publication".to_string());
     }
     Ok(PublishedFixture {
-        published: outcome.published,
-        snapshot: outcome.snapshot,
+        published,
+        snapshot,
         head_token,
     })
 }
@@ -133,7 +135,7 @@ impl VariantWorld {
         updated_at: u64,
     ) -> PublishedFixture {
         let engine = self.engine();
-        let current = engine.inspect_optional_with_token(&self.bundle_id).unwrap();
+        let current = engine.observe(&self.bundle_id).unwrap().current;
         let previous = current
             .as_ref()
             .map(|(snapshot, _)| snapshot.manifest.clone());

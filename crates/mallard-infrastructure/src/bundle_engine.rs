@@ -1,9 +1,10 @@
 //! Project-bundle storage, publication, fetch, restore planning, and apply.
 //!
 //! The engine operates on validated logical/store keys and a small object
-//! store trait. Its local implementation is complete; an S3 adapter can reuse
-//! the same immutable-object and head-CAS protocol without exposing UI paths
-//! to manifests.
+//! store trait. A provider needs three operations: write bytes at a key, read
+//! a key, list a prefix. There is no mutable head: every publish ends by
+//! writing one immutable record, and the current snapshot of a bundle is
+//! selected from the names of those records.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::payload::PayloadBytes;
 use crate::portable_resources::PortableResourceRegistry;
@@ -24,49 +25,94 @@ use mallard_domain::{
     self as domain, hex_lower, now_secs, sha256_hex, ActionId, ActionStatus, ApplyPolicyPrimitive,
     ApplyReceipt, BindingState, BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
-    CapturedWith, CloudThreadId, ConversationThread, LogicalPath, PlanId, PortableContractResolver,
-    PortableOrigin, ProjectBinding, ProjectFilePreservationPin, ProviderKey, ResolvedScope,
-    ResourceDescriptor, ResourceId, ResourceKindPrimitive, RestoreAction, RestoreActionKind,
-    RestorePlan, StorageId, SyncScopeKey, Tombstone, TombstoneTargetPrimitive, BUNDLE_SCHEMA,
-    RESTORE_PLAN_SCHEMA,
+    CapturedWith, CloudThreadId, ConversationThread, LogicalPath, Mainline, PlanId,
+    PortableContractResolver, PortableOrigin, ProjectBinding, ProjectFilePreservationPin,
+    ProviderKey, PublicationToken, RecordName, ResolvedScope, ResourceDescriptor, ResourceId,
+    ResourceKindPrimitive, RestoreAction, RestoreActionKind, RestorePlan, StorageId, SyncScopeKey,
+    Tombstone, TombstoneTargetPrimitive, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
 
+use crate::storage_core::publication::{
+    list_project_streams, list_stream, read_record, read_records, write_record, RecordStream,
+    REMOTE_CHANGED,
+};
 use crate::storage_core::{
     open_read_only_no_follow, parse_json_bytes, parse_json_reader, repository_object_key,
-    repository_tag_key, sha256_reader, validate_bundle_relative_object_key, CasExpectation,
-    CasOutcome, ExpectedObject, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, VerifiedBody,
-    HEAD_FILE, MAX_LIST_PAGE, REPOSITORY_TAGS_PREFIX,
+    sha256_reader, validate_bundle_relative_object_key, ExpectedObject, ObjectStore, StageOutcome,
+    VerifiedBody,
 };
 
-const MAX_BUNDLE_HEAD_BYTES: u64 = 64 * 1024;
-const MAX_BUNDLE_TAG_BYTES: u64 = 64 * 1024;
 const MAX_LISTED_BUNDLES: usize = 10_000;
 const DEFAULT_PLAN_LIFETIME_SECS: u64 = 24 * 60 * 60;
 
+/// The publication one observation selected: the coordinates of its manifest
+/// and the digest of its record. A publish names it as its parent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeadToken {
     pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
     pub manifest_size: u64,
-    pub etag: String,
+    pub record_sha256: String,
+}
+
+impl HeadToken {
+    fn publication(&self) -> Result<PublicationToken, String> {
+        PublicationToken::new(self.commit_id.clone(), self.record_sha256.clone())
+    }
+}
+
+/// What one listing of a bundle's stream established: the selected chain,
+/// the listed records that are kept and not selected, and the selected
+/// publication with its verified manifest.
+#[derive(Clone, Debug)]
+pub struct BundleObservation {
+    pub mainline: Mainline,
+    pub unselected: Vec<RecordName>,
+    pub current: Option<(BundleSnapshot, HeadToken)>,
+}
+
+impl BundleObservation {
+    pub fn snapshot(&self) -> Option<&BundleSnapshot> {
+        self.current.as_ref().map(|(snapshot, _)| snapshot)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublishExpectation {
     Absent,
-    /// The verified apply observation and its exact CAS token. It never
-    /// crosses the IPC or persistence boundary.
+    /// The verified apply observation and the publication it selected. It
+    /// never crosses the IPC or persistence boundary.
     Match(Box<BundleSnapshot>, HeadToken),
 }
 
 #[derive(Clone, Debug)]
-pub struct PublishedBundle {
-    /// False when the candidate manifest was semantically identical to the
-    /// observed head's: nothing was written and `snapshot` is the observed
-    /// revision's.
-    pub published: bool,
-    pub snapshot: BundleSnapshot,
+pub enum PublishedBundle {
+    /// The record was written and is the selected publication.
+    Stored { snapshot: BundleSnapshot },
+    /// The candidate manifest was semantically identical to the publication
+    /// it was compared to. Nothing was written and `snapshot` is that
+    /// publication's.
+    NoChange { snapshot: BundleSnapshot },
+}
+
+impl PublishedBundle {
+    pub fn snapshot(&self) -> &BundleSnapshot {
+        match self {
+            Self::Stored { snapshot } | Self::NoChange { snapshot } => snapshot,
+        }
+    }
+
+    pub fn into_snapshot(self) -> BundleSnapshot {
+        match self {
+            Self::Stored { snapshot } | Self::NoChange { snapshot } => snapshot,
+        }
+    }
+
+    /// Whether this publish wrote a record, which is then the selected one.
+    pub fn stored(&self) -> bool {
+        matches!(self, Self::Stored { .. })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -95,9 +141,9 @@ pub struct ScopePublishInput {
 
 /// A scoped publication. Only the named writable scopes may change; every
 /// other scope is carried from the verified current manifest with exactly
-/// the same revision and content digest (the mutation firewall). Apply reads
-/// the head once. Changed publication makes one CAS attempt; a no-op checks
-/// head freshness because it makes no write.
+/// the same revision and content digest (the mutation firewall). Apply
+/// observes the stream once. A changed publication ends in list-then-write;
+/// a no-op lists once more, because it makes no write that would.
 #[derive(Clone, Debug)]
 pub struct PublishBundleRequest {
     pub identity: BundleIdentity,
@@ -431,42 +477,167 @@ struct PlannedFile<'m> {
     outcome: PlannedOutcome,
 }
 
+/// The publication record: written last, and the only thing that publishes
+/// a snapshot. Its object name repeats its graph facts and carries the digest
+/// of these exact bytes, so it never contains its own digest, and whether it
+/// is current is derived from a listing, never stored.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 struct CommitRecord {
     schema_version: u32,
     bundle_id: BundleId,
     revision: u64,
     commit_id: String,
-    manifest_key: String,
-    manifest_sha256: String,
-    created_at: u64,
+    /// The parent's token. Both halves are absent for a first publication
+    /// and both present otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     previous_commit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_record_sha256: Option<String>,
+    /// UTC Unix milliseconds, taken when the record is built. It ranks
+    /// siblings and proves nothing about arrival order.
+    created_at_ms: u64,
+    manifest_key: String,
+    manifest_sha256: String,
+    manifest_size: u64,
     added_files: u64,
     changed_files: u64,
     removed_files: u64,
     published_by_origin: PortableOrigin,
+    summary: RecordSummary,
 }
 
-/// The discovery record for one bundle, rewritten on every successful
-/// publish. It carries every fact listing needs so discovery never reads
-/// heads or manifests; the facts are advisory as of the last publish that
-/// managed to write the tag — acting flows (link, connect, pull) always
-/// re-verify against the live head.
+/// Every fact bundle discovery shows, so discovery reads records and never
+/// manifests. It is exactly as fresh as its publication.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BundleTag {
-    pub schema_version: u32,
-    pub bundle_id: BundleId,
-    pub display_name: String,
-    pub kind: BundleKind,
-    pub revision: u64,
-    pub updated_at: u64,
-    pub resources: u64,
-    pub files: u64,
-    pub registration_only: bool,
-    pub providers: Vec<ProviderKey>,
+struct RecordSummary {
+    display_name: String,
+    kind: BundleKind,
+    resources: u64,
+    files: u64,
+    registration_only: bool,
+    providers: Vec<ProviderKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository_fingerprint: Option<String>,
+    repository_fingerprint: Option<String>,
+}
+
+fn manifest_relative_key(revision: u64, commit_id: &str) -> String {
+    format!("_manifests/{revision}-{commit_id}.json")
+}
+
+fn now_millis() -> Result<u64, String> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?;
+    u64::try_from(elapsed.as_millis()).map_err(|_| "system clock is out of range".to_string())
+}
+
+impl CommitRecord {
+    /// Build the record of `manifest` on `parent`, and its name.
+    fn build(
+        manifest: &BundleManifest,
+        manifest_bytes: &[u8],
+        parent: Option<&PublicationToken>,
+        file_delta: (u64, u64, u64),
+    ) -> Result<(RecordName, Vec<u8>), String> {
+        let created_at_ms = now_millis()?;
+        let (added_files, changed_files, removed_files) = file_delta;
+        let record = Self {
+            schema_version: BUNDLE_SCHEMA,
+            bundle_id: manifest.bundle.bundle_id.clone(),
+            revision: manifest.revision,
+            commit_id: manifest.commit_id.clone(),
+            previous_commit_id: parent.map(|parent| parent.commit_id().to_string()),
+            previous_record_sha256: parent.map(|parent| parent.record_sha256().to_string()),
+            created_at_ms,
+            manifest_key: manifest_relative_key(manifest.revision, &manifest.commit_id),
+            manifest_sha256: sha256_hex(manifest_bytes),
+            manifest_size: u64::try_from(manifest_bytes.len())
+                .map_err(|_| "serialized bundle manifest is too large".to_string())?,
+            added_files,
+            changed_files,
+            removed_files,
+            published_by_origin: manifest.published_by_origin.clone(),
+            summary: RecordSummary {
+                display_name: manifest.bundle.display_name.clone(),
+                kind: manifest.bundle.kind,
+                resources: manifest.all_resources().count() as u64,
+                files: manifest.all_files().count() as u64,
+                registration_only: manifest.is_registration_only(),
+                providers: manifest
+                    .provider_scopes()
+                    .map(|(provider, _)| provider.clone())
+                    .collect(),
+                repository_fingerprint: manifest.bundle.repository_fingerprint.clone(),
+            },
+        };
+        let bytes = serde_json::to_vec(&record)
+            .map_err(|error| format!("serialize publication record: {error}"))?;
+        let name = RecordName::new(
+            record.revision,
+            PublicationToken::new(record.commit_id.clone(), sha256_hex(&bytes))?,
+            parent.cloned(),
+            created_at_ms,
+        )?;
+        Ok((name, bytes))
+    }
+
+    /// Parse verified record bytes. A name is self-certifying: the bytes
+    /// already hash to the digest in it, and the fields must equal its facts.
+    fn parse(bundle_id: &BundleId, name: &RecordName, bytes: &[u8]) -> Result<Self, String> {
+        let record: Self = parse_json_bytes(bytes, "publication record")?;
+        let parent = match (&record.previous_commit_id, &record.previous_record_sha256) {
+            (None, None) => None,
+            (Some(commit_id), Some(record_sha256)) => Some(PublicationToken::new(
+                commit_id.clone(),
+                record_sha256.clone(),
+            )?),
+            _ => return Err("publication record names half a parent".to_string()),
+        };
+        if record.schema_version != BUNDLE_SCHEMA
+            || &record.bundle_id != bundle_id
+            || record.revision != name.revision()
+            || record.commit_id != name.commit_id()
+            || parent.as_ref() != name.parent()
+            || record.created_at_ms != name.created_at_ms()
+            || record.manifest_key != manifest_relative_key(record.revision, &record.commit_id)
+        {
+            return Err(format!(
+                "publication record '{}' of bundle '{}' disagrees with its name",
+                name.token(),
+                bundle_id
+            ));
+        }
+        record.published_by_origin.validate()?;
+        Ok(record)
+    }
+
+    /// The in-memory view of this record that every reader of
+    /// `snapshot.head` sees, field for field.
+    fn head(&self) -> Result<BundleHead, String> {
+        let head = BundleHead {
+            schema_version: self.schema_version,
+            bundle_id: self.bundle_id.clone(),
+            kind: self.summary.kind,
+            revision: self.revision,
+            commit_id: self.commit_id.clone(),
+            manifest_key: self.manifest_key.clone(),
+            manifest_sha256: self.manifest_sha256.clone(),
+            manifest_size: self.manifest_size,
+            updated_at: self.created_at_ms / 1000,
+        };
+        head.validate()?;
+        Ok(head)
+    }
+}
+
+fn head_token(head: &BundleHead, name: &RecordName) -> HeadToken {
+    HeadToken {
+        revision: head.revision,
+        commit_id: head.commit_id.clone(),
+        manifest_sha256: head.manifest_sha256.clone(),
+        manifest_size: head.manifest_size,
+        record_sha256: name.token().record_sha256().to_string(),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -492,8 +663,8 @@ pub struct BundleEngine<S> {
     /// scope and leave unresolvable ones preserved and inert.
     contracts: Arc<PortableResourceRegistry>,
     /// Verified immutable objects shared across operations: payload bodies
-    /// for planning and apply, and manifests for every read that is not a
-    /// continuity witness. `None` reads the store every time.
+    /// for planning and apply, and manifests. `None` reads the store every
+    /// time.
     object_cache: Option<Arc<ObjectCache>>,
 }
 
@@ -542,38 +713,116 @@ impl<S: ObjectStore> BundleEngine<S> {
         &self.storage_id
     }
 
+    /// Select, then read: list the bundle's stream, select from the names,
+    /// and read the selected record. An unchanged selection costs the one
+    /// listing; its record is already held by the store's process cache.
     pub fn read_head(
         &self,
         bundle_id: &BundleId,
     ) -> Result<Option<(BundleHead, HeadToken)>, String> {
-        let key = repository_object_key(bundle_id, HEAD_FILE)?;
-        let Some(stored) = self.store.get_metadata(&key, MAX_BUNDLE_HEAD_BYTES)? else {
-            return Ok(None);
-        };
-        let head: BundleHead = parse_json_bytes(&stored.bytes, "bundle head")?;
-        head.validate()?;
-        if &head.bundle_id != bundle_id {
-            return Err(format!(
-                "bundle head '{}' is stored under bundle '{}'",
-                head.bundle_id, bundle_id
-            ));
-        }
-        let token = HeadToken {
-            revision: head.revision,
-            commit_id: head.commit_id.clone(),
-            manifest_sha256: head.manifest_sha256.clone(),
-            manifest_size: head.manifest_size,
-            etag: stored.etag,
-        };
-        Ok(Some((head, token)))
+        list_stream(&self.store, &RecordStream::project(bundle_id)?)?
+            .into_mainline()
+            .selected()
+            .map(|name| self.read_head_at(bundle_id, name))
+            .transpose()
+    }
+
+    /// The head view of one listed publication. Reading health never changes
+    /// selection: a selected record that cannot be read or fails verification
+    /// is an error, never a reason to try another one.
+    fn read_head_at(
+        &self,
+        bundle_id: &BundleId,
+        name: &RecordName,
+    ) -> Result<(BundleHead, HeadToken), String> {
+        let bytes = read_record(&self.store, &RecordStream::project(bundle_id)?, name)?;
+        let head = CommitRecord::parse(bundle_id, name, &bytes)?.head()?;
+        let token = head_token(&head, name);
+        Ok((head, token))
+    }
+
+    /// One listed publication with its verified manifest: the selected one,
+    /// or an earlier one on the chain that a link is rolled back to.
+    pub fn snapshot_at(
+        &self,
+        bundle_id: &BundleId,
+        name: &RecordName,
+    ) -> Result<(BundleSnapshot, HeadToken), String> {
+        let (head, token) = self.read_head_at(bundle_id, name)?;
+        let manifest = self.read_manifest(&head)?;
+        Ok((
+            BundleSnapshot {
+                storage_id: self.storage_id.clone(),
+                head,
+                manifest,
+                fetched_at: now_secs(),
+            },
+            token,
+        ))
+    }
+
+    /// One observation of a bundle: the selected chain, the records that are
+    /// kept and not selected, and the selected publication with its verified
+    /// manifest. A command takes it once, classifies continuity from the
+    /// chain, and later hands the observed publication to `publish` as the
+    /// parent.
+    pub fn observe(&self, bundle_id: &BundleId) -> Result<BundleObservation, String> {
+        let (mainline, unselected) =
+            list_stream(&self.store, &RecordStream::project(bundle_id)?)?.into_selection();
+        let current = mainline
+            .selected()
+            .map(|name| self.snapshot_at(bundle_id, name))
+            .transpose()?;
+        Ok(BundleObservation {
+            mainline,
+            unselected,
+            current,
+        })
+    }
+
+    /// Put the manifest, then publish it with list-then-write. The record is
+    /// built once, held in memory, and never outlives this call: nothing is
+    /// journaled and nothing is resent after a restart.
+    fn store_publication(
+        &self,
+        manifest: BundleManifest,
+        parent: Option<&PublicationToken>,
+        file_delta: (u64, u64, u64),
+        fetched_at: u64,
+    ) -> Result<PublishedBundle, String> {
+        let bundle_id = manifest.bundle.bundle_id.clone();
+        let manifest_bytes = serde_json::to_vec(&manifest)
+            .map_err(|error| format!("serialize bundle manifest: {error}"))?;
+        let (name, record_bytes) =
+            CommitRecord::build(&manifest, &manifest_bytes, parent, file_delta)?;
+        let head = CommitRecord::parse(&bundle_id, &name, &record_bytes)?.head()?;
+        self.store.put_immutable(
+            &repository_object_key(&bundle_id, &head.manifest_key)?,
+            &manifest_bytes,
+        )?;
+        write_record(
+            &self.store,
+            &RecordStream::project(&bundle_id)?,
+            &name,
+            &record_bytes,
+        )?;
+        Ok(PublishedBundle::Stored {
+            snapshot: BundleSnapshot {
+                storage_id: self.storage_id.clone(),
+                head,
+                manifest,
+                fetched_at,
+            },
+        })
     }
 
     /// Publish the empty registration manifest that makes a just-linked
     /// bundle discoverable before its first push: revision 1, zero scopes,
     /// identity and repository fingerprint only. This can only create a
-    /// bundle, never advance one — an existing head (including one written
-    /// concurrently, observed as a CAS conflict) is returned as the no-op
-    /// outcome so registration is idempotent and race-safe.
+    /// bundle, never advance one: a stream that already selects a
+    /// publication, including one that lands while this one is being
+    /// written, is returned as the no-op outcome, so registration is
+    /// idempotent and race-safe.
     pub fn publish_registration(
         &self,
         identity: &BundleIdentity,
@@ -593,8 +842,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                 return Ok(None);
             };
             let manifest = self.read_manifest(&head)?;
-            Ok(Some(PublishedBundle {
-                published: false,
+            Ok(Some(PublishedBundle::NoChange {
                 snapshot: BundleSnapshot {
                     storage_id: self.storage_id.clone(),
                     head,
@@ -607,100 +855,39 @@ impl<S: ObjectStore> BundleEngine<S> {
             return Ok(existing);
         }
 
-        let revision = 1;
-        let commit_id = random_named_id("commit")?;
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA,
-            revision,
-            commit_id: commit_id.clone(),
+            revision: 1,
+            commit_id: random_named_id("commit")?,
             updated_at,
             bundle: identity.clone(),
             published_by_origin: published_by_origin.clone(),
             scopes: BTreeMap::new(),
         };
         manifest.validate()?;
-        let manifest_bytes = serde_json::to_vec(&manifest)
-            .map_err(|error| format!("serialize registration manifest: {error}"))?;
-        let manifest_size = u64::try_from(manifest_bytes.len())
-            .map_err(|_| "serialized registration manifest is too large".to_string())?;
-        let manifest_sha256 = sha256_hex(&manifest_bytes);
-        let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
-        let manifest_key = repository_object_key(&identity.bundle_id, &manifest_relative_key)?;
-
-        let commit = CommitRecord {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: identity.bundle_id.clone(),
-            revision,
-            commit_id: commit_id.clone(),
-            manifest_key: manifest_relative_key.clone(),
-            manifest_sha256: manifest_sha256.clone(),
-            created_at: updated_at,
-            previous_commit_id: None,
-            added_files: 0,
-            changed_files: 0,
-            removed_files: 0,
-            published_by_origin: published_by_origin.clone(),
-        };
-        let commit_bytes = serde_json::to_vec(&commit)
-            .map_err(|error| format!("serialize registration commit: {error}"))?;
-        let commit_key = repository_object_key(
-            &identity.bundle_id,
-            &format!("_commits/{}-{}.json", revision, commit_id),
-        )?;
-        self.write_manifest_and_commit(manifest_key, manifest_bytes, commit_key, commit_bytes)?;
-
-        let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: identity.bundle_id.clone(),
-            kind: identity.kind,
-            revision,
-            commit_id,
-            manifest_key: manifest_relative_key,
-            manifest_sha256,
-            manifest_size,
-            updated_at,
-        };
-        head.validate()?;
-        let head_bytes = serde_json::to_vec(&head)
-            .map_err(|error| format!("serialize registration head: {error}"))?;
-        let head_key = repository_object_key(&identity.bundle_id, HEAD_FILE)?;
-        match self
-            .store
-            .compare_and_swap(&head_key, &CasExpectation::Absent, &head_bytes)?
-        {
-            CasOutcome::Written { .. } => {
-                let _ = self.publish_tag(&manifest);
-                Ok(PublishedBundle {
-                    published: true,
-                    snapshot: BundleSnapshot {
-                        storage_id: self.storage_id.clone(),
-                        head,
-                        manifest,
-                        fetched_at: updated_at,
-                    },
-                })
-            }
-            CasOutcome::Conflict { .. } => established(updated_at)?.ok_or_else(|| {
-                "bundle head disappeared during registration; the repository was removed"
+        match self.store_publication(manifest, None, (0, 0, 0), updated_at) {
+            Err(error) if error == REMOTE_CHANGED => established(updated_at)?.ok_or_else(|| {
+                "bundle publications disappeared during registration; the repository was removed"
                     .to_string()
             }),
+            outcome => outcome,
         }
     }
 
     /// Publish one complete reviewed bundle snapshot. The caller supplies the
     /// live resource and conversation sets; the engine enforces retention
     /// against the previous hash-verified manifest, skips true no-ops, and
-    /// advances the head only through compare-and-swap. Uploads carry their
-    /// sha256 checksum so the accepted PUT is the verification receipt;
-    /// publish downloads nothing back.
+    /// publishes only by writing the record last, with list-then-write.
+    /// Uploads carry their sha256 checksum so the accepted PUT is the
+    /// verification receipt; publish downloads nothing back.
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish(&self, request: PublishBundleRequest) -> Result<PublishedBundle, String> {
         self.publish_with_progress(request, &mut |_| {}, &mut |_, _| {})
     }
 
-    /// `on_phase` receives one timing per publish stage — head read,
-    /// manifest build, uploads, immutable writes, head swing — so callers
-    /// can log where a slow Push actually spends its time.
+    /// `on_phase` receives one timing per publish stage — observation check,
+    /// manifest build, uploads, manifest and record writes — so callers can
+    /// log where a slow Push actually spends its time.
     pub fn publish_with_progress(
         &self,
         mut request: PublishBundleRequest,
@@ -737,8 +924,9 @@ impl<S: ObjectStore> BundleEngine<S> {
             }
         }
 
-        // Apply owns the live read. A later publisher must lose at CAS, never
-        // silently replace the manifest used for the apply-time checks.
+        // Apply owns the live observation. The record names it as its parent,
+        // so a publisher that lists another selection stops at the record
+        // write and never replaces the manifest used for the apply-time checks.
         let (current, previous_manifest) = match request.expected_head {
             PublishExpectation::Absent => (None, None),
             PublishExpectation::Match(snapshot, token) => {
@@ -750,10 +938,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                     || head.commit_id != token.commit_id
                     || head.manifest_sha256 != token.manifest_sha256
                     || head.manifest_size != token.manifest_size
-                    || token.etag.is_empty()
                 {
                     return Err("publication snapshot and head token do not match".to_string());
                 }
+                token.publication()?;
                 let bytes = serde_json::to_vec(&snapshot.manifest)
                     .map_err(|error| format!("serialize observed manifest: {error}"))?;
                 if bytes.len() as u64 != head.manifest_size
@@ -923,19 +1111,24 @@ impl<S: ObjectStore> BundleEngine<S> {
                 let (head, token) = current
                     .as_ref()
                     .expect("a semantic noop requires a current head");
-                // No write means no CAS. Prove freshness before issuing a receipt.
+                // No write means no list-then-write. Prove with one listing
+                // that the compared publication is still the selected one
+                // before issuing a receipt for it.
                 let phase_started = Instant::now();
-                if self
-                    .read_head(&request.identity.bundle_id)?
-                    .as_ref()
-                    .map(|(_, token)| token)
-                    != Some(token)
+                let stream = RecordStream::project(&request.identity.bundle_id)?;
+                if list_stream(&self.store, &stream)?
+                    .mainline()
+                    .selected()
+                    .map(RecordName::token)
+                    != Some(&token.publication()?)
                 {
-                    return Err("bundle head changed; compare again before pushing".to_string());
+                    return Err(REMOTE_CHANGED.to_string());
                 }
-                on_phase("publish: verify unchanged head", phase_started.elapsed());
-                return Ok(PublishedBundle {
-                    published: false,
+                on_phase(
+                    "publish: verify unchanged selection",
+                    phase_started.elapsed(),
+                );
+                return Ok(PublishedBundle::NoChange {
                     snapshot: BundleSnapshot {
                         storage_id: self.storage_id.clone(),
                         head: head.clone(),
@@ -950,11 +1143,10 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .as_ref()
                 .map(|(head, _)| head.revision.saturating_add(1))
                 .unwrap_or(1);
-            let commit_id = random_named_id("commit")?;
             let manifest = BundleManifest {
                 schema_version: BUNDLE_SCHEMA,
                 revision,
-                commit_id: commit_id.clone(),
+                commit_id: random_named_id("commit")?,
                 updated_at: request.updated_at,
                 bundle: request.identity.clone(),
                 published_by_origin: request.published_by_origin.clone(),
@@ -974,7 +1166,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             // The final mutation firewall at the request boundary: a
             // publication may change only scopes named by the reviewed
             // writable-scope set. Every other scope must retain its exact
-            // revision and content digest from the CAS input manifest.
+            // revision and content digest from the parent's manifest.
             if let Some(previous) = &previous_manifest {
                 for (scope_key, previous_scope) in &previous.scopes {
                     if request.writable_scopes.contains_key(scope_key) {
@@ -1046,87 +1238,18 @@ impl<S: ObjectStore> BundleEngine<S> {
             on_phase("publish: upload objects", phase_started.elapsed());
 
             let phase_started = Instant::now();
-            let manifest_bytes = serde_json::to_vec(&manifest)
-                .map_err(|error| format!("serialize bundle manifest: {error}"))?;
-            let manifest_size = u64::try_from(manifest_bytes.len())
-                .map_err(|_| "serialized bundle manifest is too large".to_string())?;
-            let manifest_sha256 = sha256_hex(&manifest_bytes);
-            let manifest_relative_key = format!("_manifests/{}-{}.json", revision, commit_id);
-            let manifest_key =
-                repository_object_key(&request.identity.bundle_id, &manifest_relative_key)?;
-
-            let (added_files, changed_files, removed_files) =
-                file_delta(previous_manifest.as_ref(), &manifest);
-            let commit = CommitRecord {
-                schema_version: BUNDLE_SCHEMA,
-                bundle_id: request.identity.bundle_id.clone(),
-                revision,
-                commit_id: commit_id.clone(),
-                manifest_key: manifest_relative_key.clone(),
-                manifest_sha256: manifest_sha256.clone(),
-                created_at: request.updated_at,
-                previous_commit_id: current.as_ref().map(|(head, _)| head.commit_id.clone()),
-                added_files,
-                changed_files,
-                removed_files,
-                published_by_origin: request.published_by_origin.clone(),
-            };
-            let commit_bytes = serde_json::to_vec(&commit)
-                .map_err(|error| format!("serialize bundle commit: {error}"))?;
-            let commit_key = repository_object_key(
-                &request.identity.bundle_id,
-                &format!("_commits/{}-{}.json", revision, commit_id),
-            )?;
-            self.write_manifest_and_commit(manifest_key, manifest_bytes, commit_key, commit_bytes)?;
+            let parent = current
+                .as_ref()
+                .map(|(_, token)| token.publication())
+                .transpose()?;
+            let delta = file_delta(previous_manifest.as_ref(), &manifest);
+            let published =
+                self.store_publication(manifest, parent.as_ref(), delta, request.updated_at);
             on_phase(
-                "publish: write manifest and commit",
+                "publish: write manifest and record",
                 phase_started.elapsed(),
             );
-
-            let phase_started = Instant::now();
-            let head = BundleHead {
-                schema_version: BUNDLE_SCHEMA,
-                bundle_id: request.identity.bundle_id.clone(),
-                kind: request.identity.kind,
-                revision,
-                commit_id,
-                manifest_key: manifest_relative_key,
-                manifest_sha256,
-                manifest_size,
-                updated_at: request.updated_at,
-            };
-            head.validate()?;
-            let head_bytes = serde_json::to_vec(&head)
-                .map_err(|error| format!("serialize bundle head: {error}"))?;
-            let head_key = repository_object_key(&request.identity.bundle_id, HEAD_FILE)?;
-            let cas_expectation = match &current {
-                Some((_, token)) => CasExpectation::Match(token.etag.clone()),
-                None => CasExpectation::Absent,
-            };
-            match self
-                .store
-                .compare_and_swap(&head_key, &cas_expectation, &head_bytes)?
-            {
-                CasOutcome::Written { .. } => {
-                    on_phase("publish: head CAS", phase_started.elapsed());
-                    let phase_started = Instant::now();
-                    let _ = self.publish_tag(&manifest);
-                    on_phase("publish: update tag", phase_started.elapsed());
-                    Ok(PublishedBundle {
-                        published: true,
-                        snapshot: BundleSnapshot {
-                            storage_id: self.storage_id.clone(),
-                            head: head.clone(),
-                            manifest,
-                            fetched_at: request.updated_at,
-                        },
-                    })
-                }
-                CasOutcome::Conflict { .. } => {
-                    on_phase("publish: head CAS conflict", phase_started.elapsed());
-                    Err("bundle head CAS conflict; compare again before pushing".to_string())
-                }
-            }
+            published
         }
     }
 
@@ -1146,9 +1269,10 @@ impl<S: ObjectStore> BundleEngine<S> {
         }
     }
 
-    /// Verify a bundle's mutable head and immutable manifest without loading
-    /// payload objects. Discovery uses this to match repository identities
-    /// without downloading every session or project file in a storage.
+    /// Verify a bundle's selected publication and its immutable manifest
+    /// without loading payload objects. Discovery uses this to match
+    /// repository identities without downloading every session or project
+    /// file in a storage.
     pub fn inspect(&self, bundle_id: &BundleId) -> Result<BundleSnapshot, String> {
         self.inspect_optional(bundle_id)?
             .ok_or_else(|| format!("bundle '{}' does not exist", bundle_id))
@@ -1158,30 +1282,9 @@ impl<S: ObjectStore> BundleEngine<S> {
     /// linked destination is a valid state rather than an error.
     pub fn inspect_optional(&self, bundle_id: &BundleId) -> Result<Option<BundleSnapshot>, String> {
         Ok(self
-            .inspect_optional_with_token(bundle_id)?
+            .observe(bundle_id)?
+            .current
             .map(|(snapshot, _)| snapshot))
-    }
-
-    /// `inspect_optional` that also returns the head token, so a command can
-    /// take one remote snapshot and later hand the observed head to `publish`
-    /// without a second read.
-    pub fn inspect_optional_with_token(
-        &self,
-        bundle_id: &BundleId,
-    ) -> Result<Option<(BundleSnapshot, HeadToken)>, String> {
-        let Some((head, token)) = self.read_head(bundle_id)? else {
-            return Ok(None);
-        };
-        let manifest = self.read_manifest(&head)?;
-        Ok(Some((
-            BundleSnapshot {
-                storage_id: self.storage_id.clone(),
-                head,
-                manifest,
-                fetched_at: now_secs(),
-            },
-            token,
-        )))
     }
 
     /// Load one immutable historical manifest using the coordinates retained
@@ -1199,28 +1302,23 @@ impl<S: ObjectStore> BundleEngine<S> {
         if manifest_size == 0 {
             return Err("historical manifest size must be nonzero".to_string());
         }
-        let relative_key = format!("_manifests/{revision}-{commit_id}.json");
-        let body = match self.manifest_body(
-            bundle_id,
-            &relative_key,
-            manifest_size,
-            manifest_sha256,
-            false,
-        )? {
-            StageOutcome::Missing => {
-                return Err(format!(
-                    "bundle manifest '{}' is missing",
-                    repository_object_key(bundle_id, &relative_key)?
-                ))
-            }
-            StageOutcome::Mismatch => {
-                return Err(format!(
-                    "bundle manifest '{}' failed verification",
-                    repository_object_key(bundle_id, &relative_key)?
-                ))
-            }
-            StageOutcome::Verified(body) => body,
-        };
+        let relative_key = manifest_relative_key(revision, commit_id);
+        let body =
+            match self.manifest_body(bundle_id, &relative_key, manifest_size, manifest_sha256)? {
+                StageOutcome::Missing => {
+                    return Err(format!(
+                        "bundle manifest '{}' is missing",
+                        repository_object_key(bundle_id, &relative_key)?
+                    ))
+                }
+                StageOutcome::Mismatch => {
+                    return Err(format!(
+                        "bundle manifest '{}' failed verification",
+                        repository_object_key(bundle_id, &relative_key)?
+                    ))
+                }
+                StageOutcome::Verified(body) => body,
+            };
         let manifest: BundleManifest = parse_json_reader(body.open()?, "bundle manifest")?;
         manifest.validate()?;
         if &manifest.bundle.bundle_id != bundle_id
@@ -1232,109 +1330,50 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(manifest)
     }
 
-    /// Continuity probe (DESIGN_REMOTE_HISTORY_CONTINUITY.md): report whether
-    /// the immutable manifest named by a reviewed base is still present in
-    /// the store with exactly the recorded digest. This reads the store
-    /// directly — never an object cache — because the answer must witness the
-    /// remote repository, not a local copy of bytes it once held. `Ok(None)`
-    /// covers both an absent key and bytes that no longer reproduce the
-    /// digest; transport failures stay errors so the caller classifies
-    /// continuity as unknown instead of guessing.
-    pub fn fetch_manifest_version_optional(
-        &self,
-        bundle_id: &BundleId,
-        revision: u64,
-        commit_id: &str,
-        manifest_size: u64,
-        manifest_sha256: &str,
-    ) -> Result<Option<BundleManifest>, String> {
-        domain::validate_sha256("historical manifest", manifest_sha256)?;
-        if manifest_size == 0 {
-            return Err("historical manifest size must be nonzero".to_string());
-        }
-        let relative_key = format!("_manifests/{revision}-{commit_id}.json");
-        let body = match self.manifest_body(
-            bundle_id,
-            &relative_key,
-            manifest_size,
-            manifest_sha256,
-            true,
-        )? {
-            StageOutcome::Missing | StageOutcome::Mismatch => return Ok(None),
-            StageOutcome::Verified(body) => body,
-        };
-        let manifest: BundleManifest = parse_json_reader(body.open()?, "bundle manifest")?;
-        manifest.validate()?;
-        if &manifest.bundle.bundle_id != bundle_id
-            || manifest.revision != revision
-            || manifest.commit_id != commit_id
-        {
-            return Err("historical manifest coordinates do not match its contents".to_string());
-        }
-        Ok(Some(manifest))
-    }
-
-    /// One-pass remote discovery over the flat tag namespace, sorted by
-    /// bundle ID. Cost scales with bundle count, never with payload objects;
-    /// tag reads go through the store's bounded-concurrency metadata fetch.
+    /// One-pass remote discovery over the flat record namespace, sorted by
+    /// bundle ID: one listing of every project stream's record names, each
+    /// stream selected from them, and the selected records read through the
+    /// store's bounded-concurrency metadata fetch. No payload key is listed
+    /// and no manifest is read; the rows come from each record's summary.
     pub fn list_remote_bundles(&self) -> Result<Vec<RemoteBundleSummary>, String> {
-        let prefix = ObjectPrefix::parse(REPOSITORY_TAGS_PREFIX)?;
-        let mut tag_keys = Vec::new();
-        let mut object_cursor = None;
-        loop {
-            let page = self
-                .store
-                .list(&prefix, object_cursor.as_deref(), MAX_LIST_PAGE)?;
-            tag_keys.extend(page.entries.into_iter().map(|entry| entry.key));
-            if tag_keys.len() > MAX_LISTED_BUNDLES {
+        let mut requests = Vec::new();
+        for (bundle_id, mainline) in list_project_streams(&self.store)? {
+            if let Some(name) = mainline.selected() {
+                requests.push((RecordStream::project(&bundle_id)?, name.clone(), bundle_id));
+            }
+            if requests.len() > MAX_LISTED_BUNDLES {
                 return Err(format!(
                     "remote bundle listing exceeds the {}-bundle safety limit",
                     MAX_LISTED_BUNDLES
                 ));
             }
-            let Some(next) = page.next_cursor else {
-                break;
-            };
-            object_cursor = Some(next);
         }
-
-        let stored_tags = self
-            .store
-            .get_metadata_many(&tag_keys, MAX_BUNDLE_TAG_BYTES)?;
-        let mut summaries = Vec::with_capacity(tag_keys.len());
-        for (key, stored) in tag_keys.iter().zip(stored_tags) {
-            let Some(bundle_component) = key
-                .as_str()
-                .strip_prefix(&format!("{}/", REPOSITORY_TAGS_PREFIX))
-                .and_then(|rest| rest.strip_suffix(".json"))
-            else {
-                return Err(format!(
-                    "unexpected object '{}' in the bundle tag namespace",
-                    key
-                ));
-            };
-            let bundle_id = BundleId::parse(bundle_component.to_string())?;
-            let stored =
-                stored.ok_or_else(|| format!("listed bundle tag '{}' disappeared", key))?;
-            let tag: BundleTag = parse_json_bytes(&stored.bytes, "bundle tag")?;
-            if tag.schema_version != BUNDLE_SCHEMA || tag.bundle_id != bundle_id {
-                return Err(format!("bundle tag '{}' has inconsistent identity", key));
-            }
-            summaries.push(RemoteBundleSummary {
-                bundle_id: tag.bundle_id,
-                display_name: tag.display_name,
-                kind: tag.kind,
-                revision: tag.revision,
-                updated_at: tag.updated_at,
-                resources: tag.resources,
-                files: tag.files,
-                registration_only: tag.registration_only,
-                providers: tag.providers,
-                repository_fingerprint: tag.repository_fingerprint,
-            });
-        }
-        summaries.sort_by(|a, b| a.bundle_id.cmp(&b.bundle_id));
-        Ok(summaries)
+        let records = read_records(
+            &self.store,
+            &requests
+                .iter()
+                .map(|(stream, name, _)| (stream.clone(), name.clone()))
+                .collect::<Vec<_>>(),
+        )?;
+        requests
+            .iter()
+            .zip(records)
+            .map(|((_, name, bundle_id), bytes)| {
+                let record = CommitRecord::parse(bundle_id, name, &bytes)?;
+                Ok(RemoteBundleSummary {
+                    bundle_id: record.bundle_id,
+                    display_name: record.summary.display_name,
+                    kind: record.summary.kind,
+                    revision: record.revision,
+                    updated_at: record.created_at_ms / 1000,
+                    resources: record.summary.resources,
+                    files: record.summary.files,
+                    registration_only: record.summary.registration_only,
+                    providers: record.summary.providers,
+                    repository_fingerprint: record.summary.repository_fingerprint,
+                })
+            })
+            .collect()
     }
 
     /// Build a restore plan from a verified current-schema manifest.
@@ -1718,27 +1757,6 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(plan)
     }
 
-    /// One immutable batch for the two publication records: a remote store
-    /// commits both in one window, and neither is visible until the head
-    /// swings. Outcomes are not inspected beyond their count; an identical
-    /// object already present under either key satisfies the write.
-    fn write_manifest_and_commit(
-        &self,
-        manifest_key: ObjectKey,
-        manifest_bytes: Vec<u8>,
-        commit_key: ObjectKey,
-        commit_bytes: Vec<u8>,
-    ) -> Result<(), String> {
-        let written = self.store.put_many(vec![
-            (manifest_key, Bytes::from(manifest_bytes)),
-            (commit_key, Bytes::from(commit_bytes)),
-        ])?;
-        if written.len() != 2 {
-            return Err("manifest and commit batch returned the wrong outcome count".to_string());
-        }
-        Ok(())
-    }
-
     fn read_manifest(&self, head: &BundleHead) -> Result<BundleManifest, String> {
         head.validate()?;
         let body = match self.manifest_body(
@@ -1746,7 +1764,6 @@ impl<S: ObjectStore> BundleEngine<S> {
             &head.manifest_key,
             head.manifest_size,
             &head.manifest_sha256,
-            false,
         )? {
             StageOutcome::Missing => {
                 return Err(format!(
@@ -1767,17 +1784,15 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(manifest)
     }
 
-    /// Verified bytes of one immutable manifest object. A fresh head names
-    /// its manifest by digest, so a digest-verified copy in the object cache
-    /// is that manifest. `witness` bypasses the cache for reads that must
-    /// observe the remote repository itself; they share what they verified.
+    /// Verified bytes of one immutable manifest object. A record names its
+    /// manifest by digest, so a digest-verified copy in the object cache is
+    /// that manifest.
     fn manifest_body(
         &self,
         bundle_id: &BundleId,
         relative_key: &str,
         size: u64,
         sha256: &str,
-        witness: bool,
     ) -> Result<StageOutcome, String> {
         validate_bundle_relative_object_key(relative_key)?;
         let key = repository_object_key(bundle_id, relative_key)?;
@@ -1787,14 +1802,12 @@ impl<S: ObjectStore> BundleEngine<S> {
             sha256: sha256.to_string(),
             size,
         };
-        if !witness {
-            if let Some(hit) = self
-                .object_cache
-                .as_ref()
-                .and_then(|cache| cache.get(&cache_key))
-            {
-                return Ok(StageOutcome::Verified(hit));
-            }
+        if let Some(hit) = self
+            .object_cache
+            .as_ref()
+            .and_then(|cache| cache.get(&cache_key))
+        {
+            return Ok(StageOutcome::Verified(hit));
         }
         let outcome = self.store.stage_verified(
             &key,
@@ -1807,40 +1820,6 @@ impl<S: ObjectStore> BundleEngine<S> {
             cache.insert(cache_key, body.clone());
         }
         Ok(outcome)
-    }
-
-    fn publish_tag(&self, manifest: &BundleManifest) -> Result<(), String> {
-        let tag = BundleTag {
-            schema_version: manifest.schema_version,
-            bundle_id: manifest.bundle.bundle_id.clone(),
-            display_name: manifest.bundle.display_name.clone(),
-            kind: manifest.bundle.kind,
-            revision: manifest.revision,
-            updated_at: manifest.updated_at,
-            resources: manifest.all_resources().count() as u64,
-            files: manifest.all_files().count() as u64,
-            registration_only: manifest.is_registration_only(),
-            providers: manifest
-                .provider_scopes()
-                .map(|(provider, _)| provider.clone())
-                .collect(),
-            repository_fingerprint: manifest.bundle.repository_fingerprint.clone(),
-        };
-        let bytes = serde_json::to_vec(&tag).map_err(|e| format!("serialize bundle tag: {}", e))?;
-        let key = repository_tag_key(&manifest.bundle.bundle_id)?;
-        for _ in 0..4 {
-            let expectation = match self.store.get_metadata(&key, MAX_BUNDLE_TAG_BYTES)? {
-                Some(existing) => CasExpectation::Match(existing.etag),
-                None => CasExpectation::Absent,
-            };
-            if matches!(
-                self.store.compare_and_swap(&key, &expectation, &bytes)?,
-                CasOutcome::Written { .. }
-            ) {
-                return Ok(());
-            }
-        }
-        Err("bundle tag CAS remained contended after publication".to_string())
     }
 
     fn validate_binding(
@@ -1906,9 +1885,11 @@ mod tests {
     use crate::provider_capture::{
         capture_recipe, discover_project, domain_resources, CaptureRequest,
     };
+    use crate::storage_core::plain_store::PlainStore;
     use crate::storage_core::{
-        DeleteOutcome, ImmutablePutOutcome, LocalObjectStore, ObjectKey, StoreListPage,
-        StoredMetadata, REPOSITORY_PREFIX, STORAGE_MARKER_KEY,
+        DeleteOutcome, ImmutablePutOutcome, LocalObjectStore, ObjectKey, ObjectPrefix,
+        StoreKeyPage, StoreListPage, StoredMetadata, REPOSITORY_COMMITS_PREFIX, REPOSITORY_PREFIX,
+        STORAGE_MARKER_KEY,
     };
     use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId};
 
@@ -2306,10 +2287,67 @@ mod tests {
         )
     }
 
-    #[test]
-    fn current_manifest_read_enforces_the_head_manifest_size() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
+    /// The selected record of `id`, as stored.
+    fn selected_record<S: ObjectStore>(
+        engine: &BundleEngine<S>,
+        id: &BundleId,
+    ) -> (RecordName, CommitRecord) {
+        let stream = RecordStream::project(id).unwrap();
+        let name = list_stream(engine.store(), &stream)
+            .unwrap()
+            .mainline()
+            .selected()
+            .cloned()
+            .expect("the bundle has a selected publication");
+        let bytes = read_record(engine.store(), &stream, &name).unwrap();
+        let record = CommitRecord::parse(id, &name, &bytes).unwrap();
+        (name, record)
+    }
+
+    /// Write a hand-built record straight to its key, as a writer that skips
+    /// list-then-write would. `created_at_ms` is the fact its name states.
+    fn plant_record<S: ObjectStore>(
+        store: &S,
+        record: &CommitRecord,
+        created_at_ms: u64,
+    ) -> RecordName {
+        let bytes = serde_json::to_vec(record).unwrap();
+        let parent = record.previous_commit_id.as_ref().map(|commit_id| {
+            PublicationToken::new(
+                commit_id.clone(),
+                record.previous_record_sha256.clone().unwrap(),
+            )
+            .unwrap()
+        });
+        let name = RecordName::new(
+            record.revision,
+            PublicationToken::new(record.commit_id.clone(), sha256_hex(&bytes)).unwrap(),
+            parent,
+            created_at_ms,
+        )
+        .unwrap();
+        let key = RecordStream::project(&record.bundle_id)
+            .unwrap()
+            .key(&name)
+            .unwrap();
+        store.put_record(&key, &bytes).unwrap();
+        name
+    }
+
+    /// A hand-built child of `parent`. Its manifest is not written.
+    fn child_record(parent: &(RecordName, CommitRecord), commit: u8) -> CommitRecord {
+        let mut child = parent.1.clone();
+        child.revision += 1;
+        child.commit_id = format!("commit-{}", format!("{commit:02x}").repeat(12));
+        child.manifest_key = manifest_relative_key(child.revision, &child.commit_id);
+        child.previous_commit_id = Some(parent.0.commit_id().to_string());
+        child.previous_record_sha256 = Some(parent.0.token().record_sha256().to_string());
+        child.created_at_ms += 1;
+        child
+    }
+
+    fn published_project(root: &Path, id: &BundleId) -> BundleEngine<LocalObjectStore> {
+        let project = root.join("project");
         fs::create_dir_all(&project).unwrap();
         write(&project.join("CLAUDE.md"), b"portable guidance");
         let mut request = CaptureRequest::for_project(&project);
@@ -2321,28 +2359,134 @@ mod tests {
                 .iter()
                 .map(|resource| resource.resource_id.clone()),
         );
-        let id = bundle_id(91);
-        let store_root = temp.path().join("store");
-        let engine =
-            BundleEngine::open(LocalObjectStore::open(&store_root).unwrap(), storage_id()).unwrap();
+        let engine = BundleEngine::open(
+            LocalObjectStore::open(root.join("store")).unwrap(),
+            storage_id(),
+        )
+        .unwrap();
         publish_captured(
             &engine,
-            identity(id.clone(), "Sized manifest"),
+            identity(id.clone(), "Recorded"),
             &recipe,
             &capture_recipe(registry(), &request, &recipe).unwrap(),
             None,
             10,
         )
         .unwrap();
+        engine
+    }
 
-        let head_path = store_root
+    #[test]
+    fn the_head_is_the_selected_record_field_for_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = bundle_id(91);
+        let engine = published_project(temp.path(), &id);
+        let (name, record) = selected_record(&engine, &id);
+        let (head, token) = engine.read_head(&id).unwrap().unwrap();
+        assert_eq!(
+            head,
+            BundleHead {
+                schema_version: record.schema_version,
+                bundle_id: record.bundle_id.clone(),
+                kind: record.summary.kind,
+                revision: record.revision,
+                commit_id: record.commit_id.clone(),
+                manifest_key: record.manifest_key.clone(),
+                manifest_sha256: record.manifest_sha256.clone(),
+                manifest_size: record.manifest_size,
+                updated_at: record.created_at_ms / 1000,
+            }
+        );
+        assert_eq!(token.publication().unwrap(), *name.token());
+        assert_eq!(engine.inspect(&id).unwrap().head, head);
+        assert_eq!(
+            (record.previous_commit_id, record.previous_record_sha256),
+            (None, None)
+        );
+        assert!(!record.summary.registration_only);
+        assert_eq!((record.summary.resources, record.summary.files), (1, 1));
+        assert_eq!(record.created_at_ms, name.created_at_ms());
+    }
+
+    #[test]
+    fn a_selected_record_that_fails_verification_is_an_error_and_selection_does_not_move() {
+        // The record's manifest size is enforced, as the stored head's was.
+        let temp = tempfile::tempdir().unwrap();
+        let id = bundle_id(92);
+        let engine = published_project(temp.path(), &id);
+        let first = selected_record(&engine, &id);
+        let mut wrong_size = child_record(&first, 2);
+        let manifest_bytes = fs::read(
+            temp.path()
+                .join("store")
+                .join(REPOSITORY_PREFIX)
+                .join(id.as_str())
+                .join(&first.1.manifest_key),
+        )
+        .unwrap();
+        engine
+            .store()
+            .put_immutable(
+                &repository_object_key(&id, &wrong_size.manifest_key).unwrap(),
+                &manifest_bytes,
+            )
+            .unwrap();
+        wrong_size.manifest_size += 1;
+        plant_record(engine.store(), &wrong_size, wrong_size.created_at_ms);
+        let error = engine.inspect(&id).unwrap_err();
+        assert!(error.contains("failed verification"), "{error}");
+
+        // Fields that disagree with the name's facts.
+        let temp = tempfile::tempdir().unwrap();
+        let engine = published_project(temp.path(), &id);
+        let first = selected_record(&engine, &id);
+        let renamed = child_record(&first, 3);
+        let name = plant_record(engine.store(), &renamed, renamed.created_at_ms + 5);
+        let error = engine.read_head(&id).unwrap_err();
+        assert!(error.contains("disagrees with its name"), "{error}");
+        // The first publication still reads, and is still not selected.
+        let stream = RecordStream::project(&id).unwrap();
+        assert_eq!(
+            list_stream(engine.store(), &stream)
+                .unwrap()
+                .mainline()
+                .selected(),
+            Some(&name)
+        );
+        assert!(engine.inspect_optional(&id).is_err());
+
+        // Bytes that do not hash to the digest in the name.
+        let temp = tempfile::tempdir().unwrap();
+        let engine = published_project(temp.path(), &id);
+        let (name, _) = selected_record(&engine, &id);
+        let path = temp
+            .path()
+            .join("store")
+            .join(REPOSITORY_COMMITS_PREFIX)
+            .join(id.as_str())
+            .join(name.file_name());
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.push(b' ');
+        fs::write(&path, bytes).unwrap();
+        let error = engine.inspect(&id).unwrap_err();
+        assert!(
+            error.contains("does not match the digest in its name"),
+            "{error}"
+        );
+
+        // A manifest that does not match the record fails the read too.
+        let temp = tempfile::tempdir().unwrap();
+        let engine = published_project(temp.path(), &id);
+        let (_, record) = selected_record(&engine, &id);
+        let manifest_path = temp
+            .path()
+            .join("store")
             .join(REPOSITORY_PREFIX)
             .join(id.as_str())
-            .join(HEAD_FILE);
-        let mut head: BundleHead = serde_json::from_slice(&fs::read(&head_path).unwrap()).unwrap();
-        head.manifest_size += 1;
-        fs::write(&head_path, serde_json::to_vec(&head).unwrap()).unwrap();
-
+            .join(&record.manifest_key);
+        let mut manifest = fs::read(&manifest_path).unwrap();
+        manifest.push(b' ');
+        fs::write(&manifest_path, manifest).unwrap();
         let error = engine.inspect(&id).unwrap_err();
         assert!(error.contains("failed verification"), "{error}");
     }
@@ -2381,26 +2525,33 @@ mod tests {
             10,
         )
         .unwrap();
-        assert_eq!(first.snapshot.head.revision, 1);
+        assert!(matches!(first, PublishedBundle::Stored { .. }));
+        let first = first.into_snapshot();
+        assert_eq!(first.head.revision, 1);
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         let repository_root = store_root.join(format!("{}/{}", REPOSITORY_PREFIX, id));
         assert!(store_root.join(STORAGE_MARKER_KEY).is_file());
-        assert!(repository_root.join(HEAD_FILE).is_file());
+        // The record is the publication: there is no head object and no tag,
+        // and records live in the flat namespace beside the bundle folder.
+        assert!(!repository_root.join("_head.json").exists());
+        assert!(!store_root.join(REPOSITORY_PREFIX).join("_tags").exists());
+        assert!(!repository_root.join("_commits").exists());
+        let (record_name, _) = selected_record(&engine, &id);
         assert!(store_root
-            .join(REPOSITORY_TAGS_PREFIX)
-            .join(format!("{}.json", id))
+            .join(REPOSITORY_COMMITS_PREFIX)
+            .join(id.as_str())
+            .join(record_name.file_name())
             .is_file());
         assert!(repository_root.join("_manifests").is_dir());
-        assert!(repository_root.join("_commits").is_dir());
         assert!(repository_root.join("_objects").is_dir());
         let listed = engine.list_remote_bundles().unwrap();
         assert_eq!(listed.len(), 1);
         assert!(!listed[0].registration_only);
         assert_eq!(
-            fs::metadata(repository_root.join(&first.snapshot.head.manifest_key))
+            fs::metadata(repository_root.join(&first.head.manifest_key))
                 .unwrap()
                 .len(),
-            first.snapshot.head.manifest_size
+            first.head.manifest_size
         );
         let snapshot = engine.inspect(&id).unwrap();
         let path = project_scope(&snapshot.manifest)
@@ -2440,21 +2591,25 @@ mod tests {
             identity(id.clone(), "Renamed Project"),
             &recipe,
             &captured,
-            Some((first.snapshot.head.clone(), first_token.clone())),
+            Some((first.head.clone(), first_token.clone())),
             20,
         )
-        .unwrap();
-        assert_eq!(second.snapshot.head.revision, 2);
+        .unwrap()
+        .into_snapshot();
+        assert_eq!(second.head.revision, 2);
         let second_token = engine.read_head(&id).unwrap().unwrap().1;
-        assert!(publish_captured(
-            &engine,
-            identity(id.clone(), "Stale"),
-            &recipe,
-            &capture_recipe(registry(), &request, &recipe).unwrap(),
-            Some((first.snapshot.head.clone(), first_token)),
-            21,
-        )
-        .is_err());
+        assert_eq!(
+            publish_captured(
+                &engine,
+                identity(id.clone(), "Stale"),
+                &recipe,
+                &capture_recipe(registry(), &request, &recipe).unwrap(),
+                Some((first.head.clone(), first_token)),
+                21,
+            )
+            .unwrap_err(),
+            REMOTE_CHANGED
+        );
 
         let empty_recipe = BundleRecipe::default();
         let removed = publish_captured(
@@ -2462,14 +2617,14 @@ mod tests {
             identity(id.clone(), "Renamed Project"),
             &empty_recipe,
             &capture_recipe(registry(), &request, &empty_recipe).unwrap(),
-            Some((second.snapshot.head.clone(), second_token)),
+            Some((second.head.clone(), second_token)),
             30,
         )
-        .unwrap();
-        assert!(removed.snapshot.manifest.all_files().next().is_none());
-        assert!(removed.snapshot.manifest.all_resources().next().is_none());
+        .unwrap()
+        .into_snapshot();
+        assert!(removed.manifest.all_files().next().is_none());
+        assert!(removed.manifest.all_resources().next().is_none());
         assert!(removed
-            .snapshot
             .manifest
             .all_tombstones()
             .any(|(_, _, tombstone)| tombstone.target.kind.as_str() == contracts::RESOURCE));
@@ -2478,7 +2633,7 @@ mod tests {
     /// Forces tiny list pages so the one-pass listing's internal store
     /// cursor loop is exercised without seeding ten thousand objects.
     struct SmallListPageStore {
-        inner: LocalObjectStore,
+        inner: PlainStore,
     }
 
     impl ObjectStore for SmallListPageStore {
@@ -2506,19 +2661,6 @@ mod tests {
             self.inner.put_immutable(key, bytes)
         }
 
-        fn compare_and_swap(
-            &self,
-            key: &ObjectKey,
-            expectation: &CasExpectation,
-            bytes: &[u8],
-        ) -> Result<CasOutcome, String> {
-            self.inner.compare_and_swap(key, expectation, bytes)
-        }
-
-        fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
-            self.inner.delete(key, expected_etag)
-        }
-
         fn list(
             &self,
             prefix: &ObjectPrefix,
@@ -2527,46 +2669,65 @@ mod tests {
         ) -> Result<StoreListPage, String> {
             self.inner.list(prefix, cursor, limit.min(100))
         }
+
+        fn list_keys(
+            &self,
+            prefix: &ObjectPrefix,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<StoreKeyPage, String> {
+            self.inner.list_keys(prefix, cursor, limit.min(100))
+        }
     }
 
     #[test]
-    fn remote_bundle_listing_is_one_pass_over_the_flat_tag_namespace() {
-        let temp = tempfile::tempdir().unwrap();
+    fn remote_bundle_listing_is_one_pass_over_the_flat_record_namespace() {
         let store = SmallListPageStore {
-            inner: LocalObjectStore::open(temp.path().join("store")).unwrap(),
+            inner: PlainStore::default(),
+        };
+        let origin = PortableOrigin {
+            origin_host_token: domain::OriginHostToken::parse("0".repeat(64)).unwrap(),
+            origin_replica_token: domain::OriginReplicaToken::parse("0".repeat(64)).unwrap(),
+            shared_label: None,
         };
         for number in 1..=1_005_u64 {
-            let id = bundle_id(number);
-            let tag = BundleTag {
+            let record = CommitRecord {
                 schema_version: BUNDLE_SCHEMA,
-                bundle_id: id.clone(),
-                display_name: format!("Bundle {}", number),
-                kind: BundleKind::Project,
+                bundle_id: bundle_id(number),
                 revision: 1,
-                updated_at: number,
-                resources: 1,
-                files: 1,
-                registration_only: number == 1,
-                providers: vec![claude_key()],
-                repository_fingerprint: Some("b".repeat(64)),
+                commit_id: format!("commit-{number:024x}"),
+                previous_commit_id: None,
+                previous_record_sha256: None,
+                created_at_ms: number * 1000,
+                manifest_key: manifest_relative_key(1, &format!("commit-{number:024x}")),
+                manifest_sha256: "c".repeat(64),
+                manifest_size: 10,
+                added_files: 1,
+                changed_files: 0,
+                removed_files: 0,
+                published_by_origin: origin.clone(),
+                summary: RecordSummary {
+                    display_name: format!("Bundle {}", number),
+                    kind: BundleKind::Project,
+                    resources: 1,
+                    files: 1,
+                    registration_only: number == 1,
+                    providers: vec![claude_key()],
+                    repository_fingerprint: Some("b".repeat(64)),
+                },
             };
-            store
-                .compare_and_swap(
-                    &repository_tag_key(&id).unwrap(),
-                    &CasExpectation::Absent,
-                    &serde_json::to_vec(&tag).unwrap(),
-                )
-                .unwrap();
+            plant_record(&store, &record, record.created_at_ms);
         }
-        // Bundle payload objects never influence discovery: heads live
-        // outside the tag namespace and are invisible to the listing.
+        // Bundle payload objects never influence discovery: they live outside
+        // the record namespace and are invisible to the listing.
         store
-            .compare_and_swap(
-                &repository_object_key(&bundle_id(1), HEAD_FILE).unwrap(),
-                &CasExpectation::Absent,
-                b"{}",
+            .put_immutable(
+                &repository_object_key(&bundle_id(1), &format!("_objects/{}", "d".repeat(64)))
+                    .unwrap(),
+                b"payload",
             )
             .unwrap();
+        store.inner.reset_counts();
 
         let engine = BundleEngine::open(store, storage_id()).unwrap();
         let listed = engine.list_remote_bundles().unwrap();
@@ -2582,6 +2743,12 @@ mod tests {
             first.repository_fingerprint.as_deref(),
             Some("b".repeat(64).as_str())
         );
+        assert_eq!((first.revision, first.updated_at), (1, 1));
+        assert_eq!((first.resources, first.files), (1, 1));
+        // Eleven pages of one listing, one read per selected record, and no
+        // manifest or payload read.
+        assert_eq!(engine.store().inner.listings(), 11);
+        assert_eq!(engine.store().inner.reads(), 1_005);
     }
 
     #[test]
@@ -2955,8 +3122,8 @@ mod tests {
         puts: Arc<Mutex<Vec<String>>>,
         put_batches: Arc<Mutex<Vec<usize>>>,
         put_pointers: Arc<Mutex<Vec<(String, usize)>>>,
-        cas_writes: Arc<Mutex<Vec<String>>>,
-        force_next_cas_conflict: Arc<Mutex<bool>>,
+        record_requests: Arc<Mutex<Vec<String>>>,
+        listings: Arc<Mutex<Vec<String>>>,
     }
 
     impl CountingStore {
@@ -2967,8 +3134,8 @@ mod tests {
                 puts: Arc::new(Mutex::new(Vec::new())),
                 put_batches: Arc::new(Mutex::new(Vec::new())),
                 put_pointers: Arc::new(Mutex::new(Vec::new())),
-                cas_writes: Arc::new(Mutex::new(Vec::new())),
-                force_next_cas_conflict: Arc::new(Mutex::new(false)),
+                record_requests: Arc::new(Mutex::new(Vec::new())),
+                listings: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -2977,7 +3144,8 @@ mod tests {
             self.puts.lock().unwrap().clear();
             self.put_batches.lock().unwrap().clear();
             self.put_pointers.lock().unwrap().clear();
-            self.cas_writes.lock().unwrap().clear();
+            self.record_requests.lock().unwrap().clear();
+            self.listings.lock().unwrap().clear();
         }
 
         /// Object counts of every bulk write, in call order.
@@ -3010,27 +3178,34 @@ mod tests {
             self.puts.lock().unwrap().len()
         }
 
-        fn cas_count(&self) -> usize {
-            self.cas_writes.lock().unwrap().len()
+        /// Record requests sent, in call order.
+        fn record_requests(&self) -> usize {
+            self.record_requests.lock().unwrap().len()
         }
 
-        fn conflict_next_cas(&self) {
-            *self.force_next_cas_conflict.lock().unwrap() = true;
+        /// Key listings made, in call order.
+        fn listings(&self) -> usize {
+            self.listings.lock().unwrap().len()
         }
 
-        /// Repository object reads that are payloads — heads, discovery
-        /// tags, and manifests are metadata and excluded.
+        /// Reads of publication records.
+        fn record_gets(&self) -> usize {
+            self.keys
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|key| key.contains("/_commits/"))
+                .count()
+        }
+
+        /// Repository object reads that are payloads — records and manifests
+        /// are metadata and excluded.
         fn payload_gets(&self) -> usize {
             self.keys
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|key| {
-                    key.contains("/repositories/")
-                        && !key.ends_with("/_head.json")
-                        && !key.contains("/_tags/")
-                        && !key.contains("/_manifests/")
-                })
+                .filter(|key| key.contains("/_objects/"))
                 .count()
         }
     }
@@ -3090,22 +3265,12 @@ mod tests {
                 .collect()
         }
 
-        fn compare_and_swap(
-            &self,
-            key: &ObjectKey,
-            expectation: &CasExpectation,
-            bytes: &[u8],
-        ) -> Result<CasOutcome, String> {
-            self.cas_writes
+        fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
+            self.record_requests
                 .lock()
                 .unwrap()
                 .push(key.as_str().to_string());
-            let mut force_conflict = self.force_next_cas_conflict.lock().unwrap();
-            if *force_conflict {
-                *force_conflict = false;
-                return Ok(CasOutcome::Conflict { current_etag: None });
-            }
-            self.inner.compare_and_swap(key, expectation, bytes)
+            self.inner.put_record(key, bytes)
         }
 
         fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {
@@ -3121,13 +3286,26 @@ mod tests {
             self.inner.list(prefix, cursor, limit)
         }
 
+        fn list_keys(
+            &self,
+            prefix: &ObjectPrefix,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<StoreKeyPage, String> {
+            self.listings
+                .lock()
+                .unwrap()
+                .push(prefix.as_str().to_string());
+            self.inner.list_keys(prefix, cursor, limit)
+        }
+
         fn local_root(&self) -> Option<&Path> {
             self.inner.local_root()
         }
     }
 
     #[test]
-    fn publish_makes_one_head_cas_attempt() {
+    fn publish_sends_one_record_request_after_its_listing_and_stops_when_the_stream_changed() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -3143,23 +3321,51 @@ mod tests {
         );
         let captured = capture_recipe(registry(), &request, &recipe).unwrap();
         let store = CountingStore::open(&temp.path().join("store"));
-        store.conflict_next_cas();
         let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let id = bundle_id(92);
 
+        // Another computer's first publication lands after this one's
+        // review: the listing before the write shows it, and nothing is sent.
+        let rival = published_project(&temp.path().join("rival"), &id);
+        let (_, rival_record) = selected_record(&rival, &id);
+        plant_record(&store, &rival_record, rival_record.created_at_ms);
+        store.reset();
         let error = publish_captured(
             &engine,
-            identity(bundle_id(92), "One attempt"),
+            identity(id.clone(), "One attempt"),
             &recipe,
             &captured,
             None,
             10,
         )
         .unwrap_err();
+        assert_eq!(error, REMOTE_CHANGED);
+        assert_eq!((store.listings(), store.record_requests()), (1, 0));
+        // One payload window; the manifest is its own write. Both are
+        // unreferenced residue: without a record they are not history.
+        assert_eq!(store.put_batches(), vec![1]);
+        assert_eq!(store.put_count(), 2);
+        assert_eq!(engine.list_remote_bundles().unwrap().len(), 1);
+        assert_eq!(
+            engine.read_head(&id).unwrap().unwrap().0.commit_id,
+            rival_record.commit_id
+        );
 
-        assert!(error.contains("compare again before pushing"), "{error}");
-        assert_eq!(store.cas_count(), 1);
-        // One payload window, then the manifest and commit in one batch.
-        assert_eq!(store.put_batches(), vec![1, 2]);
+        // An undisturbed publish: list, send the record once, select again.
+        let other = bundle_id(93);
+        store.reset();
+        let published = publish_captured(
+            &engine,
+            identity(other.clone(), "One attempt"),
+            &recipe,
+            &captured,
+            None,
+            10,
+        )
+        .unwrap();
+        assert!(matches!(published, PublishedBundle::Stored { .. }));
+        assert_eq!((store.listings(), store.record_requests()), (2, 1));
+        assert_eq!(store.record_gets(), 0);
     }
 
     #[test]
@@ -3190,10 +3396,11 @@ mod tests {
             10,
         )
         .unwrap();
-        assert!(first.published);
+        assert!(first.stored());
+        let first = first.into_snapshot();
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         assert_eq!(store.payload_puts().len(), 2);
-        for entry in project_scope(&first.snapshot.manifest).files.values() {
+        for entry in project_scope(&first.manifest).files.values() {
             assert_eq!(entry.object_key, format!("_objects/{}", entry.sha256));
         }
 
@@ -3204,12 +3411,13 @@ mod tests {
             identity(id.clone(), "Incremental"),
             &recipe,
             &capture_recipe(registry(), &request, &recipe).unwrap(),
-            Some((first.snapshot.head.clone(), first_token)),
+            Some((first.head.clone(), first_token)),
             20,
         )
         .unwrap();
-        assert!(second.published);
-        assert_eq!(second.snapshot.head.revision, 2);
+        assert!(second.stored());
+        let second = second.into_snapshot();
+        assert_eq!(second.head.revision, 2);
         let changed_key =
             repository_object_key(&id, &format!("_objects/{}", sha256_hex(b"second draft")))
                 .unwrap();
@@ -3224,15 +3432,15 @@ mod tests {
             "publish downloads nothing — retained entries are witnessed by the previous \
              manifest and the checksummed PUT is the upload receipt"
         );
-        let stable_path = project_scope(&second.snapshot.manifest)
+        let stable_path = project_scope(&second.manifest)
             .files
             .iter()
             .find(|(_, entry)| entry.sha256 == sha256_hex(b"stable contents"))
             .map(|(path, _)| path.clone())
             .unwrap();
         assert_eq!(
-            project_scope(&second.snapshot.manifest).files[&stable_path],
-            project_scope(&first.snapshot.manifest).files[&stable_path],
+            project_scope(&second.manifest).files[&stable_path],
+            project_scope(&first.manifest).files[&stable_path],
             "the unchanged entry carries over verbatim, object key included"
         );
     }
@@ -3264,8 +3472,9 @@ mod tests {
             10,
         )
         .unwrap();
+        let first = first.into_snapshot();
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
-        let first_scope = project_scope(&first.snapshot.manifest).clone();
+        let first_scope = project_scope(&first.manifest).clone();
         let mut retained_files = first_scope.files.clone();
         let retained_path = {
             let (path, entry) = retained_files.iter_mut().next().unwrap();
@@ -3276,8 +3485,8 @@ mod tests {
         store.reset();
         let error = engine
             .publish(PublishBundleRequest {
-                identity: first.snapshot.manifest.bundle.clone(),
-                published_by_origin: first.snapshot.manifest.published_by_origin.clone(),
+                identity: first.manifest.bundle.clone(),
+                published_by_origin: first.manifest.published_by_origin.clone(),
                 writable_scopes: BTreeMap::from([(
                     SyncScopeKey::Project,
                     ScopePublishInput {
@@ -3295,10 +3504,7 @@ mod tests {
                     SyncScopeKey::Project,
                     (first_scope.revision, first_scope.content_sha256.clone()),
                 )]),
-                expected_head: PublishExpectation::Match(
-                    Box::new(first.snapshot.clone()),
-                    first_token,
-                ),
+                expected_head: PublishExpectation::Match(Box::new(first.clone()), first_token),
                 updated_at: 20,
             })
             .unwrap_err();
@@ -3311,120 +3517,7 @@ mod tests {
             )
         );
         assert_eq!(store.put_count(), 0);
-        assert_eq!(store.cas_count(), 0);
-    }
-
-    /// The continuity probe answers from the store on every call — a local
-    /// cache hit would witness nothing about a wiped remote
-    /// (DESIGN_REMOTE_HISTORY_CONTINUITY.md, warm-cache tripwire).
-    #[test]
-    fn manifest_presence_probe_reads_the_store_every_time() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source-project");
-        fs::create_dir_all(&source).unwrap();
-        write(&source.join("stable.md"), b"stable contents");
-        let mut request = CaptureRequest::for_project(&source);
-        request.include_project_content = true;
-        let inventory = discover_project(registry(), &request).unwrap();
-        let recipe = recipe_for(
-            inventory
-                .resources
-                .iter()
-                .map(|resource| resource.resource_id.clone()),
-        );
-        let id = bundle_id(77);
-        let store = CountingStore::open(&temp.path().join("store"));
-        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
-        let published = publish_captured(
-            &engine,
-            identity(id.clone(), "Probe"),
-            &recipe,
-            &capture_recipe(registry(), &request, &recipe).unwrap(),
-            None,
-            10,
-        )
-        .unwrap();
-        let head = published.snapshot.head.clone();
-        let manifest_key_reads = |store: &CountingStore| {
-            store
-                .keys
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|key| key.contains("/_manifests/"))
-                .count()
-        };
-
-        store.reset();
-        let hit = engine
-            .fetch_manifest_version_optional(
-                &id,
-                head.revision,
-                &head.commit_id,
-                head.manifest_size,
-                &head.manifest_sha256,
-            )
-            .unwrap();
-        assert_eq!(hit.map(|manifest| manifest.revision), Some(1));
-        assert_eq!(manifest_key_reads(&store), 1);
-
-        // A second identical call reads the store again: presence answers
-        // are always live, never remembered.
-        assert!(engine
-            .fetch_manifest_version_optional(
-                &id,
-                head.revision,
-                &head.commit_id,
-                head.manifest_size,
-                &head.manifest_sha256,
-            )
-            .unwrap()
-            .is_some());
-        assert_eq!(manifest_key_reads(&store), 2);
-
-        // Bytes that no longer reproduce the recorded digest are absence,
-        // not an error — row 8 treats them exactly like a missing key.
-        assert!(engine
-            .fetch_manifest_version_optional(
-                &id,
-                head.revision,
-                &head.commit_id,
-                head.manifest_size,
-                &"f".repeat(64),
-            )
-            .unwrap()
-            .is_none());
-        assert!(engine
-            .fetch_manifest_version_optional(
-                &id,
-                99,
-                "commit-nowhere",
-                head.manifest_size,
-                &head.manifest_sha256,
-            )
-            .unwrap()
-            .is_none());
-
-        // A wiped repository answers absent although nothing local changed:
-        // the verdict comes from the store alone.
-        fs::remove_dir_all(
-            store
-                .local_root()
-                .unwrap()
-                .join(REPOSITORY_PREFIX)
-                .join(id.as_str()),
-        )
-        .unwrap();
-        assert!(engine
-            .fetch_manifest_version_optional(
-                &id,
-                head.revision,
-                &head.commit_id,
-                head.manifest_size,
-                &head.manifest_sha256,
-            )
-            .unwrap()
-            .is_none());
+        assert_eq!((store.listings(), store.record_requests()), (0, 0));
     }
 
     #[test]
@@ -3484,26 +3577,27 @@ mod tests {
         .unwrap();
         assert_eq!(manifest_key_reads(&store), 0);
 
-        // The continuity probe always witnesses the store.
+        // A pinned base manifest is addressed by key and digest, so the
+        // verified copy the refresh cached serves it without a request.
         store.reset();
         let head = first.head;
-        for expected_reads in [1, 2] {
-            assert!(engine
-                .fetch_manifest_version_optional(
+        for _ in 0..2 {
+            engine
+                .inspect_manifest_version(
                     &id,
                     head.revision,
                     &head.commit_id,
                     head.manifest_size,
                     &head.manifest_sha256,
                 )
-                .unwrap()
-                .is_some());
-            assert_eq!(manifest_key_reads(&store), expected_reads);
+                .unwrap();
         }
+        assert_eq!(manifest_key_reads(&store), 0);
+        assert_eq!(store.listings(), 0);
     }
 
     #[test]
-    fn registration_publishes_an_empty_discoverable_head_exactly_once() {
+    fn registration_publishes_an_empty_discoverable_record_exactly_once() {
         let temp = tempfile::tempdir().unwrap();
         let engine = BundleEngine::open(
             LocalObjectStore::open(temp.path().join("store")).unwrap(),
@@ -3519,32 +3613,30 @@ mod tests {
         };
 
         let first = engine.publish_registration(&who, &origin, 10).unwrap();
-        assert!(first.published);
-        assert_eq!(first.snapshot.head.revision, 1);
-        assert!(first.snapshot.manifest.is_registration_only());
-        assert!(first.snapshot.manifest.scopes.is_empty());
+        assert!(matches!(first, PublishedBundle::Stored { .. }));
+        let first = first.into_snapshot();
+        assert_eq!(first.head.revision, 1);
+        assert!(first.manifest.is_registration_only());
+        assert!(first.manifest.scopes.is_empty());
         assert_eq!(
-            first.snapshot.manifest.bundle.repository_fingerprint,
+            first.manifest.bundle.repository_fingerprint,
             Some("a".repeat(64))
         );
 
-        // Idempotent: a repeat registration adopts the standing head instead
-        // of advancing or replacing it.
+        // Idempotent: a repeat registration adopts the standing publication
+        // instead of advancing or replacing it.
         let second = engine.publish_registration(&who, &origin, 20).unwrap();
-        assert!(!second.published);
-        assert_eq!(second.snapshot.head.revision, 1);
-        assert_eq!(
-            second.snapshot.head.commit_id,
-            first.snapshot.head.commit_id
-        );
+        assert!(!second.stored());
+        assert_eq!(second.snapshot().head.revision, 1);
+        assert_eq!(second.snapshot().head.commit_id, first.head.commit_id);
 
         // The discovery read path verifies and returns the registration.
         let snapshot = engine.inspect(&bundle_id(7)).unwrap();
         assert_eq!(snapshot.manifest.revision, 1);
         assert!(snapshot.manifest.is_registration_only());
 
-        // Listing reads the claim's tag alone: registration-only and the
-        // fingerprint surface without touching the head or manifest.
+        // Listing reads the claim's record alone: registration-only and the
+        // fingerprint surface without touching the manifest.
         let listed = engine.list_remote_bundles().unwrap();
         assert_eq!(listed.len(), 1);
         assert!(listed[0].registration_only);
@@ -3581,7 +3673,7 @@ mod tests {
         .unwrap();
         assert_eq!(store.payload_puts().len(), 1);
         let shared_key = format!("_objects/{}", sha256_hex(b"same bytes either way"));
-        let file_entries: Vec<_> = project_scope(&published.snapshot.manifest)
+        let file_entries: Vec<_> = project_scope(&published.snapshot().manifest)
             .files
             .values()
             .collect();
@@ -3690,7 +3782,7 @@ mod tests {
         .unwrap();
         store.reset();
         let _review = engine.inspect(&id).unwrap();
-        let (snapshot, token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+        let (snapshot, token) = engine.observe(&id).unwrap().current.unwrap();
         let mut changed = retained_publication(&snapshot, &token);
         changed.identity.display_name = "Changed".into();
         let stale = changed.clone();
@@ -3701,57 +3793,58 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            store
-                .keys
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|key| key.ends_with("/_head.json"))
-                .count(),
+            store.record_gets(),
             2,
-            "review and apply read the head; publication reuses the observation"
+            "review and apply read the selected record; publication reuses the observation"
         );
-        assert!(phases.iter().any(|phase| phase == "publish: head CAS"));
-        assert!(phases.iter().any(|phase| phase == "publish: update tag"));
+        // Review, apply, the listing before the write, and the one after it.
+        assert_eq!((store.listings(), store.record_requests()), (4, 1));
+        assert!(phases
+            .iter()
+            .any(|phase| phase == "publish: write manifest and record"));
         store.reset();
-        assert!(engine.publish(stale).unwrap_err().contains("CAS conflict"));
-        assert_eq!(store.cas_count(), 1);
+        assert_eq!(engine.publish(stale).unwrap_err(), REMOTE_CHANGED);
+        assert_eq!((store.listings(), store.record_requests()), (1, 0));
         assert!(
             store.keys.lock().unwrap().is_empty(),
-            "late change is rejected by CAS without a head read"
+            "a late change is stopped by the listing without a read"
         );
         store.reset();
-        assert!(engine
-            .publish(retained_publication(&snapshot, &token))
-            .unwrap_err()
-            .contains("head changed"));
-        assert_eq!(store.put_count(), 0);
-        assert_eq!(store.cas_count(), 0);
         assert_eq!(
-            store.keys.lock().unwrap().len(),
-            1,
-            "no-op verifies freshness"
+            engine
+                .publish(retained_publication(&snapshot, &token))
+                .unwrap_err(),
+            REMOTE_CHANGED
         );
+        assert_eq!(store.put_count(), 0);
+        assert_eq!(
+            (store.listings(), store.record_requests()),
+            (1, 0),
+            "a no-op proves with one listing that its publication is still selected"
+        );
+        assert!(store.keys.lock().unwrap().is_empty());
 
-        let (current, token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
-        for corrupt in 0..4 {
+        let (current, token) = engine.observe(&id).unwrap().current.unwrap();
+        for corrupt in 0..5 {
             let mut request = retained_publication(&current, &token);
             if let PublishExpectation::Match(snapshot, token) = &mut request.expected_head {
                 match corrupt {
                     0 => token.revision += 1,
                     1 => snapshot.storage_id = StorageId::parse("another-store").unwrap(),
                     2 => snapshot.manifest.bundle.display_name = "Tampered".into(),
+                    3 => token.record_sha256 = "not a digest".into(),
                     _ => request.identity.bundle_id = bundle_id(95),
                 }
             }
             store.reset();
             assert!(engine.publish(request).is_err());
             assert_eq!(store.put_count(), 0);
-            assert_eq!(store.cas_count(), 0);
+            assert_eq!((store.listings(), store.record_requests()), (0, 0));
             assert!(store.keys.lock().unwrap().is_empty());
         }
         // A disjoint scope observed before apply is carried unchanged. A later
-        // disjoint update still requires a fresh comparison after CAS conflict.
+        // disjoint update still requires a fresh comparison: its parent has a
+        // child by then.
         let provider = SyncScopeKey::Provider(domain::ProviderKey::parse("claude").unwrap());
         let mut disjoint = retained_publication(&current, &token);
         let tombstone = Tombstone {
@@ -3773,32 +3866,38 @@ mod tests {
         engine.publish(disjoint).unwrap();
         let mut stale = retained_publication(&current, &token);
         stale.identity.display_name = "Late writer".into();
-        assert!(engine.publish(stale).unwrap_err().contains("CAS conflict"));
-        let (latest, latest_token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+        assert_eq!(engine.publish(stale).unwrap_err(), REMOTE_CHANGED);
+        let (latest, latest_token) = engine.observe(&id).unwrap().current.unwrap();
         let mut carry = retained_publication(&latest, &latest_token);
         carry.writable_scopes.remove(&provider);
         carry.reviewed_scope_pins.remove(&provider);
         carry.identity.display_name = "Carry disjoint scope".into();
-        let carried = engine.publish(carry).unwrap().snapshot;
+        let carried = engine.publish(carry).unwrap().into_snapshot();
         assert_eq!(
             carried.manifest.scopes[&provider],
             latest.manifest.scopes[&provider]
         );
-        let (current, token) = engine.inspect_optional_with_token(&id).unwrap().unwrap();
+        let (current, token) = engine.observe(&id).unwrap().current.unwrap();
 
-        // Deletion after observation must fail for both changed and no-op requests.
-        let head_key = repository_object_key(&id, HEAD_FILE).unwrap();
-        store.inner.delete(&head_key, &token.etag).unwrap();
+        // A stream cleared after observation stops both changed and no-op
+        // requests: nothing selects the parent any more.
+        fs::remove_dir_all(
+            store
+                .local_root()
+                .unwrap()
+                .join(REPOSITORY_COMMITS_PREFIX)
+                .join(id.as_str()),
+        )
+        .unwrap();
         let mut changed = retained_publication(&current, &token);
         changed.identity.display_name = "After deletion".into();
-        assert!(engine
-            .publish(changed)
-            .unwrap_err()
-            .contains("CAS conflict"));
-        assert!(engine
-            .publish(retained_publication(&current, &token))
-            .unwrap_err()
-            .contains("head changed"));
+        assert_eq!(engine.publish(changed).unwrap_err(), REMOTE_CHANGED);
+        assert_eq!(
+            engine
+                .publish(retained_publication(&current, &token))
+                .unwrap_err(),
+            REMOTE_CHANGED
+        );
         engine
             .publish_registration(
                 &current.manifest.bundle,
@@ -3808,24 +3907,445 @@ mod tests {
             .unwrap();
         let mut recreated = retained_publication(&current, &token);
         recreated.identity.display_name = "After recreation".into();
-        assert!(engine
-            .publish(recreated)
-            .unwrap_err()
-            .contains("CAS conflict"));
-        assert!(engine
-            .publish(retained_publication(&current, &token))
-            .unwrap_err()
-            .contains("head changed"));
-        assert!(publish_captured(
-            &engine,
-            identity(id, "Absent race"),
-            &recipe,
-            &capture_recipe(registry(), &capture_request, &recipe).unwrap(),
-            None,
-            110
-        )
-        .unwrap_err()
-        .contains("CAS conflict"));
+        assert_eq!(engine.publish(recreated).unwrap_err(), REMOTE_CHANGED);
+        assert_eq!(
+            engine
+                .publish(retained_publication(&current, &token))
+                .unwrap_err(),
+            REMOTE_CHANGED
+        );
+        // A first publication needs a stream without a selected chain.
+        assert_eq!(
+            publish_captured(
+                &engine,
+                identity(id, "Absent race"),
+                &recipe,
+                &capture_recipe(registry(), &capture_request, &recipe).unwrap(),
+                None,
+                110
+            )
+            .unwrap_err(),
+            REMOTE_CHANGED
+        );
+    }
+
+    fn test_origin() -> PortableOrigin {
+        PortableOrigin {
+            origin_host_token: domain::OriginHostToken::parse("0".repeat(64)).unwrap(),
+            origin_replica_token: domain::OriginReplicaToken::parse("0".repeat(64)).unwrap(),
+            shared_label: None,
+        }
+    }
+
+    /// A publish on `snapshot` that changes one provider scope and nothing
+    /// else: the scope gains a tombstone.
+    fn provider_scope_request(
+        snapshot: &BundleSnapshot,
+        token: &HeadToken,
+        provider: &str,
+    ) -> PublishBundleRequest {
+        let scope = SyncScopeKey::Provider(domain::ProviderKey::parse(provider).unwrap());
+        let tombstone = Tombstone {
+            target: contracts::tombstone_resource(
+                &ResourceId::parse(format!("{provider}:memory:removed")).unwrap(),
+            )
+            .unwrap(),
+            last_sha256: None,
+            deleted_at: 12,
+        };
+        let pin = snapshot
+            .manifest
+            .scopes
+            .get(&scope)
+            .map(|scope| (scope.revision, scope.content_sha256.clone()))
+            .unwrap_or_else(absent_scope_pin);
+        PublishBundleRequest {
+            identity: snapshot.manifest.bundle.clone(),
+            published_by_origin: snapshot.manifest.published_by_origin.clone(),
+            writable_scopes: BTreeMap::from([(
+                scope.clone(),
+                ScopePublishInput {
+                    tombstones: BTreeMap::from([(tombstone.structural_key(), tombstone)]),
+                    ..Default::default()
+                },
+            )]),
+            reviewed_scope_pins: BTreeMap::from([(scope, pin)]),
+            expected_head: PublishExpectation::Match(Box::new(snapshot.clone()), token.clone()),
+            updated_at: snapshot.head.updated_at + 1,
+        }
+    }
+
+    fn repository_base(snapshot: &BundleSnapshot) -> domain::RepositoryBase {
+        domain::RepositoryBase {
+            revision: snapshot.head.revision,
+            commit_id: snapshot.head.commit_id.clone(),
+            manifest_sha256: snapshot.head.manifest_sha256.clone(),
+            manifest_size: snapshot.head.manifest_size,
+        }
+    }
+
+    #[test]
+    fn a_publication_that_loses_the_fork_window_fails_and_its_record_is_kept() {
+        use std::sync::mpsc;
+        let shared = PlainStore::default();
+        let engine = |store: PlainStore| BundleEngine::open(store, storage_id()).unwrap();
+        let id = bundle_id(61);
+        let claude = SyncScopeKey::Provider(claude_key());
+        let codex = SyncScopeKey::Provider(domain::ProviderKey::parse("codex").unwrap());
+        engine(shared.clone())
+            .publish_registration(&identity(id.clone(), "Forked"), &test_origin(), 10)
+            .unwrap();
+        // Both computers review the same publication and change different scopes.
+        let (reviewed, token) = engine(shared.clone())
+            .observe(&id)
+            .unwrap()
+            .current
+            .unwrap();
+
+        // The first computer builds its record and lists, then stalls right
+        // before its one record request.
+        let (stalled_tx, stalled_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+        shared.before_next_record_request(move || {
+            stalled_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        });
+        let earlier = std::thread::spawn({
+            let store = shared.clone();
+            let request = provider_scope_request(&reviewed, &token, "claude");
+            move || engine(store).publish(request)
+        });
+        stalled_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        // The second computer lists the same childless parent. Between its
+        // listing and its write, the first one's record lands.
+        let record_keys = |store: &PlainStore| {
+            store
+                .keys()
+                .into_iter()
+                .filter(|key| key.as_str().starts_with(REPOSITORY_COMMITS_PREFIX))
+                .collect::<Vec<_>>()
+        };
+        shared.before_next_record_request({
+            let store = shared.clone();
+            move || {
+                resume_tx.send(()).unwrap();
+                while record_keys(&store).len() < 2 {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        let later = engine(shared.clone())
+            .publish(provider_scope_request(&reviewed, &token, "codex"))
+            .unwrap_err();
+        let earlier = earlier.join().unwrap().unwrap();
+
+        // Both records are kept and exactly one is selected, the same one on
+        // every device. The push whose record ranks second failed as a whole.
+        assert_eq!(later, REMOTE_CHANGED);
+        assert!(earlier.stored());
+        let earlier = earlier.into_snapshot();
+        let records = record_keys(&shared);
+        assert_eq!(records.len(), 3);
+        let kept = records
+            .iter()
+            .filter_map(|key| RecordName::parse(key.as_str().rsplit('/').next()?))
+            .find(|name| name.revision() == 2 && name.commit_id() != earlier.head.commit_id)
+            .expect("the record that was not selected is kept");
+        for device in 0..2 {
+            let observed = engine(shared.clone()).observe(&id).unwrap();
+            let selected = observed.snapshot().unwrap();
+            assert_eq!(selected.head, earlier.head, "device {device}");
+            assert!(!observed.mainline.contains(2, kept.commit_id()));
+            // The observation also names what is kept and not selected, and
+            // the chain says where it was left: at the publication both
+            // computers reviewed, which still reads by its record name.
+            assert_eq!(observed.unselected, [kept.clone()]);
+            let left_at = observed
+                .mainline
+                .outranked(&observed.unselected, kept.commit_id())
+                .and_then(|outranked| outranked.shared)
+                .expect("the record that lost names the shared publication");
+            let (at_shared, _) = engine(shared.clone()).snapshot_at(&id, &left_at).unwrap();
+            assert_eq!(at_shared.head, reviewed.head);
+            assert_eq!(at_shared.manifest, reviewed.manifest);
+            // Nothing is merged: the selected snapshot is the winner's alone.
+            assert!(selected.manifest.scopes.contains_key(&claude));
+            assert!(!selected.manifest.scopes.contains_key(&codex));
+            // A failed push moves no base. The computer that lost still holds
+            // the publication both reviewed, and the selected one descends
+            // from it: an ordinary advanced storage, never a replaced one.
+            assert_eq!(
+                domain::classify_remote_continuity(
+                    &observed.mainline,
+                    [&repository_base(&earlier)]
+                ),
+                domain::RemoteContinuity::InSync { revision: 2 }
+            );
+            assert_eq!(
+                domain::classify_remote_continuity(
+                    &observed.mainline,
+                    [&repository_base(&reviewed)]
+                ),
+                domain::RemoteContinuity::Advanced {
+                    base_revision: 1,
+                    remote_revision: 2
+                }
+            );
+        }
+
+        // The user compares again and pushes again: the same change lands on
+        // the selected publication, which carries the winner's scope byte for
+        // byte.
+        let (selected, selected_token) = engine(shared.clone())
+            .observe(&id)
+            .unwrap()
+            .current
+            .unwrap();
+        let republished = engine(shared.clone())
+            .publish(provider_scope_request(&selected, &selected_token, "codex"))
+            .unwrap();
+        assert!(republished.stored());
+        let republished = republished.into_snapshot();
+        assert_eq!(republished.head.revision, 3);
+        assert_eq!(
+            republished.manifest.scopes[&claude],
+            earlier.manifest.scopes[&claude]
+        );
+        assert!(republished.manifest.scopes.contains_key(&codex));
+        // The record that was not selected is still there, on no chain.
+        let observed = engine(shared.clone()).observe(&id).unwrap();
+        assert_eq!(record_keys(&shared).len(), 4);
+        assert!(!observed.mainline.contains(2, kept.commit_id()));
+    }
+
+    #[test]
+    fn a_registration_that_loses_the_fork_window_returns_the_established_one() {
+        use std::sync::mpsc;
+        let shared = PlainStore::default();
+        let engine = |store: PlainStore| BundleEngine::open(store, storage_id()).unwrap();
+        let id = bundle_id(96);
+        let record_count = |store: &PlainStore| {
+            store
+                .keys()
+                .iter()
+                .filter(|key| key.as_str().starts_with(REPOSITORY_COMMITS_PREFIX))
+                .count()
+        };
+
+        // Two computers link the same project at once and both list an empty
+        // stream. The first one's record is built first, so it ranks first,
+        // and it lands between the second one's listing and its write.
+        let (stalled_tx, stalled_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel::<()>();
+        shared.before_next_record_request(move || {
+            stalled_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        });
+        let first = std::thread::spawn({
+            let (store, identity) = (shared.clone(), identity(id.clone(), "Forked"));
+            move || engine(store).publish_registration(&identity, &test_origin(), 10)
+        });
+        stalled_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        shared.before_next_record_request({
+            let store = shared.clone();
+            move || {
+                resume_tx.send(()).unwrap();
+                while record_count(&store) < 1 {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        let second = engine(shared.clone())
+            .publish_registration(&identity(id.clone(), "Forked"), &test_origin(), 10)
+            .unwrap();
+        let first = first.join().unwrap().unwrap();
+
+        // Registration stays idempotent: one computer stored the project's
+        // first publication, and the other returns that same publication.
+        assert!(first.stored() && !second.stored());
+        assert_eq!(second.snapshot().head, first.snapshot().head);
+        assert_eq!(record_count(&shared), 2);
+        let observed = engine(shared).observe(&id).unwrap();
+        assert_eq!(observed.snapshot().unwrap().head, first.snapshot().head);
+    }
+
+    #[test]
+    fn refresh_costs_one_listing_until_the_selection_changes() {
+        let shared = PlainStore::default();
+        let id = bundle_id(62);
+        let device = |store: &PlainStore| {
+            BundleEngine::open(store.clone().with_publication_cache(), storage_id())
+                .unwrap()
+                .with_object_cache(Arc::new(ObjectCache::default()))
+        };
+        let publisher = device(&shared);
+        publisher
+            .publish_registration(&identity(id.clone(), "Counted"), &test_origin(), 10)
+            .unwrap();
+
+        // A cold start: the listing, the selected record, and its manifest.
+        // Nothing was persisted, so that is all a new process has to read.
+        let reader = device(&shared);
+        shared.reset_counts();
+        let first = reader.observe(&id).unwrap();
+        assert_eq!((shared.listings(), shared.reads()), (1, 2));
+
+        // Nothing changed: exactly one listing request, and nothing else.
+        shared.reset_counts();
+        let again = reader.observe(&id).unwrap();
+        assert_eq!((shared.listings(), shared.reads()), (1, 0));
+        assert_eq!(again.snapshot(), first.snapshot());
+        assert_eq!(again.mainline, first.mainline);
+
+        // The remote moves ahead of this replica's base: the listing, the new
+        // record and its manifest. The base is found by walking the names;
+        // no probe of the base manifest is read.
+        let (current, token) = publisher.observe(&id).unwrap().current.unwrap();
+        publisher
+            .publish(provider_scope_request(&current, &token, "claude"))
+            .unwrap();
+        shared.reset_counts();
+        let ahead = reader.observe(&id).unwrap();
+        assert_eq!((shared.listings(), shared.reads()), (1, 2));
+        assert_eq!(
+            domain::classify_remote_continuity(
+                &ahead.mainline,
+                [&repository_base(first.snapshot().unwrap())]
+            ),
+            domain::RemoteContinuity::Advanced {
+                base_revision: 1,
+                remote_revision: 2
+            }
+        );
+        assert_eq!(shared.reads(), 2);
+    }
+
+    #[test]
+    fn objects_and_a_manifest_without_a_record_are_never_history_and_nothing_is_resent() {
+        let shared = PlainStore::default();
+        let engine = |store: &PlainStore| BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let id = bundle_id(63);
+        let who = identity(id.clone(), "Interrupted");
+
+        // The push dies at the record request, however often it is tried.
+        shared.fail_record_requests(usize::MAX, false);
+        let error = engine(&shared)
+            .publish_registration(&who, &test_origin(), 10)
+            .unwrap_err();
+        assert!(error.contains("record request failed"), "{error}");
+        shared.fail_record_requests(0, false);
+        let residue = shared.keys();
+        assert_eq!(residue.len(), 1);
+        assert!(residue[0].as_str().contains("/_manifests/1-commit-"));
+        assert!(engine(&shared).inspect_optional(&id).unwrap().is_none());
+        assert!(engine(&shared).list_remote_bundles().unwrap().is_empty());
+
+        // The app restarts: no record was kept anywhere, so nothing is resent.
+        shared.reset_counts();
+        let restarted = engine(&shared);
+        assert!(restarted.observe(&id).unwrap().current.is_none());
+        assert_eq!(shared.record_requests(), 0);
+        // The next push builds a new record on a new commit id.
+        let published = restarted
+            .publish_registration(&who, &test_origin(), 20)
+            .unwrap()
+            .into_snapshot();
+        assert_eq!(shared.record_requests(), 1);
+        assert!(!residue[0].as_str().contains(&published.head.commit_id));
+        let records = shared
+            .keys()
+            .into_iter()
+            .filter(|key| key.as_str().starts_with(REPOSITORY_COMMITS_PREFIX))
+            .count();
+        assert_eq!(records, 1);
+    }
+
+    #[test]
+    fn a_store_with_only_put_get_and_list_runs_publication_refresh_review_and_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = PlainStore::default();
+        let first = BundleEngine::open(shared.clone(), storage_id()).unwrap();
+        let second = BundleEngine::open(shared.clone(), storage_id()).unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        write(&source.join("note.md"), b"version one");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(64);
+        first
+            .publish_registration(&identity(id.clone(), "Plain"), &test_origin(), 5)
+            .unwrap();
+        for (version, bytes) in [(10, b"version one".as_slice()), (20, b"version two")] {
+            write(&source.join("note.md"), bytes);
+            publish_captured(
+                &first,
+                identity(id.clone(), "Plain"),
+                &recipe,
+                &capture_recipe(registry(), &request, &recipe).unwrap(),
+                first.read_head(&id).unwrap(),
+                version,
+            )
+            .unwrap();
+        }
+
+        // Only three shapes of object are ever written: a record in the flat
+        // namespace, a manifest, and a content-addressed payload. No head, no
+        // tag, no flag, and nothing moved.
+        for key in shared.keys() {
+            let key = key.as_str();
+            let in_bundle = key
+                .strip_prefix(&format!("{REPOSITORY_PREFIX}/{id}/"))
+                .is_some_and(|rest| {
+                    rest.strip_prefix("_objects/")
+                        .is_some_and(|sha| domain::validate_sha256("object", sha).is_ok())
+                        || rest.strip_prefix("_manifests/").is_some_and(|name| {
+                            name.ends_with(".json") && name.contains("-commit-")
+                        })
+                });
+            let record = key
+                .strip_prefix(&format!("{REPOSITORY_COMMITS_PREFIX}/{id}/"))
+                .is_some_and(|name| RecordName::parse(name).is_some());
+            assert!(in_bundle || record, "unexpected object '{key}'");
+        }
+
+        let listed = second.list_remote_bundles().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].revision, listed[0].files), (3, 1));
+        let snapshot = second.inspect(&id).unwrap();
+        let binding = active_binding(id, &target);
+        let homes = BTreeMap::new();
+        let plan = second
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &homes,
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
+        let mut bytes = second.byte_source(&snapshot, None);
+        second
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &homes,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        assert_eq!(fs::read(target.join("note.md")).unwrap(), b"version two");
     }
 
     #[test]
@@ -3855,7 +4375,8 @@ mod tests {
             10,
         )
         .unwrap();
-        assert!(first.published);
+        assert!(first.stored());
+        let first = first.into_snapshot();
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
 
         store.reset();
@@ -3864,19 +4385,21 @@ mod tests {
             identity(id.clone(), "Noop"),
             &recipe,
             &capture_recipe(registry(), &request, &recipe).unwrap(),
-            Some((first.snapshot.head.clone(), first_token.clone())),
+            Some((first.head.clone(), first_token.clone())),
             20,
         )
         .unwrap();
-        assert!(!noop.published);
-        assert_eq!(noop.snapshot.head.revision, 1);
-        assert_eq!(engine.read_head(&id).unwrap().unwrap().1, first_token);
+        // The compared publication is returned, and nothing is written.
+        assert!(
+            matches!(&noop, PublishedBundle::NoChange { snapshot } if snapshot.head == first.head)
+        );
         assert_eq!(store.put_count(), 0, "a semantic no-op writes no objects");
         assert_eq!(
-            store.cas_count(),
-            0,
-            "a semantic no-op never touches the head"
+            (store.listings(), store.record_requests()),
+            (1, 0),
+            "a semantic no-op lists once and never writes a record"
         );
+        assert_eq!(engine.read_head(&id).unwrap().unwrap().1, first_token);
         assert_eq!(engine.inspect(&id).unwrap().head.revision, 1);
     }
 
@@ -3924,12 +4447,12 @@ mod tests {
             identity(id.clone(), "Progress"),
             &recipe,
             &capture_recipe(registry(), &request, &recipe).unwrap(),
-            Some((first.snapshot.head.clone(), first_token.clone())),
+            Some((first.snapshot().head.clone(), first_token.clone())),
             20,
             &mut |progress| events.push(progress),
         )
         .unwrap();
-        assert!(!noop.published);
+        assert!(!noop.stored());
         assert!(events.is_empty(), "a no-op publish reports no transfer");
 
         write(
@@ -3942,7 +4465,7 @@ mod tests {
             identity(id.clone(), "Progress"),
             &recipe,
             &capture_recipe(registry(), &request, &recipe).unwrap(),
-            Some((first.snapshot.head.clone(), first_token)),
+            Some((first.snapshot().head.clone(), first_token)),
             30,
             &mut |progress| events.push(progress),
         )
@@ -3982,7 +4505,7 @@ mod tests {
             10,
         )
         .unwrap()
-        .snapshot;
+        .into_snapshot();
         let files = &project_scope(&snapshot.manifest).files;
         let paths = files.keys().rev().cloned().collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
@@ -4206,14 +4729,11 @@ mod tests {
             b"portable guidance"
         );
 
-        let head_path = store_root
-            .join(REPOSITORY_PREFIX)
-            .join(id.as_str())
-            .join(HEAD_FILE);
-        let mut changed_head: BundleHead =
-            serde_json::from_slice(&fs::read(&head_path).unwrap()).unwrap();
-        changed_head.manifest_size += 1;
-        fs::write(&head_path, serde_json::to_vec(&changed_head).unwrap()).unwrap();
+        // Another publication is selected after planning: the apply must be
+        // of exactly the reviewed one, so it asks for another review.
+        let reviewed = selected_record(&engine, &id);
+        let newer = child_record(&reviewed, 9);
+        plant_record(engine.store(), &newer, newer.created_at_ms);
         let mut apply_bytes = engine.byte_source(&snapshot, None);
         let error = engine
             .apply_restore_plan_lazy(

@@ -6,6 +6,11 @@
 
 **Research date:** 1 September 2026
 
+**19 September update:** The Google Drive CAS blocker below describes the
+earlier mutable-head protocol. The current non-CAS assessment and local proof
+are in [Google Drive with non-CAS publication](GOOGLE_DRIVE_NON_CAS_POC_2026-09-19.md).
+Live Drive validation remains pending.
+
 **Scope:** Research only; no implementation or schema change
 
 **Decision status:** Dropbox is feasible after a capability probe; OneDrive is conditional; Google Drive is blocked by the current consistency contract

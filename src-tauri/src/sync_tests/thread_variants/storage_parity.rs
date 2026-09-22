@@ -5,17 +5,17 @@ use super::harness::{
 use crate::sync_tests::stub_s3::StubS3;
 use mallard_domain::CloudThreadId;
 use mallard_infrastructure::bundle_engine::{BundleEngine, PublishExpectation};
+use mallard_infrastructure::storage_core::publication::REMOTE_CHANGED;
 use mallard_infrastructure::storage_core::{
-    CasExpectation, CasOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey,
-    ObjectPrefix, ObjectStore, S3Connection, S3ObjectStore, StageOutcome, StoreListPage,
-    StoredMetadata,
+    DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore,
+    S3Connection, S3ObjectStore, StageOutcome, StoreListPage, StoredMetadata,
 };
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[test]
-fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
+fn local_store_rejects_unreviewed_remote_thread_loss_and_a_stale_writer() {
     let world = VariantWorld::new();
     let origin = world.origin(&world.repo_a, "replica-a");
     let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
@@ -77,16 +77,16 @@ fn local_store_rejects_unreviewed_remote_thread_loss_and_stale_cas() {
         PublishExpectation::Match(Box::new(initial.snapshot.clone()), initial.head_token),
     );
     world.engine().publish(first_request).unwrap();
-    // Both requests used the same apply observation. The later write loses at CAS.
-    assert!(world
-        .engine()
-        .publish(stale_request)
-        .unwrap_err()
-        .contains("CAS conflict"));
+    // Both requests used the same apply observation. The later writer lists a
+    // child under its parent and stops before its record.
+    assert_eq!(
+        world.engine().publish(stale_request).unwrap_err(),
+        REMOTE_CHANGED
+    );
 }
 
 #[test]
-fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
+fn local_store_immutable_and_record_failures_leave_a_retryable_fixed_point() {
     let temp = tempfile::tempdir().unwrap();
     let inner =
         mallard_infrastructure::storage_core::LocalObjectStore::open(temp.path().join("store"))
@@ -131,14 +131,20 @@ fn local_store_immutable_and_head_failures_leave_a_retryable_fixed_point() {
             initial.head_token.clone(),
         ),
     );
-    store.fail_next(StoreFailure::HeadCas);
-    assert!(engine.publish(advanced_request.clone()).is_err());
+    // The record request keeps failing: every attempt lists first and sends
+    // once, and the operation ends with nothing published.
+    store.fail_records(true);
+    assert!(engine
+        .publish(advanced_request.clone())
+        .unwrap_err()
+        .contains("injected record failure"));
+    store.fail_records(false);
     let unchanged = engine.inspect(&world.bundle_id).unwrap();
     assert_eq!(unchanged.head.revision, 1);
     assert_eq!(unchanged.head.commit_id, initial.snapshot.head.commit_id);
 
     let retried = engine.publish(advanced_request).unwrap();
-    assert_eq!(retried.snapshot.head.revision, 2);
+    assert_eq!(retried.snapshot().head.revision, 2);
     let snapshot = engine.inspect(&world.bundle_id).unwrap();
     assert_snapshot_consistent(&engine, &snapshot);
 }
@@ -242,9 +248,14 @@ async fn stub_s3_current_schema_noop_and_fast_forward_match_local_protocol() {
     .await
     .unwrap();
     snapshot.validate().unwrap();
-    assert!(server.requests().iter().any(|request| {
-        request.method == "PUT" && request.key.ends_with("/_head.json") && request.conditional
-    }));
+    // The record is the publication: no head and no tag is ever written.
+    let requests = server.requests();
+    assert!(requests
+        .iter()
+        .any(|request| request.method == "PUT" && request.key.contains("/_commits/")));
+    assert!(!requests
+        .iter()
+        .any(|request| request.key.ends_with("/_head.json") || request.key.contains("/_tags/")));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -366,8 +377,9 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     })
     .await
     .unwrap();
-    // A writer using the old apply observation must lose at CAS.
-    assert!(stale_error.contains("CAS conflict"), "{stale_error}");
+    // A writer using the old apply observation lists a child under its
+    // parent and stops before its record.
+    assert_eq!(stale_error, REMOTE_CHANGED);
 
     let t1_path = codex_scope(&after_a.snapshot.manifest).conversations[&t1_id].files[0]
         .logical_path
@@ -414,11 +426,10 @@ async fn stub_s3_retains_remote_threads_and_one_stale_writer_replans() {
     .await
     .unwrap();
     snapshot.validate().unwrap();
-    assert!(server
+    assert!(!server
         .requests()
         .iter()
-        .filter(|request| request.method == "PUT" && request.key.ends_with("/_head.json"))
-        .all(|request| request.conditional));
+        .any(|request| request.key.ends_with("/_head.json") || request.key.contains("/_tags/")));
 }
 
 fn second_thread(origin: &mallard_domain::PortableOrigin) -> ThreadSpec {
@@ -434,13 +445,13 @@ fn second_thread(origin: &mallard_domain::PortableOrigin) -> ThreadSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StoreFailure {
     Immutable,
-    HeadCas,
 }
 
 #[derive(Clone)]
 struct FailingStore {
     inner: mallard_infrastructure::storage_core::LocalObjectStore,
     next_failure: Arc<Mutex<Option<StoreFailure>>>,
+    records_fail: Arc<Mutex<bool>>,
 }
 
 impl FailingStore {
@@ -448,11 +459,16 @@ impl FailingStore {
         Self {
             inner,
             next_failure: Arc::new(Mutex::new(None)),
+            records_fail: Arc::new(Mutex::new(false)),
         }
     }
 
     fn fail_next(&self, failure: StoreFailure) {
         *self.next_failure.lock().unwrap() = Some(failure);
+    }
+
+    fn fail_records(&self, fail: bool) {
+        *self.records_fail.lock().unwrap() = fail;
     }
 
     fn take(&self, failure: StoreFailure) -> bool {
@@ -490,16 +506,11 @@ impl ObjectStore for FailingStore {
         self.inner.put_immutable(key, bytes)
     }
 
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        if self.take(StoreFailure::HeadCas) {
-            return Err("injected head compare-and-swap failure".to_string());
+    fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
+        if *self.records_fail.lock().unwrap() {
+            return Err("injected record failure".to_string());
         }
-        self.inner.compare_and_swap(key, expectation, bytes)
+        self.inner.put_record(key, bytes)
     }
 
     fn delete(&self, key: &ObjectKey, expected_etag: &str) -> Result<DeleteOutcome, String> {

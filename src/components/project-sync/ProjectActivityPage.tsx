@@ -25,6 +25,7 @@ import LoadingScaffold from "../LoadingScaffold";
 import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { projectLabel } from "./model";
+import { clearedStorageNotice } from "./clearedStorageNotice";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
@@ -79,7 +80,6 @@ interface PageProps extends SessionSearchProps {
   /** Drop selected rows hidden by Show less because they cannot be reviewed. */
   onDropSelection?: (resourceIds: string[]) => void;
   onReviewPull?: () => void;
-  onUnlinkStorage?: () => void;
   onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
   comparisonOverride?: ThreadSyncComparison | null;
@@ -136,7 +136,6 @@ interface ContentProps extends SessionSearchProps {
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
-  onUnlinkStorage?: () => void;
   onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
 }
@@ -1604,7 +1603,7 @@ export function ProjectChatHistoryContent({
   onSessionAction, onOpenSessionDetail, comparison = null,
   comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
-  selectionDisabled = false, onToggleResource, onReviewPull, onUnlinkStorage,
+  selectionDisabled = false, onToggleResource, onReviewPull,
   onChooseAgentProfile,
   continuityActionBusy = false,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
@@ -1834,20 +1833,12 @@ export function ProjectChatHistoryContent({
       ),
     });
   }
-  if (comparison?.remote_continuity?.state === "replaced") {
-    notices.push({
-      key: "continuity-replaced",
-      severity: "warning",
-      title: "Storage history changed",
-      message: `The sync history in ${comparisonStorageName} is different from the one Mallard last synced for this project (version ${comparison.remote_continuity.base_revision}). This usually means Mallard's sync data in that storage was deleted and created again. The session statuses below use the replacement. Unlink this storage and link it again to start fresh. Unlinking does not delete files, but anything saved only in the previous storage history cannot be recovered from this machine.`,
-      // The recovery is one verb, and only when the host offers it.
-      action: onUnlinkStorage ? (
-        <button type="button" className="btn btn-ghost danger" onClick={onUnlinkStorage} disabled={continuityActionBusy}>
-          Unlink storage
-        </button>
-      ) : undefined,
-    });
-  }
+  /* A Pull of a cleared storage is an ordinary first Pull, so its review says
+     nothing about the clear. */
+  const clearedNotice = selectionMode === "pull"
+    ? null
+    : clearedStorageNotice(comparison, comparisonStorageName);
+  if (clearedNotice) notices.push(clearedNotice);
   /* One note per provider whose rows are visible but not fully actionable,
      straight from the backend's provider states — the page never derives
      access from a provider name. */
@@ -2249,7 +2240,6 @@ export default function ProjectActivityPage({
   onToggleResource,
   onDropSelection,
   onReviewPull,
-  onUnlinkStorage,
   onChooseAgentProfile,
   continuityActionBusy = false,
   comparisonOverride,
@@ -2491,5 +2481,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onUnlinkStorage={onUnlinkStorage} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
 }

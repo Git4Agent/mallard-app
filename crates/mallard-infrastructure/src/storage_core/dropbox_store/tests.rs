@@ -265,15 +265,13 @@ fn refreshed_credential_supports_probe_and_verified_transport_without_mutation_r
     assert_eq!(oauth.count("refresh"), 1);
     server.state.lock().unwrap().fail_upload = true;
     let before = server.state.lock().unwrap().uploads;
-    assert!(store
-        .compare_and_swap(&key("_head.json"), &CasExpectation::Absent, b"head")
-        .is_err());
+    assert!(store.put_record(&key("record.json"), b"record").is_err());
     assert_eq!(server.state.lock().unwrap().uploads, before + 1);
 }
 #[test]
-fn immutable_cas_integrity_and_conditional_delete() {
+fn immutable_writes_records_integrity_and_conditional_delete() {
     let server = Server::new();
-    let key = key("_head.json");
+    let key = key("_manifests/1-commit-a.json");
     let store = &server.store;
     assert!(store.get_metadata(&key, 64).unwrap().is_none());
     assert_eq!(
@@ -286,20 +284,33 @@ fn immutable_cas_integrity_and_conditional_delete() {
     );
     assert!(store.put_immutable(&key, b"b").is_err());
     let first = store.get_metadata(&key, 64).unwrap().unwrap();
-    let CasOutcome::Written { etag } = store
-        .compare_and_swap(&key, &CasExpectation::Match(first.etag.clone()), b"b")
-        .unwrap()
-    else {
-        panic!()
-    };
+
+    // A publication record is one direct upload request. A repeat writes
+    // identical bytes to the same name, which is not a conflict; different
+    // bytes at a record's name are.
+    let record = super::tests::key("record.json");
+    let requests = || server.state.lock().unwrap().requests;
+    let before = requests();
+    assert_eq!(
+        store.put_record(&record, b"record").unwrap(),
+        ImmutablePutOutcome::Written
+    );
+    assert_eq!(requests(), before + 1);
+    assert_eq!(
+        store.put_record(&record, b"record").unwrap(),
+        ImmutablePutOutcome::Written
+    );
+    assert!(store.put_record(&record, b"other").is_err());
+    assert_eq!(requests(), before + 3);
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.routes["files/upload"], 3);
+        assert_eq!(state.direct_uploads.len(), 3);
+        assert_eq!(state.entries[&object_path(&record).unwrap()].1, b"record");
+    }
+
     assert!(matches!(
-        store
-            .compare_and_swap(&key, &CasExpectation::Match(first.etag.clone()), b"b")
-            .unwrap(),
-        CasOutcome::Conflict { .. }
-    ));
-    assert!(matches!(
-        store.delete(&key, &first.etag).unwrap(),
+        store.delete(&key, "0123456789abcdef").unwrap(),
         DeleteOutcome::Conflict { .. }
     ));
     assert!(matches!(
@@ -308,7 +319,7 @@ fn immutable_cas_integrity_and_conditional_delete() {
                 &key,
                 &ExpectedObject {
                     size: 1,
-                    sha256: sha256_hex(b"b")
+                    sha256: sha256_hex(b"a")
                 }
             )
             .unwrap(),
@@ -320,26 +331,26 @@ fn immutable_cas_integrity_and_conditional_delete() {
         .unwrap_err()
         .contains("integrity"));
     server.state.lock().unwrap().bad_hash = false;
-    assert_eq!(store.delete(&key, &etag).unwrap(), DeleteOutcome::Deleted);
-    assert!(matches!(
-        store
-            .compare_and_swap(&key, &CasExpectation::Match(etag), b"b")
-            .unwrap(),
-        CasOutcome::Conflict { current_etag: None }
-    ));
+    assert_eq!(
+        store.delete(&key, &first.etag).unwrap(),
+        DeleteOutcome::Deleted
+    );
+    assert_eq!(
+        store.delete(&key, &first.etag).unwrap(),
+        DeleteOutcome::Missing
+    );
 }
 #[test]
-fn unknown_cas_never_infers_a_win_but_immutable_can_verify_content() {
+fn an_unacknowledged_record_is_an_error_but_immutable_can_verify_content() {
     let server = Server::new();
-    let key = key("_head.json");
+    let key = key("record.json");
     server.state.lock().unwrap().fail_upload = true;
-    let error = server
-        .store
-        .compare_and_swap(&key, &CasExpectation::Absent, b"a")
-        .unwrap_err();
+    let error = server.store.put_record(&key, b"a").unwrap_err();
     assert!(error.contains("unknown"));
     assert!(!error.contains("private_response"));
+    // One request and no retry: the caller lists before it tries again.
     assert_eq!(server.state.lock().unwrap().uploads, 1);
+    assert!(server.store.get_metadata(&key, 64).unwrap().is_none());
     server.state.lock().unwrap().fail_upload = true;
     assert_eq!(
         server
@@ -397,7 +408,7 @@ fn list_accepts_requested_folder_and_returns_only_child_files() {
 }
 #[test]
 fn list_rejects_invalid_requested_folder_and_outside_entries() {
-    for fault in ["file", "name", "outside", "duplicate"] {
+    for fault in ["file", "outside", "duplicate"] {
         let server = Server::new();
         let object = key("_objects/a");
         let prefix = ObjectPrefix::parse(key("_objects").as_str()).unwrap();
@@ -412,7 +423,6 @@ fn list_rejects_invalid_requested_folder_and_outside_entries() {
                     root.path_lower = path.clone();
                     root.name = "_objects".into();
                 }
-                "name" => root.name = "_Objects".into(),
                 "outside" => root = folder(&format!("{path}_other")),
                 "duplicate" => {
                     state
@@ -434,6 +444,66 @@ fn list_rejects_invalid_requested_folder_and_outside_entries() {
                 1
             );
         }
+    }
+}
+#[test]
+fn dropbox_runs_the_same_publication_as_every_other_store() {
+    let server = Server::new();
+    crate::storage_core::publication::parity::publishes_and_selects(&server.store);
+    // Every record was one direct upload request.
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.direct_uploads.len(), state.routes["files/upload"]);
+    assert!(state
+        .direct_uploads
+        .iter()
+        .all(|path| path.contains("/_commits/")));
+}
+#[test]
+fn list_skips_and_reports_names_mallard_never_writes() {
+    let server = Server::new();
+    let object = key("_objects/a");
+    let prefix = ObjectPrefix::parse(key("_objects").as_str()).unwrap();
+    let folder_path = format!("/{}", prefix.as_str());
+    server.store.put_immutable(&object, b"a").unwrap();
+    let mut events = crate::storage_core::publication::ignored_name_events().subscribe();
+    {
+        let mut state = server.state.lock().unwrap();
+        let listed = state.entries[&object_path(&object).unwrap()].0.clone();
+        // A sync client's conflicted copy, a file a person dropped in, and a
+        // name whose case Mallard never writes.
+        for (path_lower, name) in [
+            (
+                format!("{folder_path}/a (rika's conflicted copy 2026-09-19)"),
+                "a (Rika's conflicted copy 2026-09-19)".to_string(),
+            ),
+            (format!("{folder_path}/.ds_store"), ".DS_Store".to_string()),
+            (format!("{folder_path}/b"), "B".to_string()),
+        ] {
+            let mut foreign = listed.clone();
+            foreign.path_lower = path_lower.clone();
+            foreign.name = name;
+            state.entries.insert(path_lower, (foreign, b"x".to_vec()));
+        }
+    }
+    // The listing succeeds and holds Mallard's object alone.
+    let page = server.store.list(&prefix, None, 10).unwrap();
+    assert_eq!(
+        page.keys().cloned().collect::<Vec<_>>(),
+        vec![object.clone()]
+    );
+    assert_eq!(
+        server.store.list_keys(&prefix, None, 10).unwrap().keys,
+        vec![object]
+    );
+    let mut reported = Vec::new();
+    while let Ok(name) = events.try_recv() {
+        reported.push(name);
+    }
+    for foreign in ["conflicted copy", "/.ds_store", "/_objects/b"] {
+        assert!(
+            reported.iter().any(|name| name.contains(foreign)),
+            "{foreign} was not reported: {reported:?}"
+        );
     }
 }
 #[test]
@@ -471,7 +541,7 @@ fn noncanonical_keys_and_credential_errors_fail_closed() {
     server.state.lock().unwrap().deny = true;
     let error = server
         .store
-        .get_metadata(&key("_head.json"), 64)
+        .get_metadata(&key("_manifests/1-commit-a.json"), 64)
         .unwrap_err();
     assert!(error.contains("token"));
     assert!(!error.contains("must never escape"));
@@ -620,11 +690,7 @@ fn recovery_uses_the_durable_revision_after_restart() {
     let metadata = server
         .store
         .runtime
-        .block_on(
-            server
-                .store
-                .upload(&path, json!({".tag":"add"}), Bytes::from_static(b"known")),
-        )
+        .block_on(server.store.upload(&path, Bytes::from_static(b"known")))
         .unwrap();
     let mut entry = StorageSetupJournalEntry {
         schema: 1,
@@ -693,7 +759,7 @@ fn redirects_and_rate_limits_do_not_trigger_automatic_requests() {
         server.state.lock().unwrap().response_status = Some(status);
         let error = server
             .store
-            .get_metadata(&key("_head.json"), 64)
+            .get_metadata(&key("_manifests/1-commit-a.json"), 64)
             .unwrap_err();
         assert!(error.contains(expected), "{error}");
         assert!(!error.contains("must never escape"));
@@ -797,20 +863,6 @@ fn preflight_covers_later_windows_empty_batches_modes_and_duplicate_keys() {
     let mut objects = upload_objects(8);
     objects.push((key("_objects/Upper"), Bytes::from_static(b"bad")));
     assert_eq!(put_at(&server, objects, 6), Err(Error::Invalid));
-    for mode in [
-        json!({".tag":"overwrite"}),
-        json!({".tag":"update","update":"invalid"}),
-        json!({".tag":"add","extra":true}),
-    ] {
-        assert!(matches!(
-            server.store.runtime.block_on(server.store.upload(
-                &object_path(&key("_objects/a")).unwrap(),
-                mode,
-                Bytes::new()
-            )),
-            Err(Error::Invalid)
-        ));
-    }
     assert_eq!(put_at(&server, vec![], 0), Err(Error::Limit));
     assert_eq!(put_at(&server, vec![], 17), Err(Error::Limit));
     let duplicate = key("_objects/a");
@@ -888,14 +940,12 @@ fn a_file_where_a_folder_belongs_fails_closed_without_folder_probes() {
 #[test]
 fn reads_listing_and_deletion_cost_one_request_each() {
     let server = Server::new();
-    let head = key("_head.json");
-    let CasOutcome::Written { etag } = server
-        .store
-        .compare_and_swap(&head, &CasExpectation::Absent, b"head")
-        .unwrap()
-    else {
-        panic!()
-    };
+    let head = key("record.json");
+    server.store.put_record(&head, b"head").unwrap();
+    let etag = server.state.lock().unwrap().entries[&object_path(&head).unwrap()]
+        .0
+        .rev
+        .clone();
     let requests = || server.state.lock().unwrap().requests;
     let before = requests();
     assert_eq!(
@@ -1030,13 +1080,10 @@ fn malformed_commit_results_never_count_as_success() {
 }
 
 #[test]
-fn partial_commits_stop_later_windows_and_preserve_existing_head() {
+fn partial_commits_stop_later_windows_and_preserve_the_published_record() {
     let server = Server::new();
-    let head = key("_head.json");
-    server
-        .store
-        .compare_and_swap(&head, &CasExpectation::Absent, b"old head")
-        .unwrap();
+    let head = key("record.json");
+    server.store.put_record(&head, b"old head").unwrap();
     server.state.lock().unwrap().entry_failure =
         Some((1, json!({".tag":"too_many_write_operations"})));
     assert_eq!(
@@ -1044,8 +1091,10 @@ fn partial_commits_stop_later_windows_and_preserve_existing_head() {
         Err(Error::RateLimit)
     );
     let state = server.state.lock().unwrap();
-    assert_eq!(state.routes["files/upload_session/start"], 7);
-    assert_eq!(state.routes["files/upload_session/finish_batch_v2"], 2);
+    // The record went in one direct request, outside any upload session.
+    assert_eq!(state.routes["files/upload"], 1);
+    assert_eq!(state.routes["files/upload_session/start"], 6);
+    assert_eq!(state.routes["files/upload_session/finish_batch_v2"], 1);
     assert_eq!(state.entries[&object_path(&head).unwrap()].1, b"old head");
     assert!(state
         .entries

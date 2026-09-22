@@ -1,0 +1,66 @@
+{
+  "date": "2026-09-20",
+  "mode": "live_feishu_desktop",
+  "data": "synthetic_only",
+  "production_ready": false,
+  "verification": {
+    "verdict": "PASS",
+    "expected_files": 8,
+    "matched_files": 8,
+    "missing": [],
+    "changed": [],
+    "extra": [],
+    "record_count": 3,
+    "selected_chain_length": 2,
+    "selection_matches": true
+  },
+  "record_name_length": 223,
+  "expected": [
+    {
+      "path": "binary-4096.bin",
+      "size": 4096,
+      "sha256": "c8f5d0341d54d951a71b136e6e2afcb14d11ed8489a7ae126a8fee0df6ecf193"
+    },
+    {
+      "path": "over-20MiB.bin",
+      "size": 20971537,
+      "sha256": "d25836993363fe915f80b39e3dc15061607bdce5cd8bdaa9ffaac246ca3efbf1"
+    },
+    {
+      "path": "same-name.bin",
+      "size": 37,
+      "sha256": "120561b295a2d8f5a8982fa2ec237593254bfff95dfdc0dcadabc0142e1af6b0"
+    },
+    {
+      "path": "0000000002.commit-222222222222222222222222-05a79973215a2bd78b348da6c232afe942035e0f4f7a032e19b87ef44a7bea83.commit-111111111111111111111111-0e9cd225c8326ab272be199287f2a9ab029dd181addfed34c31f0c45c53f8744.1790000000001.json",
+      "size": 277,
+      "sha256": "05a79973215a2bd78b348da6c232afe942035e0f4f7a032e19b87ef44a7bea83"
+    },
+    {
+      "path": ".mallard/_storage.json",
+      "size": 54,
+      "sha256": "e5e8cd76996d67f41061257ccaddfb7374839680a63bf6c2a6a003d9ff7a7f0e"
+    },
+    {
+      "path": ".mallard/v1/repositories/_commits/0123456789abcdef0123456789abcdef/0000000001.commit-111111111111111111111111-0e9cd225c8326ab272be199287f2a9ab029dd181addfed34c31f0c45c53f8744.root.1790000000000.json",
+      "size": 148,
+      "sha256": "0e9cd225c8326ab272be199287f2a9ab029dd181addfed34c31f0c45c53f8744"
+    },
+    {
+      "path": ".mallard/v1/repositories/_commits/0123456789abcdef0123456789abcdef/0000000002.commit-222222222222222222222222-05a79973215a2bd78b348da6c232afe942035e0f4f7a032e19b87ef44a7bea83.commit-111111111111111111111111-0e9cd225c8326ab272be199287f2a9ab029dd181addfed34c31f0c45c53f8744.1790000000001.json",
+      "size": 277,
+      "sha256": "05a79973215a2bd78b348da6c232afe942035e0f4f7a032e19b87ef44a7bea83"
+    },
+    {
+      "path": ".mallard/v1/repositories/_commits/0123456789abcdef0123456789abcdef/0000000002.commit-333333333333333333333333-6cf8af5de137c0653966248f4be2195b3bb3fbc2b6869cb55155edeffb7df83e.commit-111111111111111111111111-0e9cd225c8326ab272be199287f2a9ab029dd181addfed34c31f0c45c53f8744.1790000000002.json",
+      "size": 277,
+      "sha256": "6cf8af5de137c0653966248f4be2195b3bb3fbc2b6869cb55155edeffb7df83e"
+    }
+  ],
+  "limits": [
+    "one_account_one_machine",
+    "desktop_ui_not_open_api",
+    "static_record_set_not_concurrent_publication",
+    "no_api_consistency_guarantee"
+  ]
+}

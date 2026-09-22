@@ -1,5 +1,6 @@
 //! Dropbox transport for a user-linked shared or team namespace.
-//! Bounded upload sessions with strict batch commits. No automatic mutation retries.
+//! Bounded upload sessions with strict batch commits, and one direct upload
+//! per publication record. No automatic mutation retries.
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 mod probe;
@@ -8,9 +9,9 @@ mod tests;
 mod upload;
 
 use super::{
-    CasExpectation, CasOutcome, ConnectionEvidence, ConnectionHealth, DeleteOutcome,
-    ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome,
-    StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, MAX_LIST_PAGE,
+    ConnectionEvidence, ConnectionHealth, DeleteOutcome, ExpectedObject, ImmutablePutOutcome,
+    ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, StoreListEntry, StoreListPage,
+    StoredMetadata, VerifiedBody, MAX_LIST_PAGE,
 };
 use crate::dropbox_auth::{
     auth_error_tag, AuthClass, AuthError, DropboxAuthorization, DropboxClient, DropboxCredential,
@@ -791,10 +792,20 @@ impl DropboxObjectStore {
             for value in entries {
                 let metadata: Metadata =
                     serde_json::from_value(value.clone()).map_err(|_| Error::Invalid)?;
-                canonical_path(&metadata.path_lower)?;
                 let is_requested_folder = metadata.kind == "folder" && metadata.path_lower == path;
                 if !is_requested_folder && !metadata.path_lower.starts_with(&format!("{path}/")) {
                     return Err(Error::Invalid);
+                }
+                // A name Mallard never writes — a conflicted copy, a file a
+                // person dropped in, anything that is not lowercase canonical
+                // — is not Mallard's: skip it and report it instead of
+                // failing the listing. Everything below such a folder has a
+                // non-canonical path too.
+                if canonical_path(&metadata.path_lower).is_err()
+                    || metadata.path_lower.rsplit('/').next() != Some(metadata.name.as_str())
+                {
+                    super::publication::report_ignored_name(&metadata.path_lower);
+                    continue;
                 }
                 metadata.check(&metadata.path_lower, metadata.kind == "folder")?;
                 byte_count = byte_count
@@ -936,43 +947,16 @@ impl ObjectStore for DropboxObjectStore {
             )
             .map_err(|error| self.describe(error))
     }
-    fn compare_and_swap(
+    fn put_record(
         &self,
         key: &ObjectKey,
-        expected: &CasExpectation,
         bytes: &[u8],
-    ) -> std::result::Result<CasOutcome, String> {
+    ) -> std::result::Result<ImmutablePutOutcome, String> {
         let path = object_path(key)?;
         upload_size(bytes.len() as u64)?;
-        let mode = match expected {
-            CasExpectation::Absent => json!({".tag":"add"}),
-            CasExpectation::Match(rev) => {
-                if !valid_rev(rev) {
-                    return Err(Error::Invalid.into());
-                }
-                json!({".tag":"update","update":rev})
-            }
-        };
         self.runtime
-            .block_on(async {
-                match self
-                    .upload(&path, mode, Bytes::copy_from_slice(bytes))
-                    .await
-                {
-                    Ok(m) => Ok(CasOutcome::Written { etag: m.rev }),
-                    Err(Error::Conflict) => {
-                        let current = self.metadata(&path).await?;
-                        if let Some(m) = &current {
-                            m.check(&path, false)?;
-                        }
-                        Ok(CasOutcome::Conflict {
-                            current_etag: current.map(|m| m.rev),
-                        })
-                    }
-                    // Equal bytes after an unknown write do not prove who won the CAS.
-                    Err(error) => Err(error),
-                }
-            })
+            .block_on(self.upload_record(&path, Bytes::copy_from_slice(bytes)))
+            .map(|_| ImmutablePutOutcome::Written)
             .map_err(|error| self.describe(error))
     }
     fn supports_conditional_delete(&self) -> bool {

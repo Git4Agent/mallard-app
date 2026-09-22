@@ -658,7 +658,9 @@ pub fn derive_library_origin(
 /// Immutable discovery metadata for one repository. It freezes exactly the
 /// coordinate the repository id derives from and contains no local
 /// profile/path/target/storage identity. It is never trusted in place of the
-/// verified head and manifest.
+/// verified publication and manifest. Every field derives from the
+/// coordinate, so every writer writes identical bytes and a plain write of
+/// its key is safe.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryResourceTag {
@@ -668,15 +670,10 @@ pub struct LibraryResourceTag {
     pub resource_kind: CatalogResourceKindKey,
     pub format: CatalogFormatKey,
     pub format_version: u32,
-    pub created_at: u64,
 }
 
 impl LibraryResourceTag {
-    pub fn new(
-        coordinate: &CatalogCoordinate,
-        repository_id: CatalogResourceRepositoryId,
-        created_at: u64,
-    ) -> Self {
+    pub fn new(coordinate: &CatalogCoordinate, repository_id: CatalogResourceRepositoryId) -> Self {
         Self {
             schema_version: CATALOG_SCHEMA,
             repository_id,
@@ -684,7 +681,6 @@ impl LibraryResourceTag {
             resource_kind: coordinate.resource_kind.clone(),
             format: coordinate.format.clone(),
             format_version: coordinate.format_version,
-            created_at,
         }
     }
 
@@ -709,9 +705,6 @@ impl LibraryResourceTag {
             return Err(
                 "library repository id does not match its coordinate derivation".to_string(),
             );
-        }
-        if self.created_at == 0 {
-            return Err("library tag requires a creation timestamp".to_string());
         }
         Ok(())
     }
@@ -786,6 +779,8 @@ impl LibraryResourceManifest {
     }
 }
 
+/// The in-memory view of the selected publication record, field for field.
+/// It is never a stored object.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryResourceHead {
@@ -801,10 +796,6 @@ pub struct LibraryResourceHead {
 
 pub fn library_manifest_relative_key(revision: u64, commit_id: &CatalogCommitId) -> String {
     format!("_manifests/{}-{}.json", revision, commit_id)
-}
-
-pub fn library_commit_relative_key(revision: u64, commit_id: &CatalogCommitId) -> String {
-    format!("_commits/{}-{}.json", revision, commit_id)
 }
 
 impl LibraryResourceHead {
@@ -826,6 +817,9 @@ impl LibraryResourceHead {
     }
 }
 
+/// The publication record of one repository: written last, and the only
+/// thing that publishes a set. Its object name repeats its graph facts and
+/// carries the digest of these exact bytes.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryResourceCommit {
@@ -833,24 +827,53 @@ pub struct LibraryResourceCommit {
     pub repository_id: CatalogResourceRepositoryId,
     pub revision: u64,
     pub commit_id: CatalogCommitId,
-    pub manifest_key: String,
-    pub manifest_sha256: String,
-    pub created_at: u64,
+    /// The parent's token. Both halves are absent for a first publication
+    /// and both present otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_commit_id: Option<CatalogCommitId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_record_sha256: Option<String>,
+    /// UTC Unix milliseconds, taken when the record is built. It ranks
+    /// siblings and proves nothing about arrival order.
+    pub created_at_ms: u64,
+    pub manifest_key: String,
+    pub manifest_sha256: String,
+    pub manifest_size: u64,
     pub published_by_origin: PortableCatalogOrigin,
 }
 
 impl LibraryResourceCommit {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != CATALOG_SCHEMA || self.revision == 0 || self.created_at == 0 {
+        if self.schema_version != CATALOG_SCHEMA || self.revision == 0 || self.manifest_size == 0 {
             return Err("invalid library commit coordinates".to_string());
+        }
+        if self.previous_commit_id.is_some() != self.previous_record_sha256.is_some()
+            || self.previous_commit_id.is_some() != (self.revision > 1)
+        {
+            return Err("library commit names half a parent or the wrong depth".to_string());
+        }
+        if let Some(previous) = &self.previous_record_sha256 {
+            validate_sha256("library commit parent record digest", previous)?;
         }
         validate_sha256("library commit manifest digest", &self.manifest_sha256)?;
         if self.manifest_key != library_manifest_relative_key(self.revision, &self.commit_id) {
             return Err("library commit manifest key does not match its coordinates".to_string());
         }
-        Ok(())
+        self.published_by_origin.validate()
+    }
+
+    /// The head view every reader of the selected publication sees.
+    pub fn head(&self) -> LibraryResourceHead {
+        LibraryResourceHead {
+            schema_version: self.schema_version,
+            repository_id: self.repository_id.clone(),
+            revision: self.revision,
+            commit_id: self.commit_id.clone(),
+            manifest_key: self.manifest_key.clone(),
+            manifest_sha256: self.manifest_sha256.clone(),
+            manifest_size: self.manifest_size,
+            updated_at: (self.created_at_ms / 1000).max(1),
+        }
     }
 }
 
@@ -2841,9 +2864,17 @@ mod tests {
         let tag = LibraryResourceTag::new(
             &codex_skills(),
             CatalogResourceRepositoryId::for_coordinate(&codex_skills()),
-            1,
         );
         tag.validate().unwrap();
+        // Two first writers converge on identical bytes.
+        assert_eq!(
+            serde_json::to_vec(&tag).unwrap(),
+            serde_json::to_vec(&LibraryResourceTag::new(
+                &codex_skills(),
+                CatalogResourceRepositoryId::for_coordinate(&codex_skills()),
+            ))
+            .unwrap()
+        );
         assert_eq!(tag.coordinate(), codex_skills());
 
         let mismatched = LibraryResourceTag {
@@ -2860,7 +2891,6 @@ mod tests {
         LibraryResourceTag::new(
             &unknown,
             CatalogResourceRepositoryId::for_coordinate(&unknown),
-            1,
         )
         .validate()
         .unwrap();

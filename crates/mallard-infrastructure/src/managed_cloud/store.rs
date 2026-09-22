@@ -1,46 +1,43 @@
 //! The managed store: the bundle engine's object-store contract answered by
-//! the Mallard Cloud service. Heads, tags, and the storage marker are
-//! synthesized from the service's answers; objects are staged in memory
-//! until the manifest arrives, which turns into the three-step upload; the
-//! head compare-and-swap is the commit.
+//! the Mallard Cloud service. The storage marker is synthesized; objects are
+//! staged in memory until the manifest arrives, which turns into the upload;
+//! the record write is the commit.
+//!
+//! Mallard Cloud is not offered by this build. The engine reads by listing a
+//! stream of publication records; the service stores no records and lists
+//! none yet, so this store is not in the production registry
+//! (DESIGN_CAS_FREE_STORAGE_REFACTOR.md, section 14).
 //!
 //! | Engine key | Behaviour |
 //! | --- | --- |
 //! | `.mallard/_storage.json` | synthesized marker |
-//! | `_head.json` read | exact repository head when pinned, otherwise by bundle; etag is the commit id |
+//! | `_head.json` read | the repository status read: exact repository head when pinned, otherwise by bundle |
 //! | `_manifests/{rev}-{commit}.json` read | streamed manifest, digest checked |
 //! | `_objects/{sha}` read | streamed object, digest checked |
 //! | `_objects/{sha}` write | staged in memory |
-//! | `_manifests/…` + `_commits/…` write | create the upload, put the missing objects |
-//! | `_head.json` CAS | commit the upload |
-//! | `_tags/…` | read from one repository listing; writes are no-ops |
+//! | `_manifests/…` write | create the upload, put the missing objects |
+//! | `_commits/{bundle}/{record}` write | commit the upload; the service refuses a parent that is not its head |
+//! | `_commits/…` read and list | absent and refused: the service stores no records yet |
 //! | `_uploads/…` | refused: probes are for user-owned stores |
 //! | `.mallard/v1/library/…` | reads absent; writes refused |
 use super::client::{
-    CreateRepository, Error, ErrorKind, InventoryEntry, ManagedCloudClient, RepositorySummary,
-    UploadRequest,
+    CreateRepository, Error, ErrorKind, InventoryEntry, ManagedCloudClient, UploadRequest,
 };
 use super::views::build_views_for_manifest;
-use crate::bundle_engine::BundleTag;
 use crate::providers::AgentProviderRegistry;
+use crate::storage_core::publication::REMOTE_CHANGED;
 use crate::storage_core::{
-    CasExpectation, CasOutcome, ConnectionHealth, ExpectedObject, ImmutablePutOutcome, ObjectKey,
-    ObjectPrefix, ObjectStore, StageOutcome, StorageMarker, StoreListEntry, StoreListPage,
-    StoredMetadata, VerifiedBody, LIBRARY_PREFIX, REPOSITORY_PREFIX, REPOSITORY_TAGS_PREFIX,
-    STORAGE_MARKER_KEY,
+    ConnectionHealth, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore,
+    StageOutcome, StorageMarker, StoreListPage, StoredMetadata, VerifiedBody, LIBRARY_PREFIX,
+    REPOSITORY_COMMITS_PREFIX, REPOSITORY_PREFIX, STORAGE_MARKER_KEY,
 };
 use bytes::Bytes;
-use mallard_domain::{
-    sha256_hex, BundleHead, BundleId, BundleKind, BundleManifest, ProviderKey, BUNDLE_SCHEMA,
-};
+use mallard_domain::{sha256_hex, BundleHead, BundleId, BundleKind, BundleManifest, BUNDLE_SCHEMA};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
-
-const LISTING_FRESH_FOR: Duration = Duration::from_secs(60);
 
 pub const CATALOG_REFUSAL: &str =
     "managed_catalog_uses_item_adapter: Library items on Mallard Cloud are synced through the catalog item adapter, not the storage namespace.";
@@ -54,13 +51,12 @@ enum Key {
         revision: u64,
         commit_id: String,
     },
-    Commit(BundleId),
+    Record(BundleId),
     Object {
         bundle_id: BundleId,
         sha256: String,
     },
     Upload(BundleId),
-    Tag(BundleId),
     Library,
 }
 
@@ -72,11 +68,11 @@ fn classify(key: &ObjectKey) -> Result<Key, String> {
     if raw.starts_with(&format!("{LIBRARY_PREFIX}/")) {
         return Ok(Key::Library);
     }
-    if let Some(rest) = raw.strip_prefix(&format!("{REPOSITORY_TAGS_PREFIX}/")) {
-        let bundle = rest
-            .strip_suffix(".json")
-            .ok_or_else(|| format!("unexpected tag key '{raw}'"))?;
-        return Ok(Key::Tag(BundleId::parse(bundle.to_string())?));
+    if let Some(rest) = raw.strip_prefix(&format!("{REPOSITORY_COMMITS_PREFIX}/")) {
+        let (bundle, _) = rest
+            .split_once('/')
+            .ok_or_else(|| format!("unexpected record key '{raw}'"))?;
+        return Ok(Key::Record(BundleId::parse(bundle.to_string())?));
     }
     let rest = raw
         .strip_prefix(&format!("{REPOSITORY_PREFIX}/"))
@@ -101,9 +97,6 @@ fn classify(key: &ObjectKey) -> Result<Key, String> {
             commit_id: commit_id.to_owned(),
         });
     }
-    if relative.starts_with("_commits/") {
-        return Ok(Key::Commit(bundle_id));
-    }
     if let Some(sha256) = relative.strip_prefix("_objects/") {
         mallard_domain::validate_sha256("managed object", sha256)?;
         return Ok(Key::Object {
@@ -117,8 +110,8 @@ fn classify(key: &ObjectKey) -> Result<Key, String> {
     Err(format!("unexpected repository key '{raw}'"))
 }
 
-/// The upload created for a bundle's next snapshot, waiting for the head
-/// swing that commits it.
+/// The upload created for a bundle's next snapshot, waiting for the record
+/// write that commits it.
 #[derive(Clone, Debug)]
 struct PendingUpload {
     repository_id: String,
@@ -141,7 +134,6 @@ struct Inner {
     /// Objects written before their manifest, per bundle.
     staged: Mutex<BTreeMap<BundleId, BTreeMap<String, Bytes>>>,
     pending: Mutex<BTreeMap<BundleId, PendingUpload>>,
-    listing: Mutex<Option<(Instant, Vec<RepositorySummary>)>>,
 }
 
 #[derive(Clone)]
@@ -162,7 +154,6 @@ impl ManagedObjectStore {
                 status_read: tokio::sync::Mutex::new(()),
                 staged: Mutex::new(BTreeMap::new()),
                 pending: Mutex::new(BTreeMap::new()),
-                listing: Mutex::new(None),
             }),
         }
     }
@@ -253,61 +244,6 @@ impl ManagedObjectStore {
         };
         self.remember(bundle_id, &answer.repository_id)?;
         Ok(Some(answer.repository_id))
-    }
-
-    /// One `GET /v1/repositories?class=project`, reused for a minute so a
-    /// listing followed by its tag reads costs one request.
-    async fn listing(&self, fresh: bool) -> Result<Vec<RepositorySummary>, String> {
-        if !fresh {
-            if let Some((taken, rows)) = Self::lock(&self.inner.listing)?.as_ref() {
-                if taken.elapsed() < LISTING_FRESH_FOR {
-                    return Ok(rows.clone());
-                }
-            }
-        }
-        let rows = self.inner.client.list_project_repositories().await?;
-        for row in &rows {
-            if let Some(bundle) = row.bundle_id.as_deref() {
-                if let Ok(bundle_id) = BundleId::parse(bundle.to_string()) {
-                    self.remember(&bundle_id, &row.id)?;
-                }
-            }
-        }
-        *Self::lock(&self.inner.listing)? = Some((Instant::now(), rows.clone()));
-        Ok(rows)
-    }
-
-    fn tag_bytes(row: &RepositorySummary) -> Result<Option<(Vec<u8>, String)>, String> {
-        let Some(bundle) = row.bundle_id.as_deref() else {
-            return Ok(None);
-        };
-        let Some(summary) = row.private_summary.as_ref().or(row.public_summary.as_ref()) else {
-            return Ok(None);
-        };
-        let head = row.private_head.as_ref().or(row.public_head.as_ref());
-        let tag = BundleTag {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: BundleId::parse(bundle.to_string())?,
-            display_name: summary.display_name.clone(),
-            kind: BundleKind::Project,
-            revision: summary.revision,
-            updated_at: summary.updated_at,
-            resources: summary.resources,
-            files: summary.files,
-            registration_only: summary.registration_only,
-            providers: summary
-                .providers
-                .iter()
-                .filter_map(|provider| ProviderKey::parse(provider).ok())
-                .collect(),
-            repository_fingerprint: row.repository_fingerprint.clone(),
-        };
-        let bytes =
-            serde_json::to_vec(&tag).map_err(|error| format!("encode bundle tag: {error}"))?;
-        let etag = head
-            .map(|head| head.commit_id.clone())
-            .unwrap_or_else(|| format!("revision-{}", summary.revision));
-        Ok(Some((bytes, etag)))
     }
 
     async fn head_bytes(&self, bundle_id: &BundleId) -> Result<Option<StoredMetadata>, String> {
@@ -439,17 +375,6 @@ impl ManagedObjectStore {
                 etag: "managed".to_string(),
             })),
             Key::Head(bundle_id) => self.head_bytes(&bundle_id).await,
-            Key::Tag(bundle_id) => {
-                let rows = self.listing(false).await?;
-                let row = rows
-                    .iter()
-                    .find(|row| row.bundle_id.as_deref() == Some(bundle_id.as_str()));
-                Ok(row
-                    .map(Self::tag_bytes)
-                    .transpose()?
-                    .flatten()
-                    .map(|(bytes, etag)| StoredMetadata { bytes, etag }))
-            }
             classified @ (Key::Manifest { .. } | Key::Object { .. }) => {
                 let mut bytes = Vec::new();
                 Ok(self
@@ -460,7 +385,7 @@ impl ManagedObjectStore {
                         etag: downloaded.etag,
                     }))
             }
-            Key::Commit(_) | Key::Library => Ok(None),
+            Key::Record(_) | Key::Library => Ok(None),
             Key::Upload(_) => Err("Mallard Cloud has no probe namespace".to_string()),
         }
     }
@@ -469,7 +394,7 @@ impl ManagedObjectStore {
     /// upload of this same manifest, build the views, create the upload, put
     /// what the service says is missing, then end the account's own stale
     /// uploads (the new upload already references the objects they carried).
-    /// The commit happens at the head compare-and-swap.
+    /// The commit happens at the record write.
     async fn begin_upload(
         &self,
         bundle_id: &BundleId,
@@ -653,60 +578,58 @@ impl ManagedObjectStore {
         Ok(())
     }
 
-    async fn commit_head(
+    /// The record write commits the upload. The service keeps its commit
+    /// guard: it refuses a record whose parent is not its current head, which
+    /// is a changed remote with nothing written.
+    async fn commit_record(
         &self,
         bundle_id: &BundleId,
-        expectation: &CasExpectation,
         bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        let head: BundleHead = serde_json::from_slice(bytes)
-            .map_err(|error| format!("parse the head being written: {error}"))?;
-        head.validate()?;
+    ) -> Result<ImmutablePutOutcome, String> {
+        #[derive(serde::Deserialize)]
+        struct RecordFacts {
+            revision: u64,
+            commit_id: String,
+            #[serde(default)]
+            previous_commit_id: Option<String>,
+        }
+        let record: RecordFacts = serde_json::from_slice(bytes)
+            .map_err(|error| format!("parse the record being written: {error}"))?;
         let pending = Self::lock(&self.inner.pending)?.remove(bundle_id);
         Self::lock(&self.inner.staged)?.remove(bundle_id);
         let Some(pending) = pending else {
-            return Err("the bundle head cannot move before its manifest was uploaded".to_string());
+            return Err("a record cannot be written before its manifest was uploaded".to_string());
         };
-        if pending.commit_id != head.commit_id || pending.revision != head.revision {
+        if pending.commit_id != record.commit_id || pending.revision != record.revision {
             let _ = self
                 .inner
                 .client
                 .abandon_upload(&pending.repository_id, &pending.upload_id)
                 .await;
-            return Err("the head being written does not name the uploaded manifest".to_string());
+            return Err("the record being written does not name the uploaded manifest".to_string());
         }
-        let expected = match expectation {
-            CasExpectation::Absent => None,
-            CasExpectation::Match(commit_id) => Some(commit_id.as_str()),
-        };
         match self
             .inner
             .client
-            .commit_upload(&pending.repository_id, &pending.upload_id, expected)
+            .commit_upload(
+                &pending.repository_id,
+                &pending.upload_id,
+                record.previous_commit_id.as_deref(),
+            )
             .await
         {
-            Ok(committed) => {
-                *Self::lock(&self.inner.listing)? = None;
-                Ok(CasOutcome::Written {
-                    etag: committed.head.commit_id,
-                })
-            }
+            Ok(_) => Ok(ImmutablePutOutcome::Written),
             // The upload is stale now. It stays open so the next push, built
             // on the moved head, reuses the objects it carried; that push ends
             // it, or it expires.
-            Err(error) if error.kind == ErrorKind::HeadChanged => {
-                Ok(CasOutcome::Conflict { current_etag: None })
-            }
+            Err(error) if error.kind == ErrorKind::HeadChanged => Err(REMOTE_CHANGED.to_string()),
             Err(error) => Err(error.message()),
         }
     }
 
-    async fn enumerate(
-        &self,
-        prefix: &ObjectPrefix,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<StoreListPage, String> {
+    /// Nothing is enumerable: Library reads are absent, and the service
+    /// lists no publication records yet.
+    fn enumerate(prefix: &ObjectPrefix, limit: usize) -> Result<StoreListPage, String> {
         if limit == 0 {
             return Err("listing limit must be positive".to_string());
         }
@@ -717,36 +640,7 @@ impl ManagedObjectStore {
                 next_cursor: None,
             });
         }
-        if raw != REPOSITORY_TAGS_PREFIX {
-            return Err(
-                "Mallard Cloud lists repositories through their tags only; objects are not enumerable"
-                    .to_string(),
-            );
-        }
-        let rows = self.listing(cursor.is_none()).await?;
-        let mut entries = Vec::new();
-        for row in &rows {
-            if let Some((_, etag)) = Self::tag_bytes(row)? {
-                let key = crate::storage_core::repository_tag_key(&BundleId::parse(
-                    row.bundle_id.clone().unwrap_or_default(),
-                )?)?;
-                entries.push(StoreListEntry { key, etag });
-            }
-        }
-        entries.sort_by(|left, right| left.key.cmp(&right.key));
-        let mut remaining = entries
-            .into_iter()
-            .filter(|entry| cursor.is_none_or(|cursor| entry.key.as_str() > cursor));
-        let page: Vec<_> = remaining.by_ref().take(limit).collect();
-        let next_cursor = if remaining.next().is_some() {
-            page.last().map(|entry| entry.key.as_str().to_owned())
-        } else {
-            None
-        };
-        Ok(StoreListPage {
-            entries: page,
-            next_cursor,
-        })
+        Err("Mallard Cloud does not list publication records yet".to_string())
     }
 }
 
@@ -870,50 +764,36 @@ impl ObjectStore for ManagedObjectStore {
                         .block_on(self.begin_upload(&bundle_id, bytes))?;
                     outcomes.push(ImmutablePutOutcome::Written);
                 }
-                // The commit record is the service's own; the manifest write
-                // already carries everything it says.
-                Key::Commit(_) | Key::Marker => outcomes.push(ImmutablePutOutcome::AlreadyPresent),
+                Key::Marker => outcomes.push(ImmutablePutOutcome::AlreadyPresent),
                 Key::Library => return Err(CATALOG_REFUSAL.to_string()),
                 Key::Upload(_) => return Err("Mallard Cloud has no probe namespace".to_string()),
-                Key::Head(_) | Key::Tag(_) => {
-                    return Err(format!("'{key}' is written by compare-and-swap only"))
+                Key::Record(_) => {
+                    return Err(format!("'{key}' is written as a publication record only"))
                 }
+                Key::Head(_) => return Err(format!("'{key}' is never written")),
             }
         }
         Ok(outcomes)
     }
 
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
+    fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         match classify(key)? {
-            Key::Head(bundle_id) => {
-                self.inner
-                    .runtime
-                    .block_on(self.commit_head(&bundle_id, expectation, bytes))
-            }
-            // The website listing is the source of truth; tags are read
-            // from it and never written.
-            Key::Tag(_) => Ok(CasOutcome::Written {
-                etag: "managed".to_string(),
-            }),
+            Key::Record(bundle_id) => self
+                .inner
+                .runtime
+                .block_on(self.commit_record(&bundle_id, bytes)),
             Key::Library => Err(CATALOG_REFUSAL.to_string()),
-            _ => Err(format!("'{key}' is not a compare-and-swap object")),
+            _ => Err(format!("'{key}' is not a publication record")),
         }
     }
 
     fn list(
         &self,
         prefix: &ObjectPrefix,
-        cursor: Option<&str>,
+        _cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreListPage, String> {
-        self.inner
-            .runtime
-            .block_on(self.enumerate(prefix, cursor, limit))
+        Self::enumerate(prefix, limit)
     }
 }
 
@@ -934,10 +814,8 @@ mod tests {
             classify(&ObjectKey::parse(STORAGE_MARKER_KEY).unwrap()).unwrap(),
             Key::Marker
         );
-        assert_eq!(
-            classify(&object("_head.json")).unwrap(),
-            Key::Head(id.clone())
-        );
+        let head = ObjectKey::parse(format!("{REPOSITORY_PREFIX}/{id}/_head.json")).unwrap();
+        assert_eq!(classify(&head).unwrap(), Key::Head(id.clone()));
         assert_eq!(
             classify(&object("_manifests/3-commit-abcdef12.json")).unwrap(),
             Key::Manifest {
@@ -946,10 +824,9 @@ mod tests {
                 commit_id: "commit-abcdef12".into()
             }
         );
-        assert_eq!(
-            classify(&object("_commits/3-commit-abcdef12.json")).unwrap(),
-            Key::Commit(id.clone())
-        );
+        let record =
+            ObjectKey::parse(format!("{REPOSITORY_COMMITS_PREFIX}/{id}/record.json")).unwrap();
+        assert_eq!(classify(&record).unwrap(), Key::Record(id.clone()));
         let sha = "a".repeat(64);
         assert_eq!(
             classify(&object(&format!("_objects/{sha}"))).unwrap(),
@@ -960,17 +837,13 @@ mod tests {
         );
         assert_eq!(
             classify(&object("_uploads/probe")).unwrap(),
-            Key::Upload(id.clone())
-        );
-        assert_eq!(
-            classify(&crate::storage_core::repository_tag_key(&id).unwrap()).unwrap(),
-            Key::Tag(id)
+            Key::Upload(id)
         );
         assert_eq!(
             classify(
                 &crate::storage_core::library_object_key(
                     "library-0123456789abcdef0123456789abcdef",
-                    "_head.json"
+                    "_tag.json"
                 )
                 .unwrap()
             )
@@ -983,11 +856,12 @@ mod tests {
 #[cfg(test)]
 mod stub_tests {
     use super::*;
-    use crate::bundle_engine::BundleEngine;
     use crate::managed_cloud::stub::StubManagedCloud;
-    use crate::storage_core::{repository_object_key, HEAD_FILE};
+    use crate::storage_core::publication::RecordStream;
+    use crate::storage_core::repository_object_key;
     use mallard_domain::{
-        BundleIdentity, OriginHostToken, OriginReplicaToken, PortableOrigin, SecretValue, StorageId,
+        BundleIdentity, OriginHostToken, OriginReplicaToken, PortableOrigin, PublicationToken,
+        RecordName, SecretValue,
     };
 
     fn origin() -> PortableOrigin {
@@ -1022,24 +896,83 @@ mod stub_tests {
         )
     }
 
-    fn engine(store: ManagedObjectStore) -> BundleEngine<ManagedObjectStore> {
-        BundleEngine::open(store, StorageId::parse("storage-cloud").unwrap()).unwrap()
+    fn manifest_key(manifest: &BundleManifest) -> ObjectKey {
+        repository_object_key(
+            &manifest.bundle.bundle_id,
+            &format!(
+                "_manifests/{}-{}.json",
+                manifest.revision, manifest.commit_id
+            ),
+        )
+        .unwrap()
+    }
+
+    /// The publication record of `manifest` on `parent`, and its key. The
+    /// service reads the commit facts from it and nothing else.
+    fn record_of(manifest: &BundleManifest, parent: Option<&str>) -> (ObjectKey, Vec<u8>) {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "bundle_id": manifest.bundle.bundle_id,
+            "revision": manifest.revision,
+            "commit_id": manifest.commit_id,
+            "previous_commit_id": parent,
+        }))
+        .unwrap();
+        let name = RecordName::new(
+            manifest.revision,
+            PublicationToken::new(manifest.commit_id.clone(), sha256_hex(&bytes)).unwrap(),
+            parent.map(|parent| PublicationToken::new(parent, "0".repeat(64)).unwrap()),
+            manifest.updated_at,
+        )
+        .unwrap();
+        let key = RecordStream::project(&manifest.bundle.bundle_id)
+            .unwrap()
+            .key(&name)
+            .unwrap();
+        (key, bytes)
+    }
+
+    /// Pushes a manifest on top of `parent`: the manifest write creates the
+    /// upload, the record write commits it.
+    async fn push(
+        store: &ManagedObjectStore,
+        manifest: &BundleManifest,
+        parent: Option<&str>,
+    ) -> Result<ImmutablePutOutcome, String> {
+        let manifest_key = manifest_key(manifest);
+        let manifest_bytes = Bytes::from(serde_json::to_vec(manifest).unwrap());
+        let (record_key, record_bytes) = record_of(manifest, parent);
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .put_many(vec![(manifest_key, manifest_bytes)])
+                .unwrap();
+            store.put_record(&record_key, &record_bytes)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// The empty registration manifest of a just-linked bundle, pushed as
+    /// the repository's first publication.
+    async fn register(store: &ManagedObjectStore, identity: BundleIdentity) -> BundleManifest {
+        let manifest = BundleManifest {
+            schema_version: BUNDLE_SCHEMA,
+            revision: 1,
+            commit_id: mallard_domain::generated_named_id("commit").unwrap(),
+            updated_at: 100,
+            bundle: identity,
+            published_by_origin: origin(),
+            scopes: BTreeMap::new(),
+        };
+        push(store, &manifest, None).await.unwrap();
+        manifest
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pinned_status_shares_one_details_read_and_never_recreates_a_missing_repository() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "status-owner").await;
-        tokio::task::spawn_blocking({
-            let store = store.clone();
-            move || {
-                engine(store)
-                    .publish_registration(&identity(91), &origin(), 100)
-                    .unwrap()
-            }
-        })
-        .await
-        .unwrap();
+        register(&store, identity(91)).await;
         let id = stub
             .state
             .lock()
@@ -1124,16 +1057,7 @@ mod stub_tests {
         let stub = StubManagedCloud::start().await;
         let (owner, _) = store(&stub, "private-owner").await;
         let (contributor, _) = store(&stub, "contributor").await;
-        tokio::task::spawn_blocking({
-            let owner = owner.clone();
-            move || {
-                engine(owner)
-                    .publish_registration(&identity(92), &origin(), 100)
-                    .unwrap()
-            }
-        })
-        .await
-        .unwrap();
+        register(&owner, identity(92)).await;
         let id = stub
             .state
             .lock()
@@ -1168,34 +1092,10 @@ mod stub_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn registration_creates_the_repository_once_and_lists_it_as_a_tag() {
+    async fn a_first_publication_creates_the_repository_and_commits_on_the_record_write() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "octocat").await;
-        let outcome = tokio::task::spawn_blocking({
-            let store = store.clone();
-            move || {
-                let engine = engine(store);
-                let first = engine
-                    .publish_registration(&identity(1), &origin(), 100)
-                    .unwrap();
-                let second = engine
-                    .publish_registration(&identity(1), &origin(), 200)
-                    .unwrap();
-                let listed = engine.list_remote_bundles().unwrap();
-                (
-                    first.published,
-                    second.published,
-                    second.snapshot.head.revision,
-                    listed,
-                )
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!((outcome.0, outcome.1, outcome.2), (true, false, 1));
-        assert_eq!(outcome.3.len(), 1);
-        assert!(outcome.3[0].registration_only);
-        assert_eq!(outcome.3[0].bundle_id, bundle(1));
+        register(&store, identity(1)).await;
         let state = stub.state.lock().unwrap();
         assert_eq!(state.repositories.len(), 1);
         let repository = state.repository_for_bundle(bundle(1).as_str()).unwrap();
@@ -1219,19 +1119,12 @@ mod stub_tests {
     async fn registration_keeps_the_requested_github_name_and_suffixes_conflicts() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "octocat").await;
-        tokio::task::spawn_blocking(move || {
-            let engine = engine(store);
-            for number in [1, 2] {
-                let mut requested = identity(number);
-                requested.display_name = "My--Repo".into();
-                requested.repository_fingerprint = Some("a".repeat(64));
-                engine
-                    .publish_registration(&requested, &origin(), 100)
-                    .unwrap();
-            }
-        })
-        .await
-        .unwrap();
+        for number in [1, 2] {
+            let mut requested = identity(number);
+            requested.display_name = "My--Repo".into();
+            requested.repository_fingerprint = Some("a".repeat(64));
+            register(&store, requested).await;
+        }
         let state = stub.state.lock().unwrap();
         assert_eq!(
             state
@@ -1249,45 +1142,22 @@ mod stub_tests {
         );
     }
 
-    fn next_manifest(previous: &BundleManifest) -> (Bytes, Bytes, BundleHead) {
+    fn next_manifest(previous: &BundleManifest) -> BundleManifest {
         let mut manifest = previous.clone();
         manifest.revision += 1;
         manifest.commit_id = mallard_domain::generated_named_id("commit").unwrap();
         manifest.updated_at += 1;
-        let bytes = Bytes::from(serde_json::to_vec(&manifest).unwrap());
-        let head = BundleHead {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: manifest.bundle.bundle_id.clone(),
-            kind: BundleKind::Project,
-            revision: manifest.revision,
-            commit_id: manifest.commit_id.clone(),
-            manifest_key: format!(
-                "_manifests/{}-{}.json",
-                manifest.revision, manifest.commit_id
-            ),
-            manifest_sha256: sha256_hex(&bytes),
-            manifest_size: bytes.len() as u64,
-            updated_at: manifest.updated_at,
-        };
-        (bytes, Bytes::from_static(b"{}"), head)
+        manifest
     }
 
     /// Creates the upload for a manifest without committing it; returns its id.
     async fn open_upload(
         stub: &StubManagedCloud,
         store: &ManagedObjectStore,
-        id: &BundleId,
-        bytes: Bytes,
+        manifest: &BundleManifest,
     ) -> String {
-        let manifest: BundleManifest = serde_json::from_slice(&bytes).unwrap();
-        let key = repository_object_key(
-            id,
-            &format!(
-                "_manifests/{}-{}.json",
-                manifest.revision, manifest.commit_id
-            ),
-        )
-        .unwrap();
+        let key = manifest_key(manifest);
+        let bytes = Bytes::from(serde_json::to_vec(manifest).unwrap());
         let store = store.clone();
         tokio::task::spawn_blocking(move || store.put_many(vec![(key, bytes)]).unwrap())
             .await
@@ -1302,44 +1172,15 @@ mod stub_tests {
             .clone()
     }
 
-    /// Pushes a manifest as the next head on top of `parent`: the manifest and
-    /// commit writes, then the head compare-and-swap.
-    async fn push(
-        store: &ManagedObjectStore,
-        id: &BundleId,
-        bytes: Bytes,
-        head: BundleHead,
-        parent: &str,
-    ) -> CasOutcome {
-        let manifest_key = repository_object_key(id, &head.manifest_key).unwrap();
-        let commit_key = repository_object_key(
-            id,
-            &format!("_commits/{}-{}.json", head.revision, head.commit_id),
-        )
-        .unwrap();
-        let head_key = repository_object_key(id, HEAD_FILE).unwrap();
-        let expectation = CasExpectation::Match(parent.to_owned());
-        let store = store.clone();
-        tokio::task::spawn_blocking(move || {
-            store
-                .put_many(vec![
-                    (manifest_key, bytes),
-                    (commit_key, Bytes::from_static(b"{}")),
-                ])
-                .unwrap();
-            store
-                .compare_and_swap(&head_key, &expectation, &serde_json::to_vec(&head).unwrap())
-                .unwrap()
-        })
-        .await
-        .unwrap()
-    }
-
-    fn current_manifest(store: &ManagedObjectStore, number: u64) -> BundleManifest {
-        let store = store.clone();
-        tokio::task::block_in_place(move || {
-            engine(store).inspect(&bundle(number)).unwrap().manifest
-        })
+    fn current_manifest(stub: &StubManagedCloud, number: u64) -> BundleManifest {
+        let state = stub.state.lock().unwrap();
+        let head = state
+            .repository_for_bundle(bundle(number).as_str())
+            .unwrap()
+            .private_head
+            .as_ref()
+            .unwrap();
+        serde_json::from_slice(&head.manifest).unwrap()
     }
 
     /// Positions in the stub's request log of the last upload creation and of
@@ -1366,19 +1207,8 @@ mod stub_tests {
     async fn own_uploads_are_ended_in_order_and_a_collaborators_push_coexists() {
         let stub = StubManagedCloud::start().await;
         let (store, me) = store(&stub, "octocat").await;
-        let registered = tokio::task::spawn_blocking({
-            let store = store.clone();
-            move || {
-                engine(store)
-                    .publish_registration(&identity(2), &origin(), 100)
-                    .unwrap()
-            }
-        })
-        .await
-        .unwrap();
+        let base = register(&store, identity(2)).await;
         let id = bundle(2);
-        let base = registered.snapshot.manifest.clone();
-        let base_commit = registered.snapshot.head.commit_id.clone();
         let revision_of = |stub: &StubManagedCloud| {
             stub.state
                 .lock()
@@ -1392,15 +1222,13 @@ mod stub_tests {
         };
 
         // Two own leftovers, never committed: one of the very manifest pushed next, one of another.
-        let (bytes2, _, head2) = next_manifest(&base);
-        let same = open_upload(&stub, &store, &id, bytes2.clone()).await;
-        let (other_bytes, _, _) = next_manifest(&base);
-        let other = open_upload(&stub, &store, &id, other_bytes).await;
+        let second = next_manifest(&base);
+        let same = open_upload(&stub, &store, &second).await;
+        let other = open_upload(&stub, &store, &next_manifest(&base)).await;
         assert_eq!(stub.state.lock().unwrap().uploads[&same].user_id, me);
         // A new process knows neither.
         store.inner.pending.lock().unwrap().clear();
-        let written = push(&store, &id, bytes2, head2.clone(), &base_commit).await;
-        assert!(matches!(written, CasOutcome::Written { .. }));
+        push(&store, &second, Some(&base.commit_id)).await.unwrap();
         {
             let state = stub.state.lock().unwrap();
             // The same-manifest leftover had to go first; the other is not stale yet and is left alone.
@@ -1410,9 +1238,8 @@ mod stub_tests {
         assert_eq!(revision_of(&stub), 2);
 
         // The head moved, so the other leftover is stale: the next push ends it, after its own upload exists.
-        let (bytes3, _, head3) = next_manifest(&current_manifest(&store, 2));
-        let written = push(&store, &id, bytes3, head3.clone(), &head2.commit_id).await;
-        assert!(matches!(written, CasOutcome::Written { .. }));
+        let third = next_manifest(&current_manifest(&stub, 2));
+        push(&store, &third, Some(&second.commit_id)).await.unwrap();
         assert_eq!(
             stub.state.lock().unwrap().uploads[&other].state,
             "abandoned"
@@ -1422,41 +1249,33 @@ mod stub_tests {
 
         // A collaborator's open upload never blocks a push and is never touched.
         let (rika_store, rika) = store_for_member(&stub, "rika321", id.as_str()).await;
-        let shared_base = current_manifest(&rika_store, 2);
-        let (theirs_bytes, _, theirs_head) = next_manifest(&shared_base);
-        let theirs = open_upload(&stub, &rika_store, &id, theirs_bytes).await;
-        let (bytes4, _, head4) = next_manifest(&shared_base);
-        let written = push(&store, &id, bytes4, head4.clone(), &head3.commit_id).await;
-        assert!(matches!(written, CasOutcome::Written { .. }));
+        let shared_base = current_manifest(&stub, 2);
+        let theirs_manifest = next_manifest(&shared_base);
+        let theirs = open_upload(&stub, &rika_store, &theirs_manifest).await;
+        let fourth = next_manifest(&shared_base);
+        push(&store, &fourth, Some(&third.commit_id)).await.unwrap();
         {
             let state = stub.state.lock().unwrap();
             assert_eq!(state.uploads[&theirs].state, "open");
             assert_eq!(state.uploads[&theirs].user_id, rika);
         }
 
-        // Their commit is the divergent one: a conflict that leaves the upload open...
+        // Their record names a parent that is no longer the head: a changed
+        // remote that leaves the upload open...
         let conflict = tokio::task::spawn_blocking({
             let store = rika_store.clone();
-            let head_key = repository_object_key(&id, HEAD_FILE).unwrap();
-            let expectation = CasExpectation::Match(head3.commit_id.clone());
-            move || {
-                store
-                    .compare_and_swap(
-                        &head_key,
-                        &expectation,
-                        &serde_json::to_vec(&theirs_head).unwrap(),
-                    )
-                    .unwrap()
-            }
+            let (record_key, record_bytes) = record_of(&theirs_manifest, Some(&third.commit_id));
+            move || store.put_record(&record_key, &record_bytes)
         })
         .await
         .unwrap();
-        assert_eq!(conflict, CasOutcome::Conflict { current_etag: None });
+        assert_eq!(conflict.unwrap_err(), REMOTE_CHANGED);
         assert_eq!(stub.state.lock().unwrap().uploads[&theirs].state, "open");
         // ...and their push on the moved head ends it only once the replacement exists.
-        let (bytes5, _, head5) = next_manifest(&current_manifest(&rika_store, 2));
-        let written = push(&rika_store, &id, bytes5, head5, &head4.commit_id).await;
-        assert!(matches!(written, CasOutcome::Written { .. }));
+        let fifth = next_manifest(&current_manifest(&stub, 2));
+        push(&rika_store, &fifth, Some(&fourth.commit_id))
+            .await
+            .unwrap();
         assert_eq!(
             stub.state.lock().unwrap().uploads[&theirs].state,
             "abandoned"
@@ -1487,49 +1306,18 @@ mod stub_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_moved_head_is_a_cas_conflict_that_leaves_the_upload_open() {
+    async fn a_moved_head_is_a_changed_remote_that_leaves_the_upload_open() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "octocat").await;
-        let registered = tokio::task::spawn_blocking({
-            let store = store.clone();
-            move || {
-                engine(store)
-                    .publish_registration(&identity(3), &origin(), 100)
-                    .unwrap()
-            }
-        })
-        .await
-        .unwrap();
-        let id = bundle(3);
-        let (manifest_bytes, commit_bytes, head) = next_manifest(&registered.snapshot.manifest);
-        let manifest_key = repository_object_key(&id, &head.manifest_key).unwrap();
-        let commit_key = repository_object_key(
-            &id,
-            &format!("_commits/{}-{}.json", head.revision, head.commit_id),
-        )
-        .unwrap();
+        let registered = register(&store, identity(3)).await;
         stub.state.lock().unwrap().fail_next_commit = true;
-        let outcome = tokio::task::spawn_blocking({
-            let store = store.clone();
-            move || {
-                store
-                    .put_many(vec![
-                        (manifest_key, manifest_bytes),
-                        (commit_key, commit_bytes),
-                    ])
-                    .unwrap();
-                store
-                    .compare_and_swap(
-                        &repository_object_key(&id, HEAD_FILE).unwrap(),
-                        &CasExpectation::Match(registered.snapshot.head.commit_id.clone()),
-                        &serde_json::to_vec(&head).unwrap(),
-                    )
-                    .unwrap()
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(outcome, CasOutcome::Conflict { current_etag: None });
+        let outcome = push(
+            &store,
+            &next_manifest(&registered),
+            Some(&registered.commit_id),
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), REMOTE_CHANGED);
         let state = stub.state.lock().unwrap();
         // The upload stays open: the next push, built on the moved head, reuses what it carried.
         assert_eq!(
@@ -1550,15 +1338,17 @@ mod stub_tests {
         let marker = ObjectKey::parse(STORAGE_MARKER_KEY).unwrap();
         let library = crate::storage_core::library_object_key(
             "library-0123456789abcdef0123456789abcdef",
-            HEAD_FILE,
+            "_tag.json",
         )
         .unwrap();
         stub.state.lock().unwrap().revoke_token(&token);
         let (marker_read, head_read, health, library_read, library_write) =
             tokio::task::spawn_blocking(move || {
                 let marker_read = store.get_metadata(&marker, 4096).unwrap();
-                let head_read = store
-                    .get_metadata(&repository_object_key(&bundle(4), HEAD_FILE).unwrap(), 4096);
+                let head_key =
+                    ObjectKey::parse(format!("{REPOSITORY_PREFIX}/{}/_head.json", bundle(4)))
+                        .unwrap();
+                let head_read = store.get_metadata(&head_key, 4096);
                 let health = store.connection_health().unwrap();
                 let library_read = store.get_metadata(&library, 4096).unwrap();
                 let library_write = store.put_immutable(&library, b"{}").unwrap_err();

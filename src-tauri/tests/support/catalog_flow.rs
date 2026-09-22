@@ -1800,10 +1800,11 @@ fn assert_storage_privacy(storage_root: &Path, needles: &[Vec<u8>]) -> usize {
     repositories.len()
 }
 
-/// Exercise real Library Push/Pull review, immutable publication, CAS,
-/// preservation, materialization, and fixed-point behavior for two isolated
-/// Codex homes. It is safe to call after a conversation flow because the
-/// Library namespace is independent of project bundle heads.
+/// Exercise real Library Push/Pull review, immutable publication, the
+/// stale-review refusal, preservation, materialization, and fixed-point
+/// behavior for two isolated Codex homes. It is safe to call after a
+/// conversation flow because the Library namespace is independent of project
+/// bundle streams.
 #[allow(dead_code)]
 pub fn run_catalog_flow(inputs: CatalogFlowInputs<'_>) -> CatalogFlowReport {
     run_catalog_flow_inner(inputs, false)

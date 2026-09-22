@@ -38,7 +38,7 @@ List provider candidates. Then read only `.mallard/_storage.json` at each
 candidate root. A supported marker has this content:
 
 ```json
-{"format":"mallard-storage","layout_version":1}
+{"format":"mallard-append-storage","layout_version":1}
 ```
 
 The marker read limit is 4 KiB, as in the Rust storage engine. A missing,

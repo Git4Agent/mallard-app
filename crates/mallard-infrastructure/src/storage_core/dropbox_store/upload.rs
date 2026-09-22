@@ -1,4 +1,6 @@
-//! One write path for payloads, control objects, and setup probes.
+//! The write paths: bounded upload sessions for payloads, manifests, and
+//! setup probes, and one direct upload for a publication record. Every write
+//! creates its path; nothing is overwritten by revision.
 use super::*;
 
 const MAX_SESSION_ID_BYTES: usize = 16 * 1024;
@@ -6,30 +8,17 @@ const MAX_SESSION_ID_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 struct Upload {
     path: String,
-    mode: Value,
     bytes: Bytes,
     /// Dropbox block hash of `bytes`, computed once at preflight on the
     /// calling thread so transfer workers never hash.
     hash: String,
 }
 impl Upload {
-    fn new(path: String, mode: Value, bytes: Bytes) -> Result<Self> {
+    fn new(path: String, bytes: Bytes) -> Result<Self> {
         canonical_path(&path)?;
         upload_size(bytes.len() as u64)?;
-        let fields = mode.as_object().ok_or(Error::Invalid)?;
-        match mode[".tag"].as_str() {
-            Some("add") if fields.len() == 1 => {}
-            Some("update")
-                if fields.len() == 2 && mode["update"].as_str().is_some_and(valid_rev) => {}
-            _ => return Err(Error::Invalid),
-        }
         let hash = content_hash(&bytes);
-        Ok(Self {
-            path,
-            mode,
-            bytes,
-            hash,
-        })
+        Ok(Self { path, bytes, hash })
     }
 }
 
@@ -90,7 +79,7 @@ impl DropboxObjectStore {
             entries.push(json!({
                 "cursor": {"session_id": session, "offset": upload.bytes.len()},
                 "commit": {
-                    "path": upload.path, "mode": upload.mode,
+                    "path": upload.path, "mode": {".tag": "add"},
                     "autorename": false, "mute": true, "strict_conflict": true
                 }
             }));
@@ -138,12 +127,43 @@ impl DropboxObjectStore {
             .collect())
     }
 
-    pub(super) async fn upload(&self, path: &str, mode: Value, bytes: Bytes) -> Result<Metadata> {
-        let upload = Upload::new(path.to_owned(), mode, bytes)?;
+    pub(super) async fn upload(&self, path: &str, bytes: Bytes) -> Result<Metadata> {
+        let upload = Upload::new(path.to_owned(), bytes)?;
         self.upload_window(&[upload])
             .await?
             .pop()
             .ok_or(Error::Invalid)?
+    }
+
+    /// A publication record is one `files/upload` request: not a session
+    /// start plus a batch commit with Mallard's code in between, and never
+    /// retried here, because every attempt to write a record follows its own
+    /// listing. The record's name holds the digest of its bytes, so the
+    /// conflict check is not strict: a path that already holds these bytes is
+    /// this record, and Dropbox answers it as written.
+    pub(super) async fn upload_record(&self, path: &str, bytes: Bytes) -> Result<Metadata> {
+        let upload = Upload::new(path.to_owned(), bytes)?;
+        let argument = json!({
+            "path": upload.path, "mode": {".tag": "add"},
+            "autorename": false, "mute": true, "strict_conflict": false,
+            "content_hash": upload.hash
+        })
+        .to_string();
+        let response = self
+            .send_checked("files/upload", Endpoint::Content, |request| {
+                request
+                    .header("Content-Type", "application/octet-stream")
+                    .header("Dropbox-API-Arg", argument.clone())
+                    .body(upload.bytes.clone())
+            })
+            .await?;
+        let body = Self::bounded(response, RPC_LIMIT).await?;
+        let metadata = Metadata::from_file_response(&body)?;
+        metadata.check(&upload.path, false)?;
+        if metadata.size != upload.bytes.len() as u64 || metadata.content_hash != upload.hash {
+            return Err(Error::Integrity);
+        }
+        Ok(metadata)
     }
 
     pub(super) async fn put_many_async(
@@ -159,7 +179,7 @@ impl DropboxObjectStore {
         let mut by_path: BTreeMap<String, usize> = BTreeMap::new();
         let mut indices = Vec::with_capacity(objects.len());
         for (key, bytes) in objects {
-            let upload = Upload::new(object_path(&key)?, json!({".tag":"add"}), bytes)?;
+            let upload = Upload::new(object_path(&key)?, bytes)?;
             let index = if let Some(&index) = by_path.get(&upload.path) {
                 if unique[index].bytes != upload.bytes {
                     return Err(Error::Integrity);

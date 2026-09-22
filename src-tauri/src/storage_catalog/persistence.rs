@@ -19,8 +19,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::domain::{
     sha256_hex, CatalogMaterializationsDocument, CatalogOperationsDocument, CatalogPlanId,
     CatalogPreservationsDocument, CatalogProfilesDocument, CatalogResourcePlanDocument,
-    CatalogScopeLinksDocument, CatalogScopesDocument,
+    CatalogResourceRepositoryId, CatalogScopeLinksDocument, CatalogScopesDocument,
 };
+use mallard_domain::StorageId;
 
 const MAX_CATALOG_PROFILES_BYTES: u64 = 1024 * 1024;
 const MAX_CATALOG_SCOPES_BYTES: u64 = 1024 * 1024;
@@ -40,6 +41,12 @@ pub struct CatalogStateGuard<'a> {
 
 /// Exclusive guard over one canonical provider target path.
 pub struct CatalogTargetLock {
+    _file: fs::File,
+}
+
+/// Exclusive guard over this computer's publication to one Library
+/// repository of one storage.
+pub struct CatalogPublicationLock {
     _file: fs::File,
 }
 
@@ -143,6 +150,28 @@ impl CatalogStateRepository {
         file.lock()
             .map_err(|error| format!("lock provider target: {}", error))?;
         Ok(CatalogTargetLock { _file: file })
+    }
+
+    /// Local single-flight for one repository of one storage
+    /// (`locks/publish-<sha256>.lock`). It is a local convenience, not the
+    /// distributed exclusion: it stops a second Apply of the same review
+    /// from writing a sibling record. A held lock refuses at once.
+    pub fn acquire_publication_lock(
+        &self,
+        storage_id: &StorageId,
+        repository_id: &CatalogResourceRepositoryId,
+    ) -> Result<CatalogPublicationLock, String> {
+        let locks_dir = self.root.join("locks");
+        ensure_restricted_directory(&locks_dir)?;
+        let digest = sha256_hex(format!("{}/{}", storage_id, repository_id).as_bytes());
+        let file = open_lock_file(&locks_dir.join(format!("publish-{}.lock", digest)))?;
+        file.try_lock().map_err(|error| match error {
+            fs::TryLockError::WouldBlock => {
+                "another Push to this Library repository is already in progress".to_string()
+            }
+            fs::TryLockError::Error(error) => format!("lock Library publication: {}", error),
+        })?;
+        Ok(CatalogPublicationLock { _file: file })
     }
 
     fn profiles_path(&self) -> PathBuf {
@@ -455,7 +484,7 @@ impl CatalogStateRepository {
     /// storage deletion never silently rewrites Library state.
     pub fn storage_reference_reason(
         &self,
-        storage_id: &mallard_domain::StorageId,
+        storage_id: &StorageId,
     ) -> Result<Option<String>, String> {
         if self
             .load_scope_links()?
@@ -501,7 +530,7 @@ impl CatalogStateRepository {
     /// can repopulate the now-empty storage.
     pub fn clear_storage_data<T>(
         &self,
-        storage_id: &mallard_domain::StorageId,
+        storage_id: &StorageId,
         clear_remote_and_project_state: impl FnOnce() -> Result<T, String>,
     ) -> Result<(T, CatalogStorageDataClearResult), String> {
         let _guard = self.guard()?;

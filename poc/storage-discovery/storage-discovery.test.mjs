@@ -19,7 +19,7 @@ test("mock proves discovery, pagination, deduplication, and denied marker access
 test("marker constants match the current Rust contract", async () => {
   const marker = await readFile(new URL("../../crates/mallard-infrastructure/src/storage_core/marker.rs", import.meta.url), "utf8");
   const core = await readFile(new URL("../../crates/mallard-infrastructure/src/storage_core/mod.rs", import.meta.url), "utf8");
-  assert.match(marker, /STORAGE_MARKER_FORMAT: &str = "mallard-storage"/u);
+  assert.match(marker, /STORAGE_MARKER_FORMAT: &str = "mallard-append-storage"/u);
   assert.match(marker, /STORAGE_LAYOUT_VERSION: u32 = 1/u);
   assert.match(core, /MAX_STORAGE_MARKER_BYTES: u64 = 4 \* 1024/u);
   assert.ok(core.includes(`"${MARKER_KEY}"`));
@@ -31,7 +31,7 @@ for (const [name, bytes, state] of [
   ["unknown fields accepted by Rust", JSON.stringify({ ...MARKER, extra: true }), "mallard_storage"],
   ["future layout", JSON.stringify({ ...MARKER, layout_version: 2 }), "unsupported_layout"],
   ["wrong format", JSON.stringify({ format: "other", layout_version: 1 }), "invalid_marker"],
-  ["missing version", JSON.stringify({ format: "mallard-storage" }), "invalid_marker"],
+  ["missing version", JSON.stringify({ format: "mallard-append-storage" }), "invalid_marker"],
   ["string version", JSON.stringify({ ...MARKER, layout_version: "1" }), "invalid_marker"],
   ["negative version", JSON.stringify({ ...MARKER, layout_version: -1 }), "invalid_marker"],
   ["out of range version", JSON.stringify({ ...MARKER, layout_version: 2 ** 32 }), "invalid_marker"],

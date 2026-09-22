@@ -2701,7 +2701,7 @@ mod dropbox_tests {
         );
         server.set_auth_tag(Some("invalid_access_token"));
         let key = mallard_infrastructure::storage_core::ObjectKey::parse(
-            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_head.json",
+            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_manifests/1-commit-a.json",
         )
         .unwrap();
         assert!(store.get_metadata(&key, 64).is_err());
@@ -2775,7 +2775,7 @@ mod dropbox_tests {
             }
         };
         let key = ObjectKey::parse(
-            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_head.json",
+            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_manifests/1-commit-a.json",
         )
         .unwrap();
 

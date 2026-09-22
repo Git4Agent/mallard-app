@@ -13,6 +13,13 @@
 //! deliberately no containment refinement: a canonical-prefix relationship
 //! between two unequal tails still classifies `Divergent`, and the accepted
 //! residual is an occasional extra keep-both.
+//!
+//! A pair without accepted pins has nothing to be read relative to. The
+//! caller proves an equal or an earlier stored copy from content before it
+//! builds the evidence (first-contact adoption) and passes that proof as the
+//! accepted pins. A pair that arrives here without them is one that proof
+//! could not decide: the stored copy is longer or different. It classifies
+//! `Divergent`, so nothing is replaced and Pull keeps both copies.
 
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +141,6 @@ pub enum TailEvidenceBlocker {
     InvalidSide,
     InvalidTail,
     IncompleteAcceptance,
-    UnacceptedOverlap,
     ExpectedSideMissing,
     LayoutMismatch,
     AcceptanceCoordinateMismatch,
@@ -181,12 +187,10 @@ impl VerifiedTailEvidence {
         if accepted.value().is_some() != accepted_local.value().is_some() {
             return Err(TailEvidenceBlocker::IncompleteAcceptance);
         }
-        match (accepted.value(), local.value(), cloud.value()) {
-            (None, Some(_), Some(_)) => return Err(TailEvidenceBlocker::UnacceptedOverlap),
-            (Some(_), None, _) | (Some(_), _, None) => {
-                return Err(TailEvidenceBlocker::ExpectedSideMissing)
-            }
-            _ => {}
+        if let (Some(_), None, _) | (Some(_), _, None) =
+            (accepted.value(), local.value(), cloud.value())
+        {
+            return Err(TailEvidenceBlocker::ExpectedSideMissing);
         }
         if let (Some(accepted), Some(accepted_local), Some(local), Some(cloud)) = (
             accepted.value(),
@@ -225,6 +229,8 @@ pub fn compare_conversation_tail(evidence: &VerifiedTailEvidence) -> TailClassif
         (None, Some(_), None) => return TailClassification::MissingCloud,
         (None, None, Some(_)) => return TailClassification::MissingLocal,
         (None, None, None) => return TailClassification::MissingBoth,
+        // Both copies exist and no accepted pins relate them.
+        (None, Some(_), Some(_)) => return TailClassification::Divergent,
         (Some(_), Some(_), Some(_)) => {}
         _ => unreachable!("verified evidence exhausts ambiguous absence shapes"),
     }
@@ -317,12 +323,14 @@ mod owned_child_tests {
             }),
             Err(TailEvidenceBlocker::ExpectedSideMissing)
         );
+        // A child pair without accepted pins: nothing relates the two
+        // copies, so the conversation keeps both.
         assert_eq!(
             compare_subagent_tail(&SubagentTailPins {
                 accepted: None,
                 ..pins.clone()
             }),
-            Err(TailEvidenceBlocker::UnacceptedOverlap)
+            Ok(TailClassification::Divergent)
         );
         assert_eq!(
             compare_subagent_tail(&SubagentTailPins {

@@ -8,6 +8,7 @@
 //! an error with that instruction, but catching it is not a substitute for
 //! keeping blocking work off an async runtime worker.
 
+use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::ByteStream;
@@ -25,8 +26,8 @@ use tokio::runtime::Handle;
 use tokio::time::{sleep, timeout};
 
 use super::{
-    CasExpectation, CasOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
-    ObjectStore, StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
+    ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome,
+    StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
 };
 use mallard_domain::{self as domain, hex_lower, sha256_hex as sha256_bytes};
 
@@ -51,8 +52,7 @@ pub enum R2CapabilityProbeStage {
     List,
     Create,
     Read,
-    ConditionalOverwrite,
-    StaleConditionalRejection,
+    ListAfterWrite,
     Cleanup,
 }
 
@@ -63,8 +63,7 @@ impl std::fmt::Display for R2CapabilityProbeStage {
             Self::List => "bounded listing",
             Self::Create => "absent-key creation",
             Self::Read => "verified readback",
-            Self::ConditionalOverwrite => "conditional overwrite",
-            Self::StaleConditionalRejection => "stale-condition rejection",
+            Self::ListAfterWrite => "listing after the write",
             Self::Cleanup => "cleanup",
         })
     }
@@ -256,11 +255,8 @@ impl S3ObjectStore {
             }
         }
 
-        let first_body = format!("mallard-r2-setup-probe-v1:{setup_id}:first").into_bytes();
-        match self
-            .probe_conditional_put_async(key, &first_body, ProbeExpectation::Absent)
-            .await
-        {
+        let body = format!("mallard-r2-setup-probe-v1:{setup_id}").into_bytes();
+        match self.probe_put_async(key, &body).await {
             ProbePutAttempt::Written => {}
             ProbePutAttempt::Ambiguous => {
                 return self
@@ -271,7 +267,7 @@ impl S3ObjectStore {
                     )
                     .await
             }
-            ProbePutAttempt::PreconditionFailed | ProbePutAttempt::Failed => {
+            ProbePutAttempt::Failed => {
                 return Err(R2CapabilityProbeError::remote(
                     R2CapabilityProbeStage::Create,
                     setup_id,
@@ -279,46 +275,25 @@ impl S3ObjectStore {
             }
         }
 
-        let first_etag = match self.probe_get_verified_async(key, &first_body).await {
-            Ok(Some(etag)) => etag,
-            Ok(None) | Err(()) => {
+        match self.probe_get_verified_async(key, &body).await {
+            Ok(true) => {}
+            Ok(false) | Err(()) => {
                 return self
                     .probe_failure_after_possible_write(setup_id, key, R2CapabilityProbeStage::Read)
                     .await
             }
-        };
-
-        let second_body = format!("mallard-r2-setup-probe-v1:{setup_id}:second").into_bytes();
-        match self
-            .probe_conditional_put_async(key, &second_body, ProbeExpectation::Match(&first_etag))
-            .await
-        {
-            ProbePutAttempt::Written => {}
-            ProbePutAttempt::PreconditionFailed
-            | ProbePutAttempt::Ambiguous
-            | ProbePutAttempt::Failed => {
-                return self
-                    .probe_failure_after_possible_write(
-                        setup_id,
-                        key,
-                        R2CapabilityProbeStage::ConditionalOverwrite,
-                    )
-                    .await
-            }
         }
 
-        let stale_body = format!("mallard-r2-setup-probe-v1:{setup_id}:stale").into_bytes();
-        match self
-            .probe_conditional_put_async(key, &stale_body, ProbeExpectation::Match(&first_etag))
-            .await
-        {
-            ProbePutAttempt::PreconditionFailed => {}
-            ProbePutAttempt::Written | ProbePutAttempt::Ambiguous | ProbePutAttempt::Failed => {
+        // Publication lists a stream right after writing to it: a completed
+        // write must be visible to the very next listing of its prefix.
+        match self.probe_key_is_absent_from_list_async(key).await {
+            Ok(false) => {}
+            Ok(true) | Err(()) => {
                 return self
                     .probe_failure_after_possible_write(
                         setup_id,
                         key,
-                        R2CapabilityProbeStage::StaleConditionalRejection,
+                        R2CapabilityProbeStage::ListAfterWrite,
                     )
                     .await
             }
@@ -368,45 +343,33 @@ impl S3ObjectStore {
             if response.is_truncated() == Some(true) || response.contents().len() > 2 {
                 return Err(());
             }
-            return Ok(response.contents().is_empty());
+            return Ok(!response
+                .contents()
+                .iter()
+                .any(|object| object.key() == Some(key)));
         }
         Err(())
     }
 
-    async fn probe_conditional_put_async(
-        &self,
-        key: &str,
-        body: &[u8],
-        expectation: ProbeExpectation<'_>,
-    ) -> ProbePutAttempt {
+    async fn probe_put_async(&self, key: &str, body: &[u8]) -> ProbePutAttempt {
         let checksum = aws_smithy_types::base64::encode(Sha256::digest(body));
-        let mut request = self
+        let request = self
             .client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
             .checksum_sha256(checksum)
             .body(ByteStream::from(Bytes::copy_from_slice(body)));
-        request = match expectation {
-            ProbeExpectation::Absent => request.if_none_match("*"),
-            ProbeExpectation::Match(etag) => request.if_match(format!("\"{etag}\"")),
-        };
         match timeout(self.request_timeout, request.send()).await {
             Err(_) => ProbePutAttempt::Ambiguous,
             Ok(Ok(_)) => ProbePutAttempt::Written,
-            Ok(Err(error)) if matches!(sdk_status(&error), Some(409) | Some(412)) => {
-                ProbePutAttempt::PreconditionFailed
-            }
             Ok(Err(error)) if ambiguous_sdk_error(&error) => ProbePutAttempt::Ambiguous,
             Ok(Err(_)) => ProbePutAttempt::Failed,
         }
     }
 
-    async fn probe_get_verified_async(
-        &self,
-        key: &str,
-        expected: &[u8],
-    ) -> Result<Option<String>, ()> {
+    /// Whether the probe key reads back exactly `expected`.
+    async fn probe_get_verified_async(&self, key: &str, expected: &[u8]) -> Result<bool, ()> {
         let request = self
             .client
             .get_object()
@@ -415,7 +378,7 @@ impl S3ObjectStore {
             .send();
         let response = match timeout(self.request_timeout, request).await {
             Ok(Ok(response)) => response,
-            Ok(Err(error)) if sdk_status(&error) == Some(404) => return Ok(None),
+            Ok(Err(error)) if sdk_status(&error) == Some(404) => return Ok(false),
             Err(_) | Ok(Err(_)) => return Err(()),
         };
         if response
@@ -424,10 +387,6 @@ impl S3ObjectStore {
         {
             return Err(());
         }
-        let etag = response
-            .e_tag()
-            .and_then(|etag| validated_service_etag(etag, "setup probe").ok())
-            .ok_or(())?;
         let mut body = response.body;
         let mut received = Vec::new();
         loop {
@@ -443,10 +402,7 @@ impl S3ObjectStore {
             }
             received.extend_from_slice(&chunk);
         }
-        if received.len() != expected.len() || sha256_bytes(&received) != sha256_bytes(expected) {
-            return Err(());
-        }
-        Ok(Some(etag))
+        Ok(received.len() == expected.len() && sha256_bytes(&received) == sha256_bytes(expected))
     }
 
     /// Remove only this setup's unique probe key. R2 does not support
@@ -571,10 +527,10 @@ impl S3ObjectStore {
         &self,
         key: &ObjectKey,
         expected: &ExpectedObject,
-    ) -> Result<S3StageOutcome, String> {
+    ) -> Result<StageOutcome, String> {
         domain::validate_sha256("expected object", &expected.sha256)?;
         let Some(response) = self.get_response(key).await? else {
-            return Ok(S3StageOutcome::Missing);
+            return Ok(StageOutcome::Missing);
         };
         let declared_length = response.content_length();
         if let Some(length) = declared_length {
@@ -590,7 +546,7 @@ impl S3ObjectStore {
             .ok_or_else(|| format!("S3 get '{}' returned no ETag", key))
             .and_then(|etag| validated_service_etag(etag, key.as_str()))?;
         if declared_length.is_some_and(|length| length as u64 != expected.size) {
-            return Ok(S3StageOutcome::Mismatch { etag });
+            return Ok(StageOutcome::Mismatch);
         }
 
         let mut staged = NamedTempFile::new()
@@ -618,7 +574,7 @@ impl S3ObjectStore {
                 .checked_add(chunk_len)
                 .ok_or_else(|| format!("S3 object '{}' byte count overflow", key))?;
             if new_received > expected.size {
-                return Ok(S3StageOutcome::Mismatch { etag });
+                return Ok(StageOutcome::Mismatch);
             }
             staged
                 .as_file_mut()
@@ -629,7 +585,7 @@ impl S3ObjectStore {
         }
         let digest = hex_lower(&hasher.finalize());
         if received != expected.size || digest != expected.sha256 {
-            return Ok(S3StageOutcome::Mismatch { etag });
+            return Ok(StageOutcome::Mismatch);
         }
         staged
             .as_file_mut()
@@ -639,55 +595,55 @@ impl S3ObjectStore {
             .as_file_mut()
             .sync_all()
             .map_err(|error| format!("sync staged S3 object '{}': {}", key, error))?;
-        Ok(S3StageOutcome::Verified(VerifiedBody::from_temp_file(
+        Ok(StageOutcome::Verified(VerifiedBody::from_temp_file(
             staged, received, digest, etag,
         )?))
     }
 
-    async fn conditional_put_async(
+    /// Create-only write, the store's native immutable mechanic: the service
+    /// refuses a key that is already taken. The service also verifies the
+    /// received bytes against this digest before accepting, so an
+    /// acknowledged PUT is a content-verified receipt and no write path ever
+    /// reads its object back. `retry` is false for a publication record,
+    /// whose every attempt must follow its own listing.
+    async fn put_absent_async(
         &self,
         key: &ObjectKey,
         body: Bytes,
-        expectation: &CasExpectation,
+        retry: bool,
     ) -> Result<PutAttempt, String> {
-        // The service verifies the received bytes against this digest before
-        // accepting, so an acknowledged PUT is a content-verified receipt and
-        // no write path ever reads its object back.
         let checksum = aws_smithy_types::base64::encode(Sha256::digest(&body));
-        let mut request = self
+        let request = self
             .client
             .put_object()
             .bucket(&self.bucket)
             .key(key.as_str())
             .checksum_sha256(checksum)
+            .if_none_match("*")
             .body(ByteStream::from(body));
-        request = match expectation {
-            CasExpectation::Absent => request.if_none_match("*"),
-            CasExpectation::Match(etag) => {
-                validate_expected_etag(etag)?;
-                request.if_match(format!("\"{}\"", etag))
-            }
+        let sent = if retry {
+            timeout(self.request_timeout, request.send()).await
+        } else {
+            let single_attempt = S3Config::builder().retry_config(RetryConfig::disabled());
+            timeout(
+                self.request_timeout,
+                request.customize().config_override(single_attempt).send(),
+            )
+            .await
         };
-
-        match timeout(self.request_timeout, request.send()).await {
+        match sent {
             Err(_) => Ok(PutAttempt::Ambiguous(format!(
                 "request timed out after {} ms",
                 self.request_timeout.as_millis()
             ))),
-            Ok(Ok(response)) => {
-                let etag = response
-                    .e_tag()
-                    .map(|etag| validated_service_etag(etag, key.as_str()))
-                    .transpose()?;
-                Ok(PutAttempt::Written(etag))
-            }
+            Ok(Ok(_)) => Ok(PutAttempt::Written),
             Ok(Err(error)) if matches!(sdk_status(&error), Some(409) | Some(412)) => {
                 Ok(PutAttempt::PreconditionFailed)
             }
             Ok(Err(error)) if ambiguous_sdk_error(&error) => {
                 Ok(PutAttempt::Ambiguous(error.to_string()))
             }
-            Ok(Err(error)) => Err(format!("S3 conditional put '{}': {}", key, error)),
+            Ok(Err(error)) => Err(format!("S3 put '{}': {}", key, error)),
         }
     }
 
@@ -697,31 +653,28 @@ impl S3ObjectStore {
         bytes: Bytes,
     ) -> Result<ImmutablePutOutcome, String> {
         let expected = expected_object(&bytes)?;
-        match self
-            .conditional_put_async(key, bytes.clone(), &CasExpectation::Absent)
-            .await?
-        {
-            PutAttempt::Written(_) => Ok(ImmutablePutOutcome::Written),
+        match self.put_absent_async(key, bytes.clone(), true).await? {
+            PutAttempt::Written => Ok(ImmutablePutOutcome::Written),
             PutAttempt::PreconditionFailed => {
                 match self.stage_verified_async(key, &expected).await? {
-                    S3StageOutcome::Verified(_) => Ok(ImmutablePutOutcome::AlreadyPresent),
-                    S3StageOutcome::Mismatch { .. } => Err(format!(
+                    StageOutcome::Verified(_) => Ok(ImmutablePutOutcome::AlreadyPresent),
+                    StageOutcome::Mismatch => Err(format!(
                         "immutable object '{}' already exists with different bytes",
                         key
                     )),
-                    S3StageOutcome::Missing => Err(format!(
+                    StageOutcome::Missing => Err(format!(
                     "immutable put '{}' failed its absent precondition but the object is missing",
                     key
                 )),
                 }
             }
             PutAttempt::Ambiguous(cause) => match self.stage_verified_async(key, &expected).await {
-                Ok(S3StageOutcome::Verified(_)) => Ok(ImmutablePutOutcome::AlreadyPresent),
-                Ok(S3StageOutcome::Mismatch { .. }) => Err(format!(
+                Ok(StageOutcome::Verified(_)) => Ok(ImmutablePutOutcome::AlreadyPresent),
+                Ok(StageOutcome::Mismatch) => Err(format!(
                     "immutable put '{}' was ambiguous ({}) and a different object is present",
                     key, cause
                 )),
-                Ok(S3StageOutcome::Missing) => Err(format!(
+                Ok(StageOutcome::Missing) => Err(format!(
                     "immutable put '{}' was ambiguous ({}) and no object is present",
                     key, cause
                 )),
@@ -733,47 +686,22 @@ impl S3ObjectStore {
         }
     }
 
-    async fn compare_and_swap_async(
+    /// One request, with the SDK's retries off and nothing resolved
+    /// afterwards. A record's name holds the digest of its bytes, so a key
+    /// that is already taken holds this record. An unacknowledged request is
+    /// an error: the caller lists the stream, and that listing settles it.
+    async fn put_record_async(
         &self,
         key: &ObjectKey,
-        expectation: &CasExpectation,
         bytes: Bytes,
-    ) -> Result<CasOutcome, String> {
-        match self
-            .conditional_put_async(key, bytes.clone(), expectation)
-            .await?
-        {
-            PutAttempt::Written(Some(etag)) => Ok(CasOutcome::Written { etag }),
-            PutAttempt::Written(None) | PutAttempt::Ambiguous(_) => {
-                self.resolve_cas_write(key, &bytes).await
-            }
-            PutAttempt::PreconditionFailed => {
-                let current = self
-                    .stage_verified_async(key, &expected_object(&bytes)?)
-                    .await?;
-                Ok(CasOutcome::Conflict {
-                    current_etag: current.etag().map(str::to_string),
-                })
-            }
-        }
-    }
-
-    async fn resolve_cas_write(
-        &self,
-        key: &ObjectKey,
-        intended_bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        match self
-            .stage_verified_async(key, &expected_object(intended_bytes)?)
-            .await?
-        {
-            S3StageOutcome::Verified(body) => Ok(CasOutcome::Written {
-                etag: body.etag().to_string(),
-            }),
-            S3StageOutcome::Mismatch { etag } => Ok(CasOutcome::Conflict {
-                current_etag: Some(etag),
-            }),
-            S3StageOutcome::Missing => Ok(CasOutcome::Conflict { current_etag: None }),
+    ) -> Result<ImmutablePutOutcome, String> {
+        match self.put_absent_async(key, bytes, false).await? {
+            PutAttempt::Written => Ok(ImmutablePutOutcome::Written),
+            PutAttempt::PreconditionFailed => Ok(ImmutablePutOutcome::AlreadyPresent),
+            PutAttempt::Ambiguous(cause) => Err(format!(
+                "S3 record put '{}' was not acknowledged ({})",
+                key, cause
+            )),
         }
     }
 
@@ -833,13 +761,17 @@ impl S3ObjectStore {
                 }
                 // S3's byte-prefix match can also return lexical neighbors
                 // (for example `.mallard/v1/repositories-old` for the
-                // repository namespace). Ignore
-                // those before applying the stricter ObjectKey validator;
-                // malformed keys inside the requested namespace still fail.
+                // repository namespace). Ignore those before applying the
+                // stricter ObjectKey validator.
                 if !raw_key_is_under_prefix(raw_key, prefix) {
                     continue;
                 }
-                let key = ObjectKey::parse(raw_key.to_string())?;
+                // A key Mallard cannot represent is not Mallard's: skip it
+                // and report it instead of failing the listing.
+                let Ok(key) = ObjectKey::parse(raw_key.to_string()) else {
+                    super::publication::report_ignored_name(raw_key);
+                    continue;
+                };
                 if cursor.is_none_or(|cursor| key.as_str() > cursor) {
                     let etag = object
                         .e_tag()
@@ -976,12 +908,7 @@ impl ObjectStore for S3ObjectStore {
         key: &ObjectKey,
         expected: &ExpectedObject,
     ) -> Result<StageOutcome, String> {
-        self.run("stage verified", async {
-            Ok(self
-                .stage_verified_async(key, expected)
-                .await?
-                .into_public())
-        })
+        self.run("stage verified", self.stage_verified_async(key, expected))
     }
 
     /// Bounded-concurrency verified staging. Order matches `requests`; the
@@ -1009,13 +936,7 @@ impl ObjectStore for S3ObjectStore {
                         .acquire_owned()
                         .await
                         .map_err(|_| "bulk staging concurrency gate closed".to_string())?;
-                    Ok::<_, String>((
-                        index,
-                        store
-                            .stage_verified_async(&key, &expected)
-                            .await?
-                            .into_public(),
-                    ))
+                    Ok::<_, String>((index, store.stage_verified_async(&key, &expected).await?))
                 });
             }
             let mut outcomes: Vec<Option<StageOutcome>> = Vec::new();
@@ -1097,18 +1018,10 @@ impl ObjectStore for S3ObjectStore {
         })
     }
 
-    fn compare_and_swap(
-        &self,
-        key: &ObjectKey,
-        expectation: &CasExpectation,
-        bytes: &[u8],
-    ) -> Result<CasOutcome, String> {
-        if let CasExpectation::Match(etag) = expectation {
-            validate_expected_etag(etag)?;
-        }
+    fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         self.run(
-            "compare-and-swap",
-            self.compare_and_swap_async(key, expectation, Bytes::copy_from_slice(bytes)),
+            "put record",
+            self.put_record_async(key, Bytes::copy_from_slice(bytes)),
         )
     }
 
@@ -1159,14 +1072,8 @@ impl ObjectStore for S3ObjectStore {
     }
 }
 
-enum ProbeExpectation<'a> {
-    Absent,
-    Match(&'a str),
-}
-
 enum ProbePutAttempt {
     Written,
-    PreconditionFailed,
     Ambiguous,
     Failed,
 }
@@ -1186,33 +1093,9 @@ fn setup_probe_key(setup_id: &str) -> Result<String, ()> {
 }
 
 enum PutAttempt {
-    Written(Option<String>),
+    Written,
     PreconditionFailed,
     Ambiguous(String),
-}
-
-enum S3StageOutcome {
-    Missing,
-    Mismatch { etag: String },
-    Verified(VerifiedBody),
-}
-
-impl S3StageOutcome {
-    fn etag(&self) -> Option<&str> {
-        match self {
-            Self::Missing => None,
-            Self::Mismatch { etag } => Some(etag),
-            Self::Verified(body) => Some(body.etag()),
-        }
-    }
-
-    fn into_public(self) -> StageOutcome {
-        match self {
-            Self::Missing => StageOutcome::Missing,
-            Self::Mismatch { .. } => StageOutcome::Mismatch,
-            Self::Verified(body) => StageOutcome::Verified(body),
-        }
-    }
 }
 
 async fn abort_and_drain<T: 'static>(join_set: &mut tokio::task::JoinSet<T>) {
@@ -1316,12 +1199,6 @@ fn normalize_etag(etag: &str) -> String {
 
 fn validated_service_etag(raw: &str, key: &str) -> Result<String, String> {
     let etag = normalize_etag(raw);
-    validate_expected_etag(&etag)
-        .map_err(|_| format!("S3 object '{}' returned an invalid ETag", key))?;
-    Ok(etag)
-}
-
-fn validate_expected_etag(etag: &str) -> Result<(), String> {
     if etag.is_empty()
         || etag.len() > 1_024
         || !etag.is_ascii()
@@ -1329,9 +1206,9 @@ fn validate_expected_etag(etag: &str) -> Result<(), String> {
             .bytes()
             .any(|byte| byte.is_ascii_control() || matches!(byte, b'"' | b'\\'))
     {
-        return Err("S3 CAS expectation contains an invalid ETag".to_string());
+        return Err(format!("S3 object '{}' returned an invalid ETag", key));
     }
-    Ok(())
+    Ok(etag)
 }
 
 fn ambiguous_sdk_error<E>(error: &SdkError<E>) -> bool {
@@ -1366,7 +1243,10 @@ mod tests {
         endpoint: String,
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
-        honor_conditions: Arc<AtomicBool>,
+        /// PUT requests still to answer with a retryable 503, and every PUT
+        /// the service has seen.
+        put_failures: Arc<AtomicUsize>,
+        put_requests: Arc<AtomicUsize>,
         conditional_delete_requests: Arc<AtomicUsize>,
         fail_delete: Arc<AtomicBool>,
         delete_successes_left: Arc<AtomicUsize>,
@@ -1437,14 +1317,16 @@ mod tests {
             let endpoint = format!("http://{}", listener.local_addr().expect("test S3 address"));
             let objects = Arc::new(Mutex::new(BTreeMap::new()));
             let get_behaviors = Arc::new(Mutex::new(BTreeMap::new()));
-            let honor_conditions = Arc::new(AtomicBool::new(true));
+            let put_failures = Arc::new(AtomicUsize::new(0));
+            let put_requests = Arc::new(AtomicUsize::new(0));
             let conditional_delete_requests = Arc::new(AtomicUsize::new(0));
             let fail_delete = Arc::new(AtomicBool::new(false));
             let delete_successes_left = Arc::new(AtomicUsize::new(usize::MAX));
             let list_authorization_failures = Arc::new(AtomicUsize::new(0));
             let server_objects = objects.clone();
             let server_get_behaviors = get_behaviors.clone();
-            let server_honor_conditions = honor_conditions.clone();
+            let server_put_failures = put_failures.clone();
+            let server_put_requests = put_requests.clone();
             let server_conditional_delete_requests = conditional_delete_requests.clone();
             let server_fail_delete = fail_delete.clone();
             let server_delete_successes_left = delete_successes_left.clone();
@@ -1456,7 +1338,8 @@ mod tests {
                     };
                     let objects = server_objects.clone();
                     let get_behaviors = server_get_behaviors.clone();
-                    let honor_conditions = server_honor_conditions.clone();
+                    let put_failures = server_put_failures.clone();
+                    let put_requests = server_put_requests.clone();
                     let conditional_delete_requests = server_conditional_delete_requests.clone();
                     let fail_delete = server_fail_delete.clone();
                     let delete_successes_left = server_delete_successes_left.clone();
@@ -1467,7 +1350,8 @@ mod tests {
                                 request,
                                 objects.clone(),
                                 get_behaviors.clone(),
-                                honor_conditions.clone(),
+                                put_failures.clone(),
+                                put_requests.clone(),
                                 conditional_delete_requests.clone(),
                                 fail_delete.clone(),
                                 delete_successes_left.clone(),
@@ -1484,7 +1368,8 @@ mod tests {
                 endpoint,
                 objects,
                 get_behaviors,
-                honor_conditions,
+                put_failures,
+                put_requests,
                 conditional_delete_requests,
                 fail_delete,
                 delete_successes_left,
@@ -1537,8 +1422,8 @@ mod tests {
                 .expect("construct test store")
         }
 
-        fn ignore_conditions(&self) {
-            self.honor_conditions.store(false, Ordering::SeqCst);
+        fn fail_puts(&self, attempts: usize) {
+            self.put_failures.store(attempts, Ordering::SeqCst);
         }
 
         fn fail_delete(&self) {
@@ -1588,7 +1473,7 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&marker).unwrap(),
             serde_json::json!({
-                "format": "mallard-storage",
+                "format": "mallard-append-storage",
                 "layout_version": 1,
             })
         );
@@ -1610,7 +1495,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn immutable_metadata_staging_and_cas_preserve_service_etags() {
+    async fn immutable_metadata_and_staging_preserve_service_etags() {
         let server = TestS3::start().await;
         let store = server.store();
         let immutable = ObjectKey::parse(
@@ -1668,61 +1553,54 @@ mod tests {
         };
         assert_eq!(staged.read_bounded(3, "test object").unwrap(), b"one");
         assert_eq!(staged.etag(), sha256_bytes(b"one"));
+    }
 
-        let head = ObjectKey::parse(
-            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_head.json",
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_is_one_request_with_no_retry_inside_the_transport() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        let record = ObjectKey::parse(
+            ".mallard/v1/repositories/_commits/0123456789abcdef0123456789abcdef/record.json",
         )
         .unwrap();
-        let store_for_create = store.clone();
-        let head_for_create = head.clone();
-        let created = blocking(move || {
-            store_for_create.compare_and_swap(
-                &head_for_create,
-                &CasExpectation::Absent,
-                b"head-one",
-            )
-        })
-        .await
-        .unwrap();
-        let CasOutcome::Written { etag } = created else {
-            panic!("head create should succeed")
-        };
-        assert_eq!(etag, sha256_bytes(b"head-one"));
 
-        let store_for_stale = store.clone();
-        let head_for_stale = head.clone();
-        let stale = blocking(move || {
-            store_for_stale.compare_and_swap(
-                &head_for_stale,
-                &CasExpectation::Match("stale".to_string()),
-                b"wrong",
-            )
-        })
-        .await
-        .unwrap();
+        // A retryable failure: the SDK would send an ordinary write again.
+        server.fail_puts(1);
+        let (failing, key) = (store.clone(), record.clone());
+        let error = blocking(move || failing.put_record(&key, b"record"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("S3 put"), "{error}");
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 1);
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+        server.fail_puts(1);
+        let (retrying, key) = (store.clone(), test_upload_key("retried"));
+        blocking(move || retrying.put_immutable(&key, b"payload"))
+            .await
+            .unwrap();
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 3);
+
+        // The next attempt is the caller's, after its own listing.
+        let (writer, key) = (store.clone(), record.clone());
         assert_eq!(
-            stale,
-            CasOutcome::Conflict {
-                current_etag: Some(etag.clone())
-            }
+            blocking(move || writer.put_record(&key, b"record"))
+                .await
+                .unwrap(),
+            ImmutablePutOutcome::Written
         );
-
-        let store_for_update = store.clone();
-        let head_for_update = head.clone();
-        let updated = blocking(move || {
-            store_for_update.compare_and_swap(
-                &head_for_update,
-                &CasExpectation::Match(etag),
-                b"head-two",
-            )
-        })
-        .await
-        .unwrap();
+        // A repeat finds its name taken: the name holds the digest of these
+        // bytes, so nothing is read back and nothing is resolved.
+        let (repeat, key) = (store.clone(), record.clone());
         assert_eq!(
-            updated,
-            CasOutcome::Written {
-                etag: sha256_bytes(b"head-two")
-            }
+            blocking(move || repeat.put_record(&key, b"record"))
+                .await
+                .unwrap(),
+            ImmutablePutOutcome::AlreadyPresent
+        );
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 5);
+        assert_eq!(
+            server.objects.lock().expect("test S3 lock")[record.as_str()],
+            b"record"
         );
     }
 
@@ -1759,11 +1637,11 @@ mod tests {
         server.seed(super::super::STORAGE_MARKER_KEY.to_string(), marker.clone());
         for index in 0..1_005 {
             server.seed(
-                format!(".mallard/v1/repositories/{index:032x}/_head.json"),
+                format!(".mallard/v1/repositories/{index:032x}/_manifests/1-commit-a.json"),
                 b"repo".to_vec(),
             );
         }
-        let library = ".mallard/v1/library/library-22222222222222222222222222222222/_head.json";
+        let library = ".mallard/v1/library/library-22222222222222222222222222222222/_manifests/1-commit-a.json";
         server.seed(library.to_string(), b"library".to_vec());
         let retained = [
             "unrelated.txt",
@@ -1793,7 +1671,7 @@ mod tests {
     async fn r2_clear_partial_failure_can_retry_remaining_objects() {
         let server = TestS3::start().await;
         let repo = test_upload_key("clear-repo");
-        let library = ".mallard/v1/library/library-22222222222222222222222222222222/_head.json";
+        let library = ".mallard/v1/library/library-22222222222222222222222222222222/_manifests/1-commit-a.json";
         server.seed(repo.as_str().to_string(), b"repo".to_vec());
         server.seed(library.to_string(), b"library".to_vec());
         server.delete_successes_left.store(1, Ordering::SeqCst);
@@ -1833,7 +1711,7 @@ mod tests {
         server.seed(key.as_str().to_string(), b"repo".to_vec());
         server.seed(
             super::super::STORAGE_MARKER_KEY.to_string(),
-            br#"{"format":"mallard-storage","layout_version":2}"#.to_vec(),
+            br#"{"format":"mallard-append-storage","layout_version":2}"#.to_vec(),
         );
         let before = server.objects.lock().unwrap().clone();
         let store = server.store();
@@ -2123,6 +2001,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn s3_runs_the_same_publication_as_every_other_store() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        blocking(move || super::super::publication::parity::publishes_and_selects(&store)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_skips_and_reports_a_key_it_cannot_represent() {
+        let server = TestS3::start().await;
+        let stream = ".mallard/v1/repositories/_commits/0123456789abcdef0123456789abcdef";
+        let record = format!("{stream}/record.json");
+        server.seed(record.clone(), b"record".to_vec());
+        // A colon can never be part of a Mallard key.
+        let foreign = format!("{stream}/record (conflict: 2026-09-19).json");
+        server.seed(foreign.clone(), b"copy".to_vec());
+        let mut events = super::super::publication::ignored_name_events().subscribe();
+
+        let store = server.store();
+        let prefix = ObjectPrefix::parse(stream).unwrap();
+        let page = blocking(move || store.list_keys(&prefix, None, 10))
+            .await
+            .unwrap();
+        assert_eq!(
+            page.keys.iter().map(ObjectKey::as_str).collect::<Vec<_>>(),
+            vec![record.as_str()]
+        );
+        let mut reported = Vec::new();
+        while let Ok(name) = events.try_recv() {
+            reported.push(name);
+        }
+        assert!(reported.contains(&foreign), "{reported:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_uses_stable_key_cursors_across_s3_pages() {
         let server = TestS3::start().await;
         for index in 0..1_005 {
@@ -2162,7 +2074,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn r2_capability_probe_verifies_conditional_writes_and_cleans_up() {
+    async fn r2_capability_probe_verifies_write_readback_and_listing_and_cleans_up() {
         let server = TestS3::start().await;
         let store = server.store();
         let receipt =
@@ -2190,19 +2102,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn r2_capability_probe_rejects_stores_that_accept_stale_etags() {
+    async fn r2_capability_probe_needs_no_conditional_overwrite() {
+        // The fake refuses any write that names a revision, so a passing
+        // probe proves setup asks for none.
         let server = TestS3::start().await;
-        server.ignore_conditions();
         let store = server.store();
-        let error = blocking(move || store.probe_r2_capabilities("setup-1123456789abcdef01234567"))
+        blocking(move || store.probe_r2_capabilities("setup-1123456789abcdef01234567"))
+            .await
+            .unwrap();
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 1);
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+
+        // A write that fails reports its stage and leaves nothing behind.
+        server.fail_puts(usize::MAX);
+        let store = server.store();
+        let error = blocking(move || store.probe_r2_capabilities("setup-2123456789abcdef01234567"))
             .await
             .unwrap_err();
-
         assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
-        assert_eq!(
-            error.stage(),
-            R2CapabilityProbeStage::StaleConditionalRejection
-        );
+        assert_eq!(error.stage(), R2CapabilityProbeStage::Create);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
 
@@ -2281,10 +2199,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsafe_cas_etags_and_foreign_cursors() {
-        assert!(validate_expected_etag("").is_err());
-        assert!(validate_expected_etag("bad\"etag").is_err());
-        assert!(validate_expected_etag("good-etag").is_ok());
+    fn rejects_unsafe_service_etags_and_foreign_cursors() {
+        assert!(validated_service_etag("", "key").is_err());
+        assert!(validated_service_etag("bad\\etag", "key").is_err());
+        assert_eq!(
+            validated_service_etag("\"good-etag\"", "key").as_deref(),
+            Ok("good-etag")
+        );
         let prefix =
             ObjectPrefix::parse(".mallard/v1/repositories/0123456789abcdef0123456789abcdef")
                 .unwrap();
@@ -2298,7 +2219,8 @@ mod tests {
         request: Request<Incoming>,
         objects: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         get_behaviors: Arc<Mutex<BTreeMap<String, GetBehavior>>>,
-        honor_conditions: Arc<AtomicBool>,
+        put_failures: Arc<AtomicUsize>,
+        put_requests: Arc<AtomicUsize>,
         conditional_delete_requests: Arc<AtomicUsize>,
         fail_delete: Arc<AtomicBool>,
         delete_successes_left: Arc<AtomicUsize>,
@@ -2358,14 +2280,19 @@ mod tests {
                 None => xml_error(StatusCode::NOT_FOUND, "NoSuchKey"),
             }),
             Method::PUT => {
-                let current = objects.get(key);
-                let precondition_failed = honor_conditions.load(Ordering::SeqCst)
-                    && ((if_none_match && current.is_some())
-                        || if_match.as_ref().is_some_and(|expected| {
-                            current.map(|bytes| sha256_bytes(bytes)).as_deref()
-                                != Some(expected.as_str())
-                        }));
-                if precondition_failed {
+                put_requests.fetch_add(1, Ordering::SeqCst);
+                if put_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    return Ok(xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown"));
+                }
+                // The service knows one write condition: create-only. Nothing
+                // overwrites by revision.
+                assert!(if_match.is_none(), "no write names a revision");
+                if if_none_match && objects.contains_key(key) {
                     return Ok(xml_error(
                         StatusCode::PRECONDITION_FAILED,
                         "PreconditionFailed",

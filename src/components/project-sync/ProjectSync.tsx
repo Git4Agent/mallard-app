@@ -27,6 +27,7 @@ import type {
   ProviderKey,
   ProviderProfile,
   ProviderProfileSummary,
+  PushOutrankedEvent,
   ResourceInventory as ResourceInventoryModel,
   PullReview,
   SetupDraftSummary,
@@ -96,6 +97,7 @@ import { buildPullReviewItems, pullActionResourceIds } from "./pullReviewModel";
 import {
   buildPullOutcome,
   buildPushOutcome,
+  pushOutrankedNotice,
   type SyncOutcome,
   type SyncOutcomeAction,
 } from "./syncOutcome";
@@ -1040,7 +1042,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     return { nextProjects, nextConfig, nextBindings, nextProfiles, hostIdentityReady: true };
   };
 
-  /* Storage transports fail in AWS SDK prose ("S3 conditional put …: dispatch
+  /* Storage transports fail in AWS SDK prose ("S3 put …: dispatch
      failure: io error"). The storage page already translates that into the
      sentence that names the fix; Push and Pull showed the raw string for the
      same root cause. One resolution point, so both surfaces agree. */
@@ -1393,6 +1395,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       void unlisten.then((dispose) => dispose());
     };
   }, [adoptConfigSnapshot]);
+
+  /* A push this computer had confirmed was outranked by another computer's
+     and rolled back. The sessions show as not pushed again, so say why, once. */
+  useEffect(() => {
+    const unlisten = listen<PushOutrankedEvent>("project-sync-push-outranked", (event) => {
+      const storage = configRef.current.storages
+        .find((candidate) => candidate.storage_id === event.payload.storage_id);
+      setNotice({ message: pushOutrankedNotice(storage?.name), tone: "attention" });
+    });
+    return () => {
+      void unlisten.then((dispose) => dispose());
+    };
+  }, []);
 
   const saveStorageDraftBeforeNavigation = async () => (
     storageNavigationGuardRef.current ? storageNavigationGuardRef.current() : true
@@ -1784,33 +1799,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
         return;
       }
-      if (
-        destination.state === "requires_pull"
-        || destination.state === "remote_history_missing"
-        || destination.state === "remote_history_replaced"
-      ) {
+      if (destination.state === "requires_pull") {
         const changedConversations = context.thread_comparison
           ? context.thread_comparison.counts.storage + context.thread_comparison.counts.diverged
           : 0;
-        setStorageNotice(destination.state === "requires_pull"
-          ? {
-            projectId,
-            storageId,
-            kind: "requires_pull",
-            copy: pullRequiredCopy(
-              destination.reason,
-              storage.name,
-              destination.remote_revision,
-              destination.base_revision,
-              changedConversations,
-            ),
-          }
-          : {
-            projectId,
-            storageId,
-            kind: destination.state === "remote_history_missing" ? "remote_missing" : "remote_replaced",
-            baseRevision: destination.base_revision ?? null,
-          });
+        setStorageNotice({
+          projectId,
+          storageId,
+          kind: "requires_pull",
+          copy: pullRequiredCopy(
+            destination.reason,
+            storage.name,
+            destination.remote_revision,
+            destination.base_revision,
+            changedConversations,
+          ),
+        });
         setActiveProjectId(projectId);
         setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
         return;
@@ -2064,11 +2068,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             storageId,
           );
           if (hostWorkflowEpoch.current !== workflowEpoch) return;
-          if (
-            destinationStatus.state === "remote_history_missing"
-            || destinationStatus.state === "remote_history_replaced"
-            || destinationStatus.state === "requires_pull"
-          ) {
+          if (destinationStatus.state === "requires_pull") {
             // The destination moved out from under the push mid-flight; the
             // review can no longer finish its job, so it closes and the gate
             // explains itself on the storage card.
@@ -2079,25 +2079,18 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             const changedConversations = pendingPush.threadComparison
               ? pendingPush.threadComparison.counts.storage + pendingPush.threadComparison.counts.diverged
               : 0;
-            setStorageNotice(destinationStatus.state === "requires_pull"
-              ? {
-                projectId,
-                storageId,
-                kind: "requires_pull",
-                copy: pullRequiredCopy(
-                  destinationStatus.reason,
-                  pendingPush.storage.name,
-                  destinationStatus.remote_revision,
-                  destinationStatus.base_revision,
-                  changedConversations,
-                ),
-              }
-              : {
-                projectId,
-                storageId,
-                kind: destinationStatus.state === "remote_history_missing" ? "remote_missing" : "remote_replaced",
-                baseRevision: destinationStatus.base_revision ?? null,
-              });
+            setStorageNotice({
+              projectId,
+              storageId,
+              kind: "requires_pull",
+              copy: pullRequiredCopy(
+                destinationStatus.reason,
+                pendingPush.storage.name,
+                destinationStatus.remote_revision,
+                destinationStatus.base_revision,
+                changedConversations,
+              ),
+            });
             return;
           }
         } catch {
@@ -2750,11 +2743,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     });
   };
 
-  const unlinkStorage = async (
-    projectId: string,
-    storageId: string,
-    reason: "standard" | "remote_history_missing" = "standard",
-  ) => {
+  const unlinkStorage = async (projectId: string, storageId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const project = projects.find((candidate) => candidate.local_project_id === projectId);
     const storage = config.storages.find((candidate) => candidate.storage_id === storageId);
@@ -2763,9 +2752,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const projectName = projectLabel(project);
     const storageName = storage.name || "Storage";
     const approved = await confirm(
-      reason === "remote_history_missing"
-        ? `Unlink “${storageName}” from “${projectName}”?\n\nMallard will clear this project’s reviewed sync base. No project files or cloud objects will be deleted. After unlinking, link this storage again and review a new Push.`
-        : `Unlink “${storageName}” from “${projectName}”?\n\nPush and Pull will stop for this pairing. Files and repositories already stored there will not be deleted, and you can link the storage again later.`,
+      `Unlink “${storageName}” from “${projectName}”?\n\nPush and Pull will stop for this pairing. Files and repositories already stored there will not be deleted, and you can link the storage again later.`,
       { title: "Unlink storage" },
     );
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
@@ -2810,9 +2797,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await loadProjectData(projectId, nextConfig, nextStorageId, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify(removed
-        ? reason === "remote_history_missing"
-          ? `${storageName} unlinked — files kept; link again for a fresh history.`
-          : `${storageName} unlinked from ${projectName} — files kept.`
+        ? `${storageName} unlinked from ${projectName} — files kept.`
         : `${storageName} was already unlinked.`);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -3247,13 +3232,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
-        onUnlinkStorage={() => {
-          void unlinkStorage(
-            pendingPush.projectId,
-            pendingPush.storageId,
-            "remote_history_missing",
-          );
-        }}
         onResetMetadata={() => void resetProjectSyncMetadata(pendingPush.projectId)}
       />
     ),
@@ -3291,13 +3269,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           restoreBinding,
           restoreProjectName,
         )}
-        onUnlinkStorage={() => {
-          void unlinkStorage(
-            restoreBinding.local_project_id,
-            restorePlan.storage_id,
-            "remote_history_missing",
-          );
-        }}
         onResetMetadata={() => void resetProjectSyncMetadata(restoreBinding.local_project_id)}
         onPrimaryChange={setPullReviewPrimary}
       />
