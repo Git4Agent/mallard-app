@@ -2295,7 +2295,9 @@ fn inspect_project_files_guarded(
         })?;
     let eligibility = project_file_sync_eligibility(&binding);
     let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
-    let remote = engine.inspect_optional(&project.bundle_id)?;
+    // Observed, not inspected: the files are judged against the project
+    // area's base only while that base is on the selected chain.
+    let observation = engine.observe(&project.bundle_id)?;
     let discovery = if eligibility.state == ProjectFileSyncEligibilityState::Eligible {
         let resolved = resolve_project_binding_from_state(&state.bindings, &binding)?;
         let mut request = capture_request_for_resolved_binding_from_state(
@@ -2320,14 +2322,17 @@ fn inspect_project_files_guarded(
         &binding,
         eligibility,
         &engine,
-        remote.as_ref(),
+        observation.snapshot(),
+        &observation.mainline,
         discovery.as_ref(),
     )
 }
 
 /// Project-files section over a shared Discovery (walked with project
-/// content included) and one already-read remote snapshot. The review token
-/// minted here binds current disk state and the observed remote head.
+/// content included) and one already-read remote snapshot, with the chain
+/// it was selected on: the project area's base is read through that chain
+/// (`project_base`) before its manifest is opened. The review token minted
+/// here binds current disk state and the observed remote head.
 #[allow(clippy::too_many_arguments)]
 fn build_project_files_inventory(
     local_project_id: &LocalProjectId,
@@ -2338,6 +2343,7 @@ fn build_project_files_inventory(
     eligibility: ProjectFileSyncEligibility,
     engine: &StorageEngine,
     remote: Option<&BundleSnapshot>,
+    mainline: &Mainline,
     discovery: Option<&provider_capture::Discovery>,
 ) -> Result<ProjectContentInventory, String> {
     let remote_versions = remote
@@ -2345,25 +2351,27 @@ fn build_project_files_inventory(
         .transpose()?
         .unwrap_or_default();
     let mut warnings = Vec::new();
-    let (base_versions, base_unavailable) = match link.scope_bases.get(&SyncScopeKey::Project) {
-        Some(base) => match engine.inspect_manifest_version(
-            &project.bundle_id,
-            base.reviewed_in.revision,
-            &base.reviewed_in.commit_id,
-            base.reviewed_in.manifest_size,
-            &base.reviewed_in.manifest_sha256,
-        ) {
-            Ok(manifest) => (project_content_versions(&manifest)?, false),
-            Err(error) => {
-                warnings.push(format!(
-                    "Reviewed project-content base is unavailable: {}",
-                    error
-                ));
-                (BTreeMap::new(), true)
-            }
-        },
-        None => (BTreeMap::new(), false),
-    };
+    let (base_versions, base_unavailable) =
+        match project_base(link, mainline, remote.map(|snapshot| &snapshot.manifest)) {
+            ProjectBase::None => (BTreeMap::new(), false),
+            ProjectBase::Current => (remote_versions.clone(), false),
+            ProjectBase::Reviewed(base) => match engine.inspect_manifest_version(
+                &project.bundle_id,
+                base.reviewed_in.revision,
+                &base.reviewed_in.commit_id,
+                base.reviewed_in.manifest_size,
+                &base.reviewed_in.manifest_sha256,
+            ) {
+                Ok(manifest) => (project_content_versions(&manifest)?, false),
+                Err(error) => {
+                    warnings.push(format!(
+                        "Reviewed project-content base is unavailable: {}",
+                        error
+                    ));
+                    (BTreeMap::new(), true)
+                }
+            },
+        };
     let effective_recipe = link
         .recipe
         .clone()
@@ -2699,46 +2707,94 @@ fn project_content_ancestor_paths(relative_path: &str) -> Vec<String> {
         .collect()
 }
 
-/// Raw content digests per project-content logical path in the reviewed
-/// base manifest — what the restore planner compares a diverged file's disk
+/// The project area's base, read by the rule of section 4.1 of
+/// `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` before anything opens the manifest
+/// it names. It counts while the publication it was reviewed in is on the
+/// selected chain, and while the selected manifest holds exactly the
+/// reviewed content. Any other base is stale and is read as if it were not
+/// recorded, whether or not its manifest can still be read. After another
+/// computer's clear that manifest is usually gone; when it can still be
+/// read (the object cache, an interrupted clear, a displaced Push), it
+/// describes a history the storage no longer has, and judged against it a
+/// file this computer changed there would pass as changed only in the
+/// storage and be replaced plainly.
+enum ProjectBase<'a> {
+    /// No base, or a stale one: every file is compared by content alone.
+    None,
+    /// Reviewed on the selected chain: the manifest it names is the base.
+    Reviewed(&'a ScopeBase),
+    /// The selected manifest holds exactly the reviewed content, so it is
+    /// the base, whoever wrote it (row A5).
+    Current,
+}
+
+fn project_base<'a>(
+    link: &'a ProjectStorageLink,
+    mainline: &Mainline,
+    current: Option<&BundleManifest>,
+) -> ProjectBase<'a> {
+    let Some(base) = link.scope_bases.get(&SyncScopeKey::Project) else {
+        return ProjectBase::None;
+    };
+    if mainline.contains(base.reviewed_in.revision, &base.reviewed_in.commit_id) {
+        return ProjectBase::Reviewed(base);
+    }
+    let same_content = current
+        .and_then(|manifest| manifest.scope(&SyncScopeKey::Project))
+        .is_some_and(|scope| scope.content_sha256 == base.scope_sha256);
+    if same_content {
+        ProjectBase::Current
+    } else {
+        ProjectBase::None
+    }
+}
+
+/// Raw content digests per project-content logical path in the base
+/// manifest — what the restore planner compares a diverged file's disk
 /// bytes against. Never mode-composited: a mode-only change must not force
-/// a preservation copy. An absent or unreadable base returns empty, which
-/// the planner treats as "preserve" (fail closed — never silently lose
-/// local bytes the app cannot prove are stored).
+/// a preservation copy. A base that is absent, stale or unreadable returns
+/// empty, which the planner treats as "preserve" (fail closed — never
+/// silently lose local bytes the app cannot prove are stored).
 fn project_content_base_content_digests(
     engine: &StorageEngine,
     bundle_id: &BundleId,
     link: &ProjectStorageLink,
+    mainline: &Mainline,
+    current: &BundleManifest,
 ) -> BTreeMap<mallard_domain::LogicalPath, String> {
-    let Some(base) = link.scope_bases.get(&SyncScopeKey::Project) else {
-        return BTreeMap::new();
-    };
-    let Ok(manifest) = engine.inspect_manifest_version(
-        bundle_id,
-        base.reviewed_in.revision,
-        &base.reviewed_in.commit_id,
-        base.reviewed_in.manifest_size,
-        &base.reviewed_in.manifest_sha256,
-    ) else {
-        return BTreeMap::new();
-    };
-    let Some(scope) = manifest.scope(&SyncScopeKey::Project) else {
-        return BTreeMap::new();
-    };
-    scope
-        .files
-        .iter()
-        .filter(|(_, entry)| {
-            scope
-                .resources
-                .get(&entry.resource_id)
-                .is_some_and(|descriptor| {
-                    kind_primitive(&descriptor.kind)
-                        == Some(ResourceKindPrimitive::ProjectContentFile)
-                })
-        })
-        .map(|(logical_path, entry)| (logical_path.clone(), entry.sha256.clone()))
-        .collect()
+    fn content_digests(manifest: &BundleManifest) -> BTreeMap<mallard_domain::LogicalPath, String> {
+        let Some(scope) = manifest.scope(&SyncScopeKey::Project) else {
+            return BTreeMap::new();
+        };
+        scope
+            .files
+            .iter()
+            .filter(|(_, entry)| {
+                scope
+                    .resources
+                    .get(&entry.resource_id)
+                    .is_some_and(|descriptor| {
+                        kind_primitive(&descriptor.kind)
+                            == Some(ResourceKindPrimitive::ProjectContentFile)
+                    })
+            })
+            .map(|(logical_path, entry)| (logical_path.clone(), entry.sha256.clone()))
+            .collect()
+    }
+    match project_base(link, mainline, Some(current)) {
+        ProjectBase::None => BTreeMap::new(),
+        ProjectBase::Current => content_digests(current),
+        ProjectBase::Reviewed(base) => engine
+            .inspect_manifest_version(
+                bundle_id,
+                base.reviewed_in.revision,
+                &base.reviewed_in.commit_id,
+                base.reviewed_in.manifest_size,
+                &base.reviewed_in.manifest_sha256,
+            )
+            .map(|manifest| content_digests(&manifest))
+            .unwrap_or_default(),
+    }
 }
 
 fn classify_project_content_state(
@@ -8082,6 +8138,7 @@ pub(super) fn prepare_push_review_with_progress(
                     eligibility.clone(),
                     engine,
                     current.as_ref(),
+                    mainline,
                     // Git-managed inventories never walk local content, so the
                     // shared discovery (walked without it) is not offered.
                     None,
@@ -10321,6 +10378,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
             eligibility.clone(),
             &engine,
             observed.as_ref().map(|(snapshot, _)| snapshot),
+            &mainline,
             Some(&discovery),
         )?;
         if inventory.review_token.as_deref() != Some(review_token) {
@@ -10777,9 +10835,15 @@ pub(super) fn plan_bundle_restore_with_progress(
         return Err("host identity changed while preparing the Pull review".to_string());
     }
     // Reviewed-base content digests decide which diverged project files must
-    // preserve their local bytes as a visible copy. An unavailable base
-    // yields an empty map, which fails closed to preservation.
-    let project_content_bases = project_content_base_content_digests(&engine, bundle_id, &link);
+    // preserve their local bytes as a visible copy. A stale or unavailable
+    // base yields an empty map, which fails closed to preservation.
+    let project_content_bases = project_content_base_content_digests(
+        &engine,
+        bundle_id,
+        &link,
+        &mainline,
+        &snapshot.manifest,
+    );
     let mut plan = engine.build_restore_plan_from_snapshot(
         provider_registry(),
         &snapshot,
@@ -10903,8 +10967,13 @@ fn build_restore_plan_for_apply(
     }
 
     let phase_started = Instant::now();
-    let project_content_bases =
-        project_content_base_content_digests(engine, &review.bundle_id, &link);
+    let project_content_bases = project_content_base_content_digests(
+        engine,
+        &review.bundle_id,
+        &link,
+        mainline,
+        &snapshot.manifest,
+    );
     let mut plan = engine.build_restore_plan_from_snapshot(
         provider_registry(),
         snapshot,
@@ -20335,6 +20404,347 @@ mod tests {
             .all(|accepted| observation
                 .mainline
                 .contains_commit(&accepted.accepted_at_commit_id)));
+    }
+
+    /// A project that is not managed by Git, with `draft.md`, linked to a
+    /// local storage. Its files are one storage area, compared against the
+    /// manifest the area's base names (PLAN_CLEARED_STORAGE_PUSH_AGAIN.md,
+    /// section 2.3). One repository plays both computers: the other one's
+    /// Push saves its records on this link, and `restore_scope_bases` puts
+    /// this computer's own back.
+    struct FilesWorld {
+        repo: LocalStateRepository,
+        storage_id: StorageId,
+        storage_root: PathBuf,
+        project: LocalProjectRegistration,
+        project_root: PathBuf,
+    }
+
+    impl FilesWorld {
+        fn new(temp: &tempfile::TempDir, storage: &str) -> Self {
+            let repo = repository(temp);
+            let storage_id = StorageId::parse(storage).unwrap();
+            let storage_root = temp.path().join("store");
+            add_local_storage(&repo, &storage_id, &storage_root);
+            let project = register(&repo);
+            let project_root = temp.path().join("project");
+            std::fs::create_dir_all(&project_root).unwrap();
+            std::fs::write(project_root.join("draft.md"), b"first draft\n").unwrap();
+            bind_and_link_test_replica(
+                &repo,
+                &project,
+                &storage_id,
+                &project_root,
+                &temp.path().join("codex-home"),
+            );
+            Self {
+                repo,
+                storage_id,
+                storage_root,
+                project,
+                project_root,
+            }
+        }
+
+        fn write(&self, relative_path: &str, bytes: &[u8]) {
+            std::fs::write(self.project_root.join(relative_path), bytes).unwrap();
+        }
+
+        fn read(&self, relative_path: &str) -> Vec<u8> {
+            std::fs::read(self.project_root.join(relative_path)).unwrap()
+        }
+
+        /// The files review, as Scan shows it.
+        fn files(&self) -> ProjectContentInventory {
+            inspect_project_files_with_repository(
+                &self.repo,
+                &self.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap()
+        }
+
+        fn state_of(files: &ProjectContentInventory, relative_path: &str) -> String {
+            files
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == relative_path)
+                .unwrap_or_else(|| panic!("no files row for '{relative_path}'"))
+                .state
+                .clone()
+        }
+
+        /// Push the scanned files, as the Push review does after a Scan.
+        fn push_files(&self) -> ProjectOperationResult {
+            let files = self.files();
+            let review = prepare_push_review_with_repository(
+                &self.repo,
+                &self.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap();
+            let mut approval = PushApproval::recommended(&review, &self.storage_id);
+            approval
+                .recipe
+                .entries
+                .extend(reviewed_project_content_recipe(&files).entries);
+            approval.project_content_review_token = files.review_token;
+            ProjectSyncService::new(&self.repo)
+                .push_reviewed(&self.project.local_project_id, &self.storage_id, approval)
+                .unwrap()
+        }
+
+        fn destination(&self) -> PushDestinationStatus {
+            prepare_push_review_with_repository(
+                &self.repo,
+                &self.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap()
+            .destination_status
+        }
+
+        fn scope_bases(&self) -> BTreeMap<SyncScopeKey, ScopeBase> {
+            reviewed_link_state(&self.repo, &self.project.local_project_id, &self.storage_id).1
+        }
+
+        fn restore_scope_bases(&self, bases: &BTreeMap<SyncScopeKey, ScopeBase>) {
+            self.repo
+                .mutate_config(|config| {
+                    config
+                        .links
+                        .iter_mut()
+                        .find(|link| {
+                            link.local_project_id == self.project.local_project_id
+                                && link.storage_id == self.storage_id
+                        })
+                        .unwrap()
+                        .scope_bases = bases.clone();
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        fn pull_plan(&self) -> RestorePlan {
+            let binding = self
+                .repo
+                .load_bindings()
+                .unwrap()
+                .active_for(&self.project.local_project_id)
+                .cloned()
+                .unwrap();
+            ProjectSyncService::new(&self.repo)
+                .plan_bundle_restore(&self.storage_id, &self.project.bundle_id, &binding)
+                .unwrap()
+        }
+
+        fn pull_everything(&self, plan: &RestorePlan) {
+            ProjectSyncService::new(&self.repo)
+                .apply_bundle_restore(
+                    plan,
+                    plan.actions
+                        .iter()
+                        .map(|action| action.action_id.clone())
+                        .collect(),
+                )
+                .unwrap();
+        }
+
+        /// The Pull's write of one project file, and whether it keeps this
+        /// computer's version beside it: `Some` is "Replace file · keeps
+        /// local copy", `None` a plain write.
+        fn file_write(
+            plan: &RestorePlan,
+            relative_path: &str,
+        ) -> Option<mallard_domain::ProjectFilePreservationPin> {
+            let logical_path = format!("project/{relative_path}");
+            plan.actions
+                .iter()
+                .find_map(|action| match &action.kind {
+                    RestoreActionKind::WriteProjectFile {
+                        logical_path: path,
+                        preserve,
+                        ..
+                    } if path.as_str() == logical_path => Some(preserve.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("the Pull does not write '{relative_path}'"))
+        }
+    }
+
+    /// Story 1 with project files, rows F1 and A3: another computer cleared
+    /// the storage and nobody pushed since. The base of the project's files
+    /// names a manifest the storage no longer has. It is read as absent, so
+    /// every file is compared by content alone and reads "Only on this
+    /// computer": none reads "unknown", nothing warns, Push is open, and one
+    /// Push publishes the files. Reading deletes nothing.
+    #[test]
+    fn a_cleared_storage_with_project_files_reads_them_local_only_and_pushes_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let world = FilesWorld::new(&temp, "cleared-files-store");
+        world.write("notes.md", b"notes\n");
+        let first = world.push_files();
+        assert_eq!(first.revision, Some(2), "{}", first.message);
+        assert!(world
+            .files()
+            .entries
+            .iter()
+            .all(|entry| entry.state == "synced"));
+        let reviewed_bases = world.scope_bases();
+
+        wipe_remote_bundle(&world.storage_root, &world.project.bundle_id);
+
+        let files = world.files();
+        assert_eq!(files.entries.len(), 2);
+        for entry in &files.entries {
+            assert_eq!(entry.state, "local_only", "{}", entry.relative_path);
+            assert!(!entry.base_present, "{}", entry.relative_path);
+        }
+        assert!(files.warnings.is_empty(), "{:?}", files.warnings);
+        assert_eq!(world.scope_bases(), reviewed_bases);
+        assert_eq!(
+            world.destination(),
+            PushDestinationStatus::Ready { revision: None }
+        );
+
+        let republished = world.push_files();
+        assert_eq!(republished.revision, Some(1), "{}", republished.message);
+        let (_, engine) = storage_engine(&world.repo, &world.storage_id).unwrap();
+        let stored = engine.inspect(&world.project.bundle_id).unwrap();
+        let stored_files = project_content_versions(&stored.manifest)
+            .unwrap()
+            .values()
+            .filter(|version| version.entry_type == ProjectContentEntryType::File)
+            .map(|version| version.relative_path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            stored_files,
+            BTreeSet::from(["draft.md".to_string(), "notes.md".to_string()])
+        );
+        assert!(world
+            .files()
+            .entries
+            .iter()
+            .all(|entry| entry.state == "synced"));
+    }
+
+    /// Story 2 with project files, rows F3, F4 and A7: another computer
+    /// cleared the storage and pushed files again. With the base read as
+    /// absent, a file both hold with other content reads "Changed here and
+    /// in storage", a file only the storage has reads "Only in storage",
+    /// Push asks for a Pull, and the Pull replaces the changed file while
+    /// keeping this computer's version beside it.
+    #[test]
+    fn a_recreated_storage_with_project_files_compares_by_content_and_the_pull_keeps_a_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let world = FilesWorld::new(&temp, "recreated-files-store");
+        let first = world.push_files();
+        assert_eq!(first.revision, Some(2), "{}", first.message);
+        let reviewed_bases = world.scope_bases();
+
+        // The other computer: the clear, then other content and one more file.
+        wipe_remote_bundle(&world.storage_root, &world.project.bundle_id);
+        world.write("draft.md", b"second draft\n");
+        world.write("extra.md", b"only in storage\n");
+        let recreated = world.push_files();
+        assert_eq!(recreated.revision, Some(1), "{}", recreated.message);
+
+        // This computer: its own files, and its records of the cleared history.
+        world.write("draft.md", b"first draft\n");
+        std::fs::remove_file(world.project_root.join("extra.md")).unwrap();
+        world.restore_scope_bases(&reviewed_bases);
+
+        let files = world.files();
+        assert_eq!(FilesWorld::state_of(&files, "draft.md"), "diverged");
+        assert_eq!(FilesWorld::state_of(&files, "extra.md"), "storage_only");
+        assert!(files.entries.iter().all(|entry| entry.state != "unknown"));
+        assert!(files.warnings.is_empty(), "{:?}", files.warnings);
+        assert!(matches!(
+            world.destination(),
+            PushDestinationStatus::RequiresPull {
+                reason: PushDestinationPullReason::RemoteWithoutBase,
+                ..
+            }
+        ));
+
+        let plan = world.pull_plan();
+        let kept = FilesWorld::file_write(&plan, "draft.md").expect("draft.md keeps a local copy");
+        assert_eq!(kept.copy_logical_path.as_str(), "project/draft-local-copy.md");
+        assert_eq!(FilesWorld::file_write(&plan, "extra.md"), None);
+        world.pull_everything(&plan);
+        assert_eq!(world.read("draft.md"), b"second draft\n");
+        assert_eq!(world.read("draft-local-copy.md"), b"first draft\n");
+        assert_eq!(world.read("extra.md"), b"only in storage\n");
+        let after = world.files();
+        assert_eq!(FilesWorld::state_of(&after, "draft.md"), "synced");
+        assert_eq!(FilesWorld::state_of(&after, "extra.md"), "synced");
+        assert_eq!(
+            FilesWorld::state_of(&after, "draft-local-copy.md"),
+            "local_only"
+        );
+        assert_eq!(
+            world.destination(),
+            PushDestinationStatus::Ready { revision: Some(1) }
+        );
+    }
+
+    /// A readable stale manifest, after an interrupted clear: the clear
+    /// deleted the records and stopped before the manifests, and another
+    /// computer then pushed a first version with other content. The manifest
+    /// this computer's base names can still be read, and judged against it
+    /// a file this computer did not change would read "Newer in storage" and
+    /// be replaced plainly. The base is off the selected chain, so nothing
+    /// reads that manifest: the file reads "Changed here and in storage",
+    /// and the Pull keeps a local copy.
+    #[test]
+    fn a_readable_stale_manifest_after_an_interrupted_clear_judges_no_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let world = FilesWorld::new(&temp, "interrupted-clear-files-store");
+        let first = world.push_files();
+        assert_eq!(first.revision, Some(2), "{}", first.message);
+        let reviewed_bases = world.scope_bases();
+
+        std::fs::remove_dir_all(
+            world
+                .storage_root
+                .join(".mallard/v1/repositories/_commits")
+                .join(world.project.bundle_id.as_str()),
+        )
+        .unwrap();
+        world.write("draft.md", b"second draft\n");
+        let recreated = world.push_files();
+        assert_eq!(recreated.revision, Some(1), "{}", recreated.message);
+        world.write("draft.md", b"first draft\n");
+        world.restore_scope_bases(&reviewed_bases);
+
+        // The manifest the base names is still there, and it says that this
+        // computer's draft.md is the reviewed one...
+        let base = &reviewed_bases[&SyncScopeKey::Project];
+        let (_, engine) = storage_engine(&world.repo, &world.storage_id).unwrap();
+        let old = engine
+            .inspect_manifest_version(
+                &world.project.bundle_id,
+                base.reviewed_in.revision,
+                &base.reviewed_in.commit_id,
+                base.reviewed_in.manifest_size,
+                &base.reviewed_in.manifest_sha256,
+            )
+            .unwrap();
+        assert_eq!(
+            old.scope(&SyncScopeKey::Project)
+                .unwrap()
+                .files
+                .get(&LogicalPath::parse("project/draft.md").unwrap())
+                .unwrap()
+                .sha256,
+            mallard_domain::sha256_hex(b"first draft\n")
+        );
+        // ...and nothing reads it.
+        let files = world.files();
+        assert_eq!(FilesWorld::state_of(&files, "draft.md"), "diverged");
+        assert!(files.warnings.is_empty(), "{:?}", files.warnings);
+        let plan = world.pull_plan();
+        assert!(FilesWorld::file_write(&plan, "draft.md").is_some());
     }
 
     /// The record names of one bundle's stream at `revision`, as the storage

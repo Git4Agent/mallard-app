@@ -1,6 +1,6 @@
 # Mallard: push again instead of reset — implementation plan
 
-- Status: Steps 1 to 10 implemented on September 20. Steps 11 to 14 are open. Step 11 fixes a gap found at review on September 22: after another computer's clear, the project's files read "unknown" and hold the Push (section 4.7). Steps 12 and 13 apply the decision of September 22 (CAS-free plan, decision 12: recovery is a user action), which withdraws two implemented behaviors, the rollback of R3 and the Library reset at load of B1 and B2; both become the read rule of section 4. None of steps 11 to 14 needs the claims of the CAS-free plan. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
+- Status: Steps 1 to 10 implemented on September 20, step 11 on September 22. Steps 12 to 14 are open. Step 11 fixed a gap found at review on September 22: after another computer's clear, the project's files read "unknown" and held the Push (section 4.7). Steps 12 and 13 apply the decision of September 22 (CAS-free plan, decision 12: recovery is a user action), which withdraws two implemented behaviors, the rollback of R3 and the Library reset at load of B1 and B2; both become the read rule of section 4. None of steps 11 to 14 needs the claims of the CAS-free plan. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026, against the working tree
 - Scope: the desktop app — how Push and Pull behave when this computer's sync record cannot be used, and when two computers race
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
@@ -502,10 +502,9 @@ storage deletes. `RemoteContinuity` keeps its variants and gains one,
 | 9. Docs | `DESIGN_REMOTE_HISTORY_CONTINUITY.md` becomes design history; sections 9.1, 9.2, 11, 12 and 16 of the CAS-free plan; `CURRENT_METADATA_LAYOUT.md`, `TECHNICAL_REPORT.md`, `README.md` | The documents describe this behavior |
 | 10. Gate | `cargo test --workspace --all-targets`, `npx tsc --noEmit`, the frontend integration suite, `npm run build` | All pass |
 
-Steps 1 to 10 are implemented and uncommitted. Commit them first, then take
-steps 11 to 14 in order; each leaves the workspace building and its own tests
-green. They need nothing from the claims of the CAS-free plan (its step 9) and
-can land before them. They take over the parts of the CAS-free plan's step 10
+Steps 1 to 11 are implemented and committed. Steps 12 to 14 follow in order;
+each leaves the workspace building and its own tests green. They need nothing
+from the claims of the CAS-free plan (its step 9) and can land before them. They take over the parts of the CAS-free plan's step 10
 that are not about publishing: the rollback, `Displaced`, the base readers and
 the Library read rule. The rest of that step (the request limits,
 `OutcomeUnknown`, `PushUnfinished` and *Finish that push*) stays there.
@@ -569,7 +568,7 @@ Implemented on September 20, 2026. What differs from the plan above:
 | The standing notice | It sits in the notice zone of the project activity list, which the project page embeds and the Push review shows above its list. It is derived from the comparison the page already has: the history reads `remote_missing` or `replaced`, and Push is open when every area this computer writes reads `fresh` or `in_sync`. No IPC payload changed. Step 12 adds the `displaced` form and the one IPC change of section 5. The storage card keeps its event notices; the two kinds that the removed Push states produced are gone |
 | `canAcceptPullMetadata` | It refuses only a storage that could not be listed. A recreated storage whose rows all read "Mark synced" is accepted without opening the review, as any first Pull is |
 | Library B1 | Built as first planned: the page resets the link's accepted state when the repository lists empty, as it already did for B2. That made a short listing (story 4) change saved state. Withdrawn on September 22 with the reset for B2; step 13 replaces both with the read rule and the save rule of section 4.5 |
-| Project files, found at review on September 22 | Steps 1 to 10 did not cover the files review or the Pull planner, which open the project area's base manifest without the rule of section 4.1. A test of story 1 on a project with files, run and then removed, read both files "unknown" with the warning "Reviewed project-content base is unavailable", while the project area read `Fresh` and the history `RemoteMissing`. The story tests used sessions only. Step 11 fixes it (section 4.7) |
+| Project files, found at review on September 22 | Steps 1 to 10 did not cover the files review or the Pull planner, which open the project area's base manifest without the rule of section 4.1. A test of story 1 on a project with files, run and then removed, read both files "unknown" with the warning "Reviewed project-content base is unavailable", while the project area read `Fresh` and the history `RemoteMissing`. The story tests used sessions only. Step 11 fixed it on September 22 (section 4.7): `project_base` is the one rule both readers take the base through, and row A5 reads the selected manifest as the base, because it holds exactly the reviewed content and the base's own manifest may be gone; the files inspection observes the stream. Story 1 with files, story 2 with files and a readable stale manifest after an interrupted clear are tested in the service suite. The readable manifest of a displaced base is tested with step 12: until the rollback goes, it moves that base before the readers see it |
 | Tests that were rewritten | `push_destination_is_decided_by_the_writable_scopes_alone`, `a_cleared_storage_is_pushed_again_without_an_unlink_or_a_reset`, `a_recreated_storage_asks_for_a_pull_and_the_pull_replaces_the_stale_bases`, `a_recreated_history_reads_as_unreviewed_and_a_live_one_as_advanced`, and the two tests that pinned the blocked overlap, which now expect "Pull required" and "Keep both" |
 
 Still open: the live two-computer pass on R2 and on Dropbox. The owner runs it,
@@ -578,8 +577,8 @@ after clearing `~/.mallard` and the cloud data.
 ## Source pointers
 
 Line numbers are those of the working tree on September 20, 2026, after the
-implementation. The rows after the frontend tests are for steps 11 to 14 and
-were read on September 22, before them.
+implementation. The rows after the frontend tests are for steps 11 to 14; those
+of step 11 were read after it, on September 22, and the others before them.
 
 | Subject | Location |
 |---|---|
@@ -621,8 +620,9 @@ were read on September 22, before them.
 | `canAcceptPullMetadata` | `src/components/project-sync/pullReviewFlow.ts:52` |
 | Type mirrors: `ScopeContinuity`, `PushDestinationStatus`, `RemoteContinuity` | `src/types.ts:275`, `:1066`, `:1089` |
 | Frontend tests of the notice, the Pull review and the Push states | `tests/frontend/project-activity.integration.test.tsx`, `tests/frontend/pull-review.integration.test.tsx`, `tests/frontend/resource-inventory.integration.test.tsx` |
-| The two base readers of section 4.7: the files review, the Pull planner | `src-tauri/src/project_sync/service.rs:2348`, `:2708` |
-| The files inspection that reads the storage without observing it | `src-tauri/src/project_sync/service.rs:2274` |
+| The rule of section 4.7, `project_base`; its two readers, the files review and the Pull planner | `src-tauri/src/project_sync/service.rs:2721`; `:2337`, `:2758` |
+| The files inspection, which observes the stream | `src-tauri/src/project_sync/service.rs:2274` |
+| Tests of story 1 and story 2 with project files, and of a readable stale manifest after an interrupted clear (`FilesWorld`) | `src-tauri/src/project_sync/service.rs:20415`, `:20582`, `:20638`, `:20700` |
 | The planner keeps a local copy when a file's base digest is unknown | `crates/mallard-infrastructure/src/bundle_engine.rs:5040` |
 | The in-memory object cache that can still serve a cleared manifest | `crates/mallard-infrastructure/src/bundle_engine.rs:180`, `:1790` |
 | The Push hold on an "unknown" file | `src/components/project-sync/PushResourceWorkspace.tsx:99`, `:416` |
