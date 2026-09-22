@@ -31,10 +31,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -148,7 +148,7 @@ jobs:
 
       - name: Upload dry-run DMG and updater archive to the workflow run
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos-aarch64-dmg
           path: |
@@ -160,7 +160,7 @@ jobs:
       # The manifest job reads every platform's signature from a workflow
       # artifact, in both modes, so a dry run exercises the manifest too.
       - name: Hand the updater signature to the manifest job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: updater-sig-darwin-aarch64
           path: target/aarch64-apple-darwin/release/bundle/macos/Mallard_*_aarch64.app.tar.gz.sig
@@ -182,10 +182,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -272,7 +272,7 @@ jobs:
 
       - name: Upload dry-run Intel DMG and updater archive to the workflow run
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos-x64-dmg
           path: |
@@ -282,7 +282,7 @@ jobs:
           if-no-files-found: error
 
       - name: Hand the updater signature to the manifest job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: updater-sig-darwin-x86_64
           path: target/x86_64-apple-darwin/release/bundle/macos/Mallard_*_x64.app.tar.gz.sig
@@ -302,10 +302,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -372,7 +372,7 @@ jobs:
 
       - name: Upload dry-run installer to the workflow run
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: windows-x64-nsis
           path: |
@@ -381,7 +381,7 @@ jobs:
           if-no-files-found: error
 
       - name: Hand the updater signature to the manifest job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: updater-sig-windows-x86_64
           path: ${{ steps.verify_windows.outputs.installer_path }}.sig
@@ -399,15 +399,15 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
 
       - name: Collect updater signatures
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: updater-sig-*
           path: updater-signatures
@@ -452,7 +452,7 @@ jobs:
 
       - name: Upload dry-run latest.json to the workflow run
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: updater-manifest
           path: latest.json

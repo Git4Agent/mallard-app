@@ -286,7 +286,7 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   for (const step of dispatchSteps) {
     assert.doesNotMatch(step, /tagName|releaseDraft|gh release/);
   }
-  assert.match(workflow, /uses: actions\/upload-artifact@v4/);
+  assert.match(workflow, /uses: actions\/upload-artifact@v6/);
   // Windows Authenticode signing and Apple ID password notarization are not
   // configured; the workflow must not pretend otherwise.
   assert.doesNotMatch(
