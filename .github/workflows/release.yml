@@ -103,7 +103,7 @@ jobs:
           retryAttempts: 2
           args: >-
             --target aarch64-apple-darwin
-            --bundles dmg
+            --bundles app,dmg
 
       # tauri-action attaches the DMG; the renamed updater archive and its
       # signature are attached here, behind the same draft guard the other
@@ -144,7 +144,7 @@ jobs:
         run: >-
           npm run tauri build --
           --target aarch64-apple-darwin
-          --bundles dmg
+          --bundles app,dmg
 
       - name: Upload dry-run DMG and updater archive to the workflow run
         if: github.event_name == 'workflow_dispatch'
@@ -244,7 +244,7 @@ jobs:
         run: >-
           npm run tauri build --
           --target x86_64-apple-darwin
-          --bundles dmg
+          --bundles app,dmg
 
       - name: Upload verified Intel DMG and updater archive to draft
         if: github.event_name == 'push'

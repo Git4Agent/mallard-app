@@ -205,7 +205,11 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   assert.match(workflow, /--target x86_64-apple-darwin/);
   assert.match(workflow, /--target x86_64-pc-windows-msvc/);
   assert.doesNotMatch(workflow, /universal-apple-darwin|aarch64-pc-windows|i686-pc-windows/);
-  assert.match(workflow, /--bundles dmg/);
+  // `app` must be requested explicitly: Tauri only emits the `.app.tar.gz`
+  // updater archive for that target, and `dmg` alone builds the app bundle
+  // without counting it as one.
+  assert.match(workflow, /--bundles app,dmg/);
+  assert.doesNotMatch(workflow, /--bundles dmg\b/);
   // The Intel job cross-compiles on the Apple Silicon runner and attaches to
   // the draft that tauri-action created in the Apple Silicon job.
   assert.match(intelJob, /needs: publish_macos/);
