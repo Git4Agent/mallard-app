@@ -1,6 +1,6 @@
 # Mallard: push again instead of reset — implementation plan
 
-- Status: Steps 1 to 10 implemented on September 20, steps 11 and 12 on September 22. Steps 13 and 14 are open. Step 11 fixed a gap found at review on September 22: after another computer's clear, the project's files read "unknown" and held the Push (section 4.7). Steps 12 and 13 apply the decision of September 22 (CAS-free plan, decision 12: recovery is a user action), which withdraws two implemented behaviors, the rollback of R3 and the Library reset at load of B1 and B2; both become the read rule of section 4. None of steps 11 to 14 needs the claims of the CAS-free plan. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
+- Status: Implemented and committed: steps 1 to 10 on September 20, steps 11 to 14 on September 22. Step 11 fixed a gap found at review on September 22: after another computer's clear, the project's files read "unknown" and held the Push (section 4.7). Steps 12 and 13 applied the decision of September 22 (CAS-free plan, decision 12: recovery is a user action), which withdrew two built behaviors, the rollback of R3 and the Library reset at load of B1 and B2; both are the read rule of section 4. None of steps 11 to 14 needed the claims of the CAS-free plan. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026, against the working tree
 - Scope: the desktop app — how Push and Pull behave when this computer's sync record cannot be used, and when two computers race
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
@@ -502,9 +502,9 @@ storage deletes. `RemoteContinuity` keeps its variants and gains one,
 | 9. Docs | `DESIGN_REMOTE_HISTORY_CONTINUITY.md` becomes design history; sections 9.1, 9.2, 11, 12 and 16 of the CAS-free plan; `CURRENT_METADATA_LAYOUT.md`, `TECHNICAL_REPORT.md`, `README.md` | The documents describe this behavior |
 | 10. Gate | `cargo test --workspace --all-targets`, `npx tsc --noEmit`, the frontend integration suite, `npm run build` | All pass |
 
-Steps 1 to 12 are implemented and committed. Steps 13 and 14 follow in order;
-each leaves the workspace building and its own tests green. They need nothing
-from the claims of the CAS-free plan (its step 9) and can land before them. They take over the parts of the CAS-free plan's step 10
+Steps 1 to 14 are implemented and committed; each left the workspace building
+and its own tests green. They needed nothing from the claims of the CAS-free
+plan (its step 9) and landed before them. They take over the parts of the CAS-free plan's step 10
 that are not about publishing: the rollback, `Displaced`, the base readers and
 the Library read rule. The rest of that step (the request limits,
 `OutcomeUnknown`, `PushUnfinished` and *Finish that push*) stays there.
@@ -571,6 +571,7 @@ Implemented on September 20, 2026. What differs from the plan above:
 | Project files, found at review on September 22 | Steps 1 to 10 did not cover the files review or the Pull planner, which open the project area's base manifest without the rule of section 4.1. A test of story 1 on a project with files, run and then removed, read both files "unknown" with the warning "Reviewed project-content base is unavailable", while the project area read `Fresh` and the history `RemoteMissing`. The story tests used sessions only. Step 11 fixed it on September 22 (section 4.7): `project_base` is the one rule both readers take the base through, and row A5 reads the selected manifest as the base, because it holds exactly the reviewed content and the base's own manifest may be gone; the files inspection observes the stream. Story 1 with files, story 2 with files and a readable stale manifest after an interrupted clear are tested in the service suite. The readable manifest of a displaced base is tested with step 12: until the rollback goes, it moves that base before the readers see it |
 | Tests that were rewritten | `push_destination_is_decided_by_the_writable_scopes_alone`, `a_cleared_storage_is_pushed_again_without_an_unlink_or_a_reset`, `a_recreated_storage_asks_for_a_pull_and_the_pull_replaces_the_stale_bases`, `a_recreated_history_reads_as_unreviewed_and_a_live_one_as_advanced`, and the two tests that pinned the blocked overlap, which now expect "Pull required" and "Keep both" |
 | Step 12, `Displaced` | Built on September 22. `RemoteContinuity::Displaced { base_revision, remote_revision, saved_by }`, with `SavedBy::Push` or `Pull`. The classifier takes the listed records the chain does not hold, and asks once, with the newest displaced publication, who published it: `BundleEngine::published_by` reads that record, and its replica token is compared with this binding's. `Mainline::outranked` names the displaced record; `Outranked.shared`, the rollback transaction, its event, its forwarder, the shell notice and `pushOutrankedNotice` are gone. `observe_linked_bundle` returns the observation with the verdict, and takes the link by reference. The three rollback tests are `Displaced` tests that compare the saved state byte for byte before and after the refresh; the readable manifest of a displaced base is tested with the files world of step 11. The notice's third form is in `clearedStorageNotice.ts` and in the static specimen. Story 4's test gives the second first version one more session than the real history, so its area reads A7 by construction: with identical sessions the conversation entries in the area digest still carry their `updated_at`, and A5 or A7 then depends on whether the two captures fell in the same second, which the story allows |
+| Step 13, Library | Built on September 22. `resolve_scope_workspace` reads the accepted state as absent when `verify_library_continuity` says `Replaced`, on the workspace's copy of the link only (`stale_acceptance`), and writes nothing; `reset_accepted_state` is gone. When the state was stale, the Push save clears the saved acceptances before it saves its own, and the Pull save does the same and then always saves the head it reviewed. Tests: B1 rewritten; B2 with the Push half of the save rule; a displaced head, a rival record planted on the first publication after two pushes, with a Push; B2 with the Pull half. The rival planter takes the chain's root as the parent, so it works with more than one record |
 
 Still open: the live two-computer pass on R2 and on Dropbox. The owner runs it,
 after clearing `~/.mallard` and the cloud data.
@@ -578,7 +579,7 @@ after clearing `~/.mallard` and the cloud data.
 ## Source pointers
 
 Line numbers are those of the working tree on September 20, 2026, after steps
-1 to 10, except the rows that steps 11 and 12 touched, which were read after
+1 to 10, except the rows that steps 11 to 13 touched, which were read after
 them on September 22.
 
 | Subject | Location |
@@ -612,8 +613,8 @@ them on September 22.
 | Rule 0 with S4 and "Keep both"; S2 and S3 under a stale record | `src-tauri/src/project_sync/service.rs:21232`, `:21358` |
 | Story 4, nothing done and pushed | `src-tauri/src/project_sync/service.rs:21972`, `:22051` |
 | The `Displaced` tests: a confirmed Push, a first Push, story 4, and a readable manifest of a displaced base; an interrupted clear reads `Replaced` | `src-tauri/src/project_sync/service.rs:20951`, `:21180`, `:22051`, `:20633`; `:21282` |
-| `verify_library_continuity`; the text of R10 | `src-tauri/src/storage_catalog/resource_engine.rs:85`, `:35` |
-| The Library reset at load, withdrawn by step 13; B1 | `src-tauri/src/storage_catalog/service.rs:1058`, `:1109`; `:3798` |
+| `verify_library_continuity`; the text of R10 | `src-tauri/src/storage_catalog/resource_engine.rs:86`, `:35` |
+| The Library read rule at load (`stale_acceptance`); B1; B2 with the Push half of the save rule; a displaced head; the Pull half of the save rule | `src-tauri/src/storage_catalog/service.rs:1068`; `:4074`, `:3747`, `:3859`, `:3957` |
 | Library row states without acceptance | `src-tauri/src/storage_catalog/resource_planning.rs:236-282` |
 | The row labels of section 2.1 | `src/components/project-sync/ProjectActivityPage.tsx:1102-1140` |
 | The standing notice and where it is shown | `src/components/project-sync/clearedStorageNotice.ts`, `src/components/project-sync/ProjectActivityPage.tsx:1840` |
@@ -627,6 +628,6 @@ them on September 22.
 | The planner keeps a local copy when a file's base digest is unknown | `crates/mallard-infrastructure/src/bundle_engine.rs:5040` |
 | The in-memory object cache that can still serve a cleared manifest | `crates/mallard-infrastructure/src/bundle_engine.rs:180`, `:1790` |
 | The Push hold on an "unknown" file | `src/components/project-sync/PushResourceWorkspace.tsx:99`, `:416` |
-| Library: a row's state reads the acceptances alone; the Push save; the Pull save and its head | `src-tauri/src/storage_catalog/resource_planning.rs:87`; `src-tauri/src/storage_catalog/service.rs:1898`; `:2151` |
+| Library: a row's state reads the acceptances alone; the Push save; the Pull save and its head | `src-tauri/src/storage_catalog/resource_planning.rs:87`; `src-tauri/src/storage_catalog/service.rs:1885`; `:2148` |
 | The origin a Push records | `src-tauri/src/project_sync/service.rs:9435` |
 | A Pull that fails in part keeps its previous `last_pull_at` | `src-tauri/src/project_sync/service.rs:13447` |

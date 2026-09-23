@@ -987,6 +987,10 @@ struct ResolvedScopeWorkspace {
     inventory: CatalogLocalInventory,
     storage: Option<StorageConfig>,
     link: Option<CatalogScopeLink>,
+    /// The saved accepted state names a history the repository no longer
+    /// has: `link` carries it as absent, nothing was written, and the next
+    /// Push or Pull drops the saved acceptances and saves its own.
+    stale_acceptance: bool,
     observed: Option<ObservedLibraryHead>,
     manifest: Option<LibraryResourceManifest>,
 }
@@ -1045,6 +1049,7 @@ fn resolve_scope_workspace(
     }
     let mut observed = None;
     let mut manifest = None;
+    let mut stale_acceptance = false;
     if let Some(storage) = &storage {
         let engine = engine_for(storage)?;
         let (mainline, selected) = engine.observe(&repository_id)?;
@@ -1055,9 +1060,16 @@ fn resolve_scope_workspace(
             &repository_id,
             &storage_identity_for_config(storage)?,
         )?;
-        if continuity == LibraryContinuity::Replaced {
-            if let Some(stale) = link.take() {
-                link = Some(reset_accepted_state(catalog, &stale)?);
+        // The accepted state names a history the repository no longer has:
+        // it is read as absent, and nothing is written. Every row then
+        // compares as unreviewed, and the next Push or Pull drops the saved
+        // acceptances and saves its own. Nothing is reset (CAS-free plan,
+        // decision 12: recovery is a user action).
+        stale_acceptance = continuity == LibraryContinuity::Replaced;
+        if stale_acceptance {
+            if let Some(link) = link.as_mut() {
+                link.accepted_head = None;
+                link.accepted_resources.clear();
             }
         }
         if let Some(observed) = &observed {
@@ -1095,34 +1107,9 @@ fn resolve_scope_workspace(
         inventory,
         storage,
         link,
+        stale_acceptance,
         observed,
         manifest,
-    })
-}
-
-/// The accepted publication is on no selected chain: the repository was
-/// cleared and pushed again, or the accepted push was outranked after it was
-/// confirmed, which only the fork window allows. The accepted state no
-/// longer describes this storage, so it is reset the way a storage clear
-/// resets it, and the link's rows compare as unreviewed and can be pushed
-/// again.
-fn reset_accepted_state(
-    catalog: &CatalogStateRepository,
-    stale: &CatalogScopeLink,
-) -> Result<CatalogScopeLink, String> {
-    catalog.mutate_scope_links(|document| {
-        let link = document
-            .links
-            .iter_mut()
-            .find(|link| link.link_id == stale.link_id)
-            .ok_or("the scope link disappeared while it was being reset")?;
-        if link.revision == stale.revision {
-            link.accepted_head = None;
-            link.accepted_resources.clear();
-            link.revision = link.revision.saturating_add(1);
-            link.updated_at = link.updated_at.max(now_secs());
-        }
-        Ok(link.clone())
     })
 }
 
@@ -1895,6 +1882,7 @@ fn apply_push_with_repositories(
         .collect::<Result<_, String>>()?;
     let link_id = link.link_id.clone();
     let link_revision = plan.link_revision;
+    let stale_acceptance = workspace.stale_acceptance;
     catalog.mutate_scope_links(|document| {
         let link = document
             .links
@@ -1903,6 +1891,11 @@ fn apply_push_with_repositories(
             .ok_or("the scope link disappeared while publishing")?;
         if link.revision != link_revision {
             return Err("the scope link changed while publishing".to_string());
+        }
+        if stale_acceptance {
+            // The saved acceptances describe a history the repository no
+            // longer has: from here on only what this Push accepted counts.
+            link.accepted_resources.clear();
         }
         link.accepted_head = Some(coordinate.clone());
         for (resource_id, content) in &accepted {
@@ -2148,10 +2141,16 @@ fn apply_pull_with_repositories(
         results.push(result);
     }
 
-    let advance_head = all_accepted;
-    let base_changed = accepted_updates
-        .iter()
-        .any(|(resource_id, content)| link.accepted_resources.get(resource_id) != Some(content))
+    // A Pull from an accepted state that is read as absent drops the saved
+    // acceptances and always saves the head it reviewed: otherwise what it
+    // accepted would sit under a head off the chain, be read as absent
+    // again, and the rows it installed would ask for review once more.
+    let stale_acceptance = workspace.stale_acceptance;
+    let advance_head = all_accepted || stale_acceptance;
+    let base_changed = stale_acceptance
+        || accepted_updates
+            .iter()
+            .any(|(resource_id, content)| link.accepted_resources.get(resource_id) != Some(content))
         || (advance_head && link.accepted_head.as_ref() != Some(&plan.head));
     if base_changed {
         let link_id = link.link_id.clone();
@@ -2165,6 +2164,9 @@ fn apply_pull_with_repositories(
                 .ok_or("the scope link disappeared while accepting Pull")?;
             if link.revision != link_revision {
                 return Err("the scope link changed while accepting Pull".to_string());
+            }
+            if stale_acceptance {
+                link.accepted_resources.clear();
             }
             for (resource_id, content) in &accepted_updates {
                 link.accepted_resources
@@ -3613,9 +3615,10 @@ mod tests {
         assert_eq!(stored_records(&fixture, &repository_id), 1);
     }
 
-    /// Another computer's publication on the repository's one record: the
+    /// Another computer's publication on the repository's first record: the
     /// same resources under its own commit id, in a record that claims the
-    /// millisecond after its parent.
+    /// millisecond after its parent. With one record it is a rival of the
+    /// next push; with more, it outranks the second publication.
     fn plant_rival_library_publication(repository: &Path) {
         use super::super::domain::{
             library_manifest_relative_key, sha256_hex, CatalogCommitId, LibraryResourceCommit,
@@ -3623,11 +3626,9 @@ mod tests {
         };
         let parent_file = fs::read_dir(repository.join("_commits"))
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .file_name()
-            .into_string()
+            .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+            .filter(|name| mallard_domain::RecordName::parse(name).is_some())
+            .min_by_key(|name| mallard_domain::RecordName::parse(name).unwrap().revision())
             .unwrap();
         let parent_name = mallard_domain::RecordName::parse(&parent_file).unwrap();
         let mut commit: LibraryResourceCommit = serde_json::from_slice(
@@ -3734,21 +3735,54 @@ mod tests {
         assert_eq!(stored_records(&fixture, &repository_id), 4);
     }
 
+    /// B2, and the Push half of the save rule (cleared plan, section 4.5):
+    /// the repository was cleared and another computer pushed its own skill.
+    /// The accepted state names a history the repository no longer has, so
+    /// the page reads it as absent and writes nothing: both of this
+    /// computer's skills read as new. A Push of one of them drops every
+    /// saved acceptance and keeps only its own, so the other one still reads
+    /// as new afterwards instead of counting as accepted on a history the
+    /// storage no longer has.
     #[test]
-    fn an_accepted_push_on_no_selected_chain_resets_the_link_and_its_rows_push_again() {
+    fn a_recreated_library_repository_reads_the_link_as_absent_and_a_push_keeps_its_own_acceptance(
+    ) {
         let fixture = library_fixture();
+        let notes = fixture.user_home.join("codex-home/skills/notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(
+            notes.join("SKILL.md"),
+            b"---\nname: notes\n---\nSecond skill.\n",
+        )
+        .unwrap();
         let row = skill_scope(&fixture);
         let scope_id = row.scope.scope_id.clone();
         link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
         push_all(&fixture, &scope_id, &fixture.storage.id);
-        let links = fixture.catalog.load_scope_links().unwrap();
-        let accepted = links.link_for(&scope_id, &fixture.storage.id).unwrap();
+        let link_of = |fixture: &LibraryFixture| {
+            fixture
+                .catalog
+                .load_scope_links()
+                .unwrap()
+                .link_for(&scope_id, &fixture.storage.id)
+                .cloned()
+                .unwrap()
+        };
+        let state_of = |fixture: &LibraryFixture, name: &str| {
+            page(fixture, &scope_id, Some(&fixture.storage.id))
+                .unwrap()
+                .rows
+                .into_iter()
+                .find(|row| row.display_name == name)
+                .unwrap_or_else(|| panic!("no row named '{name}'"))
+                .state
+        };
+        let accepted = link_of(&fixture);
         assert!(accepted.accepted_head.is_some());
+        assert_eq!(accepted.accepted_resources.len(), 2);
         let repository_id = accepted.repository_id.as_str().to_string();
 
         // The repository is cleared and another computer pushes its own
         // skill: a new history that does not contain this computer's push.
-        // A push outranked after it was confirmed reads the same way.
         fs::remove_dir_all(
             fixture
                 .storage_path
@@ -3769,31 +3803,273 @@ mod tests {
         link_scope(&other, &other_row.scope.scope_id, &other.storage.id, 4);
         push_all(&other, &other_row.scope.scope_id, &other.storage.id);
 
-        // The page still loads. The accepted state no longer describes this
-        // storage, so it is reset the way a storage clear resets it.
-        page(&fixture, &scope_id, Some(&fixture.storage.id)).unwrap();
-        let links = fixture.catalog.load_scope_links().unwrap();
-        let reset = links.link_for(&scope_id, &fixture.storage.id).unwrap();
-        assert!(reset.accepted_head.is_none());
-        assert!(reset.accepted_resources.is_empty());
-        assert!(reset.revision > accepted.revision);
+        // The page loads and writes nothing, and reads the rows without the
+        // stale acceptances.
+        assert_eq!(state_of(&fixture, "review"), Some(CatalogLinkState::New));
+        assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::New));
+        assert_eq!(
+            state_of(&fixture, "extra"),
+            Some(CatalogLinkState::LocalMissing)
+        );
+        assert_eq!(link_of(&fixture), accepted);
 
-        // Its rows can be pushed again, on the selected publication.
+        // One of the two skills is pushed, onto the selected history.
         let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
-        let review = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
-        assert!(review.row.selectable, "{:?}", review.row.blocked_reason);
-        push_all(&fixture, &scope_id, &fixture.storage.id);
+        for name in ["review", "notes"] {
+            let offered = plan.push_row(&resource_id_of(&plan, name)).unwrap();
+            assert!(offered.row.selectable, "{:?}", offered.row.blocked_reason);
+        }
+        let review_id = resource_id_of(&plan, "review");
+        let outcome = apply_push(&fixture, &plan, vec![review_id.clone()]).unwrap();
+        assert!(outcome.published, "{}", outcome.message);
         let engine = engine_for(&fixture.storage).unwrap();
-        let repository = plan.repository_id.clone();
-        let (head, manifest) = engine.inspect(&repository).unwrap().unwrap();
+        let (head, manifest) = engine.inspect(&plan.repository_id).unwrap().unwrap();
         assert_eq!(head.head.revision, 2);
         assert_eq!(manifest.resources.len(), 2);
+
+        // The link accepted the new history and the skill it pushed, and
+        // nothing else: the other skill's acceptance from the cleared history
+        // is gone, so it still reads as new.
+        let saved = link_of(&fixture);
+        assert!(saved.accepted_head.is_some());
+        assert_eq!(
+            saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
+            vec![review_id]
+        );
+        assert_eq!(
+            state_of(&fixture, "review"),
+            Some(CatalogLinkState::InSync)
+        );
+        assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::New));
+        assert_eq!(
+            state_of(&fixture, "extra"),
+            Some(CatalogLinkState::LocalMissing)
+        );
+    }
+
+    /// A displaced accepted head: another computer's record on the same
+    /// parent, ranked first, shows up after this computer's second push was
+    /// confirmed. The accepted head is off the selected chain, so the page
+    /// reads the accepted state as absent and writes nothing, the Library's
+    /// counterpart of a displaced project push. The skill the selected
+    /// version also holds reads in sync by its content, the skill only this
+    /// computer has reads as new, and pushing it saves the selected history
+    /// with that one acceptance; the displaced record stays in the storage.
+    #[test]
+    fn a_displaced_library_push_reads_the_link_as_absent_and_is_pushed_again() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let notes = fixture.user_home.join("codex-home/skills/notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(
+            notes.join("SKILL.md"),
+            b"---\nname: notes\n---\nSecond skill.\n",
+        )
+        .unwrap();
+        // The second record must rank behind a rival stamped one millisecond
+        // after the first.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let link_of = |fixture: &LibraryFixture| {
+            fixture
+                .catalog
+                .load_scope_links()
+                .unwrap()
+                .link_for(&scope_id, &fixture.storage.id)
+                .cloned()
+                .unwrap()
+        };
+        let state_of = |fixture: &LibraryFixture, name: &str| {
+            page(fixture, &scope_id, Some(&fixture.storage.id))
+                .unwrap()
+                .rows
+                .into_iter()
+                .find(|row| row.display_name == name)
+                .unwrap_or_else(|| panic!("no row named '{name}'"))
+                .state
+        };
+        let accepted = link_of(&fixture);
+        assert_eq!(
+            accepted.accepted_head.as_ref().map(|head| head.revision),
+            Some(2)
+        );
+        assert_eq!(accepted.accepted_resources.len(), 2);
+        let repository_id = accepted.repository_id.as_str().to_string();
+        plant_rival_library_publication(
+            &fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(&repository_id),
+        );
+        assert_eq!(stored_records(&fixture, &repository_id), 3);
+
+        // The page loads, writes nothing, and reads the rows without the
+        // displaced acceptances.
+        assert_eq!(
+            state_of(&fixture, "review"),
+            Some(CatalogLinkState::InSync)
+        );
+        assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::New));
+        assert_eq!(link_of(&fixture), accepted);
+
+        // Pushing the skill again lands on the selected history, with the
+        // acceptance of that one skill.
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        let notes_id = resource_id_of(&plan, "notes");
+        let offered = plan.push_row(&notes_id).unwrap();
+        assert!(offered.row.selectable, "{:?}", offered.row.blocked_reason);
+        let outcome = apply_push(&fixture, &plan, vec![notes_id.clone()]).unwrap();
+        assert!(outcome.published, "{}", outcome.message);
+        let engine = engine_for(&fixture.storage).unwrap();
+        let (head, manifest) = engine.inspect(&plan.repository_id).unwrap().unwrap();
+        assert_eq!(head.head.revision, 3);
+        assert_eq!(manifest.resources.len(), 2);
+        assert_eq!(stored_records(&fixture, &repository_id), 4);
+        let saved = link_of(&fixture);
+        assert_eq!(
+            saved.accepted_head.as_ref().map(|head| head.revision),
+            Some(3)
+        );
+        assert_eq!(
+            saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
+            vec![notes_id]
+        );
+        assert_eq!(
+            state_of(&fixture, "review"),
+            Some(CatalogLinkState::InSync)
+        );
+        assert_eq!(
+            state_of(&fixture, "notes"),
+            Some(CatalogLinkState::InSync)
+        );
+    }
+
+    /// The Pull half of the save rule (cleared plan, section 4.5), from B2:
+    /// the repository was cleared and another computer pushed its own skill.
+    /// A Pull that installs it saves the head it reviewed with that one
+    /// acceptance, and drops the acceptance this computer's own skill had on
+    /// the cleared history. Afterwards the installed skill reads in sync,
+    /// and the own skill still reads as new, ready to push.
+    #[test]
+    fn a_pull_from_an_accepted_state_read_as_absent_saves_the_reviewed_head_and_what_it_accepted(
+    ) {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let link_of = |fixture: &LibraryFixture| {
+            fixture
+                .catalog
+                .load_scope_links()
+                .unwrap()
+                .link_for(&scope_id, &fixture.storage.id)
+                .cloned()
+                .unwrap()
+        };
+        let state_of = |fixture: &LibraryFixture, name: &str| {
+            page(fixture, &scope_id, Some(&fixture.storage.id))
+                .unwrap()
+                .rows
+                .into_iter()
+                .find(|row| row.display_name == name)
+                .unwrap_or_else(|| panic!("no row named '{name}'"))
+                .state
+        };
+        let accepted = link_of(&fixture);
+        let repository_id = accepted.repository_id.as_str().to_string();
+        fs::remove_dir_all(
+            fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(&repository_id),
+        )
+        .unwrap();
+        let other = sibling_machine(&fixture, "other-user", b"unused");
+        fs::remove_dir_all(&other.skill_path).unwrap();
+        let extra = other.user_home.join("codex-home/skills/extra");
+        fs::create_dir_all(&extra).unwrap();
+        fs::write(
+            extra.join("SKILL.md"),
+            b"---\nname: extra\n---\nAnother computer's skill.\n",
+        )
+        .unwrap();
+        let other_row = skill_scope(&other);
+        link_scope(&other, &other_row.scope.scope_id, &other.storage.id, 4);
+        push_all(&other, &other_row.scope.scope_id, &other.storage.id);
+        assert_eq!(link_of(&fixture), accepted);
+
+        // The Pull installs the other computer's skill.
+        let plan = prepare_pull_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &scope_id,
+            &fixture.storage.id,
+            BTreeMap::new(),
+            &fixture.user_home,
+            now_secs(),
+        )
+        .unwrap();
+        let item = plan
+            .items
+            .iter()
+            .find(|item| item.item.display_name == "extra")
+            .expect("the other computer's skill is offered");
+        let extra_id = item.item.resource_id.clone();
+        let outcome = apply_pull_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &PanicRunner,
+            plan.plan_id.clone(),
+            BTreeMap::from([(
+                extra_id.clone(),
+                item.item
+                    .default_action_id
+                    .clone()
+                    .expect("an install action"),
+            )]),
+            Vec::new(),
+            &fixture.user_home,
+            now_secs(),
+        )
+        .unwrap();
+        assert!(outcome.remote_accepted);
+        assert!(fixture
+            .user_home
+            .join("codex-home/skills/extra/SKILL.md")
+            .exists());
+
+        // The link is on the new history with the one acceptance the Pull
+        // made; the own skill's acceptance from the cleared history is gone.
+        let saved = link_of(&fixture);
+        assert_eq!(
+            saved.accepted_head.as_ref().map(|head| head.revision),
+            Some(1)
+        );
+        assert_ne!(saved.accepted_head, accepted.accepted_head);
+        assert_eq!(
+            saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
+            vec![extra_id]
+        );
+        assert_eq!(
+            state_of(&fixture, "extra"),
+            Some(CatalogLinkState::InSync)
+        );
+        assert_eq!(state_of(&fixture, "review"), Some(CatalogLinkState::New));
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        let offered = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
+        assert!(offered.row.selectable, "{:?}", offered.row.blocked_reason);
     }
 
     /// B1: the repository was cleared, and nobody has pushed since. The page
-    /// loads instead of refusing, the accepted state is reset as for any
-    /// replaced history, a local row is selectable, and one Push repopulates
-    /// the repository from its first version.
+    /// loads instead of refusing and writes nothing: the accepted state is
+    /// read as absent, the local row reads as new and is selectable, and one
+    /// Push repopulates the repository from its first version.
     #[test]
     fn a_cleared_library_repository_loads_and_one_push_repopulates_it() {
         let fixture = library_fixture();
@@ -3801,8 +4077,16 @@ mod tests {
         let scope_id = row.scope.scope_id.clone();
         link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
         push_all(&fixture, &scope_id, &fixture.storage.id);
-        let links = fixture.catalog.load_scope_links().unwrap();
-        let accepted = links.link_for(&scope_id, &fixture.storage.id).unwrap();
+        let link_of = |fixture: &LibraryFixture| {
+            fixture
+                .catalog
+                .load_scope_links()
+                .unwrap()
+                .link_for(&scope_id, &fixture.storage.id)
+                .cloned()
+                .unwrap()
+        };
+        let accepted = link_of(&fixture);
         assert!(accepted.accepted_head.is_some());
         let repository_id = accepted.repository_id.as_str().to_string();
 
@@ -3815,12 +4099,10 @@ mod tests {
         .unwrap();
         assert_eq!(stored_records(&fixture, &repository_id), 0);
 
-        page(&fixture, &scope_id, Some(&fixture.storage.id)).unwrap();
-        let links = fixture.catalog.load_scope_links().unwrap();
-        let reset = links.link_for(&scope_id, &fixture.storage.id).unwrap();
-        assert!(reset.accepted_head.is_none());
-        assert!(reset.accepted_resources.is_empty());
-        assert!(reset.revision > accepted.revision);
+        let loaded = page(&fixture, &scope_id, Some(&fixture.storage.id)).unwrap();
+        assert_eq!(loaded.rows.len(), 1);
+        assert_eq!(loaded.rows[0].state, Some(CatalogLinkState::New));
+        assert_eq!(link_of(&fixture), accepted);
 
         let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
         let review = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
@@ -3831,12 +4113,16 @@ mod tests {
         assert_eq!(head.head.revision, 1);
         assert_eq!(manifest.resources.len(), 1);
         assert_eq!(stored_records(&fixture, &repository_id), 1);
-        let links = fixture.catalog.load_scope_links().unwrap();
-        assert!(links
-            .link_for(&scope_id, &fixture.storage.id)
-            .unwrap()
-            .accepted_head
-            .is_some());
+        let saved = link_of(&fixture);
+        assert!(saved.accepted_head.is_some());
+        assert_eq!(saved.accepted_resources.len(), 1);
+        assert_eq!(
+            page(&fixture, &scope_id, Some(&fixture.storage.id))
+                .unwrap()
+                .rows[0]
+                .state,
+            Some(CatalogLinkState::InSync)
+        );
     }
 
     #[test]

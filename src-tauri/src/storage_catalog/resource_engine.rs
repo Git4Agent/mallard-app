@@ -73,7 +73,8 @@ pub enum LibraryContinuity {
     /// The accepted publication is on no selected chain: the repository was
     /// cleared, with or without a Push since, or the accepted push was
     /// outranked after it was confirmed. The link's accepted state no longer
-    /// describes this storage.
+    /// describes this storage: it is read as absent and never reset, and the
+    /// next Push or Pull replaces it.
     Replaced,
 }
 

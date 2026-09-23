@@ -730,9 +730,11 @@ or combined implicit selection.
 Machine-local scope links hold provider paths, storage IDs, the accepted head
 continuity pin, and per-resource accepted content bases. Continuity is
 ancestry: an accepted publication that is neither the selected one nor one of
-its ancestors resets the link's accepted state, the way a storage clear does,
-so its rows can be pushed again. A repository that lists empty holds no chain,
-so it reads the same way: the page loads, and one Push repopulates it. Portable Library
+its ancestors is read as absent, and nothing is reset: every row compares as
+unreviewed, a Push drops the saved acceptances and keeps the ones it made, and
+a Pull from that state saves the head it reviewed with what it accepted. A
+repository that lists empty holds no chain, so it reads the same way: the page
+loads, and one Push repopulates it. Portable Library
 documents contain none of those machine-local values. Pull reviews pin
 cross-storage claims per item; a target claimed at another digest can only be
 preserved as a named semantic copy, explicitly overwritten with
