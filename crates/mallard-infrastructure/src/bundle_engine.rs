@@ -33,9 +33,9 @@ use mallard_domain::{
 };
 
 use crate::storage_core::publication::{
-    list_project_streams, list_stream, read_record, read_records, write_claimed_record,
-    write_record, ClaimedRecord, RecordStream, WriteOutcome, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
-    REMOTE_CHANGED,
+    finish_claimed_push, list_project_streams, list_stream, read_record, read_records,
+    write_claimed_record, write_record, ClaimedRecord, RecordStream, WriteOutcome,
+    OWN_PUSH_UNFINISHED, PUSH_UNFINISHED, REMOTE_CHANGED,
 };
 use crate::storage_core::{
     open_read_only_no_follow, parse_json_bytes, parse_json_reader, repository_object_key,
@@ -891,6 +891,13 @@ impl<S: ObjectStore> BundleEngine<S> {
         }
         write_claimed_record(&self.store, stream, claimed)?;
         Ok((head, manifest))
+    }
+
+    /// *Finish that push*: write the record that the claim of the selected
+    /// version holds, once, and report. The user's verb, never the engine's
+    /// (section 13 of the CAS-free plan).
+    pub fn finish_unfinished_push(&self, bundle_id: &BundleId) -> Result<(), String> {
+        finish_claimed_push(&self.store, &RecordStream::project(bundle_id)?).map(|_| ())
     }
 
     /// Publish the empty registration manifest that makes a just-linked
@@ -5175,15 +5182,31 @@ mod tests {
             .all(|key| !key.as_str().contains("/_claims/")));
         assert!(!store.listed_prefixes().is_empty() && !store.read_keys().is_empty());
 
-        // Once their record is listed, the listing before the claim stops
-        // the Push: another computer got in first.
+        // Finishing their push, the user's verb, writes their record once
+        // with no claim: the next comparison shows their version, with
+        // their commit id and origin. Once it is listed, this computer's
+        // Push stops at its listing: another computer got in first.
         let their_name = record_name_of(&their_bytes, Some(&parent)).unwrap();
-        store
-            .put_record(&stream.key(&their_name).unwrap(), &their_bytes)
-            .unwrap();
+        store.reset_counts();
+        engine.finish_unfinished_push(&id).unwrap();
+        assert_eq!(counts(), (3, 0, 1));
+        let (head, _) = engine.read_head(&id).unwrap().unwrap();
+        assert_eq!(head.commit_id, their_name.commit_id());
+        assert_eq!(
+            engine
+                .published_by(&id, &their_name)
+                .unwrap()
+                .origin_replica_token,
+            domain::OriginReplicaToken::parse("1".repeat(64)).unwrap()
+        );
         store.reset_counts();
         assert_eq!(publish(observed, 70).unwrap_err(), REMOTE_CHANGED);
         assert_eq!(counts(), (1, 0, 0));
+        // Nothing is left to finish: their version has no claim yet.
+        assert_eq!(
+            engine.finish_unfinished_push(&id).unwrap_err(),
+            REMOTE_CHANGED
+        );
     }
 }
 

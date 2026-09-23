@@ -5,6 +5,7 @@ import Icon, { iconNameFromHint, type IconName } from "../Icons";
 import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
+import { PUSH_FINISHED, finishPushOffered } from "../../unfinishedPush";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import LoadingScaffold from "../LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
@@ -1105,6 +1106,24 @@ export default function StorageCatalogPage({
     }
   };
 
+  /* Finish that push: the record an earlier push claimed and never wrote is
+     written once, and the page reports. Nothing runs this by itself, and
+     nothing local moves: the user reviews again afterwards. */
+  const finishUnfinishedPush = async () => {
+    if (!storageId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await storageCatalogApi.finishUnfinishedPush(scope.scope.scope_id, storageId);
+      setFailures([]);
+      notify(PUSH_FINISHED);
+    } catch (reason) {
+      setFailures([storageFailureMessage(reason)]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Opening the Pull review pins one plan over every stored resource. The
    * scope pairs with the storage first when it never has — the same "link for
    * review" step this page has always taken, configuration only, no provider
@@ -1510,7 +1529,21 @@ export default function StorageCatalogPage({
     pageNotices.push({ key: "error", severity: "danger", message: error });
   }
   for (const failure of failures) {
-    pageNotices.push({ key: `failure:${failure}`, severity: "danger", message: failure });
+    pageNotices.push({
+      key: `failure:${failure}`,
+      severity: "danger",
+      message: failure,
+      /* A push onto the selected version that did not finish offers the one
+         verb that finishes it. */
+      action: finishPushOffered(failure, storageName)
+        ? (
+          <button type="button" className="btn btn-ghost" onClick={() => void finishUnfinishedPush()} disabled={busy}>
+            <Icon name="upload" size={13} />
+            Finish that push
+          </button>
+        )
+        : undefined,
+    });
   }
   /* Nothing in this zone is standing content: the progress line is written
      while a Push or Pull runs, and both failure surfaces are written after

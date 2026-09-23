@@ -200,6 +200,19 @@ pub async fn apply_catalog_scope_push(
     .await
 }
 
+/// *Finish that push*: write the record that the claim of the selected
+/// version holds, once, and report. The user's verb, from the Library page.
+#[tauri::command]
+pub async fn finish_catalog_unfinished_push(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+) -> Result<(), String> {
+    run_blocking(move || {
+        StorageCatalogService::from_user_home()?.finish_unfinished_push(&scope_id, &storage_id)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn prepare_catalog_scope_pull(
     scope_id: CatalogScopeId,

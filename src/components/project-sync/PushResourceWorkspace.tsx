@@ -27,6 +27,7 @@ import { STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { formatBytes } from "../../format";
+import { PUSH_FINISHED, finishPushOffered } from "../../unfinishedPush";
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -71,6 +72,9 @@ interface Props {
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
+  /** Finish that push: the record an earlier push claimed and never wrote is
+   *  written once. Offered only while the error is that sentence. */
+  onFinishPush?: () => void;
 }
 
 function countSelected(items: InventoryResource[], selected: ReadonlySet<string>): number {
@@ -564,6 +568,7 @@ export default function PushResourceWorkspace({
   onClose,
   onPush,
   onPull,
+  onFinishPush,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
@@ -1001,11 +1006,22 @@ export default function PushResourceWorkspace({
         {error && (
           /* The push the user just started failed. That is an event — the
              review rendered without it — and it stops the flow, so the box
-             announces assertively. */
+             announces assertively. A push onto this version that did not
+             finish offers the one verb that finishes it, and once it did the
+             same box reads so in the done tone: the box prints its severity
+             word, so a finished push is never an "Error". */
           <Notice
-            severity="danger"
+            severity={error === PUSH_FINISHED ? "success" : "danger"}
             timing="blocking"
             className="sync-pull-error"
+            action={finishPushOffered(error, storageName) && onFinishPush
+              ? (
+                <button type="button" className="btn btn-ghost" onClick={onFinishPush} disabled={busy}>
+                  <Icon name="upload" size={13} />
+                  Finish that push
+                </button>
+              )
+              : undefined}
           >
             {error}
           </Notice>

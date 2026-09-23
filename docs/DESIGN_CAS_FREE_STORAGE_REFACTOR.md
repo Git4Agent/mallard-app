@@ -1,15 +1,13 @@
 # Mallard: CAS-free storage publication — implementation plan
 
-- Status: Implemented, steps 1 to 7, step 9 (the claim of decision 11 and
-  section 7.2, on September 22) and the automated part of step 8; the live
-  two-machine pass on R2 and on Dropbox (step 8, and the two live rows of step
-  9) is still to be run and recorded. Step 10, the publishing part of the
-  decision of September 22 that recovery is a user action (decision 12), is
-  planned and not implemented: it withdraws the write retries of section 7.2
-  and adds *Finish that push*. The rest of decision 12, which withdrew the
-  rollback of section 9.4 and the Library reset at load, landed on September
-  22 as steps 11 to 14 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, without
-  claims. *Implementation notes* at the end list what differs from the plan
+- Status: Implemented, steps 1 to 7, 9 and 10 (the claim of decision 11 and
+  section 7.2, and the publishing part of decision 12, both on September 22)
+  and the automated part of step 8; the live two-machine pass on R2 and on
+  Dropbox (step 8, and the two live rows of step 9) is still to be run and
+  recorded. The rest of decision 12, which withdrew the rollback of section
+  9.4 and the Library reset at load, landed on September 22 as steps 11 to 14
+  of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, without claims. *Implementation
+  notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026
 - Scope: the desktop app — both sync engines, the Local, S3/R2 and Dropbox stores, and the Push error copy. Mallard Cloud follows in its own plan (section 14)
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
@@ -1084,8 +1082,8 @@ Release condition:
 
 ## Implementation notes
 
-Step 9 was implemented on September 22, 2026. What differs from the plan
-above, or was decided while building it:
+Steps 9 and 10 were implemented on September 22, 2026. What differs from
+the plan above, or was decided while building them:
 
 | Subject | What was built |
 |---|---|
@@ -1093,7 +1091,8 @@ above, or was decided while building it:
 | An unacknowledged request | The read-only check settles it, on both sides: present counts, absent did not land, and the Push fails with the store's error rather than `OutcomeUnknown`, which is reported only when the check itself cannot be made. S3/R2, Dropbox and the local store list their own completed writes, so absent is evidence, and the store's error tells the user why the Push failed. Sections 7.3 and 16 say so. The record half of this rule lands with step 10, which removes the retry loop |
 | The shared module's shape | `write_record` returns `WriteOutcome`: `Stored` with the listing that selects the record, or `Unfinished` with the claimed record's name and bytes. The engine decides the own-record case, because only it can read the claimed record's manifest and compare content: the bundle engine compares the scope digests, the Library engine the per-resource content digests, and both compare the origin's replica token with the one this Push writes. An own record with the same content is written through `write_claimed_record`; anything else fails with `PUSH_UNFINISHED` or `OWN_PUSH_UNFINISHED`, engine-level texts that the two services turn into the sentences of section 13 with the storage's name |
 | The claim's parent check | A claim whose bytes are not a record of the claimed parent, by the five graph fields and the digest of the bytes, is an integrity error for that parent, as section 7.2 says; the record name is derived by the shared module from those fields, for both record types, without either engine's record type |
-| Step 10 | Planned: the single claim and record request, the read-only checks, *Finish that push* |
+| One request each | The write lists, again while its listing is stale, claims once, sends once, and lists once to settle; the record loop and its constant are gone. A request the store does not acknowledge is settled by one read-only check, the claim key after a claim and a listing after a record: what it shows landed counts, what it shows absent did not land and the Push fails with the store's error, and a check that cannot be made is `OutcomeUnknown`. The next Push is the user's |
+| *Finish that push* | One shared verb, `finish_claimed_push`: list, read the claim of the selected version, and write the record it holds through the same record path, once. A claim that is absent, or whose record a listing already holds, is `RemoteChanged` for the verb: the storage changed since the review that reported the unfinished push. A store without claims refuses the verb with its own sentence, and no banner offers it there. Both engines and both services expose it, under the same host or per-repository lock a Push takes; the Push review's banner and the Library page's failure zone offer it only while the error is a sentence of section 13 for that storage. A finished push reads "Finished. Compare again." in the done tone in the Push review, because the notice prints its severity word, and as the shell notice on the Library page |
 
 Still open: the live two-machine pass on R2 and on Dropbox, with the two live
 rows of step 9 (one child per version after simultaneous Pushes, one
@@ -1137,15 +1136,15 @@ Line numbers of the working tree on September 22, 2026, after step 9.
 
 | Subject | Location |
 |---|---|
-| `write_record` and `WriteOutcome`; `ClaimedRecord`; the claim step inside `attempt`; `claim_parent`; `taken_claim`, with the fresh listing before an unfinished push is reported; `write_claimed_record`; `record_name_of` | `crates/mallard-infrastructure/src/storage_core/publication.rs:162`, `:155`, `:622`, `:586`, `:599`, `:553`, `:201` |
-| `RecordStream::claim_key`; the engine-level texts `PUSH_UNFINISHED` and `OWN_PUSH_UNFINISHED`; `unfinished_push_sentence`, the Push review's sentence with the storage's name | `crates/mallard-infrastructure/src/storage_core/publication.rs:139`, `:58`, `:64` |
+| `write_record` and `WriteOutcome`; `ClaimedRecord`; the claim step inside `attempt`; `claim_once`; `taken_claim`, with the fresh listing before an unfinished push is reported; `write_claimed_record`; `record_name_of` | `crates/mallard-infrastructure/src/storage_core/publication.rs:164`, `:157`, `:704`, `:597`, `:637`, `:560`, `:203` |
+| `RecordStream::claim_key`; the engine-level texts `PUSH_UNFINISHED` and `OWN_PUSH_UNFINISHED`; `unfinished_push_sentence`, the Push review's sentence with the storage's name | `crates/mallard-infrastructure/src/storage_core/publication.rs:141`, `:60`, `:66` |
 | Trait: `ClaimOutcome`, `supports_claims`, `put_claim`; the shared wrapper's forwards; `REPOSITORY_CLAIMS_PREFIX`; the Library key allowlist; the clear's claims pass | `crates/mallard-infrastructure/src/storage_core/object_store.rs:162`, `:284`, `:292`; `storage_core/mod.rs:513`, `:58`, `:291`, `:206` |
 | S3/R2: `put_claim_async`, the create-only put with retries off and one read on a refused precondition; the probe stage `Refuse`; the fake's overwrite knob | `crates/mallard-infrastructure/src/storage_core/s3_store.rs:750`, `:392`, `:2454` |
 | Dropbox: `put_claim_async`, add mode without a strict conflict check and one download on a conflict; the probe's refusal; the mock's overwrite knob | `crates/mallard-infrastructure/src/storage_core/dropbox_store/upload.rs:172`; `dropbox_store/probe.rs:134`; `dropbox_store/mock.rs:36` |
 | The plain test store's claim, exclusive in memory and switchable, its faults, the hook before the claim request, its request log | `crates/mallard-infrastructure/src/storage_core/plain_store.rs:72`, `:122`, `:130`, `:91`, `:282` |
 | The bundle engine's own-record decision; the Library engine's | `crates/mallard-infrastructure/src/bundle_engine.rs:867`; `src-tauri/src/storage_catalog/resource_engine.rs:496` |
 | The two services print the sentence with the storage's name | `src-tauri/src/project_sync/service.rs:10481`; `src-tauri/src/storage_catalog/service.rs:1885` |
-| Tests: the shared module's claim rows; the clear order; the bundle engine; the Library engine; the S3 fake; the Dropbox mock; the stub S3 end to end | `crates/mallard-infrastructure/src/storage_core/publication.rs:1261-1535`; `storage_core/mod.rs:832`; `bundle_engine.rs:5044`; `src-tauri/src/storage_catalog/resource_engine.rs:1125`; `s3_store.rs:2213`, `:2229`; `dropbox_store/tests.rs:584`, `:624`; `src-tauri/src/sync_tests/thread_variants/storage_parity.rs:540` |
+| Tests: the shared module's claim rows; the clear order; the bundle engine; the Library engine; the S3 fake; the Dropbox mock; the stub S3 end to end | `crates/mallard-infrastructure/src/storage_core/publication.rs:1347-1621`; `storage_core/mod.rs:832`; `bundle_engine.rs:5044`; `src-tauri/src/storage_catalog/resource_engine.rs:1125`; `s3_store.rs:2213`, `:2229`; `dropbox_store/tests.rs:584`, `:624`; `src-tauri/src/sync_tests/thread_variants/storage_parity.rs:540` |
 
 *Recovery is a user action*
 
@@ -1159,4 +1158,6 @@ Line numbers of the working tree on September 22, 2026, after step 9.
 | Base readers that open the base manifest: the files review's per-file states; the Pull planner's per-file base digests; the preservation rule they feed | `src-tauri/src/project_sync/service.rs:2348`, `:2708-2742`; `crates/mallard-infrastructure/src/bundle_engine.rs:5034-5057` |
 | Base readers that already filter, through `classify_scope_continuity` | `src-tauri/src/project_sync/service.rs:7728`, `:7851`; `crates/mallard-domain/src/lib.rs:931-956` |
 | What marks an area reviewed after a Pull with unticked rows | `src-tauri/src/project_sync/service.rs:13472` |
-| The retry loop and its constants, which step 10 removes | `crates/mallard-infrastructure/src/storage_core/publication.rs:37-41`, `:622-695` |
+| One claim request and one record request, each settled by one read-only check: `claim_once`, `send_once`, the `attempt` they belong to | `crates/mallard-infrastructure/src/storage_core/publication.rs:597`, `:678`, `:704` |
+| *Finish that push*: the shared verb; the engines'; the services'; the commands; the frontend's sentences and `finishPushOffered`; the Push review's action and done tone; the Library page's action; the specimen | `crates/mallard-infrastructure/src/storage_core/publication.rs:752`; `crates/mallard-infrastructure/src/bundle_engine.rs:899`, `src-tauri/src/storage_catalog/resource_engine.rs:297`; `src-tauri/src/project_sync/service.rs:10113`, `src-tauri/src/storage_catalog/service.rs:1762`; `src-tauri/src/project_sync/commands.rs:1197`, `src-tauri/src/storage_catalog/resource_commands.rs:206`; `src/unfinishedPush.ts`; `src/components/project-sync/PushResourceWorkspace.tsx:1017`; `src/components/storage-catalog/StorageCatalogPage.tsx:1538`; `src/push-notices-live.tsx` |
+| Tests: one request in every outcome; the unacknowledged claim; the verb; the engines and the stub S3 finishing another computer's push; the frontend's sentences and buttons | `crates/mallard-infrastructure/src/storage_core/publication.rs:1087`, `:1639`, `:1697`; `crates/mallard-infrastructure/src/bundle_engine.rs:5044`; `src-tauri/src/storage_catalog/resource_engine.rs:1125`; `src-tauri/src/sync_tests/thread_variants/storage_parity.rs:540`; `tests/frontend/push-outcome.integration.test.tsx`, `tests/frontend/resource-inventory.integration.test.tsx`, `tests/frontend/storage-catalog.integration.test.tsx` |

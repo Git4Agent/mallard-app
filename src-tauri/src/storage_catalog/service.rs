@@ -566,6 +566,23 @@ impl StorageCatalogService {
         )
     }
 
+    /// *Finish that push*: the record an earlier push claimed and never
+    /// wrote is written once, and the result is reported. The user's verb.
+    pub fn finish_unfinished_push(
+        &self,
+        scope_id: &CatalogScopeId,
+        storage_id: &StorageId,
+    ) -> Result<(), String> {
+        finish_unfinished_push_with_repositories(
+            &self.registry,
+            &self.state,
+            &self.catalog,
+            scope_id,
+            storage_id,
+            &self.user_home,
+        )
+    }
+
     pub fn apply_push(
         &self,
         approval: CatalogPushApproval,
@@ -1738,6 +1755,37 @@ fn observed_matches(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The user's verb for a push onto the selected version that did not
+/// finish (CAS-free plan, section 13): write the record its claim holds,
+/// once, under the same local single-flight lock a Push takes, and report
+/// with the sentences of the Push review. Nothing local moves.
+fn finish_unfinished_push_with_repositories(
+    registry: &CatalogRegistry,
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    user_home: &Path,
+) -> Result<(), String> {
+    let workspace = resolve_scope_workspace(
+        registry,
+        state,
+        catalog,
+        scope_id,
+        Some(storage_id),
+        user_home,
+    )?;
+    let link = require_link(&workspace)?;
+    let storage = workspace
+        .storage
+        .as_ref()
+        .expect("a linked workspace always has its storage");
+    let _publication = catalog.acquire_publication_lock(storage_id, &link.repository_id)?;
+    engine_for(storage)?
+        .finish_unfinished_push(&link.repository_id)
+        .map_err(|error| unfinished_push_sentence(&storage.name, error))
+}
+
 fn apply_push_with_repositories(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,

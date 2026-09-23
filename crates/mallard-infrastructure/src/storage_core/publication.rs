@@ -9,9 +9,12 @@
 //! claimed first: one create-only write of the record's bytes under the
 //! parent's token, which admits one child per parent (claim, then write).
 //! A write is a publication only when the listing after it selects the
-//! record; otherwise the push failed and the record is never selected.
-//! Nothing here is persisted: the process remembers the last listing of a
-//! stream and the records it has read, and nothing else.
+//! record; otherwise the push failed and the record is never selected. The
+//! claim and the record are sent once each: a request the store does not
+//! acknowledge is settled by one read-only check, never by sending again,
+//! and recovery is the user's. Nothing here is persisted: the process
+//! remembers the last listing of a stream and the records it has read, and
+//! nothing else.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -35,9 +38,8 @@ const MAX_LISTED_RECORDS: usize = 100_000;
 /// old on the wall clock. The monotonic clock is not enough: on macOS it
 /// stands still while the machine sleeps.
 const LISTING_FRESHNESS: Duration = Duration::from_secs(10);
-/// Record requests one operation may send. Every one follows its own listing.
-const MAX_RECORD_REQUESTS: usize = 3;
-/// Listings one operation may make before it gives up on a fresh one.
+/// Listings one operation may make before it gives up on a fresh one. The
+/// claim and the record are sent once each, whatever the listings cost.
 const MAX_WRITE_LISTINGS: usize = 8;
 const MAX_CACHED_RECORDS_PER_STREAM: usize = 64;
 const MAX_REPORTED_NAMES: usize = 1_024;
@@ -530,12 +532,17 @@ pub fn read_record<S: ObjectStore + ?Sized>(
 /// claims the parent's claim admits one child: the second computer finds
 /// the claim taken and stops before it writes.
 ///
+/// The claim and the record are sent once each. A request the store does not
+/// acknowledge is settled by one read-only check, the claim key or a listing:
+/// what it shows landed counts, what it shows absent did not land and the
+/// push fails with the store's own error, and a check that cannot be made is
+/// [`OUTCOME_UNKNOWN`]. Nothing is sent again; the next push is the user's.
+///
 /// Errors: [`REMOTE_CHANGED`] when the listing before the write shows another
 /// child or another selection, when the claim is taken by a record a listing
 /// holds, and when the listing that holds the record selects another
-/// computer's, all with nothing of this record written; [`OUTCOME_UNKNOWN`]
-/// when the storage cannot be listed after a record was sent. A claim taken
-/// by a record no listing holds is [`WriteOutcome::Unfinished`]: nothing is
+/// computer's, all with nothing of this record written. A claim taken by a
+/// record no listing holds is [`WriteOutcome::Unfinished`]: nothing is
 /// written, and the caller decides (section 7.3 of the CAS-free plan).
 pub fn write_record<S: ObjectStore + ?Sized>(
     store: &S,
@@ -583,13 +590,44 @@ pub(crate) fn write_record_at<S: ObjectStore + ?Sized>(
 }
 
 /// One claim request for the parent of `name`, carrying the record's bytes.
-fn claim_parent<S: ObjectStore + ?Sized>(
+/// A request the store does not acknowledge is settled by one read of the
+/// claim key: this computer's bytes and the claim is its own, other bytes
+/// and it is taken, absent and the push fails with the store's error. A read
+/// that cannot be made leaves the outcome unknown. Nothing is sent again.
+fn claim_once<S: ObjectStore + ?Sized>(
     store: &S,
     stream: &RecordStream,
     name: &RecordName,
     bytes: &[u8],
 ) -> Result<ClaimOutcome, String> {
-    store.put_claim(&stream.claim_key(name.parent())?, bytes)
+    let claim_key = stream.claim_key(name.parent())?;
+    let refused = match store.put_claim(&claim_key, bytes) {
+        Ok(outcome) => return Ok(outcome),
+        Err(error) => error,
+    };
+    match store.get_metadata(&claim_key, MAX_RECORD_BYTES) {
+        Ok(Some(found)) if found.bytes.as_slice() == bytes => Ok(ClaimOutcome::Mine),
+        Ok(Some(found)) => Ok(ClaimOutcome::Taken(found.bytes)),
+        Ok(None) => Err(refused),
+        Err(_) => Err(OUTCOME_UNKNOWN.to_string()),
+    }
+}
+
+/// The record `found` is, when it is a record of `parent`; anything else is
+/// an integrity error for that parent, like a record whose bytes do not
+/// match its name.
+fn claimed_record_of(
+    stream: &RecordStream,
+    parent: Option<&PublicationToken>,
+    found: &[u8],
+) -> Result<RecordName, String> {
+    record_name_of(found, parent).map_err(|reason| {
+        format!(
+            "the claim of {} in '{}' is not a record of it: {reason}",
+            parent_label(parent),
+            stream.prefix.as_str()
+        )
+    })
 }
 
 /// The claim of `name`'s parent holds another record. A record the listing
@@ -603,13 +641,7 @@ fn taken_claim<S: ObjectStore + ?Sized>(
     view: &StreamView,
     found: Vec<u8>,
 ) -> Result<WriteOutcome, String> {
-    let claimed = record_name_of(&found, name.parent()).map_err(|reason| {
-        format!(
-            "the claim of {} in '{}' is not a record of it: {reason}",
-            parent_label(name.parent()),
-            stream.prefix.as_str()
-        )
-    })?;
+    let claimed = claimed_record_of(stream, name.parent(), &found)?;
     if view.holds(claimed.token()) || list_stream(store, stream)?.holds(claimed.token()) {
         return Err(REMOTE_CHANGED.to_string());
     }
@@ -617,6 +649,56 @@ fn taken_claim<S: ObjectStore + ?Sized>(
         name: claimed,
         bytes: found,
     }))
+}
+
+/// The listing selects the record: it is the publication, and the process
+/// remembers it. Written is not published: a sibling that ranks first was
+/// written in the same seconds, and this push failed as a whole.
+fn stored<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    name: &RecordName,
+    bytes: &[u8],
+    view: StreamView,
+) -> Result<WriteOutcome, String> {
+    if view.mainline.selected() != Some(name) {
+        return Err(REMOTE_CHANGED.to_string());
+    }
+    if let Some(cache) = store.publication_cache() {
+        cache.with_stream(stream, |memory| memory.seen.insert(name.clone()));
+        cache.remember_record(stream, name.token(), bytes);
+    }
+    Ok(WriteOutcome::Stored(view))
+}
+
+/// One record request, settled by one listing: present and selected is
+/// stored, present and not selected has failed, and absent did not land, so
+/// the push fails with the store's error. A listing that cannot be made
+/// leaves the outcome unknown. Nothing is sent again.
+fn send_once<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    key: &ObjectKey,
+    name: &RecordName,
+    bytes: &[u8],
+) -> Result<WriteOutcome, String> {
+    let sent = store.put_record(key, bytes);
+    let Ok(mut view) = list_stream(store, stream) else {
+        return Err(OUTCOME_UNKNOWN.to_string());
+    };
+    if !view.holds(name.token()) {
+        match sent {
+            // The store acknowledged the record; a listing that lags behind
+            // its own write does not unwrite it.
+            Ok(_) => {
+                let mut names = std::mem::take(&mut view.names);
+                names.push(name.clone());
+                view = StreamView::from_names(names);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    stored(store, stream, name, bytes, view)
 }
 
 fn attempt<S: ObjectStore + ?Sized>(
@@ -633,65 +715,65 @@ fn attempt<S: ObjectStore + ?Sized>(
     }
     verify_record(name, &key, bytes)?;
 
-    let mut requests = 0_usize;
-    let mut acknowledged = false;
-    let mut send_error: Option<String> = None;
-    // The parent is claimed once per operation, on a store with claims. A
-    // record written for a claim this computer already holds needs none.
-    let mut claimed = !claim || !store.supports_claims();
+    // The parent is claimed once, on a store with claims, right before the
+    // one record request. A record written for a claim this computer
+    // already holds needs none.
+    let claims = claim && store.supports_claims();
     for _ in 0..MAX_WRITE_LISTINGS {
-        let (mut view, listed_at) = match list_stream_at(store, stream, wall_clock) {
-            Ok(listed) => listed,
-            Err(_) if requests > 0 => return Err(OUTCOME_UNKNOWN.to_string()),
-            Err(error) => return Err(error),
-        };
-        if acknowledged && !view.holds(name.token()) {
-            // The store acknowledged the record; a listing that lags behind
-            // its own write does not unwrite it.
-            let mut names = std::mem::take(&mut view.names);
-            names.push(name.clone());
-            view = StreamView::from_names(names);
-        }
+        let (view, listed_at) = list_stream_at(store, stream, wall_clock)?;
         if view.holds(name.token()) {
-            // Written is not published: a sibling that ranks first was
-            // written in the same seconds, and this push failed as a whole.
-            if view.mainline.selected() != Some(name) {
-                return Err(REMOTE_CHANGED.to_string());
-            }
-            if let Some(cache) = store.publication_cache() {
-                cache.with_stream(stream, |memory| memory.seen.insert(name.clone()));
-                cache.remember_record(stream, name.token(), bytes);
-            }
-            return Ok(WriteOutcome::Stored(view));
+            // An earlier attempt of this record landed.
+            return stored(store, stream, name, bytes, view);
         }
         if !view.admits(name) {
             return Err(REMOTE_CHANGED.to_string());
         }
-        if requests == MAX_RECORD_REQUESTS {
-            break;
-        }
         if !listing_is_fresh(listed_at, wall_clock()) {
             continue;
         }
-        if !claimed {
-            match claim_parent(store, stream, name, bytes)? {
-                ClaimOutcome::Mine => claimed = true,
-                ClaimOutcome::Taken(found) => {
-                    return taken_claim(store, stream, name, &view, found)
-                }
+        if claims {
+            if let ClaimOutcome::Taken(found) = claim_once(store, stream, name, bytes)? {
+                return taken_claim(store, stream, name, &view, found);
             }
         }
-        requests += 1;
         #[cfg(any(test, feature = "test-support"))]
         test_support::run_before_record_request();
-        match store.put_record(&key, bytes) {
-            Ok(_) => acknowledged = true,
-            Err(error) => send_error = Some(error),
-        }
+        return send_once(store, stream, &key, name, bytes);
     }
-    Err(send_error.unwrap_or_else(|| {
-        "the storage listing could not be kept fresh enough to push".to_string()
-    }))
+    Err("the storage listing could not be kept fresh enough to push".to_string())
+}
+
+/// The user's verb for a push that did not finish: write the record that
+/// the claim of the selected version holds, once, through the same record
+/// path, and report. A claim that is absent, or whose record a listing
+/// already holds, is a storage that changed since the review that reported
+/// the unfinished push. Nothing deletes or reassigns a claim, and nothing
+/// runs this by itself.
+pub fn finish_claimed_push<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+) -> Result<StreamView, String> {
+    if !store.supports_claims() {
+        return Err("this storage holds no claims, so there is no push to finish".to_string());
+    }
+    let view = list_stream(store, stream)?;
+    let parent = view.mainline().selected().map(|name| name.token().clone());
+    let Some(found) = store.get_metadata(&stream.claim_key(parent.as_ref())?, MAX_RECORD_BYTES)?
+    else {
+        return Err(REMOTE_CHANGED.to_string());
+    };
+    let claimed = claimed_record_of(stream, parent.as_ref(), &found.bytes)?;
+    if view.holds(claimed.token()) {
+        return Err(REMOTE_CHANGED.to_string());
+    }
+    write_claimed_record(
+        store,
+        stream,
+        &ClaimedRecord {
+            name: claimed,
+            bytes: found.bytes,
+        },
+    )
 }
 
 /// Test control over the instant between a record's listing and its write,
@@ -997,38 +1079,42 @@ mod tests {
         assert!(!listing_is_fresh(start, start - Duration::from_secs(1)));
     }
 
+    /// The record is sent once. A request the store refuses is settled by
+    /// the one listing that follows it: absent, the push fails with the
+    /// store's error and nothing is sent again; present, the record landed
+    /// and only its acknowledgment was lost. The next push is the user's.
     #[test]
-    fn a_failed_record_request_is_never_resent_without_a_new_listing() {
+    fn a_failed_record_request_is_never_resent() {
         let store = PlainStore::default();
         let stream = RecordStream::project(&bundle(5)).unwrap();
         let (root, root_bytes) = record(None, 1, 100);
-
-        // The transport fails once: one request per attempt, and the next
-        // attempt lists first.
         store.fail_record_requests(1, false);
+        let error = write_record(&store, &stream, &root, &root_bytes).unwrap_err();
+        assert!(error.contains("record request failed"), "{error}");
+        assert_eq!((store.listings(), store.record_requests()), (2, 1));
+        assert!(!list_stream(&store, &stream).unwrap().holds(root.token()));
+        // The user's next push lists first and sends once.
+        store.reset_counts();
         let view = write_record(&store, &stream, &root, &root_bytes).unwrap();
         assert_eq!(selected(&view), Some(&root));
-        assert_eq!(store.record_requests(), 2);
-        assert_eq!(store.listings(), 3);
+        assert_eq!((store.listings(), store.record_requests()), (2, 1));
 
-        // The acknowledgment is lost: the record landed, and one listing
-        // settles it without another request.
+        // The acknowledgment is lost: the record landed, and the one
+        // listing settles it.
         let (next, next_bytes) = record(Some(&root), 2, 200);
         store.reset_counts();
         store.fail_record_requests(1, true);
         let view = write_record(&store, &stream, &next, &next_bytes).unwrap();
         assert_eq!(selected(&view), Some(&next));
-        assert_eq!(store.record_requests(), 1);
-        assert_eq!(store.listings(), 2);
+        assert_eq!((store.listings(), store.record_requests()), (2, 1));
 
-        // A transport that keeps failing ends the operation with its error
-        // after a bounded number of single requests. Nothing is kept.
+        // A transport that keeps failing: still one request, nothing kept.
         let (third, third_bytes) = record(Some(&next), 3, 300);
         store.reset_counts();
         store.fail_record_requests(usize::MAX, false);
         let error = write_record(&store, &stream, &third, &third_bytes).unwrap_err();
         assert!(error.contains("record request failed"), "{error}");
-        assert_eq!(store.record_requests(), MAX_RECORD_REQUESTS);
+        assert_eq!(store.record_requests(), 1);
         store.fail_record_requests(0, false);
         assert!(!list_stream(&store, &stream).unwrap().holds(third.token()));
     }
@@ -1545,5 +1631,136 @@ mod tests {
             unfinished_push_sentence("Attic R2", REMOTE_CHANGED.to_string()),
             REMOTE_CHANGED
         );
+    }
+
+    /// The claim is sent once. A request the store does not acknowledge is
+    /// settled by one read of the claim key, and never sent again.
+    #[test]
+    fn an_unacknowledged_claim_is_settled_by_one_read_and_never_sent_again() {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(26)).unwrap();
+        let (root, root_bytes) = json_record(None, 1, 100);
+
+        // The claim landed and its acknowledgment was lost: the read finds
+        // this computer's bytes, and the push goes on to its record.
+        store.fail_claim_requests(1, true);
+        store.reset_counts();
+        let view = write_record(&store, &stream, &root, &root_bytes).unwrap();
+        assert_eq!(selected(&view), Some(&root));
+        assert_eq!(counts(&store), (2, 1, 1));
+        assert_eq!(store.reads(), 1);
+
+        // The claim did not land: the push fails with the store's error.
+        let (next, next_bytes) = json_record(Some(&root), 2, 200);
+        store.fail_claim_requests(1, false);
+        store.reset_counts();
+        let error = write_record(&store, &stream, &next, &next_bytes).unwrap_err();
+        assert!(error.contains("claim request failed"), "{error}");
+        assert_eq!(counts(&store), (1, 1, 0));
+        assert_eq!(claim_bytes(&store, &stream, Some(root.token())), None);
+
+        // Another computer's claim is there: the read tells it is taken.
+        let (theirs, their_bytes) = json_record(Some(&root), 3, 150);
+        store
+            .put_claim(&stream.claim_key(Some(root.token())).unwrap(), &their_bytes)
+            .unwrap();
+        store.fail_claim_requests(1, false);
+        store.reset_counts();
+        assert!(matches!(
+            super::write_record(&store, &stream, &next, &next_bytes).unwrap(),
+            WriteOutcome::Unfinished(ref claimed) if claimed.name == theirs
+        ));
+        assert_eq!(counts(&store), (2, 1, 0));
+
+        // The read itself fails: the outcome is unknown, and nothing is
+        // sent again. The claim landed after all, and the next push meets
+        // it as this computer's own.
+        store.remove(&stream.claim_key(Some(root.token())).unwrap());
+        store.fail_claim_requests(1, true);
+        store.fail_reads(1);
+        store.reset_counts();
+        assert_eq!(
+            write_record(&store, &stream, &next, &next_bytes).unwrap_err(),
+            OUTCOME_UNKNOWN
+        );
+        assert_eq!(counts(&store), (1, 1, 0));
+        store.reset_counts();
+        let view = write_record(&store, &stream, &next, &next_bytes).unwrap();
+        assert_eq!(selected(&view), Some(&next));
+        assert_eq!(counts(&store), (2, 1, 1));
+    }
+
+    /// The user's verb for a push that did not finish: it writes the claimed
+    /// record once and reports. A claim that is absent, or whose record is
+    /// listed, is a storage that changed; nothing runs the verb by itself.
+    #[test]
+    fn finishing_an_unfinished_push_writes_the_claimed_record_once_and_only_when_asked() {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(27)).unwrap();
+        // Nothing to finish on an empty stream, or on a version nobody claimed.
+        assert_eq!(
+            finish_claimed_push(&store, &stream).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        let (root, root_bytes) = json_record(None, 1, 100);
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        assert_eq!(
+            finish_claimed_push(&store, &stream).unwrap_err(),
+            REMOTE_CHANGED
+        );
+
+        // A writer died between its claim and its record.
+        let (dead, dead_bytes) = json_record(Some(&root), 2, 200);
+        store
+            .put_claim(&stream.claim_key(Some(root.token())).unwrap(), &dead_bytes)
+            .unwrap();
+        store.reset_counts();
+        let view = finish_claimed_push(&store, &stream).unwrap();
+        assert_eq!(selected(&view), Some(&dead));
+        // The listing that finds the claim, the one before the record, and
+        // the one that settles it; no claim request.
+        assert_eq!(counts(&store), (3, 0, 1));
+        store.reset_counts();
+        assert_eq!(
+            finish_claimed_push(&store, &stream).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        assert_eq!(counts(&store), (1, 0, 0));
+
+        // A refused record request: the store's error, and the claim stays
+        // for another try.
+        let (next_dead, next_dead_bytes) = json_record(Some(&dead), 3, 300);
+        store
+            .put_claim(
+                &stream.claim_key(Some(dead.token())).unwrap(),
+                &next_dead_bytes,
+            )
+            .unwrap();
+        store.fail_record_requests(1, false);
+        store.reset_counts();
+        let error = finish_claimed_push(&store, &stream).unwrap_err();
+        assert!(error.contains("record request failed"), "{error}");
+        assert_eq!(store.record_requests(), 1);
+        assert_eq!(
+            claim_bytes(&store, &stream, Some(dead.token())),
+            Some(next_dead_bytes)
+        );
+        assert_eq!(
+            selected(&finish_claimed_push(&store, &stream).unwrap()),
+            Some(&next_dead)
+        );
+
+        // A store without claims has nothing to finish, and a claim that is
+        // not a record of the version is an integrity error.
+        let error = finish_claimed_push(&PlainStore::default(), &stream).unwrap_err();
+        assert!(error.contains("holds no claims"), "{error}");
+        store
+            .put_immutable(
+                &stream.claim_key(Some(next_dead.token())).unwrap(),
+                b"garbage",
+            )
+            .unwrap();
+        let error = finish_claimed_push(&store, &stream).unwrap_err();
+        assert!(error.contains("is not a record of it"), "{error}");
     }
 }

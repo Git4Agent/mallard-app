@@ -195,8 +195,10 @@ its record, with one create-only write that the storage refuses for a second
 computer, so a version listed there has one child and never loses while the
 storage's claims are intact. A push that claimed a version and never wrote
 its record stops the next Push onto that version with "A push to <storage>
-did not finish"; nothing finishes it by itself. A local folder writes no
-claim.
+did not finish"; nothing finishes it by itself, and the Push review offers
+**Finish that push**, which writes that record once. A Push sends one claim
+and one record request and never retries or resends them. A local folder
+writes no claim.
 
 **Clear storage data** is available for local-folder, R2, and Dropbox storage. The
 confirmation names the storage and requires you to confirm that sync has

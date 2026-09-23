@@ -113,6 +113,11 @@ export const storageCatalogApi = {
     acknowledgedWarningDigests,
   }),
 
+  /** Finish that push: write the record an earlier push claimed and never
+   *  wrote, once. */
+  finishUnfinishedPush: (scopeId: string, storageId: string) =>
+    invoke<void>("finish_catalog_unfinished_push", { scopeId, storageId }),
+
   preparePull: (
     scopeId: string,
     storageId: string,

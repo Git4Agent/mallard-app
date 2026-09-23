@@ -221,6 +221,11 @@ export const projectSyncApi = {
       expectedProjectRevision,
     }),
 
+  /** Finish that push: write the record an earlier push claimed and never
+   *  wrote, once. */
+  finishUnfinishedPush: (localProjectId: string, storageId: string) =>
+    invoke<void>("finish_unfinished_push", { localProjectId, storageId }),
+
   clearStorageData: (storageId: string, expectedConfigRevision: number) =>
     invoke<StorageDataClearResult>("clear_storage_data", {
       storageId,

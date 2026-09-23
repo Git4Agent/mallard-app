@@ -167,8 +167,11 @@ Treat safety behavior as part of the product contract:
   before the record, under `_claims/`, which a refresh never lists or reads.
   A Push whose record is not selected has failed: keep every local acceptance
   (bases, checkpoints, receipts, Library accepted state) after the publish
-  call returns. Never finish another writer's claim, delete a claim, or
-  reassign one by itself. Observe a linked bundle only through
+  call returns. A Push sends one claim request and one record request; a
+  request the store does not acknowledge is settled by one read-only check,
+  never by sending again. Never finish another writer's claim by itself
+  (only the user's *Finish that push* does), delete a claim, or reassign
+  one. Observe a linked bundle only through
   `observe_linked_bundle`, which classifies a displaced base and writes
   nothing: recovery is a user action, never a rollback.
 - Pull and dependency apply operations must remain plan-based and explicitly

@@ -30,6 +30,8 @@ struct Faults {
     claim_lands: bool,
     /// Listings still allowed before every later one fails.
     listings_left: Option<usize>,
+    /// Reads still to fail.
+    read_failures: usize,
     hidden: BTreeSet<ObjectKey>,
     /// Runs once, right before the next record request is served: whatever
     /// another computer does between this one's listing and its write.
@@ -139,6 +141,11 @@ impl PlainStore {
         faults.record_lands = lands;
     }
 
+    /// Fail the next `count` reads.
+    pub fn fail_reads(&self, count: usize) {
+        self.shared.faults.lock().unwrap().read_failures = count;
+    }
+
     /// Answer `count` more listings, then refuse every later one.
     /// `usize::MAX` lifts the fault.
     pub fn fail_listings_after(&self, count: usize) {
@@ -184,6 +191,15 @@ impl PlainStore {
         self.shared.objects.lock().unwrap().remove(key);
     }
 
+    fn read_fault(&self) -> Result<(), String> {
+        let mut faults = self.shared.faults.lock().unwrap();
+        if faults.read_failures == 0 {
+            return Ok(());
+        }
+        faults.read_failures -= 1;
+        Err("read failed in the transport".to_string())
+    }
+
     fn write(&self, key: &ObjectKey, bytes: &[u8]) {
         self.shared
             .objects
@@ -201,6 +217,7 @@ impl ObjectStore for PlainStore {
     ) -> Result<Option<StoredMetadata>, String> {
         self.shared.reads.fetch_add(1, Ordering::SeqCst);
         self.shared.read_keys.lock().unwrap().push(key.clone());
+        self.read_fault()?;
         let Some(bytes) = self.shared.objects.lock().unwrap().get(key).cloned() else {
             return Ok(None);
         };
@@ -220,6 +237,7 @@ impl ObjectStore for PlainStore {
     ) -> Result<StageOutcome, String> {
         self.shared.reads.fetch_add(1, Ordering::SeqCst);
         self.shared.read_keys.lock().unwrap().push(key.clone());
+        self.read_fault()?;
         let Some(bytes) = self.shared.objects.lock().unwrap().get(key).cloned() else {
             return Ok(StageOutcome::Missing);
         };

@@ -9,6 +9,7 @@ import PushResourceWorkspace, {
   recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
+import { PUSH_FINISHED, unfinishedPushSentence } from "../../src/unfinishedPush";
 import ResourceInventory from "../../src/components/project-sync/ResourceInventory";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
 import type {
@@ -511,6 +512,39 @@ test("a Push error names itself and offers no local-state reset", () => {
 
   assert.match(html, /stale at LineageDigest/);
   assert.doesNotMatch(html, /Reset local sync state/);
+});
+
+test("a push that did not finish offers Finish that push, and a finished one reads done", () => {
+  const resource = memoryResource("review");
+  const render = (error: string, onFinishPush?: () => void) => renderToStaticMarkup(
+    <PushResourceWorkspace
+      credentialRedactionEnabled={true}
+      resources={[resource]}
+      selected={new Set([resource.resource_id])}
+      projectDefaults={new Set([resource.resource_id])}
+      busy={false}
+      error={error}
+      storageName="Attic R2"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      onFinishPush={onFinishPush}
+    />,
+  );
+  const unfinished = render(unfinishedPushSentence("Attic R2"), () => undefined);
+  assert.match(unfinished, /A push to Attic R2 did not finish\. Finish it, then compare again\./);
+  assert.match(unfinished, /Finish that push<\/button>/);
+  assert.match(unfinished, /notice danger/);
+  // The same sentence for another storage, or any other error, offers nothing.
+  assert.doesNotMatch(render(unfinishedPushSentence("Other storage"), () => undefined), /Finish that push/);
+  assert.doesNotMatch(render("The storage changed while pushing. Compare again.", () => undefined), /Finish that push/);
+  assert.doesNotMatch(render(unfinishedPushSentence("Attic R2")), /Finish that push/);
+  // Once the record was written, the box reads done, not error.
+  const finished = render(PUSH_FINISHED, () => undefined);
+  assert.match(finished, /notice success/);
+  assert.match(finished, /Done ·/);
+  assert.match(finished, /Finished\. Compare again\./);
+  assert.doesNotMatch(finished, /Finish that push/);
 });
 
 test("a failed comparison names the error and offers no reset", () => {

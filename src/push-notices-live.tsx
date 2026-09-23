@@ -4,6 +4,7 @@ import Notice, { NoticeZone } from "./components/notice/Notice";
 import { clearedStorageNotice } from "./components/project-sync/clearedStorageNotice";
 import SyncOutcomeNotice from "./components/project-sync/SyncOutcomeNotice";
 import { REVIEW_EXPIRED, REVIEW_SUPERSEDED } from "./components/project-sync/pullReviewFlow";
+import { PUSH_FINISHED, ownUnfinishedPushSentence, unfinishedPushSentence } from "./unfinishedPush";
 import type { SyncOutcome } from "./components/project-sync/syncOutcome";
 import type { ScopeContinuity, ThreadSyncComparison } from "./types";
 import "./App.css";
@@ -181,10 +182,34 @@ createRoot(document.getElementById("root")!).render(
       </Specimen>
       <Specimen
         when="OutcomeUnknown"
-        where="Push review error banner, when the storage cannot be reached after the record was sent."
+        where="Push review error banner, when the storage cannot be read after a claim or a record was sent, so the one check that would settle it cannot be made."
       >
         <Notice severity="danger" timing="blocking" className="sync-pull-error">
           Couldn&apos;t confirm the push. Refresh to see whether it arrived.
+        </Notice>
+      </Specimen>
+      <Specimen
+        when="PushUnfinished"
+        where="Push review error banner, with Finish that push: a push onto this version claimed it and never wrote its record, another computer's or this computer's own for other content. The action writes that record once and lists, and the banner then reads Finished in the done tone, or the RemoteChanged or OutcomeUnknown sentence. The Library page has the same sentences and action."
+      >
+        <Notice
+          severity="danger"
+          timing="blocking"
+          className="sync-pull-error"
+          action={<button type="button" className="btn btn-ghost">Finish that push</button>}
+        >
+          {unfinishedPushSentence("Attic R2")}
+        </Notice>
+        <Notice
+          severity="danger"
+          timing="blocking"
+          className="sync-pull-error"
+          action={<button type="button" className="btn btn-ghost">Finish that push</button>}
+        >
+          {ownUnfinishedPushSentence("Attic R2")}
+        </Notice>
+        <Notice severity="success" timing="blocking" className="sync-pull-error">
+          {PUSH_FINISHED}
         </Notice>
       </Specimen>
       <Specimen

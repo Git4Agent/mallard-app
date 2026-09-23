@@ -622,7 +622,10 @@ List-then-write and earliest-sibling selection provide single-selection
 publication without a conditional write; on S3/R2 and Dropbox a create-only
 claim of the parent, written before the record, admits one child per version,
 so a listed version there never loses while the storage's claims are intact.
-A pusher's base must be the selected
+A Push sends one claim request and one record request, settled by one
+read-only check each when unacknowledged, and never resends; a push that
+claimed a version and never wrote its record is finished only by the user's
+*Finish that push*. A pusher's base must be the selected
 publication or one of its ancestors, and a Pull applies exactly the
 publication it reviewed while that publication is on the selected chain: a
 newer one pushed since shows afterwards as changes to pull, and a review whose

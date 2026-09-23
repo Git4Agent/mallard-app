@@ -1191,6 +1191,50 @@ pub async fn list_remote_bundle_snapshots(
         .await
 }
 
+/// *Finish that push*: write the record that the claim of the selected
+/// version holds, once, and report. The user's verb, from the Push review.
+#[tauri::command]
+pub async fn finish_unfinished_push(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    storage_id: StorageId,
+) -> Result<(), String> {
+    let repository = repository()?;
+    let context_repository = repository.clone();
+    let context_project_id = local_project_id.clone();
+    let context_storage_id = storage_id.clone();
+    let (project, storage, _) = run_blocking(move || {
+        Ok(project_storage_log_context(
+            &context_repository,
+            &context_project_id,
+            &context_storage_id,
+        ))
+    })
+    .await?;
+    let log = ActivityLogScope::new(ActivityLogType::Push)
+        .project(&local_project_id, Some(&project))
+        .storage(&storage_id, Some(&storage));
+    let result = run_blocking(move || {
+        ProjectSyncService::new(&repository).finish_unfinished_push(&local_project_id, &storage_id)
+    })
+    .await;
+    match &result {
+        Ok(()) => log.emit(
+            &app,
+            "ok",
+            "push.finished",
+            &format!("↑  Finished a push to {storage} that did not finish"),
+        ),
+        Err(error) => log.emit(
+            &app,
+            "error",
+            "push.finish_failed",
+            &format!("↑  Finish that push to {storage} failed — {error}"),
+        ),
+    }
+    result
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn push_bundle(

@@ -573,7 +573,7 @@ async fn stub_s3_claims_the_parent_and_reports_an_unfinished_push() {
 
     let initial_request = publish_request(
         bundle_id.clone(),
-        &[t1.clone()],
+        std::slice::from_ref(&t1),
         origin_a.clone(),
         10,
         None,
@@ -675,17 +675,27 @@ async fn stub_s3_claims_the_parent_and_reports_an_unfinished_push() {
         "only the first version's record was ever sent"
     );
 
-    // Once that record is listed, the Push stops at its listing: another
+    // Finishing that push, the user's verb, writes their record once with
+    // no claim. Once it is listed, the Push stops at its listing: another
     // computer got in first, and nothing claims or writes.
-    let (record_store, record_key, record_bytes) = (
-        store.clone(),
-        stream.key(&their_name).unwrap(),
-        their_bytes.clone(),
-    );
-    tokio::task::spawn_blocking(move || record_store.put_record(&record_key, &record_bytes))
-        .await
-        .unwrap()
-        .unwrap();
+    let (finish_store, finish_storage, finish_bundle) =
+        (store.clone(), storage_id.clone(), bundle_id.clone());
+    tokio::task::spawn_blocking(move || {
+        BundleEngine::open(finish_store, finish_storage)
+            .unwrap()
+            .finish_unfinished_push(&finish_bundle)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let record_puts = server
+        .requests()
+        .iter()
+        .filter(|request| request.method == "PUT" && request.key.contains("/_commits/"))
+        .map(|request| request.key.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(record_puts.len(), 2);
+    assert!(record_puts[1].ends_with(&their_name.file_name()));
     let changed_request = publish_request(
         bundle_id.clone(),
         &[advanced],

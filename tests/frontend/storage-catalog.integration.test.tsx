@@ -35,6 +35,7 @@ const commandNames = [
   "apply_catalog_scope_push",
   "create_catalog_scope",
   "delete_catalog_scope",
+  "finish_catalog_unfinished_push",
   "get_catalog_resource_preview",
   "link_catalog_scope_storage",
   "list_catalog_capabilities",
@@ -197,7 +198,7 @@ test("the Catalog API exposes only the scope-level command surface", () => {
     "listCapabilities", "listProfiles", "saveProfile", "renameProfile",
     "createScope", "listScopeResources", "getPreview", "linkScopeStorage",
     "unlinkScopeStorage", "openProfileApp", "openProfileTerminal",
-    "preparePush", "applyPush", "preparePull", "applyPull",
+    "preparePush", "applyPush", "finishUnfinishedPush", "preparePull", "applyPull",
     "prepareFork", "applyFork",
   ]) {
     assert.match(callers, new RegExp(`storageCatalogApi\\.${method}\\(`), `${method} has a production caller`);
@@ -1124,4 +1125,14 @@ test("search bulk selection retains hidden choices and does not select ineligibl
   assert.deepEqual([...selected].sort(), ["hidden", "matching-old"]);
   assert.deepEqual([...replaceSearchSelection(next, matchingIds)], ["hidden"]);
   assert.deepEqual([...replaceSearchSelection(next, [])].sort(), [...next].sort());
+});
+
+test("the Library page offers Finish that push on the unfinished-push sentence only", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // The failure zone's one control, keyed on the backend's sentence for this
+  // storage; the action goes through the API and reports on the same page.
+  assert.match(page, /action: finishPushOffered\(failure, storageName\)/);
+  assert.match(page, /Finish that push/);
+  assert.match(page, /storageCatalogApi\.finishUnfinishedPush\(scope\.scope\.scope_id, storageId\)/);
+  assert.match(page, /notify\(PUSH_FINISHED\)/);
 });

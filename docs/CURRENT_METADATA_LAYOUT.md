@@ -914,8 +914,14 @@ One publication performs:
    attempt whose record request failed, is written as this push's. Then send
    the record, once. A listing older than ten wall-clock seconds is taken
    again before sending, because the monotonic clock stands still while a
-   laptop sleeps. The claim and the record write are one request each with
-   no retry inside the transport; a retry is a new attempt that lists first.
+   laptop sleeps. The claim and the record are one request each, with no
+   retry inside the transport and none outside it: a request the store does
+   not acknowledge is settled by one read-only check, the claim key after a
+   claim and the listing of step 8 after a record. What the check shows
+   landed counts; what it shows absent did not land, and the push fails with
+   the store's error; a check that cannot be made is `OutcomeUnknown`.
+   Nothing is sent again, and nothing is resent after a restart: the next
+   push is the user's.
 8. List once more. If that listing selects this record, commit the
    corresponding local bindings and reviewed base. If it selects another
    computer's record, stop with `RemoteChanged`: the publication failed as a
@@ -923,6 +929,13 @@ One publication performs:
    never selected. The claim proves that the parent has no other child, not
    that the parent is still there: a clear between the claim and the record
    leaves the record an orphan, and only this listing shows it.
+
+A push that claimed a version and never wrote its record is finished only
+by the user: the Push review and the Library page offer *Finish that push*
+while the error is that sentence, and the verb writes the record the claim
+holds, once, through the same record path, then reports "Finished. Compare
+again.", or `RemoteChanged` when the claim is gone or its record is already
+listed. Nothing deletes or reassigns a claim; only a clear removes one.
 
 On the local folder a sibling of a publication can land after that
 publication became visible: another computer listed before this record was

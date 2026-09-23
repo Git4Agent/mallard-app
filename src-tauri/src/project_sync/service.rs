@@ -234,6 +234,16 @@ impl<'a> ProjectSyncService<'a> {
         )
     }
 
+    /// *Finish that push*: the record an earlier push claimed and never
+    /// wrote is written once, and the result is reported. The user's verb.
+    pub fn finish_unfinished_push(
+        &self,
+        local_project_id: &LocalProjectId,
+        storage_id: &StorageId,
+    ) -> Result<(), String> {
+        finish_unfinished_push(self.repository, local_project_id, storage_id)
+    }
+
     pub fn push_reviewed_with_progress(
         &self,
         local_project_id: &LocalProjectId,
@@ -10096,6 +10106,30 @@ fn conversation_push_results(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The user's verb for a push onto the selected version that did not
+/// finish (CAS-free plan, section 13): write the record its claim holds,
+/// once, and report with the sentences of the Push review. Nothing runs it
+/// by itself, and nothing local moves: the user compares again afterwards.
+pub(super) fn finish_unfinished_push(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+) -> Result<(), String> {
+    let _host_operation = repository.acquire_host_operation()?;
+    let state = repository.load_project_state_snapshot()?;
+    let config = &state.config;
+    let project = config
+        .project(local_project_id)
+        .cloned()
+        .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
+    let link = require_project_link(config, &project, storage_id)?.clone();
+    let (storage, engine) =
+        storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
+    engine
+        .finish_unfinished_push(&link.bundle_id)
+        .map_err(|error| unfinished_push_sentence(&storage.name, error))
+}
+
 pub(super) fn push_bundle_reviewed_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,

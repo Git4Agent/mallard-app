@@ -50,6 +50,7 @@ import ActivityLogDrawer from "./ActivityLogDrawer";
 import SettingsPage from "./SettingsPage";
 import { getPreference } from "../../preferences";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
+import { PUSH_FINISHED } from "../../unfinishedPush";
 import ProjectBindingEditor, {
   type BindingProfileSelection,
   type ProjectBindingDraft,
@@ -2090,6 +2091,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
+  /* Finish that push: the record an earlier push claimed and never wrote is
+     written once, and the review's banner reports. Nothing runs this by
+     itself, and nothing local moves: the user compares again afterwards. */
+  const finishUnfinishedPush = async () => {
+    if (!pendingPush) return;
+    const { projectId, storageId } = pendingPush;
+    const workflowEpoch = hostWorkflowEpoch.current;
+    setBusy(true);
+    try {
+      await projectSyncApi.finishUnfinishedPush(projectId, storageId);
+      if (hostWorkflowEpoch.current === workflowEpoch) setPushError(PUSH_FINISHED);
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) {
+        setPushError(storageFailureMessage(storageId, reason));
+      }
+    } finally {
+      if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  };
+
   const publishPendingPush = async () => {
     if (!pendingPush) return;
     const resources = pushResources(pendingPush);
@@ -3219,6 +3240,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
+        onFinishPush={() => void finishUnfinishedPush()}
       />
     ),
   } : restorePlan && restoreBinding ? {

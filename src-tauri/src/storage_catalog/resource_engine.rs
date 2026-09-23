@@ -11,8 +11,8 @@ use bytes::Bytes;
 use mallard_domain::{Mainline, PublicationToken, RecordName, StorageConfig};
 use mallard_infrastructure::bundle_engine::VERSION_INCOMPLETE;
 use mallard_infrastructure::storage_core::publication::{
-    list_stream, read_record, write_claimed_record, write_record, ClaimedRecord, RecordStream,
-    WriteOutcome, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
+    finish_claimed_push, list_stream, read_record, write_claimed_record, write_record,
+    ClaimedRecord, RecordStream, WriteOutcome, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
 };
 use mallard_infrastructure::storage_core::{
     library_object_key, ExpectedObject, ObjectStore, StageOutcome, TAG_FILE,
@@ -290,6 +290,16 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             )),
             StageOutcome::Verified(body) => body.read_bounded(size, "Library payload"),
         }
+    }
+
+    /// *Finish that push*: write the record that the claim of the selected
+    /// version holds, once, and report. The user's verb, never the engine's.
+    pub fn finish_unfinished_push(
+        &self,
+        repository_id: &CatalogResourceRepositoryId,
+    ) -> Result<(), String> {
+        finish_claimed_push(&self.store, &RecordStream::library(repository_id.as_str())?)
+            .map(|_| ())
     }
 
     pub fn publish(
@@ -1125,7 +1135,7 @@ mod tests {
     fn a_library_push_meets_its_own_claim_for_the_same_content_and_stops_at_any_other() {
         use mallard_infrastructure::storage_core::plain_store::PlainStore;
         use mallard_infrastructure::storage_core::publication::{
-            record_name_of, MAX_RECORD_BYTES, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
+            record_name_of, MAX_RECORD_BYTES, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED, REMOTE_CHANGED,
         };
         let store = PlainStore::default().with_claims();
         let engine = LibraryResourceEngine::new(store.clone());
@@ -1214,18 +1224,33 @@ mod tests {
                 .as_str(),
             claimed.commit_id()
         );
-        // Once their record is listed, the apply-time listing stops the
-        // push before any claim: the Library requires the reviewed
-        // publication to be the selected one.
+        // Finishing their push, the user's verb, writes their record once
+        // with no claim. Once it is listed, the apply-time listing stops
+        // this computer's push before any claim: the Library requires the
+        // reviewed publication to be the selected one.
         let their_name = record_name_of(&their_bytes, Some(&parent)).unwrap();
-        store
-            .put_record(&stream.key(&their_name).unwrap(), &their_bytes)
-            .unwrap();
+        store.reset_counts();
+        engine.finish_unfinished_push(&repository_id).unwrap();
+        assert_eq!(counts(), (3, 0, 1));
+        assert_eq!(
+            engine
+                .read_head(&repository_id)
+                .unwrap()
+                .unwrap()
+                .head
+                .commit_id
+                .as_str(),
+            their_name.commit_id()
+        );
         store.reset_counts();
         assert_eq!(
             publish(&engine, observed, &later, 7).unwrap_err(),
             CHANGED_AFTER_REVIEW
         );
         assert_eq!(counts(), (1, 0, 0));
+        assert_eq!(
+            engine.finish_unfinished_push(&repository_id).unwrap_err(),
+            REMOTE_CHANGED
+        );
     }
 }

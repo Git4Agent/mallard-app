@@ -11,6 +11,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Notice from "../../src/components/notice/Notice";
 import { buildPushOutcome } from "../../src/components/project-sync/syncOutcome";
 import { storageAccessErrorMessage } from "../../src/storageError";
+import {
+  PUSH_FINISHED,
+  finishPushOffered,
+  ownUnfinishedPushSentence,
+  unfinishedPushSentence,
+} from "../../src/unfinishedPush";
 
 function decision(action: ConversationReviewAction, selectable: boolean): ThreadSyncDecision {
   return { action, selectable };
@@ -160,6 +166,8 @@ test("a changed storage and an unconfirmed push reach the Push review banner wor
   for (const sentence of [
     "The storage changed while pushing. Compare again.",
     "Couldn't confirm the push. Refresh to see whether it arrived.",
+    unfinishedPushSentence("Attic R2"),
+    ownUnfinishedPushSentence("Attic R2"),
   ]) {
     assert.equal(storageAccessErrorMessage(storage, sentence), sentence);
     assert.equal(storageAccessErrorMessage(storage, new Error(sentence)), sentence);
@@ -172,3 +180,17 @@ test("a changed storage and an unconfirmed push reach the Push review banner wor
   }
 });
 
+test("only the two unfinished-push sentences, for this storage, offer Finish that push", () => {
+  assert.equal(unfinishedPushSentence("Attic R2"), "A push to Attic R2 did not finish. Finish it, then compare again.");
+  assert.equal(
+    ownUnfinishedPushSentence("Attic R2"),
+    "This computer's earlier push to Attic R2 did not finish. Finish it, then compare again.",
+  );
+  assert.equal(finishPushOffered(unfinishedPushSentence("Attic R2"), "Attic R2"), true);
+  assert.equal(finishPushOffered(ownUnfinishedPushSentence("Attic R2"), "Attic R2"), true);
+  assert.equal(finishPushOffered(unfinishedPushSentence("Attic R2"), "Other storage"), false);
+  assert.equal(finishPushOffered("The storage changed while pushing. Compare again.", "Attic R2"), false);
+  assert.equal(finishPushOffered(PUSH_FINISHED, "Attic R2"), false);
+  assert.equal(finishPushOffered(null, "Attic R2"), false);
+  assert.doesNotMatch(PUSH_FINISHED, /\b(error|warning|note|done)\b/i);
+});
