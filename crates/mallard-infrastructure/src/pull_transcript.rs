@@ -69,10 +69,17 @@ fn verify_wire_digests(
     if request.lineage_digest != Some(lineage_digest.as_str())
         || request.semantic_digest != Some(semantic_digest.as_str())
     {
-        return Err("cloud conversation changed lineage or semantic content".to_string());
+        return Err(STORED_SESSION_UNREADABLE.to_string());
     }
     Ok(())
 }
+
+/// The receipt of a stored session whose content does not match what its
+/// manifest says about it: a storage or an app-version problem, which no
+/// local reset can repair. The row can be left unticked
+/// (PLAN_PULL_PINNED_VERSION.md, row D6).
+pub const STORED_SESSION_UNREADABLE: &str =
+    "This stored session cannot be read by this version of Mallard.";
 
 pub fn prepare_pull_transcript(
     adapter: &dyn SessionAdapter,
@@ -115,7 +122,7 @@ pub fn prepare_pull_transcript_with_identities(
         if request.lineage_digest != Some(resolved.lineage_digest.as_str())
             || request.semantic_digest != Some(resolved.semantic_digest.as_str())
         {
-            return Err("cloud conversation changed lineage or semantic content".to_string());
+            return Err(STORED_SESSION_UNREADABLE.to_string());
         }
         let layout = RootTailLayout {
             codec: mallard_domain::PORTABLE_TAIL_CODEC_V1.to_string(),
@@ -652,11 +659,10 @@ mod tests {
     fn incorrect_cloud_pins_fail_only_their_preparation() {
         for mut fixture in [WireFixture::codex(), WireFixture::claude()] {
             fixture.semantic = "0".repeat(64);
-            assert!(fixture
-                .prepare("fresh")
-                .err()
-                .unwrap()
-                .contains("changed lineage or semantic content"));
+            assert_eq!(
+                fixture.prepare("fresh").err().unwrap(),
+                STORED_SESSION_UNREADABLE
+            );
         }
     }
 

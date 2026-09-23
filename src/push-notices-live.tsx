@@ -2,13 +2,71 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import Notice, { NoticeZone } from "./components/notice/Notice";
 import { clearedStorageNotice } from "./components/project-sync/clearedStorageNotice";
+import SyncOutcomeNotice from "./components/project-sync/SyncOutcomeNotice";
+import { REVIEW_EXPIRED, REVIEW_SUPERSEDED } from "./components/project-sync/pullReviewFlow";
+import type { SyncOutcome } from "./components/project-sync/syncOutcome";
 import type { ScopeContinuity, ThreadSyncComparison } from "./types";
 import "./App.css";
 
 /* A dev harness: the notices of DESIGN_CAS_FREE_STORAGE_REFACTOR.md
-   section 13 and the standing notice of PLAN_CLEARED_STORAGE_PUSH_AGAIN.md
-   section 5 in its three forms, drawn by the real components in the surfaces
-   they already live in. Open /push-notices-live.html on the Vite server. */
+   section 13, the standing notice of PLAN_CLEARED_STORAGE_PUSH_AGAIN.md
+   section 5 in its three forms, and the Pull texts of
+   PLAN_PULL_PINNED_VERSION.md section 5, drawn by the real components in
+   the surfaces they already live in. Open /push-notices-live.html on the
+   Vite server. */
+
+const outcomeBase = {
+  projectId: "project-specimen",
+  storageId: "storage-specimen",
+  tone: "warning" as const,
+  defaultOpen: true,
+  technical: [],
+};
+
+/** A Pull that stopped after it installed three sessions (D2 to D4). */
+const stoppedPull: SyncOutcome = {
+  ...outcomeBase,
+  title: "Pull stopped",
+  message: "Part of this version is missing from Attic R2. Compare again.",
+  stats: [
+    { icon: "download", value: "3", label: "restored" },
+    { icon: "git-compare-arrows", value: "4", label: "not pulled" },
+    { icon: "git-branch", label: "Version", value: "5", lead: true },
+  ],
+  rows: [
+    { key: "a", title: "Refactor the parser", status: "synced" },
+    { key: "b", title: "Write the changelog", status: "not_pulled" },
+    { key: "c", title: "notes.md", status: "not_pulled" },
+  ],
+  actions: [{ kind: "open_pull", label: "Open Pull review" }],
+};
+
+/** Sessions that failed alone (D6 and T7): no reset is offered. */
+const failedAlone: SyncOutcome = {
+  ...outcomeBase,
+  title: "2 changes need attention",
+  stats: [
+    { icon: "download", value: "1", label: "restored" },
+    { icon: "octagon-x", value: "2", label: "failed" },
+    { icon: "git-branch", label: "Version", value: "5", lead: true },
+  ],
+  rows: [
+    { key: "a", title: "Refactor the parser", status: "synced" },
+    {
+      key: "d6",
+      title: "An older session",
+      status: "failed",
+      reason: "This stored session cannot be read by this version of Mallard.",
+    },
+    {
+      key: "t7",
+      title: "Today's session",
+      status: "failed",
+      reason: "This conversation changed after the comparison. Compare again.",
+    },
+  ],
+  actions: [{ kind: "open_pull", label: "Open Pull review" }],
+};
 
 /** A comparison of a storage another computer cleared: the agent's area
  *  reads `codex`, and the project's files were never stored. */
@@ -128,6 +186,49 @@ createRoot(document.getElementById("root")!).render(
         <Notice severity="danger" timing="blocking" className="sync-pull-error">
           Couldn&apos;t confirm the push. Refresh to see whether it arrived.
         </Notice>
+      </Specimen>
+      <Specimen
+        when="A Pull refused after its review"
+        where="The Pull review's error banner, with Compare again: the pinned version lost a race, the storage was cleared, or this computer synced past the review from another window (T3 to T5, T11); or the review is older than a day (T6)."
+      >
+        <Notice
+          severity="danger"
+          timing="blocking"
+          className="sync-pull-error"
+          action={<button type="button" className="btn btn-ghost">Compare again</button>}
+        >
+          {REVIEW_SUPERSEDED}
+        </Notice>
+        <Notice
+          severity="danger"
+          timing="blocking"
+          className="sync-pull-error"
+          action={<button type="button" className="btn btn-ghost">Compare again</button>}
+        >
+          {REVIEW_EXPIRED}
+        </Notice>
+      </Specimen>
+      <Specimen
+        when="A Pull that stopped"
+        where="The Pull result on the storage card: the storage could not be read after the download. What was installed stays, every row not reached reads not pulled, and no line says that Push is blocked."
+      >
+        <SyncOutcomeNotice outcome={stoppedPull} onDismiss={() => undefined} />
+      </Specimen>
+      <Specimen
+        when="Nothing to pull"
+        where="The storage card's notice, in the note tone and with no button: a cleared storage this computer synced with before. The standing note says to push again."
+      >
+        <NoticeZone
+          items={[{ key: "nothing-to-pull", severity: "info", message: "There is nothing to pull from Attic R2." }]}
+          subject="reasons this storage is held"
+          timing="blocking"
+        />
+      </Specimen>
+      <Specimen
+        when="Sessions that failed alone"
+        where="Rows of the Pull result: a stored session this version of Mallard cannot read (D6), and a session that changed here after the comparison (T7). Neither offers a reset."
+      >
+        <SyncOutcomeNotice outcome={failedAlone} onDismiss={() => undefined} />
       </Specimen>
     </main>
   </StrictMode>,

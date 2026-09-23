@@ -9,6 +9,7 @@
 
 use bytes::Bytes;
 use mallard_domain::{Mainline, PublicationToken, RecordName, StorageConfig};
+use mallard_infrastructure::bundle_engine::VERSION_INCOMPLETE;
 use mallard_infrastructure::storage_core::publication::{
     list_stream, read_record, write_record, RecordStream,
 };
@@ -277,8 +278,11 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             size,
             sha256: sha256.to_string(),
         };
+        // A payload of a published version that the storage does not hold
+        // names no cause: the repository was cleared, or a folder that a
+        // sync product replicates has not received it yet.
         match self.store.stage_verified(&key, &expected)? {
-            StageOutcome::Missing => Err(format!("Library payload '{}' is missing", key)),
+            StageOutcome::Missing => Err(VERSION_INCOMPLETE.to_string()),
             StageOutcome::Mismatch => Err(format!(
                 "Library payload '{}' failed integrity verification",
                 key

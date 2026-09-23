@@ -1225,6 +1225,12 @@ export interface RestoreResult {
    *  say), executed through the generic maintenance command. The frontend
    *  renders them; it never checks a provider key. */
   after_pull_actions: AfterPullActionOffer[];
+  /** Why the Pull stopped before it reached every ticked item, when it did:
+   *  the storage could not be read. What was installed stays, nothing is
+   *  retried, and the storage areas are not marked as reviewed. */
+  stopped?: string | null;
+  /** The ticked items a stopped Pull did not reach. */
+  not_pulled_action_ids: string[];
 }
 
 export interface BundleReadinessIssue {

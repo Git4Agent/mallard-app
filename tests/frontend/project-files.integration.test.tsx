@@ -837,6 +837,7 @@ test("confirming keep-local still submits an empty approved set so Pull can adva
           failed_actions: [],
           preserved_threads: [],
           after_pull_actions: [],
+          not_pulled_action_ids: [],
           readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
           readiness_error: null,
         };

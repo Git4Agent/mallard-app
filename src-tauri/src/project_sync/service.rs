@@ -51,9 +51,9 @@ use mallard_domain::{
 };
 use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use mallard_infrastructure::bundle_engine::{
-    absent_scope_pin, BundleBytes, BundleEngine, BundleObservation, CapturedBundleFile,
-    FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation, PublishedBundle,
-    ScopePublishInput,
+    absent_scope_pin, unreached_apply_result, BundleBytes, BundleEngine, BundleObservation,
+    CapturedBundleFile, FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation,
+    PublishedBundle, ScopePublishInput, NOT_PULLED, VERSION_INCOMPLETE,
 };
 use mallard_infrastructure::claude_history_tail;
 use mallard_infrastructure::codex_history_graph;
@@ -885,6 +885,14 @@ pub struct RestoreResult {
     /// command. The frontend renders them; it never checks a provider key.
     #[serde(default)]
     pub after_pull_actions: Vec<AfterPullActionOffer>,
+    /// Why the Pull stopped before it reached every ticked item, when it
+    /// did: the storage could not be read. What was installed stays, nothing
+    /// is retried, and the storage areas are not marked as reviewed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
+    /// The ticked items a stopped Pull did not reach.
+    #[serde(default)]
+    pub not_pulled_action_ids: Vec<ActionId>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -3317,24 +3325,6 @@ pub(super) fn sibling_bundle_status_with_repository(
     Ok(SiblingBundleStatus::RegistrationTwin {
         survivor: Box::new(survivor),
     })
-}
-
-/// Verified head + manifest of the selected publication, no payload objects,
-/// with the chain it was selected on. Pull apply streams just the objects it
-/// needs through a [`BundleBytes`] source on top of the returned snapshot,
-/// and reads every saved acceptance against the returned chain, as its
-/// review did.
-fn inspect_from_storage(
-    repository: &LocalStateRepository,
-    storage_id: &StorageId,
-    bundle_id: &BundleId,
-) -> Result<(StorageEngine, BundleSnapshot, Mainline), String> {
-    let (_, engine) = storage_engine(repository, storage_id)?;
-    let observation = engine.observe(bundle_id)?;
-    let (snapshot, _) = observation
-        .current
-        .ok_or_else(|| format!("bundle '{}' does not exist", bundle_id))?;
-    Ok((engine, snapshot, observation.mainline))
 }
 
 /// The provider-native session id inside a `<provider>:session:<component>`
@@ -10698,9 +10688,19 @@ pub(super) fn plan_bundle_restore_with_progress(
         .ok_or_else(|| "project is not linked to this storage".to_string())?;
     let (observation, remote_continuity) = observe_linked_bundle(repository, &engine, &link)?;
     let mainline = observation.mainline;
-    let (snapshot, _) = observation
-        .current
-        .ok_or_else(|| format!("bundle '{}' does not exist", bundle_id))?;
+    let Some((snapshot, _)) = observation.current else {
+        // A computer that holds a base for this storage synced with it
+        // before: the storage was cleared, and the standing notice already
+        // says to push again. Without a base the storage is one this
+        // computer never used, and the text opens the chooser of the
+        // projects it does hold.
+        if !link.scope_bases.is_empty() {
+            let (_, storage_name, _) =
+                project_storage_log_context(repository, &binding.local_project_id, storage_id);
+            return Err(format!("There is nothing to pull from {storage_name}."));
+        }
+        return Err(format!("bundle '{}' does not exist", bundle_id));
+    };
     on_phase("inspect remote head and manifest", phase_started.elapsed());
     let phase_started = Instant::now();
     let identity = &state.host_identity;
@@ -11008,7 +11008,10 @@ fn captured_local_conversation_for_action<'a>(
 
 struct PreparedPullConversationFailure {
     action: ConversationPlanAction,
+    /// What the receipt prints.
     message: String,
+    /// The precise reason behind a one-sentence receipt, for the log.
+    detail: Option<String>,
 }
 
 /// Prepare every approved conversation action. Shared-state loads are
@@ -11249,8 +11252,10 @@ fn prepare_pull_conversation_actions(
             },
         };
         validate_conversation_action_pins(action, &context).map_err(|pin| {
+            // The receipt prints one sentence whatever pin noticed the
+            // change; the pin's name follows on its own line, for the log.
             format!(
-                "conversation Pull action '{}' is stale at {:?}",
+                "{CONVERSATION_CHANGED}\nconversation Pull action '{}' is stale at {:?}",
                 action.action_id, pin
             )
         })?;
@@ -11320,10 +11325,19 @@ fn prepare_pull_conversation_actions(
     for selected in actions {
         match prepare_one(selected, bytes) {
             Ok(conversation) => prepared.push(conversation),
-            Err(message) => failures.push(PreparedPullConversationFailure {
-                action: selected.action.clone(),
-                message,
-            }),
+            Err(message) => {
+                let (message, detail) = match message.split_once('\n') {
+                    Some((sentence, precise)) if sentence == CONVERSATION_CHANGED => {
+                        (sentence.to_string(), Some(precise.to_string()))
+                    }
+                    _ => (message, None),
+                };
+                failures.push(PreparedPullConversationFailure {
+                    action: selected.action.clone(),
+                    message,
+                    detail,
+                })
+            }
         }
     }
     Ok((prepared, failures, session_views.to_vec()))
@@ -12432,7 +12446,7 @@ fn validate_pull_approval(
 ) -> Result<BTreeSet<ActionId>, String> {
     review.validate_review()?;
     if now < review.created_at || now > review.expires_at {
-        return Err("Pull review has expired or is not active yet".to_string());
+        return Err(REVIEW_EXPIRED.to_string());
     }
     let mut approved = BTreeSet::new();
     for action_id in approved_action_ids {
@@ -12541,6 +12555,99 @@ fn align_pull_apply_selections(
     Ok(unaligned)
 }
 
+/// The refusal of a Pull whose review no longer matches the storage: the
+/// pinned version lost a race, the storage was cleared, or this computer
+/// synced past the pin from another window. The review's error banner prints
+/// it with its "Compare again" button (PLAN_PULL_PINNED_VERSION.md, T3 to T5
+/// and T11).
+pub const REVIEW_SUPERSEDED: &str = "The storage changed since this review. Compare again.";
+
+/// The refusal of a review older than its one-day validity (T6).
+pub const REVIEW_EXPIRED: &str = "This review is older than a day. Compare again.";
+
+/// The receipt of a ticked session that changed on this computer since the
+/// review, whatever pin noticed it (T7). The pin's own name goes to the log.
+pub const CONVERSATION_CHANGED: &str =
+    "This conversation changed after the comparison. Compare again.";
+
+/// The version a review pinned, read for its apply: one listing of the
+/// stream, the pinned version looked up on the selected chain, and its
+/// record and manifest read by name. A newer version pushed on top does not
+/// matter, because the pinned bytes are the same. The Pull is refused when
+/// the pinned version is on no selected chain (it lost a race, or the
+/// storage was cleared, with or without a push since), when its manifest is
+/// not the reviewed one, and when a usable base of this link already names
+/// a later version, because this computer synced past the pin from another
+/// window and applying it would move its bases backwards
+/// (PLAN_PULL_PINNED_VERSION.md, section 4.1).
+fn pinned_version_for_apply(
+    repository: &LocalStateRepository,
+    review: &RestorePlan,
+    binding: &ProjectBinding,
+) -> Result<(StorageEngine, BundleSnapshot, Mainline), String> {
+    let (_, engine) = storage_engine(repository, &review.storage_id)?;
+    let (mainline, _) = engine.select(&review.bundle_id)?;
+    let Some(pinned) = mainline
+        .names()
+        .iter()
+        .find(|name| name.revision() == review.revision && name.commit_id() == review.commit_id)
+    else {
+        return Err(REVIEW_SUPERSEDED.to_string());
+    };
+    let config = repository.load_config()?;
+    let synced_past = project_link(&config, &binding.local_project_id, &review.storage_id)
+        .into_iter()
+        .flat_map(|link| repository_bases(link))
+        .any(|base| {
+            base.revision > review.revision && mainline.contains(base.revision, &base.commit_id)
+        });
+    if synced_past {
+        return Err(REVIEW_SUPERSEDED.to_string());
+    }
+    let (snapshot, _) = engine.snapshot_at(&review.bundle_id, pinned)?;
+    if snapshot.head.manifest_sha256 != review.manifest_sha256 {
+        return Err(REVIEW_SUPERSEDED.to_string());
+    }
+    Ok((engine, snapshot, mainline))
+}
+
+/// Test control over the instants around step 4 of a Pull apply, the batched
+/// download of the ticked sessions, for tests that reach the storage only
+/// through the whole service: what another computer does in that instant.
+#[cfg(test)]
+mod pull_test_support {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BEFORE_DOWNLOAD: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+        static AFTER_DOWNLOAD: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `action` once on this thread, right before the next Pull apply
+    /// downloads its sessions.
+    pub fn before_conversation_download(action: impl FnOnce() + 'static) {
+        BEFORE_DOWNLOAD.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
+    }
+
+    /// Run `action` once on this thread, right after the next Pull apply
+    /// downloaded its sessions and before it installs them.
+    pub fn after_conversation_download(action: impl FnOnce() + 'static) {
+        AFTER_DOWNLOAD.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
+    }
+
+    pub(super) fn run_before_download() {
+        if let Some(action) = BEFORE_DOWNLOAD.with(|slot| slot.borrow_mut().take()) {
+            action();
+        }
+    }
+
+    pub(super) fn run_after_download() {
+        if let Some(action) = AFTER_DOWNLOAD.with(|slot| slot.borrow_mut().take()) {
+            action();
+        }
+    }
+}
+
 pub(super) fn apply_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     review: &RestorePlan,
@@ -12554,14 +12661,7 @@ pub(super) fn apply_bundle_restore_with_progress(
     let resolved = current_binding_for_restore_plan(repository, review)?;
     let binding = resolved.binding.clone();
     let selected_conversations = approved_pull_conversation_resources(review, &approved_set);
-    let (engine, snapshot, mainline) =
-        inspect_from_storage(repository, &review.storage_id, &review.bundle_id)?;
-    if snapshot.head.revision != review.revision
-        || snapshot.head.commit_id != review.commit_id
-        || snapshot.head.manifest_sha256 != review.manifest_sha256
-    {
-        return Err("bundle head changed after comparison; compare again".to_string());
-    }
+    let (engine, snapshot, mainline) = pinned_version_for_apply(repository, review, &binding)?;
     // Keep verified payloads alive across planning, preparation, and file apply,
     // even when the selected content exceeds the shared cache capacity.
     let mut byte_source = engine.byte_source(&snapshot, Some(on_progress));
@@ -12642,20 +12742,47 @@ pub(super) fn apply_bundle_restore_with_progress(
             }
         }
     }
-    let (prepared_conversations, prepare_failures, session_views) =
-        prepare_pull_conversation_actions(
-            repository,
-            &resolved,
-            &snapshot,
-            &mut byte_source,
-            &materializing_actions,
-            &session_views,
-            &captured,
-            &plan.storage_id,
-            applied_at,
-        )?;
+    #[cfg(test)]
+    pull_test_support::run_before_download();
+    // Step 4 reads the storage. When it cannot be read, the work ends here:
+    // no ticked session is installed, every ticked session and file is not
+    // pulled, and what step 3 saved stays (PLAN_PULL_PINNED_VERSION.md,
+    // section 4.3).
+    let downloaded = prepare_pull_conversation_actions(
+        repository,
+        &resolved,
+        &snapshot,
+        &mut byte_source,
+        &materializing_actions,
+        &session_views,
+        &captured,
+        &plan.storage_id,
+        applied_at,
+    );
+    #[cfg(test)]
+    pull_test_support::run_after_download();
+    let (prepared_conversations, prepare_failures, session_views, mut stopped) = match downloaded
+    {
+        Ok((prepared, failures, views)) => (prepared, failures, views, None),
+        Err(reason) => (Vec::new(), Vec::new(), session_views, Some(reason)),
+    };
     on_phase("prepare conversations", phase_started.elapsed());
+    if stopped.is_some() {
+        for selected in &materializing_actions {
+            conversation_receipts.push(failed_conversation_receipt(
+                &selected.action,
+                NOT_PULLED.to_string(),
+                applied_at,
+            )?);
+        }
+    }
     for failure in prepare_failures {
+        if let Some(detail) = &failure.detail {
+            on_phase(
+                &format!("a session changed after the comparison: {detail}"),
+                std::time::Duration::ZERO,
+            );
+        }
         conversation_receipts.push(failed_conversation_receipt(
             &failure.action,
             failure.message,
@@ -12930,16 +13057,22 @@ pub(super) fn apply_bundle_restore_with_progress(
     indexed_receipts.sort_by_key(|(index, _)| *index);
     conversation_receipts.extend(indexed_receipts.into_iter().map(|(_, receipt)| receipt));
     let phase_started = Instant::now();
-    let mut applied = engine.apply_restore_plan_lazy(
-        &snapshot,
-        &mut byte_source,
-        &binding,
-        &resolved.homes,
-        &plan,
-        &approved,
-        &repository.backups_dir()?,
-        applied_at,
-    )?;
+    let mut applied = if stopped.is_some() {
+        unreached_apply_result(&plan, &approved, applied_at, None)
+    } else {
+        let applied = engine.apply_restore_plan_lazy(
+            &snapshot,
+            &mut byte_source,
+            &binding,
+            &resolved.homes,
+            &plan,
+            &approved,
+            &repository.backups_dir()?,
+            applied_at,
+        )?;
+        stopped = applied.stopped.clone();
+        applied
+    };
     on_phase("restore files and provider data", phase_started.elapsed());
     let phase_started = Instant::now();
     applied.receipts.extend(conversation_receipts);
@@ -13110,10 +13243,19 @@ pub(super) fn apply_bundle_restore_with_progress(
         .filter(|receipt| receipt.status == ActionStatus::Applied)
         .map(|receipt| receipt.action_id.clone())
         .collect::<Vec<_>>();
+    let not_pulled_action_ids = applied
+        .receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.status == ActionStatus::Failed && receipt.error.as_deref() == Some(NOT_PULLED)
+        })
+        .map(|receipt| receipt.action_id.clone())
+        .collect::<Vec<_>>();
     let failed_actions = applied
         .receipts
         .iter()
         .filter(|receipt| matches!(receipt.status, ActionStatus::Failed | ActionStatus::Blocked))
+        .filter(|receipt| !not_pulled_action_ids.contains(&receipt.action_id))
         .map(|receipt| FailedAction {
             action_id: receipt.action_id.clone(),
             display_name: None,
@@ -13156,7 +13298,22 @@ pub(super) fn apply_bundle_restore_with_progress(
                 ))
     });
     let success = overall_success;
-    let message = if success {
+    // A stopped Pull says so first: what it installed stays, what it did not
+    // reach is not pulled, and the areas are not marked as reviewed. A
+    // missing object names no cause: the storage was cleared, or a folder
+    // that a sync product replicates has not received it yet.
+    let stopped = stopped.map(|reason| {
+        if reason == VERSION_INCOMPLETE {
+            let (_, storage_name, _) =
+                project_storage_log_context(repository, &binding.local_project_id, &plan.storage_id);
+            format!("Part of this version is missing from {storage_name}. Compare again.")
+        } else {
+            reason
+        }
+    });
+    let message = if let Some(stopped) = &stopped {
+        stopped.clone()
+    } else if success {
         format!("Applied {} restore actions", applied_action_ids.len())
     } else {
         format!(
@@ -13199,6 +13356,8 @@ pub(super) fn apply_bundle_restore_with_progress(
                     .collect()
             })
             .unwrap_or_default(),
+        stopped,
+        not_pulled_action_ids,
     };
     on_phase("build after-Pull offers", offers_started.elapsed());
     let invalidation_started = Instant::now();
@@ -16738,7 +16897,8 @@ mod tests {
     ) -> BundleReadiness {
         let resolved = require_current_binding(repo, binding).unwrap();
         assert_eq!(&resolved.binding.bundle_id, bundle_id);
-        let (_, snapshot, _) = inspect_from_storage(repo, storage_id, bundle_id).unwrap();
+        let (_, engine) = storage_engine(repo, storage_id).unwrap();
+        let snapshot = engine.inspect(bundle_id).unwrap();
         bundle_readiness_for_snapshot(repo, &resolved, &snapshot).unwrap()
     }
 
@@ -20730,6 +20890,28 @@ mod tests {
         commit_id: &str,
         created_at_ms: u64,
     ) -> mallard_domain::RecordName {
+        plant_edited_publication(
+            storage_root,
+            bundle_id,
+            content_of,
+            parent,
+            commit_id,
+            created_at_ms,
+            |_| {},
+        )
+    }
+
+    /// `plant_publication` with the manifest edited before it is written,
+    /// for a stored version that says something false about its content.
+    fn plant_edited_publication(
+        storage_root: &Path,
+        bundle_id: &BundleId,
+        content_of: &mallard_domain::RecordName,
+        parent: Option<&mallard_domain::RecordName>,
+        commit_id: &str,
+        created_at_ms: u64,
+        edit: impl FnOnce(&mut BundleManifest),
+    ) -> mallard_domain::RecordName {
         let repositories = storage_root.join(".mallard/v1/repositories");
         let stream = repositories.join("_commits").join(bundle_id.as_str());
         let bundle = repositories.join(bundle_id.as_str());
@@ -20746,6 +20928,7 @@ mod tests {
         .unwrap();
         manifest.revision = parent.map_or(1, |parent| parent.revision() + 1);
         manifest.commit_id = commit_id.to_string();
+        edit(&mut manifest);
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let manifest_key = format!("_manifests/{}-{commit_id}.json", manifest.revision);
         std::fs::write(bundle.join(&manifest_key), &manifest_bytes).unwrap();
@@ -21647,7 +21830,666 @@ mod tests {
             let (_, engine) = storage_engine(&self.repo, &self.storage_id).unwrap();
             stored_cloud_ids(engine.observe(&self.bundle_id).unwrap().snapshot().unwrap())
         }
+
+        /// Scan and push this computer's project files with its sessions, as
+        /// the Push review does after a Scan.
+        fn push_with_files(&self, computer: &TestComputer) -> ProjectOperationResult {
+            let files = inspect_project_files_with_repository(
+                &self.repo,
+                &computer.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap();
+            let review = prepare_push_review_with_repository(
+                &self.repo,
+                &computer.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap();
+            let mut approval = PushApproval::recommended(&review, &self.storage_id);
+            approval
+                .recipe
+                .entries
+                .extend(reviewed_project_content_recipe(&files).entries);
+            approval.project_content_review_token = files.review_token;
+            ProjectSyncService::new(&self.repo)
+                .push_reviewed(&computer.project.local_project_id, &self.storage_id, approval)
+                .unwrap()
+        }
+
+        /// Apply every row of `plan`, its file actions and every conversation
+        /// row that carries an action, and return the result as it is.
+        fn pull_everything(&self, plan: &RestorePlan) -> RestoreResult {
+            ProjectSyncService::new(&self.repo)
+                .apply_bundle_restore(
+                    plan,
+                    plan.actions
+                        .iter()
+                        .map(|action| action.action_id.clone())
+                        .chain(
+                            plan.conversation_review
+                                .iter()
+                                .filter_map(|row| row.action_id.clone()),
+                        )
+                        .collect(),
+                )
+                .unwrap()
+        }
+
+        /// Every action id a review offers, files and sessions.
+        fn ticked_ids(plan: &RestorePlan) -> BTreeSet<ActionId> {
+            plan.actions
+                .iter()
+                .map(|action| action.action_id.clone())
+                .chain(
+                    plan.conversation_review
+                        .iter()
+                        .filter_map(|row| row.action_id.clone()),
+                )
+                .collect()
+        }
+
+        /// The machine-local sync documents, byte for byte: what a refused
+        /// Pull leaves exactly as they were.
+        fn local_documents(&self) -> Vec<(String, Vec<u8>)> {
+            [
+                "sync_config.json",
+                "conversation_bindings.json",
+                "materializations.json",
+            ]
+            .iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    std::fs::read(self.repo.root().join(name)).unwrap_or_default(),
+                )
+            })
+            .collect()
+        }
+
+        /// The stream's record at `revision`, as the storage names it.
+        fn record_at(&self, revision: u64) -> mallard_domain::RecordName {
+            record_names_at(&self.storage_root, &self.bundle_id, revision).remove(0)
+        }
+
+        /// The stored object of one project file of the selected version.
+        fn object_path_of(&self, relative_path: &str) -> PathBuf {
+            let (_, engine) = storage_engine(&self.repo, &self.storage_id).unwrap();
+            let snapshot = engine.inspect(&self.bundle_id).unwrap();
+            let (_, entry) = snapshot
+                .manifest
+                .find_file(&LogicalPath::parse(format!("project/{relative_path}")).unwrap())
+                .expect("the file is stored");
+            self.storage_root
+                .join(".mallard/v1/repositories")
+                .join(self.bundle_id.as_str())
+                .join(&entry.object_key)
+        }
+
+        fn row_for<'a>(
+            comparison: &'a ThreadSyncComparison,
+            cloud_thread_id: &CloudThreadId,
+        ) -> &'a ThreadSyncEntry {
+            comparison
+                .entries
+                .iter()
+                .find(|entry| entry.cloud_thread_id.as_ref() == Some(cloud_thread_id))
+                .expect("a row for the stored session")
+        }
     }
+
+    /// A rollout path inside one computer's Codex home.
+    fn codex_rollout_path(codex_home: &Path, session_id: &str) -> PathBuf {
+        codex_home
+            .join("sessions/2026/07/22")
+            .join(format!("rollout-{session_id}.jsonl"))
+    }
+
+    /// T2 and Q1, then N1: another computer pushes a newer version between
+    /// the review and the Pull. The Pull applies exactly the version it
+    /// reviewed: the installed session has that version's turns, the bases
+    /// name it, and the next comparison reads the newer version as changes
+    /// to pull.
+    #[test]
+    fn a_pull_applies_the_version_it_reviewed_when_a_newer_one_was_pushed_since() {
+        let world = TwoComputers::new("pinned-pull-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000a1";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let plan = world.plan_pull(b);
+        assert_eq!(plan.revision, 2);
+
+        // Version 3: the session continued on A, pushed before B applies.
+        append_codex_user_turn(
+            &codex_rollout_path(&a.codex, session),
+            "message-next",
+            "continued on A",
+        );
+        assert_eq!(world.push(a).revision, Some(3));
+
+        let result = world.pull_everything(&plan);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.reviewed_base_advanced, Some(true));
+        let installed = std::fs::read_to_string(world.rollout_of(b, &cloud_id)).unwrap();
+        assert!(installed.contains("hello"));
+        assert!(!installed.contains("continued on A"));
+        let link = world.link(b);
+        assert!(repository_bases(&link).all(|base| base.revision == 2));
+        let comparison = world.compare(b);
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Advanced {
+                base_revision: 2,
+                remote_revision: 3
+            }
+        );
+        let row = TwoComputers::row_for(&comparison, &cloud_id);
+        assert_eq!(row.state, ThreadSyncState::StorageAhead);
+        assert_eq!(
+            row.pull_decision.action,
+            ConversationReviewAction::MaterializeCloud
+        );
+    }
+
+    /// T3 and Q3: the pinned version lost its race before the Pull started,
+    /// to a record with an earlier stamp planted beside it, as no Push can
+    /// write it on R2 or Dropbox. The Pull is refused before anything
+    /// changes, and every local document is byte for byte what it was.
+    #[test]
+    fn a_pull_is_refused_before_anything_changes_when_its_pinned_version_lost_its_race() {
+        let world = TwoComputers::new("lost-pin-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000a2";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let plan = world.plan_pull(b);
+        let pinned = world.record_at(2);
+        plant_rival_publication(
+            &world.storage_root,
+            &world.bundle_id,
+            &world.record_at(1),
+            &format!("commit-{}", "e".repeat(24)),
+            pinned.created_at_ms() - 1_000,
+        );
+        let before = world.local_documents();
+        let error = ProjectSyncService::new(&world.repo)
+            .apply_bundle_restore(&plan, TwoComputers::ticked_ids(&plan).into_iter().collect())
+            .unwrap_err();
+        assert_eq!(error, REVIEW_SUPERSEDED);
+        assert_eq!(world.local_documents(), before);
+        assert!(!b.codex.join("sessions").exists());
+    }
+
+    /// T4, T5 and Q5: the storage was cleared between the review and the
+    /// Pull, and then cleared and pushed again. Both refuse the Pull before
+    /// anything changes on this computer.
+    #[test]
+    fn a_pull_is_refused_before_anything_changes_when_the_storage_was_cleared() {
+        let world = TwoComputers::new("cleared-pin-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000a3";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let plan = world.plan_pull(b);
+        let ticked: Vec<ActionId> = TwoComputers::ticked_ids(&plan).into_iter().collect();
+        let link_before = world.link(b);
+
+        wipe_remote_bundle(&world.storage_root, &world.bundle_id);
+        let before = world.local_documents();
+        let error = ProjectSyncService::new(&world.repo)
+            .apply_bundle_restore(&plan, ticked.clone())
+            .unwrap_err();
+        assert_eq!(error, REVIEW_SUPERSEDED);
+        assert_eq!(world.local_documents(), before);
+
+        // Pushed again: a new history that starts at version 1.
+        assert_eq!(world.push(a).revision, Some(1));
+        let error = ProjectSyncService::new(&world.repo)
+            .apply_bundle_restore(&plan, ticked)
+            .unwrap_err();
+        assert_eq!(error, REVIEW_SUPERSEDED);
+        assert_eq!(world.link(b), link_before);
+        assert!(!b.codex.join("sessions").exists());
+    }
+
+    /// T11: this computer synced past its review from another window: a
+    /// newer review of the same storage was applied, so a base names a later
+    /// version than the pin. The older review is refused, and the bases
+    /// still name the newer version.
+    #[test]
+    fn a_pull_is_refused_when_this_computer_synced_past_its_review() {
+        let world = TwoComputers::new("synced-past-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000a4";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let older = world.plan_pull(b);
+        append_codex_user_turn(
+            &codex_rollout_path(&a.codex, session),
+            "message-next",
+            "continued on A",
+        );
+        assert_eq!(world.push(a).revision, Some(3));
+        let newer = world.plan_pull(b);
+        assert_eq!(newer.revision, 3);
+        let result = world.pull_everything(&newer);
+        assert!(result.success, "{}", result.message);
+        let link = world.link(b);
+        assert!(repository_bases(&link).all(|base| base.revision == 3));
+
+        let error = ProjectSyncService::new(&world.repo)
+            .apply_bundle_restore(&older, TwoComputers::ticked_ids(&older).into_iter().collect())
+            .unwrap_err();
+        assert_eq!(error, REVIEW_SUPERSEDED);
+        assert_eq!(world.link(b), link);
+    }
+
+    /// T6: a review older than a day is refused with its own sentence.
+    #[test]
+    fn a_review_older_than_a_day_is_refused() {
+        let world = TwoComputers::new("expired-review-store");
+        let (a, b) = (&world.a, &world.b);
+        write_codex_session(&a.codex, "019f7500-0000-7000-8000-0000000000a5", &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let mut plan = world.plan_pull(b);
+        // Reviewed two days ago: its one-day lifetime is over.
+        plan.created_at -= 2 * 86_400;
+        plan.expires_at -= 2 * 86_400;
+        let error = ProjectSyncService::new(&world.repo)
+            .apply_bundle_restore(&plan, TwoComputers::ticked_ids(&plan).into_iter().collect())
+            .unwrap_err();
+        assert_eq!(error, REVIEW_EXPIRED);
+    }
+
+    /// D1 and Q2: a newer version lands while the Pull applies, after its
+    /// download. The Pull finishes against the pinned version, its result
+    /// lists what it installed, and the next comparison reads the newer
+    /// version as changes to pull.
+    #[test]
+    fn a_pull_finishes_when_a_newer_version_lands_while_it_applies() {
+        let world = TwoComputers::new("newer-during-pull-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000a6";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let plan = world.plan_pull(b);
+        let (storage_root, bundle_id, pinned) = (
+            world.storage_root.clone(),
+            world.bundle_id.clone(),
+            world.record_at(2),
+        );
+        pull_test_support::after_conversation_download(move || {
+            plant_publication(
+                &storage_root,
+                &bundle_id,
+                &pinned,
+                Some(&pinned),
+                &format!("commit-{}", "f".repeat(24)),
+                pinned.created_at_ms() + 60_000,
+            );
+        });
+        let result = world.pull_everything(&plan);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.stopped, None);
+        assert_eq!(
+            result.applied_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            TwoComputers::ticked_ids(&plan)
+        );
+        assert!(world.rollout_of(b, &cloud_id).exists());
+        assert_eq!(
+            world.compare(b).remote_continuity,
+            RemoteContinuity::Advanced {
+                base_revision: 2,
+                remote_revision: 3
+            }
+        );
+    }
+
+    /// D2 and Q6: the storage is cleared while the Pull downloads, and the
+    /// app restarted since the review, so nothing of it is in the process
+    /// cache. The Pull stops before it installs anything: no session and no
+    /// file, every ticked item is not pulled, the result says what is missing
+    /// without naming a cause, and the bases did not move. The session is
+    /// one this computer already has: a new one is read once in step 2 (K3)
+    /// and installs from that verified copy, as after the download (D3).
+    #[test]
+    fn a_pull_stops_before_installing_anything_when_the_storage_is_cleared_during_its_download() {
+        let world = TwoComputers::new("cleared-during-download-store");
+        let (a, b) = (&world.a, &world.b);
+        std::fs::write(a.root.join("draft.md"), b"first draft\n").unwrap();
+        let session = "019f7500-0000-7000-8000-0000000000a7";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push_with_files(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let first = world.plan_pull(b);
+        let result = world.pull_everything(&first);
+        assert!(result.success, "{}", result.message);
+        let rollout = world.rollout_of(b, &cloud_id);
+        let installed = std::fs::read(&rollout).unwrap();
+
+        // Version 3: the session continued and the file changed on A.
+        append_codex_user_turn(
+            &codex_rollout_path(&a.codex, session),
+            "message-next",
+            "continued on A",
+        );
+        std::fs::write(a.root.join("draft.md"), b"second draft\n").unwrap();
+        assert_eq!(world.push_with_files(a).revision, Some(3));
+        let plan = world.plan_pull(b);
+        let ticked = TwoComputers::ticked_ids(&plan);
+        assert!(plan
+            .conversation_review
+            .iter()
+            .any(|row| row.action == ConversationReviewAction::MaterializeCloud));
+        assert!(plan.actions.iter().any(|action| matches!(
+            &action.kind,
+            RestoreActionKind::WriteProjectFile { logical_path, .. }
+                if logical_path.as_str() == "project/draft.md"
+        )));
+        let (storage_root, bundle_id) = (world.storage_root.clone(), world.bundle_id.clone());
+        pull_test_support::before_conversation_download(move || {
+            ObjectCache::global().clear();
+            wipe_remote_bundle(&storage_root, &bundle_id);
+        });
+        let result = world.pull_everything(&plan);
+        assert!(!result.success);
+        assert_eq!(
+            result.stopped.as_deref(),
+            Some("Part of this version is missing from Project content store. Compare again.")
+        );
+        assert_eq!(Some(result.message.as_str()), result.stopped.as_deref());
+        assert!(
+            result.applied_action_ids.is_empty(),
+            "{:?}",
+            result.applied_action_ids
+        );
+        assert!(result.failed_actions.is_empty(), "{:?}", result.failed_actions);
+        assert_eq!(
+            result.not_pulled_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            ticked
+        );
+        assert_eq!(result.reviewed_base_advanced, Some(false));
+        assert_eq!(std::fs::read(&rollout).unwrap(), installed);
+        assert_eq!(
+            std::fs::read(b.root.join("draft.md")).unwrap(),
+            b"first draft\n"
+        );
+        assert!(repository_bases(&world.link(b)).all(|base| base.revision == 2));
+    }
+
+    /// D3, and the check the plan rests on: a session installs from its
+    /// downloaded copy while the storage is empty. The storage is cleared
+    /// after the download: the session is installed, the Pull stops at the
+    /// first file it cannot read, the file reads not pulled, and the bases
+    /// did not move. Then N2: the next comparison reads story 1, the
+    /// installed session is a new task under the cloud id it already has,
+    /// and one Push recreates the storage.
+    #[test]
+    fn a_pull_installs_the_downloaded_sessions_and_stops_at_the_files_when_the_storage_is_cleared_after_its_download(
+    ) {
+        let world = TwoComputers::new("cleared-after-download-store");
+        let (a, b) = (&world.a, &world.b);
+        std::fs::write(a.root.join("draft.md"), b"first draft
+").unwrap();
+        let session = "019f7500-0000-7000-8000-0000000000a8";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push_with_files(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let plan = world.plan_pull(b);
+        let session_actions = plan
+            .conversation_review
+            .iter()
+            .filter_map(|row| row.action_id.clone())
+            .collect::<BTreeSet<_>>();
+        let file_actions = plan
+            .actions
+            .iter()
+            .map(|action| action.action_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!session_actions.is_empty() && !file_actions.is_empty());
+        let (storage_root, bundle_id) = (world.storage_root.clone(), world.bundle_id.clone());
+        pull_test_support::after_conversation_download(move || {
+            wipe_remote_bundle(&storage_root, &bundle_id);
+        });
+        let result = world.pull_everything(&plan);
+        assert!(!result.success);
+        assert_eq!(
+            result.stopped.as_deref(),
+            Some("Part of this version is missing from Project content store. Compare again.")
+        );
+        assert_eq!(
+            result.applied_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            session_actions
+        );
+        assert_eq!(
+            result.not_pulled_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            file_actions
+        );
+        assert!(result.failed_actions.is_empty(), "{:?}", result.failed_actions);
+        assert_eq!(result.reviewed_base_advanced, Some(false));
+        assert!(world.rollout_of(b, &cloud_id).exists());
+        assert!(!b.root.join("draft.md").exists());
+        assert!(world.link(b).scope_bases.is_empty());
+
+        // N2: story 1. The installed session's acceptance names the cleared
+        // history and is read as absent.
+        let comparison = world.compare(b);
+        assert_eq!(comparison.remote_continuity, RemoteContinuity::Fresh);
+        let row = TwoComputers::row_for(&comparison, &cloud_id);
+        assert_eq!(row.state, ThreadSyncState::LocalOnly);
+        assert_eq!(
+            row.push_decision.action,
+            ConversationReviewAction::CreateCloud
+        );
+        assert_eq!(world.push(b).revision, Some(1));
+        assert!(world.stored_cloud_ids().values().any(|id| id == &cloud_id));
+    }
+
+    /// N7: a folder that a sync product replicates has not received one
+    /// object of the pinned version yet. The Pull stops with the same result
+    /// and no cause in its text. When the object has arrived, the next review
+    /// offers the file again, the installed session reads in sync, and the
+    /// Pull finishes.
+    #[test]
+    fn a_pull_stops_the_same_way_when_an_object_has_not_arrived_and_offers_the_rest_afterwards() {
+        let world = TwoComputers::new("replicating-folder-store");
+        let (a, b) = (&world.a, &world.b);
+        std::fs::write(a.root.join("draft.md"), b"first draft
+").unwrap();
+        let session = "019f7500-0000-7000-8000-0000000000a9";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push_with_files(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let object = world.object_path_of("draft.md");
+        let aside = object.with_extension("not-arrived");
+        std::fs::rename(&object, &aside).unwrap();
+
+        let plan = world.plan_pull(b);
+        let result = world.pull_everything(&plan);
+        assert!(!result.success);
+        assert_eq!(
+            result.stopped.as_deref(),
+            Some("Part of this version is missing from Project content store. Compare again.")
+        );
+        assert!(world.rollout_of(b, &cloud_id).exists());
+        assert!(!b.root.join("draft.md").exists());
+        assert_eq!(result.not_pulled_action_ids.len(), plan.actions.len());
+
+        std::fs::rename(&aside, &object).unwrap();
+        let comparison = world.compare(b);
+        assert_eq!(
+            TwoComputers::row_for(&comparison, &cloud_id).state,
+            ThreadSyncState::Synced
+        );
+        let again = world.plan_pull(b);
+        assert!(again.actions.iter().any(|action| matches!(
+            &action.kind,
+            RestoreActionKind::WriteProjectFile { logical_path, .. }
+                if logical_path.as_str() == "project/draft.md"
+        )));
+        let result = world.pull_everything(&again);
+        assert!(result.success, "{}", result.message);
+        assert_eq!(
+            std::fs::read(b.root.join("draft.md")).unwrap(),
+            b"first draft
+"
+        );
+    }
+
+    /// D4: the storage cannot be read after the download. The Pull stops
+    /// with the storage's own error, and what was installed stays.
+    #[test]
+    fn a_pull_stops_with_the_storage_own_error_when_it_cannot_be_read() {
+        let world = TwoComputers::new("unreadable-store");
+        let (a, b) = (&world.a, &world.b);
+        std::fs::write(a.root.join("draft.md"), b"first draft
+").unwrap();
+        let session = "019f7500-0000-7000-8000-0000000000aa";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push_with_files(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let plan = world.plan_pull(b);
+        // The object becomes something the store refuses to read.
+        let object = world.object_path_of("draft.md");
+        pull_test_support::after_conversation_download(move || {
+            std::fs::remove_file(&object).unwrap();
+            std::fs::create_dir(&object).unwrap();
+        });
+        let result = world.pull_everything(&plan);
+        assert!(!result.success);
+        let stopped = result.stopped.expect("the Pull stopped");
+        assert!(
+            stopped.contains("not a regular no-follow file"),
+            "the storage's own error, got: {stopped}"
+        );
+        assert_eq!(result.message, stopped);
+        assert!(world.rollout_of(b, &cloud_id).exists());
+        assert!(!b.root.join("draft.md").exists());
+        assert_eq!(result.not_pulled_action_ids.len(), plan.actions.len());
+    }
+
+    /// D6: a stored session whose content does not match what its manifest
+    /// says about it fails alone, with its own sentence, and nothing offers a
+    /// reset. With that row left unticked, the next Pull marks the areas as
+    /// reviewed (rule 5).
+    #[test]
+    fn a_stored_session_that_cannot_be_read_fails_alone_and_the_next_pull_marks_the_areas_reviewed(
+    ) {
+        let world = TwoComputers::new("unreadable-session-store");
+        let (a, b) = (&world.a, &world.b);
+        write_codex_session(&a.codex, "019f7500-0000-7000-8000-0000000000ab", &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        // Version 3 says something false about the session's lineage.
+        let pinned = world.record_at(2);
+        plant_edited_publication(
+            &world.storage_root,
+            &world.bundle_id,
+            &pinned,
+            Some(&pinned),
+            &format!("commit-{}", "d".repeat(24)),
+            pinned.created_at_ms() + 60_000,
+            |manifest| {
+                for (key, scope) in manifest.scopes.iter_mut() {
+                    for thread in scope.conversations.values_mut() {
+                        thread.lineage_digest = "1".repeat(64);
+                    }
+                    scope.content_sha256 = scope.compute_content_sha256(key).unwrap();
+                }
+            },
+        );
+        let plan = world.plan_pull(b);
+        assert_eq!(plan.revision, 3);
+        let result = world.pull_everything(&plan);
+        assert!(!result.success);
+        assert_eq!(result.stopped, None);
+        assert_eq!(result.failed_actions.len(), 1, "{:?}", result.failed_actions);
+        assert_eq!(
+            result.failed_actions[0].message,
+            mallard_infrastructure::pull_transcript::STORED_SESSION_UNREADABLE
+        );
+        assert!(!b.codex.join("sessions").exists());
+
+        let again = world.plan_pull(b);
+        let result = ProjectSyncService::new(&world.repo)
+            .apply_bundle_restore(&again, Vec::new())
+            .unwrap();
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.reviewed_base_advanced, Some(true));
+        assert!(repository_bases(&world.link(b)).all(|base| base.revision == 3));
+    }
+
+    /// Q4: a version a Pull applied is outranked afterwards. The refresh
+    /// reads `Displaced` with "last pull", changes no base and no acceptance,
+    /// and keeps the installed session, which now compares against the
+    /// version that won.
+    #[test]
+    fn a_version_a_pull_applied_is_reported_displaced_when_it_loses_its_race_afterwards() {
+        let world = TwoComputers::new("displaced-pull-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000ac";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        let plan = world.plan_pull(b);
+        let result = world.pull_everything(&plan);
+        assert!(result.success, "{}", result.message);
+        let rollout = world.rollout_of(b, &cloud_id);
+        assert!(rollout.exists());
+        // Another computer's record of the same session, on the same parent,
+        // built a second earlier: it outranks the version B pulled.
+        let pinned = world.record_at(2);
+        plant_publication(
+            &world.storage_root,
+            &world.bundle_id,
+            &pinned,
+            Some(&world.record_at(1)),
+            &format!("commit-{}", "e".repeat(24)),
+            pinned.created_at_ms() - 1_000,
+        );
+
+        let before = std::fs::read(world.repo.config_path()).unwrap();
+        let comparison = world.compare(b);
+        assert_eq!(
+            comparison.remote_continuity,
+            RemoteContinuity::Displaced {
+                base_revision: 2,
+                remote_revision: 2,
+                saved_by: SavedBy::Pull,
+            }
+        );
+        assert_eq!(std::fs::read(world.repo.config_path()).unwrap(), before);
+        assert!(rollout.exists());
+        let row = TwoComputers::row_for(&comparison, &cloud_id);
+        assert_eq!(row.state, ThreadSyncState::Synced);
+        assert_eq!(
+            row.pull_decision.action,
+            ConversationReviewAction::AdoptCloudMetadata
+        );
+    }
+
+    /// O2 and O1: a Pull on a cleared, empty storage. A computer that synced
+    /// with it before is told there is nothing to pull; one that never did
+    /// gets the text that opens the chooser of the storage's other projects.
+    #[test]
+    fn a_pull_on_a_cleared_storage_this_computer_synced_with_says_there_is_nothing_to_pull() {
+        let world = TwoComputers::new("nothing-to-pull-store");
+        let (a, b) = (&world.a, &world.b);
+        write_codex_session(&a.codex, "019f7500-0000-7000-8000-0000000000ad", &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        wipe_remote_bundle(&world.storage_root, &world.bundle_id);
+        let plan = |computer: &TestComputer| {
+            ProjectSyncService::new(&world.repo)
+                .plan_bundle_restore(&world.storage_id, &world.bundle_id, &computer.binding)
+                .unwrap_err()
+        };
+        assert_eq!(plan(a), "There is nothing to pull from Project content store.");
+        assert!(plan(b).contains("does not exist"), "{}", plan(b));
+    }
+
 
     /// Continue a Codex rollout by one user turn, as the provider would.
     fn append_codex_user_turn(path: &Path, id: &str, text: &str) {
@@ -24693,7 +25535,7 @@ mod tests {
                         &mut |_, _| panic!("must not start execution"),
                     )
                     .unwrap_err();
-                assert!(error.contains("expired or is not active yet"), "{error}");
+                assert_eq!(error, REVIEW_EXPIRED);
             }
         }
         for (approval, expected) in [

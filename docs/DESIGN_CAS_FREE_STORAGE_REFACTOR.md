@@ -666,10 +666,11 @@ it has today (section 11).
 | The repository base is `max_by_key(revision)` over the scope bases | Every scope base is checked against the selected mainline |
 | `scope_revision.max(…)` when a single-conversation Pull advances a base | Take the scope coordinates of the reviewed publication |
 | The Library's "history was rewound" on a lower revision | Ancestry |
-| Whole-head equality at Pull apply, the project-files review token, the readiness match | Unchanged: they test `(revision, commit_id, manifest_sha256)` for equality |
+| Whole-head equality at Pull apply, the project-files review token, the readiness match | Pull apply looks the reviewed publication up on the selected chain and reads it by name, since September 22 (`PLAN_PULL_PINNED_VERSION.md`, section 4.1); the review token and the readiness match still test `(revision, commit_id, manifest_sha256)` for equality |
 
-Pull apply still requires the selected publication to be the reviewed one. The
-local mutation is always of the exact reviewed bytes.
+Pull apply requires the reviewed publication to be on the selected chain and
+reads it by name: a newer publication pushed since the review does not stop
+it. The local mutation is always of the exact reviewed bytes.
 
 ### 9.4 A Push outranked after it was confirmed
 

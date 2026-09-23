@@ -8,7 +8,8 @@
 //! unavailable and cannot be operated on.
 
 use bytes::Bytes;
-use mallard_domain::{now_secs, StorageConfig, StorageId, SyncConfig};
+use mallard_domain::{now_secs, Mainline, StorageConfig, StorageId, SyncConfig};
+use mallard_infrastructure::bundle_engine::{NOT_PULLED, VERSION_INCOMPLETE};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::ConfiguredObjectStore;
 use serde::Serialize;
@@ -24,7 +25,8 @@ use super::apply::{
 use super::domain::{
     CatalogActionOutcome, CatalogActionResult, CatalogCapturedWith, CatalogCoordinate,
     CatalogCoordinateLabels, CatalogFormatKey, CatalogLinkId, CatalogLinkState,
-    CatalogPlanActionId, CatalogPlanId, CatalogProviderConfig, CatalogResourceEnvelope,
+    CatalogPlanActionId, CatalogPlanId, CatalogProviderConfig, CatalogPullItem,
+    CatalogResourceEnvelope,
     CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey,
     CatalogResourcePlanDocument, CatalogResourceWarning, CatalogScope, CatalogScopeId,
     CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan, CatalogTargetConfig,
@@ -254,7 +256,19 @@ pub struct CatalogScopePullOutcomeDto {
     /// row failed, keeping the comparison base honest.
     pub remote_accepted: bool,
     pub results: Vec<CatalogActionResult>,
+    /// Why the Pull stopped at a payload it could not read, when it did. The
+    /// resources installed before it stay, with their claims; the rows it
+    /// did not reach read "Not pulled"; the accepted version does not
+    /// advance (PLAN_PULL_PINNED_VERSION.md, G3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
 }
+
+/// The refusal of a Library Pull whose reviewed version is no longer part of
+/// the selected history: it lost its race, or the repository was cleared,
+/// with or without a push since (PLAN_PULL_PINNED_VERSION.md, G2).
+pub const LIBRARY_REVIEW_SUPERSEDED: &str =
+    "The storage changed since this review. Review again.";
 
 /// One Library repository as the storage page lists it: the coordinate it
 /// derives from with its labels, the head facts when the repository reads,
@@ -991,6 +1005,9 @@ struct ResolvedScopeWorkspace {
     /// has: `link` carries it as absent, nothing was written, and the next
     /// Push or Pull drops the saved acceptances and saves its own.
     stale_acceptance: bool,
+    /// The selected chain of the one listing this workspace made, for a Pull
+    /// apply to look its reviewed version up on.
+    mainline: Option<Mainline>,
     observed: Option<ObservedLibraryHead>,
     manifest: Option<LibraryResourceManifest>,
 }
@@ -1050,6 +1067,7 @@ fn resolve_scope_workspace(
     let mut observed = None;
     let mut manifest = None;
     let mut stale_acceptance = false;
+    let mut chain = None;
     if let Some(storage) = &storage {
         let engine = engine_for(storage)?;
         let (mainline, selected) = engine.observe(&repository_id)?;
@@ -1098,6 +1116,7 @@ fn resolve_scope_workspace(
             }
             manifest = Some(read);
         }
+        chain = Some(mainline);
     }
     Ok(ResolvedScopeWorkspace {
         scope,
@@ -1108,6 +1127,7 @@ fn resolve_scope_workspace(
         storage,
         link,
         stale_acceptance,
+        mainline: chain,
         observed,
         manifest,
     })
@@ -2049,12 +2069,17 @@ fn apply_pull_with_repositories(
     workspace
         .context
         .verify_pins(&plan.profile_pins, &plan.target_pins)?;
-    let observed = workspace
-        .observed
-        .as_ref()
-        .ok_or("the stored repository head disappeared")?;
-    if head_coordinate(&observed.head, &plan.storage_identity_sha256) != plan.head {
-        return Err("the stored content changed after review".to_string());
+    // The reviewed version must still be part of the selected history. A
+    // newer version pushed on top does not matter: every resource
+    // description comes from the review, and every payload is fetched by
+    // its digest. A version that lost its race, or a cleared repository,
+    // refuses the Pull before anything changes (PLAN_PULL_PINNED_VERSION.md,
+    // section 4.7).
+    let reviewed_on_chain = workspace.mainline.as_ref().is_some_and(|mainline| {
+        mainline.contains(plan.head.revision, plan.head.commit_id.as_str())
+    });
+    if !reviewed_on_chain {
+        return Err(LIBRARY_REVIEW_SUPERSEDED.to_string());
     }
 
     let acknowledged: BTreeSet<CatalogResourceId> = destructive_acknowledged.into_iter().collect();
@@ -2110,8 +2135,21 @@ fn apply_pull_with_repositories(
     let mut results = Vec::new();
     let mut accepted_updates: Vec<(CatalogResourceId, String)> = Vec::new();
     let mut all_accepted = true;
+    let mut stopped = None;
+    let not_pulled = |item: &CatalogPullItem| CatalogActionResult {
+        resource_id: item.resource_id.clone(),
+        action_id: None,
+        display_name: item.display_name.clone(),
+        outcome: CatalogActionOutcome::Failed,
+        message: Some(NOT_PULLED.to_string()),
+    };
     for selection in &selections {
-        let result = execute_scope_pull_item(
+        if stopped.is_some() {
+            results.push(not_pulled(&selection.item.item));
+            all_accepted = false;
+            continue;
+        }
+        let mut result = execute_scope_pull_item(
             &environment,
             &plan.storage_id,
             &plan.plan_id,
@@ -2120,6 +2158,18 @@ fn apply_pull_with_repositories(
             selection.action,
             now,
         );
+        if result.outcome == CatalogActionOutcome::Failed
+            && result.message.as_deref() == Some(VERSION_INCOMPLETE)
+        {
+            // The storage cannot be read: this resource and the rest are not
+            // pulled, what was installed before stays, and the accepted
+            // version does not advance (rule 3 of the Pull plan).
+            stopped = Some(format!(
+                "Part of this version is missing from {}. Compare again.",
+                storage.name
+            ));
+            result = not_pulled(&selection.item.item);
+        }
         // A row's comparison base advances only when the user actually acted
         // on it, or when both sides already match. A skipped executable row
         // stays unreviewed — silently accepting it would flip a later
@@ -2185,6 +2235,7 @@ fn apply_pull_with_repositories(
         plan_id,
         remote_accepted: advance_head,
         results,
+        stopped,
     })
 }
 
@@ -4064,6 +4115,224 @@ mod tests {
         let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
         let offered = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
         assert!(offered.row.selectable, "{:?}", offered.row.blocked_reason);
+    }
+
+    /// The Pull review of one scope on the fixture's storage.
+    fn prepare_pull(fixture: &LibraryFixture, scope_id: &CatalogScopeId) -> CatalogScopePullPlan {
+        prepare_pull_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            scope_id,
+            &fixture.storage.id,
+            BTreeMap::new(),
+            &fixture.user_home,
+            now_secs(),
+        )
+        .unwrap()
+    }
+
+    /// Apply `plan` with every item's default action.
+    fn apply_pull_defaults(
+        fixture: &LibraryFixture,
+        plan: &CatalogScopePullPlan,
+    ) -> Result<CatalogScopePullOutcomeDto, String> {
+        let choices = plan
+            .items
+            .iter()
+            .filter_map(|item| {
+                Some((
+                    item.item.resource_id.clone(),
+                    item.item.default_action_id.clone()?,
+                ))
+            })
+            .collect();
+        apply_pull_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &PanicRunner,
+            plan.plan_id.clone(),
+            choices,
+            Vec::new(),
+            &fixture.user_home,
+            now_secs(),
+        )
+    }
+
+    /// A second computer on the same storage, without skills of its own,
+    /// linked to the scope the fixture pushed.
+    fn puller(fixture: &LibraryFixture) -> (LibraryFixture, CatalogScopeId) {
+        let other = sibling_machine(fixture, "other-user", b"unused");
+        fs::remove_dir_all(&other.skill_path).unwrap();
+        let row = skill_scope(&other);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&other, &scope_id, &other.storage.id, 4);
+        (other, scope_id)
+    }
+
+    fn link_of(fixture: &LibraryFixture, scope_id: &CatalogScopeId) -> Option<CatalogScopeLink> {
+        fixture
+            .catalog
+            .load_scope_links()
+            .unwrap()
+            .link_for(scope_id, &fixture.storage.id)
+            .cloned()
+    }
+
+    /// G1: another computer pushed a newer version between the review and
+    /// the Pull. The Pull installs the reviewed resources and saves the
+    /// reviewed version as accepted; the next page reads the row the newer
+    /// version changed as changed in the storage.
+    #[test]
+    fn a_library_pull_applies_the_version_it_reviewed_when_a_newer_one_was_pushed_since() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let (other, other_scope) = puller(&fixture);
+        let plan = prepare_pull(&other, &other_scope);
+        assert_eq!(plan.head.revision, 1);
+
+        // Version 2: the skill revised on the first computer.
+        fs::write(
+            fixture.skill_path.join("SKILL.md"),
+            b"---\nname: review\n---\nDraft-linked skill, revised.\n",
+        )
+        .unwrap();
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+
+        let outcome = apply_pull_defaults(&other, &plan).unwrap();
+        assert!(outcome.remote_accepted);
+        assert_eq!(outcome.stopped, None);
+        assert_eq!(
+            fs::read(other.skill_path.join("SKILL.md")).unwrap(),
+            b"---\nname: review\n---\nDraft-linked skill.\n"
+        );
+        let link = link_of(&other, &other_scope).unwrap();
+        assert_eq!(
+            link.accepted_head.as_ref().map(|head| head.revision),
+            Some(1)
+        );
+        let loaded = page(&other, &other_scope, Some(&other.storage.id)).unwrap();
+        assert_eq!(loaded.rows.len(), 1);
+        assert_eq!(
+            loaded.rows[0].state,
+            Some(CatalogLinkState::StorageChanged)
+        );
+    }
+
+    /// G2: the reviewed version lost its race, and then the repository was
+    /// cleared, before the Pull starts. Both refuse the Pull before anything
+    /// changes: no local file and no link.
+    #[test]
+    fn a_library_pull_is_refused_before_anything_changes_when_its_reviewed_version_is_off_the_chain(
+    ) {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let notes = fixture.user_home.join("codex-home/skills/notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(
+            notes.join("SKILL.md"),
+            b"---\nname: notes\n---\nSecond skill.\n",
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let repository_id = link_of(&fixture, &scope_id)
+            .unwrap()
+            .repository_id
+            .as_str()
+            .to_string();
+        let repository = fixture
+            .storage_path
+            .join(".mallard/v1/library")
+            .join(&repository_id);
+
+        let (other, other_scope) = puller(&fixture);
+        let plan = prepare_pull(&other, &other_scope);
+        assert_eq!(plan.head.revision, 2);
+        let link_before = link_of(&other, &other_scope);
+
+        // The reviewed version loses its race to a record stamped earlier.
+        plant_rival_library_publication(&repository);
+        let error = apply_pull_defaults(&other, &plan).unwrap_err();
+        assert_eq!(error, LIBRARY_REVIEW_SUPERSEDED);
+        assert!(!other.skill_path.exists());
+        assert_eq!(link_of(&other, &other_scope), link_before);
+
+        // The repository is cleared after a new review.
+        let plan = prepare_pull(&other, &other_scope);
+        fs::remove_dir_all(&repository).unwrap();
+        let error = apply_pull_defaults(&other, &plan).unwrap_err();
+        assert_eq!(error, LIBRARY_REVIEW_SUPERSEDED);
+        assert!(!other.skill_path.exists());
+        assert_eq!(link_of(&other, &other_scope), link_before);
+    }
+
+    /// G3: the repository lost a payload after the review, or a synced
+    /// folder has not replicated it yet. The Pull installs the resources
+    /// before it, stops at the first payload it cannot read, reads the rest
+    /// as not pulled, and does not advance the accepted version.
+    #[test]
+    fn a_library_pull_stops_at_the_first_payload_it_cannot_read() {
+        let fixture = library_fixture();
+        let notes = fixture.user_home.join("codex-home/skills/notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(
+            notes.join("SKILL.md"),
+            b"---\nname: notes\n---\nSecond skill.\n",
+        )
+        .unwrap();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let repository_id = link_of(&fixture, &scope_id)
+            .unwrap()
+            .repository_id
+            .as_str()
+            .to_string();
+
+        let (other, other_scope) = puller(&fixture);
+        let plan = prepare_pull(&other, &other_scope);
+        assert_eq!(plan.items.len(), 2);
+        // The payload of the resource the apply reaches second is gone.
+        let second = plan.items[1].resource.as_ref().expect("a stored resource");
+        fs::remove_file(
+            fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(&repository_id)
+                .join("_objects")
+                .join(&second.files[0].sha256),
+        )
+        .unwrap();
+
+        let outcome = apply_pull_defaults(&other, &plan).unwrap();
+        assert_eq!(
+            outcome.stopped.as_deref(),
+            Some("Part of this version is missing from Library test storage. Compare again.")
+        );
+        assert!(!outcome.remote_accepted);
+        assert_eq!(outcome.results.len(), 2);
+        assert_eq!(outcome.results[0].outcome, CatalogActionOutcome::Installed);
+        assert_eq!(outcome.results[1].outcome, CatalogActionOutcome::Failed);
+        assert_eq!(outcome.results[1].message.as_deref(), Some("Not pulled"));
+        let first = &plan.items[0].item.display_name;
+        assert!(other
+            .user_home
+            .join(format!("codex-home/skills/{first}/SKILL.md"))
+            .exists());
+        assert!(!other.user_home.join(format!("codex-home/skills/{}/SKILL.md", plan.items[1].item.display_name)).exists());
+        assert!(!other.catalog.load_materializations().unwrap().claims.is_empty());
+        let link = link_of(&other, &other_scope).unwrap();
+        assert!(link.accepted_head.is_none());
+        assert_eq!(link.accepted_resources.len(), 1);
     }
 
     /// B1: the repository was cleared, and nobody has pushed since. The page

@@ -1,6 +1,6 @@
 # Mallard: a Pull applies the version it reviewed — implementation plan
 
-- Status: Planned, not implemented
+- Status: Implemented on September 22, 2026, steps 1 to 9, and committed. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026
 - Scope: the desktop app — how a Pull behaves when the storage changes after its review or while it applies, what it keeps when it cannot finish, and what it asks of the user
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
@@ -546,44 +546,46 @@ Every changed row of section 2 gets a test that names it.
   writer that pauses after its listing stays possible. It belongs to the
   CAS-free plan.
 
+## Implementation notes
+
+Implemented on September 22, 2026. What differs from the plan above:
+
+| Subject | What was built |
+|---|---|
+| D2 and the object cache | The review reads each "Create local task" session once (K3), and the process-wide object cache keeps verified payloads for the apply that follows, so a clear during step 4 installs those sessions from their verified copies, exactly as after the download (D3). A session this computer already has is read only in step 4, and D2 holds as written for it. The test of D2 models a cold cache, an app restarted since the review, through `ObjectCache::clear`, which exists for tests only |
+| A clear with no files ticked | A clear during step 5 is noticed only by the file step. With no file ticked it is not noticed at all: the Pull completes, and the next comparison reads story 1 of the Push plan. The accepted risk of section 3 is that wide |
+| The missing object's text | The byte source reports one fixed text, `VERSION_INCOMPLETE`, for an object of a listed version the storage does not hold; the service prints the sentence of section 5 with the storage's name. The file step stops before it writes anything: its bulk fetch runs before the first write, so a stop never leaves a file half-written |
+| "Not pulled" | A `Failed` receipt whose error is the fixed text `NOT_PULLED`, because no persisted document changes shape. The result names them in `not_pulled_action_ids`, apart from `failed_actions`, and carries the stop reason in `stopped` |
+| T7 | The stale-pin failure prints `CONVERSATION_CHANGED`; the pin's own name goes to the apply's phase log through the failure's detail |
+| O2 | The backend tells O2 from O1 by the link's bases and returns the sentence of section 5; the shell shows it as a note without a button (`nothing_to_pull`), and O1 keeps the text that opens the chooser |
+| Compare again | The review's banner offers it for the two backend sentences, recognized verbatim (`compareAgainOffered`), and runs the same replan as Rescan |
+| The Library | The apply looks the reviewed version up on the chain the workspace observed and refuses with `LIBRARY_REVIEW_SUPERSEDED`; the payload fetch reports `VERSION_INCOMPLETE`, the loop stops at the first such failure, the rows not reached are `Failed` results with the message "Not pulled" (no new outcome variant), and the outcome carries `stopped`. The page prints it and lists the rows not pulled |
+| The engine | `BundleEngine::select` lists a stream without reading it, which is what the apply lists with; the second read of the head is gone, and its engine test now proves that a newer publication does not stop the apply |
+| T2, other areas only | Not tested: the two-computer fixture binds one provider, so a newer version can only change an area this computer writes. The T2 test covers the apply of an ancestor |
+
+Still open: the live two-computer pass on R2 and on Dropbox. The owner runs it,
+after clearing `~/.mallard` and the cloud data.
+
 ## Source pointers
 
-Line numbers are those of the working tree on September 20, 2026.
+Line numbers are those of the working tree on September 22, 2026, after the
+implementation.
 
 | Subject | Location |
 |---|---|
-| The review: `plan_bundle_restore_with_progress`; "bundle '<id>' does not exist" | `src-tauri/src/project_sync/service.rs:10740`, `:10771` |
-| The pin on the review: `revision`, `commit_id`, `manifest_sha256`, `expires_at` | `crates/mallard-domain/src/lib.rs:5286` |
-| The review's lifetime | `crates/mallard-infrastructure/src/bundle_engine.rs:46` |
-| The apply: `apply_bundle_restore_with_progress`; the equality with the selected version | `src-tauri/src/project_sync/service.rs:12602`, `:12617-12622` |
-| `inspect_from_storage`: the snapshot with its chain | `src-tauri/src/project_sync/service.rs:3271` |
-| `Mainline::contains`; `snapshot_at`; `observe` | `crates/mallard-domain/src/publication.rs:266`; `crates/mallard-infrastructure/src/bundle_engine.rs:746`, `:769` |
-| Approval checks and the expiry text | `src-tauri/src/project_sync/service.rs:12486`, `:12493` |
-| Binding and identity checks (T9) | `src-tauri/src/project_sync/service.rs:13812` |
-| Step 2: `build_restore_plan_for_apply`; the stored-subagent read; aligning the ticked rows | `src-tauri/src/project_sync/service.rs:10883`, `:6292`, `:12528` |
-| Step 3: `adopt_cloud_metadata_actions` | `src-tauri/src/project_sync/service.rs:13291` |
-| Step 4: `prepare_pull_conversation_actions`; its batched download | `src-tauri/src/project_sync/service.rs:11077`, `:11137` |
-| Step 5: the install loop; "sync config changed during Pull apply"; one session's install | `src-tauri/src/project_sync/service.rs:12809-12980`, `:12936`, `:11541` |
-| One session's files, backup and local save; "not replayed, rolled back, or resumed" | `crates/mallard-infrastructure/src/conversation_materialization.rs:222`, `:1-6` |
-| Step 6: the call; `apply_restore_plan_lazy`; `validate_plan_pin`; the second read of the head; the file download | `src-tauri/src/project_sync/service.rs:12991`; `crates/mallard-infrastructure/src/bundle_engine.rs:6109`, `:5725`, `:6182-6191`, `:6223` |
-| The byte source: missing, mismatching, transport | `crates/mallard-infrastructure/src/bundle_engine.rs:317`, `:414-425` |
-| Step 7: what marks the areas as reviewed; the bases and the stale ones; the result | `src-tauri/src/project_sync/service.rs:13472`, `:13085-13145`, `:865` |
-| The per-session pins and their names (T7) | `crates/mallard-infrastructure/src/conversation_sync.rs:119`; `src-tauri/src/project_sync/service.rs:11311` |
-| D6: "cloud conversation changed lineage or semantic content" | `crates/mallard-infrastructure/src/pull_transcript.rs:72`, `:118` |
-| File rows of the review; the local copy of a diverged file | `crates/mallard-infrastructure/src/bundle_engine.rs:1392`, `:5040` |
-| The report of Q4: `observe_linked_bundle`, the `Displaced` classifier (cleared plan, step 12, September 22) | `src-tauri/src/project_sync/service.rs:7122` |
-| One operation at a time on one computer (Q7) | `crates/mallard-infrastructure/src/persistence.rs:380`, `:411` |
-| The engine test that pins the second read of the head | `crates/mallard-infrastructure/src/bundle_engine.rs:4567`, `:4733-4752` |
-| Existing Pull tests: per-session isolation, approvals, a row the apply no longer offers, an empty approval | `src-tauri/src/project_sync/service.rs:23832`, `:24133`, `:24393`, `:24192` |
-| The two-computer fixture for the new tests | `src-tauri/src/project_sync/service.rs:21050` |
-| Library: the review; the apply; the equality; the loop; when the accepted version advances | `src-tauri/src/storage_catalog/service.rs:1964`, `:2019`, `:2063`, `:2120`, `:2151-2180` |
-| Library: payload fetch and its missing text; one resource's apply; the review's lifetime | `src-tauri/src/storage_catalog/resource_engine.rs:268`, `:280`; `src-tauri/src/storage_catalog/apply.rs:1134`; `src-tauri/src/storage_catalog/resource_planning.rs:29` |
-| The Pull flow in the shell: review, the chooser of O1, apply, closing | `src/components/project-sync/ProjectSync.tsx:2207`, `:2379`, `:2417`, `:2809`, `:2582` |
-| The apply error and its prefix; the Pull without a review | `src/components/project-sync/pullReviewFlow.ts:112`, `:136`, `:73` |
-| The review's error banner; the footer's verb; Rescan | `src/components/project-sync/RestorePlanView.tsx:379`, `:281`, `:537` |
-| The reset matcher and its uses | `src/components/project-sync/syncError.ts:6`; `RestorePlanView.tsx:382`; `ProjectLinksWorkspace.tsx:2911`; `syncOutcome.ts:289`, `:316`; `PushResourceWorkspace.tsx:741`, `:1017` |
-| The Pull result: titles, "Push is still blocked", actions | `src/components/project-sync/syncOutcome.ts:192`, `:279`, `:315-341` |
-| "Pull couldn't start" | `src/components/project-sync/ProjectLinksWorkspace.tsx:2894` |
-| "Reset local sync state…" in the project menu | `src/components/project-sync/ProjectLinksWorkspace.tsx:2201` |
-| Which session rows can be ticked (K7) | `src/components/project-sync/pullReviewModel.ts:35` |
-| Row labels | `src/components/project-sync/ProjectActivityPage.tsx:1101-1139` |
+| The review: `plan_bundle_restore_with_progress`; O2's sentence | `src-tauri/src/project_sync/service.rs:10662`, `:10700` |
+| The texts: `REVIEW_SUPERSEDED`, `REVIEW_EXPIRED`, `CONVERSATION_CHANGED`; the pin lookup, `pinned_version_for_apply`; the apply | `src-tauri/src/project_sync/service.rs:12563`, `:12566`, `:12570`; `:12583`; `:12651` |
+| The engine's listing-only `select`; `snapshot_at`; `published_by` | `crates/mallard-infrastructure/src/bundle_engine.rs:799`, `:760`, `:786` |
+| Step 4: `prepare_pull_conversation_actions`; its failure with the detail for the log; the test hooks around it | `src-tauri/src/project_sync/service.rs:11022`, `:11009`; `:12618` |
+| Step 6: the file step reads no head; the stop before the first write; `unreached_apply_result`; the byte source's texts | `crates/mallard-infrastructure/src/bundle_engine.rs:6289`, `:6324`, `:6171`, `:270-273` |
+| Step 7: what is not pulled, the stop reason, the result | `src-tauri/src/project_sync/service.rs:13246` |
+| D6: `STORED_SESSION_UNREADABLE` | `crates/mallard-infrastructure/src/pull_transcript.rs:81` |
+| The report of Q4: `observe_linked_bundle`, the `Displaced` classifier | `src-tauri/src/project_sync/service.rs:7122` |
+| The object cache and its test-only `clear` | `crates/mallard-infrastructure/src/bundle_engine.rs:222` |
+| Library: `LIBRARY_REVIEW_SUPERSEDED`; the lookup on the chain; the stop at a missing payload; the payload fetch's text | `src-tauri/src/storage_catalog/service.rs:270`, `:2078`, `:2139`; `src-tauri/src/storage_catalog/resource_engine.rs:285` |
+| Frontend: the texts and `compareAgainOffered`; the banner's button; the stopped outcome; the `nothing_to_pull` notice; the Library stop | `src/components/project-sync/pullReviewFlow.ts:55-60`; `RestorePlanView.tsx:386`; `syncOutcome.ts:230`; `ProjectLinksWorkspace.tsx:125`, `ProjectSync.tsx:2401`; `src/components/storage-catalog/StorageCatalogPage.tsx:1157` |
+| The static specimen of every Pull text | `src/push-notices-live.tsx` |
+| Tests: the two-computer fixture with files; a planted publication with an edited manifest | `src-tauri/src/project_sync/service.rs:21685`, `:21836`; `:20906` |
+| Tests: T2 and N1; T3; T4 and T5; T11; T6; D1; D2; D3 and N2; N7; D4; D6; Q4; O2 and O1 | `src-tauri/src/project_sync/service.rs:21954`, `:22002`, `:22030`, `:22063`, `:22092`, `:22112`, `:22160`, `:22232`, `:22298`, `:22346`, `:22380`, `:22430`, `:22478` |
+| Tests: G1; G2; G3; the engine test of a newer publication after planning | `src-tauri/src/storage_catalog/service.rs:4188`, `:4230`, `:4282`; `crates/mallard-infrastructure/src/bundle_engine.rs:4620` |
+| Frontend tests: Compare again, the stopped Pull, a session that failed alone; no reset on the Push review | `tests/frontend/pull-review.integration.test.tsx`, `tests/frontend/resource-inventory.integration.test.tsx` |

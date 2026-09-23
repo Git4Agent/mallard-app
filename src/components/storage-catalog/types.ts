@@ -345,6 +345,9 @@ export interface CatalogScopePullOutcome {
    * row failed, keeping the comparison base honest. */
   remote_accepted: boolean;
   results: CatalogActionResult[];
+  /** Why the Pull stopped at a payload it could not read, when it did. The
+   *  rows it did not reach read "Not pulled". */
+  stopped?: string | null;
 }
 
 export interface CatalogResourceForkPlan {

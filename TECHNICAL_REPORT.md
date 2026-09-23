@@ -620,8 +620,14 @@ absolute path.
 
 List-then-write and earliest-sibling selection provide single-selection
 publication without a conditional write. A pusher's base must be the selected
-publication or one of its ancestors, and a Pull review must still match the
-selected publication. The hash-linked record chain retains published history,
+publication or one of its ancestors, and a Pull applies exactly the
+publication it reviewed while that publication is on the selected chain: a
+newer one pushed since shows afterwards as changes to pull, and a review whose
+publication lost its race or was cleared is refused before anything changes
+("Compare again"). A Pull whose storage cannot be read after its download
+stops: what it installed stays, the rest reads "Not pulled", nothing is rolled
+back or retried, and no Pull surface offers a local-state reset. The
+hash-linked record chain retains published history,
 including publications that were not selected, while a writer that lists a
 child under its parent stops and must inspect/review again.
 

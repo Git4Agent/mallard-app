@@ -15,19 +15,16 @@ const ROW_PRESENTATION: Record<
   held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
   preserved: { icon: "git-fork", className: "preserved", label: "Kept independently" },
   failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
+  not_pulled: { icon: "git-compare-arrows", className: "diverged", label: "Not pulled" },
 };
 
 function actionIcon(action: SyncOutcomeAction): IconName {
   if (action.kind === "open_pull") return "download";
-  if (action.kind === "reset_metadata") return "trash";
   return "refresh";
 }
 
 function actionTitle(action: SyncOutcomeAction): string | undefined {
   if (action.kind === "after_pull_action") return action.title;
-  if (action.kind === "reset_metadata") {
-    return "Forget this project's local sync bases, mappings, and results";
-  }
   return undefined;
 }
 
@@ -136,6 +133,11 @@ export default function SyncOutcomeNotice({
           </button>
         </span>
       </div>
+      {outcome.message && (
+        <div className="sync-outcome-guidance">
+          <p>{outcome.message}</p>
+        </div>
+      )}
       {manualActions.length > 0 && (
         <div className="sync-outcome-guidance">
           {manualActions.map((action, index) => (

@@ -46,7 +46,6 @@ import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "./SyncOutcomeNotice";
 import SiblingRepoNotice from "./SiblingRepoNotice";
 import StorageLinkDialog from "./StorageLinkDialog";
-import { isIrrecoverableSyncError } from "./syncError";
 import type { SyncOutcome, SyncOutcomeAction } from "./syncOutcome";
 import {
   connectionDetail,
@@ -122,6 +121,8 @@ export type StorageNotice = {
 } & (
   | { kind: "requires_pull"; copy: PullRequiredCopy }
   | { kind: "action_failed"; action: "push" | "pull"; message: string }
+  /** A cleared storage this computer synced with before: nothing to pull. */
+  | { kind: "nothing_to_pull"; message: string }
   /** A finished Push or Pull; the flow has already closed behind it. */
   | { kind: "outcome"; outcome: SyncOutcome }
 );
@@ -2885,6 +2886,16 @@ export default function ProjectLinksWorkspace({
                           ),
                         });
                       }
+                      if (activeNotice?.kind === "nothing_to_pull") {
+                        /* A cleared storage this computer synced with
+                           before. There is nothing to pull, and the standing
+                           note in the activity list says to push again. */
+                        gateNotices.push({
+                          key: "nothing-to-pull",
+                          severity: "info",
+                          message: activeNotice.message,
+                        });
+                      }
                       if (activeNotice?.kind === "action_failed") {
                         const failedAction = activeNotice.action;
                         const failedMessage = activeNotice.message;
@@ -2907,19 +2918,6 @@ export default function ProjectLinksWorkspace({
                                   onClick={() => onOpenStorage(storage.storage_id)}
                                 >
                                   Reconnect {storage.provider_label}
-                                </button>
-                              ) : isIrrecoverableSyncError(failedMessage) ? (
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost danger"
-                                  disabled={noticeActionsDisabled}
-                                  onClick={() => void run(
-                                    `reset-sync-metadata:${project.local_project_id}`,
-                                    () => onResetProjectMetadata(project.local_project_id),
-                                  )}
-                                >
-                                  <Icon name="trash" size={13} />
-                                  Reset local sync state
                                 </button>
                               ) : (
                                 <button

@@ -18,7 +18,7 @@ import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSe
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
 import { providerLabel } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
-import { isIrrecoverableSyncError } from "./syncError";
+import { compareAgainOffered } from "./pullReviewFlow";
 import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
 import {
   buildPullReviewItems,
@@ -47,7 +47,6 @@ interface Props {
   /** Rebuilds the plan against the storage's current head — the files
    *  page's Rescan. */
   onRefreshPlan?: () => void;
-  onResetMetadata?: () => void;
   /**
    * Mirrors the footer primary out to the host, so the storage-card Pull
    * button can apply the review — including the empty, acknowledge-only
@@ -220,7 +219,6 @@ export default function RestorePlanView({
   onApply,
   onBack,
   onRefreshPlan,
-  onResetMetadata,
   onPrimaryChange,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
@@ -379,11 +377,13 @@ export default function RestorePlanView({
       key: "pull-failed",
       severity: "danger",
       message: error,
-      action: isIrrecoverableSyncError(error) && onResetMetadata
+      /* A review the storage moved past, or one older than a day, is
+         rebuilt in place: the same control as Rescan on the files step. */
+      action: compareAgainOffered(error) && onRefreshPlan
         ? (
-          <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
-            <Icon name="trash" size={13} />
-            Reset local sync state
+          <button type="button" className="btn btn-ghost" onClick={onRefreshPlan} disabled={busy}>
+            <Icon name="refresh" size={13} />
+            Compare again
           </button>
         )
         : undefined,

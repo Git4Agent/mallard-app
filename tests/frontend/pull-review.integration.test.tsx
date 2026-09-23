@@ -19,7 +19,7 @@ import {
   buildPullOutcome,
   type SyncOutcome,
 } from "../../src/components/project-sync/syncOutcome";
-import { isIrrecoverableSyncError } from "../../src/components/project-sync/syncError";
+import { REVIEW_EXPIRED, REVIEW_SUPERSEDED, compareAgainOffered } from "../../src/components/project-sync/pullReviewFlow";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
@@ -131,6 +131,7 @@ function result(overrides: Partial<RestoreResult> = {}): RestoreResult {
     failed_actions: [],
     preserved_threads: [],
     after_pull_actions: [],
+    not_pulled_action_ids: [],
     ...overrides,
   };
 }
@@ -138,7 +139,7 @@ function result(overrides: Partial<RestoreResult> = {}): RestoreResult {
 function renderReview(
   plan: PullReview,
   error: string | null = null,
-  onResetMetadata?: () => void,
+  onRefreshPlan?: () => void,
   phase: "idle" | "restoring" = "idle",
 ) {
   return renderToStaticMarkup(
@@ -153,7 +154,7 @@ function renderReview(
       error={error}
       onApply={() => undefined}
       onBack={() => undefined}
-      onResetMetadata={onResetMetadata}
+      onRefreshPlan={onRefreshPlan}
     />,
   );
 }
@@ -563,34 +564,68 @@ test("independent readiness errors stay visible without adding to failed action 
   assert.equal(withFailure.rows.some((row) => row.title === "Codex needs setup"), true);
 });
 
-test("irrecoverable sync metadata failures offer a local reset instead of retry", () => {
-  const message = "conversation Pull action 'action-a' is stale at SemanticDigest";
+test("a refused review offers Compare again, and no Pull surface offers a reset", () => {
+  for (const sentence of [REVIEW_SUPERSEDED, REVIEW_EXPIRED]) {
+    const html = renderReview(restorePlan, `Restore failed: ${sentence}`, () => undefined);
+    assert.match(html, /Compare again<\/button>/);
+    assert.match(html, new RegExp(sentence.replace(/[.]/g, "\\.")));
+    assert.doesNotMatch(html, /Reset local sync state/);
+  }
+  // Any other apply error keeps the banner without that button.
+  const other = renderReview(restorePlan, "Restore failed: storage is temporarily unavailable", () => undefined);
+  assert.doesNotMatch(other, /Compare again<\/button>/);
+  assert.doesNotMatch(other, /Reset local sync state/);
+  assert.equal(compareAgainOffered(`Restore failed: ${REVIEW_SUPERSEDED}`), true);
+  assert.equal(compareAgainOffered("storage is temporarily unavailable"), false);
+});
+
+test("a stopped Pull says so first, lists what it did not reach, and never says Push is blocked", () => {
+  const sentence = "Part of this version is missing from Local storage 1. Compare again.";
   const outcome = buildPullOutcome({
     projectId: binding.local_project_id,
     plan: restorePlan,
     result: result({
       success: false,
-      failed_actions: [{ action_id: "action-a", display_name: "Task A", message }],
+      message: sentence,
+      stopped: sentence,
+      reviewed_base_advanced: false,
+      not_pulled_action_ids: ["action-a"],
     }),
     readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
     items: buildPullReviewItems(restorePlan),
     completedResourceIds: new Set(),
-    error: message,
   });
-
-  assert.equal(isIrrecoverableSyncError(message), true);
-  assert.equal(isIrrecoverableSyncError("storage is temporarily unavailable"), false);
-  assert.deepEqual(outcome.actions, [{
-    kind: "reset_metadata",
-    label: "Reset local sync state",
-  }]);
+  assert.equal(outcome.title, "Pull stopped");
+  assert.equal(outcome.message, sentence);
+  assert.deepEqual(outcome.rows.map((row) => row.status), ["not_pulled"]);
+  assert.equal(outcome.stats.find((stat) => stat.label === "not pulled")?.value, "1");
+  assert.equal(outcome.rows.some((row) => row.title === "Push is still blocked"), false);
+  assert.deepEqual(outcome.actions, [{ kind: "open_pull", label: "Open Pull review" }]);
   const html = renderOutcome(outcome);
-  assert.match(html, /Reset local sync state/);
-  assert.match(html, /data-icon="trash"/);
-  assert.doesNotMatch(html, />Retry</);
+  assert.match(html, /Pull stopped/);
+  assert.match(html, /Part of this version is missing from Local storage 1\. Compare again\./);
+  assert.match(html, /Not pulled/);
+  assert.doesNotMatch(html, /Push is still blocked|Reset local sync state/);
+});
 
-  const reviewHtml = renderReview(restorePlan, message, () => undefined);
-  assert.match(reviewHtml, /Reset local sync state/);
+test("a session that failed alone prints its sentence and offers no reset", () => {
+  const sentence = "This stored session cannot be read by this version of Mallard.";
+  const outcome = buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: restorePlan,
+    result: result({
+      success: false,
+      failed_actions: [{ action_id: "action-a", display_name: "Task A", message: sentence }],
+    }),
+    readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+    items: buildPullReviewItems(restorePlan),
+    completedResourceIds: new Set(),
+  });
+  assert.equal(outcome.rows.find((row) => row.status === "failed")?.reason, sentence);
+  assert.deepEqual(outcome.actions, [{ kind: "open_pull", label: "Open Pull review" }]);
+  const html = renderOutcome(outcome);
+  assert.match(html, /This stored session cannot be read by this version of Mallard\./);
+  assert.doesNotMatch(html, /Reset local sync state/);
 });
 
 test("a Pull review renders before readiness support resolves", async () => {

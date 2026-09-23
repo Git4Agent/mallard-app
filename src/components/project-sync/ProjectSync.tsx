@@ -2271,10 +2271,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
    *  offers keep their backend order and execute independently. */
   const runOutcomeAction = async (outcome: SyncOutcome, action: SyncOutcomeAction) => {
     if (!outcome.actions.includes(action)) return;
-    if (action.kind === "reset_metadata") {
-      await resetProjectSyncMetadata(outcome.projectId);
-      return;
-    }
     if (action.kind === "open_pull") {
       setStorageNotice(null);
       void beginProjectRestore(outcome.projectId, outcome.storageId);
@@ -2399,6 +2395,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectLabel(nextDetail.project),
       );
       if (!failure) return;
+      if (failure.startsWith("There is nothing to pull from")) {
+        /* O2: a cleared storage this computer synced with before. The
+           standing note in the activity list already says to push again. */
+        setStorageNotice({ projectId, storageId, kind: "nothing_to_pull", message: failure });
+        return;
+      }
       if (failure.includes("does not exist")) {
         if (isManagedCloudStorage(config.storages.find((candidate) => candidate.storage_id === storageId))) {
           // The address picker is the feedback: the repository to pull from
@@ -3217,7 +3219,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
-        onResetMetadata={() => void resetProjectSyncMetadata(pendingPush.projectId)}
       />
     ),
   } : restorePlan && restoreBinding ? {
@@ -3254,7 +3255,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           restoreBinding,
           restoreProjectName,
         )}
-        onResetMetadata={() => void resetProjectSyncMetadata(restoreBinding.local_project_id)}
         onPrimaryChange={setPullReviewPrimary}
       />
     ),

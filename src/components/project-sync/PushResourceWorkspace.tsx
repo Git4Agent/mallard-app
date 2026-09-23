@@ -26,7 +26,6 @@ import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSte
 import { STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
-import { isIrrecoverableSyncError } from "./syncError";
 import { formatBytes } from "../../format";
 
 export interface PushReviewBlocker {
@@ -72,7 +71,6 @@ interface Props {
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
-  onResetMetadata?: () => void;
 }
 
 function countSelected(items: InventoryResource[], selected: ReadonlySet<string>): number {
@@ -566,7 +564,6 @@ export default function PushResourceWorkspace({
   onClose,
   onPush,
   onPull,
-  onResetMetadata,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
@@ -738,11 +735,6 @@ export default function PushResourceWorkspace({
       severity: "danger",
       title: "Conversations couldn't be compared, so nothing can be selected",
       message: threadComparisonError,
-      action: isIrrecoverableSyncError(threadComparisonError) && onResetMetadata
-        ? (
-          <button type="button" className="btn btn-ghost" onClick={onResetMetadata} disabled={busy}>Reset local sync state</button>
-        )
-        : undefined,
     });
   }
   /* Plan-derived is not the same as present-at-open. Project-file holds come
@@ -1014,14 +1006,6 @@ export default function PushResourceWorkspace({
             severity="danger"
             timing="blocking"
             className="sync-pull-error"
-            action={isIrrecoverableSyncError(error) && onResetMetadata
-              ? (
-                <button type="button" className="btn btn-ghost danger" onClick={onResetMetadata} disabled={busy}>
-                  <Icon name="trash" size={13} />
-                  Reset local sync state
-                </button>
-              )
-              : undefined}
           >
             {error}
           </Notice>

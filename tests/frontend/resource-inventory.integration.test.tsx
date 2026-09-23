@@ -493,7 +493,7 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   assert.doesNotMatch(html, /Remote history is missing/);
 });
 
-test("an irrecoverable Push error replaces retry with the local-state reset", () => {
+test("a Push error names itself and offers no local-state reset", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
@@ -506,15 +506,14 @@ test("an irrecoverable Push error replaces retry with the local-state reset", ()
       onToggle={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
-      onResetMetadata={() => undefined}
     />,
   );
 
-  assert.match(html, /Reset local sync state/);
-  assert.match(html, /data-icon="trash"/);
+  assert.match(html, /stale at LineageDigest/);
+  assert.doesNotMatch(html, /Reset local sync state/);
 });
 
-test("a failed comparison offers the local-state reset only for stale metadata", () => {
+test("a failed comparison names the error and offers no reset", () => {
   const resource = memoryResource("review");
   const render = (threadComparisonError: string) => renderToStaticMarkup(
     <PushResourceWorkspace
@@ -528,17 +527,18 @@ test("a failed comparison offers the local-state reset only for stale metadata",
       onToggle={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
-      onResetMetadata={() => undefined}
     />,
   );
 
-  // A transport failure is not repaired by forgetting sync bases.
   const offline = render("S3 get 'bundles/head.json': dispatch failure: io error");
   assert.match(offline, /Conversations couldn&#x27;t be compared/);
   assert.doesNotMatch(offline, /Reset local sync state/);
-
+  // Contradictory metadata is not repaired by forgetting sync bases either:
+  // no Pull or Push surface offers the reset (PLAN_PULL_PINNED_VERSION.md,
+  // section 4.4).
   const stale = render("conversation checkpoint is stale at LineageDigest");
-  assert.match(stale, /Reset local sync state/);
+  assert.match(stale, /stale at LineageDigest/);
+  assert.doesNotMatch(stale, /Reset local sync state/);
 });
 
 test("two steps render two plain tabs — never a Review tab", () => {

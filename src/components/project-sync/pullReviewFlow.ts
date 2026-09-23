@@ -48,6 +48,19 @@ export interface PullReviewApplyResult {
   error: string | null;
 }
 
+/** The backend's refusal of a Pull whose review no longer matches the
+ *  storage: the pinned version lost a race, the storage was cleared, or this
+ *  computer synced past the review from another window. Printed verbatim in
+ *  the review's banner, with "Compare again". */
+export const REVIEW_SUPERSEDED = "The storage changed since this review. Compare again.";
+/** The refusal of a review older than its one-day validity. */
+export const REVIEW_EXPIRED = "This review is older than a day. Compare again.";
+
+/** Whether an apply error is one that a new review resolves. */
+export function compareAgainOffered(message: string | null | undefined): boolean {
+  return !!message && (message.includes(REVIEW_SUPERSEDED) || message.includes(REVIEW_EXPIRED));
+}
+
 /** Inspect the complete plan, including rows hidden from the file review. */
 export function canAcceptPullMetadata(plan: PullReview): boolean {
   if (plan.actions.length > 0) return false;

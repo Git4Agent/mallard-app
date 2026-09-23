@@ -1154,6 +1154,15 @@ export default function StorageCatalogPage({
       setMode({ kind: "list" });
       setPullPlan(null);
       await load();
+      if (outcome.stopped) {
+        // The storage could not be read: what was installed stays, the rest
+        // was not reached, and the accepted version did not advance.
+        notify(`Pull stopped — ${outcome.stopped}`, "attention");
+        setFailures(outcome.results
+          .filter((result) => result.message === "Not pulled")
+          .map((result) => `${result.display_name}: Not pulled`));
+        return;
+      }
       const failed = outcome.results
         .filter((result) => result.outcome === "failed" || result.outcome === "partial")
         .map((result) => `${result.display_name}: ${result.message ?? result.outcome}`);

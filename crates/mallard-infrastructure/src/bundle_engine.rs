@@ -216,6 +216,17 @@ impl ObjectCache {
             .clone()
     }
 
+    /// Forget every staged object, as an app restart does: a test of an apply
+    /// whose review ran in another process starts from a cold cache.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.entries.clear();
+            inner.order.clear();
+            inner.total_bytes = 0;
+        }
+    }
+
     fn get(&self, key: &ObjectCacheKey) -> Option<VerifiedBody> {
         let mut inner = self.inner.lock().ok()?;
         let hit = inner.entries.get(key).cloned()?;
@@ -249,6 +260,17 @@ impl ObjectCache {
         }
     }
 }
+
+/// The text a byte source reports for an object of a published version that
+/// the storage does not hold. The storage was cleared, or a folder that a
+/// sync product replicates has not received the object yet; nothing else
+/// removes an object of a listed version, and the two cannot be told apart,
+/// so the text names no cause. A stopped Pull prints it with the storage's
+/// name (PLAN_PULL_PINNED_VERSION.md, section 4.3).
+pub const VERSION_INCOMPLETE: &str = "part of this version is missing from the storage";
+
+/// The receipt of a ticked item that a stopped Pull did not reach.
+pub const NOT_PULLED: &str = "Not pulled";
 
 /// Payload access for planning and apply. Implementations verify each
 /// object against the manifest exactly once — callers trust returned bodies.
@@ -314,7 +336,7 @@ impl<'a, S: ObjectStore> EngineByteSource<'a, S> {
             },
         )?;
         let body = match outcome {
-            StageOutcome::Missing => return Err(format!("bundle object '{}' is missing", key)),
+            StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
             StageOutcome::Mismatch => {
                 return Err(format!(
                     "bundle object '{}' does not match manifest size/hash",
@@ -414,9 +436,7 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
             let objects = self.engine.store.stage_many_verified(&requests)?;
             for (((path, entry), (key, _)), outcome) in batch.iter().zip(&requests).zip(objects) {
                 let body = match outcome {
-                    StageOutcome::Missing => {
-                        return Err(format!("bundle object '{}' is missing", key))
-                    }
+                    StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
                     StageOutcome::Mismatch => {
                         return Err(format!(
                             "bundle object '{}' does not match manifest size/hash",
@@ -772,14 +792,21 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok(CommitRecord::parse(bundle_id, name, &bytes)?.published_by_origin)
     }
 
+    /// One listing of a bundle's stream, selected: the chain and the records
+    /// it does not hold, with nothing read. A Pull apply looks the version
+    /// its review pinned up on the chain before it reads that version by
+    /// name.
+    pub fn select(&self, bundle_id: &BundleId) -> Result<(Mainline, Vec<RecordName>), String> {
+        Ok(list_stream(&self.store, &RecordStream::project(bundle_id)?)?.into_selection())
+    }
+
     /// One observation of a bundle: the selected chain, the records that are
     /// kept and not selected, and the selected publication with its verified
     /// manifest. A command takes it once, classifies continuity from the
     /// chain, and later hands the observed publication to `publish` as the
     /// parent.
     pub fn observe(&self, bundle_id: &BundleId) -> Result<BundleObservation, String> {
-        let (mainline, unselected) =
-            list_stream(&self.store, &RecordStream::project(bundle_id)?)?.into_selection();
+        let (mainline, unselected) = self.select(bundle_id)?;
         let current = mainline
             .selected()
             .map(|name| self.snapshot_at(bundle_id, name))
@@ -4755,13 +4782,14 @@ mod tests {
             b"portable guidance"
         );
 
-        // Another publication is selected after planning: the apply must be
-        // of exactly the reviewed one, so it asks for another review.
+        // Another publication is selected after planning. The apply is of
+        // exactly the reviewed one, whose bytes cannot change, so it reads no
+        // head and finishes against the reviewed snapshot.
         let reviewed = selected_record(&engine, &id);
         let newer = child_record(&reviewed, 9);
         plant_record(engine.store(), &newer, newer.created_at_ms);
         let mut apply_bytes = engine.byte_source(&snapshot, None);
-        let error = engine
+        let applied = engine
             .apply_restore_plan_lazy(
                 &snapshot,
                 &mut apply_bytes,
@@ -4772,10 +4800,18 @@ mod tests {
                 &temp.path().join("backups"),
                 104,
             )
-            .unwrap_err();
-        assert!(
-            error.contains("bundle head changed after restore planning"),
-            "{error}"
+            .unwrap();
+        assert_eq!(applied.stopped, None);
+        // The action itself judges its target, which the first apply wrote
+        // after the plan pinned it absent: it reports on its own, and the
+        // apply is not refused for the newer publication.
+        assert!(applied
+            .receipts
+            .iter()
+            .any(|receipt| receipt.action_id == write_action.action_id));
+        assert_eq!(
+            fs::read(target.join("CLAUDE.md")).unwrap(),
+            b"portable guidance"
         );
     }
 
@@ -6123,6 +6159,51 @@ pub struct ApplyBundleResult {
     pub plan_id: PlanId,
     pub receipts: Vec<ApplyReceipt>,
     pub backups: Vec<BackupRecord>,
+    /// Why the apply stopped before it wrote any file, when it did: the
+    /// storage could not be read. Every approved action then carries a
+    /// "not pulled" receipt.
+    pub stopped: Option<String>,
+}
+
+/// The result of an apply that could not start its writes: every approved
+/// action is not pulled, every other one is skipped as it would have been,
+/// and nothing was written or backed up.
+pub fn unreached_apply_result(
+    plan: &RestorePlan,
+    approved_action_ids: &BTreeSet<ActionId>,
+    applied_at: u64,
+    stopped: Option<String>,
+) -> ApplyBundleResult {
+    ApplyBundleResult {
+        plan_id: plan.plan_id.clone(),
+        receipts: plan
+            .actions
+            .iter()
+            .map(|action| {
+                if approved_action_ids.contains(&action.action_id) {
+                    receipt_for(
+                        action,
+                        ActionStatus::Failed,
+                        applied_at,
+                        None,
+                        None,
+                        Some(NOT_PULLED.to_string()),
+                    )
+                } else {
+                    receipt_for(
+                        action,
+                        ActionStatus::Skipped,
+                        applied_at,
+                        None,
+                        None,
+                        Some("action was not approved".to_string()),
+                    )
+                }
+            })
+            .collect(),
+        backups: Vec::new(),
+        stopped,
+    }
 }
 
 impl<S: ObjectStore> BundleEngine<S> {
@@ -6205,16 +6286,10 @@ impl<S: ObjectStore> BundleEngine<S> {
             );
         }
 
-        let current = self
-            .read_head(&plan.bundle_id)?
-            .ok_or_else(|| "bundle head disappeared after planning".to_string())?;
-        if current.0.revision != plan.revision
-            || current.0.commit_id != plan.commit_id
-            || current.0.manifest_size != snapshot.head.manifest_size
-            || current.0.manifest_sha256 != plan.manifest_sha256
-        {
-            return Err("bundle head changed after restore planning".to_string());
-        }
+        // The apply reads the pinned version only. A newer publication
+        // selected since the review does not matter: the pinned bytes are the
+        // same, so no head is read here (PLAN_PULL_PINNED_VERSION.md, section
+        // 4.2).
         if !backup_root.is_absolute() {
             return Err("backup root must be absolute".to_string());
         }
@@ -6246,7 +6321,18 @@ impl<S: ObjectStore> BundleEngine<S> {
                 prefetch_paths.push(logical_path.clone());
             }
         }
-        bytes.prefetch(&prefetch_paths)?;
+        if let Err(reason) = bytes.prefetch(&prefetch_paths) {
+            // The storage cannot be read: the work ends before any file is
+            // written, and every approved action is not pulled. Nothing is
+            // rolled back and nothing is retried (PLAN_PULL_PINNED_VERSION.md,
+            // section 4.3).
+            return Ok(unreached_apply_result(
+                plan,
+                &effective_approved,
+                applied_at,
+                Some(reason),
+            ));
+        }
 
         let mut receipts = Vec::new();
         let mut backups = Vec::new();
@@ -6415,6 +6501,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             plan_id: plan.plan_id.clone(),
             receipts,
             backups,
+            stopped: None,
         })
     }
 

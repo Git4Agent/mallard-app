@@ -10,10 +10,9 @@ import type {
 import { compactThreadTitle, syncHoldDetail } from "./ProjectActivityPage";
 import { pushReviewPullHolds } from "./PushResourceWorkspace";
 import { pullActionResourceIds, type PullReviewItem } from "./pullReviewModel";
-import { isIrrecoverableSyncError } from "./syncError";
 
 /** A finished operation rendered on the storage card after its review closes. */
-export type SyncOutcomeRowStatus = "synced" | "held" | "preserved" | "failed";
+export type SyncOutcomeRowStatus = "synced" | "held" | "preserved" | "failed" | "not_pulled";
 
 export interface SyncOutcomeRow {
   key: string;
@@ -43,14 +42,16 @@ export type SyncOutcomeAction =
   }
   /** Nothing failed to apply — the environment did. Recheck without another Pull. */
   | { kind: "recheck"; label: string }
-  | { kind: "open_pull"; label: string }
-  | { kind: "reset_metadata"; label: string };
+  | { kind: "open_pull"; label: string };
 
 export interface SyncOutcome {
   projectId: string;
   storageId: string;
   tone: "success" | "warning";
   title: string;
+  /** One line under the title, when the result has one to say: why a Pull
+   *  stopped, or the storage's own error. */
+  message?: string;
   stats: SyncOutcomeStat[];
   rows: SyncOutcomeRow[];
   actions: SyncOutcomeAction[];
@@ -224,6 +225,14 @@ export function buildPullOutcome({
     !preservedResourceIds.has(resourceId)
   ));
   const failures = result.failed_actions ?? [];
+  // A stopped Pull: the storage could not be read after the download. What
+  // it installed stays, and every ticked item it did not reach is listed.
+  const stopped = result.stopped ?? null;
+  const notPulled = result.not_pulled_action_ids ?? [];
+  const fileTitle = (actionId: string): string | null => {
+    const path = plan.actions.find((action) => action.action_id === actionId)?.target_path;
+    return path ? path.split("/").pop() ?? path : null;
+  };
   // This readiness issue summarizes the same failed receipts shown below.
   // Keep independent setup errors, but do not report the failures twice.
   const readinessProblems = (readiness?.issues ?? []).filter((issue) => (
@@ -264,9 +273,22 @@ export function buildPullOutcome({
       status: "failed" as const,
       reason: issue.detail,
     })),
+    ...notPulled.map((actionId) => {
+      const resourceId = resourceByAction.get(actionId);
+      return {
+        key: actionId,
+        title: resourceId
+          ? displayThreadTitle(nameFor(resourceId))
+          : fileTitle(actionId) ?? "Restore action",
+        status: "not_pulled" as const,
+        threadId: resourceId ? threadByResource.get(resourceId) : undefined,
+      };
+    }),
   ];
 
-  const baselineStalled = result.reviewed_base_advanced === false;
+  // A stopped Pull does not say that Push is blocked: after a clear there is
+  // nothing to pull, and the standing note says what to do next.
+  const baselineStalled = result.reviewed_base_advanced === false && !stopped;
   if (baselineStalled) {
     rows.push({
       key: `${result.plan_id ?? "plan"}:baseline`,
@@ -279,9 +301,7 @@ export function buildPullOutcome({
   const problemCount = failures.length
     + readinessProblems.length
     + (error ? 1 : 0);
-  const needsAttention = problemCount > 0 || baselineStalled;
-  const irrecoverable = [error, ...failures.map((failure) => failure.message)]
-    .some((message) => isIrrecoverableSyncError(message));
+  const needsAttention = problemCount > 0 || baselineStalled || stopped !== null;
   const afterPullActions: SyncOutcomeAction[] = !needsAttention
     ? result.after_pull_actions.map((offer) => ({
       kind: "after_pull_action",
@@ -303,15 +323,21 @@ export function buildPullOutcome({
         label: "failed",
       }]
       : []),
+    ...(notPulled.length > 0
+      ? [{
+        icon: "git-compare-arrows" as const,
+        value: String(notPulled.length),
+        label: "not pulled",
+      }]
+      : []),
     { icon: "git-branch", label: "Version", value: String(plan.revision), lead: true },
   ];
 
-  const actions: SyncOutcomeAction[] = irrecoverable
-    ? [{ kind: "reset_metadata", label: "Reset local sync state" }]
-    : afterPullActions.length > 0
+  const actions: SyncOutcomeAction[] = afterPullActions.length > 0
     ? afterPullActions
     : failures.length === 0
       && !baselineStalled
+      && stopped === null
       && (readinessProblems.length > 0 || error)
       && result.plan_id
       ? [{ kind: "recheck", label: "Recheck" }]
@@ -323,7 +349,10 @@ export function buildPullOutcome({
     projectId,
     storageId: plan.storage_id,
     tone: needsAttention ? "warning" : "success",
-    title: problemCount > 0
+    message: stopped ?? undefined,
+    title: stopped !== null
+      ? "Pull stopped"
+      : problemCount > 0
       ? `${problemCount} ${plural(problemCount, "change")} ${problemCount === 1 ? "needs" : "need"} attention`
       : baselineStalled
         ? "Pull complete — Push still blocked"
