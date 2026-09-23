@@ -74,41 +74,37 @@ pub enum LibraryContinuity {
     Continuous,
     /// The accepted publication is on no selected chain: the repository was
     /// cleared, with or without a Push since, or the accepted push was
-    /// outranked after it was confirmed. The link's accepted state no longer
-    /// describes this storage: it is read as absent and never reset, and the
-    /// next Push or Pull replaces it.
+    /// outranked after it was confirmed; or the accepted head names another
+    /// storage identity or another repository. The link's accepted state
+    /// does not describe this storage's history: it is read as absent and
+    /// never reset, and the next Push or Pull replaces it.
     Replaced,
 }
 
 /// Continuity is decided by identity and ancestry, never by revision order:
 /// two sibling publications share a revision. A repository that lists empty
 /// holds no chain, so an accepted publication is not on it: the repository
-/// was cleared, and one Push repopulates it. A changed storage identity and a
-/// foreign repository id stay refusals.
+/// was cleared, and one Push repopulates it. An accepted head that names
+/// another storage identity or another repository describes a history this
+/// storage does not hold, and is read the same way, as absent: a refusal
+/// here would leave the page unable to load, and with it the link unable to
+/// be unlinked. Recovery is a user action, through the next Push or Pull.
 pub fn verify_library_continuity(
     accepted: Option<&LibraryHeadCoordinate>,
     mainline: &Mainline,
     repository_id: &CatalogResourceRepositoryId,
     storage_identity_sha256: &str,
-) -> Result<LibraryContinuity, String> {
+) -> LibraryContinuity {
     let Some(accepted) = accepted else {
-        return Ok(LibraryContinuity::Continuous);
+        return LibraryContinuity::Continuous;
     };
-    if &accepted.repository_id != repository_id {
-        return Err("the storage link points at a different resource repository".to_string());
+    if &accepted.repository_id != repository_id
+        || accepted.storage_identity_sha256 != storage_identity_sha256
+        || !mainline.contains(accepted.revision, accepted.commit_id.as_str())
+    {
+        return LibraryContinuity::Replaced;
     }
-    if accepted.storage_identity_sha256 != storage_identity_sha256 {
-        return Err(
-            "the storage connection identity changed after this resource was accepted".to_string(),
-        );
-    }
-    Ok(
-        if mainline.contains(accepted.revision, accepted.commit_id.as_str()) {
-            LibraryContinuity::Continuous
-        } else {
-            LibraryContinuity::Replaced
-        },
-    )
+    LibraryContinuity::Continuous
 }
 
 /// The selected publication as one observation read it: its head view and
@@ -1029,10 +1025,10 @@ mod tests {
             verify_library_continuity(Some(accepted), &mainline, &repository_id, &identity)
         };
         // The first publication is an ancestor, and the winner is selected.
-        assert_eq!(verdict(&accepted_first), Ok(LibraryContinuity::Continuous));
+        assert_eq!(verdict(&accepted_first), LibraryContinuity::Continuous);
         assert_eq!(
             verdict(&head_coordinate(earlier.head(), &identity)),
-            Ok(LibraryContinuity::Continuous)
+            LibraryContinuity::Continuous
         );
         // A record that is not selected shares the winner's revision and is
         // on no selected chain: revision order would have called it current.
@@ -1041,11 +1037,11 @@ mod tests {
         assert_eq!(earlier.head().revision, kept_head.revision);
         assert_eq!(
             verdict(&head_coordinate(&kept_head, &identity)),
-            Ok(LibraryContinuity::Replaced)
+            LibraryContinuity::Replaced
         );
         assert_eq!(
             verify_library_continuity(None, &mainline, &repository_id, &identity),
-            Ok(LibraryContinuity::Continuous)
+            LibraryContinuity::Continuous
         );
 
         // B1: the repository was cleared and nobody pushed since. It holds
@@ -1059,33 +1055,35 @@ mod tests {
                 &repository_id,
                 &identity
             ),
-            Ok(LibraryContinuity::Replaced)
+            LibraryContinuity::Replaced
         );
         assert_eq!(
             verify_library_continuity(None, &Mainline::default(), &repository_id, &identity),
-            Ok(LibraryContinuity::Continuous)
+            LibraryContinuity::Continuous
         );
 
-        // B3: the refusals stay, on a cleared repository too: another storage
-        // identity, and a foreign repository.
-        for chain in [&mainline, &Mainline::default()] {
-            assert!(verify_library_continuity(
-                Some(&accepted_first),
-                chain,
-                &repository_id,
-                &"b".repeat(64)
-            )
-            .unwrap_err()
-            .contains("identity changed"));
-        }
+        // B3: an accepted head that names another storage identity or another
+        // repository describes a history this storage does not hold. It is
+        // read as absent like a cleared repository's, on a live chain and on
+        // an empty one, and is never a refusal.
         let skills = CatalogResourceRepositoryId::for_coordinate(
             &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap(),
         );
-        assert!(
-            verify_library_continuity(Some(&accepted_first), &mainline, &skills, &identity)
-                .unwrap_err()
-                .contains("different resource repository")
-        );
+        for chain in [&mainline, &Mainline::default()] {
+            assert_eq!(
+                verify_library_continuity(
+                    Some(&accepted_first),
+                    chain,
+                    &repository_id,
+                    &"b".repeat(64)
+                ),
+                LibraryContinuity::Replaced
+            );
+            assert_eq!(
+                verify_library_continuity(Some(&accepted_first), chain, &skills, &identity),
+                LibraryContinuity::Replaced
+            );
+        }
     }
 
     #[test]

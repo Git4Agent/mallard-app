@@ -817,8 +817,10 @@ shared module for names, selection and list-then-write.
 - Continuity replaces the numeric rewind check with ancestry. A repository
   that lists empty holds no chain, so an accepted head is not on it: it reads
   replaced like any other cleared repository, the page loads, and one Push
-  repopulates it. The checks for a changed storage identity and a foreign
-  repository id stay.
+  repopulates it. An accepted head that names another storage identity or
+  another repository describes a history this storage does not hold, and is
+  read the same way, as absent, with nothing written; since September 22
+  neither is a refusal (implementation notes).
 - Apply takes a local single-flight lock per repository.
 - A Library record claims its parent the same way, at
   `library/<repository_id>/_claims/<parent token, or root>.json`, through the
@@ -833,7 +835,7 @@ shared module for names, selection and list-then-write.
   selected publication nor one of its ancestors, the page reads the accepted
   state as absent and writes nothing: every row compares as unreviewed and
   goes through the Pull choice, and the next Push saves a new accepted state.
-  This serves a cleared or recreated repository (B1 and B2 of
+  This serves a cleared or recreated repository (B1, B2 and B3 of
   `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, whose reset at load it replaces) and a
   Push that was outranked after it was confirmed: the Library's counterpart of
   section 9.4. Nothing is reset by the page (decision 12).
@@ -1038,7 +1040,7 @@ own tests green.
 | Claim: the local store | Writes none; its Push is unchanged; the fork-window tests stay on the plain store without claims and still pass |
 | Claim: clear | `_claims` goes before `_commits`; an interrupted clear after the claims pass leaves records without claims and the next Push claims the tip; a claim that lands during the clear is swept by the `repositories` pass; after a clear `root` can be claimed again |
 | Claim: interrupted clear, then a delayed writer (no recovery) | The clear is interrupted after its claims pass with the chain intact. A writer that listed the tip's parent childless before the tip was visible claims it, writes an earlier-stamped sibling, and is `Stored`. The tip's computer reads `Displaced` at its next refresh, nothing is rolled back, and it compares and pushes again. The clear's retry sweeps the stale claims first |
-| Library: accepted head off the chain (no recovery) | The page loads and writes nothing; every row compares as unreviewed and goes through the Pull choice; a Push saves a new accepted state. One fixture for a cleared repository and one for a displaced head |
+| Library: accepted head off the chain (no recovery) | The page loads and writes nothing; every row compares as unreviewed and goes through the Pull choice; a Push saves a new accepted state. One fixture for a cleared repository, one for a displaced head, and one for an accepted head that names another storage identity or another repository |
 | Claim: setup probe | The S3 and Dropbox probes refuse a destination that overwrites a key |
 | Claim: Library | The same rows on the resource engine; a taken claim ends before the accepted state is saved |
 
@@ -1092,6 +1094,7 @@ the plan above, or was decided while building them:
 | The shared module's shape | `write_record` returns `WriteOutcome`: `Stored` with the listing that selects the record, or `Unfinished` with the claimed record's name and bytes. The engine decides the own-record case, because only it can read the claimed record's manifest and compare content: the bundle engine compares the scope digests, the Library engine the per-resource content digests, and both compare the origin's replica token with the one this Push writes. An own record with the same content is written through `write_claimed_record`; anything else fails with `PUSH_UNFINISHED` or `OWN_PUSH_UNFINISHED`, engine-level texts that the two services turn into the sentences of section 13 with the storage's name |
 | The claim's parent check | A claim whose bytes are not a record of the claimed parent, by the five graph fields and the digest of the bytes, is an integrity error for that parent, as section 7.2 says; the record name is derived by the shared module from those fields, for both record types, without either engine's record type |
 | One request each | The write lists, again while its listing is stale, claims once, sends once, and lists once to settle; the record loop and its constant are gone. A request the store does not acknowledge is settled by one read-only check, the claim key after a claim and a listing after a record: what it shows landed counts, what it shows absent did not land and the Push fails with the store's error, and a check that cannot be made is `OutcomeUnknown`. The next Push is the user's |
+| Library: the last two refusals | `verify_library_continuity` no longer refuses an accepted head whose storage identity or repository id is not this link's. Both describe a history this storage does not hold, so both read `Replaced`: absent, nothing written, every row compares as unreviewed, and the next Push or Pull saves a fresh accepted state under this storage's identity. The refusals had left the page unable to load, and with it Unlink disabled, the row's deletion and the storage's removal refused while the link existed: the one remaining state that ended at a wipe of `~/.mallard`. Only the storage identity can differ in practice, from a hand edit of the storage configuration, a local folder configured through a symlink whose target moved, or a build that changes a derivation; a head that names another repository never reaches the page, because the links document refuses it at load and at save, so that half of the classifier is a second line that does not fire. Section 11 and B3 of the cleared plan say so |
 | *Finish that push* | One shared verb, `finish_claimed_push`: list, read the claim of the selected version, and write the record it holds through the same record path, once. A claim that is absent, or whose record a listing already holds, is `RemoteChanged` for the verb: the storage changed since the review that reported the unfinished push. A store without claims refuses the verb with its own sentence, and no banner offers it there. Both engines and both services expose it, under the same host or per-repository lock a Push takes; the Push review's banner and the Library page's failure zone offer it only while the error is a sentence of section 13 for that storage. A finished push reads "Finished. Compare again." in the done tone in the Push review, because the notice prints its severity word, and as the shell notice on the Library page |
 
 Still open: the live two-machine pass on R2 and on Dropbox, with the two live

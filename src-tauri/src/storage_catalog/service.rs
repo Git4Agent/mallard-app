@@ -1095,8 +1095,8 @@ fn resolve_scope_workspace(
             &mainline,
             &repository_id,
             &storage_identity_for_config(storage)?,
-        )?;
-        // The accepted state names a history the repository no longer has:
+        );
+        // The accepted state names a history this storage does not hold:
         // it is read as absent, and nothing is written. Every row then
         // compares as unreviewed, and the next Push or Pull drops the saved
         // acceptances and saves its own. Nothing is reset (CAS-free plan,
@@ -3946,6 +3946,148 @@ mod tests {
         assert_eq!(
             state_of(&fixture, "extra"),
             Some(CatalogLinkState::LocalMissing)
+        );
+    }
+
+    /// B3, no longer a refusal: an accepted head whose storage identity is
+    /// not this storage's describes a history this storage does not hold,
+    /// and is read like a cleared repository's. The page loads and writes
+    /// nothing, a skill this computer changed compares as unreviewed instead
+    /// of as changed here, and the next Push saves a fresh accepted state
+    /// under this storage's identity. The refusal this replaces left the page
+    /// unable to load, and with it Unlink disabled and the row's deletion and
+    /// the storage's removal refused. A head that names another repository
+    /// never reaches the page: the links document refuses it.
+    #[test]
+    fn an_accepted_head_of_another_storage_or_repository_reads_as_absent_and_the_next_push_replaces_it(
+    ) {
+        use super::super::domain::{
+            CatalogCoordinate, CatalogResourceRepositoryId, LibraryHeadCoordinate,
+        };
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        let scope_id = row.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let link_of = |fixture: &LibraryFixture| {
+            fixture
+                .catalog
+                .load_scope_links()
+                .unwrap()
+                .link_for(&scope_id, &fixture.storage.id)
+                .cloned()
+                .unwrap()
+        };
+        let state_of = |fixture: &LibraryFixture, name: &str| {
+            page(fixture, &scope_id, Some(&fixture.storage.id))
+                .unwrap()
+                .rows
+                .into_iter()
+                .find(|row| row.display_name == name)
+                .unwrap_or_else(|| panic!("no row named '{name}'"))
+                .state
+        };
+        let accepted = link_of(&fixture);
+        let identity = storage_identity_for_config(&fixture.storage).unwrap();
+        assert_eq!(
+            accepted
+                .accepted_head
+                .as_ref()
+                .map(|head| head.storage_identity_sha256.as_str()),
+            Some(identity.as_str())
+        );
+        // The skill changes here: with its acceptance it reads changed here.
+        fs::write(
+            fixture.skill_path.join("SKILL.md"),
+            b"---\nname: review\n---\nChanged here.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            state_of(&fixture, "review"),
+            Some(CatalogLinkState::LocalChanged)
+        );
+        let edit_head = |fixture: &LibraryFixture, edit: &dyn Fn(&mut LibraryHeadCoordinate)| {
+            fixture
+                .catalog
+                .mutate_scope_links(|document| {
+                    let link = document
+                        .links
+                        .iter_mut()
+                        .find(|link| link.link_id == accepted.link_id)
+                        .expect("the link");
+                    edit(link.accepted_head.as_mut().expect("an accepted head"));
+                    Ok(())
+                })
+                .unwrap();
+        };
+
+        // Another storage's identity on the accepted head: the page loads,
+        // writes nothing, and reads the acceptance as absent, so the changed
+        // skill compares as unreviewed.
+        edit_head(&fixture, &|head| {
+            head.storage_identity_sha256 = "b".repeat(64)
+        });
+        let foreign_identity = link_of(&fixture);
+        assert_eq!(
+            state_of(&fixture, "review"),
+            Some(CatalogLinkState::UnreviewedRemote)
+        );
+        assert_eq!(link_of(&fixture), foreign_identity);
+
+        // An accepted head that names another repository cannot exist in a
+        // loadable links document: the document refuses it at save and at
+        // load, so the classifier's reading of it as absent is a second line
+        // that never fires. Nothing is written by the refused edit.
+        let refused = fixture.catalog.mutate_scope_links(|document| {
+            let link = document
+                .links
+                .iter_mut()
+                .find(|link| link.link_id == accepted.link_id)
+                .expect("the link");
+            link.accepted_head
+                .as_mut()
+                .expect("an accepted head")
+                .repository_id = CatalogResourceRepositoryId::for_coordinate(
+                &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 2).unwrap(),
+            );
+            Ok(())
+        });
+        assert!(refused
+            .unwrap_err()
+            .contains("accepted a different repository"));
+        assert_eq!(link_of(&fixture), foreign_identity);
+
+        // A new skill is pushed. The changed one is not pushable without a
+        // Pull, because no base says this computer's copy came from the
+        // stored one. The saved acceptance is this storage's and this
+        // push's, and nothing of the foreign head remains.
+        let notes = fixture.user_home.join("codex-home/skills/notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(
+            notes.join("SKILL.md"),
+            b"---\nname: notes\n---\nSecond skill.\n",
+        )
+        .unwrap();
+        let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
+        let notes_id = resource_id_of(&plan, "notes");
+        let review_id = resource_id_of(&plan, "review");
+        assert!(plan.push_row(&notes_id).unwrap().row.selectable);
+        assert!(!plan.push_row(&review_id).unwrap().row.selectable);
+        let outcome = apply_push(&fixture, &plan, vec![notes_id.clone()]).unwrap();
+        assert!(outcome.published, "{}", outcome.message);
+        let saved = link_of(&fixture);
+        let saved_head = saved.accepted_head.expect("the push accepted a head");
+        assert_eq!(saved_head.storage_identity_sha256, identity);
+        assert_eq!(saved_head.repository_id, accepted.repository_id);
+        assert_eq!(saved_head.revision, 2);
+        assert_eq!(
+            saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
+            vec![notes_id]
+        );
+        assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::InSync));
+        assert_eq!(
+            state_of(&fixture, "review"),
+            Some(CatalogLinkState::UnreviewedRemote)
         );
     }
 

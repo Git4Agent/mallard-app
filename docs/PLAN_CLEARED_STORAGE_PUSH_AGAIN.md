@@ -202,7 +202,7 @@ section 12). They remain as written on a local folder.
 |---|---|---|---|
 | B1 | A repository was cleared, and nobody pushed since | The page loads and writes nothing: the link's accepted state is read as absent. Rows that exist only here are new and pushable. One Push repopulates the repository and saves a new accepted state | The page and its Push review fail: "the accepted resource repository disappeared from storage" |
 | B2 | A repository was cleared and pushed again | The accepted state is read as absent; nothing is written at load. Rows on both sides compare as unreviewed and go through the Pull choice. Rows only here are pushable | As today |
-| B3 | A changed storage identity, or a foreign repository | Refused | As today |
+| B3 | A changed storage identity, or a foreign repository | Read as absent, like B1 and B2: the accepted head describes a history this storage does not hold, so the page loads and writes nothing, every row compares as unreviewed, and the next Push or Pull saves a fresh accepted state. Changed on September 22, after this plan shipped: the refusal left the page unable to load, and with it Unlink disabled, the row's deletion and the storage's removal refused while the link existed. Only the identity can differ in practice; a head that names another repository never loads, because the links document refuses it | Refused: "the storage connection identity changed after this resource was accepted", or "the storage link points at a different resource repository" |
 
 ### 2.7 Cases this plan leaves as they are
 
@@ -536,7 +536,7 @@ Every changed row of section 2 gets a test that names it.
 | R4 | Two first versions: the later one fails, or reads `Displaced` |
 | R5 | A record whose parent was cleared is never selected, and that Push fails as a whole |
 | B1 | The page loads and writes nothing. A local row is selectable. One Push repopulates the repository |
-| B3 | Still refused |
+| B3 | Read as absent since September 22, like B1 and B2; the page loads |
 | F1 to F4, story 1 with project files | A project with files, cleared by another computer: every file reads "Only on this computer", no file reads "unknown", Push is `Ready`, and one Push publishes the files |
 | F3 and F4, story 2 with project files | After the other computer pushed files again: a file both hold with other content reads "Changed here and in storage", and the Pull offers "Replace file · keeps local copy"; a file only the storage has reads "Add file" |
 | A readable stale manifest | After an interrupted clear, and for a displaced base, the old manifest can be read: no file is judged against it, and no replaced file loses its local copy |
