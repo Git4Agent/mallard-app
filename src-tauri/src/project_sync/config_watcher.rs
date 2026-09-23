@@ -26,16 +26,6 @@ pub struct StorageConnectionChangedEvent {
     pub storage_id: String,
 }
 
-/// A Push this computer had confirmed was outranked by another computer's
-/// and rolled back on one link. The payload names the link only.
-pub const PUSH_OUTRANKED_EVENT: &str = "project-sync-push-outranked";
-
-#[derive(Serialize, Clone)]
-pub struct PushOutrankedEvent {
-    pub local_project_id: String,
-    pub storage_id: String,
-}
-
 /// Forward the infrastructure's connection-health transitions to the window
 /// for the life of the process. A lagged receiver just keeps forwarding; the
 /// frontend re-reads the whole listing on every event.
@@ -77,39 +67,6 @@ pub fn start_ignored_name_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>)
                     "warn",
                     &format!("Ignored '{name}' in the storage: it is not a Mallard object."),
                 ),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
-        })
-        .ok();
-}
-
-/// Tell the window, and the activity log, each time a link was rolled back
-/// because another computer's Push outranked one this computer had confirmed.
-pub fn start_outranked_push_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    let mut events = super::service::outranked_push_events().subscribe();
-    thread::Builder::new()
-        .name("mallard-outranked-push-events".to_string())
-        .spawn(move || loop {
-            match events.blocking_recv() {
-                Ok(outranked) => {
-                    crate::activity_log::emit_typed_log(
-                        &app,
-                        mallard_infrastructure::activity_log::ActivityLogType::Push,
-                        "warn",
-                        &format!(
-                            "Another computer's push to {} was selected over the last push of {}. That push is kept in the storage and counts as not made; push again.",
-                            outranked.storage, outranked.project
-                        ),
-                    );
-                    let _ = app.emit(
-                        PUSH_OUTRANKED_EVENT,
-                        PushOutrankedEvent {
-                            local_project_id: outranked.local_project_id.to_string(),
-                            storage_id: outranked.storage_id.to_string(),
-                        },
-                    );
-                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }

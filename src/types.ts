@@ -951,13 +951,6 @@ export interface StorageConnectionChangedEvent {
   storage_id: string;
 }
 
-/** A push this computer had confirmed was outranked by another computer's
- *  and rolled back on this link; pushing again publishes it. */
-export interface PushOutrankedEvent {
-  local_project_id: string;
-  storage_id: string;
-}
-
 export type ResourceSyncState =
   | "synced"
   | "local_only"
@@ -1093,6 +1086,10 @@ export type RemoteContinuity =
   | { state: "in_sync"; revision: number }
   | { state: "advanced"; base_revision: number; remote_revision: number }
   | { state: "replaced"; base_revision: number; remote_revision: number }
+  /** Another computer's push displaced the publication this computer last
+   *  pushed (`saved_by: "push"`) or last pulled (`"pull"`). Nothing is
+   *  rolled back: the standing notice asks for a comparison. */
+  | { state: "displaced"; base_revision: number; remote_revision: number; saved_by: "push" | "pull" }
   | { state: "unknown"; message: string };
 
 /**

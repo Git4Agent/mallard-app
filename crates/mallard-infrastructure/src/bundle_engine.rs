@@ -741,8 +741,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         Ok((head, token))
     }
 
-    /// One listed publication with its verified manifest: the selected one,
-    /// or an earlier one on the chain that a link is rolled back to.
+    /// One listed publication with its verified manifest.
     pub fn snapshot_at(
         &self,
         bundle_id: &BundleId,
@@ -759,6 +758,18 @@ impl<S: ObjectStore> BundleEngine<S> {
             },
             token,
         ))
+    }
+
+    /// The origin one listed record carries: who published it. Read only
+    /// while a link's history reads `Displaced`, to tell whether this
+    /// computer's copy of the project published the displaced publication.
+    pub fn published_by(
+        &self,
+        bundle_id: &BundleId,
+        name: &RecordName,
+    ) -> Result<PortableOrigin, String> {
+        let bytes = read_record(&self.store, &RecordStream::project(bundle_id)?, name)?;
+        Ok(CommitRecord::parse(bundle_id, name, &bytes)?.published_by_origin)
     }
 
     /// One observation of a bundle: the selected chain, the records that are
@@ -4059,15 +4070,20 @@ mod tests {
             assert_eq!(selected.head, earlier.head, "device {device}");
             assert!(!observed.mainline.contains(2, kept.commit_id()));
             // The observation also names what is kept and not selected, and
-            // the chain says where it was left: at the publication both
-            // computers reviewed, which still reads by its record name.
+            // the chain says it was outranked: its parent is the publication
+            // both computers reviewed, which still reads by its record name.
             assert_eq!(observed.unselected, [kept.clone()]);
-            let left_at = observed
+            let outranked = observed
                 .mainline
                 .outranked(&observed.unselected, kept.commit_id())
-                .and_then(|outranked| outranked.shared)
-                .expect("the record that lost names the shared publication");
-            let (at_shared, _) = engine(shared.clone()).snapshot_at(&id, &left_at).unwrap();
+                .expect("the record that lost is outranked");
+            let left_at = observed
+                .mainline
+                .names()
+                .iter()
+                .find(|name| Some(name.token()) == outranked.parent())
+                .expect("the record that lost names a selected parent");
+            let (at_shared, _) = engine(shared.clone()).snapshot_at(&id, left_at).unwrap();
             assert_eq!(at_shared.head, reviewed.head);
             assert_eq!(at_shared.manifest, reviewed.manifest);
             // Nothing is merged: the selected snapshot is the winner's alone.
@@ -4076,18 +4092,25 @@ mod tests {
             // A failed push moves no base. The computer that lost still holds
             // the publication both reviewed, and the selected one descends
             // from it: an ordinary advanced storage, never a replaced one.
+            let nobody = |_: &RecordName| unreachable!("no base names the record that lost");
             assert_eq!(
                 domain::classify_remote_continuity(
                     &observed.mainline,
-                    [&repository_base(&earlier)]
-                ),
+                    &observed.unselected,
+                    [&repository_base(&earlier)],
+                    nobody,
+                )
+                .unwrap(),
                 domain::RemoteContinuity::InSync { revision: 2 }
             );
             assert_eq!(
                 domain::classify_remote_continuity(
                     &observed.mainline,
-                    [&repository_base(&reviewed)]
-                ),
+                    &observed.unselected,
+                    [&repository_base(&reviewed)],
+                    nobody,
+                )
+                .unwrap(),
                 domain::RemoteContinuity::Advanced {
                     base_revision: 1,
                     remote_revision: 2
@@ -4213,8 +4236,11 @@ mod tests {
         assert_eq!(
             domain::classify_remote_continuity(
                 &ahead.mainline,
-                [&repository_base(first.snapshot().unwrap())]
-            ),
+                &ahead.unselected,
+                [&repository_base(first.snapshot().unwrap())],
+                |_| unreachable!("nothing is displaced"),
+            )
+            .unwrap(),
             domain::RemoteContinuity::Advanced {
                 base_revision: 1,
                 remote_revision: 2

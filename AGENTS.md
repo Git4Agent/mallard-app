@@ -165,8 +165,9 @@ Treat safety behavior as part of the product contract:
   storage provider needs only put, get, and list. A Push whose record is not
   selected has failed: keep every local acceptance (bases, checkpoints,
   receipts, Library accepted state) after the publish call returns. Observe a
-  linked bundle only through `observe_linked_bundle`, which first rolls back
-  a Push that was outranked after it was confirmed.
+  linked bundle only through `observe_linked_bundle`, which classifies a
+  displaced base and writes nothing: recovery is a user action, never a
+  rollback.
 - Pull and dependency apply operations must remain plan-based and explicitly
   approved. Keep revision, digest, and expiry checks intact.
 - Deletion is opt-in. File deletion must verify the expected local digest;

@@ -897,27 +897,25 @@ One publication performs:
    whole, nothing local is committed, and the record stays in the storage,
    never selected.
 
-A sibling of a publication can be written only inside the fork window — the
-store's listing lag, the ten-second listing freshness, and one record request
-— after that publication became visible. Outside it, selection is final.
-Inside it the earlier-ranked sibling is selected and the other is kept and
-not selected. Its writer reads that from the listing of step 8 and fails, so
-its base stays on the shared parent: the next refresh reads `Advanced`, and
-the next Push publishes the same content.
+A sibling of a publication can land after that publication became visible:
+another computer listed before this record was visible, then wrote a record
+that carries an earlier timestamp, usually within seconds and in principle at
+any later time. The earlier-ranked sibling is selected and the other is kept
+and not selected. A writer that reads that from the listing of step 8 fails,
+and its base stays on the shared parent: the next refresh reads `Advanced`,
+and the next Push publishes the same content.
 
-Only a sibling that becomes visible after step 8 already selected this record
-leaves local state on an unselected record. Every command that observes the
-bundle settles that first. The record is listed, it is not selected, and its
-parent names lead over listed records to a selected publication whose selected
-child is another record; ranks never change, so that verdict is final. The
-link is rolled back in one local transaction: each scope base reviewed in the
-outranked publication returns to that shared publication (or is removed when
-the shared publication lacks the scope), and each session acceptance saved
-there is forgotten the way a storage clear forgets one: the checkpoint keeps
-its read cursor and its physical mapping, and the local-to-cloud conversation
-mappings stay. The link then reads `Advanced`, first-contact adoption re-proves
-the sessions the storage already holds, and the next Push publishes the same
-content under the same cloud ids.
+A sibling that becomes visible only after step 8 already selected this record
+leaves local state on an unselected record. The record is listed, it is not
+selected, and its parent names lead over listed records to a selected
+publication whose selected child is another record; ranks never change, so
+that verdict is final. Nothing is rolled back: recovery is a user action. The
+next observation reports the link `Displaced`, every scope base and session
+acceptance saved in that publication is stale and read as absent (below), the
+standing notice says whether this computer's last push or last pull is no
+longer part of the history, and the user compares and pushes again. The Push
+or the Pull that saves new bases removes the stale ones in the same
+transaction.
 
 A record that no listed record connects to the selected chain is left alone:
 that is a stream that was cleared (`RemoteMissing`), or cleared and pushed

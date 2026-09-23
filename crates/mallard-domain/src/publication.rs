@@ -283,32 +283,40 @@ impl Mainline {
         self.0.iter().any(|name| name.commit_id() == commit_id)
     }
 
-    /// Where this chain left the publication `commit_id`, when it is one of
-    /// `unselected`: the records of the same listing that this chain does not
-    /// hold. A publication that is selected, that is not listed, or that no
-    /// listed record connects to this chain is not outranked; a stream that
-    /// was cleared and pushed again proves nothing about it.
-    pub fn outranked(&self, unselected: &[RecordName], commit_id: &str) -> Option<Outranked> {
+    /// The listed record of the publication `commit_id` that this chain
+    /// left, when it is one of `unselected`: the records of the same listing
+    /// that this chain does not hold. It is outranked when walking its
+    /// parent names over listed records reaches this chain, where another
+    /// record on the same parent ranked first, or the virtual root while
+    /// another first publication is selected. Ranks never change and records
+    /// are deleted only by a clear, so the verdict is final; a listing that
+    /// lags can hide records, and cannot produce it. A publication that is
+    /// selected, that is not listed, or that no listed record connects to
+    /// this chain is not outranked: a stream that was cleared and pushed
+    /// again proves nothing about it.
+    pub fn outranked<'u>(
+        &self,
+        unselected: &'u [RecordName],
+        commit_id: &str,
+    ) -> Option<&'u RecordName> {
         if self.contains_commit(commit_id) {
             return None;
         }
-        let mut current = unselected
+        let record = unselected
             .iter()
             .filter(|name| name.commit_id() == commit_id)
             .min_by(|left, right| left.rank().cmp(&right.rank()))?;
+        let mut current = record;
         loop {
             let Some(parent) = current.parent() else {
                 // A first publication that is not selected: another one is.
-                return (!self.is_empty()).then_some(Outranked { shared: None });
+                return (!self.is_empty()).then_some(record);
             };
             if let Some(shared) = self.0.iter().find(|name| name.token() == parent) {
                 // The selected chain goes on from `shared` through a sibling.
                 let sibling_selected = self.contains_depth(shared.revision() + 1);
-                return (current.revision() == shared.revision() + 1 && sibling_selected).then(
-                    || Outranked {
-                        shared: Some(shared.clone()),
-                    },
-                );
+                return (current.revision() == shared.revision() + 1 && sibling_selected)
+                    .then_some(record);
             }
             let next = unselected.iter().find(|name| name.token() == parent)?;
             if current.revision() != next.revision() + 1 {
@@ -321,17 +329,6 @@ impl Mainline {
     fn contains_depth(&self, revision: u64) -> bool {
         usize::try_from(revision).is_ok_and(|depth| depth >= 1 && depth <= self.0.len())
     }
-}
-
-/// A publication that is listed in its stream and not selected, and where the
-/// selected chain left it: another record on the same parent ranked first.
-/// Ranks never change and records are never deleted, so the verdict is
-/// final. A listing that lags can hide records; it cannot produce this.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outranked {
-    /// The last selected publication it descends from. None when its branch
-    /// starts at a first publication that was not selected.
-    pub shared: Option<RecordName>,
 }
 
 #[cfg(test)]
@@ -549,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn an_outranked_publication_names_the_last_selected_one_it_descends_from() {
+    fn an_outranked_publication_is_one_the_chain_left_through_a_sibling() {
         let root = first(1, 10);
         let middle = child(&root, 2, 20);
         let winner = child(&middle, 3, 30);
@@ -559,19 +556,24 @@ mod tests {
         let names = [&root, &middle, &winner, &tip, &loser, &built_on_loser];
         let mainline = Mainline::select(names.into_iter().cloned());
         let unselected = [loser.clone(), built_on_loser.clone()];
-        let shared = |commit: &RecordName| {
-            mainline
-                .outranked(&unselected, commit.commit_id())
-                .map(|outranked| outranked.shared)
-        };
         // The sibling that ranked second, and everything built on it, left
-        // the chain at the parent both siblings name.
-        assert_eq!(shared(&loser), Some(Some(middle.clone())));
-        assert_eq!(shared(&built_on_loser), Some(Some(middle.clone())));
+        // the chain at the parent both siblings name. The verdict names the
+        // record it was asked about.
+        assert_eq!(
+            mainline.outranked(&unselected, loser.commit_id()),
+            Some(&loser)
+        );
+        assert_eq!(
+            mainline.outranked(&unselected, built_on_loser.commit_id()),
+            Some(&built_on_loser)
+        );
         // Selected publications and their ancestors are not outranked, and
         // neither is a publication the listing does not hold.
         for selected in [&root, &middle, &winner, &tip] {
-            assert_eq!(shared(selected), None);
+            assert_eq!(
+                mainline.outranked(&unselected, selected.commit_id()),
+                None
+            );
         }
         assert_eq!(
             mainline.outranked(&unselected, first(9, 1).commit_id()),
@@ -586,7 +588,7 @@ mod tests {
         for name in [&other_root, &on_other_root] {
             assert_eq!(
                 mainline.outranked(&unselected, name.commit_id()),
-                Some(Outranked { shared: None })
+                Some(name)
             );
         }
     }

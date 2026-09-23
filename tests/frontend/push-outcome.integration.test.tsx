@@ -7,10 +7,9 @@ import type {
   ThreadSyncDecision,
   ThreadSyncEntry,
 } from "../../src/types";
-import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import Notice from "../../src/components/notice/Notice";
-import { buildPushOutcome, pushOutrankedNotice } from "../../src/components/project-sync/syncOutcome";
+import { buildPushOutcome } from "../../src/components/project-sync/syncOutcome";
 import { storageAccessErrorMessage } from "../../src/storageError";
 
 function decision(action: ConversationReviewAction, selectable: boolean): ThreadSyncDecision {
@@ -173,23 +172,3 @@ test("a changed storage and an unconfirmed push reach the Push review banner wor
   }
 });
 
-test("a push outranked after it was confirmed is said once, in one short sentence", () => {
-  const sentence = pushOutrankedNotice("Attic R2");
-  assert.equal(sentence, "Another computer pushed to Attic R2 first. Push again.");
-  assert.equal(
-    pushOutrankedNotice(undefined),
-    "Another computer pushed to this storage first. Push again.",
-  );
-  // The shell notice prints the severity word itself, so the copy names none.
-  assert.doesNotMatch(sentence, /\b(error|warning|note|done)\b/i);
-  const markup = renderToStaticMarkup(
-    <Notice severity="warning" timing="progress">{sentence}</Notice>,
-  );
-  assert.ok(markup.includes(sentence), markup);
-  assert.match(markup, /Warning/);
-  // The backend rolls the link back during a refresh and announces it; the
-  // shell says it through its one notice, at the attention tone.
-  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  assert.match(shell, /listen<PushOutrankedEvent>\("project-sync-push-outranked"/);
-  assert.match(shell, /pushOutrankedNotice\(storage\?\.name\), tone: "attention"/);
-});

@@ -977,31 +977,59 @@ pub enum RemoteContinuity {
         remote_revision: u64,
     },
     /// A recorded base is neither the selected publication nor one of its
-    /// ancestors, and the listing cannot connect it to the selected chain:
-    /// the stream was cleared or recreated. A Push that another computer's
-    /// outranks never reads this: while it runs it fails and moves no base,
-    /// and after it was confirmed the link is rolled back to the publication
-    /// both share before continuity is classified (`Mainline::outranked`).
+    /// ancestors, and no listed record connects it to the selected chain:
+    /// the stream was cleared or recreated.
     Replaced {
         base_revision: u64,
         remote_revision: u64,
     },
+    /// A recorded base was reviewed in a publication that is listed, not
+    /// selected, and connected by listed records to the selected chain:
+    /// another computer's record outranked it after this computer's Push
+    /// was confirmed, or after its Pull (`Mainline::outranked`). The storage
+    /// was not cleared. Nothing is rolled back: the base is stale and read
+    /// as absent, like a cleared history's, and the user compares and
+    /// pushes again. `base_revision` is the newest displaced publication a
+    /// base was reviewed in, and `saved_by` says whether this computer's
+    /// copy of the project published it.
+    Displaced {
+        base_revision: u64,
+        remote_revision: u64,
+        saved_by: SavedBy,
+    },
     /// The stream could not be listed; no verdict is claimed.
     Unknown { message: String },
+}
+
+/// Which operation of this computer saved a base: a Push, which published
+/// the publication the base names, or a Pull, which reviewed another
+/// computer's.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedBy {
+    Push,
+    Pull,
 }
 
 /// Classify remote history continuity by identity and ancestry, never by
 /// revision order: two sibling publications share a revision, and a losing
 /// branch can be longer than the selected one. `bases` is every publication
 /// a scope base of the link was reviewed in; the newest of them is the one
-/// the verdict reports.
+/// the verdict reports. `unselected` is every listed record the chain does
+/// not hold: a stale base whose publication is among them and connects to
+/// the chain was displaced, not cleared, and `saved_by` is then asked once,
+/// with the newest displaced publication, who published it. That is the
+/// only read this classifier can need, only while the verdict is
+/// `Displaced`, and its failure is the caller's error, never a verdict.
 pub fn classify_remote_continuity<'a>(
     mainline: &Mainline,
+    unselected: &[RecordName],
     bases: impl IntoIterator<Item = &'a RepositoryBase>,
-) -> RemoteContinuity {
+    saved_by: impl FnOnce(&RecordName) -> Result<SavedBy, String>,
+) -> Result<RemoteContinuity, String> {
     let bases = bases.into_iter().collect::<Vec<_>>();
     let newest = bases.iter().max_by_key(|base| base.revision);
-    match (mainline.selected(), newest) {
+    Ok(match (mainline.selected(), newest) {
         (None, None) => RemoteContinuity::Fresh,
         (None, Some(base)) => RemoteContinuity::RemoteMissing {
             base_revision: base.revision,
@@ -1010,10 +1038,21 @@ pub fn classify_remote_continuity<'a>(
             remote_revision: selected.revision(),
         },
         (Some(selected), Some(newest)) => {
-            let continuous = bases
+            let stale = bases
                 .iter()
-                .all(|base| mainline.contains(base.revision, &base.commit_id));
-            if !continuous {
+                .filter(|base| !mainline.contains(base.revision, &base.commit_id))
+                .collect::<Vec<_>>();
+            let displaced = stale
+                .iter()
+                .filter_map(|base| mainline.outranked(unselected, &base.commit_id))
+                .max_by_key(|name| name.revision());
+            if let Some(displaced) = displaced {
+                RemoteContinuity::Displaced {
+                    base_revision: displaced.revision(),
+                    remote_revision: selected.revision(),
+                    saved_by: saved_by(displaced)?,
+                }
+            } else if !stale.is_empty() {
                 RemoteContinuity::Replaced {
                     base_revision: newest.revision,
                     remote_revision: selected.revision(),
@@ -1029,7 +1068,7 @@ pub fn classify_remote_continuity<'a>(
                 }
             }
         }
-    }
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -5744,7 +5783,7 @@ pub use portable::{
     TombstoneTargetPrimitive,
 };
 pub use provider_config::{AgentProviderConfig, CatalogProviderConfig, StorageProviderConfig};
-pub use publication::{Mainline, Outranked, PublicationToken, RecordName};
+pub use publication::{Mainline, PublicationToken, RecordName};
 pub use secrets::{SecretMap, SecretOperation, SecretValue};
 
 pub use conversation_reconciliation::{

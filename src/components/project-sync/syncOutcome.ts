@@ -66,12 +66,6 @@ function displayThreadTitle(value: string): string {
   return compactThreadTitle(value).trim() || "Untitled session";
 }
 
-/** Said once when a push this computer had confirmed was outranked by another
- *  computer's and rolled back. The notice prints the severity word itself. */
-export function pushOutrankedNotice(storageName: string | undefined): string {
-  return `Another computer pushed to ${storageName ?? "this storage"} first. Push again.`;
-}
-
 export function buildPushOutcome({
   projectId,
   storageId,

@@ -2,14 +2,13 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import Notice, { NoticeZone } from "./components/notice/Notice";
 import { clearedStorageNotice } from "./components/project-sync/clearedStorageNotice";
-import { pushOutrankedNotice } from "./components/project-sync/syncOutcome";
 import type { ScopeContinuity, ThreadSyncComparison } from "./types";
 import "./App.css";
 
-/* A dev harness: the three notices of DESIGN_CAS_FREE_STORAGE_REFACTOR.md
+/* A dev harness: the notices of DESIGN_CAS_FREE_STORAGE_REFACTOR.md
    section 13 and the standing notice of PLAN_CLEARED_STORAGE_PUSH_AGAIN.md
-   section 5, drawn by the real components in the surfaces they already live
-   in. Open /push-notices-live.html on the Vite server. */
+   section 5 in its three forms, drawn by the real components in the surfaces
+   they already live in. Open /push-notices-live.html on the Vite server. */
 
 /** A comparison of a storage another computer cleared: the agent's area
  *  reads `codex`, and the project's files were never stored. */
@@ -58,12 +57,38 @@ createRoot(document.getElementById("root")!).render(
         </Notice>
       </Specimen>
       <Specimen
-        when="A confirmed push was outranked afterwards"
-        where="Shell notice under the path bar, once, on the refresh that rolled the link back. The sessions show as not pushed again."
+        when="A confirmed push was displaced afterwards"
+        where="Standing note in the project activity notice zone, also above the Push review list, while the comparison reads the last push displaced. Nothing is rolled back; the areas it wrote read as never reviewed here, so a Pull comes first. It ends by itself after the next Push."
       >
-        <Notice severity="warning" timing="progress">
-          {pushOutrankedNotice("Attic R2")}
-        </Notice>
+        <NoticeZone
+          items={[clearedStorageNotice(
+            clearedComparison(
+              { state: "displaced", base_revision: 3, remote_revision: 3, saved_by: "push" },
+              { state: "unreviewed", remote_revision: 3 },
+            ),
+            "Attic R2",
+          )!]}
+          subject="notes about this project activity"
+          timing="standing"
+          label="Notes about this project activity"
+        />
+      </Specimen>
+      <Specimen
+        when="A pulled version was displaced afterwards"
+        where="The same zone, when this computer did not publish the displaced version: it pulled it."
+      >
+        <NoticeZone
+          items={[clearedStorageNotice(
+            clearedComparison(
+              { state: "displaced", base_revision: 3, remote_revision: 3, saved_by: "pull" },
+              { state: "unreviewed", remote_revision: 3 },
+            ),
+            "Attic R2",
+          )!]}
+          subject="notes about this project activity"
+          timing="standing"
+          label="Notes about this project activity"
+        />
       </Specimen>
       <Specimen
         when="Another computer cleared the storage, and Push is open"

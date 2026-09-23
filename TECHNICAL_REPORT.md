@@ -412,17 +412,18 @@ two causes: the listing before the write shows another child or another
 selection and nothing is written, or the listing after the write selects the
 other computer's record and this one stays in the storage, never selected.
 Either way the Push failed as a whole and no machine-local metadata moved.
-A sibling of a publication can be written only inside the fork window — the
-store's listing lag, the ten-second listing freshness, and one record request
-— after that publication became visible; outside it selection is final. The
-earlier-ranked sibling is selected and the other is kept; the losing replica's
-Push failed, so it reads `Advanced` on its next refresh and pushes again. A
-sibling that becomes visible only after a Push was confirmed is settled by the
-next observation: the link's scope bases return to the last selected
-publication both branches share, the session acceptance saved at the
-outranked publication is forgotten with its read cursor kept, the window says
-so once, and the next Push publishes the same content under the same cloud
-ids. `Replaced` is left for a stream that was cleared or recreated, and
+A sibling of a publication can land after that publication became visible:
+another computer listed before this record was visible and wrote a record
+that carries an earlier timestamp, usually within seconds and in principle at
+any later time. The earlier-ranked sibling is selected and the other is kept;
+a Push that reads that from its confirming listing failed, reads `Advanced`
+on its next refresh and pushes again. A sibling that becomes visible only
+after a Push was confirmed is reported by the next observation as
+`Displaced`: nothing is rolled back, the bases and the acceptance saved at
+the outranked publication are stale and read as absent, a standing notice
+says that this computer's last push (or last pull) is no longer part of the
+history, and the user compares and pushes again under the same cloud ids.
+`Replaced` is left for a stream that was cleared or recreated, and
 `RemoteMissing` for one that was cleared and not pushed to since. Neither
 blocks anything. A scope base or a session acceptance that names a
 publication off the selected chain is stale: every comparison reads it as

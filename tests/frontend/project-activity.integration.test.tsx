@@ -1378,10 +1378,37 @@ test("a storage another computer cleared shows one standing note with no unlink 
   // A storage whose history this computer is on has nothing to say.
   assert.doesNotMatch(render(emptyComparison()), /Another computer cleared/);
 
+  // R3 and Q4: another computer's push displaced the publication this
+  // computer last pushed, or last pulled. Nothing is rolled back; the note
+  // says which, and asks for a comparison. The area that holds the displaced
+  // content reads as never reviewed here, so a Pull comes first.
+  const displaced = (saved_by: "push" | "pull") => emptyComparison({
+    revision: 3,
+    base_revision: 3,
+    remote_continuity: { state: "displaced", base_revision: 3, remote_revision: 3, saved_by },
+    scopes: [
+      writable("project", { state: "in_sync", revision: 3 }),
+      writable("provider:codex", { state: "unreviewed", remote_revision: 3 }),
+    ],
+  });
+  const displacedPush = render(displaced("push"));
+  assert.match(
+    displacedPush,
+    /Another computer pushed to Local storage 1 first\. This computer&#x27;s last push is no longer part of its history\. Compare again\./,
+  );
+  assert.match(
+    render(displaced("pull")),
+    /Another computer pushed to Local storage 1 first\. This computer&#x27;s last pull is no longer part of its history\. Compare again\./,
+  );
+  assert.match(displacedPush, /class="notice warning[^"]*" role="region"/);
+  assert.match(render(displaced("push"), "push"), /Another computer pushed to Local storage 1 first/);
+  assert.doesNotMatch(render(displaced("push"), "pull"), /Another computer pushed/);
+  assert.doesNotMatch(displacedPush, /Another computer cleared|Push again\./);
+
   // No state asks for an unlink or a reset, and the note has no action.
-  for (const html of [openHtml, render(recreated)]) {
+  for (const html of [openHtml, render(recreated), displacedPush]) {
     assert.doesNotMatch(html, /Unlink storage|Storage history changed|Reset local sync|unlink/i);
-    assert.doesNotMatch(html, /Another computer cleared[^<]*<\/p>\s*<button/);
+    assert.doesNotMatch(html, /Another computer (cleared|pushed)[^<]*<\/p>\s*<button/);
   }
 });
 

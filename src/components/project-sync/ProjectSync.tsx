@@ -27,7 +27,6 @@ import type {
   ProviderKey,
   ProviderProfile,
   ProviderProfileSummary,
-  PushOutrankedEvent,
   ResourceInventory as ResourceInventoryModel,
   PullReview,
   SetupDraftSummary,
@@ -97,7 +96,6 @@ import { buildPullReviewItems, pullActionResourceIds } from "./pullReviewModel";
 import {
   buildPullOutcome,
   buildPushOutcome,
-  pushOutrankedNotice,
   type SyncOutcome,
   type SyncOutcomeAction,
 } from "./syncOutcome";
@@ -1395,19 +1393,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       void unlisten.then((dispose) => dispose());
     };
   }, [adoptConfigSnapshot]);
-
-  /* A push this computer had confirmed was outranked by another computer's
-     and rolled back. The sessions show as not pushed again, so say why, once. */
-  useEffect(() => {
-    const unlisten = listen<PushOutrankedEvent>("project-sync-push-outranked", (event) => {
-      const storage = configRef.current.storages
-        .find((candidate) => candidate.storage_id === event.payload.storage_id);
-      setNotice({ message: pushOutrankedNotice(storage?.name), tone: "attention" });
-    });
-    return () => {
-      void unlisten.then((dispose) => dispose());
-    };
-  }, []);
 
   const saveStorageDraftBeforeNavigation = async () => (
     storageNavigationGuardRef.current ? storageNavigationGuardRef.current() : true

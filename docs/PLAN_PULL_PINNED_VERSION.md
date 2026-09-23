@@ -395,8 +395,10 @@ storage has synced with it before.
 The report of Q4 is the Push plan's `Displaced` state (CAS-free plan, section
 9.4): nothing is rolled back, and the bases and the acceptance this Pull saved
 are kept and read as absent. Its standing notice says "last push" or "last
-pull" by which operation saved the newest stale base. A base already records
-when it was last pushed and when it was last pulled.
+pull" by whether this computer's copy of the project published the newest
+displaced publication, read from that record's origin; the base's own
+`last_push_at` and `last_pull_at` are not used, because a Pull that fails in
+part keeps its previous `last_pull_at` (cleared plan, section 5).
 
 ### 4.7 Library
 
@@ -569,7 +571,7 @@ Line numbers are those of the working tree on September 20, 2026.
 | The per-session pins and their names (T7) | `crates/mallard-infrastructure/src/conversation_sync.rs:119`; `src-tauri/src/project_sync/service.rs:11311` |
 | D6: "cloud conversation changed lineage or semantic content" | `crates/mallard-infrastructure/src/pull_transcript.rs:72`, `:118` |
 | File rows of the review; the local copy of a diverged file | `crates/mallard-infrastructure/src/bundle_engine.rs:1392`, `:5040` |
-| The report of Q4: `observe_linked_bundle`, today the rollback, to become the `Displaced` classifier (CAS-free plan, step 10) | `src-tauri/src/project_sync/service.rs:7092` |
+| The report of Q4: `observe_linked_bundle`, the `Displaced` classifier (cleared plan, step 12, September 22) | `src-tauri/src/project_sync/service.rs:7122` |
 | One operation at a time on one computer (Q7) | `crates/mallard-infrastructure/src/persistence.rs:380`, `:411` |
 | The engine test that pins the second read of the head | `crates/mallard-infrastructure/src/bundle_engine.rs:4567`, `:4733-4752` |
 | Existing Pull tests: per-session isolation, approvals, a row the apply no longer offers, an empty approval | `src-tauri/src/project_sync/service.rs:23832`, `:24133`, `:24393`, `:24192` |

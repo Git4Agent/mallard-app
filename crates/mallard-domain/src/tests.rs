@@ -1265,25 +1265,27 @@ fn remote_continuity_covers_every_decision_row_by_identity_and_ancestry() {
     assert_eq!(mainline.selected(), Some(&names[2]));
     let empty = Mainline::default();
     let base = |index: usize| repository_base_at(&names[index]);
+    // Every verdict but `Displaced` asks nobody who published anything.
+    let nobody = |_: &RecordName| -> Result<SavedBy, String> { unreachable!("not displaced") };
+    let classify = |mainline: &Mainline, bases: &[&RepositoryBase]| {
+        classify_remote_continuity(mainline, &[], bases.iter().copied(), nobody).unwrap()
+    };
 
+    assert_eq!(classify(&empty, &[]), RemoteContinuity::Fresh);
     assert_eq!(
-        classify_remote_continuity(&empty, []),
-        RemoteContinuity::Fresh
-    );
-    assert_eq!(
-        classify_remote_continuity(&empty, [&base(1)]),
+        classify(&empty, &[&base(1)]),
         RemoteContinuity::RemoteMissing { base_revision: 2 }
     );
     assert_eq!(
-        classify_remote_continuity(&mainline, []),
+        classify(&mainline, &[]),
         RemoteContinuity::Unreviewed { remote_revision: 3 }
     );
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(2)]),
+        classify(&mainline, &[&base(2)]),
         RemoteContinuity::InSync { revision: 3 }
     );
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(0)]),
+        classify(&mainline, &[&base(0)]),
         RemoteContinuity::Advanced {
             base_revision: 1,
             remote_revision: 3
@@ -1292,40 +1294,98 @@ fn remote_continuity_covers_every_decision_row_by_identity_and_ancestry() {
     // Several scope bases: every one of them must be on the selected chain,
     // and the newest is the one reported.
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(0), &base(2)]),
+        classify(&mainline, &[&base(0), &base(2)]),
         RemoteContinuity::InSync { revision: 3 }
     );
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(1), &base(0)]),
+        classify(&mainline, &[&base(1), &base(0)]),
         RemoteContinuity::Advanced {
             base_revision: 2,
             remote_revision: 3
         }
     );
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(2), &base(3)]),
+        classify(&mainline, &[&base(2), &base(3)]),
         RemoteContinuity::Replaced {
             base_revision: 3,
             remote_revision: 3
         }
     );
 
-    // A base on the losing sibling branch: same depth as a selected
-    // ancestor, and then deeper than the selected publication itself.
-    // Revision order would call the first one advanced.
+    // A base on the losing sibling branch while its records are not listed:
+    // same depth as a selected ancestor, and then deeper than the selected
+    // publication itself. Revision order would call the first one advanced.
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(3)]),
+        classify(&mainline, &[&base(3)]),
         RemoteContinuity::Replaced {
             base_revision: 2,
             remote_revision: 3
         }
     );
     assert_eq!(
-        classify_remote_continuity(&mainline, [&base(6)]),
+        classify(&mainline, &[&base(6)]),
         RemoteContinuity::Replaced {
             base_revision: 5,
             remote_revision: 3
         }
+    );
+
+    // The same bases while the losing branch is listed: its records connect
+    // them to the chain, so they were displaced, not cleared. The newest
+    // displaced publication is reported, and who published it is asked
+    // once, with that record.
+    let unselected = names[3..].to_vec();
+    let asked = std::cell::RefCell::new(Vec::new());
+    let ask = |name: &RecordName| -> Result<SavedBy, String> {
+        asked.borrow_mut().push(name.clone());
+        Ok(SavedBy::Pull)
+    };
+    assert_eq!(
+        classify_remote_continuity(&mainline, &unselected, [&base(3)], ask).unwrap(),
+        RemoteContinuity::Displaced {
+            base_revision: 2,
+            remote_revision: 3,
+            saved_by: SavedBy::Pull
+        }
+    );
+    assert_eq!(
+        classify_remote_continuity(&mainline, &unselected, [&base(3), &base(6)], ask).unwrap(),
+        RemoteContinuity::Displaced {
+            base_revision: 5,
+            remote_revision: 3,
+            saved_by: SavedBy::Pull
+        }
+    );
+    assert_eq!(asked.take(), vec![names[3].clone(), names[6].clone()]);
+    // A displaced base wins over a cleared one on the same link, a base on
+    // the chain does not hide it, and a stream that selects nothing still
+    // reads missing.
+    let cleared = repository_base_at(&record_names(&[(9, None, 50)])[0]);
+    assert_eq!(
+        classify_remote_continuity(
+            &mainline,
+            &unselected,
+            [&cleared, &base(3), &base(0)],
+            |_| Ok(SavedBy::Push)
+        )
+        .unwrap(),
+        RemoteContinuity::Displaced {
+            base_revision: 2,
+            remote_revision: 3,
+            saved_by: SavedBy::Push
+        }
+    );
+    assert_eq!(
+        classify_remote_continuity(&empty, &unselected, [&base(3)], nobody).unwrap(),
+        RemoteContinuity::RemoteMissing { base_revision: 2 }
+    );
+    // The read the verdict needs is the caller's: its failure is an error,
+    // never a verdict.
+    assert_eq!(
+        classify_remote_continuity(&mainline, &unselected, [&base(3)], |_| Err(
+            "record unreadable".to_string()
+        )),
+        Err("record unreadable".to_string())
     );
 
     // The selected chain runs deeper than a base on the losing branch: a
@@ -1338,9 +1398,9 @@ fn remote_continuity_covers_every_decision_row_by_identity_and_ancestry() {
         (8, Some(0), 21),
     ]);
     assert_eq!(
-        classify_remote_continuity(
+        classify(
             &Mainline::select(deeper.iter().cloned()),
-            [&repository_base_at(&deeper[4])]
+            &[&repository_base_at(&deeper[4])]
         ),
         RemoteContinuity::Replaced {
             base_revision: 2,
@@ -1352,7 +1412,7 @@ fn remote_continuity_covers_every_decision_row_by_identity_and_ancestry() {
     // new commit id: the old base is on no chain of it.
     let recreated = record_names(&[(9, None, 50)]);
     assert_eq!(
-        classify_remote_continuity(&Mainline::select(recreated), [&base(0)]),
+        classify(&Mainline::select(recreated), &[&base(0)]),
         RemoteContinuity::Replaced {
             base_revision: 1,
             remote_revision: 1

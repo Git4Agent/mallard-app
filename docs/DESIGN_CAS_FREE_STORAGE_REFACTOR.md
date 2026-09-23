@@ -1124,9 +1124,9 @@ Line numbers are from the working tree on September 18, 2026; the rows under
 
 | Subject | Location |
 |---|---|
-| The rollback: `observe_linked_bundle` and its transaction; `outranked_push_events`; the event constant and its forwarder; the app hook | `src-tauri/src/project_sync/service.rs:7092-7220`, `:7066`; `src-tauri/src/project_sync/config_watcher.rs:31`, `:89`; `src-tauri/src/lib.rs:159` |
+| `observe_linked_bundle`, the `Displaced` classifier that writes nothing; the rollback, its event, forwarder and app hook were removed on September 22 (step 12 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`) | `src-tauri/src/project_sync/service.rs:7122` |
 | The three rollback tests to rewrite as `Displaced` tests | `src-tauri/src/project_sync/service.rs:20600`, `:20762`, `:20837` |
-| `Mainline::outranked` and `Outranked.shared`; `BundleEngine::snapshot_at` | `crates/mallard-domain/src/publication.rs:291-335`; `crates/mallard-infrastructure/src/bundle_engine.rs:746` |
+| `Mainline::outranked`, which names the displaced record; `BundleEngine::published_by`, the one record read of a `Displaced` verdict | `crates/mallard-domain/src/publication.rs:297-331`; `crates/mallard-infrastructure/src/bundle_engine.rs:766` |
 | The shell notice and its listener; the event type | `src/components/project-sync/syncOutcome.ts:69`; `src/components/project-sync/ProjectSync.tsx:1399-1402`; `src/types.ts:954` |
 | The Library reset at load | `src-tauri/src/storage_catalog/service.rs:1050-1062` |
 | Base readers that open the base manifest: the files review's per-file states; the Pull planner's per-file base digests; the preservation rule they feed | `src-tauri/src/project_sync/service.rs:2348`, `:2708-2742`; `crates/mallard-infrastructure/src/bundle_engine.rs:5034-5057` |

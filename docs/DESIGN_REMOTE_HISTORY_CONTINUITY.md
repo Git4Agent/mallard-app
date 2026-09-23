@@ -12,9 +12,11 @@
 > ancestry over the selected chain of publication records, never by revision
 > order and never by a store read of the base manifest — `Advanced` means the
 > base is an ancestor of the selected publication, and `Replaced` means it is
-> on no selected chain (a cleared or recreated stream; a push that is
-> outranked fails or is rolled back, and never reads `Replaced`). Read rows 1
-> to 8, the probe, and its cache rules as design history.
+> on no selected chain (a cleared or recreated stream), and `Displaced` means
+> another computer's record outranked the publication a base was reviewed in
+> after this computer's Push was confirmed, or after its Pull; nothing is
+> rolled back, and the user compares and pushes again. Read rows 1 to 8, the
+> probe, and its cache rules as design history.
 
 > **Superseded gates and recovery.** `RemoteMissing` and `Replaced` no longer
 > block a Push, and nothing asks for an unlink, a relink or a reset. A sync
