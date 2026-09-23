@@ -127,6 +127,16 @@ impl DropboxObjectStore {
                 {
                     return Err(Error::Invalid);
                 }
+                // A claim is an add-mode upload Dropbox must refuse when the
+                // path already holds other bytes: a folder that overwrites
+                // cannot arbitrate one, and cannot be set up.
+                if !matches!(
+                    self.upload_record(&path, Bytes::from_static(b"mallard-probe-b"))
+                        .await,
+                    Err(Error::Conflict)
+                ) {
+                    return Err(Error::Invalid);
+                }
                 if !matches!(
                     self.delete_path(&path, "0123456789abcdef").await?,
                     DeleteOutcome::Conflict { .. }

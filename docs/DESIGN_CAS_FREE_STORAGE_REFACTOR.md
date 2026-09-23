@@ -1,13 +1,15 @@
 # Mallard: CAS-free storage publication — implementation plan
 
-- Status: Implemented, steps 1 to 7 and the automated part of step 8; the live
-  two-machine pass on R2 and on Dropbox (step 8) is still to be run and recorded.
-  Step 9, the claim of decision 11 and section 7.2, and step 10, the decision of
-  September 22 that recovery is a user action (decision 12), are planned and not
-  implemented. Step 10 withdraws the write retries of section 7.2. The rest of
-  decision 12, which withdrew the rollback of section 9.4 and the Library reset
-  at load, landed on September 22 as steps 11 to 14 of
-  `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, without claims
+- Status: Implemented, steps 1 to 7, step 9 (the claim of decision 11 and
+  section 7.2, on September 22) and the automated part of step 8; the live
+  two-machine pass on R2 and on Dropbox (step 8, and the two live rows of step
+  9) is still to be run and recorded. Step 10, the publishing part of the
+  decision of September 22 that recovery is a user action (decision 12), is
+  planned and not implemented: it withdraws the write retries of section 7.2
+  and adds *Finish that push*. The rest of decision 12, which withdrew the
+  rollback of section 9.4 and the Library reset at load, landed on September
+  22 as steps 11 to 14 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, without
+  claims. *Implementation notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026
 - Scope: the desktop app — both sync engines, the Local, S3/R2 and Dropbox stores, and the Push error copy. Mallard Cloud follows in its own plan (section 14)
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
@@ -363,9 +365,10 @@ Every attempt to write a record is the second half of one step:
    store answers in one request. The key was free: the claim is **mine**. The
    key holds other bytes: the claim is **taken**, and the Push stops before it
    writes its record. Read the claim; its bytes are the record that was claimed.
-   When the listing of step 1 holds that record, another computer got in first:
-   `RemoteChanged`. When it does not, that push did not finish:
-   `PushUnfinished`, and finishing it is the user's (section 7.3). Nothing
+   When the listing of step 1 holds that record, or one fresh listing taken
+   now does, another computer got in first: `RemoteChanged`. When neither
+   does, that push did not finish: `PushUnfinished`, and finishing it is the
+   user's (section 7.3). Nothing
    sends that record by itself, and nothing deletes or reassigns the claim. One
    case needs no user: the claim holds this computer's own record, for the same
    content on the same parent, from an earlier attempt whose record request
@@ -455,7 +458,8 @@ A Push on a store with claims makes one request more than today: listing,
 claim, record, listing. The listing after the write stays, because the claim
 answers one question, whether another computer got in first, and not the other
 one the listing answers, whether the parent still exists. Its taken path reads
-the claim once and sends at most one record. A refresh never lists or reads a
+the claim once, lists once more when the listing it has does not hold the
+claimed record, and sends at most one record. A refresh never lists or reads a
 claim.
 
 The local store writes no claim, and `supports_claims` says so. Nothing
@@ -480,8 +484,11 @@ is not an outcome: it is the `RemoteChanged` error, raised by the shared
 `write_record`, so both engines fail the same way.
 
 Errors: `RemoteChanged` replaces every CAS-conflict string, and
-`OutcomeUnknown` is reported when the storage cannot be reached after the
-record was sent.
+`OutcomeUnknown` is reported when the storage cannot be read after a claim or
+a record was sent, so the one read-only check that would settle the request
+cannot be made. A check that can be made settles it: what it shows landed
+counts, and what it shows absent did not land, so the Push fails with the
+store's own error and nothing is sent again.
 
 | Boundary | What happens |
 |---|---|
@@ -489,12 +496,12 @@ record was sent.
 | The listing before the write shows another child or another selection | `RemoteChanged`. Nothing is written. The user compares again |
 | The claim is taken, and the listing holds its record | `RemoteChanged` before the record is sent: another computer got in first. Nothing is written. The user compares again |
 | The claim is taken, and its record is not listed | `PushUnfinished`: a push onto this version did not finish, this computer's own or another's. Nothing is written, and nothing finishes it by itself. The Push review offers *Finish that push*, which writes the record the claim holds, once, then lists and reports Finished, `RemoteChanged` or `OutcomeUnknown`; the user compares again (section 13). When the claim holds this computer's own record for the same content on the same parent, the Push writes that record as its own and goes on |
-| The claim request is not acknowledged | A read-only check: read the claim key. This computer's bytes: the claim is its own, and the Push goes on to the record. Other bytes: taken. Absent: `OutcomeUnknown`; the request may still land, and nothing is sent again |
+| The claim request is not acknowledged | A read-only check: read the claim key. This computer's bytes: the claim is its own, and the Push goes on to the record. Other bytes: taken. Absent: the Push fails with the store's error, and nothing is sent again; a claim that lands after all is this computer's own, and its next Push meets it as such. The read itself fails: `OutcomeUnknown` |
 | The storage is cleared between the claim and the record | The record lands as an orphan: its parent is gone. The listing after the write does not select it, the Push fails with `RemoteChanged`, and nothing local moves; the next refresh reads the cleared storage. When that listing came before the clear reached the record, the Push was confirmed and its records are stale, as R5 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` already says |
 | This computer's claim landed and its record never did | Its next Push finds its own claim taken. Same content on the same parent: it writes that record as its own, and its local save is this Push's; no L3. Other content: `PushUnfinished`, nothing written; *Finish that push* writes the earlier record, and this computer is then in L3 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` for the sessions of that earlier push. When another computer finished it first, this computer's Push gate reads `Advanced` before any claim, and the same L3 applies |
 | The machine sleeps between the listing and the write | The listing is older than ten seconds, so the attempt lists again. On a store with claims a stale listing could only end in a taken claim |
-| The record was sent and no acknowledgment arrived | One listing, read-only. Present and selected: `Stored`. Present and not selected: `RemoteChanged`. Absent: `OutcomeUnknown`; the request may still land, and nothing is sent again. The next refresh shows whether it arrived: an arrived record reads `Advanced` with equal content, and the sessions of that push are L3 |
-| The record request fails outright: a store error, a refused connection | The Push fails with the store's error. Nothing is resent. On a store with claims the claim stays: the next Push with the same content writes the claimed record as its own; with other content it reads `PushUnfinished` |
+| The record was sent and no acknowledgment arrived | One listing, read-only. Present and selected: `Stored`. Present and not selected: `RemoteChanged`. Absent: the Push fails with the store's error, and nothing is sent again; a record that lands after all is found by the next refresh, reads `Advanced` with equal content, and the sessions of that push are L3. The listing itself fails: `OutcomeUnknown` |
+| The record request fails outright: a store error, a refused connection | The same one listing shows that the record did not land, and the Push fails with the store's error. Nothing is resent. On a store with claims the claim stays: the next Push with the same content writes the claimed record as its own; with other content it reads `PushUnfinished` |
 | The storage cannot be reached after sending | `OutcomeUnknown`. Nothing is persisted and nothing is resent; the next refresh shows whether it arrived |
 | The app quits or crashes | Nothing is resent, and nothing on disk names the attempt. The next Push builds a new record, and on a store with claims meets its own claim as above |
 | Stored, but the local bases were not saved | The next refresh reads `Advanced` with content equal to local; a Pull review with nothing to apply advances the bases |
@@ -972,7 +979,7 @@ own tests green.
 | 7. Copy | The three notices of section 13 and their frontend tests. Copy only, in existing surfaces; show them in a static specimen before wiring, as usual | Frontend suite and type check pass |
 | 8. Gate | Request-count tests, provider parity on Local, R2 and Dropbox, a live two-machine pass on R2 and on Dropbox after a wipe, and the documentation (the agent guide's sentence that mutable heads require compare-and-swap, the README, the continuity design) | Section 16 is green and the live pass is recorded |
 | 9. Claims | `supports_claims` and `put_claim` on the trait with their defaults, forwarded by the shared wrapper and the test wrappers; `put_claim` on S3/R2 and Dropbox; the plain test store's claim, exclusive in memory, switchable off, with a fault before the claim request; in the shared module: the claim key of a stream, the record name read from record bytes, the claim step before the record request, the two outcomes of a taken claim and the own-record case; the listing after the write stays as it is; the claims pass in clear; the probe stage; `CURRENT_METADATA_LAYOUT.md`, the README and the agent guide | The rows of section 16 marked *claim* pass on the plain store with claims and on the S3 and Dropbox fakes; request counts read listing, claim, record, listing on a store with claims and today's three on the local store; the live two-machine pass on R2 and on Dropbox shows one child per version after simultaneous Pushes, and one `_claims` object per version |
-| 10. Recovery is a user action | Decision 12, the publishing part. In the shared module: one claim request and one record request, no `MAX_RECORD_REQUESTS` loop; the read-only checks after an unacknowledged claim or record; `OutcomeUnknown` on absent; `PushUnfinished`. The *Finish that push* command and banner action in both Push reviews. The `PushUnfinished` copy of section 13 in the static specimen first. The rest of decision 12 needed no claims and landed on September 22 as steps 11 to 13 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`: the usability rule on the two base readers that open a manifest, `RemoteContinuity::Displaced` and its standing notice in place of the rollback, and the Library read rule in place of the reset at load | The rows of section 16 marked *no recovery* pass, except "Displaced after the Push was confirmed", "Stale acceptance cannot bypass review" and "Library: accepted head off the chain", which that plan's steps 11 to 13 carried: at most one claim and one record request per Push in every outcome; the finish action writes once and only when invoked; the frontend suite asserts the `PushUnfinished` texts of section 13 |
+| 10. Recovery is a user action | Decision 12, the publishing part. In the shared module: one claim request and one record request, no `MAX_RECORD_REQUESTS` loop; the read-only checks after an unacknowledged claim or record, which fail the Push with the store's error when the request did not land and report `OutcomeUnknown` only when the check itself cannot be made; `PushUnfinished`. The *Finish that push* command and banner action in both Push reviews. The `PushUnfinished` copy of section 13 in the static specimen first. The rest of decision 12 needed no claims and landed on September 22 as steps 11 to 13 of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`: the usability rule on the two base readers that open a manifest, `RemoteContinuity::Displaced` and its standing notice in place of the rollback, and the Library read rule in place of the reset at load | The rows of section 16 marked *no recovery* pass, except "Displaced after the Push was confirmed", "Stale acceptance cannot bypass review" and "Library: accepted head off the chain", which that plan's steps 11 to 13 carried: at most one claim and one record request per Push in every outcome; the finish action writes once and only when invoked; the frontend suite asserts the `PushUnfinished` texts of section 13 |
 
 ## 16. Tests
 
@@ -993,7 +1000,7 @@ own tests green.
 | Listing older than ten wall-clock seconds | The attempt lists again; a monotonic-only check is shown not to catch a simulated sleep |
 | Record write fails in the transport (no recovery) | One request, no automatic retry; the Push fails with the store's error; nothing local moves; on a store with claims the claim stays. A second Push is the user's, and with the same content it writes the claimed record |
 | App restarts with a Push in flight (no recovery) | Nothing is resent; no pending record or claim exists on disk; a claim it left in the storage is met by the next Push through the claim alone |
-| Acknowledgment lost (no recovery) | One read-only listing: present and selected is `Stored`, present and not selected `RemoteChanged`, absent `OutcomeUnknown`; no second request; a record that lands later is found by the next refresh |
+| Acknowledgment lost (no recovery) | One read-only listing: present and selected is `Stored`, present and not selected `RemoteChanged`, absent fails the Push with the store's error, and a listing that cannot be made is `OutcomeUnknown`; no second request; a record that lands later is found by the next refresh |
 | Crash after each publish step | Objects and a manifest without a record never appear as history |
 | No-op while the remote changes | Nothing is written; the compared publication is returned |
 | Written, not selected | `RemoteChanged` from `write_record`, and again from a repeat, which sends nothing. No base, checkpoint, binding, receipt or Library accepted state moves; the next refresh reads `Advanced`; the next Push publishes the same sessions; Library rows are offered again. A registration returns the established one |
@@ -1023,11 +1030,11 @@ own tests green.
 | Claim: two first versions | One `root` claim, one first version; the other Push fails before it writes |
 | Claim: the writer dies between its claim and its record (no recovery) | The next Push onto that parent, from another computer, writes nothing and fails with `PushUnfinished`; one claim request, no record request. *Finish that push* writes the claimed record once, lists, and reports Finished; the next comparison shows that version with the dead writer's commit id and origin. The dead writer then reads `Advanced` with its own content; a session it continued reads "Keep both" and a first-published one appears twice (L3) |
 | Claim: the same computer, after its claim landed and its record did not | Same content on the same parent: the next Push writes the claimed record as its own, one record request, `Stored`, and its local save is this Push's; no L3. Other content: `PushUnfinished`, nothing written; *Finish that push* writes the earlier record, and the sessions of that earlier push are L3 |
-| Claim: the claim request is not acknowledged (no recovery) | One read of the claim key and no second claim request: this computer's bytes and the Push goes on; other bytes and it is taken; absent and the Push ends with `OutcomeUnknown` |
+| Claim: the claim request is not acknowledged (no recovery) | One read of the claim key and no second claim request: this computer's bytes and the Push goes on; other bytes and it is taken; absent and the Push fails with the store's error; a read that cannot be made ends it with `OutcomeUnknown` |
 | Claim: the record request fails after the claim (no recovery) | One record request; the Push fails with the store's error; the claim stays; nothing local moves. The next Push with the same content writes the claimed record as its own |
 | Claim: request count | On a store with claims a Push makes one listing, one claim, one record request and one listing, and in no outcome more than one claim or one record request; the local store makes today's three |
 | Claim: the storage is cleared between the claim and the record | A lists, claims its parent, and the plain store is cleared before A's record request. A's record lands as an orphan; the listing after the write does not select it; A fails with `RemoteChanged`; no base, checkpoint, acceptance or receipt moves; A's next refresh reads the cleared storage and story 1 or 2 follows. A second variant clears after A's confirming listing: A was confirmed, its records read as stale, R5 |
-| Claim: a stale listing | A listing older than the sibling's claim ends in a taken claim, never in a second child |
+| Claim: a stale listing | A listing older than the sibling's claim ends in a taken claim, never in a second child; the fresh listing the taken path takes holds the sibling's record, so the Push fails with `RemoteChanged`, not `PushUnfinished` |
 | Claim: not a record, or another parent's record | The Push onto that parent fails with an integrity error, not `RemoteChanged`; nothing is written; selection does not move |
 | Claim: never read by a refresh | Refresh, review, the Pull apply and bundle discovery make no request under `_claims/` |
 | Claim: the local store | Writes none; its Push is unchanged; the fork-window tests stay on the plain store without claims and still pass |
@@ -1075,6 +1082,23 @@ Release condition:
 - A storage generation, an epoch, or any locking protocol. Recovery is a user
   action, and the storage layout stays.
 
+## Implementation notes
+
+Step 9 was implemented on September 22, 2026. What differs from the plan
+above, or was decided while building it:
+
+| Subject | What was built |
+|---|---|
+| A taken claim and a stale listing | The listing of step 1 can predate the sibling's record when both Pushes ran in the same seconds. Before a taken claim whose record that listing does not hold is reported `PushUnfinished`, the module lists once more; a record that fresh listing holds is another computer's finished push, `RemoteChanged`. Sections 7.2 and 16 say so |
+| An unacknowledged request | The read-only check settles it, on both sides: present counts, absent did not land, and the Push fails with the store's error rather than `OutcomeUnknown`, which is reported only when the check itself cannot be made. S3/R2, Dropbox and the local store list their own completed writes, so absent is evidence, and the store's error tells the user why the Push failed. Sections 7.3 and 16 say so. The record half of this rule lands with step 10, which removes the retry loop |
+| The shared module's shape | `write_record` returns `WriteOutcome`: `Stored` with the listing that selects the record, or `Unfinished` with the claimed record's name and bytes. The engine decides the own-record case, because only it can read the claimed record's manifest and compare content: the bundle engine compares the scope digests, the Library engine the per-resource content digests, and both compare the origin's replica token with the one this Push writes. An own record with the same content is written through `write_claimed_record`; anything else fails with `PUSH_UNFINISHED` or `OWN_PUSH_UNFINISHED`, engine-level texts that the two services turn into the sentences of section 13 with the storage's name |
+| The claim's parent check | A claim whose bytes are not a record of the claimed parent, by the five graph fields and the digest of the bytes, is an integrity error for that parent, as section 7.2 says; the record name is derived by the shared module from those fields, for both record types, without either engine's record type |
+| Step 10 | Planned: the single claim and record request, the read-only checks, *Finish that push* |
+
+Still open: the live two-machine pass on R2 and on Dropbox, with the two live
+rows of step 9 (one child per version after simultaneous Pushes, one
+`_claims` object per version).
+
 ## Source pointers
 
 Line numbers are from the working tree on September 18, 2026; the rows under
@@ -1109,17 +1133,19 @@ Line numbers are from the working tree on September 18, 2026; the rows under
 
 *Claims*
 
+Line numbers of the working tree on September 22, 2026, after step 9.
+
 | Subject | Location |
 |---|---|
-| `write_record_at`: the list-then-write loop, where the claim goes before the record request; the view synthesized after an acknowledged write; `verify_record` | `crates/mallard-infrastructure/src/storage_core/publication.rs:425-486`, `:447-453`, `:333-341` |
-| `RecordStream` and its key constructor; `list_record_keys`; `admits` | `publication.rs:72-102`, `:199-222`, `:151-153` |
-| `RecordName::new`; the five graph fields both records carry under the same names | `crates/mallard-domain/src/publication.rs:112-143`; `crates/mallard-infrastructure/src/bundle_engine.rs:485-507`; `src-tauri/src/storage_catalog/domain.rs:825-841` |
-| Trait: `put_immutable`, `put_record`, `supports_conditional_delete`, `list_keys`; the shared wrapper's forwards | `crates/mallard-infrastructure/src/storage_core/object_store.rs:239-265`, `:267-271`, `:306-317`; `storage_core/mod.rs:498-530` |
-| S3/R2: `put_absent_async` (`If-None-Match: *`, retries off), `put_record_async`; the fake's create-only check | `crates/mallard-infrastructure/src/storage_core/s3_store.rs:609-648`, `:693-706`, `:2290-2300` |
-| Dropbox: `upload_record` (add mode, not strict), `put_record`; `get_metadata` as a download; the mock's add-mode conflict | `crates/mallard-infrastructure/src/storage_core/dropbox_store/upload.rs:138-167`; `dropbox_store.rs:950-963`, `:638-652`; `dropbox_store/mock.rs:228-250` |
-| Clear: the pass order | `crates/mallard-infrastructure/src/storage_core/mod.rs:151-216` and `:195-200` |
-| Plain test store: `put_record` and its faults | `crates/mallard-infrastructure/src/storage_core/plain_store.rs:185-215` |
-| Library key constructor | `crates/mallard-infrastructure/src/storage_core/mod.rs:304` |
+| `write_record` and `WriteOutcome`; `ClaimedRecord`; the claim step inside `attempt`; `claim_parent`; `taken_claim`, with the fresh listing before an unfinished push is reported; `write_claimed_record`; `record_name_of` | `crates/mallard-infrastructure/src/storage_core/publication.rs:162`, `:155`, `:622`, `:586`, `:599`, `:553`, `:201` |
+| `RecordStream::claim_key`; the engine-level texts `PUSH_UNFINISHED` and `OWN_PUSH_UNFINISHED`; `unfinished_push_sentence`, the Push review's sentence with the storage's name | `crates/mallard-infrastructure/src/storage_core/publication.rs:139`, `:58`, `:64` |
+| Trait: `ClaimOutcome`, `supports_claims`, `put_claim`; the shared wrapper's forwards; `REPOSITORY_CLAIMS_PREFIX`; the Library key allowlist; the clear's claims pass | `crates/mallard-infrastructure/src/storage_core/object_store.rs:162`, `:284`, `:292`; `storage_core/mod.rs:513`, `:58`, `:291`, `:206` |
+| S3/R2: `put_claim_async`, the create-only put with retries off and one read on a refused precondition; the probe stage `Refuse`; the fake's overwrite knob | `crates/mallard-infrastructure/src/storage_core/s3_store.rs:750`, `:392`, `:2454` |
+| Dropbox: `put_claim_async`, add mode without a strict conflict check and one download on a conflict; the probe's refusal; the mock's overwrite knob | `crates/mallard-infrastructure/src/storage_core/dropbox_store/upload.rs:172`; `dropbox_store/probe.rs:134`; `dropbox_store/mock.rs:36` |
+| The plain test store's claim, exclusive in memory and switchable, its faults, the hook before the claim request, its request log | `crates/mallard-infrastructure/src/storage_core/plain_store.rs:72`, `:122`, `:130`, `:91`, `:282` |
+| The bundle engine's own-record decision; the Library engine's | `crates/mallard-infrastructure/src/bundle_engine.rs:867`; `src-tauri/src/storage_catalog/resource_engine.rs:496` |
+| The two services print the sentence with the storage's name | `src-tauri/src/project_sync/service.rs:10481`; `src-tauri/src/storage_catalog/service.rs:1885` |
+| Tests: the shared module's claim rows; the clear order; the bundle engine; the Library engine; the S3 fake; the Dropbox mock; the stub S3 end to end | `crates/mallard-infrastructure/src/storage_core/publication.rs:1261-1535`; `storage_core/mod.rs:832`; `bundle_engine.rs:5044`; `src-tauri/src/storage_catalog/resource_engine.rs:1125`; `s3_store.rs:2213`, `:2229`; `dropbox_store/tests.rs:584`, `:624`; `src-tauri/src/sync_tests/thread_variants/storage_parity.rs:540` |
 
 *Recovery is a user action*
 
@@ -1133,4 +1159,4 @@ Line numbers are from the working tree on September 18, 2026; the rows under
 | Base readers that open the base manifest: the files review's per-file states; the Pull planner's per-file base digests; the preservation rule they feed | `src-tauri/src/project_sync/service.rs:2348`, `:2708-2742`; `crates/mallard-infrastructure/src/bundle_engine.rs:5034-5057` |
 | Base readers that already filter, through `classify_scope_continuity` | `src-tauri/src/project_sync/service.rs:7728`, `:7851`; `crates/mallard-domain/src/lib.rs:931-956` |
 | What marks an area reviewed after a Pull with unticked rows | `src-tauri/src/project_sync/service.rs:13472` |
-| The retry loop and its constants | `crates/mallard-infrastructure/src/storage_core/publication.rs:35-37`, `:441-486` |
+| The retry loop and its constants, which step 10 removes | `crates/mallard-infrastructure/src/storage_core/publication.rs:37-41`, `:622-695` |

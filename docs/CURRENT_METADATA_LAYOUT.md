@@ -504,6 +504,9 @@ The local-folder and S3/R2 adapters expose the same object keys:
     |-- _storage.json
     `-- v1/
         |-- repositories/
+        |   |-- _claims/                      # one claim per claimed parent (S3/R2, Dropbox)
+        |   |   `-- <bundle-id>/
+        |   |       `-- <parent token, or root>.json
         |   |-- _commits/                     # every project record, nothing else
         |   |   `-- <bundle-id>/
         |   |       `-- <record name>
@@ -516,6 +519,8 @@ The local-folder and S3/R2 adapters expose the same object keys:
         `-- library/
             `-- <kind-repository-id>/
                 |-- _tag.json                 # constant bytes, discovery only
+                |-- _claims/
+                |   `-- <parent token, or root>.json
                 |-- _commits/
                 |   `-- <record name>
                 |-- _manifests/
@@ -536,6 +541,15 @@ Project records live in one flat namespace beside the bundle folders. Listing
 listing `_commits/` returns every project stream's records and no payload
 key, which is what bundle discovery needs. Library records stay inside each
 repository, because the Library never enumerates repositories.
+
+A claim lives beside the records and never among them: `_claims/` is not
+under `_commits/`, so no record listing returns one and no refresh, review or
+discovery lists or reads one. Its name is the parent it claims, that parent's
+token or the word `root`; its bytes are the record of that parent's one
+child, exactly as written under `_commits/`. Only a store whose server
+refuses a second write of a key holds claims: S3/R2 and Dropbox. The local
+folder holds none, because a folder a sync product shares would take two
+claims and a network share promises no create-only write.
 
 The `repositories/` and `library/` constructors are closed and mutually
 isolated. The removed `.mallard/v1/catalog/` namespace is rejected by the
@@ -888,24 +902,39 @@ One publication performs:
    record's token an earlier attempt landed; continue only if the selected
    publication is the record's parent, which means the parent has no child
    (an empty stream for a first publication), otherwise stop with
-   `RemoteChanged` and nothing written; send the record, once. A listing
-   older than ten wall-clock seconds is taken again before sending, because
-   the monotonic clock stands still while a laptop sleeps. The record write
-   is one request with no retry inside the transport; a retry is a new
-   attempt that lists first.
+   `RemoteChanged` and nothing written. On a store with claims (S3/R2 and
+   Dropbox), claim the parent: one create-only write of the record's bytes
+   at `_claims/<parent token, or root>.json`, which the store answers in one
+   request. A free key, or one that already holds these bytes, is this
+   push's claim. A key that holds other bytes is taken: the push stops before
+   its record. When a listing holds the claimed record, another computer got
+   in first, `RemoteChanged`; when none does, a push onto this version did
+   not finish, `PushUnfinished`, and nothing writes that record by itself,
+   except that this computer's own record for the same content, left by an
+   attempt whose record request failed, is written as this push's. Then send
+   the record, once. A listing older than ten wall-clock seconds is taken
+   again before sending, because the monotonic clock stands still while a
+   laptop sleeps. The claim and the record write are one request each with
+   no retry inside the transport; a retry is a new attempt that lists first.
 8. List once more. If that listing selects this record, commit the
    corresponding local bindings and reviewed base. If it selects another
    computer's record, stop with `RemoteChanged`: the publication failed as a
    whole, nothing local is committed, and the record stays in the storage,
-   never selected.
+   never selected. The claim proves that the parent has no other child, not
+   that the parent is still there: a clear between the claim and the record
+   leaves the record an orphan, and only this listing shows it.
 
-A sibling of a publication can land after that publication became visible:
-another computer listed before this record was visible, then wrote a record
-that carries an earlier timestamp, usually within seconds and in principle at
-any later time. The earlier-ranked sibling is selected and the other is kept
-and not selected. A writer that reads that from the listing of step 8 fails,
-and its base stays on the shared parent: the next refresh reads `Advanced`,
-and the next Push publishes the same content.
+On the local folder a sibling of a publication can land after that
+publication became visible: another computer listed before this record was
+visible, then wrote a record that carries an earlier timestamp, usually
+within seconds and in principle at any later time. The earlier-ranked sibling
+is selected and the other is kept and not selected. A writer that reads that
+from the listing of step 8 fails, and its base stays on the shared parent:
+the next refresh reads `Advanced`, and the next Push publishes the same
+content. On S3/R2 and Dropbox the claim admits one child per parent, so a
+listed version has no sibling and cannot lose while the storage's claims and
+records are intact; an interrupted clear can remove a claim while keeping
+the parent (below), and a delayed writer can then displace the child.
 
 A sibling that becomes visible only after step 8 already selected this record
 leaves local state on an unselected record. The record is listed, it is not
@@ -943,22 +972,31 @@ selection that changed after review makes the reviewed plan stale; it never
 silently advances an unreviewed resource.
 
 Local-folder writes are serialized by `.mallard/.storage.lock`. S3/R2 writes
-create-only with `If-None-Match: *`, and the record write runs with SDK
-retries off. Dropbox writes a record with one `files/upload` request. None of
-them overwrites by revision, and a provider with plain overwrite and no
-conditional write runs the same engine.
+create-only with `If-None-Match: *`, and the claim and the record write run
+with SDK retries off; a refused claim costs one read that tells this
+attempt's own bytes from another's. Dropbox writes a record, and a claim,
+with one `files/upload` request in add mode without a strict conflict check:
+identical bytes are answered as written, other bytes as a conflict, and one
+download then returns them. None of them overwrites by revision, and a
+provider with plain overwrite and no conditional write runs the same engine
+without claims. The setup probes of R2 and Dropbox write other bytes to a key
+they just wrote and require the refusal: a destination that overwrites
+cannot be set up.
 
 If publication stops before the record is sent, immutable objects and a
 manifest may remain unreferenced. Readers cannot see them as a revision
 because no record names them. There is no remote garbage collector.
 
-Storage clear keeps the marker and deletes records first:
-`repositories/_commits` before the rest of `repositories`, and inside a
-Library repository `_commits/` already sorts before `_manifests/` and
-`_objects/`. Record names sort by depth, so a stream's first publications go
-first; once they are gone the stream selects nothing while every manifest and
-object still exists, so an interrupted clear never leaves a selected record
-pointing at deleted data.
+Storage clear keeps the marker and deletes claims first, then records:
+`repositories/_claims`, then `repositories/_commits`, then the rest of
+`repositories`; inside a Library repository `_claims/` already sorts before
+`_commits/`, and `_commits/` before `_manifests/` and `_objects/`. That is
+the opposite of the write order, so an interrupted clear leaves records
+without claims and never a claim without its record. Record names sort by
+depth, so a stream's first publications go first; once they are gone the
+stream selects nothing while every manifest and object still exists, so an
+interrupted clear never leaves a selected record pointing at deleted data.
+After a clear the root's claim is free again for the next first version.
 
 ## 7. What crosses the machine boundary
 
@@ -1073,13 +1111,14 @@ are authoritative.
   and backups.
 - [`storage_core/publication.rs`](../crates/mallard-infrastructure/src/storage_core/publication.rs):
   stream listing, selection over record names, verified record reads,
-  list-then-write, and the process memory of listings and records.
+  list-then-write with the claim of the parent, the record a taken claim
+  holds, and the process memory of listings and records.
 - [`mallard-domain/src/publication.rs`](../crates/mallard-domain/src/publication.rs):
   record-name grammar, publication tokens, the mainline selector, and the
   ancestor test.
 - [`s3_store.rs`](../crates/mallard-infrastructure/src/storage_core/s3_store.rs):
-  S3/R2 create-only writes, the single-request record write, chunk-to-tempfile
-  staging, inactivity timeout, and pagination behavior.
+  S3/R2 create-only writes, the single-request record and claim writes,
+  chunk-to-tempfile staging, inactivity timeout, and pagination behavior.
 - [`project_activity.rs`](../crates/mallard-infrastructure/src/project_activity.rs):
   local-only activity cache and provider session scanning through the
   registered adapters.

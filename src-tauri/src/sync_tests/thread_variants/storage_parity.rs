@@ -530,3 +530,187 @@ impl ObjectStore for FailingStore {
         self.inner.local_root()
     }
 }
+
+/// The claim over the S3 client and a service that honors `If-None-Match`:
+/// the parent of a Push is claimed with the record's bytes, a claim left by
+/// a writer that died before its record stops the next Push onto that
+/// version with nothing written, and a claim whose record is listed is
+/// another computer's finished push.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stub_s3_claims_the_parent_and_reports_an_unfinished_push() {
+    use mallard_infrastructure::storage_core::publication::{
+        list_stream, read_record, record_name_of, RecordStream, MAX_RECORD_BYTES, PUSH_UNFINISHED,
+    };
+    use mallard_infrastructure::storage_core::ClaimOutcome;
+    let temp = tempfile::tempdir().unwrap();
+    let cloud = temp.path().join("cloud");
+    fs::create_dir_all(cloud.join("variant-bucket")).unwrap();
+    let server = StubS3::start(cloud).await;
+    let world = VariantWorld::new();
+    let origin_a = world.origin(&world.repo_a, "replica-a");
+    let t1 = ThreadSpec::new(
+        "cloudthread-v1",
+        "shared-source",
+        chain("shared-source", &[("m-a", "base"), ("m-b", "answer")]),
+        origin_a.clone(),
+        10,
+    );
+    let storage_id = mallard_domain::StorageId::parse("s3-claim-store").unwrap();
+    let store = S3ObjectStore::from_connection(
+        &S3Connection {
+            endpoint: &server.endpoint,
+            region: "auto",
+            bucket: "variant-bucket",
+            access_key_id: "test-access-key",
+            secret_access_key: "test-secret",
+        },
+        tokio::runtime::Handle::current(),
+    )
+    .unwrap();
+    assert!(store.supports_claims());
+    let bundle_id = world.bundle_id.clone();
+    let stream = RecordStream::project(&bundle_id).unwrap();
+
+    let initial_request = publish_request(
+        bundle_id.clone(),
+        &[t1.clone()],
+        origin_a.clone(),
+        10,
+        None,
+        PublishExpectation::Absent,
+    );
+    let (initial_store, initial_storage) = (store.clone(), storage_id.clone());
+    let initial = tokio::task::spawn_blocking(move || {
+        let engine = BundleEngine::open(initial_store, initial_storage).unwrap();
+        publish_with_head(&engine, initial_request).unwrap()
+    })
+    .await
+    .unwrap();
+
+    // The first version claimed the root with its own bytes.
+    let (claim_store, claim_stream) = (store.clone(), stream.clone());
+    let (selected, record_bytes, root_claim) = tokio::task::spawn_blocking(move || {
+        let selected = list_stream(&claim_store, &claim_stream)
+            .unwrap()
+            .into_mainline()
+            .selected()
+            .cloned()
+            .unwrap();
+        let record_bytes = read_record(&claim_store, &claim_stream, &selected).unwrap();
+        let root_claim = claim_store
+            .get_metadata(&claim_stream.claim_key(None).unwrap(), MAX_RECORD_BYTES)
+            .unwrap()
+            .unwrap()
+            .bytes;
+        (selected, record_bytes, root_claim)
+    })
+    .await
+    .unwrap();
+    assert_eq!(root_claim, record_bytes);
+    assert_eq!(selected.commit_id(), initial.snapshot.head.commit_id);
+
+    // Another computer claimed the version and died before its record.
+    let mut theirs: serde_json::Value = serde_json::from_slice(&record_bytes).unwrap();
+    theirs["revision"] = serde_json::json!(selected.revision() + 1);
+    theirs["commit_id"] = serde_json::Value::String(format!("commit-{}", "d".repeat(24)));
+    theirs["manifest_key"] = serde_json::Value::String(format!(
+        "_manifests/{}-commit-{}.json",
+        selected.revision() + 1,
+        "d".repeat(24)
+    ));
+    theirs["previous_commit_id"] = serde_json::Value::String(selected.commit_id().to_string());
+    theirs["previous_record_sha256"] =
+        serde_json::Value::String(selected.token().record_sha256().to_string());
+    theirs["created_at_ms"] = serde_json::json!(selected.created_at_ms() + 1);
+    theirs["published_by_origin"]["origin_replica_token"] =
+        serde_json::Value::String("e".repeat(64));
+    let their_bytes = serde_json::to_vec(&theirs).unwrap();
+    let their_name = record_name_of(&their_bytes, Some(selected.token())).unwrap();
+    let their_claim = stream.claim_key(Some(selected.token())).unwrap();
+    let (plant_store, plant_key, plant_bytes) =
+        (store.clone(), their_claim.clone(), their_bytes.clone());
+    assert_eq!(
+        tokio::task::spawn_blocking(move || plant_store.put_claim(&plant_key, &plant_bytes))
+            .await
+            .unwrap()
+            .unwrap(),
+        ClaimOutcome::Mine
+    );
+
+    // This computer's Push onto that version stops before its record: the
+    // claim is taken and its record is listed nowhere.
+    let mut advanced = t1.clone();
+    advanced.transcript = chain(
+        "shared-source",
+        &[("m-a", "base"), ("m-b", "answer"), ("m-c", "more")],
+    );
+    let stopped_request = publish_request(
+        bundle_id.clone(),
+        &[advanced.clone()],
+        origin_a.clone(),
+        20,
+        Some(&initial.snapshot.manifest),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
+    );
+    let (stopped_store, stopped_storage) = (store.clone(), storage_id.clone());
+    let error = tokio::task::spawn_blocking(move || {
+        BundleEngine::open(stopped_store, stopped_storage)
+            .unwrap()
+            .publish(stopped_request)
+            .unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert_eq!(error, PUSH_UNFINISHED);
+    let records_before = server
+        .requests()
+        .iter()
+        .filter(|request| request.method == "PUT" && request.key.contains("/_commits/"))
+        .count();
+    assert_eq!(
+        records_before, 1,
+        "only the first version's record was ever sent"
+    );
+
+    // Once that record is listed, the Push stops at its listing: another
+    // computer got in first, and nothing claims or writes.
+    let (record_store, record_key, record_bytes) = (
+        store.clone(),
+        stream.key(&their_name).unwrap(),
+        their_bytes.clone(),
+    );
+    tokio::task::spawn_blocking(move || record_store.put_record(&record_key, &record_bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    let changed_request = publish_request(
+        bundle_id.clone(),
+        &[advanced],
+        origin_a,
+        30,
+        Some(&initial.snapshot.manifest),
+        PublishExpectation::Match(Box::new(initial.snapshot.clone()), initial.head_token),
+    );
+    let (changed_store, changed_storage) = (store.clone(), storage_id.clone());
+    let error = tokio::task::spawn_blocking(move || {
+        BundleEngine::open(changed_store, changed_storage)
+            .unwrap()
+            .publish(changed_request)
+            .unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert_eq!(error, REMOTE_CHANGED);
+    let claims = server
+        .requests()
+        .iter()
+        .filter(|request| request.method == "PUT" && request.key.contains("/_claims/"))
+        .count();
+    assert_eq!(
+        claims, 3,
+        "the first version's, the planted one, and the refused one"
+    );
+}

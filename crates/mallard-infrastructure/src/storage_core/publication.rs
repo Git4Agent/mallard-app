@@ -5,6 +5,9 @@
 //! There is no mutable head. A stream's current publication is selected from
 //! the names of one listing, and a record is written only right after a
 //! listing that shows its parent selected and childless (list, then write).
+//! On a store whose server refuses a second write of a key, the parent is
+//! claimed first: one create-only write of the record's bytes under the
+//! parent's token, which admits one child per parent (claim, then write).
 //! A write is a publication only when the listing after it selects the
 //! record; otherwise the push failed and the record is never selected.
 //! Nothing here is persisted: the process remembers the last listing of a
@@ -15,11 +18,12 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use mallard_domain::{sha256_hex, BundleId, Mainline, PublicationToken, RecordName};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use super::{
-    library_object_key, ObjectKey, ObjectPrefix, ObjectStore, MAX_LIST_PAGE,
-    REPOSITORY_COMMITS_PREFIX,
+    library_object_key, ClaimOutcome, ObjectKey, ObjectPrefix, ObjectStore, MAX_LIST_PAGE,
+    REPOSITORY_CLAIMS_PREFIX, REPOSITORY_COMMITS_PREFIX,
 };
 
 /// A record is at most this large.
@@ -46,6 +50,28 @@ const MAX_REPORTED_NAMES: usize = 1_024;
 pub const REMOTE_CHANGED: &str = "The storage changed while pushing. Compare again.";
 /// The storage could not be reached after the record was sent.
 pub const OUTCOME_UNKNOWN: &str = "Couldn't confirm the push. Refresh to see whether it arrived.";
+/// A push onto the selected version claimed it and never wrote its record:
+/// another computer's, or this computer's for other content. Nothing writes
+/// that record by itself; finishing it is the user's. The services print
+/// the Push review's sentence with the storage's name
+/// ([`unfinished_push_sentence`]).
+pub const PUSH_UNFINISHED: &str = "A push onto this version did not finish.";
+pub const OWN_PUSH_UNFINISHED: &str =
+    "This computer's earlier push onto this version did not finish.";
+
+/// The Push review's sentence for an unfinished push, with the storage's
+/// name (section 13 of the CAS-free plan). Any other error passes through.
+pub fn unfinished_push_sentence(storage_name: &str, error: String) -> String {
+    if error == PUSH_UNFINISHED {
+        format!("A push to {storage_name} did not finish. Finish it, then compare again.")
+    } else if error == OWN_PUSH_UNFINISHED {
+        format!(
+            "This computer's earlier push to {storage_name} did not finish. Finish it, then compare again."
+        )
+    } else {
+        error
+    }
+}
 
 /// Object names the storage holds inside a Mallard namespace that are not
 /// Mallard's: a `.DS_Store`, a sync client's conflicted copy. They are
@@ -73,6 +99,9 @@ pub(crate) fn report_ignored_name(name: &str) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordStream {
     prefix: ObjectPrefix,
+    /// The stream's claims, beside its records and never among them: no
+    /// record listing returns one.
+    claims: ObjectPrefix,
 }
 
 impl RecordStream {
@@ -80,25 +109,120 @@ impl RecordStream {
     pub fn project(bundle_id: &BundleId) -> Result<Self, String> {
         Ok(Self {
             prefix: ObjectPrefix::parse(format!("{REPOSITORY_COMMITS_PREFIX}/{bundle_id}"))?,
+            claims: ObjectPrefix::parse(format!("{REPOSITORY_CLAIMS_PREFIX}/{bundle_id}"))?,
         })
     }
 
     /// Library records stay inside their repository, which is never
     /// enumerated: its id is derived from the registered coordinate.
     pub fn library(repository_id: &str) -> Result<Self, String> {
-        let probe = library_object_key(repository_id, "_commits/probe")?;
-        let prefix = probe
-            .as_str()
-            .strip_suffix("/probe")
-            .expect("the Library key constructor appends the relative key");
+        let directory = |relative: &str| -> Result<ObjectPrefix, String> {
+            let probe = library_object_key(repository_id, &format!("{relative}/probe"))?;
+            let prefix = probe
+                .as_str()
+                .strip_suffix("/probe")
+                .expect("the Library key constructor appends the relative key");
+            ObjectPrefix::parse(prefix)
+        };
         Ok(Self {
-            prefix: ObjectPrefix::parse(prefix)?,
+            prefix: directory("_commits")?,
+            claims: directory("_claims")?,
         })
     }
 
     pub fn key(&self, name: &RecordName) -> Result<ObjectKey, String> {
         ObjectKey::parse(format!("{}/{}", self.prefix.as_str(), name.file_name()))
     }
+
+    /// The claim of `parent` in this stream, or of the virtual root: it
+    /// holds the record of that parent's one child.
+    pub fn claim_key(&self, parent: Option<&PublicationToken>) -> Result<ObjectKey, String> {
+        ObjectKey::parse(format!(
+            "{}/{}.json",
+            self.claims.as_str(),
+            parent_label(parent)
+        ))
+    }
+}
+
+fn parent_label(parent: Option<&PublicationToken>) -> String {
+    parent.map_or_else(|| "root".to_string(), PublicationToken::to_string)
+}
+
+/// The record a taken claim holds: what an earlier push onto the same parent
+/// built, and did not write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimedRecord {
+    pub name: RecordName,
+    pub bytes: Vec<u8>,
+}
+
+/// What one write of a record ended in.
+#[derive(Clone, Debug)]
+pub enum WriteOutcome {
+    /// Written and selected: the listing after the write selects the record.
+    Stored(StreamView),
+    /// Nothing was written. The claim of the parent holds a record that no
+    /// listing holds, so a push onto this version did not finish. The
+    /// caller decides whether it is this computer's own, for the same
+    /// content, and then writes it through [`write_claimed_record`];
+    /// anything else is the user's to finish.
+    Unfinished(ClaimedRecord),
+}
+
+impl WriteOutcome {
+    /// The listing that selects the record, or the unfinished push as an
+    /// error.
+    pub fn stored(self) -> Result<StreamView, String> {
+        match self {
+            Self::Stored(view) => Ok(view),
+            Self::Unfinished(_) => Err(PUSH_UNFINISHED.to_string()),
+        }
+    }
+}
+
+/// The five graph facts a record's name repeats. Both record types carry
+/// them under these names, so a claim's record is named here without either
+/// engine's record type.
+#[derive(Deserialize)]
+struct GraphFields {
+    revision: u64,
+    commit_id: String,
+    #[serde(default)]
+    previous_commit_id: Option<String>,
+    #[serde(default)]
+    previous_record_sha256: Option<String>,
+    created_at_ms: u64,
+}
+
+/// The name of the record `bytes` are, when they are a record of `parent`:
+/// the five graph facts they state, and the digest of the bytes themselves.
+/// Anything else is not a record of that parent.
+pub fn record_name_of(
+    bytes: &[u8],
+    parent: Option<&PublicationToken>,
+) -> Result<RecordName, String> {
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err("the record exceeds its size limit".to_string());
+    }
+    let fields: GraphFields = serde_json::from_slice(bytes)
+        .map_err(|error| format!("not a publication record: {error}"))?;
+    let named_parent = match (fields.previous_commit_id, fields.previous_record_sha256) {
+        (None, None) => None,
+        (Some(commit_id), Some(record_sha256)) => {
+            Some(PublicationToken::new(commit_id, record_sha256)?)
+        }
+        _ => return Err("the record names half a parent".to_string()),
+    };
+    if named_parent.as_ref() != parent {
+        return Err("the record names another parent".to_string());
+    }
+    RecordName::new(
+        fields.revision,
+        PublicationToken::new(fields.commit_id, sha256_hex(bytes))?,
+        named_parent,
+        fields.created_at_ms,
+    )
 }
 
 /// What one listing of a stream holds: every record name, and the chain
@@ -394,26 +518,52 @@ pub fn read_record<S: ObjectStore + ?Sized>(
 
 /// Write one record with list-then-write and return the listing that selects
 /// it. Every attempt is the second half of one step: list the stream, go on
-/// only if the record's parent is selected and childless, send the record
-/// once. A retry is a new attempt and lists first, never a resend; nothing is
-/// kept between attempts or across operations.
+/// only if the record's parent is selected and childless, claim the parent
+/// on a store with claims, send the record once. A retry is a new attempt
+/// and lists first, never a resend; nothing is kept between attempts or
+/// across operations.
 ///
 /// A record is published only when the listing after its write selects it.
-/// Two computers can both list the same childless parent and both write; the
-/// one whose record ranks second has failed, and its record is kept in the
-/// storage and never selected.
+/// On a store without claims two computers can both list the same childless
+/// parent and both write; the one whose record ranks second has failed, and
+/// its record is kept in the storage and never selected. On a store with
+/// claims the parent's claim admits one child: the second computer finds
+/// the claim taken and stops before it writes.
 ///
 /// Errors: [`REMOTE_CHANGED`] when the listing before the write shows another
-/// child or another selection, with nothing written, and when the listing
-/// that holds the record selects another computer's; [`OUTCOME_UNKNOWN`] when
-/// the storage cannot be listed after a record was sent.
+/// child or another selection, when the claim is taken by a record a listing
+/// holds, and when the listing that holds the record selects another
+/// computer's, all with nothing of this record written; [`OUTCOME_UNKNOWN`]
+/// when the storage cannot be listed after a record was sent. A claim taken
+/// by a record no listing holds is [`WriteOutcome::Unfinished`]: nothing is
+/// written, and the caller decides (section 7.3 of the CAS-free plan).
 pub fn write_record<S: ObjectStore + ?Sized>(
     store: &S,
     stream: &RecordStream,
     name: &RecordName,
     bytes: &[u8],
-) -> Result<StreamView, String> {
+) -> Result<WriteOutcome, String> {
     write_record_at(store, stream, name, bytes, &SystemTime::now)
+}
+
+/// Write the record an earlier push claimed and left unwritten, as this
+/// operation's own: the claim already holds exactly these bytes, so no claim
+/// is made, the record request follows, and the listing after it decides.
+/// The caller has just found the claimed parent selected and childless.
+pub fn write_claimed_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    claimed: &ClaimedRecord,
+) -> Result<StreamView, String> {
+    attempt(
+        store,
+        stream,
+        &claimed.name,
+        &claimed.bytes,
+        &SystemTime::now,
+        false,
+    )?
+    .stored()
 }
 
 fn listing_is_fresh(listed_at: SystemTime, now: SystemTime) -> bool {
@@ -428,7 +578,55 @@ pub(crate) fn write_record_at<S: ObjectStore + ?Sized>(
     name: &RecordName,
     bytes: &[u8],
     wall_clock: &dyn Fn() -> SystemTime,
-) -> Result<StreamView, String> {
+) -> Result<WriteOutcome, String> {
+    attempt(store, stream, name, bytes, wall_clock, true)
+}
+
+/// One claim request for the parent of `name`, carrying the record's bytes.
+fn claim_parent<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    name: &RecordName,
+    bytes: &[u8],
+) -> Result<ClaimOutcome, String> {
+    store.put_claim(&stream.claim_key(name.parent())?, bytes)
+}
+
+/// The claim of `name`'s parent holds another record. A record the listing
+/// holds, or one fresh listing holds, is another computer's finished push:
+/// the listing that admitted this record was older than that push. Otherwise
+/// that push did not finish, and nothing writes its record by itself.
+fn taken_claim<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    name: &RecordName,
+    view: &StreamView,
+    found: Vec<u8>,
+) -> Result<WriteOutcome, String> {
+    let claimed = record_name_of(&found, name.parent()).map_err(|reason| {
+        format!(
+            "the claim of {} in '{}' is not a record of it: {reason}",
+            parent_label(name.parent()),
+            stream.prefix.as_str()
+        )
+    })?;
+    if view.holds(claimed.token()) || list_stream(store, stream)?.holds(claimed.token()) {
+        return Err(REMOTE_CHANGED.to_string());
+    }
+    Ok(WriteOutcome::Unfinished(ClaimedRecord {
+        name: claimed,
+        bytes: found,
+    }))
+}
+
+fn attempt<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    name: &RecordName,
+    bytes: &[u8],
+    wall_clock: &dyn Fn() -> SystemTime,
+    claim: bool,
+) -> Result<WriteOutcome, String> {
     let key = stream.key(name)?;
     if bytes.len() as u64 > MAX_RECORD_BYTES {
         return Err("publication record exceeds its size limit".to_string());
@@ -438,6 +636,9 @@ pub(crate) fn write_record_at<S: ObjectStore + ?Sized>(
     let mut requests = 0_usize;
     let mut acknowledged = false;
     let mut send_error: Option<String> = None;
+    // The parent is claimed once per operation, on a store with claims. A
+    // record written for a claim this computer already holds needs none.
+    let mut claimed = !claim || !store.supports_claims();
     for _ in 0..MAX_WRITE_LISTINGS {
         let (mut view, listed_at) = match list_stream_at(store, stream, wall_clock) {
             Ok(listed) => listed,
@@ -461,7 +662,7 @@ pub(crate) fn write_record_at<S: ObjectStore + ?Sized>(
                 cache.with_stream(stream, |memory| memory.seen.insert(name.clone()));
                 cache.remember_record(stream, name.token(), bytes);
             }
-            return Ok(view);
+            return Ok(WriteOutcome::Stored(view));
         }
         if !view.admits(name) {
             return Err(REMOTE_CHANGED.to_string());
@@ -471,6 +672,14 @@ pub(crate) fn write_record_at<S: ObjectStore + ?Sized>(
         }
         if !listing_is_fresh(listed_at, wall_clock()) {
             continue;
+        }
+        if !claimed {
+            match claim_parent(store, stream, name, bytes)? {
+                ClaimOutcome::Mine => claimed = true,
+                ClaimOutcome::Taken(found) => {
+                    return taken_claim(store, stream, name, &view, found)
+                }
+            }
         }
         requests += 1;
         #[cfg(any(test, feature = "test-support"))]
@@ -518,6 +727,16 @@ pub mod test_support {
 #[cfg(test)]
 pub(crate) mod parity {
     use super::*;
+
+    /// The listing that selects the record; an unfinished push is an error.
+    pub(crate) fn write_record<S: ObjectStore + ?Sized>(
+        store: &S,
+        stream: &RecordStream,
+        name: &RecordName,
+        bytes: &[u8],
+    ) -> Result<StreamView, String> {
+        super::write_record(store, stream, name, bytes).and_then(WriteOutcome::stored)
+    }
 
     pub(crate) fn bundle(number: u64) -> BundleId {
         BundleId::parse(format!("{number:032x}")).unwrap()
@@ -604,7 +823,7 @@ pub(crate) mod parity {
 mod tests {
     use super::super::plain_store::PlainStore;
     use super::super::{LocalObjectStore, ObjectStore};
-    use super::parity::{bundle, publishes_and_selects, record, selected};
+    use super::parity::{bundle, publishes_and_selects, record, selected, write_record};
     use super::*;
     use std::cell::Cell;
     use std::time::Instant;
@@ -986,6 +1205,345 @@ mod tests {
                 1,
                 first.file_name()
             )
+        );
+    }
+
+    /// The plain store with claims: the least a store with claims has to be.
+    fn claiming() -> PlainStore {
+        PlainStore::default().with_claims()
+    }
+
+    /// A record whose bytes carry the five graph facts, as both engines'
+    /// records do, so a claim of it names it.
+    fn json_record(
+        parent: Option<&RecordName>,
+        id: u8,
+        created_at_ms: u64,
+    ) -> (RecordName, Vec<u8>) {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "revision": parent.map_or(1, |parent| parent.revision() + 1),
+            "commit_id": format!("commit-{}", format!("{id:02x}").repeat(12)),
+            "previous_commit_id": parent.map(RecordName::commit_id),
+            "previous_record_sha256": parent.map(|parent| parent.token().record_sha256()),
+            "created_at_ms": created_at_ms,
+            "note": format!("record {id}"),
+        }))
+        .unwrap();
+        let name = record_name_of(&bytes, parent.map(RecordName::token)).unwrap();
+        (name, bytes)
+    }
+
+    fn claim_bytes(
+        store: &PlainStore,
+        stream: &RecordStream,
+        parent: Option<&PublicationToken>,
+    ) -> Option<Vec<u8>> {
+        store
+            .get_metadata(&stream.claim_key(parent).unwrap(), MAX_RECORD_BYTES)
+            .unwrap()
+            .map(|found| found.bytes)
+    }
+
+    fn counts(store: &PlainStore) -> (usize, usize, usize) {
+        (
+            store.listings(),
+            store.claim_requests(),
+            store.record_requests(),
+        )
+    }
+
+    /// Two Pushes onto one version in the same seconds. The claim decides,
+    /// not the rank: the second computer's claim is refused in one request,
+    /// its record is never written, and the version has one child. Its
+    /// listing predated the other computer's record, so the taken path
+    /// lists once more and reads a finished push, never an unfinished one.
+    #[test]
+    fn a_claim_admits_one_child_per_parent_and_a_stale_listing_ends_in_remote_changed() {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(20)).unwrap();
+        let (a, a_bytes) = json_record(None, 1, 100);
+        let (b, b_bytes) = json_record(None, 2, 99);
+        // Two first versions: B lists an empty stream, A claims the root and
+        // writes its record before B's claim. B's record would rank first.
+        store.before_next_claim_request({
+            let (store, stream) = (store.clone(), stream.clone());
+            let (a, a_bytes) = (a.clone(), a_bytes.clone());
+            move || {
+                write_record(&store, &stream, &a, &a_bytes).unwrap();
+            }
+        });
+        store.reset_counts();
+        assert_eq!(
+            write_record(&store, &stream, &b, &b_bytes).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        // B: its listing, its refused claim, one fresh listing. A, inside the
+        // hook: a listing, a claim, a record, a listing.
+        assert_eq!(counts(&store), (4, 2, 1));
+        let view = list_stream(&store, &stream).unwrap();
+        assert!(view.holds(a.token()) && !view.holds(b.token()));
+        assert_eq!(selected(&view), Some(&a));
+        assert_eq!(claim_bytes(&store, &stream, None), Some(a_bytes));
+
+        // The same on a version.
+        let (a2, a2_bytes) = json_record(Some(&a), 3, 300);
+        let (b2, b2_bytes) = json_record(Some(&a), 4, 299);
+        store.before_next_claim_request({
+            let (store, stream) = (store.clone(), stream.clone());
+            let (a2, a2_bytes) = (a2.clone(), a2_bytes.clone());
+            move || {
+                write_record(&store, &stream, &a2, &a2_bytes).unwrap();
+            }
+        });
+        assert_eq!(
+            write_record(&store, &stream, &b2, &b2_bytes).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        let view = list_stream(&store, &stream).unwrap();
+        assert!(view.holds(a2.token()) && !view.holds(b2.token()));
+        assert_eq!(selected(&view), Some(&a2));
+        assert_eq!(
+            claim_bytes(&store, &stream, Some(a.token())),
+            Some(a2_bytes)
+        );
+
+        // A writer whose listing shows the child stops before any claim.
+        store.reset_counts();
+        let (late, late_bytes) = json_record(Some(&a), 5, 1);
+        assert_eq!(
+            write_record(&store, &stream, &late, &late_bytes).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        assert_eq!(counts(&store), (1, 0, 0));
+    }
+
+    /// A writer that claimed a version and died before its record. The next
+    /// Push onto that version, from another computer, writes nothing and
+    /// reports the unfinished push: one claim request, no record request,
+    /// and the claimed record by name. Nothing finishes it by itself.
+    #[test]
+    fn a_writer_that_died_between_its_claim_and_its_record_leaves_a_push_nobody_finishes_by_itself()
+    {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(21)).unwrap();
+        let (root, root_bytes) = json_record(None, 1, 100);
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        let (a, a_bytes) = json_record(Some(&root), 2, 200);
+        assert_eq!(
+            store
+                .put_claim(&stream.claim_key(Some(root.token())).unwrap(), &a_bytes)
+                .unwrap(),
+            ClaimOutcome::Mine
+        );
+
+        let (b, b_bytes) = json_record(Some(&root), 3, 300);
+        store.reset_counts();
+        let WriteOutcome::Unfinished(claimed) =
+            super::write_record(&store, &stream, &b, &b_bytes).unwrap()
+        else {
+            panic!("a push onto a claimed version is unfinished")
+        };
+        assert_eq!(
+            claimed,
+            ClaimedRecord {
+                name: a.clone(),
+                bytes: a_bytes.clone()
+            }
+        );
+        assert_eq!(counts(&store), (2, 1, 0));
+        let view = list_stream(&store, &stream).unwrap();
+        assert!(!view.holds(a.token()) && !view.holds(b.token()));
+        assert_eq!(selected(&view), Some(&root));
+        assert_eq!(
+            WriteOutcome::Unfinished(claimed.clone())
+                .stored()
+                .unwrap_err(),
+            PUSH_UNFINISHED
+        );
+        // Asking again changes nothing.
+        assert!(matches!(
+            super::write_record(&store, &stream, &b, &b_bytes).unwrap(),
+            WriteOutcome::Unfinished(_)
+        ));
+        assert_eq!(store.record_requests(), 0);
+
+        // Finishing it writes the claimed record, once, with no claim: it
+        // is then the version's one child, and B's record has no place.
+        store.reset_counts();
+        let view = write_claimed_record(&store, &stream, &claimed).unwrap();
+        assert_eq!(selected(&view), Some(&a));
+        assert_eq!(counts(&store), (2, 0, 1));
+        assert_eq!(
+            write_record(&store, &stream, &b, &b_bytes).unwrap_err(),
+            REMOTE_CHANGED
+        );
+    }
+
+    #[test]
+    fn a_claim_that_is_not_a_record_of_its_parent_is_an_integrity_error_and_selection_stays() {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(22)).unwrap();
+        let (root, root_bytes) = json_record(None, 1, 100);
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        let (child, child_bytes) = json_record(Some(&root), 2, 200);
+        let claim = stream.claim_key(Some(root.token())).unwrap();
+        store.reset_counts();
+
+        store.put_immutable(&claim, b"not a record").unwrap();
+        let error = write_record(&store, &stream, &child, &child_bytes).unwrap_err();
+        assert!(error.contains("is not a record of it"), "{error}");
+        assert!(error.contains("not a publication record"), "{error}");
+        // A record of another parent: the root has no parent at all.
+        store.put_immutable(&claim, &root_bytes).unwrap();
+        let error = write_record(&store, &stream, &child, &child_bytes).unwrap_err();
+        assert!(error.contains("names another parent"), "{error}");
+        assert_eq!(store.record_requests(), 0);
+        assert_eq!(
+            selected(&list_stream(&store, &stream).unwrap()),
+            Some(&root)
+        );
+
+        // A record's name is read from its bytes: the five facts and the
+        // digest of the bytes themselves.
+        assert_eq!(
+            record_name_of(&child_bytes, Some(root.token())).unwrap(),
+            child
+        );
+        assert!(record_name_of(&child_bytes, None).is_err());
+        assert!(record_name_of(&[0_u8; 64 * 1024 + 1], None).is_err());
+    }
+
+    /// The claim proves that the parent has no other child, not that the
+    /// parent is still there: a clear between the claim and the record
+    /// leaves the record an orphan, and the listing after the write says
+    /// so. The clear also freed the root's claim for the next first version.
+    #[test]
+    fn a_cleared_parent_leaves_the_claimed_record_an_orphan_and_the_root_free_to_claim_again() {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(23)).unwrap();
+        let (root, root_bytes) = json_record(None, 1, 100);
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        let (child, child_bytes) = json_record(Some(&root), 2, 200);
+        store.before_next_record_request({
+            let store = store.clone();
+            move || store.clear()
+        });
+        assert_eq!(
+            write_record(&store, &stream, &child, &child_bytes).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        let view = list_stream(&store, &stream).unwrap();
+        assert!(view.holds(child.token()));
+        assert_eq!(selected(&view), None);
+        assert_eq!(claim_bytes(&store, &stream, None), None);
+
+        let (first, first_bytes) = json_record(None, 3, 300);
+        let view = write_record(&store, &stream, &first, &first_bytes).unwrap();
+        assert_eq!(selected(&view), Some(&first));
+        assert!(!view.mainline().contains_token(child.token()));
+        assert_eq!(claim_bytes(&store, &stream, None), Some(first_bytes));
+    }
+
+    /// A clear interrupted after its claims pass leaves the chain without
+    /// its claims. A writer that listed the tip's parent childless before
+    /// the tip was visible, and paused since, claims the parent again and
+    /// lands an earlier-stamped sibling: the tip's computer reads Displaced
+    /// at its next refresh, and nothing rolls back.
+    #[test]
+    fn an_interrupted_clear_that_removed_the_claims_lets_a_delayed_writer_displace_the_tip() {
+        let store = claiming();
+        let stream = RecordStream::project(&bundle(24)).unwrap();
+        let (root, root_bytes) = json_record(None, 1, 100);
+        let (tip, tip_bytes) = json_record(Some(&root), 2, 300);
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        write_record(&store, &stream, &tip, &tip_bytes).unwrap();
+        let (delayed, delayed_bytes) = json_record(Some(&root), 3, 200);
+        let tip_key = stream.key(&tip).unwrap();
+
+        // With the claims intact the delayed writer is refused: its own
+        // listing predates the tip, and the fresh listing of the taken path
+        // holds it.
+        store.hide_from_listings(&tip_key);
+        store.before_next_claim_request({
+            let (store, tip_key) = (store.clone(), tip_key.clone());
+            move || store.reveal_in_listings(&tip_key)
+        });
+        assert_eq!(
+            write_record(&store, &stream, &delayed, &delayed_bytes).unwrap_err(),
+            REMOTE_CHANGED
+        );
+        assert!(!list_stream(&store, &stream).unwrap().holds(delayed.token()));
+
+        // Without them it lands, and is selected.
+        store.remove(&stream.claim_key(None).unwrap());
+        store.remove(&stream.claim_key(Some(root.token())).unwrap());
+        store.hide_from_listings(&tip_key);
+        let view = write_record(&store, &stream, &delayed, &delayed_bytes).unwrap();
+        assert_eq!(selected(&view), Some(&delayed));
+        store.reveal_in_listings(&tip_key);
+        let (mainline, unselected) = list_stream(&store, &stream).unwrap().into_selection();
+        assert_eq!(mainline.selected(), Some(&delayed));
+        assert_eq!(mainline.outranked(&unselected, tip.commit_id()), Some(&tip));
+    }
+
+    #[test]
+    fn a_store_with_claims_costs_one_request_more_and_the_local_store_writes_none() {
+        let store = claiming();
+        publishes_and_selects(&store);
+        let stream = RecordStream::project(&bundle(25)).unwrap();
+        let (root, root_bytes) = json_record(None, 1, 100);
+        store.reset_counts();
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        // Listing, claim, record, listing.
+        assert_eq!(counts(&store), (2, 1, 1));
+        // A repeat writes and claims nothing: the listing holds the token.
+        store.reset_counts();
+        write_record(&store, &stream, &root, &root_bytes).unwrap();
+        assert_eq!(counts(&store), (1, 0, 0));
+
+        // The record request fails after the claim: the claim stays, and
+        // the next write of the same record meets it as its own.
+        let (next, next_bytes) = json_record(Some(&root), 2, 200);
+        store.reset_counts();
+        store.fail_record_requests(usize::MAX, false);
+        let error = write_record(&store, &stream, &next, &next_bytes).unwrap_err();
+        assert!(error.contains("record request failed"), "{error}");
+        assert_eq!(store.claim_requests(), 1);
+        assert_eq!(
+            claim_bytes(&store, &stream, Some(root.token())),
+            Some(next_bytes.clone())
+        );
+        store.fail_record_requests(0, false);
+        store.reset_counts();
+        let view = write_record(&store, &stream, &next, &next_bytes).unwrap();
+        assert_eq!(selected(&view), Some(&next));
+        assert_eq!(counts(&store), (2, 1, 1));
+
+        // The local store writes no claim: its folder could be one a sync
+        // product shares, and a network share promises no create-only write.
+        let temp = tempfile::tempdir().unwrap();
+        let local = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        assert!(!local.supports_claims());
+        publishes_and_selects(&local);
+        assert!(!temp
+            .path()
+            .join("store/.mallard/v1/repositories/_claims")
+            .exists());
+    }
+
+    #[test]
+    fn the_unfinished_push_sentence_names_the_storage() {
+        assert_eq!(
+            unfinished_push_sentence("Attic R2", PUSH_UNFINISHED.to_string()),
+            "A push to Attic R2 did not finish. Finish it, then compare again."
+        );
+        assert_eq!(
+            unfinished_push_sentence("Attic R2", OWN_PUSH_UNFINISHED.to_string()),
+            "This computer's earlier push to Attic R2 did not finish. Finish it, then compare again."
+        );
+        assert_eq!(
+            unfinished_push_sentence("Attic R2", REMOTE_CHANGED.to_string()),
+            REMOTE_CHANGED
         );
     }
 }

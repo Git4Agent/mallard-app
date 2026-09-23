@@ -450,13 +450,17 @@ fn list_rejects_invalid_requested_folder_and_outside_entries() {
 fn dropbox_runs_the_same_publication_as_every_other_store() {
     let server = Server::new();
     crate::storage_core::publication::parity::publishes_and_selects(&server.store);
-    // Every record was one direct upload request.
+    // Every record, and every claim, was one direct upload request.
     let state = server.state.lock().unwrap();
     assert_eq!(state.direct_uploads.len(), state.routes["files/upload"]);
     assert!(state
         .direct_uploads
         .iter()
-        .all(|path| path.contains("/_commits/")));
+        .all(|path| path.contains("/_commits/") || path.contains("/_claims/")));
+    assert!(state
+        .direct_uploads
+        .iter()
+        .any(|path| path.contains("/_claims/")));
 }
 #[test]
 fn list_skips_and_reports_names_mallard_never_writes() {
@@ -573,6 +577,69 @@ fn probe_cleans_known_revisions_and_preserves_unknown_writes() {
         .values()
         .any(|(m, _)| m.kind == "file"));
 }
+/// The claim is one add-mode upload without a strict conflict check:
+/// identical bytes are written, other bytes are a conflict, and one download
+/// then returns what was found.
+#[test]
+fn a_claim_is_one_add_mode_upload_and_a_taken_claim_returns_what_it_found() {
+    let server = Server::new();
+    let store = &server.store;
+    assert!(store.supports_claims());
+    let claim = key("_claims/root.json");
+    let requests = || server.state.lock().unwrap().requests;
+    let before = requests();
+    assert_eq!(
+        store.put_claim(&claim, b"mine").unwrap(),
+        ClaimOutcome::Mine
+    );
+    assert_eq!(requests(), before + 1);
+    assert_eq!(
+        store.put_claim(&claim, b"mine").unwrap(),
+        ClaimOutcome::Mine
+    );
+    assert_eq!(requests(), before + 2);
+    assert_eq!(
+        store.put_claim(&claim, b"theirs").unwrap(),
+        ClaimOutcome::Taken(b"mine".to_vec())
+    );
+    assert_eq!(requests(), before + 4);
+    assert_eq!(
+        server.state.lock().unwrap().entries[&object_path(&claim).unwrap()].1,
+        b"mine"
+    );
+    // An unacknowledged claim is an error here, and not retried here.
+    server.state.lock().unwrap().fail_upload = true;
+    let uploads = server.state.lock().unwrap().uploads;
+    assert!(store
+        .put_claim(&key("_claims/other.json"), b"claim")
+        .is_err());
+    assert_eq!(server.state.lock().unwrap().uploads, uploads + 1);
+}
+
+/// A folder that overwrites an add-mode upload cannot arbitrate a claim and
+/// cannot be set up: the probe's refusal stage fails, and the overwritten
+/// probe object is not a revision the journal knows, so cleanup asks for
+/// reconciliation instead of deleting it.
+#[test]
+fn probe_refuses_a_folder_that_overwrites() {
+    let server = Server::new();
+    server.state.lock().unwrap().overwrite_uploads = true;
+    let mut journal = MemoryProbeJournal::default();
+    assert_eq!(
+        server
+            .store
+            .probe("setup-0123456789abcdef01234567", &mut journal),
+        Err(Error::Cleanup)
+    );
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .entries
+        .values()
+        .any(|(m, _)| m.kind == "file"));
+}
+
 #[test]
 fn probe_rejects_account_home_before_remote_mutation() {
     let server = Server::new();

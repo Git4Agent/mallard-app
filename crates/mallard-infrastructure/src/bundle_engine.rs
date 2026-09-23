@@ -33,7 +33,8 @@ use mallard_domain::{
 };
 
 use crate::storage_core::publication::{
-    list_project_streams, list_stream, read_record, read_records, write_record, RecordStream,
+    list_project_streams, list_stream, read_record, read_records, write_claimed_record,
+    write_record, ClaimedRecord, RecordStream, WriteOutcome, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
     REMOTE_CHANGED,
 };
 use crate::storage_core::{
@@ -838,12 +839,13 @@ impl<S: ObjectStore> BundleEngine<S> {
             &repository_object_key(&bundle_id, &head.manifest_key)?,
             &manifest_bytes,
         )?;
-        write_record(
-            &self.store,
-            &RecordStream::project(&bundle_id)?,
-            &name,
-            &record_bytes,
-        )?;
+        let stream = RecordStream::project(&bundle_id)?;
+        let (head, manifest) = match write_record(&self.store, &stream, &name, &record_bytes)? {
+            WriteOutcome::Stored(_) => (head, manifest),
+            WriteOutcome::Unfinished(claimed) => {
+                self.write_own_claim(&stream, &manifest, &claimed)?
+            }
+        };
         Ok(PublishedBundle::Stored {
             snapshot: BundleSnapshot {
                 storage_id: self.storage_id.clone(),
@@ -852,6 +854,43 @@ impl<S: ObjectStore> BundleEngine<S> {
                 fetched_at,
             },
         })
+    }
+
+    /// The claim of the parent holds a record no listing holds: a push onto
+    /// this version did not finish. One case needs no user: this computer's
+    /// own record, from an earlier attempt whose record request failed, for
+    /// the same content, which means the same scope digests. Then that
+    /// record is written instead of the one this publish built, and its head
+    /// and manifest are this publish's. Anything else stops: nothing writes
+    /// another computer's record, or this computer's for other content, by
+    /// itself (section 7.3 of the CAS-free plan).
+    fn write_own_claim(
+        &self,
+        stream: &RecordStream,
+        built: &BundleManifest,
+        claimed: &ClaimedRecord,
+    ) -> Result<(BundleHead, BundleManifest), String> {
+        let bundle_id = &built.bundle.bundle_id;
+        let record = CommitRecord::parse(bundle_id, &claimed.name, &claimed.bytes)?;
+        if record.published_by_origin.origin_replica_token
+            != built.published_by_origin.origin_replica_token
+        {
+            return Err(PUSH_UNFINISHED.to_string());
+        }
+        let head = record.head()?;
+        let manifest = self.read_manifest(&head)?;
+        let scope_digests = |manifest: &BundleManifest| {
+            manifest
+                .scopes
+                .iter()
+                .map(|(key, scope)| (key.clone(), scope.content_sha256.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        if scope_digests(&manifest) != scope_digests(built) {
+            return Err(OWN_PUSH_UNFINISHED.to_string());
+        }
+        write_claimed_record(&self.store, stream, claimed)?;
+        Ok((head, manifest))
     }
 
     /// Publish the empty registration manifest that makes a just-linked
@@ -4993,6 +5032,158 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("belongs to no live thread"), "{error}");
         assert!(engine.inspect_optional(&id).unwrap().is_none());
+    }
+
+    /// On a store with claims a Push claims its parent before its record.
+    /// Its own claim, left by an attempt whose record request failed, is
+    /// met on the next Push: with the same content the claimed record is
+    /// written as this Push's; with other content, or under another
+    /// computer's claim, the Push stops with nothing written. No refresh,
+    /// review or discovery ever lists or reads a claim.
+    #[test]
+    fn a_push_meets_its_own_claim_for_the_same_content_and_stops_at_any_other() {
+        use crate::storage_core::publication::{
+            record_name_of, MAX_RECORD_BYTES, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        write(&project.join("CLAUDE.md"), b"claimed");
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let store = PlainStore::default().with_claims();
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let id = bundle_id(96);
+        let stream = RecordStream::project(&id).unwrap();
+        let capture = || capture_recipe(registry(), &request, &recipe).unwrap();
+        let publish = |observed, updated_at| {
+            publish_captured(
+                &engine,
+                identity(id.clone(), "Claimed"),
+                &recipe,
+                &capture(),
+                observed,
+                updated_at,
+            )
+        };
+        let counts = || {
+            (
+                store.listings(),
+                store.claim_requests(),
+                store.record_requests(),
+            )
+        };
+        // Listing, claim, record, listing: one request more than the local
+        // store's three.
+        store.reset_counts();
+        publish(None, 10).unwrap();
+        assert_eq!(counts(), (2, 1, 1));
+        let observed = engine.read_head(&id).unwrap();
+        let parent = observed.as_ref().unwrap().1.publication().unwrap();
+        let claim_key = stream.claim_key(Some(&parent)).unwrap();
+        let claim = || {
+            store
+                .get_metadata(&claim_key, MAX_RECORD_BYTES)
+                .unwrap()
+                .map(|found| found.bytes)
+        };
+
+        // An attempt whose record request fails after its claim: the claim
+        // stays, holding this computer's record, which no listing holds.
+        write(&project.join("CLAUDE.md"), b"claimed twice");
+        store.fail_record_requests(usize::MAX, false);
+        let error = publish(observed.clone(), 20).unwrap_err();
+        assert!(error.contains("record request failed"), "{error}");
+        store.fail_record_requests(0, false);
+        let claimed = record_name_of(&claim().unwrap(), Some(&parent)).unwrap();
+        assert!(!list_stream(&store, &stream).unwrap().holds(claimed.token()));
+
+        // The next Push with the same content writes that record as its
+        // own: one claim request, one record request, and the earlier
+        // attempt's commit id is the published one.
+        store.reset_counts();
+        let published = publish(observed.clone(), 30).unwrap();
+        assert!(published.stored());
+        assert_eq!(published.snapshot().head.commit_id, claimed.commit_id());
+        assert_eq!(published.snapshot().manifest.commit_id, claimed.commit_id());
+        assert_eq!(counts(), (4, 1, 1));
+        assert_eq!(
+            engine.read_head(&id).unwrap().unwrap().0.commit_id,
+            claimed.commit_id()
+        );
+
+        // Other content behind this computer's own claim stops the Push:
+        // nothing is written, and the claim stays as it was.
+        let observed = engine.read_head(&id).unwrap();
+        let parent = observed.as_ref().unwrap().1.publication().unwrap();
+        let claim_key = stream.claim_key(Some(&parent)).unwrap();
+        let claim = || {
+            store
+                .get_metadata(&claim_key, MAX_RECORD_BYTES)
+                .unwrap()
+                .map(|found| found.bytes)
+        };
+        write(&project.join("CLAUDE.md"), b"claimed thrice");
+        store.fail_record_requests(usize::MAX, false);
+        publish(observed.clone(), 40).unwrap_err();
+        store.fail_record_requests(0, false);
+        let own_claim = claim().unwrap();
+        write(&project.join("CLAUDE.md"), b"claimed four times");
+        store.reset_counts();
+        assert_eq!(
+            publish(observed.clone(), 50).unwrap_err(),
+            OWN_PUSH_UNFINISHED
+        );
+        assert_eq!(store.record_requests(), 0);
+        assert_eq!(claim(), Some(own_claim.clone()));
+
+        // Another computer's claim stops it the same way; nothing writes
+        // that computer's record by itself.
+        let mut theirs: serde_json::Value = serde_json::from_slice(&own_claim).unwrap();
+        theirs["published_by_origin"]["origin_replica_token"] =
+            serde_json::Value::String("1".repeat(64));
+        theirs["commit_id"] = serde_json::Value::String(format!("commit-{}", "3".repeat(24)));
+        theirs["manifest_key"] = serde_json::Value::String(manifest_relative_key(
+            theirs["revision"].as_u64().unwrap(),
+            &format!("commit-{}", "3".repeat(24)),
+        ));
+        let their_bytes = serde_json::to_vec(&theirs).unwrap();
+        store.put_immutable(&claim_key, &their_bytes).unwrap();
+        store.reset_counts();
+        assert_eq!(publish(observed.clone(), 60).unwrap_err(), PUSH_UNFINISHED);
+        assert_eq!(counts(), (2, 1, 0));
+
+        // A refresh, a review and discovery never list or read a claim.
+        store.reset_counts();
+        engine.observe(&id).unwrap();
+        engine.inspect(&id).unwrap();
+        engine.list_remote_bundles().unwrap();
+        assert!(store
+            .listed_prefixes()
+            .iter()
+            .all(|prefix| !prefix.contains("_claims")));
+        assert!(store
+            .read_keys()
+            .iter()
+            .all(|key| !key.as_str().contains("/_claims/")));
+        assert!(!store.listed_prefixes().is_empty() && !store.read_keys().is_empty());
+
+        // Once their record is listed, the listing before the claim stops
+        // the Push: another computer got in first.
+        let their_name = record_name_of(&their_bytes, Some(&parent)).unwrap();
+        store
+            .put_record(&stream.key(&their_name).unwrap(), &their_bytes)
+            .unwrap();
+        store.reset_counts();
+        assert_eq!(publish(observed, 70).unwrap_err(), REMOTE_CHANGED);
+        assert_eq!(counts(), (1, 0, 0));
     }
 }
 

@@ -1,18 +1,20 @@
 //! An in-memory store that offers only put, get and list, with plain
 //! overwrite and no conditional write: the least a provider has to be.
 //! Tests run the engines over it to prove they need nothing more, and use its
-//! counters and faults to observe requests.
+//! counters and faults to observe requests. Switched on, its claim is
+//! exclusive in memory, the way S3/R2 and Dropbox refuse a second write of a
+//! key in the same request.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
 use super::publication::PublicationCache;
 use super::{
-    ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome,
-    StoreKeyPage, StoreListPage, StoredMetadata, VerifiedBody, MAX_LIST_PAGE,
+    ClaimOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore,
+    StageOutcome, StoreKeyPage, StoreListPage, StoredMetadata, VerifiedBody, MAX_LIST_PAGE,
     REPOSITORY_COMMITS_PREFIX,
 };
 use mallard_domain::sha256_hex;
@@ -23,21 +25,33 @@ struct Faults {
     /// (a lost acknowledgment).
     record_failures: usize,
     record_lands: bool,
+    /// Claim requests still to fail, and whether the claim lands anyway.
+    claim_failures: usize,
+    claim_lands: bool,
     /// Listings still allowed before every later one fails.
     listings_left: Option<usize>,
     hidden: BTreeSet<ObjectKey>,
     /// Runs once, right before the next record request is served: whatever
     /// another computer does between this one's listing and its write.
     before_record: Option<Box<dyn FnOnce() + Send>>,
+    /// Runs once, right before the next claim request is served: whatever
+    /// another computer does between this one's listing and its claim.
+    before_claim: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Default)]
 struct Shared {
     objects: Mutex<BTreeMap<ObjectKey, Vec<u8>>>,
     faults: Mutex<Faults>,
+    /// Whether this store arbitrates claims.
+    claims: AtomicBool,
     listings: AtomicUsize,
     reads: AtomicUsize,
     record_requests: AtomicUsize,
+    claim_requests: AtomicUsize,
+    /// Every prefix listed and every key read since the last reset.
+    listed_prefixes: Mutex<Vec<String>>,
+    read_keys: Mutex<Vec<ObjectKey>>,
 }
 
 /// Clones share one set of objects, like two computers on one storage.
@@ -54,10 +68,33 @@ impl PlainStore {
         self
     }
 
+    /// Arbitrate claims, exclusively in memory, as S3/R2 and Dropbox do.
+    pub fn with_claims(self) -> Self {
+        self.set_claims(true);
+        self
+    }
+
+    pub fn set_claims(&self, claims: bool) {
+        self.shared.claims.store(claims, Ordering::SeqCst);
+    }
+
     pub fn reset_counts(&self) {
         self.shared.listings.store(0, Ordering::SeqCst);
         self.shared.reads.store(0, Ordering::SeqCst);
         self.shared.record_requests.store(0, Ordering::SeqCst);
+        self.shared.claim_requests.store(0, Ordering::SeqCst);
+        self.shared.listed_prefixes.lock().unwrap().clear();
+        self.shared.read_keys.lock().unwrap().clear();
+    }
+
+    /// Every prefix listed since the last reset, in call order.
+    pub fn listed_prefixes(&self) -> Vec<String> {
+        self.shared.listed_prefixes.lock().unwrap().clone()
+    }
+
+    /// Every key read since the last reset, in call order.
+    pub fn read_keys(&self) -> Vec<ObjectKey> {
+        self.shared.read_keys.lock().unwrap().clone()
     }
 
     /// Key listings answered or refused since the last reset.
@@ -73,6 +110,25 @@ impl PlainStore {
     /// Record requests sent since the last reset.
     pub fn record_requests(&self) -> usize {
         self.shared.record_requests.load(Ordering::SeqCst)
+    }
+
+    /// Claim requests sent since the last reset.
+    pub fn claim_requests(&self) -> usize {
+        self.shared.claim_requests.load(Ordering::SeqCst)
+    }
+
+    /// Fail the next `count` claim requests. With `lands`, the claim is
+    /// stored and only its acknowledgment is lost.
+    pub fn fail_claim_requests(&self, count: usize, lands: bool) {
+        let mut faults = self.shared.faults.lock().unwrap();
+        faults.claim_failures = count;
+        faults.claim_lands = lands;
+    }
+
+    /// Run `action` once, between the next claim request's listing and the
+    /// claim itself.
+    pub fn before_next_claim_request(&self, action: impl FnOnce() + Send + 'static) {
+        self.shared.faults.lock().unwrap().before_claim = Some(Box::new(action));
     }
 
     /// Fail the next `count` record requests. With `lands`, the record is
@@ -144,6 +200,7 @@ impl ObjectStore for PlainStore {
         max_bytes: u64,
     ) -> Result<Option<StoredMetadata>, String> {
         self.shared.reads.fetch_add(1, Ordering::SeqCst);
+        self.shared.read_keys.lock().unwrap().push(key.clone());
         let Some(bytes) = self.shared.objects.lock().unwrap().get(key).cloned() else {
             return Ok(None);
         };
@@ -162,6 +219,7 @@ impl ObjectStore for PlainStore {
         expected: &ExpectedObject,
     ) -> Result<StageOutcome, String> {
         self.shared.reads.fetch_add(1, Ordering::SeqCst);
+        self.shared.read_keys.lock().unwrap().push(key.clone());
         let Some(bytes) = self.shared.objects.lock().unwrap().get(key).cloned() else {
             return Ok(StageOutcome::Missing);
         };
@@ -215,6 +273,47 @@ impl ObjectStore for PlainStore {
         }
     }
 
+    fn supports_claims(&self) -> bool {
+        self.shared.claims.load(Ordering::SeqCst)
+    }
+
+    /// Exclusive in memory: the first bytes at the key stay, and a second
+    /// write of other bytes is refused with them.
+    fn put_claim(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ClaimOutcome, String> {
+        if !self.supports_claims() {
+            return Err("this storage cannot arbitrate a claim".to_string());
+        }
+        self.shared.claim_requests.fetch_add(1, Ordering::SeqCst);
+        let before = self.shared.faults.lock().unwrap().before_claim.take();
+        if let Some(before) = before {
+            before();
+        }
+        let lands = {
+            let mut faults = self.shared.faults.lock().unwrap();
+            if faults.claim_failures == 0 {
+                None
+            } else {
+                faults.claim_failures -= 1;
+                Some(faults.claim_lands)
+            }
+        };
+        let mut objects = self.shared.objects.lock().unwrap();
+        let outcome = match objects.get(key) {
+            None => {
+                if lands != Some(false) {
+                    objects.insert(key.clone(), bytes.to_vec());
+                }
+                ClaimOutcome::Mine
+            }
+            Some(existing) if existing.as_slice() == bytes => ClaimOutcome::Mine,
+            Some(existing) => ClaimOutcome::Taken(existing.clone()),
+        };
+        match lands {
+            None => Ok(outcome),
+            Some(_) => Err("claim request failed in the transport".to_string()),
+        }
+    }
+
     /// Record listings ask for keys only; a listing that wants revisions in
     /// the record namespace is a regression.
     fn list(
@@ -256,6 +355,11 @@ impl ObjectStore for PlainStore {
             return Err("list limit is out of range".to_string());
         }
         self.shared.listings.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .listed_prefixes
+            .lock()
+            .unwrap()
+            .push(prefix.as_str().to_string());
         {
             let mut faults = self.shared.faults.lock().unwrap();
             match faults.listings_left.as_mut() {

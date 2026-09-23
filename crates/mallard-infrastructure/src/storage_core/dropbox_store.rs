@@ -8,10 +8,11 @@ mod probe;
 mod tests;
 mod upload;
 
+use super::publication::MAX_RECORD_BYTES;
 use super::{
-    ConnectionEvidence, ConnectionHealth, DeleteOutcome, ExpectedObject, ImmutablePutOutcome,
-    ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, StoreListEntry, StoreListPage,
-    StoredMetadata, VerifiedBody, MAX_LIST_PAGE,
+    ClaimOutcome, ConnectionEvidence, ConnectionHealth, DeleteOutcome, ExpectedObject,
+    ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome, StoreListEntry,
+    StoreListPage, StoredMetadata, VerifiedBody, MAX_LIST_PAGE,
 };
 use crate::dropbox_auth::{
     auth_error_tag, AuthClass, AuthError, DropboxAuthorization, DropboxClient, DropboxCredential,
@@ -957,6 +958,22 @@ impl ObjectStore for DropboxObjectStore {
         self.runtime
             .block_on(self.upload_record(&path, Bytes::copy_from_slice(bytes)))
             .map(|_| ImmutablePutOutcome::Written)
+            .map_err(|error| self.describe(error))
+    }
+    /// Dropbox refuses an add-mode upload to a path that holds other bytes,
+    /// in the same request; the setup probe proves it for the folder.
+    fn supports_claims(&self) -> bool {
+        true
+    }
+    fn put_claim(
+        &self,
+        key: &ObjectKey,
+        bytes: &[u8],
+    ) -> std::result::Result<ClaimOutcome, String> {
+        let path = object_path(key)?;
+        upload_size(bytes.len() as u64)?;
+        self.runtime
+            .block_on(self.put_claim_async(&path, Bytes::copy_from_slice(bytes)))
             .map_err(|error| self.describe(error))
     }
     fn supports_conditional_delete(&self) -> bool {

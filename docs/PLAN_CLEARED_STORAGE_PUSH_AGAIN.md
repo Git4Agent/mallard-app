@@ -190,8 +190,8 @@ the same two checks, and this plan adds their tests. R5 needed one change: see
 *Implementation notes*.
 
 R2, R3 and R4 need two records under one version. On R2 and on Dropbox the
-claim of the CAS-free plan (decision 11 and section 7.2; planned, not
-implemented) lets a version have one child, so there they end as R1 while the
+claim of the CAS-free plan (decision 11 and section 7.2; implemented on
+September 22 as its step 9) lets a version have one child, so there they end as R1 while the
 storage's claims are intact: the second Push fails before it writes. An
 interrupted clear can remove a claim and reopen R3 there (CAS-free plan,
 section 12). They remain as written on a local folder.

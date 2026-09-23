@@ -156,6 +156,17 @@ pub enum ImmutablePutOutcome {
     AlreadyPresent,
 }
 
+/// The answer to one claim request. A claim is the one key two computers
+/// reach with different bytes, and the store admits exactly one of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// The key was free, or already held these bytes: the claim is this
+    /// writer's.
+    Mine,
+    /// The key holds other bytes: another writer's claim, returned as found.
+    Taken(Vec<u8>),
+}
+
 /// One listed object with the opaque revision the store reported for it.
 /// A later conditional delete binds to exactly this revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,6 +273,24 @@ pub trait ObjectStore: Send + Sync {
     /// already taken holds these bytes.
     fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         self.put_immutable(key, bytes)
+    }
+
+    /// Whether this store's server refuses a write to a key that already
+    /// holds other bytes, in the same request. Only such a store can
+    /// arbitrate a claim between two computers: a folder a sync product
+    /// shares would take two claims, and a network share promises no
+    /// create-only write. `false` unless the behavior is proved; the local
+    /// store never claims.
+    fn supports_claims(&self) -> bool {
+        false
+    }
+
+    /// One create-only request at the claim key, with no retry inside the
+    /// transport: `Mine` when the key was free or already held these bytes,
+    /// `Taken` with the bytes found otherwise. Used only for the claim a
+    /// publication makes of its parent; callers ask `supports_claims` first.
+    fn put_claim(&self, _key: &ObjectKey, _bytes: &[u8]) -> Result<ClaimOutcome, String> {
+        Err("this storage cannot arbitrate a claim".to_string())
     }
 
     /// Whether this store can atomically delete only the object revision that

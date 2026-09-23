@@ -10,6 +10,7 @@
 use bytes::Bytes;
 use mallard_domain::{now_secs, Mainline, StorageConfig, StorageId, SyncConfig};
 use mallard_infrastructure::bundle_engine::{NOT_PULLED, VERSION_INCOMPLETE};
+use mallard_infrastructure::storage_core::publication::unfinished_push_sentence;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::ConfiguredObjectStore;
 use serde::Serialize;
@@ -1863,7 +1864,8 @@ fn apply_push_with_repositories(
     let engine = engine_for(storage)?;
     let repository_id = link.repository_id.clone();
     let host = state.load_or_create_host_identity()?;
-    let published = engine.publish(PublishLibraryResourceRequest {
+    let published = engine
+        .publish(PublishLibraryResourceRequest {
         repository_id: repository_id.clone(),
         tag: LibraryResourceTag::new(&workspace.scope.coordinate(), repository_id.clone()),
         observed: workspace.observed.clone(),
@@ -1873,13 +1875,14 @@ fn apply_push_with_repositories(
             app: "mallard".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        published_by_origin: super::domain::derive_library_origin(
-            host.host_id.as_str(),
-            link.link_id.as_str(),
-            &repository_id,
-        )?,
-        updated_at: now,
-    })?;
+            published_by_origin: super::domain::derive_library_origin(
+                host.host_id.as_str(),
+                link.link_id.as_str(),
+                &repository_id,
+            )?,
+            updated_at: now,
+        })
+        .map_err(|error| unfinished_push_sentence(&storage.name, error))?;
 
     // A stored publication is the selected one: a push whose record ranked
     // behind another computer's failed above, before any accepted state moved.

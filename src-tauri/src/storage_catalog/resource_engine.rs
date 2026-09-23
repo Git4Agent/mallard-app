@@ -11,7 +11,8 @@ use bytes::Bytes;
 use mallard_domain::{Mainline, PublicationToken, RecordName, StorageConfig};
 use mallard_infrastructure::bundle_engine::VERSION_INCOMPLETE;
 use mallard_infrastructure::storage_core::publication::{
-    list_stream, read_record, write_record, RecordStream,
+    list_stream, read_record, write_claimed_record, write_record, ClaimedRecord, RecordStream,
+    WriteOutcome, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
 };
 use mallard_infrastructure::storage_core::{
     library_object_key, ExpectedObject, ObjectStore, StageOutcome, TAG_FILE,
@@ -474,16 +475,51 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
             parent,
             commit.created_at_ms,
         )?;
-        write_record(
-            &self.store,
-            &RecordStream::library(request.repository_id.as_str())?,
-            &name,
-            &record_bytes,
-        )?;
-        Ok(PublishedLibraryResource::Stored {
-            head: commit.head(),
-            manifest,
-        })
+        let stream = RecordStream::library(request.repository_id.as_str())?;
+        match write_record(&self.store, &stream, &name, &record_bytes)? {
+            WriteOutcome::Stored(_) => Ok(PublishedLibraryResource::Stored {
+                head: commit.head(),
+                manifest,
+            }),
+            WriteOutcome::Unfinished(claimed) => {
+                self.write_own_claim(&stream, &commit, &manifest, &claimed)
+            }
+        }
+    }
+
+    /// The claim of the parent holds a record no listing holds: a push onto
+    /// this version did not finish. This computer's own record, for the same
+    /// content (the same per-resource content digests), is written instead
+    /// of the one this publish built, and is this publish's. Anything else
+    /// stops: nothing writes another computer's record, or this computer's
+    /// for other content, by itself (section 7.3 of the CAS-free plan).
+    fn write_own_claim(
+        &self,
+        stream: &RecordStream,
+        built: &LibraryResourceCommit,
+        built_manifest: &LibraryResourceManifest,
+        claimed: &ClaimedRecord,
+    ) -> Result<PublishedLibraryResource, String> {
+        let record = parse_record(&built.repository_id, &claimed.name, &claimed.bytes)?;
+        if record.published_by_origin.origin_replica_token
+            != built.published_by_origin.origin_replica_token
+        {
+            return Err(PUSH_UNFINISHED.to_string());
+        }
+        let head = record.head();
+        let manifest = self.read_manifest(&head)?;
+        let contents = |manifest: &LibraryResourceManifest| {
+            manifest
+                .resources
+                .iter()
+                .map(|(id, entry)| (id.clone(), entry.resource.content_sha256.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        if contents(&manifest) != contents(built_manifest) {
+            return Err(OWN_PUSH_UNFINISHED.to_string());
+        }
+        write_claimed_record(&self.store, stream, claimed)?;
+        Ok(PublishedLibraryResource::Stored { head, manifest })
     }
 }
 
@@ -1082,5 +1118,114 @@ mod tests {
             error.contains("does not belong to this repository"),
             "{error}"
         );
+    }
+
+    /// The Library claims the same way, through the same shared module.
+    #[test]
+    fn a_library_push_meets_its_own_claim_for_the_same_content_and_stops_at_any_other() {
+        use mallard_infrastructure::storage_core::plain_store::PlainStore;
+        use mallard_infrastructure::storage_core::publication::{
+            record_name_of, MAX_RECORD_BYTES, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
+        };
+        let store = PlainStore::default().with_claims();
+        let engine = LibraryResourceEngine::new(store.clone());
+        let repository_id = plugin_repository();
+        let stream = RecordStream::library(repository_id.as_str()).unwrap();
+        let base = plugin("review@review-market", "main");
+        let counts = || {
+            (
+                store.listings(),
+                store.claim_requests(),
+                store.record_requests(),
+            )
+        };
+        store.reset_counts();
+        publish(&engine, None, std::slice::from_ref(&base), 1).unwrap();
+        // The apply-time listing, then listing, claim, record, listing.
+        assert_eq!(counts(), (3, 1, 1));
+        let observed = engine.read_head(&repository_id).unwrap();
+        let parent = observed.as_ref().unwrap().publication().unwrap();
+        let claim_key = stream.claim_key(Some(&parent)).unwrap();
+        let claim = || {
+            store
+                .get_metadata(&claim_key, MAX_RECORD_BYTES)
+                .unwrap()
+                .map(|found| found.bytes)
+        };
+
+        // An attempt whose record request fails after its claim.
+        let next = [base.clone(), plugin("tools@review-market", "main")];
+        store.fail_record_requests(usize::MAX, false);
+        let error = publish(&engine, observed.clone(), &next, 2).unwrap_err();
+        assert!(error.contains("record request failed"), "{error}");
+        store.fail_record_requests(0, false);
+        let claimed = record_name_of(&claim().unwrap(), Some(&parent)).unwrap();
+
+        // The same set again writes the claimed record as this push's.
+        store.reset_counts();
+        let published = publish(&engine, observed.clone(), &next, 3).unwrap();
+        assert!(published.stored());
+        assert_eq!(published.head().commit_id.as_str(), claimed.commit_id());
+        assert_eq!(counts(), (5, 1, 1));
+
+        // Other content behind this computer's claim, and another
+        // computer's claim, stop with nothing written.
+        let observed = engine.read_head(&repository_id).unwrap();
+        let parent = observed.as_ref().unwrap().publication().unwrap();
+        let claim_key = stream.claim_key(Some(&parent)).unwrap();
+        let later = [
+            next[0].clone(),
+            next[1].clone(),
+            plugin("late@review-market", "main"),
+        ];
+        store.fail_record_requests(usize::MAX, false);
+        publish(&engine, observed.clone(), &later, 4).unwrap_err();
+        store.fail_record_requests(0, false);
+        let own_claim = store
+            .get_metadata(&claim_key, MAX_RECORD_BYTES)
+            .unwrap()
+            .unwrap()
+            .bytes;
+        let other = [next[0].clone(), plugin("other@review-market", "main")];
+        store.reset_counts();
+        assert_eq!(
+            publish(&engine, observed.clone(), &other, 5).unwrap_err(),
+            OWN_PUSH_UNFINISHED
+        );
+        assert_eq!(store.record_requests(), 0);
+        let mut theirs: serde_json::Value = serde_json::from_slice(&own_claim).unwrap();
+        theirs["published_by_origin"]["origin_replica_token"] =
+            serde_json::Value::String("c".repeat(64));
+        let their_bytes = serde_json::to_vec(&theirs).unwrap();
+        store.put_immutable(&claim_key, &their_bytes).unwrap();
+        store.reset_counts();
+        assert_eq!(
+            publish(&engine, observed.clone(), &later, 6).unwrap_err(),
+            PUSH_UNFINISHED
+        );
+        assert_eq!(counts(), (3, 1, 0));
+        assert_eq!(
+            engine
+                .read_head(&repository_id)
+                .unwrap()
+                .unwrap()
+                .head
+                .commit_id
+                .as_str(),
+            claimed.commit_id()
+        );
+        // Once their record is listed, the apply-time listing stops the
+        // push before any claim: the Library requires the reviewed
+        // publication to be the selected one.
+        let their_name = record_name_of(&their_bytes, Some(&parent)).unwrap();
+        store
+            .put_record(&stream.key(&their_name).unwrap(), &their_bytes)
+            .unwrap();
+        store.reset_counts();
+        assert_eq!(
+            publish(&engine, observed, &later, 7).unwrap_err(),
+            CHANGED_AFTER_REVIEW
+        );
+        assert_eq!(counts(), (1, 0, 0));
     }
 }

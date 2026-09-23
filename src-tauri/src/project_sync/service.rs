@@ -56,6 +56,7 @@ use mallard_infrastructure::bundle_engine::{
     PublishedBundle, ScopePublishInput, NOT_PULLED, VERSION_INCOMPLETE,
 };
 use mallard_infrastructure::claude_history_tail;
+use mallard_infrastructure::storage_core::publication::unfinished_push_sentence;
 use mallard_infrastructure::codex_history_graph;
 use mallard_infrastructure::codex_history_graph::CodexSeededRoot;
 use mallard_infrastructure::codex_standalone_builder::{
@@ -10158,7 +10159,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let discovered = discovery.project_inventory();
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
-    let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
+    let (storage, engine) =
+        storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
     // Apply starts: list the stream and select. Everything below is checked
     // and built against this freshly selected publication, and the record
     // names it as its parent.
@@ -10475,7 +10477,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
         on_progress,
         &mut *on_phase,
         credential_redaction_enabled,
-    )?;
+    )
+    .map_err(|error| unfinished_push_sentence(&storage.name, error))?;
     publish_outcome.failures.extend(stale_children);
     let thread_results = conversation_push_results(
         &selected_conversations,

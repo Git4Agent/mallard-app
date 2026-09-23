@@ -166,6 +166,26 @@ impl DropboxObjectStore {
         Ok(metadata)
     }
 
+    /// `upload_record` at the claim path: add mode without a strict conflict
+    /// check answers identical bytes as written and other bytes as a
+    /// conflict, in one request; one download then returns what was found.
+    pub(super) async fn put_claim_async(&self, path: &str, bytes: Bytes) -> Result<ClaimOutcome> {
+        match self.upload_record(path, bytes).await {
+            Ok(_) => Ok(ClaimOutcome::Mine),
+            Err(Error::Conflict) => {
+                let mut found = Vec::new();
+                match self
+                    .download_into(path, MAX_RECORD_BYTES, &mut found)
+                    .await?
+                {
+                    Some(_) => Ok(ClaimOutcome::Taken(found)),
+                    None => Err(Error::Invalid),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(super) async fn put_many_async(
         &self,
         objects: Vec<(ObjectKey, Bytes)>,

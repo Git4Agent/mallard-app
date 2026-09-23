@@ -190,10 +190,19 @@ for setup and recovery details. The authorization and folder-creation POC
 passed with one live account. Full transport and two-account live checks
 remain pending.
 
+On R2 and Dropbox a Push claims the version it builds on before it writes
+its record, with one create-only write that the storage refuses for a second
+computer, so a version listed there has one child and never loses while the
+storage's claims are intact. A push that claimed a version and never wrote
+its record stops the next Push onto that version with "A push to <storage>
+did not finish"; nothing finishes it by itself. A local folder writes no
+claim.
+
 **Clear storage data** is available for local-folder, R2, and Dropbox storage. The
 confirmation names the storage and requires you to confirm that sync has
 stopped on all machines. It deletes all synced repositories and Library
-resources under `.mallard/v1/repositories/` and `.mallard/v1/library/`.
+resources under `.mallard/v1/repositories/` and `.mallard/v1/library/`,
+claims first, then records, then everything else.
 Mallard validates and retains `.mallard/_storage.json`. It preserves unrelated
 objects, local files, provider sessions, and the storage connection.
 

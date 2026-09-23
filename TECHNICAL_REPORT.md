@@ -57,7 +57,7 @@ The main implementation boundaries are:
 | `project_sync/bundle_engine.rs` | Object-key validation, immutable publication ending in the record write, head selection over a stream's records, tempfile-backed verified-body access, restore planning, streamed backups, and apply. |
 | `project_sync/commands.rs` | Tauri command boundary and cross-document transactions. |
 | `project_sync/persistence.rs` | Bounded, atomic machine-local JSON persistence. |
-| `project_sync/s3_store.rs` | S3/R2 transport with create-only writes, a single-request record write with SDK retries off, chunk-to-tempfile verified downloads, per-chunk inactivity timeouts, and bounded pagination. |
+| `project_sync/s3_store.rs` | S3/R2 transport with create-only writes, single-request record and claim writes with SDK retries off, chunk-to-tempfile verified downloads, per-chunk inactivity timeouts, and bounded pagination. |
 | `storage_core/publication.rs` | Shared by both engines: list a stream, select its current publication from record names, read and verify a record, and list-then-write. |
 | `activity_log.rs` | Sanitized local JSONL activity history and retention. |
 
@@ -619,7 +619,10 @@ existing ancestor without following symlinks. Writes never use a remote
 absolute path.
 
 List-then-write and earliest-sibling selection provide single-selection
-publication without a conditional write. A pusher's base must be the selected
+publication without a conditional write; on S3/R2 and Dropbox a create-only
+claim of the parent, written before the record, admits one child per version,
+so a listed version there never loses while the storage's claims are intact.
+A pusher's base must be the selected
 publication or one of its ancestors, and a Pull applies exactly the
 publication it reviewed while that publication is on the selected chain: a
 newer one pushed since shows afterwards as changes to pull, and a review whose

@@ -31,6 +31,9 @@ pub(super) struct State {
     payloads_until_failure: Option<usize>,
     pub(super) finish_fault: Option<&'static str>,
     pub(super) fail_upload: bool,
+    /// Answer an add-mode upload of other bytes by overwriting, as a folder
+    /// that cannot arbitrate a claim would.
+    pub(super) overwrite_uploads: bool,
     pub(super) bad_hash: bool,
     pub(super) home: bool,
     pub(super) deny: bool,
@@ -239,7 +242,11 @@ async fn serve(
                     409,
                     json!({"error":{".tag":"path","reason":{".tag":"conflict","conflict":{".tag":"file_ancestor"}},"upload_session_id":""}}),
                 )
-            } else if let Some((existing, stored)) = state.entries.get(&path) {
+            } else if let Some((existing, stored)) = state
+                .entries
+                .get(&path)
+                .filter(|_| !state.overwrite_uploads)
+            {
                 // Not strict: identical contents are not a conflict.
                 if existing.kind == "file" && stored.as_slice() == bytes.as_ref() {
                     reply(200, file_response(existing))

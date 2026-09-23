@@ -25,8 +25,8 @@ pub use local_store::LocalObjectStore;
 pub use marker::{ensure_storage_marker, StorageMarker, MarkerState, classify_storage_marker};
 pub(crate) use object_store::sha256_reader;
 pub use object_store::{
-    DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome, StoreKeyPage,
-    StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
+    ClaimOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome,
+    StoreKeyPage, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
 };
 pub use s3_store::{
     R2CapabilityProbeError, R2CapabilityProbeErrorKind, R2CapabilityProbeReceipt,
@@ -51,6 +51,11 @@ pub const REPOSITORY_PREFIX: &str = ".mallard/v1/repositories";
 /// never collide with a bundle component because bundle IDs are exactly 32
 /// hex characters.
 pub const REPOSITORY_COMMITS_PREFIX: &str = ".mallard/v1/repositories/_commits";
+/// One claim per claimed parent, and nothing else, beside the records and
+/// never among them: no record listing returns a claim, and no refresh reads
+/// one. `_claims/<bundle_id>/<parent token, or root>.json` holds the record
+/// of that parent's child, as written under `_commits/`.
+pub const REPOSITORY_CLAIMS_PREFIX: &str = ".mallard/v1/repositories/_claims";
 pub const LIBRARY_PREFIX: &str = ".mallard/v1/library";
 pub const LOCAL_STORAGE_LOCK: &str = ".storage.lock";
 pub const TAG_FILE: &str = "_tag.json";
@@ -132,11 +137,13 @@ impl ObjectPrefix {
 /// storage marker and every object outside Mallard's two managed namespaces.
 /// Repeated first-page deletion avoids cursor gaps as the key set shrinks.
 ///
-/// Records go first. Their names sort by depth, so a stream's first
-/// publications are deleted first; once they are gone every other record is
-/// disconnected from the root and the stream selects nothing, while every
-/// manifest and object still exists. An interrupted clear therefore never
-/// leaves a selected record pointing at deleted data.
+/// Claims go first, then records: the opposite of the write order, so an
+/// interrupted clear leaves records without claims and never a claim without
+/// its record. Record names sort by depth, so a stream's first publications
+/// are deleted first; once they are gone every other record is disconnected
+/// from the root and the stream selects nothing, while every manifest and
+/// object still exists. An interrupted clear therefore never leaves a
+/// selected record pointing at deleted data.
 pub fn clear_managed_storage_data<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<ManagedStorageClearResult, String> {
@@ -193,10 +200,13 @@ fn clear_managed_data_with<S: ObjectStore + ?Sized>(
         Ok(deleted - before)
     };
     let result = (|| {
-        // Inside a Library repository `_commits/` already sorts before
-        // `_manifests/` and `_objects/`, so its records go first too.
+        // Inside a Library repository `_claims/` already sorts before
+        // `_commits/`, and `_commits/` before `_manifests/` and `_objects/`,
+        // so its claims and records go first too.
+        let claim_objects_deleted = clear_prefix(REPOSITORY_CLAIMS_PREFIX)?;
         let record_objects_deleted = clear_prefix(REPOSITORY_COMMITS_PREFIX)?;
-        let repository_objects_deleted = record_objects_deleted + clear_prefix(REPOSITORY_PREFIX)?;
+        let repository_objects_deleted =
+            claim_objects_deleted + record_objects_deleted + clear_prefix(REPOSITORY_PREFIX)?;
         let library_objects_deleted = clear_prefix(LIBRARY_PREFIX)?;
         Ok(ManagedStorageClearResult {
             repository_objects_deleted,
@@ -278,6 +288,7 @@ fn validate_library_relative_object_key(value: &str) -> Result<(), String> {
     validate_relative_object_key_characters(value, "library-relative object key")?;
     if !(value == TAG_FILE
         || value.starts_with("_manifests/")
+        || value.starts_with("_claims/")
         || value.starts_with("_commits/")
         || value.starts_with("_objects/"))
     {
@@ -497,6 +508,14 @@ impl ObjectStore for ConfiguredObjectStore {
 
     fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         self.guarded(|store| store.put_record(key, bytes))
+    }
+
+    fn supports_claims(&self) -> bool {
+        self.inner.supports_claims()
+    }
+
+    fn put_claim(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ClaimOutcome, String> {
+        self.guarded(|store| store.put_claim(key, bytes))
     }
 
     fn supports_conditional_delete(&self) -> bool {
@@ -810,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_deletes_records_first_so_an_interrupted_clear_selects_nothing() {
+    fn clear_deletes_claims_then_records_so_an_interrupted_clear_selects_nothing() {
         use mallard_domain::{PublicationToken, RecordName};
         let temp = tempfile::tempdir().unwrap();
         let inner = LocalObjectStore::open(temp.path().join("storage")).unwrap();
@@ -832,17 +851,43 @@ mod tests {
             .unwrap();
             (name, bytes)
         };
+        let stored =
+            |outcome: Result<publication::WriteOutcome, String>| outcome.unwrap().stored().unwrap();
         let (first, first_bytes) = record(1, None);
         let (second, second_bytes) = record(2, Some(&first));
-        publication::write_record(&inner, &stream, &first, &first_bytes).unwrap();
-        publication::write_record(&inner, &stream, &second, &second_bytes).unwrap();
+        stored(publication::write_record(
+            &inner,
+            &stream,
+            &first,
+            &first_bytes,
+        ));
+        stored(publication::write_record(
+            &inner,
+            &stream,
+            &second,
+            &second_bytes,
+        ));
+        // The claims a store with claims holds for this chain. The local
+        // store writes none, so they are planted as objects, where a clear
+        // finds them.
+        let root_claim = stream.claim_key(None).unwrap();
+        let first_claim = stream.claim_key(Some(first.token())).unwrap();
+        inner.put_immutable(&root_claim, &first_bytes).unwrap();
+        inner.put_immutable(&first_claim, &second_bytes).unwrap();
         let manifest = repository_object_key(&id, "_manifests/2-commit-a.json").unwrap();
         let object = repository_object_key(&id, &format!("_objects/{}", "a".repeat(64))).unwrap();
         inner.put_immutable(&manifest, b"manifest").unwrap();
         inner.put_immutable(&object, b"payload").unwrap();
         let library_repository = "library-0123456789abcdef0123456789abcdef";
         let library_stream = publication::RecordStream::library(library_repository).unwrap();
-        publication::write_record(&inner, &library_stream, &first, &first_bytes).unwrap();
+        stored(publication::write_record(
+            &inner,
+            &library_stream,
+            &first,
+            &first_bytes,
+        ));
+        let library_claim = library_stream.claim_key(None).unwrap();
+        inner.put_immutable(&library_claim, &first_bytes).unwrap();
         inner
             .put_immutable(
                 &library_object_key(library_repository, "_manifests/1-commit-a.json").unwrap(),
@@ -850,9 +895,9 @@ mod tests {
             )
             .unwrap();
 
-        // The clear dies after one delete: the stream's first publication is
-        // gone, so the stream selects nothing, and every manifest and object
-        // a record could have pointed at is still there.
+        // The clear dies after one delete: a claim is gone, and the chain is
+        // intact. A record without its claim is harmless for the tip, which
+        // nobody had claimed; the next Push claims it.
         let store = InterruptedClear {
             inner,
             deletes_left: Mutex::new(1),
@@ -862,7 +907,26 @@ mod tests {
         assert!(error.contains("retry Clear storage data"), "{error}");
         assert_eq!(
             store.deleted.lock().unwrap().as_slice(),
-            [stream.key(&first).unwrap().as_str().to_string()]
+            [first_claim.as_str().to_string()]
+        );
+        let intact = publication::list_stream(&store.inner, &stream).unwrap();
+        assert_eq!(intact.mainline().selected(), Some(&second));
+        assert!(store.inner.get_metadata(&root_claim, 64).unwrap().is_some());
+
+        // The retry dies two deletes later: the last claim went, then the
+        // stream's first publication. The stream selects nothing, while
+        // every manifest and object a record could have pointed at is still
+        // there.
+        *store.deletes_left.lock().unwrap() = 2;
+        store.deleted.lock().unwrap().clear();
+        let error = clear_managed_storage_data(&store).unwrap_err();
+        assert!(error.contains("retry Clear storage data"), "{error}");
+        assert_eq!(
+            store.deleted.lock().unwrap().as_slice(),
+            [
+                root_claim.as_str().to_string(),
+                stream.key(&first).unwrap().as_str().to_string()
+            ]
         );
         let interrupted = publication::list_stream(&store.inner, &stream).unwrap();
         assert!(interrupted.holds(second.token()));
@@ -878,7 +942,8 @@ mod tests {
         );
         // The stream selects nothing, so it takes a first version again: an
         // interrupted clear never leaves a storage nobody can push to. The
-        // new history connects to none of the leftovers.
+        // new history connects to none of the leftovers, and the root's
+        // claim is free again for it.
         let restart_bytes = b"record restart".to_vec();
         let restart = RecordName::new(
             1,
@@ -891,18 +956,24 @@ mod tests {
             99,
         )
         .unwrap();
-        let restarted =
-            publication::write_record(&store.inner, &stream, &restart, &restart_bytes).unwrap();
+        let restarted = stored(publication::write_record(
+            &store.inner,
+            &stream,
+            &restart,
+            &restart_bytes,
+        ));
         assert_eq!(restarted.mainline().selected(), Some(&restart));
         assert!(!restarted.mainline().contains_token(second.token()));
+        assert!(store.inner.get_metadata(&root_claim, 64).unwrap().is_none());
 
         // The retry finishes: records, then payloads, then the Library, whose
-        // records sort before its manifests.
+        // claims sort before its records and its records before its
+        // manifests.
         *store.deletes_left.lock().unwrap() = usize::MAX;
         store.deleted.lock().unwrap().clear();
         let result = clear_managed_storage_data(&store).unwrap();
         assert_eq!(result.repository_objects_deleted, 4);
-        assert_eq!(result.library_objects_deleted, 2);
+        assert_eq!(result.library_objects_deleted, 3);
         let deleted = store.deleted.lock().unwrap().clone();
         assert_eq!(
             deleted,
@@ -911,6 +982,7 @@ mod tests {
                 stream.key(&second).unwrap().as_str().to_string(),
                 manifest.as_str().to_string(),
                 object.as_str().to_string(),
+                library_claim.as_str().to_string(),
                 library_stream.key(&first).unwrap().as_str().to_string(),
                 format!(".mallard/v1/library/{library_repository}/_manifests/1-commit-a.json"),
             ]

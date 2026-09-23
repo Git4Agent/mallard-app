@@ -6,7 +6,7 @@
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
 - Deployment assumption: there are no customers yet; the owner clears `~/.mallard` and the cloud data before retesting
 - Schemas: every schema and layout number stays `1`. No persisted document changes shape
-- Related: `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` (the Push side; its rows S1 to S10, A1 to A7, its stories and R3 are used here by their ids), `DESIGN_CAS_FREE_STORAGE_REFACTOR.md` (sections 5, 6, 7.2, 9.3 and 12; the claim of its decision 11 and section 7.2, planned and not implemented, is what makes T3, Q3, Q4 and G2 impossible on R2 and on Dropbox)
+- Related: `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` (the Push side; its rows S1 to S10, A1 to A7, its stories and R3 are used here by their ids), `DESIGN_CAS_FREE_STORAGE_REFACTOR.md` (sections 5, 6, 7.2, 9.3 and 12; the claim of its decision 11 and section 7.2, implemented on September 22 as its step 9, is what makes T3, Q3, Q4 and G2 impossible on R2 and on Dropbox while the storage's claims are intact)
 
 Code locations are collected in *Source pointers* at the end, not in the body.
 

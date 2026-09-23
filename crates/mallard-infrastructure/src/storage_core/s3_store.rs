@@ -25,9 +25,10 @@ use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
 use tokio::time::{sleep, timeout};
 
+use super::publication::MAX_RECORD_BYTES;
 use super::{
-    ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore, StageOutcome,
-    StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
+    ClaimOutcome, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore,
+    StageOutcome, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody,
 };
 use mallard_domain::{self as domain, hex_lower, sha256_hex as sha256_bytes};
 
@@ -52,6 +53,7 @@ pub enum R2CapabilityProbeStage {
     List,
     Create,
     Read,
+    Refuse,
     ListAfterWrite,
     Cleanup,
 }
@@ -63,6 +65,7 @@ impl std::fmt::Display for R2CapabilityProbeStage {
             Self::List => "bounded listing",
             Self::Create => "absent-key creation",
             Self::Read => "verified readback",
+            Self::Refuse => "refusal of a second write",
             Self::ListAfterWrite => "listing after the write",
             Self::Cleanup => "cleanup",
         })
@@ -284,6 +287,22 @@ impl S3ObjectStore {
             }
         }
 
+        // A claim is a create-only write the service must refuse when the
+        // key already holds other bytes, in the same request: a destination
+        // that overwrites cannot arbitrate one, and cannot be set up.
+        match self.probe_refusal_async(key).await {
+            Ok(true) => {}
+            Ok(false) | Err(()) => {
+                return self
+                    .probe_failure_after_possible_write(
+                        setup_id,
+                        key,
+                        R2CapabilityProbeStage::Refuse,
+                    )
+                    .await
+            }
+        }
+
         // Publication lists a stream right after writing to it: a completed
         // write must be visible to the very next listing of its prefix.
         match self.probe_key_is_absent_from_list_async(key).await {
@@ -365,6 +384,26 @@ impl S3ObjectStore {
             Ok(Ok(_)) => ProbePutAttempt::Written,
             Ok(Err(error)) if ambiguous_sdk_error(&error) => ProbePutAttempt::Ambiguous,
             Ok(Err(_)) => ProbePutAttempt::Failed,
+        }
+    }
+
+    /// Whether the service refuses a create-only write of other bytes to the
+    /// probe key it just wrote.
+    async fn probe_refusal_async(&self, key: &str) -> Result<bool, ()> {
+        let body = b"mallard-r2-setup-probe-v1:refused";
+        let checksum = aws_smithy_types::base64::encode(Sha256::digest(body));
+        let request = self
+            .client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .checksum_sha256(checksum)
+            .if_none_match("*")
+            .body(ByteStream::from(Bytes::copy_from_slice(body)));
+        match timeout(self.request_timeout, request.send()).await {
+            Ok(Ok(_)) => Ok(false),
+            Ok(Err(error)) if matches!(sdk_status(&error), Some(409) | Some(412)) => Ok(true),
+            Ok(Err(_)) | Err(_) => Err(()),
         }
     }
 
@@ -705,6 +744,31 @@ impl S3ObjectStore {
         }
     }
 
+    /// The create-only put every immutable write already uses, with the
+    /// SDK's retries off. A refused precondition means the key holds
+    /// something: one read tells this attempt's own bytes from another's.
+    async fn put_claim_async(&self, key: &ObjectKey, bytes: Bytes) -> Result<ClaimOutcome, String> {
+        match self.put_absent_async(key, bytes.clone(), false).await? {
+            PutAttempt::Written => Ok(ClaimOutcome::Mine),
+            PutAttempt::PreconditionFailed => {
+                match self.get_metadata_async(key, MAX_RECORD_BYTES).await? {
+                    Some(found) if found.bytes.as_slice() == bytes.as_ref() => {
+                        Ok(ClaimOutcome::Mine)
+                    }
+                    Some(found) => Ok(ClaimOutcome::Taken(found.bytes)),
+                    None => Err(format!(
+                        "S3 claim put '{}' was refused but the claim is missing",
+                        key
+                    )),
+                }
+            }
+            PutAttempt::Ambiguous(cause) => Err(format!(
+                "S3 claim put '{}' was not acknowledged ({})",
+                key, cause
+            )),
+        }
+    }
+
     async fn list_async(
         &self,
         prefix: &ObjectPrefix,
@@ -1025,6 +1089,19 @@ impl ObjectStore for S3ObjectStore {
         )
     }
 
+    /// S3 and R2 refuse a write whose `If-None-Match: *` precondition fails,
+    /// in the same request; the setup probe proves it for the destination.
+    fn supports_claims(&self) -> bool {
+        true
+    }
+
+    fn put_claim(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ClaimOutcome, String> {
+        self.run(
+            "put claim",
+            self.put_claim_async(key, Bytes::copy_from_slice(bytes)),
+        )
+    }
+
     fn clear_managed_data(&self) -> Result<super::ManagedStorageClearResult, String> {
         super::clear_managed_data_with(self, |entry| {
             // Only the clear loop can reach this unconditional delete. It
@@ -1251,6 +1328,8 @@ mod tests {
         fail_delete: Arc<AtomicBool>,
         delete_successes_left: Arc<AtomicUsize>,
         list_authorization_failures: Arc<AtomicUsize>,
+        /// Ignore `If-None-Match: *`, as a destination that overwrites would.
+        overwrites: Arc<AtomicBool>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -1323,6 +1402,8 @@ mod tests {
             let fail_delete = Arc::new(AtomicBool::new(false));
             let delete_successes_left = Arc::new(AtomicUsize::new(usize::MAX));
             let list_authorization_failures = Arc::new(AtomicUsize::new(0));
+            let overwrites = Arc::new(AtomicBool::new(false));
+            let server_overwrites = overwrites.clone();
             let server_objects = objects.clone();
             let server_get_behaviors = get_behaviors.clone();
             let server_put_failures = put_failures.clone();
@@ -1344,6 +1425,7 @@ mod tests {
                     let fail_delete = server_fail_delete.clone();
                     let delete_successes_left = server_delete_successes_left.clone();
                     let list_authorization_failures = server_list_authorization_failures.clone();
+                    let overwrites = server_overwrites.clone();
                     tokio::spawn(async move {
                         let service = service_fn(move |request| {
                             test_s3_request(
@@ -1356,6 +1438,7 @@ mod tests {
                                 fail_delete.clone(),
                                 delete_successes_left.clone(),
                                 list_authorization_failures.clone(),
+                                overwrites.clone(),
                             )
                         });
                         let _ = http1::Builder::new()
@@ -1374,6 +1457,7 @@ mod tests {
                 fail_delete,
                 delete_successes_left,
                 list_authorization_failures,
+                overwrites,
                 server,
             }
         }
@@ -2110,7 +2194,8 @@ mod tests {
         blocking(move || store.probe_r2_capabilities("setup-1123456789abcdef01234567"))
             .await
             .unwrap();
-        assert_eq!(server.put_requests.load(Ordering::SeqCst), 1);
+        // The write, and the create-only write of other bytes it refused.
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 2);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
 
         // A write that fails reports its stage and leaves nothing behind.
@@ -2122,6 +2207,79 @@ mod tests {
         assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
         assert_eq!(error.stage(), R2CapabilityProbeStage::Create);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn r2_capability_probe_refuses_a_destination_that_overwrites() {
+        let server = TestS3::start().await;
+        server.overwrites.store(true, Ordering::SeqCst);
+        let store = server.store();
+        let error = blocking(move || store.probe_r2_capabilities("setup-6123456789abcdef01234567"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
+        assert_eq!(error.stage(), R2CapabilityProbeStage::Refuse);
+        assert!(server.objects.lock().expect("test S3 lock").is_empty());
+    }
+
+    /// The claim is the create-only put every immutable write uses, with
+    /// the SDK's retries off: one request, and on a refused precondition
+    /// one read that tells this attempt's own bytes from another's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_claim_is_one_create_only_request_and_a_taken_claim_returns_what_it_found() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        assert!(store.supports_claims());
+        let claim = ObjectKey::parse(
+            ".mallard/v1/repositories/_claims/0123456789abcdef0123456789abcdef/root.json",
+        )
+        .unwrap();
+        let (writer, key) = (store.clone(), claim.clone());
+        assert_eq!(
+            blocking(move || writer.put_claim(&key, b"mine"))
+                .await
+                .unwrap(),
+            ClaimOutcome::Mine
+        );
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 1);
+        let (repeat, key) = (store.clone(), claim.clone());
+        assert_eq!(
+            blocking(move || repeat.put_claim(&key, b"mine"))
+                .await
+                .unwrap(),
+            ClaimOutcome::Mine
+        );
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 2);
+        let (rival, key) = (store.clone(), claim.clone());
+        assert_eq!(
+            blocking(move || rival.put_claim(&key, b"theirs"))
+                .await
+                .unwrap(),
+            ClaimOutcome::Taken(b"mine".to_vec())
+        );
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            server.objects.lock().expect("test S3 lock")[claim.as_str()],
+            b"mine"
+        );
+
+        // A retryable failure is not retried inside the transport.
+        server.fail_puts(1);
+        let other = ObjectKey::parse(
+            ".mallard/v1/repositories/_claims/0123456789abcdef0123456789abcdef/commit-000000000000000000000000-0000000000000000000000000000000000000000000000000000000000000000.json",
+        )
+        .unwrap();
+        let (failing, key) = (store.clone(), other.clone());
+        let error = blocking(move || failing.put_claim(&key, b"claim"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("S3 put"), "{error}");
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), 4);
+        assert!(!server
+            .objects
+            .lock()
+            .expect("test S3 lock")
+            .contains_key(other.as_str()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2225,6 +2383,7 @@ mod tests {
         fail_delete: Arc<AtomicBool>,
         delete_successes_left: Arc<AtomicUsize>,
         list_authorization_failures: Arc<AtomicUsize>,
+        overwrites: Arc<AtomicBool>,
     ) -> Result<Response<TestBody>, Infallible> {
         let method = request.method().clone();
         let path = request.uri().path().trim_start_matches('/').to_string();
@@ -2292,7 +2451,8 @@ mod tests {
                 // The service knows one write condition: create-only. Nothing
                 // overwrites by revision.
                 assert!(if_match.is_none(), "no write names a revision");
-                if if_none_match && objects.contains_key(key) {
+                if if_none_match && !overwrites.load(Ordering::SeqCst) && objects.contains_key(key)
+                {
                     return Ok(xml_error(
                         StatusCode::PRECONDITION_FAILED,
                         "PreconditionFailed",

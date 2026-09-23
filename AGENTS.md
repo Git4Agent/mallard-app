@@ -162,12 +162,15 @@ Treat safety behavior as part of the product contract:
 - Push publication must remain immutable and SHA-256 verified. There is no
   mutable head: a publication record is written last, with list-then-write,
   and the current snapshot is selected from the stream's record names. A
-  storage provider needs only put, get, and list. A Push whose record is not
-  selected has failed: keep every local acceptance (bases, checkpoints,
-  receipts, Library accepted state) after the publish call returns. Observe a
-  linked bundle only through `observe_linked_bundle`, which classifies a
-  displaced base and writes nothing: recovery is a user action, never a
-  rollback.
+  storage provider needs only put, get, and list; one whose server refuses a
+  second write of a key (S3/R2, Dropbox) also claims the record's parent
+  before the record, under `_claims/`, which a refresh never lists or reads.
+  A Push whose record is not selected has failed: keep every local acceptance
+  (bases, checkpoints, receipts, Library accepted state) after the publish
+  call returns. Never finish another writer's claim, delete a claim, or
+  reassign one by itself. Observe a linked bundle only through
+  `observe_linked_bundle`, which classifies a displaced base and writes
+  nothing: recovery is a user action, never a rollback.
 - Pull and dependency apply operations must remain plan-based and explicitly
   approved. Keep revision, digest, and expiry checks intact.
 - Deletion is opt-in. File deletion must verify the expected local digest;
