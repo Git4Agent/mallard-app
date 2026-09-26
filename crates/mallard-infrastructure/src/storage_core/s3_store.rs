@@ -42,12 +42,6 @@ const R2_CREDENTIAL_READINESS_ATTEMPTS: usize = 10;
 const R2_CREDENTIAL_READINESS_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum R2CapabilityProbeErrorKind {
-    Remote,
-    CleanupRequired,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum R2CapabilityProbeStage {
     Validate,
     List,
@@ -55,7 +49,6 @@ pub enum R2CapabilityProbeStage {
     Read,
     Refuse,
     ListAfterWrite,
-    Cleanup,
 }
 
 impl std::fmt::Display for R2CapabilityProbeStage {
@@ -67,79 +60,39 @@ impl std::fmt::Display for R2CapabilityProbeStage {
             Self::Read => "verified readback",
             Self::Refuse => "refusal of a second write",
             Self::ListAfterWrite => "listing after the write",
-            Self::Cleanup => "cleanup",
         })
     }
 }
 
-/// Sanitized capability-probe failure. It intentionally retains no SDK
-/// error, endpoint, bucket, object key, or credential-bearing configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Sanitized capability-probe failure: only the stage that refused. It
+/// intentionally retains no SDK error, endpoint, bucket, object key, or
+/// credential-bearing configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct R2CapabilityProbeError {
-    kind: R2CapabilityProbeErrorKind,
     stage: R2CapabilityProbeStage,
-    setup_id: String,
 }
 
 impl R2CapabilityProbeError {
-    fn remote(stage: R2CapabilityProbeStage, setup_id: &str) -> Self {
-        Self {
-            kind: R2CapabilityProbeErrorKind::Remote,
-            stage,
-            setup_id: setup_id.to_string(),
-        }
-    }
-
-    fn cleanup_required(setup_id: &str) -> Self {
-        Self {
-            kind: R2CapabilityProbeErrorKind::CleanupRequired,
-            stage: R2CapabilityProbeStage::Cleanup,
-            setup_id: setup_id.to_string(),
-        }
-    }
-
-    pub fn kind(&self) -> R2CapabilityProbeErrorKind {
-        self.kind
+    fn new(stage: R2CapabilityProbeStage) -> Self {
+        Self { stage }
     }
 
     pub fn stage(&self) -> R2CapabilityProbeStage {
         self.stage
     }
-
-    pub fn setup_id(&self) -> &str {
-        &self.setup_id
-    }
 }
 
 impl std::fmt::Display for R2CapabilityProbeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            R2CapabilityProbeErrorKind::Remote => write!(
-                formatter,
-                "R2 capability verification failed during {}",
-                self.stage
-            ),
-            R2CapabilityProbeErrorKind::CleanupRequired => write!(
-                formatter,
-                "R2 capability verification requires cleanup for setup '{}'",
-                self.setup_id
-            ),
-        }
+        write!(
+            formatter,
+            "R2 capability verification failed during {}",
+            self.stage
+        )
     }
 }
 
 impl std::error::Error for R2CapabilityProbeError {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct R2CapabilityProbeReceipt {
-    setup_id: String,
-}
-
-impl R2CapabilityProbeReceipt {
-    pub fn setup_id(&self) -> &str {
-        &self.setup_id
-    }
-}
 
 #[derive(Clone)]
 pub struct S3ObjectStore {
@@ -195,95 +148,63 @@ impl S3ObjectStore {
     }
 
     /// Verify the exact R2 operations Mallard needs without widening the
-    /// general [`ObjectStore`] namespace. Only a generated setup-probe key is
-    /// accepted, and cleanup targets that one exact key.
-    pub fn probe_r2_capabilities(
-        &self,
-        setup_id: &str,
-    ) -> Result<R2CapabilityProbeReceipt, R2CapabilityProbeError> {
-        let key = setup_probe_key(setup_id).map_err(|_| {
-            R2CapabilityProbeError::remote(R2CapabilityProbeStage::Validate, setup_id)
-        })?;
+    /// general [`ObjectStore`] namespace. The probe object carries a fresh
+    /// generated name under the setup-probe prefix; nothing about it is
+    /// recorded locally, and its final delete is best effort.
+    pub fn probe_r2_capabilities(&self) -> Result<(), R2CapabilityProbeError> {
+        let setup_id = domain::generated_named_id("setup")
+            .map_err(|_| R2CapabilityProbeError::new(R2CapabilityProbeStage::Validate))?;
+        let key = format!("{R2_SETUP_PROBE_PREFIX}/{setup_id}");
+        let body = format!("mallard-r2-setup-probe-v1:{setup_id}").into_bytes();
         match catch_unwind(AssertUnwindSafe(|| {
             self.runtime
-                .block_on(self.probe_r2_capabilities_async(setup_id, &key))
+                .block_on(self.probe_r2_capabilities_async(&key, &body))
         })) {
             Ok(result) => result,
-            Err(_) => Err(R2CapabilityProbeError::remote(
+            Err(_) => Err(R2CapabilityProbeError::new(
                 R2CapabilityProbeStage::Validate,
-                setup_id,
             )),
-        }
-    }
-
-    /// Remove and confirm absence of one journaled setup probe.
-    /// This accepts the same narrow generated setup identifier as the probe
-    /// itself and never exposes a general object-deletion primitive.
-    pub fn reconcile_r2_capability_probe(
-        &self,
-        setup_id: &str,
-    ) -> Result<(), R2CapabilityProbeError> {
-        let key = setup_probe_key(setup_id).map_err(|_| {
-            R2CapabilityProbeError::remote(R2CapabilityProbeStage::Validate, setup_id)
-        })?;
-        match catch_unwind(AssertUnwindSafe(|| {
-            self.runtime.block_on(async {
-                if self
-                    .probe_key_is_absent_from_list_async(&key)
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-                self.cleanup_probe_async(&key).await
-            })
-        })) {
-            Ok(true) => Ok(()),
-            Ok(false) | Err(_) => Err(R2CapabilityProbeError::cleanup_required(setup_id)),
         }
     }
 
     async fn probe_r2_capabilities_async(
         &self,
-        setup_id: &str,
         key: &str,
-    ) -> Result<R2CapabilityProbeReceipt, R2CapabilityProbeError> {
+        body: &[u8],
+    ) -> Result<(), R2CapabilityProbeError> {
         match self.probe_key_is_absent_from_list_async(key).await {
             Ok(true) => {}
             Ok(false) | Err(()) => {
-                return Err(R2CapabilityProbeError::remote(
-                    R2CapabilityProbeStage::List,
-                    setup_id,
-                ))
+                return Err(R2CapabilityProbeError::new(R2CapabilityProbeStage::List))
             }
         }
 
-        let body = format!("mallard-r2-setup-probe-v1:{setup_id}").into_bytes();
-        match self.probe_put_async(key, &body).await {
-            ProbePutAttempt::Written => {}
+        let checks = match self.probe_put_async(key, body).await {
+            ProbePutAttempt::Written => self.probe_written_key_async(key, body).await,
             ProbePutAttempt::Ambiguous => {
-                return self
-                    .probe_failure_after_possible_write(
-                        setup_id,
-                        key,
-                        R2CapabilityProbeStage::Create,
-                    )
-                    .await
+                Err(R2CapabilityProbeError::new(R2CapabilityProbeStage::Create))
             }
             ProbePutAttempt::Failed => {
-                return Err(R2CapabilityProbeError::remote(
-                    R2CapabilityProbeStage::Create,
-                    setup_id,
-                ))
+                return Err(R2CapabilityProbeError::new(R2CapabilityProbeStage::Create))
             }
-        }
+        };
 
-        match self.probe_get_verified_async(key, &body).await {
+        // The write may have landed: remove the probe object once, best
+        // effort. A refused delete leaves it behind and changes no verdict.
+        self.cleanup_probe_async(key).await;
+        checks
+    }
+
+    /// The checks that follow a written probe object.
+    async fn probe_written_key_async(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> Result<(), R2CapabilityProbeError> {
+        match self.probe_get_verified_async(key, body).await {
             Ok(true) => {}
             Ok(false) | Err(()) => {
-                return self
-                    .probe_failure_after_possible_write(setup_id, key, R2CapabilityProbeStage::Read)
-                    .await
+                return Err(R2CapabilityProbeError::new(R2CapabilityProbeStage::Read))
             }
         }
 
@@ -293,49 +214,17 @@ impl S3ObjectStore {
         match self.probe_refusal_async(key).await {
             Ok(true) => {}
             Ok(false) | Err(()) => {
-                return self
-                    .probe_failure_after_possible_write(
-                        setup_id,
-                        key,
-                        R2CapabilityProbeStage::Refuse,
-                    )
-                    .await
+                return Err(R2CapabilityProbeError::new(R2CapabilityProbeStage::Refuse))
             }
         }
 
         // Publication lists a stream right after writing to it: a completed
         // write must be visible to the very next listing of its prefix.
         match self.probe_key_is_absent_from_list_async(key).await {
-            Ok(false) => {}
-            Ok(true) | Err(()) => {
-                return self
-                    .probe_failure_after_possible_write(
-                        setup_id,
-                        key,
-                        R2CapabilityProbeStage::ListAfterWrite,
-                    )
-                    .await
-            }
-        }
-
-        if !self.cleanup_probe_async(key).await {
-            return Err(R2CapabilityProbeError::cleanup_required(setup_id));
-        }
-        Ok(R2CapabilityProbeReceipt {
-            setup_id: setup_id.to_string(),
-        })
-    }
-
-    async fn probe_failure_after_possible_write(
-        &self,
-        setup_id: &str,
-        key: &str,
-        stage: R2CapabilityProbeStage,
-    ) -> Result<R2CapabilityProbeReceipt, R2CapabilityProbeError> {
-        if self.cleanup_probe_async(key).await {
-            Err(R2CapabilityProbeError::remote(stage, setup_id))
-        } else {
-            Err(R2CapabilityProbeError::cleanup_required(setup_id))
+            Ok(false) => Ok(()),
+            Ok(true) | Err(()) => Err(R2CapabilityProbeError::new(
+                R2CapabilityProbeStage::ListAfterWrite,
+            )),
         }
     }
 
@@ -444,32 +333,16 @@ impl S3ObjectStore {
         Ok(received.len() == expected.len() && sha256_bytes(&received) == sha256_bytes(expected))
     }
 
-    /// Remove only this setup's unique probe key. R2 does not support
-    /// conditional DeleteObject, so cleanup verifies absence after each
-    /// bounded unconditional attempt.
-    async fn cleanup_probe_async(&self, key: &str) -> bool {
-        for _ in 0..3 {
-            let delete = self
-                .client
-                .delete_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send();
-            let _ = timeout(self.request_timeout, delete).await;
-
-            let head = self
-                .client
-                .head_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send();
-            match timeout(self.request_timeout, head).await {
-                Ok(Err(error)) if sdk_status(&error) == Some(404) => return true,
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) | Err(_) => return false,
-            }
-        }
-        false
+    /// Remove the probe object once. R2 has no conditional DeleteObject, and
+    /// the outcome is not part of the verdict, so nothing is checked.
+    async fn cleanup_probe_async(&self, key: &str) {
+        let delete = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send();
+        let _ = timeout(self.request_timeout, delete).await;
     }
 
     async fn get_response(
@@ -1155,20 +1028,6 @@ enum ProbePutAttempt {
     Failed,
 }
 
-fn setup_probe_key(setup_id: &str) -> Result<String, ()> {
-    let Some(suffix) = setup_id.strip_prefix("setup-") else {
-        return Err(());
-    };
-    if suffix.len() != 24
-        || !suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(());
-    }
-    Ok(format!("{R2_SETUP_PROBE_PREFIX}/{setup_id}"))
-}
-
 enum PutAttempt {
     Written,
     PreconditionFailed,
@@ -1842,6 +1701,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn listed_metadata_reads_use_keys_and_keep_bulk_result_order() {
+        let server = TestS3::start().await;
+        let prefix = ObjectPrefix::parse(
+            ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/_objects",
+        )
+        .unwrap();
+        for index in 0..12 {
+            server.seed(
+                format!("{}/{index:04}", prefix.as_str()),
+                format!("body-{index}").into_bytes(),
+            );
+        }
+        let store = server.store();
+        let listing_store = store.clone();
+        let mut listed = blocking(move || listing_store.list_objects(&prefix, 12))
+            .await
+            .unwrap();
+        listed.reverse();
+        // Any new listing would fail; HEAD is unsupported by this mock.
+        server
+            .list_authorization_failures
+            .store(100, Ordering::SeqCst);
+        let stored = blocking(move || store.get_listed_metadata_many(&listed, 64))
+            .await
+            .unwrap();
+        for (index, object) in stored.into_iter().enumerate() {
+            assert_eq!(
+                object.unwrap().bytes,
+                format!("body-{}", 11 - index).into_bytes()
+            );
+        }
+        assert_eq!(
+            server.list_authorization_failures.load(Ordering::SeqCst),
+            100
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verified_staging_handles_streamed_size_and_digest_boundaries() {
         let server = TestS3::start().await;
         let exact = test_upload_key("exact");
@@ -2019,6 +1916,56 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stage_many_with_progress_keeps_bulk_reads_and_reports_each_object() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        let window = crate::app_settings::cloud_transfer_concurrency();
+        let requests = (0..window * 2 + 1)
+            .map(|index| {
+                let key = test_upload_key(&format!("progress-{index}"));
+                let bytes = format!("payload-{index}").into_bytes();
+                server.seed(key.as_str().to_string(), bytes.clone());
+                (
+                    key,
+                    ExpectedObject {
+                        size: bytes.len() as u64,
+                        sha256: sha256_bytes(&bytes),
+                    },
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        let stage_requests = requests
+            .iter()
+            .map(|(key, expected, _)| (key.clone(), expected.clone()))
+            .collect::<Vec<_>>();
+        let sizes: Vec<u64> = requests
+            .iter()
+            .map(|(_, expected, _)| expected.size)
+            .collect();
+        let (outcomes, reported) = blocking(move || {
+            let mut reported = Vec::new();
+            let outcomes =
+                store.stage_many_with_progress(&stage_requests, &mut |size| reported.push(size));
+            (outcomes, reported)
+        })
+        .await;
+        let outcomes = outcomes.unwrap();
+        assert_eq!(outcomes.len(), requests.len());
+        for (outcome, (_, _, expected_bytes)) in outcomes.into_iter().zip(requests) {
+            let StageOutcome::Verified(body) = outcome else {
+                panic!("bulk body should verify")
+            };
+            assert_eq!(
+                body.read_bounded(expected_bytes.len() as u64, "progress test body")
+                    .unwrap(),
+                expected_bytes
+            );
+        }
+        assert_eq!(reported, sizes, "each object is reported once, in order");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn put_many_bulk_uploads_and_adopts_existing_objects() {
         let server = TestS3::start().await;
         let store = server.store();
@@ -2082,6 +2029,42 @@ mod tests {
         assert!(blocking(move || store_for_conflict.put_many(conflict))
             .await
             .is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_many_with_progress_sends_one_put_per_object_and_reports_each() {
+        let server = TestS3::start().await;
+        let store = server.store();
+        let repository = ".mallard/v1/repositories/0123456789abcdef0123456789abcdef";
+        let existing =
+            ObjectKey::parse(format!("{}/_objects/{}", repository, "b".repeat(64))).unwrap();
+        server.seed(existing.as_str().to_string(), b"already there".to_vec());
+        let window = crate::app_settings::cloud_transfer_concurrency();
+        let mut objects = vec![(existing, Bytes::from_static(b"already there"))];
+        for index in 0..window * 2 {
+            objects.push((
+                ObjectKey::parse(format!("{}/_objects/{:064x}", repository, index)).unwrap(),
+                Bytes::from(format!("filler {}", index).into_bytes()),
+            ));
+        }
+        let sizes: Vec<u64> = objects
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .collect();
+        let (outcomes, reported) = blocking(move || {
+            let mut reported = Vec::new();
+            let outcomes = store.put_many_with_progress(objects, &mut |size| reported.push(size));
+            (outcomes, reported)
+        })
+        .await;
+        let outcomes = outcomes.unwrap();
+        assert_eq!(outcomes[0], ImmutablePutOutcome::AlreadyPresent);
+        assert!(outcomes[1..]
+            .iter()
+            .all(|outcome| *outcome == ImmutablePutOutcome::Written));
+        assert_eq!(reported, sizes, "each object is reported once, in order");
+        // The windows add no requests: one conditional PUT per object.
+        assert_eq!(server.put_requests.load(Ordering::SeqCst), window * 2 + 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2161,12 +2144,10 @@ mod tests {
     async fn r2_capability_probe_verifies_write_readback_and_listing_and_cleans_up() {
         let server = TestS3::start().await;
         let store = server.store();
-        let receipt =
-            blocking(move || store.probe_r2_capabilities("setup-0123456789abcdef01234567"))
-                .await
-                .unwrap();
+        blocking(move || store.probe_r2_capabilities())
+            .await
+            .unwrap();
 
-        assert_eq!(receipt.setup_id(), "setup-0123456789abcdef01234567");
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
 
@@ -2175,12 +2156,10 @@ mod tests {
         let server = TestS3::start().await;
         server.fail_list_authorization(2);
         let store = server.store();
-        let receipt =
-            blocking(move || store.probe_r2_capabilities("setup-0923456789abcdef01234567"))
-                .await
-                .unwrap();
+        blocking(move || store.probe_r2_capabilities())
+            .await
+            .unwrap();
 
-        assert_eq!(receipt.setup_id(), "setup-0923456789abcdef01234567");
         assert_eq!(server.list_authorization_failures.load(Ordering::SeqCst), 0);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
@@ -2191,7 +2170,7 @@ mod tests {
         // probe proves setup asks for none.
         let server = TestS3::start().await;
         let store = server.store();
-        blocking(move || store.probe_r2_capabilities("setup-1123456789abcdef01234567"))
+        blocking(move || store.probe_r2_capabilities())
             .await
             .unwrap();
         // The write, and the create-only write of other bytes it refused.
@@ -2201,10 +2180,9 @@ mod tests {
         // A write that fails reports its stage and leaves nothing behind.
         server.fail_puts(usize::MAX);
         let store = server.store();
-        let error = blocking(move || store.probe_r2_capabilities("setup-2123456789abcdef01234567"))
+        let error = blocking(move || store.probe_r2_capabilities())
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
         assert_eq!(error.stage(), R2CapabilityProbeStage::Create);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
@@ -2214,10 +2192,9 @@ mod tests {
         let server = TestS3::start().await;
         server.overwrites.store(true, Ordering::SeqCst);
         let store = server.store();
-        let error = blocking(move || store.probe_r2_capabilities("setup-6123456789abcdef01234567"))
+        let error = blocking(move || store.probe_r2_capabilities())
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), R2CapabilityProbeErrorKind::Remote);
         assert_eq!(error.stage(), R2CapabilityProbeStage::Refuse);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
@@ -2286,74 +2263,30 @@ mod tests {
     async fn r2_capability_probe_uses_unconditional_delete_only_for_cleanup() {
         let server = TestS3::start().await;
         let store = server.store();
-        let receipt =
-            blocking(move || store.probe_r2_capabilities("setup-5123456789abcdef01234567"))
-                .await
-                .unwrap();
+        blocking(move || store.probe_r2_capabilities())
+            .await
+            .unwrap();
 
-        assert_eq!(receipt.setup_id(), "setup-5123456789abcdef01234567");
         assert_eq!(server.conditional_delete_requests.load(Ordering::SeqCst), 0);
         assert!(server.objects.lock().expect("test S3 lock").is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn r2_capability_probe_reports_only_a_setup_id_when_cleanup_fails() {
+    async fn r2_capability_probe_passes_when_the_delete_is_refused() {
         let server = TestS3::start().await;
         server.fail_delete();
         let store = server.store();
-        let error = blocking(move || store.probe_r2_capabilities("setup-2123456789abcdef01234567"))
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.kind(), R2CapabilityProbeErrorKind::CleanupRequired);
-        assert_eq!(error.setup_id(), "setup-2123456789abcdef01234567");
-        let display = error.to_string();
-        assert!(display.contains("setup-2123456789abcdef01234567"));
-        assert!(!display.contains(R2_SETUP_PROBE_PREFIX));
-        assert_eq!(server.objects.lock().expect("test S3 lock").len(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn r2_probe_reconciliation_deletes_only_the_journaled_setup_key() {
-        let server = TestS3::start().await;
-        let setup_id = "setup-3123456789abcdef01234567";
-        let probe_key = setup_probe_key(setup_id).unwrap();
-        let unrelated = ".mallard/v1/_setup_probes/setup-4123456789abcdef01234567";
-        server.seed(probe_key, b"stale probe".to_vec());
-        server.seed(unrelated.to_string(), b"keep".to_vec());
-        server.fail_list_authorization(2);
-        let store = server.store();
-        blocking(move || store.reconcile_r2_capability_probe(setup_id))
+        blocking(move || store.probe_r2_capabilities())
             .await
             .unwrap();
 
+        // The final delete is best effort: the probe object stays behind
+        // under the setup-probe prefix and the verdict is unchanged.
         let objects = server.objects.lock().expect("test S3 lock");
         assert_eq!(objects.len(), 1);
-        assert_eq!(
-            objects.get(unrelated).map(Vec::as_slice),
-            Some(&b"keep"[..])
-        );
-    }
-
-    #[test]
-    fn r2_capability_probe_rejects_unscoped_probe_identifiers() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let credentials = Credentials::new("test", "test", None, None, "bundle-tests");
-        let config = S3Config::builder()
-            .credentials_provider(credentials)
-            .region(Region::new("us-east-1"))
-            .endpoint_url("http://127.0.0.1:9")
-            .force_path_style(true)
-            .behavior_version_latest()
-            .build();
-        let store = S3ObjectStore::from_client(
-            S3Client::from_conf(config),
-            BUCKET,
-            runtime.handle().clone(),
-        )
-        .unwrap();
-        let error = store.probe_r2_capabilities("../../foreign").unwrap_err();
-        assert_eq!(error.stage(), R2CapabilityProbeStage::Validate);
+        assert!(objects
+            .keys()
+            .all(|key| key.starts_with(&format!("{R2_SETUP_PROBE_PREFIX}/setup-"))));
     }
 
     #[test]

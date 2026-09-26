@@ -21,7 +21,8 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { LoadingBone } from "../LoadingScaffold";
 import { rowReceipt, statusLine, useSettingsReceipts, type RowReceipt, type StatusLine } from "./settingsReceipts";
-import { AUTO_CHECK_INTERVAL_HOURS, requestAppUpdateCheck, useInstalledVersion } from "../AppUpdater";
+import { AUTO_CHECK_INTERVAL_HOURS, useInstalledVersion, type AppUpdates } from "../AppUpdater";
+import { formatRelativeTime } from "./model";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages
@@ -42,6 +43,8 @@ import { AUTO_CHECK_INTERVAL_HOURS, requestAppUpdateCheck, useInstalledVersion }
 interface Props {
   /** Theme and app-wide commands; the bar here is the window's only chrome. */
   appActions: PathBarMenuGroup[];
+  /** The shell's updater: the manual check and the ready release. */
+  appUpdates: AppUpdates;
   /** The log drawer shows these events; cleanup changes what it should show. */
   onLogsChanged: () => void;
   /** Leaves Settings. */
@@ -86,7 +89,7 @@ type SettingKey = LocalKey | TuningKey | PolicyKey;
 const SETTING_LABELS: Record<SettingKey, string> = {
   theme: "Theme",
   credential_redaction_enabled: "Credential redaction",
-  update_check_enabled: "Automatic update checks",
+  update_check_enabled: "Automatic updates",
   push_codex_children: "Push Codex subagents",
   push_claude_children: "Push Claude subagents",
   openLogsOnSync: "Open Logs on Push and Pull",
@@ -175,7 +178,54 @@ function SettingsRow({
   );
 }
 
-/** A boolean preference as a drawn switch; state lives in preferences.ts. */
+/**
+ * A boolean setting as a drawn switch with its state in words beside it. The
+ * word is aria-hidden: role="switch" already announces On or Off.
+ */
+function SettingSwitch({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="sync-settings-toggle">
+      <input
+        type="checkbox"
+        role="switch"
+        className="sync-settings-switch"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        aria-label={label}
+      />
+      <span className="sync-settings-state" aria-hidden="true">{checked ? "On" : "Off"}</span>
+    </label>
+  );
+}
+
+/** What the App version row says. A failed check says nothing: the time
+ * only moves when a check reached GitHub, so a stale time is the signal. */
+export function appVersionLine(
+  appVersion: string | null,
+  updates: Pick<AppUpdates, "readyVersion" | "lastCheckedAt">,
+): string {
+  const installed = appVersion ? `Mallard ${appVersion}` : "Mallard";
+  if (updates.readyVersion) {
+    return `Mallard ${updates.readyVersion} is ready to install.${appVersion ? ` You have ${appVersion}.` : ""}`;
+  }
+  if (updates.lastCheckedAt) {
+    return `${installed} is the newest release. Checked ${formatRelativeTime(updates.lastCheckedAt)}.`;
+  }
+  return `${installed}.`;
+}
+
+/** A boolean preference as a switch; state lives in preferences.ts. */
 function PreferenceSwitch({
   name,
   label,
@@ -187,13 +237,10 @@ function PreferenceSwitch({
 }) {
   const value = usePreference(name);
   return (
-    <input
-      type="checkbox"
-      role="switch"
-      className="sync-settings-switch"
+    <SettingSwitch
+      label={label}
       checked={value}
-      onChange={(event) => onSaved(setPreference(name, event.target.checked))}
-      aria-label={label}
+      onChange={(checked) => onSaved(setPreference(name, checked))}
     />
   );
 }
@@ -237,7 +284,7 @@ function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailu
   );
 }
 
-export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTarget }: Props) {
+export default function SettingsPage({ appActions, appUpdates, onLogsChanged, onDone, doneTarget }: Props) {
   const themeChoice = useThemeChoice();
   const receipts = useSettingsReceipts();
   const { version: appVersion, supported: updatesSupported } = useInstalledVersion();
@@ -629,57 +676,60 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                 setting="credential_redaction_enabled"
                 receipt={receiptFor("credential_redaction_enabled")}
                 control={(
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    className="sync-settings-switch"
-                    checked={shownTuning?.credential_redaction_enabled ?? true}
+                  <SettingSwitch
+                    label="Credential redaction"
+                    checked={shownTuning?.credential_redaction_enabled ?? false}
                     disabled={tuningBusy || !tuning}
-                    onChange={(event) => void applyTuning({ credential_redaction_enabled: event.target.checked })}
-                    aria-label="Credential redaction"
+                    onChange={(checked) => void applyTuning({ credential_redaction_enabled: checked })}
                   />
                 )}
               >
-                Hide detected credentials in exports from this machine. Off can expose secrets.
-                Changes re-upload all synced sessions on the next Push.
-                Earlier unredacted copies remain readable in storage history.
+                Hide detected credentials in pushed sessions. Changing it re-uploads synced
+                sessions on the next Push. Earlier copies stay in storage history.
               </SettingsRow>
               <SettingsRow
-                label="Automatic update checks"
+                label="Automatic updates"
                 setting="update_check_enabled"
                 receipt={receiptFor("update_check_enabled")}
                 control={(
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    className="sync-settings-switch"
+                  <SettingSwitch
+                    label="Automatic updates"
                     checked={shownTuning?.update_check_enabled ?? true}
                     disabled={tuningBusy || !tuning}
-                    onChange={(event) => void applyTuning({ update_check_enabled: event.target.checked })}
-                    aria-label="Automatic update checks"
+                    onChange={(checked) => void applyTuning({ update_check_enabled: checked })}
                   />
                 )}
               >
-                Ask github.com for the latest published Mallard release shortly after
-                startup and every {AUTO_CHECK_INTERVAL_HOURS} hours. Nothing about you or
-                your projects is sent. Off never disables Check for updates below.
+                Check GitHub at startup and every {AUTO_CHECK_INTERVAL_HOURS} hours. A new release
+                downloads in the background and installs when you restart or quit Mallard.
+                Sends nothing about you or your projects.
               </SettingsRow>
               <SettingsRow
                 label="App version"
-                control={(
+                control={appUpdates.readyVersion ? (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={appUpdates.operationRunning || appUpdates.restarting}
+                    onClick={appUpdates.restart}
+                    title={appUpdates.operationRunning ? "Finish the current operation first" : undefined}
+                  >
+                    <Icon name="refresh" size={14} />
+                    {appUpdates.restarting ? "Restarting…" : "Restart to update"}
+                  </button>
+                ) : (
                   <button
                     type="button"
                     className="btn"
-                    disabled={!updatesSupported}
-                    onClick={() => requestAppUpdateCheck()}
+                    disabled={!updatesSupported || appUpdates.checking}
+                    onClick={appUpdates.checkNow}
                     title={updatesSupported ? "Check GitHub for a newer Mallard release" : "Update checks are available in the desktop app"}
                   >
-                    Check for updates
+                    {appUpdates.checking ? "Checking…" : "Check for updates"}
                   </button>
                 )}
               >
-                {appVersion ? `Mallard ${appVersion}.` : "Mallard."} Updates are signed releases
-                from GitHub; the result appears at the top of the window.
+                {appVersionLine(appVersion, appUpdates)}
               </SettingsRow>
             </div>
             {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
@@ -695,38 +745,32 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                 setting="push_codex_children"
                 receipt={receiptFor("push_codex_children")}
                 control={
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    className="sync-settings-switch"
-                    checked={shownTuning?.push_codex_children ?? true}
+                  <SettingSwitch
+                    label="Push Codex subagents"
+                    checked={shownTuning?.push_codex_children ?? false}
                     disabled={tuningLoading || tuningBusy || !tuning}
-                    onChange={(event) => void applyTuning({ push_codex_children: event.target.checked })}
-                    aria-label="Push Codex subagents"
+                    onChange={(checked) => void applyTuning({ push_codex_children: checked })}
                   />
                 }
               >
-                Include subagent conversations in Push. Changes re-upload all synced Codex sessions
-                on the next Push. Pull uses the stored files.
+                Include subagent conversations. Changing it re-uploads synced Codex sessions
+                on the next Push.
               </SettingsRow>
               <SettingsRow
                 label="Push Claude subagents"
                 setting="push_claude_children"
                 receipt={receiptFor("push_claude_children")}
                 control={
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    className="sync-settings-switch"
-                    checked={shownTuning?.push_claude_children ?? true}
+                  <SettingSwitch
+                    label="Push Claude subagents"
+                    checked={shownTuning?.push_claude_children ?? false}
                     disabled={tuningLoading || tuningBusy || !tuning}
-                    onChange={(event) => void applyTuning({ push_claude_children: event.target.checked })}
-                    aria-label="Push Claude subagents"
+                    onChange={(checked) => void applyTuning({ push_claude_children: checked })}
                   />
                 }
               >
-                Include subagent conversations in Push. Changes re-upload all synced Claude sessions
-                on the next Push. Pull uses the stored files.
+                Include subagent conversations. Changing it re-uploads synced Claude sessions
+                on the next Push.
               </SettingsRow>
               <SettingsRow
                 label="Open Logs on Push and Pull"
@@ -756,7 +800,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   />
                 )}
               >
-                Refresh all projects and storage when you return after a few seconds away.
+                Refresh projects and storage when you come back to Mallard.
               </SettingsRow>
             </div>
             {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
@@ -1031,9 +1075,8 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                   </>
                 )}
               >
-                Permanently delete <code>~/.mallard</code>, including sync metadata, logs,
-                and Pull backups. Clear preferences and restart. Keep cloud versions
-                and project files.
+                Permanently delete <code>~/.mallard</code> (sync metadata, logs, Pull backups,
+                preferences) and restart. Cloud versions and project files stay.
               </SettingsRow>
             </div>
             <NoticeZone

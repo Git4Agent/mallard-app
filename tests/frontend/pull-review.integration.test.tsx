@@ -152,6 +152,7 @@ function renderReview(
       supportLoading={false}
       busy={false}
       error={error}
+      onDismissError={() => undefined}
       onApply={() => undefined}
       onBack={() => undefined}
       onRefreshPlan={onRefreshPlan}
@@ -574,6 +575,11 @@ test("a refused review offers Compare again, and no Pull surface offers a reset"
   // Any other apply error keeps the banner without that button.
   const other = renderReview(restorePlan, "Restore failed: storage is temporarily unavailable", () => undefined);
   assert.doesNotMatch(other, /Compare again<\/button>/);
+  // Every failure closes: the review stays open under it.
+  for (const html of [renderReview(restorePlan, `Restore failed: ${REVIEW_SUPERSEDED}`, () => undefined), other]) {
+    assert.equal(html.match(/class="sync-notice-dismiss"/g)?.length, 1, "one close control, drawn by the zone");
+    assert.match(html, /class="sync-notice-dismiss"[^>]*aria-label="Dismiss: Error\. Restore failed/);
+  }
   assert.doesNotMatch(other, /Reset local sync state/);
   assert.equal(compareAgainOffered(`Restore failed: ${REVIEW_SUPERSEDED}`), true);
   assert.equal(compareAgainOffered("storage is temporarily unavailable"), false);

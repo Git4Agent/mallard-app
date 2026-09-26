@@ -11,9 +11,9 @@ import { compactProjectPath, projectLabel, providerLabel } from "./model";
  * summary is only filled for the active project), and the linked storage's
  * name.
  *
- * Empty, it has one door: Add project opens the folder dialog straight away,
- * so there is nothing to choose before it. The door wears every agent the
- * build knows, which is what a project can bind to.
+ * Empty, it has one door: Add project opens setup at its Folder field, so
+ * there is nothing to choose before it. The door wears every agent the build
+ * knows, which is what a project can bind to.
  */
 export default function ProjectPicker({ projects, profiles, providers, storages, onAddProject, onSelectProject }: {
   projects: LocalProjectSummary[];
@@ -34,8 +34,8 @@ export default function ProjectPicker({ projects, profiles, providers, storages,
       doors={[{
         key: "folder",
         icon: "folder",
-        label: "Pick a folder…",
-        ariaLabel: "Add project: pick a folder",
+        label: "Add a folder…",
+        ariaLabel: "Add project",
         marks: providers.length > 0
           ? providers.map((provider) => (
             <ProviderMark key={provider.key} provider={provider.key} displayName={provider.display_name} />

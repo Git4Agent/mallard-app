@@ -35,17 +35,18 @@ impl StorageProviderRegistry {
         Ok(Self { adapters: map })
     }
 
-    /// The process-wide production registry: local folder, R2, and Dropbox.
-    /// Mallard Cloud is not offered by this build: the service stores and
-    /// lists no publication records yet, and its adapter returns with the
-    /// plan that adds them.
+    /// The process-wide production registry: Mallard Cloud, R2, Dropbox,
+    /// Feishu, and the local folder. Feishu is offered by every build; one
+    /// that carries no Feishu app says so on its Sign in line.
     pub fn production() -> &'static StorageProviderRegistry {
         static REGISTRY: OnceLock<StorageProviderRegistry> = OnceLock::new();
         REGISTRY.get_or_init(|| {
             StorageProviderRegistry::from_adapters(vec![
+                Arc::new(super::managed_cloud::ManagedCloudAdapter),
                 Arc::new(super::local::LocalFolderAdapter),
                 Arc::new(super::r2::R2Adapter),
                 Arc::new(super::dropbox::DropboxAdapter),
+                Arc::new(super::feishu::FeishuAdapter),
             ])
             .expect("production storage registry has no duplicate registrations")
         })
@@ -55,9 +56,11 @@ impl StorageProviderRegistry {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_test_provider() -> StorageProviderRegistry {
         StorageProviderRegistry::from_adapters(vec![
+            Arc::new(super::managed_cloud::ManagedCloudAdapter),
             Arc::new(super::local::LocalFolderAdapter),
             Arc::new(super::r2::R2Adapter),
             Arc::new(super::dropbox::DropboxAdapter),
+            Arc::new(super::feishu::FeishuAdapter),
             Arc::new(super::test_provider::TestStorageAdapter),
         ])
         .expect("test storage registry has no duplicate registrations")
@@ -170,27 +173,42 @@ mod tests {
         assert_eq!(
             keys,
             vec![
+                (5, "managed_cloud".to_string()),
                 (10, "r2".to_string()),
                 (20, "dropbox".to_string()),
+                (25, "feishu".to_string()),
                 (30, "local".to_string()),
                 (90, "teststore".to_string())
             ]
         );
         assert_eq!(
             descriptors[0].clear_mode,
-            crate::storage_providers::traits::StorageClearMode::Unconditional
+            crate::storage_providers::traits::StorageClearMode::Unavailable
         );
         assert_eq!(
             descriptors[1].clear_mode,
-            crate::storage_providers::traits::StorageClearMode::RevisionChecked
+            crate::storage_providers::traits::StorageClearMode::Unconditional
         );
         assert_eq!(
             descriptors[2].clear_mode,
             crate::storage_providers::traits::StorageClearMode::RevisionChecked
         );
-        // No build offers Mallard Cloud.
+        assert_eq!(
+            descriptors[3].clear_mode,
+            crate::storage_providers::traits::StorageClearMode::Unavailable
+        );
+        assert_eq!(
+            descriptors[4].clear_mode,
+            crate::storage_providers::traits::StorageClearMode::RevisionChecked
+        );
+        // Every build offers Mallard Cloud: the service is a gateway onto
+        // the layout every storage has. Every build offers Feishu too; the
+        // app it needs is a build fact its Sign in line reports.
         assert!(StorageProviderRegistry::production()
             .latest(&StorageProviderKey::parse("managed_cloud").unwrap())
-            .is_none());
+            .is_some());
+        assert!(StorageProviderRegistry::production()
+            .latest(&StorageProviderKey::parse("feishu").unwrap())
+            .is_some());
     }
 }

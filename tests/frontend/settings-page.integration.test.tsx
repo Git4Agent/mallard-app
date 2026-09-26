@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import SettingsPage from "../../src/components/project-sync/SettingsPage";
+import type { AppUpdates } from "../../src/components/AppUpdater";
 import {
   getPreference,
   getThemeChoice,
@@ -20,15 +21,36 @@ const appActions = [{
   ],
 }];
 
+/** The shell's updater with nothing to say: no release ready, no check run. */
+const idleUpdates: AppUpdates = {
+  readyVersion: null,
+  checking: false,
+  restarting: false,
+  operationRunning: false,
+  lastCheckedAt: null,
+  receiptVersion: null,
+  checkNow: () => undefined,
+  restart: () => undefined,
+  openReceipt: () => undefined,
+};
+
 function renderPage(): string {
   return renderToStaticMarkup(
     <SettingsPage
       appActions={appActions}
+      appUpdates={idleUpdates}
       onLogsChanged={() => undefined}
       onDone={() => undefined}
       doneTarget="mallard-app"
     />,
   );
+}
+
+/** The word printed beside each switch, in page order. */
+function switchWords(html: string): string[] {
+  return [...html.matchAll(
+    /<label class="sync-settings-toggle"><input[^>]*role="switch"[^>]*><span class="sync-settings-state" aria-hidden="true">(On|Off)<\/span><\/label>/g,
+  )].map((match) => match[1]);
 }
 
 test("the Settings page is a path-bar screen of grouped preference rows", () => {
@@ -53,21 +75,24 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, />Light</);
   assert.match(html, />Dark</);
 
-  // Boolean settings render as switches. Redaction and the scheduled update
-  // check default On while loading.
+  // Privacy and Sync default Off, including while saved settings load.
   const switches = html.match(/role="switch"[^>]*class="sync-settings-switch"[^>]*checked=""/g) ?? [];
-  assert.equal(switches.length, 7);
-  assert.match(html, /<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Automatic update checks"[^>]*checked=""/);
+  assert.equal(switches.length, 2);
+  assert.match(html, /<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Automatic updates"[^>]*checked=""/);
   // The manual check sits beside its switch and is inert outside the desktop app.
   assert.match(html, /<button[^>]*disabled=""[^>]*>Check for updates<\/button>/);
   for (const provider of ["Codex", "Claude"]) {
-    assert.match(html, new RegExp(`<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Push ${provider} subagents"[^>]*checked=""`));
+    assert.match(html, new RegExp(`<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Push ${provider} subagents"\\/>`));
   }
+  // Each switch says its state in a word after it, inside the label so the
+  // word is part of the click target, and aria-hidden because the switch
+  // already announces itself.
+  assert.deepEqual(switchWords(html), ["Off", "On", "Off", "Off", "Off", "Off", "On"]);
 
   // Redaction is disabled until saved settings load.
   assert.doesNotMatch(html, /Always on/);
   assert.doesNotMatch(html, /redact\.v1|mallard\.redact/);
-  assert.match(html, /<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Credential redaction"[^>]*checked=""/);
+  assert.match(html, /<input[^>]*role="switch"[^>]*disabled=""[^>]*aria-label="Credential redaction"\/>/);
 
   // The Logs group carries the absorbed log-policy surface: both selects on
   // the app's select shell, the folder verb, and both cleanup verbs.
@@ -105,13 +130,47 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, /class="sync-settings-readout"[^>]*>…</);
   // The row copy names the irreversible parts: backups and preferences.
   assert.match(html, /Pull backups/);
-  assert.match(html, /Clear preferences and restart/);
+  assert.match(html, /preferences\) and restart/);
 });
 
-test("preferences default on, live under the mallard.* keys, and notify", () => {
+test("a switch set off says Off, not the default", () => {
+  // The word follows the stored value: with the 24-hour clock stored off, its
+  // row reads Off and its input is unchecked.
+  const store = new Map([["mallard.clock-24h", "off"]]);
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => { store.set(key, value); },
+      },
+    },
+  });
+  try {
+    const html = renderPage();
+    assert.deepEqual(switchWords(html), ["Off", "On", "Off", "Off", "Off", "Off", "Off"]);
+    assert.match(html, /<input[^>]*role="switch"[^>]*aria-label="24-hour clock"\/>/);
+    for (const name of ["openLogsOnSync", "refreshOnFocus"] as const) {
+      assert.equal(getPreference(name), false);
+      assert.equal(setPreference(name, true), true);
+      assert.equal(getPreference(name), true);
+    }
+    assert.deepEqual(switchWords(renderPage()), ["Off", "On", "Off", "Off", "On", "On", "Off"]);
+    for (const name of ["openLogsOnSync", "refreshOnFocus"] as const) {
+      assert.equal(setPreference(name, false), true);
+      assert.equal(getPreference(name), false);
+    }
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "window", previous);
+    else delete (globalThis as { window?: unknown }).window;
+  }
+});
+
+test("sync preferences default off, live under the mallard.* keys, and notify", () => {
   // No storage in this environment: every read lands on its default.
-  assert.equal(getPreference("openLogsOnSync"), true);
-  assert.equal(getPreference("refreshOnFocus"), true);
+  assert.equal(getPreference("openLogsOnSync"), false);
+  assert.equal(getPreference("refreshOnFocus"), false);
   assert.equal(getPreference("clock24"), true);
   assert.equal(getThemeChoice(), "system");
   // Without matchMedia, System resolves to the app's historical dark.
@@ -216,7 +275,7 @@ test("every export-shaping setting says that changing it re-uploads synced sessi
   // every synced session, and revisions are immutable, so copies pushed with
   // redaction off remain readable in the storage's history.
   const source = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
-  assert.match(source, /Hide detected credentials in exports from this machine\. Off can expose secrets\.\s*Changes re-upload all synced sessions on the next Push\.\s*Earlier unredacted copies remain readable in storage history\./);
-  assert.match(source, /Changes re-upload all synced Codex sessions\s*on the next Push\. Pull uses the stored files\./);
-  assert.match(source, /Changes re-upload all synced Claude sessions\s*on the next Push\. Pull uses the stored files\./);
+  assert.match(source, /Hide detected credentials in pushed sessions\. Changing it re-uploads synced\s*sessions on the next Push\. Earlier copies stay in storage history\./);
+  assert.match(source, /Changing it re-uploads synced Codex sessions\s*on the next Push\./);
+  assert.match(source, /Changing it re-uploads synced Claude sessions\s*on the next Push\./);
 });

@@ -6,7 +6,7 @@ import type {
   ProviderProfileSummary,
 } from "../../types";
 import Icon from "../Icons";
-import Notice from "../notice/Notice";
+import Notice, { FieldMessage } from "../notice/Notice";
 import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { compactProjectPath } from "./model";
 import {
@@ -353,9 +353,7 @@ export default function ProjectBindingEditor({
                   })}
                 </div>
                 {agentError && (
-                  <div id="sync-binding-error-agent" className="sync-setup-field-error">
-                    <Icon name="alert-triangle" size={13} /> {agentError}
-                  </div>
+                  <FieldMessage id="sync-binding-error-agent">{agentError}</FieldMessage>
                 )}
               </>
             )}

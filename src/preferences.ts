@@ -20,7 +20,7 @@ export type BooleanPreferenceName =
 
 const THEME_KEY = "mallard.theme";
 
-/** All three preferences default on. */
+/** Sync preferences default off; the 24-hour clock defaults on. */
 const BOOLEAN_KEYS: Record<BooleanPreferenceName, string> = {
   openLogsOnSync: "mallard.open-logs-on-sync",
   refreshOnFocus: "mallard.refresh-on-focus",
@@ -97,7 +97,8 @@ export function setThemeChoice(choice: ThemeChoice): boolean {
 }
 
 export function getPreference(name: BooleanPreferenceName): boolean {
-  return readKey(BOOLEAN_KEYS[name]) !== "off";
+  const stored = readKey(BOOLEAN_KEYS[name]);
+  return name === "clock24" ? stored !== "off" : stored === "on";
 }
 
 /** Returns whether the value was saved; subscribers re-read either way. */
@@ -105,6 +106,31 @@ export function setPreference(name: BooleanPreferenceName, value: boolean): bool
   const saved = writeKey(BOOLEAN_KEYS[name], value ? "on" : "off");
   notify();
   return saved;
+}
+
+function warningDismissalKey(projectId: string, storageId: string): string {
+  return `mallard.dismissed-storage-warning.${JSON.stringify([projectId, storageId])}`;
+}
+
+/** Save only the UI acknowledgement. Sync records are unchanged. */
+export function dismissStorageWarning(projectId: string, storageId: string, condition: string): boolean {
+  const saved = writeKey(warningDismissalKey(projectId, storageId), condition);
+  notify();
+  return saved;
+}
+
+export function useDismissedStorageWarning(projectId: string, storageId: string): string | null {
+  const read = () => readKey(warningDismissalKey(projectId, storageId));
+  return useSyncExternalStore(subscribePreferences, read, read);
+}
+
+export function clearStorageWarningDismissal(projectId: string, storageId: string) {
+  try {
+    window.localStorage.removeItem(warningDismissalKey(projectId, storageId));
+  } catch {
+    return;
+  }
+  notify();
 }
 
 /**

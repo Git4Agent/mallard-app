@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { StorageSummary } from "../../types";
-import Icon, { iconNameFromHint } from "../Icons";
+import Icon, { storageIconName } from "../Icons";
+import { NoticeChip } from "../notice/Notice";
 import { storageConnectionIssue, storageSubtitle, storageSubtitleIsPath } from "./StorageSettings";
 
 /**
@@ -104,7 +105,7 @@ export default function StorageLinkDialog({
                   onClick={() => onLink(storage.storage_id)}
                 >
                   <span className="sync-storage-link-mark" aria-hidden="true">
-                    <Icon name={iconNameFromHint(storage.icon, "drive")} size={13} />
+                    <Icon name={storageIconName(storage.provider, storage.icon)} size={13} />
                   </span>
                   <span className="sync-storage-index-copy">
                     <strong>{name}</strong>
@@ -113,12 +114,7 @@ export default function StorageLinkDialog({
                       {storage.provider_label} · {subtitle}
                     </small>
                   </span>
-                  {reconnect ? (
-                    <span className="sync-storage-index-warning">
-                      <Icon name="alert-triangle" size={12} aria-hidden="true" />
-                      <span>Reconnect</span>
-                    </span>
-                  ) : <span />}
+                  {reconnect ? <NoticeChip severity="warning">Reconnect</NoticeChip> : <span />}
                   <span />
                   <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
                 </button>

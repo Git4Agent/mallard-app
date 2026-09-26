@@ -11,7 +11,7 @@ It tests service behavior. It does not measure the React UI or Tauri IPC.
 ## Requirements
 
 - Node 20.15 or later. Use one exact version for benchmark comparisons.
-- Codex CLI 0.154.x. Reports record the exact patch version.
+- Codex CLI 0.156.0. Reports record the exact patch version.
 - Claude Code 2.1.266.
 - aimock 1.39.0, installed by `npm ci`.
 - The repository Rust toolchain and native build dependencies.

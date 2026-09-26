@@ -28,8 +28,8 @@ import type {
   StorageSummary,
   StorageProviderKey,
 } from "../../types";
-import Icon, { iconNameFromHint } from "../Icons";
-import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import Icon, { storageIconName } from "../Icons";
+import { NoticeChip, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDateTime, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
@@ -63,6 +63,7 @@ import {
   StorageEditor,
   StorageLockedForm,
   StorageReconnectBand,
+  settingStrings,
   storageNameIsAuto,
   storageNameForSettings,
   type StorageEditorForm,
@@ -75,6 +76,7 @@ import { projectSyncApi } from "./api";
 import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
 import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
+import { FeishuSetupLane, useFeishuSetup } from "./FeishuSetup";
 import { ManagedCloudSetupLane, useManagedCloudSetup } from "./ManagedCloudSetup";
 import { cloudStatusChip, cloudVersionUrl, releaseChip } from "./managedCloudLink";
 import { openExternalUrl } from "./externalLink";
@@ -607,6 +609,7 @@ export default function ProjectLinksWorkspace({
     setManualEntry(false);
     r2.dismiss();
     dropbox.dismiss();
+    feishu.dismiss();
   };
   /** Seat a backend draft in the form. The descriptor shapes the form; a
    *  draft this build has no descriptor for opens empty and uneditable. */
@@ -782,7 +785,8 @@ export default function ProjectLinksWorkspace({
         const prepared = await loadPreparedR2Draft(saved, descriptor, isCurrent);
         if (!prepared) return false;
         const suggestedName = !saved.edits_existing
-          ? storageNameForSettings(descriptor, formFromDraft(descriptor, saved), formFromDraft(descriptor, prepared).settings) : null;
+          ? storageNameForSettings(descriptor, formFromDraft(descriptor, saved), settingStrings(prepared.settings), storages.map((storage) => storage.name))
+          : null;
         openStorageSession(prepared, descriptor);
         if (suggestedName && suggestedName !== prepared.name) {
           // Use the normal draft autosave; close, Test, and Finish also flush it.
@@ -807,6 +811,12 @@ export default function ProjectLinksWorkspace({
     mode: r2Mode,
     port: setupPort,
   });
+  const feishu = useFeishuSetup({
+    enabled: !!storageSession && findStorageProvider(storageProviders, storageSession.draft.provider, storageSession.draft.config_version)?.local_setup === "feishu",
+    draftId: storageSession?.draft.draft_id ?? null,
+    mode: r2Mode,
+    port: setupPort,
+  });
   const managedCloud = useManagedCloudSetup({
     enabled: !!storageSession && findStorageProvider(storageProviders, storageSession.draft.provider, storageSession.draft.config_version)?.local_setup === "managed_cloud",
     draftId: storageSession?.draft.draft_id ?? null,
@@ -822,7 +832,7 @@ export default function ProjectLinksWorkspace({
     return (right.updated_at ?? 0) - (left.updated_at ?? 0);
   });
   const run = async (key: string, action: () => Promise<void> | void) => {
-    if (r2.isRunning() || dropbox.isRunning() || managedCloud.isRunning()) return;
+    if (r2.isRunning() || dropbox.isRunning() || feishu.isRunning() || managedCloud.isRunning()) return;
     setRunningAction(key);
     try {
       await action();
@@ -1013,7 +1023,7 @@ export default function ProjectLinksWorkspace({
   };
 
   const saveStorageDraftBeforeNavigation = async (): Promise<boolean> => {
-    if (r2.isRunning() || dropbox.isRunning() || managedCloud.isRunning()) return false;
+    if (r2.isRunning() || dropbox.isRunning() || feishu.isRunning() || managedCloud.isRunning()) return false;
     const session = draftSessionRef.current;
     const current = storageSessionRef.current;
     if (!current) return true;
@@ -1425,7 +1435,7 @@ export default function ProjectLinksWorkspace({
     const supportsManagedClear = storageAvailable && (descriptor?.clear_mode === "revision_checked" || descriptor?.clear_mode === "unconditional");
     const storageLinkCount = links.filter((link) => link.storage_id === pageStorageId).length;
     const pathFact = savedEditedStorage?.summary.find((field) => field.is_path) ?? null;
-    const formLocked = busy || !!runningAction || r2.state.running || dropbox.state.running;
+    const formLocked = busy || !!runningAction || r2.state.running || dropbox.state.running || feishu.state.running;
     const storageActionBlocked = formLocked || !storageReady || destinationConflict !== null;
 
     /* Creation's Finish setup, and a reconnect's Save credential: the same
@@ -1540,7 +1550,7 @@ export default function ProjectLinksWorkspace({
       const session = storageSessionRef.current;
       if (!session || !descriptor) return;
       if (provider.key === descriptor.key && provider.config_version === descriptor.config_version) return;
-      const keptName = storageNameIsAuto(descriptor, session.form) ? undefined : session.form.name;
+      const keptName = storageNameIsAuto(descriptor, session.form, settingStrings(session.draft.settings)) ? undefined : session.form.name;
       try {
         await storageDraftSaveQueue.enqueue(
           () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
@@ -1559,17 +1569,18 @@ export default function ProjectLinksWorkspace({
        chosen and prepared. Taking a door drops whatever the other found. */
     const chooseSetupMode = (mode: StorageSetupMode) => {
       if (mode === storageSetupMode) return;
-      if (formLocked || (r2.isRunning() || dropbox.isRunning())) return;
+      if (formLocked || (r2.isRunning() || dropbox.isRunning() || feishu.isRunning())) return;
       r2.dismiss();
-    dropbox.dismiss();
+      dropbox.dismiss();
+      feishu.dismiss();
       setStorageSetupMode(mode);
       setManualEntry(false);
     };
     /* The doors are asked of a blank new draft and stay as a switch once
        taken; a draft that already holds values — resumed, or prepared by
        the agent or the look — is past the question. */
-    const r2Ready = (r2.state.phase === "review" || dropbox.state.phase === "review");
-    const askingSetupMode = creatingStorage && !!descriptor?.discovery
+    const r2Ready = (r2.state.phase === "review" || dropbox.state.phase === "review" || feishu.state.phase === "review");
+    const askingSetupMode = creatingStorage && !!descriptor?.setup_doors
       && (storageSetupMode !== null || (progress?.set ?? 0) === 0) && !r2Ready;
     // The trail starts at the Storages index the crumb leads back to; the
     // storage itself carries the switcher; the section names the page. A
@@ -1600,7 +1611,7 @@ export default function ProjectLinksWorkspace({
               label: storageName,
               detail: storageSubtitle(savedEditedStorage),
               detailIsPath: storageSubtitleIsPath(savedEditedStorage),
-              icon: iconNameFromHint(savedEditedStorage.icon, "drive"),
+              icon: storageIconName(savedEditedStorage.provider, savedEditedStorage.icon),
             },
             menu: [
               ...(storages.some((candidate) => candidate.storage_id !== pageStorageId) ? [{
@@ -1612,7 +1623,7 @@ export default function ProjectLinksWorkspace({
                     label: candidate.name || "(unnamed)",
                     detail: storageSubtitle(candidate),
                     detailIsPath: storageSubtitleIsPath(candidate),
-                    icon: iconNameFromHint(candidate.icon, "drive"),
+                    icon: storageIconName(candidate.provider, candidate.icon),
                     disabled: busy,
                     onSelect: () => onOpenStorage(candidate.storage_id),
                   })),
@@ -1751,7 +1762,7 @@ export default function ProjectLinksWorkspace({
        a fresh draft opens on the doors. A bucket or folder already created
        at the provider and any connected storage are kept. */
     const resetR2Setup = () => {
-      if (formLocked || r2.isRunning() || dropbox.isRunning() || managedCloud.isRunning() || !descriptor) return;
+      if (formLocked || r2.isRunning() || dropbox.isRunning() || feishu.isRunning() || managedCloud.isRunning() || !descriptor) return;
       void run(`reset-r2:${pageStorageId}`, async () => {
         const session = storageSessionRef.current;
         if (!session) return;
@@ -1775,6 +1786,7 @@ export default function ProjectLinksWorkspace({
       draftEditVersionRef.current += 1;
       r2.dismiss();
       dropbox.dismiss();
+      feishu.dismiss();
       managedCloud.dismiss();
       setStorageTestVerified(false);
       setStorageDraftActionError(null);
@@ -1803,6 +1815,9 @@ export default function ProjectLinksWorkspace({
               await onCreateStorageDraft(descriptor.key);
               onStorageDraftsChanged?.();
             })}
+            onReset={resetR2Setup} />
+      : storageSession && descriptor?.local_setup === "feishu"
+        ? <FeishuSetupLane flow={feishu} mode={r2Mode} disabled={formLocked} descriptor={descriptor}
             onReset={resetR2Setup} />
       : storageSession && descriptor?.local_setup === "managed_cloud"
         ? <ManagedCloudSetupLane flow={managedCloud} mode={r2Mode === "reconnect" ? "reconnect" : "create"} disabled={formLocked}
@@ -1855,6 +1870,7 @@ export default function ProjectLinksWorkspace({
                   setupMode={askingSetupMode ? { mode: storageSetupMode, onChoose: chooseSetupMode } : undefined}
                   manualEntry={manualEntry}
                   setupDone={r2Ready}
+                  takenNames={storages.map((storage) => storage.name)}
                   onSwitchProvider={switchStorageProvider}
                   onChange={onStorageFormChange}
                   setupSlot={setupSlot}
@@ -2084,7 +2100,7 @@ export default function ProjectLinksWorkspace({
             label: storage.name || "(unnamed)",
             detail: storageSubtitle(storage),
             detailIsPath: storageSubtitleIsPath(storage),
-            icon: iconNameFromHint(storage.icon, "drive"),
+            icon: storageIconName(storage.provider, storage.icon),
             disabled: workspaceControlsLocked,
             onSelect: () => {
               if (workspaceReviewOpen) inlineStorageReview?.onClose();
@@ -2124,7 +2140,7 @@ export default function ProjectLinksWorkspace({
       pathCrumbs.push({
         id: "storage",
         label: workspaceStorage.name || "(unnamed)",
-        icon: iconNameFromHint(workspaceStorage.icon, "drive"),
+        icon: storageIconName(workspaceStorage.provider, workspaceStorage.icon),
         tone: "root",
         title: `${workspaceStorage.name || "Storage"} · ${storageSubtitle(workspaceStorage)}`,
         ariaLabel: `${workspaceStorage.name || "Unnamed storage"}. Storage menu`,
@@ -2132,7 +2148,7 @@ export default function ProjectLinksWorkspace({
           label: workspaceStorage.name || "(unnamed)",
           detail: storageSubtitle(workspaceStorage),
           detailIsPath: storageSubtitleIsPath(workspaceStorage),
-          icon: iconNameFromHint(workspaceStorage.icon, "drive"),
+          icon: storageIconName(workspaceStorage.provider, workspaceStorage.icon),
         },
         menuBanner: storageMenuBanner,
         menu: storageMenu,
@@ -2391,7 +2407,7 @@ export default function ProjectLinksWorkspace({
           data-tooltip={activityHeader?.counts.detail}
           aria-label={`${attention} thread${attention === 1 ? "" : "s"} need attention: ${activityHeader?.counts.detail}`}
         >
-          <Icon name="alert-triangle" size={13} />
+          <Icon name={activityHeader?.counts.severity === "danger" ? "octagon-x" : "alert-triangle"} size={13} />
           <b>{attention}</b>
         </span>
       )}
@@ -2965,7 +2981,7 @@ export default function ProjectLinksWorkspace({
                           <NoticeZone
                             items={gateNotices}
                             subject="reasons this storage is held"
-                            className="sync-storage-notice"
+                            className="sync-storage-notice notice-strip"
                             timing="blocking"
                           />
                           {reviewOpen && (
@@ -3008,9 +3024,7 @@ export default function ProjectLinksWorkspace({
                     <small>{compactProjectPath(project.project_root)}</small>
                   </span>
                   {profileMissing && (
-                    <span className="sync-storage-index-warning">
-                      <Icon name="alert-triangle" size={12} /> Agent profile needed
-                    </span>
+                    <NoticeChip severity="warning">Agent profile needed</NoticeChip>
                   )}
                   <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
                 </button>

@@ -1,7 +1,10 @@
 # Design: In-App Updates from GitHub Releases
 
 Status: Implemented on `app-updates` (2026-09-20). First release carrying the
-client: v0.1.3. The updater keypair was generated and its public key
+client: v0.1.3. Client reworked 2026-09-25: the backend downloads a found
+release in the background and installs it on restart or quit; the only
+surface is an *Update* pill in the sidebar's version mark, and no failure is
+ever drawn (§7). The updater keypair was generated and its public key
 (minisign key ID `3DBE1722FCFE006B`) committed on 2026-09-20; the two
 `TAURI_SIGNING_*` secrets (§4) must be in place before the v0.1.3 tag.
 Date: 2026-09-20
@@ -175,25 +178,31 @@ Design points:
 
 ## 7. Client behaviour
 
-Implemented in `src/components/AppUpdater.tsx` and wired into
-`src/components/project-sync/ProjectSync.tsx`.
+The backend owns the release (`src-tauri/src/app_update.rs`); the frontend
+decides when to ask and draws the one place an update shows
+(`src/components/AppUpdater.tsx`, wired into
+`src/components/project-sync/ProjectSync.tsx`). The model is the one
+ChatGPT's and Slack's desktop apps use: download quietly, then offer a
+restart.
 
 | Rule | Behaviour |
 |---|---|
-| **When it checks** | 8 s after startup, then every 6 hours, and on window focus if 6 hours have passed. A check is skipped while another check or an install is running. |
-| **Opt-out** | Settings › Privacy › *Automatic update checks* (`update_check_enabled` in `~/.mallard/settings.json`, default on). The setting is read at the moment a scheduled check is due, so the toggle needs no event plumbing. It is not a tuning value: toggling it never purges caches. |
-| **Manual check** | Settings › Privacy › *Check for updates* (dispatches `mallard:check-for-updates`). Ignores the opt-out and the interval. Reports *Checking*, *Mallard is up to date* (auto-dismisses after 4 s), or the error with *Try again*. A failed **scheduled** check stays quiet. |
-| **One notice** | The updater contributes one `NoticeItem` to the shell's single notice zone (`docs/PLAN_NOTICE_SYSTEM.md`): "Note · Mallard X.Y.Z is available." with *Release notes*, *Later*, and *Update and restart*. It shares the box with any other shell message; no banner family of its own. |
-| **Busy gate** | While `ProjectSync`'s `busy` is set (Push, Pull, apply, restore, setup), the message reads "Finish the current operation before restarting" and *Update and restart* is disabled. The install path re-checks `busy` after the confirm dialog. |
-| **Later** | Hides that version, and only that version, for 24 h (`localStorage`). A manual check ignores the deferral. |
-| **Install** | Native confirm → modal `<dialog>` with a `<progress>` bar (cannot be cancelled; Escape is swallowed) → `downloadAndInstall` (5-minute timeout) → `relaunch()`. On macOS the plugin replaces `Mallard.app` in place; on Windows it runs the NSIS installer in passive mode and exits. |
-| **Failure** | The notice becomes "Error · Mallard X.Y.Z did not install." with the reason, *Try again*, and *Later*. The pending-changelog marker is cleared so a failed install never claims success. |
-| **After restart** | Once: "Done · Mallard X.Y.Z installed." with *Release notes*. Keyed by version in `localStorage`, so it shows once per update. |
-| **Outside Tauri** | `npm run dev` (Vite only): every hook is inert and the Settings button is disabled with a tooltip. |
+| **When it checks** | 8 s after startup, then every 6 hours, and on window focus if 6 hours have passed. A check is skipped while another check or a restart is running. |
+| **Check = download** | `prepare_app_update` checks the manifest and, when it names a newer version, downloads the package at once (30 s check, 5-minute download timeout). The plugin verifies the minisign signature before `download` returns, so the ready slot only ever holds a package the pinned key signed. A package already downloaded for the same version is kept. When the published release is no longer newer (it was pulled), the slot is emptied so a withdrawn release never installs. |
+| **Opt-out** | Settings › Privacy › *Automatic updates* (`update_check_enabled` in `~/.mallard/settings.json`, default on). The setting is read at the moment a scheduled check is due, so the toggle needs no event plumbing. It is not a tuning value: toggling it never purges caches. |
+| **The corner** | The sidebar footer's version mark (`v0.1.4`) gains one pill at its far end: *Update* once a release is ready, *Restarting* while it installs, *What's new* on the first launch after the version changed (opens the release page; this launch only, keyed by `mallard.update.last-run-version` in `localStorage`). With the sidebar hidden, a dot on its toggle carries *Update*. Nothing else in the app speaks for the updater: no notice, no modal, no confirm. |
+| **Busy gate** | While `ProjectSync`'s `busy` is set (Push, Pull, apply, restore, setup), *Update* is disabled and its title says to finish the operation first. |
+| **Update** | `restart_to_update` takes the package, installs it off the async runtime, then `request_restart()`. On macOS the plugin replaces `Mallard.app` in place; on Windows it runs the NSIS installer in passive mode, which exits Mallard and relaunches it (`/R`). |
+| **Quit** | `RunEvent::Exit` — reached by Quit, closing the last window, the Dock, and logout — installs a ready package so the next launch runs it (Windows: without relaunching). It installs only where no password is needed: a bundle whose folder this user cannot write would make the plugin ask for an administrator password, which must never appear unasked at quit; the *Update* button, where a prompt is expected, still installs it. |
+| **Manual check** | Settings › Privacy › *Check for updates* ignores the opt-out and the interval, reads *Checking…* while it runs, and swaps to *Restart to update* when a release is ready. The row says "Mallard X is the newest release. Checked 5m ago." — the time only moves when a check reached GitHub, so a stale time is the whole signal. |
+| **Failure** | Never drawn. An offline check, a failed download, a signature that does not verify, or a failed install leaves the corner as it was (a failed install drops the package and the *Update* pill); the next check tries again. |
+| **Development runs** | `tauri dev` never checks or installs (`tauri::is_dev()`), and on macOS neither does an executable outside `*.app/Contents/MacOS/`: the plugin would take `target/debug` for the application and replace it. Unit-tested in `app_update.rs`. Under plain Vite every hook is inert and the Settings button is disabled with a tooltip. |
 
-The download happens in Rust (the plugin), so the webview CSP's
-`connect-src 'self' ipc:` is unaffected. The release-notes link opens in the
-system browser through `openExternalUrl` (`opener:default` allows https).
+The download happens in Rust, so the webview CSP's `connect-src 'self' ipc:`
+is unaffected, and the webview holds no `updater:` or `process:` permission:
+it can only ask the backend to check or to restart. The release-notes link
+opens in the system browser through `openExternalUrl` (`opener:default`
+allows https).
 
 ## 8. Failure modes and rollback
 
@@ -204,8 +213,8 @@ system browser through `openExternalUrl` (`opener:default` allows https).
 | Users already updated to the bad build | The updater never downgrades. | Ship vX.Y.Z+1 with the fix; they update forward. |
 | Private updater key lost | New releases cannot be verified by installed copies. | Generate a new key, commit the new public key, and tell users to reinstall once from the Releases page. There is no in-band recovery. |
 | Private updater key leaked | A leaked key alone is not enough: publishing also needs release write access to `Git4Agent/mallard-app`. | Rotate: new key, new public key committed, next release signed with it. A copy verifies against the public key baked into the build it runs, so any copy that skips the rotation release cannot update past it; announce a one-time manual reinstall. |
-| GitHub unreachable | Scheduled check fails silently; manual check reports the error. | None. |
-| Tampered `.sig` or asset | Plugin rejects the download; notice shows the error. | Investigate the release's assets. |
+| GitHub unreachable | Every check fails silently; Settings' *Checked …* time stops advancing. | None. |
+| Tampered `.sig` or asset | Plugin rejects the download; nothing is offered, and each check tries again. | Investigate the release's assets. |
 
 ## 9. Open items
 
@@ -221,7 +230,7 @@ system browser through `openExternalUrl` (`opener:default` allows https).
   installer is unsigned. A browser download carries the Mark-of-the-Web and
   triggers SmartScreen; the updater's download should not, but this must be
   confirmed on a clean Windows 11 machine before v0.1.3 is published. If it
-  is blocked, the Windows notice must fall back to a *Download* button that
+  is blocked, the Windows corner must fall back to a *Download* pill that
   opens the release page until Authenticode signing lands.
 - **Secrets before the tag.** The public key is committed; the matching
   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
@@ -240,10 +249,12 @@ Automated, on every push and in CI:
   `--clobber` or `uploadUpdaterJson`; `tests/updater-manifest.test.mjs` covers
   the manifest builder and its CLI.
 - `npm run test:frontend-integration` — `tests/frontend/app-updater.integration.test.tsx`
-  covers the notice copy for every phase, the busy gate, the *Later*
-  deferral, the scheduled-check switch (and that a manual check ignores it),
-  the progress dialog, and the shell/Settings wiring.
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib` — settings default.
+  covers every corner state (plain mark, *Update*, the busy gate,
+  *Restarting*, *What's new*), the launch receipt, the scheduled-check
+  switch, and the Settings row's check and restart.
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib` — the settings
+  default, and `app_update` refusing a development run and any macOS
+  executable outside an `.app` bundle.
 
 Manual, before publishing the first release that carries the client:
 
@@ -251,11 +262,12 @@ Manual, before publishing the first release that carries the client:
    three signatures, and `latest.json`.
 2. Install the dry-run build. Serve a hand-built `latest.json` for a higher
    dry-run version from a local HTTPS or file server and temporarily point a
-   local build's endpoint at it. Confirm: the notice appears after ~8 s;
-   *Later* hides it and the manual check brings it back; *Update and restart*
-   is disabled during a Push; installing while idle downloads, restarts, and
-   launches without a Gatekeeper prompt; the "installed" receipt shows once;
-   a tampered `.sig` is rejected with an error notice. Repeat on Intel
-   (Rosetta smoke at minimum) and Windows.
+   local build's endpoint at it. Confirm: *Update* appears in the version
+   mark once the download finishes, with nothing shown before; it is
+   disabled during a Push; clicking it restarts into the new version without
+   a Gatekeeper prompt; quitting instead (⌘Q, the Dock) installs it and the
+   next launch runs it without reopening; *What's new* shows on that first
+   launch only; a tampered `.sig` offers nothing and shows no error. Repeat
+   on Intel (Rosetta smoke at minimum) and Windows (quit must not relaunch).
 3. Tag v0.1.3, verify nine assets on the draft, publish. The first genuine
    in-app update is v0.1.3 → v0.1.4.

@@ -204,13 +204,19 @@ impl Mock {
             client,
         }
     }
-    fn prepare(
+    fn prepare(&self, name: &str) -> Result<R2Destination, SetupError> {
+        self.prepare_in(R2Jurisdiction::Default, name)
+    }
+    fn prepare_in(
         &self,
-        journal: &mut R2SetupJournal,
+        jurisdiction: R2Jurisdiction,
         name: &str,
     ) -> Result<R2Destination, SetupError> {
         self.runtime
-            .block_on(prepare_bucket(&self.client, journal, name))
+            .block_on(prepare_bucket(&self.client, ACCOUNT, jurisdiction, name))
+    }
+    fn attempted(&self) -> Vec<String> {
+        self.state.lock().unwrap().attempted.clone()
     }
     fn discover(&self) -> Result<discovery::BucketScan, SetupError> {
         self.runtime.block_on(self.client.discover(ACCOUNT))
@@ -225,43 +231,19 @@ impl Mock {
     }
 }
 
-fn draft_id() -> StorageSetupDraftId {
-    StorageSetupDraftId::parse("storagedraft-111111111111111111111111").unwrap()
-}
-
-fn open(repository: &LocalStateRepository) -> R2SetupJournal {
-    R2SetupJournal::open(repository, &draft_id(), ACCOUNT, R2Jurisdiction::Default).unwrap()
-}
-
 #[test]
-fn success_and_restart_keep_the_same_bucket_and_no_secrets() {
+fn creation_makes_one_bucket_and_a_repeat_finds_the_name_taken() {
     let mock = Mock::new();
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    let first = mock
-        .prepare(&mut open(&repository), "mallard-otter")
-        .unwrap();
-    assert_eq!(first.bucket(), "mallard-otter");
-    let mut resumed = open(&repository);
+    let created = mock.prepare("mallard-otter").unwrap();
+    assert_eq!(created.bucket(), "mallard-otter");
+    assert_eq!(created.jurisdiction(), R2Jurisdiction::Default);
+    // Nothing remembers the attempt: asking again finds the bucket in the
+    // account and creates nothing.
     assert_eq!(
-        mock.prepare(&mut resumed, "mallard-otter")
-            .unwrap()
-            .api_url(),
-        first.api_url()
+        mock.prepare("mallard-otter").unwrap_err(),
+        SetupError::Taken
     );
-    assert_eq!(mock.state.lock().unwrap().attempted.len(), 1);
-    let entries = StorageSetupJournalStore::r2_provisioning(&repository)
-        .list()
-        .unwrap();
-    assert_eq!(entries[0].schema, 1);
-    assert!(!serde_json::to_string(&entries)
-        .unwrap()
-        .contains("token-canary"));
-    resumed.finish().unwrap();
-    assert!(StorageSetupJournalStore::r2_provisioning(&repository)
-        .list()
-        .unwrap()
-        .is_empty());
+    assert_eq!(mock.attempted(), ["mallard-otter"]);
 }
 
 #[test]
@@ -274,100 +256,59 @@ fn proposals_are_readable_mallard_names() {
 }
 
 #[test]
-fn a_taken_name_is_reported_and_a_renamed_request_replaces_the_plan() {
+fn an_invalid_name_is_refused_before_any_request() {
+    let mock = Mock::new();
+    assert_eq!(mock.prepare("Bad Name").unwrap_err(), SetupError::Identity);
+    assert_eq!(mock.state.lock().unwrap().requests, 0);
+}
+
+#[test]
+fn a_taken_name_is_reported_without_a_creation_request() {
     let mock = Mock::new();
     mock.state
         .lock()
         .unwrap()
         .buckets
         .insert("team-backups".into(), DATE.into());
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    let mut journal = open(&repository);
-    assert_eq!(
-        mock.prepare(&mut journal, "team-backups").unwrap_err(),
-        SetupError::Taken
-    );
-    assert!(mock.state.lock().unwrap().attempted.is_empty());
-    let saved = journal.recovery().unwrap().unwrap();
-    assert_eq!(saved.bucket, "team-backups");
-    assert!(matches!(saved.stage, BucketStage::Planned));
-    let created = mock
-        .prepare(&mut open(&repository), "team-backups-2")
-        .unwrap();
+    assert_eq!(mock.prepare("team-backups").unwrap_err(), SetupError::Taken);
+    assert!(mock.attempted().is_empty());
+    let created = mock.prepare("team-backups-2").unwrap();
     assert_eq!(created.bucket(), "team-backups-2");
-    assert_eq!(mock.state.lock().unwrap().attempted, ["team-backups-2"]);
+    assert_eq!(mock.attempted(), ["team-backups-2"]);
 }
 
 #[test]
 fn a_creation_race_reports_the_name_taken_without_adopting_the_conflict() {
     let mock = Mock::new();
     mock.state.lock().unwrap().conflict_on_create = 1;
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    let mut journal = open(&repository);
     assert_eq!(
-        mock.prepare(&mut journal, "mallard-otter").unwrap_err(),
+        mock.prepare("mallard-otter").unwrap_err(),
         SetupError::Taken
     );
-    assert_eq!(mock.state.lock().unwrap().attempted, ["mallard-otter"]);
-    assert!(matches!(
-        journal.recovery().unwrap().unwrap().stage,
-        BucketStage::Planned
-    ));
-    let created = mock.prepare(&mut journal, "mallard-brave").unwrap();
+    assert_eq!(mock.attempted(), ["mallard-otter"]);
+    let created = mock.prepare("mallard-brave").unwrap();
     assert_eq!(created.bucket(), "mallard-brave");
-    assert_eq!(mock.state.lock().unwrap().attempted.len(), 2);
+    assert_eq!(mock.attempted().len(), 2);
 }
 
 #[test]
-fn two_drafts_asking_for_the_same_name_make_one_bucket() {
-    let mock = Mock::new();
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    let mut first = open(&repository);
-    let second_id = StorageSetupDraftId::parse("storagedraft-222222222222222222222222").unwrap();
-    let mut second =
-        R2SetupJournal::open(&repository, &second_id, ACCOUNT, R2Jurisdiction::Default).unwrap();
-    assert_eq!(
-        mock.prepare(&mut first, "mallard-otter").unwrap().bucket(),
-        "mallard-otter"
-    );
-    assert_eq!(
-        mock.prepare(&mut second, "mallard-otter").unwrap_err(),
-        SetupError::Taken
-    );
-    assert_eq!(mock.state.lock().unwrap().attempted.len(), 1);
-    // The first draft still resumes its own bucket.
-    assert_eq!(
-        mock.prepare(&mut first, "mallard-otter").unwrap().bucket(),
-        "mallard-otter"
-    );
-}
-
-#[test]
-fn unknown_creation_is_never_repeated_after_restart() {
+fn an_unknown_creation_is_reported_and_the_retry_finds_the_bucket_taken() {
     let mock = Mock::new();
     mock.state.lock().unwrap().fail_after_create = true;
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+    let error = mock.prepare("mallard-otter").unwrap_err();
+    assert_eq!(error, SetupError::Uncertain);
+    assert_eq!(error.code(), "r2_setup_outcome_unknown");
+    // The bucket was made. The next attempt finds it and creates nothing.
+    mock.state.lock().unwrap().fail_after_create = false;
     assert_eq!(
-        mock.prepare(&mut open(&repository), "mallard-otter")
-            .unwrap_err(),
-        SetupError::Uncertain
+        mock.prepare("mallard-otter").unwrap_err(),
+        SetupError::Taken
     );
-    // Neither the same name nor another one may create again.
-    for name in ["mallard-otter", "mallard-brave"] {
-        assert_eq!(
-            mock.prepare(&mut open(&repository), name).unwrap_err(),
-            SetupError::Uncertain
-        );
-    }
-    assert_eq!(mock.state.lock().unwrap().attempted.len(), 1);
+    assert_eq!(mock.attempted(), ["mallard-otter"]);
 }
 
 #[test]
-fn r2_activation_errors_preserve_the_bucket_plan_for_retry() {
+fn r2_activation_errors_are_reported_once_and_a_retry_creates_after_activation() {
     for method in [Method::GET, Method::POST] {
         let mock = Mock::new();
         mock.state.lock().unwrap().failure = Some((
@@ -381,16 +322,10 @@ fn r2_activation_errors_preserve_the_bucket_plan_for_retry() {
             403,
             json!({"success":false,"errors":[{"code":10042,"message":"secret-canary"}]}),
         ));
-        let temp = tempfile::tempdir().unwrap();
-        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let mut journal = open(&repository);
-        let error = mock.prepare(&mut journal, "mallard-otter").unwrap_err();
+        let error = mock.prepare("mallard-otter").unwrap_err();
         assert_eq!(error, SetupError::R2NotEnabled);
         assert_eq!(error.code(), "r2_setup_not_enabled");
         assert!(!error.message().contains("secret-canary"));
-        let saved = journal.recovery().unwrap().unwrap();
-        assert_eq!(saved.bucket, "mallard-otter");
-        assert!(matches!(saved.stage, BucketStage::Planned));
         assert!(mock.state.lock().unwrap().buckets.is_empty());
         assert_eq!(
             mock.state.lock().unwrap().requests,
@@ -398,9 +333,8 @@ fn r2_activation_errors_preserve_the_bucket_plan_for_retry() {
         );
 
         mock.state.lock().unwrap().failure = None;
-        mock.prepare(&mut open(&repository), "mallard-otter")
-            .unwrap();
-        assert_eq!(mock.state.lock().unwrap().attempted, ["mallard-otter"]);
+        mock.prepare("mallard-otter").unwrap();
+        assert_eq!(mock.attempted(), ["mallard-otter"]);
     }
 }
 
@@ -463,27 +397,11 @@ fn cloudflare_errors_distinguish_safe_reads_from_unknown_creation_results() {
                 status,
                 json!({"success":false,"errors":[{"code":10001,"message":"secret-canary"}]}),
             ));
-            let temp = tempfile::tempdir().unwrap();
-            let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-            let mut journal = open(&repository);
-            let error = mock.prepare(&mut journal, "mallard-otter").unwrap_err();
+            let error = mock.prepare("mallard-otter").unwrap_err();
             assert_eq!(error, expected);
             assert!(!error.message().contains("secret-canary"));
-            let saved = journal.recovery().unwrap().unwrap();
-            assert_eq!(saved.bucket, "mallard-otter");
-            if expected == SetupError::Uncertain {
-                assert!(matches!(saved.stage, BucketStage::Creating));
-                let requests = mock.state.lock().unwrap().requests;
-                assert_eq!(
-                    mock.prepare(&mut open(&repository), "mallard-otter")
-                        .unwrap_err(),
-                    SetupError::Uncertain
-                );
-                assert_eq!(mock.state.lock().unwrap().requests, requests);
-            } else {
-                assert!(matches!(saved.stage, BucketStage::Planned));
-            }
         }
+        assert!(mock.state.lock().unwrap().buckets.is_empty());
         mock.state.lock().unwrap().failure = Some((
             Method::GET,
             "/buckets".into(),
@@ -500,14 +418,11 @@ fn cloudflare_errors_distinguish_safe_reads_from_unknown_creation_results() {
 }
 
 #[test]
-fn other_errors_keep_the_name_and_do_not_retry_automatically() {
+fn rejections_are_reported_once_and_never_as_taken() {
     for status in [400, 401, 403, 409, 429, 500] {
         let mock = Mock::new();
         mock.state.lock().unwrap().reject = Some(status);
-        let temp = tempfile::tempdir().unwrap();
-        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let mut journal = open(&repository);
-        let error = mock.prepare(&mut journal, "mallard-otter").unwrap_err();
+        let error = mock.prepare("mallard-otter").unwrap_err();
         assert!(!format!("{error:?}").contains("secret-canary"));
         assert_ne!(error, SetupError::Taken);
         if status == 401 {
@@ -515,142 +430,16 @@ fn other_errors_keep_the_name_and_do_not_retry_automatically() {
         } else if status == 403 {
             assert_eq!(error, SetupError::Permission);
         }
-        let saved = journal.recovery().unwrap().unwrap();
-        assert_eq!(saved.bucket, "mallard-otter");
-        assert_eq!(mock.state.lock().unwrap().attempted.len(), 1);
-        if status < 500 {
-            assert!(matches!(saved.stage, BucketStage::Planned));
-            assert!(mock
-                .prepare(&mut open(&repository), "mallard-otter")
-                .is_err());
-            assert!(mock
-                .state
-                .lock()
-                .unwrap()
-                .attempted
-                .iter()
-                .all(|name| name == "mallard-otter"));
-        } else {
-            assert!(matches!(saved.stage, BucketStage::Creating));
-        }
+        assert_eq!(mock.attempted().len(), 1);
     }
 }
 
 #[test]
-fn changed_account_jurisdiction_or_name_is_refused_once_a_bucket_exists() {
+fn a_bucket_is_created_in_the_requested_jurisdiction() {
     let mock = Mock::new();
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
     let created = mock
-        .prepare(&mut open(&repository), "mallard-otter")
+        .prepare_in(R2Jurisdiction::Eu, "mallard-otter")
         .unwrap();
-    assert!(matches!(
-        R2SetupJournal::open(
-            &repository,
-            &draft_id(),
-            "fedcba9876543210fedcba9876543210",
-            R2Jurisdiction::Default
-        ),
-        Err(SetupError::Identity)
-    ));
-    // The jurisdiction is a fact of the setup too: it cannot move after a
-    // bucket exists in one.
-    assert!(matches!(
-        R2SetupJournal::open(&repository, &draft_id(), ACCOUNT, R2Jurisdiction::Eu),
-        Err(SetupError::Identity)
-    ));
-    // Nor can the bucket be renamed once it exists.
-    assert_eq!(
-        mock.prepare(&mut open(&repository), "mallard-brave")
-            .unwrap_err(),
-        SetupError::Identity
-    );
-    mock.state
-        .lock()
-        .unwrap()
-        .buckets
-        .insert(created.bucket().into(), "2026-09-11T00:00:00Z".into());
-    assert_eq!(
-        mock.prepare(&mut open(&repository), "mallard-otter")
-            .unwrap_err(),
-        SetupError::Identity
-    );
-    assert_eq!(mock.state.lock().unwrap().attempted.len(), 1);
-}
-
-#[test]
-fn a_journal_that_created_nothing_follows_the_latest_account_and_jurisdiction() {
-    let mock = Mock::new();
-    mock.state
-        .lock()
-        .unwrap()
-        .buckets
-        .insert("mallard-otter".into(), DATE.into());
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    assert_eq!(
-        mock.prepare(&mut open(&repository), "mallard-otter")
-            .unwrap_err(),
-        SetupError::Taken
-    );
-    // Only a plan was written: the EU request opens the same journal afresh
-    // and creates there.
-    let mut moved =
-        R2SetupJournal::open(&repository, &draft_id(), ACCOUNT, R2Jurisdiction::Eu).unwrap();
-    assert!(moved.recovery().unwrap().is_none());
-    let created = mock.prepare(&mut moved, "mallard-brave").unwrap();
-    assert_eq!(created.jurisdiction(), R2Jurisdiction::Eu);
-    assert_eq!(
-        mock.state.lock().unwrap().created_in,
-        vec!["eu".to_string()]
-    );
-    // From here on the facts are pinned, as a bucket exists.
-    assert!(matches!(
-        R2SetupJournal::open(
-            &repository,
-            &draft_id(),
-            "fedcba9876543210fedcba9876543210",
-            R2Jurisdiction::Eu
-        ),
-        Err(SetupError::Identity)
-    ));
-    // Before anything exists, another account is followed too.
-    let other = tempfile::tempdir().unwrap();
-    let fresh = LocalStateRepository::from_home_dir(other.path()).unwrap();
-    assert_eq!(
-        mock.prepare(&mut open(&fresh), "mallard-otter")
-            .unwrap_err(),
-        SetupError::Taken
-    );
-    let followed = R2SetupJournal::open(
-        &fresh,
-        &draft_id(),
-        "fedcba9876543210fedcba9876543210",
-        R2Jurisdiction::Default,
-    )
-    .unwrap();
-    assert!(followed.recovery().unwrap().is_none());
-}
-
-#[cfg(unix)]
-#[test]
-fn journal_rejects_symlink_directory() {
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    std::os::unix::fs::symlink(temp.path(), repository.root().join("r2_setup_journal")).unwrap();
-    assert!(
-        R2SetupJournal::open(&repository, &draft_id(), ACCOUNT, R2Jurisdiction::Default).is_err()
-    );
-}
-
-#[test]
-fn a_bucket_is_created_in_the_journal_jurisdiction() {
-    let mock = Mock::new();
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    let mut journal =
-        R2SetupJournal::open(&repository, &draft_id(), ACCOUNT, R2Jurisdiction::Eu).unwrap();
-    let created = mock.prepare(&mut journal, "mallard-otter").unwrap();
     assert_eq!(created.jurisdiction(), R2Jurisdiction::Eu);
     assert!(created
         .api_url()

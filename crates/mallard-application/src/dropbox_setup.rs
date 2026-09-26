@@ -7,7 +7,7 @@ use mallard_domain::{
     BoundedConfigObject, SecretMap, StorageSetupDraftId, StorageSetupDraftSource,
 };
 use mallard_infrastructure::dropbox_auth::{AuthorizationGrant, DropboxClient};
-use mallard_infrastructure::dropbox_setup::{prepare_namespace, DropboxSetupJournal};
+use mallard_infrastructure::dropbox_setup::prepare_namespace;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_providers::{
     dropbox::{provider_key, refresh_token_key, DropboxSettingsV1},
@@ -76,7 +76,6 @@ pub async fn prepare(
             error.message(),
         )
     };
-    let mut journal = DropboxSetupJournal::open(repository, draft_id).map_err(remote)?;
     /* What listings call the folder: the name just created, the pick's name,
        or — on a reconnect — whatever the saved settings already say. */
     let saved_name = draft
@@ -85,7 +84,7 @@ pub async fn prepare(
         .settings
         .get_str("folder_name")
         .map(str::to_string);
-    let namespace_id = prepare_namespace(client, grant, target, &mut journal, folder_name)
+    let namespace_id = prepare_namespace(client, grant, target, folder_name)
         .await
         .map_err(remote)?;
     let settings = BoundedConfigObject::encode(&DropboxSettingsV1 {
@@ -100,14 +99,12 @@ pub async fn prepare(
     secrets
         .insert(refresh_token_key(), grant.refresh.clone())
         .map_err(|_| StorageSetupError::persistence())?;
-    let result = prepare_storage_draft_in_operation(
+    prepare_storage_draft_in_operation(
         operation,
         repository,
         registry,
         PreparedProviderConfig { settings, secrets },
-    )?;
-    journal.finish().map_err(remote)?;
-    Ok(result)
+    )
 }
 
 #[cfg(test)]

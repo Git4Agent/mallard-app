@@ -77,13 +77,21 @@ export interface AppSettings {
   push_codex_children: boolean;
   push_claude_children: boolean;
   credential_redaction_enabled: boolean;
-  /** Scheduled release checks against GitHub; a manual check ignores this. */
+  /** Scheduled update checks, which download a newer release in the
+   * background; a manual check ignores this. */
   update_check_enabled: boolean;
   schema: number;
   conversation_file_limit_bytes: number;
   timeline_preview_limit_bytes: number;
   comparison_workers: number;
   cloud_transfer_concurrency: number;
+}
+
+/** `prepare_app_update`: a newer release is ready once its package is
+ * downloaded and its signature verified. It installs on restart or quit. */
+export interface AppUpdateStatus {
+  current_version: string;
+  ready_version: string | null;
 }
 
 /** What lives under ~/.mallard right now; backups called out because a wipe
@@ -524,6 +532,34 @@ export interface CreateSetupDraftResult {
   resumed: boolean;
 }
 
+/** What setup would make of one folder, answered without writing. */
+export type ProjectFolderProbe =
+  | { kind: "invalid"; message: string }
+  | { kind: "missing" }
+  | { kind: "unreadable"; message: string }
+  | { kind: "not_a_directory"; parent?: string | null }
+  | { kind: "mallard_data"; contains: boolean }
+  | {
+    kind: "folder";
+    canonical_path: string;
+    is_git_repository: boolean;
+    existing_draft_id?: string | null;
+    existing_project_ids: string[];
+  };
+
+/** One folder recent sessions ran in, and what choosing it would do. */
+export interface AgentFolder {
+  path: string;
+  providers: ProviderKey[];
+  /** Unix seconds of the newest session file that named the folder. */
+  last_active: number;
+  probe: ProjectFolderProbe;
+}
+
+export interface AgentFolderList {
+  folders: AgentFolder[];
+}
+
 export interface SetupSectionStatus {
   section: "project" | "profiles" | "storage" | "repository";
   state: "ready" | "attention" | "blocked";
@@ -635,6 +671,8 @@ export interface StorageNameSuggestion {
   source: string;
   pattern: string;
   group: number;
+  /** Where the capture goes: `"Dropbox {1}"`, or `"{1}"` for the name alone. */
+  template: string;
 }
 
 /** One declarative extraction: capture group `group` of `pattern` matched
@@ -657,21 +695,27 @@ export interface StorageSecretDescriptor {
 
 
 
-/** The provider can look in the signed-in account for destinations Mallard
- *  already uses. Every sentence the Use-existing door and lane print comes
- *  from here, so the page never names a provider. */
-export interface StorageDiscoveryDescriptor {
-  /** What one candidate is called: "bucket", "shared folder". */
-  unit: string;
-  unit_plural: string;
-  /** Where the look happens, for prose: "your Cloudflare account". */
-  place: string;
+/** The New-storage question, Create new or Use existing, for a provider
+ *  whose setup lane can reach a destination Mallard already uses — by
+ *  looking in the account or by a pasted link. Mirrors `StorageSetupDoors`. */
+export interface StorageSetupDoors {
   /** The Create-new door's sentence. */
   create_hint: string;
   /** The Use-existing door's sentence. */
   existing_hint: string;
   /** Optional access guide beside the Use-existing choice. */
   existing_help?: { label: string; url: string } | null;
+}
+
+/** The provider can look in the signed-in account for destinations Mallard
+ *  already uses. Every sentence the look prints comes from here, so the page
+ *  never names a provider. */
+export interface StorageDiscoveryDescriptor {
+  /** What one candidate is called: "bucket", "shared folder". */
+  unit: string;
+  unit_plural: string;
+  /** Where the look happens, for prose: "your Cloudflare account". */
+  place: string;
   /** The lane's verb: "Find in my account". */
   find_label: string;
   /** What the look signs in with, and that it only reads. */
@@ -749,13 +793,16 @@ export interface StorageProviderDescriptor {
   fields: StorageFieldDescriptor[];
   secrets: StorageSecretDescriptor[];
   managed_secret_id?: string | null;
-  local_setup?: "wrangler" | "dropbox" | "managed_cloud" | null;
+  local_setup?: "wrangler" | "dropbox" | "feishu" | "managed_cloud" | null;
   /** The provider's setup documentation, offered as a "Setup guide" link. */
   setup_guide_url?: string | null;
   /** The sentence introducing the manual fields; defaults to a generic one. */
   manual_setup_hint?: string | null;
-  /** Absent for a provider that cannot look in an account: the New-storage
-   *  card then has no Use-existing door. */
+  /** Absent for a provider whose setup cannot reach an existing
+   *  destination: a new draft then opens without the Create new / Use
+   *  existing question. */
+  setup_doors?: StorageSetupDoors | null;
+  /** Absent for a provider that cannot look in an account. */
   discovery?: StorageDiscoveryDescriptor | null;
 }
 
@@ -1680,10 +1727,35 @@ export type DropboxSetupMode = "create" | "existing" | "reconnect";
 export interface DropboxSetupLogin {
   session_id: string;
   account: { id: string; name: string; email: string };
-  folder_name: string | null;
-  creation_started: boolean;
 }
 export interface DropboxSetupProgress {
+  status: "authorization_link";
+  url: string;
+  expires_in: number;
+}
+
+/** The Feishu sign-in with Mallard's own app: a new storage takes the
+ *  folder the lane creates or the pasted one; a reconnect keeps the
+ *  storage's folder and connection. */
+export type FeishuSetupMode = "create" | "reconnect";
+export interface FeishuSetupFailure {
+  code: string;
+  evidence?: StorageConnectionEvidence | null;
+  provider_code?: number | null;
+  pkce?: {
+    challenge_present: boolean;
+    method_s256: boolean;
+    verifier_matches_challenge: boolean;
+    callback_state_verified: boolean;
+    verifier_length: number;
+    challenge_length: number;
+  } | null;
+}
+export interface FeishuSetupLogin {
+  session_id: string;
+  account: { id: string; name: string };
+}
+export interface FeishuSetupProgress {
   status: "authorization_link";
   url: string;
   expires_in: number;
@@ -1693,9 +1765,13 @@ export interface DropboxSetupProgress {
  *  signs in; a reconnect keeps the storage's account. */
 export type ManagedCloudSetupMode = "create" | "reconnect";
 export interface ManagedCloudSetupLogin {
-  session_id: string;
   account: { id: string; login: string };
   service_origin: string;
+}
+/** A failure after the sign-in itself names the account it is about. */
+export interface ManagedCloudSetupFailure {
+  code: string;
+  account?: { id: string; login: string } | null;
 }
 export interface ManagedCloudSetupProgress {
   status: "authorization_link";
@@ -1790,7 +1866,7 @@ export type ManagedCloudRepositoryResolution =
 
 /** Results from one local discovery and one remote observation. */
 export type ProjectActivityRefreshEvent =
-  | { stage: "activity"; activity: ProjectActivity }
-  | { stage: "activity_error"; message: string }
+  | { stage: "activity"; activity: ProjectActivity; storage_pending: boolean }
+  | { stage: "activity_error"; message: string; storage_pending: boolean }
   | { stage: "comparison"; comparison: ThreadSyncComparison }
   | { stage: "comparison_error"; message: string; managed_cloud_status?: ManagedCloudStatus | null };

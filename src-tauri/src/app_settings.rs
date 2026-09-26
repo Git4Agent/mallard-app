@@ -83,22 +83,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
         assert!(
-            load_app_settings(&repo)
+            !load_app_settings(&repo)
                 .unwrap()
                 .credential_redaction_enabled
         );
-        let off = AppSettings {
-            credential_redaction_enabled: false,
-            push_codex_children: false,
-            push_claude_children: false,
+        let on = AppSettings {
+            credential_redaction_enabled: true,
+            push_codex_children: true,
+            push_claude_children: true,
             ..AppSettings::default()
         };
         for _ in 0..2 {
-            let saved = update_app_settings_core(&repo, &off, || {
+            let saved = update_app_settings_core(&repo, &on, || {
                 panic!("export-setting save must retain caches")
             })
             .unwrap();
-            assert_eq!(saved, off);
+            assert_eq!(saved, on);
         }
         let run = mallard_infrastructure::credential_redaction::shared()
             .begin_run()
@@ -111,7 +111,7 @@ mod tests {
                 ))
                 .is_err()
             );
-            assert_eq!(load_app_settings(&repo).unwrap(), off);
+            assert_eq!(load_app_settings(&repo).unwrap(), on);
             assert_eq!(
                 run.stamp().codec,
                 mallard_infrastructure::credential_redaction::REDACTION_OFF_CODEC_V1

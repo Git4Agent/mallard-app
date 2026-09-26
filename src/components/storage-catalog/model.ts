@@ -25,7 +25,7 @@ export interface CatalogGlyph {
 }
 
 /** The frontend's vocabulary for the backend's presentation hints, the way
- * `iconNameFromHint` is for storage hints and `ProviderMark` for provider
+ * `storageIconName` is for storage identity and `ProviderMark` for provider
  * marks. Each hint is a semantic glyph — `ProviderMark` identifies the
  * provider separately on the same row — so no kind borrows `file`, `tool`,
  * or a provider mark. A hint outside the vocabulary, a capability this build

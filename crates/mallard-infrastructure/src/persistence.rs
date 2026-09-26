@@ -385,7 +385,29 @@ impl LocalStateRepository {
             root: home.join(".mallard"),
         };
         repository.ensure_root()?;
+        repository.retire_setup_journals();
         Ok(repository)
+    }
+
+    /// Remove the storage-setup journals earlier builds kept under the root.
+    /// Setup records no recovery state any more, and a leftover must never
+    /// block the app: only real directories and a regular lock file go, and
+    /// every failure is ignored.
+    fn retire_setup_journals(&self) {
+        for directory in [
+            "storage_setup_journal",
+            "r2_setup_journal",
+            "dropbox_setup_journal",
+        ] {
+            let path = self.root.join(directory);
+            if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+        let lock = self.root.join("storage_setup_journal.lock");
+        if fs::symlink_metadata(&lock).is_ok_and(|metadata| metadata.file_type().is_file()) {
+            let _ = fs::remove_file(&lock);
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -4540,6 +4562,38 @@ mod tests {
         assert!(error.contains("open"), "{error}");
         assert_eq!(fs::read(&path).unwrap(), preserved);
         assert!(!repo.root().join("host_recovery_quarantine").exists());
+    }
+
+    #[test]
+    fn opening_a_repository_retires_the_storage_setup_journals() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".mallard");
+        for directory in ["storage_setup_journal", "r2_setup_journal"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+            fs::write(root.join(directory).join("entry.json"), b"{}").unwrap();
+        }
+        fs::write(root.join("storage_setup_journal.lock"), b"").unwrap();
+        // A link in a journal's place is neither followed nor removed.
+        let elsewhere = temp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("keep"), b"keep").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, root.join("dropbox_setup_journal")).unwrap();
+
+        repository(&temp);
+        assert!(!root.join("storage_setup_journal").exists());
+        assert!(!root.join("r2_setup_journal").exists());
+        assert!(!root.join("storage_setup_journal.lock").exists());
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(root.join("dropbox_setup_journal"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(fs::read(elsewhere.join("keep")).unwrap(), b"keep");
+        }
+        // With nothing left to retire, opening is still fine.
+        repository(&temp);
     }
 
     #[test]

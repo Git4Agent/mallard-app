@@ -8,7 +8,8 @@ import type {
   ThreadSyncEntry,
 } from "../../src/types";
 import { renderToStaticMarkup } from "react-dom/server";
-import Notice from "../../src/components/notice/Notice";
+import { NoticeZone } from "../../src/components/notice/Notice";
+import { pushFailureNotice } from "../../src/components/project-sync/pushFailureNotice";
 import { buildPushOutcome } from "../../src/components/project-sync/syncOutcome";
 import { storageAccessErrorMessage } from "../../src/storageError";
 import {
@@ -158,7 +159,7 @@ test("a push with nothing to report keeps its plain face", () => {
   assert.ok(!outcome.stats.some((stat) => stat.label === "not pushed"));
 });
 
-test("a changed storage and an unconfirmed push reach the Push review banner word for word", () => {
+test("a changed storage and an unconfirmed push reach the shell banner word for word", () => {
   // The backend sends these two sentences as the Push error. Nothing between
   // the command and the banner may rewrite them, and the banner prints the
   // severity word itself, so neither sentence names one.
@@ -173,7 +174,12 @@ test("a changed storage and an unconfirmed push reach the Push review banner wor
     assert.equal(storageAccessErrorMessage(storage, new Error(sentence)), sentence);
     assert.doesNotMatch(sentence, /\b(error|warning|note|done)\b/i);
     const markup = renderToStaticMarkup(
-      <Notice severity="danger" timing="blocking" className="sync-pull-error">{sentence}</Notice>,
+      <NoticeZone
+        items={[pushFailureNotice(sentence, "Attic R2", { busy: false, onFinishPush: () => undefined, onDismiss: () => undefined })]}
+        subject="messages from Mallard"
+        className="sync-backend-banner"
+        timing="blocking"
+      />,
     );
     assert.ok(markup.includes(sentence.replace("'", "&#x27;")), markup);
     assert.match(markup, /Error/);

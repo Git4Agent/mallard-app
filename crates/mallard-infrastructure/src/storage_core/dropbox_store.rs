@@ -63,7 +63,6 @@ pub(crate) enum Error {
     Limit,
     UploadLimit,
     Local,
-    Cleanup,
 }
 impl Error {
     pub(crate) fn message(self) -> &'static str {
@@ -81,8 +80,7 @@ impl Error {
             Self::Integrity => "Dropbox object integrity verification failed.",
             Self::Limit => "Dropbox response or listing exceeds its safety limit.",
             Self::UploadLimit => "Dropbox uploads are limited to 150 MiB per object.",
-            Self::Local => "The Dropbox staging file or setup journal could not be saved.",
-            Self::Cleanup => "Dropbox probe cleanup needs attention. Restore access and test again; an unknown version needs manual cleanup.",
+            Self::Local => "The Dropbox staging file could not be saved.",
         }
     }
 }
@@ -431,9 +429,6 @@ impl DropboxObjectStore {
     pub(crate) fn adapter_error(&self, error: Error) -> StorageAdapterError {
         let message = self.describe(error);
         match error {
-            Error::Cleanup => {
-                StorageAdapterError::cleanup_required("dropbox_probe_cleanup_required", message)
-            }
             Error::Auth => StorageAdapterError::remote("dropbox_reconnect_required", message),
             Error::Expired => StorageAdapterError::remote("dropbox_token_expired", message),
             Error::Permission => StorageAdapterError::remote("dropbox_permission_denied", message),

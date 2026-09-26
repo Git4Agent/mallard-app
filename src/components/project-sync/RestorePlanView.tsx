@@ -42,6 +42,8 @@ interface Props {
   supportLoading: boolean;
   busy: boolean;
   error: string | null;
+  /** Closes the failure box; the host clears `error`. */
+  onDismissError: () => void;
   onApply: (selection: PullReviewSelection) => void;
   onBack: () => void;
   /** Rebuilds the plan against the storage's current head — the files
@@ -216,6 +218,7 @@ export default function RestorePlanView({
   supportLoading,
   busy,
   error,
+  onDismissError,
   onApply,
   onBack,
   onRefreshPlan,
@@ -379,14 +382,15 @@ export default function RestorePlanView({
       message: error,
       /* A review the storage moved past, or one older than a day, is
          rebuilt in place: the same control as Rescan on the files step. */
-      action: compareAgainOffered(error) && onRefreshPlan
-        ? (
-          <button type="button" className="btn btn-ghost" onClick={onRefreshPlan} disabled={busy}>
-            <Icon name="refresh" size={13} />
-            Compare again
-          </button>
-        )
-        : undefined,
+      action: compareAgainOffered(error) && onRefreshPlan ? (
+        <button type="button" className="btn btn-ghost" onClick={onRefreshPlan} disabled={busy}>
+          <Icon name="refresh" size={13} />
+          Compare again
+        </button>
+      ) : undefined,
+      /* The zone draws the close control; closing clears the host's copy,
+         and the review stays open under it. */
+      onDismiss: onDismissError,
     });
   }
   /* The redaction note comes from the plan and appears on the first render —

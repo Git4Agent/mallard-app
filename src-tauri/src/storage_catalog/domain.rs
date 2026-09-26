@@ -263,6 +263,26 @@ impl CatalogResourceRepositoryId {
         Self::parse(format!("library-{}", &digest[..32]))
             .expect("derived catalog repository ids are always valid")
     }
+
+    /// The one item stream a resource maps to on a storage that holds one
+    /// item per repository (Mallard Cloud): the coordinate's derivation
+    /// extended by the resource id, under its own domain tag, so an item
+    /// stream can never collide with a coordinate repository. The service
+    /// derives the same id (`STORE_API.md` section 6).
+    pub fn for_item(coordinate: &CatalogCoordinate, resource_id: &CatalogResourceId) -> Self {
+        let digest = length_prefixed_digest(
+            b"mallard-library-item-v1",
+            &[
+                coordinate.provider.as_str().as_bytes(),
+                coordinate.resource_kind.as_str().as_bytes(),
+                coordinate.format.as_str().as_bytes(),
+                &coordinate.format_version.to_be_bytes(),
+                resource_id.as_str().as_bytes(),
+            ],
+        );
+        Self::parse(format!("library-{}", &digest[..32]))
+            .expect("derived catalog repository ids are always valid")
+    }
 }
 
 /// Backend-supplied labels for one coordinate, served beside the raw keys so
@@ -670,6 +690,10 @@ pub struct LibraryResourceTag {
     pub resource_kind: CatalogResourceKindKey,
     pub format: CatalogFormatKey,
     pub format_version: u32,
+    /// Present on an item stream (one item per repository): the resource
+    /// the stream is derived from. Absent on a coordinate repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<CatalogResourceId>,
 }
 
 impl LibraryResourceTag {
@@ -681,6 +705,20 @@ impl LibraryResourceTag {
             resource_kind: coordinate.resource_kind.clone(),
             format: coordinate.format.clone(),
             format_version: coordinate.format_version,
+            resource_id: None,
+        }
+    }
+
+    /// The tag of one item's stream.
+    pub fn for_item(coordinate: &CatalogCoordinate, resource_id: &CatalogResourceId) -> Self {
+        Self {
+            schema_version: CATALOG_SCHEMA,
+            repository_id: CatalogResourceRepositoryId::for_item(coordinate, resource_id),
+            provider: coordinate.provider.clone(),
+            resource_kind: coordinate.resource_kind.clone(),
+            format: coordinate.format.clone(),
+            format_version: coordinate.format_version,
+            resource_id: Some(resource_id.clone()),
         }
     }
 
@@ -701,7 +739,13 @@ impl LibraryResourceTag {
             ));
         }
         self.coordinate().validate()?;
-        if self.repository_id != CatalogResourceRepositoryId::for_coordinate(&self.coordinate()) {
+        let derived = match &self.resource_id {
+            Some(resource_id) => {
+                CatalogResourceRepositoryId::for_item(&self.coordinate(), resource_id)
+            }
+            None => CatalogResourceRepositoryId::for_coordinate(&self.coordinate()),
+        };
+        if self.repository_id != derived {
             return Err(
                 "library repository id does not match its coordinate derivation".to_string(),
             );
@@ -760,22 +804,38 @@ impl LibraryResourceManifest {
                 return Err("library manifest entry requires a timestamp".to_string());
             }
             // Every entry must belong to the repository's own derivation, so
-            // one manifest can never mix coordinates.
-            if CatalogResourceRepositoryId::for_coordinate(&entry.resource.coordinate())
-                != self.repository_id
-            {
+            // one manifest can never mix coordinates: the coordinate's, or,
+            // for the one entry of an item stream, the item's.
+            let coordinate = entry.resource.coordinate();
+            let belongs = CatalogResourceRepositoryId::for_coordinate(&coordinate)
+                == self.repository_id
+                || (self.resources.len() == 1
+                    && CatalogResourceRepositoryId::for_item(&coordinate, resource_id)
+                        == self.repository_id);
+            if !belongs {
                 return Err("library manifest entry does not belong to this repository".to_string());
             }
         }
         Ok(())
     }
 
-    /// The published set as plain resources, the shape Pull execution reads.
+    /// The published set as plain resources.
+    #[cfg(test)]
     pub fn resource_map(&self) -> BTreeMap<CatalogResourceId, CatalogResourceEnvelope> {
         self.resources
             .iter()
             .map(|(resource_id, entry)| (resource_id.clone(), entry.resource.clone()))
             .collect()
+    }
+
+    /// Whether this manifest is one item stream's: exactly one entry, on the
+    /// repository derived from it.
+    pub fn is_item_stream(&self) -> bool {
+        self.resources.len() == 1
+            && self.resources.iter().all(|(resource_id, entry)| {
+                CatalogResourceRepositoryId::for_item(&entry.resource.coordinate(), resource_id)
+                    == self.repository_id
+            })
     }
 }
 
@@ -1109,6 +1169,12 @@ pub struct CatalogScopeLink {
     pub accepted_head: Option<LibraryHeadCoordinate>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub accepted_resources: BTreeMap<CatalogResourceId, String>,
+    /// On a storage that holds one item per repository (Mallard Cloud):
+    /// the accepted head of each item's own stream, the per-item form of
+    /// `accepted_head`. Empty on a storage with one repository per
+    /// coordinate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub accepted_items: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -1124,6 +1190,15 @@ impl CatalogScopeLink {
                     self.link_id
                 ));
             }
+        }
+        if self.accepted_items.len() > MAX_CATALOG_RESOURCES {
+            return Err(format!(
+                "catalog scope link '{}' exceeds the {} accepted-item limit",
+                self.link_id, MAX_CATALOG_RESOURCES
+            ));
+        }
+        for head in self.accepted_items.values() {
+            head.validate()?;
         }
         if self.accepted_resources.len() > MAX_CATALOG_RESOURCES {
             return Err(format!(
@@ -2187,6 +2262,10 @@ pub struct CatalogScopePushPlan {
     pub target_pins: Vec<CatalogTargetPin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_head: Option<LibraryHeadCoordinate>,
+    /// On a storage that holds one item per repository: the head of each
+    /// item's stream as the review observed it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub observed_items: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
     pub rows: Vec<CatalogScopePushRow>,
     pub warning_digests: Vec<String>,
     pub created_at: u64,
@@ -2204,6 +2283,9 @@ impl CatalogScopePushPlan {
             if head.repository_id != self.repository_id {
                 return Err("catalog Push head belongs to another repository".to_string());
             }
+        }
+        for head in self.observed_items.values() {
+            head.validate()?;
         }
         if self.rows.len() > MAX_CATALOG_RESOURCES {
             return Err("catalog Push review exceeds its row limit".to_string());
@@ -2319,7 +2401,13 @@ pub struct CatalogScopePullPlan {
     pub profile_pins: Vec<CatalogProfilePin>,
     #[serde(skip_serializing)]
     pub target_pins: Vec<CatalogTargetPin>,
-    pub head: LibraryHeadCoordinate,
+    /// The reviewed version of the coordinate repository; absent on a
+    /// storage that holds one item per repository, where `item_heads`
+    /// carries each item's reviewed version instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<LibraryHeadCoordinate>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub item_heads: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
     pub items: Vec<CatalogScopePullItem>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -2331,9 +2419,17 @@ impl CatalogScopePullPlan {
             "catalog Pull storage identity",
             &self.storage_identity_sha256,
         )?;
-        self.head.validate()?;
-        if self.head.repository_id != self.repository_id {
-            return Err("catalog Pull head belongs to another repository".to_string());
+        if let Some(head) = &self.head {
+            head.validate()?;
+            if head.repository_id != self.repository_id {
+                return Err("catalog Pull head belongs to another repository".to_string());
+            }
+        }
+        for head in self.item_heads.values() {
+            head.validate()?;
+        }
+        if self.head.is_none() && self.item_heads.is_empty() && !self.items.is_empty() {
+            return Err("catalog Pull review names no reviewed version".to_string());
         }
         if self.items.len() > MAX_CATALOG_RESOURCES {
             return Err("catalog Pull review exceeds its item limit".to_string());
@@ -2789,6 +2885,53 @@ mod tests {
     }
 
     #[test]
+    fn item_streams_derive_from_the_coordinate_and_the_resource_and_bind_their_tag() {
+        let resource = CatalogResourceId::parse(format!("resource-{}", "7".repeat(64))).unwrap();
+        let other = CatalogResourceId::parse(format!("resource-{}", "8".repeat(64))).unwrap();
+        let item = CatalogResourceRepositoryId::for_item(&codex_skills(), &resource);
+        // The vector the service pins for the same derivation (`STORE_API.md`
+        // section 6): the two implementations must agree byte for byte.
+        assert_eq!(item.as_str(), "library-931ae060ce0a57b8eb4256a2747da419");
+        assert_eq!(
+            item,
+            CatalogResourceRepositoryId::for_item(&codex_skills(), &resource)
+        );
+        assert_ne!(
+            item,
+            CatalogResourceRepositoryId::for_item(&codex_skills(), &other)
+        );
+        assert_ne!(
+            item,
+            CatalogResourceRepositoryId::for_coordinate(&codex_skills())
+        );
+        assert_ne!(
+            item,
+            CatalogResourceRepositoryId::for_item(&codex_pets(2), &resource)
+        );
+        let tag = LibraryResourceTag::for_item(&codex_skills(), &resource);
+        assert_eq!(tag.repository_id, item);
+        assert_eq!(tag.resource_id.as_ref(), Some(&resource));
+        tag.validate().unwrap();
+        let foreign = LibraryResourceTag {
+            resource_id: Some(other.clone()),
+            ..tag.clone()
+        };
+        assert!(foreign
+            .validate()
+            .unwrap_err()
+            .contains("does not match its coordinate derivation"));
+        // A coordinate tag serializes without the field; an item tag with it.
+        let coordinate_tag = LibraryResourceTag::new(
+            &codex_skills(),
+            CatalogResourceRepositoryId::for_coordinate(&codex_skills()),
+        );
+        assert!(!serde_json::to_string(&coordinate_tag)
+            .unwrap()
+            .contains("resource_id"));
+        assert!(serde_json::to_string(&tag).unwrap().contains("resource_id"));
+    }
+
+    #[test]
     fn set_manifests_are_homogeneous_per_repository() {
         let repository_id = CatalogResourceRepositoryId::for_coordinate(&codex_pets(2));
         let duck = envelope(
@@ -2911,6 +3054,7 @@ mod tests {
             repository_id: CatalogResourceRepositoryId::for_coordinate(&codex_pets(2)),
             accepted_head: None,
             accepted_resources: BTreeMap::new(),
+            accepted_items: BTreeMap::new(),
             revision: 1,
             created_at: 1,
             updated_at: 1,
@@ -3113,6 +3257,7 @@ mod tests {
                 canonical_root: "/Users/someone/.codex/skills".to_string(),
             }],
             observed_head: None,
+            observed_items: BTreeMap::new(),
             rows: vec![CatalogScopePushRow {
                 row,
                 resource: Some(resource),

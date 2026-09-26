@@ -77,7 +77,10 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
             display_name: "Mallard Cloud".into(),
             description: "Mallard's own service: sign in with GitHub, push private snapshots, invite collaborators, and read them on the website.".into(),
             default_name: "Mallard Cloud".into(),
-            name_suggestion: None,
+            name_suggestion: Some(StorageNameSuggestion::whole_setting(
+                "account_login",
+                "Mallard Cloud {1}",
+            )),
             display_rank: 5,
             icon: "cloud".into(),
             clear_mode: StorageClearMode::Unavailable,
@@ -94,6 +97,7 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
             local_setup: Some(StorageLocalSetup::ManagedCloud),
             setup_guide_url: None,
             manual_setup_hint: None,
+            setup_doors: None,
             discovery: None,
         }
     }
@@ -151,16 +155,12 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
     fn local_root(&self, _config: &StorageProviderConfig) -> Result<Option<PathBuf>, String> {
         Ok(None)
     }
-    fn journal_facts(&self, config: &StorageProviderConfig) -> Result<BoundedConfigObject, String> {
-        BoundedConfigObject::encode(&decode(config).map_err(|e| e.to_string())?)
-    }
-    /// `GET /v1/me`: the token works and names the pinned account.
+    /// `GET /v1/me`: the token works and names the pinned account. The probe
+    /// writes nothing.
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        _setup_id: &str,
         runtime: &Handle,
-        _journal: &mut dyn StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let (settings, client) = client(config)?;
         let me = runtime.block_on(client.me()).map_err(|error| {
@@ -189,25 +189,14 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
         }
         Ok(())
     }
-    /// The probe leaves nothing behind.
-    fn reconcile_probe(
-        &self,
-        _config: &StorageProviderConfig,
-        _setup_id: &str,
-        _runtime: &Handle,
-        _journal: &mut dyn StorageProbeJournal,
-    ) -> Result<(), StorageAdapterError> {
-        Ok(())
-    }
     fn open(
         &self,
         config: &StorageProviderConfig,
         runtime: Option<Handle>,
     ) -> Result<Arc<dyn ObjectStore>, String> {
-        let (settings, client) = client(config).map_err(|e| e.to_string())?;
+        let (_, client) = client(config).map_err(|e| e.to_string())?;
         Ok(Arc::new(ManagedObjectStore::new(
             client,
-            settings.account_id,
             runtime.ok_or("Mallard Cloud requires an asynchronous runtime")?,
         )))
     }
@@ -279,9 +268,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Account", "Service"]
         );
-        let facts =
-            serde_json::to_string(&ManagedCloudAdapter.journal_facts(&first).unwrap()).unwrap();
-        assert!(!facts.contains(TOKEN));
         let descriptor = ManagedCloudAdapter.descriptor();
         assert_eq!(descriptor.managed_secret_id, Some(token_key()));
         assert_eq!(

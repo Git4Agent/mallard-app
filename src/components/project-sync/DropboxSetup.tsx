@@ -19,13 +19,10 @@ interface State {
    *  session itself is dropped. */
   account: DropboxSetupLogin["account"] | null;
   name: string;
-  /** The name Mallard last proposed, so the line can say whose the name is. */
-  proposal: string | null;
-  creationStarted: boolean;
   scan: StorageDiscoveryResult | null;
   chosen: StorageDiscoveryCandidate | null;
 }
-const idle = (): State => ({ phase: "idle", running: false, cancelling: false, error: null, link: null, login: null, account: null, name: "", proposal: null, creationStarted: false, scan: null, chosen: null });
+const idle = (): State => ({ phase: "idle", running: false, cancelling: false, error: null, link: null, login: null, account: null, name: "", scan: null, chosen: null });
 type Api = Pick<typeof projectSyncApi, "authorizeDropboxSetup" | "proposeDropboxFolderName" | "discoverDropboxStorage" | "prepareDropboxStorage" | "cancelDropboxSetup">;
 
 export function dropboxFolderNameIssue(name: string): string | null {
@@ -39,7 +36,7 @@ const errors: Record<string, string> = {
   dropbox_consent_denied: "Dropbox access was not approved",
   dropbox_callback_unavailable: "The authorization port is in use · close the other setup attempt",
   dropbox_setup_cancelled: "Stopped",
-  dropbox_new_setup_required: "This setup is tied to its original account · start a new setup to switch",
+  dropbox_new_setup_required: "This setup already has its folder · start a new setup for another account",
   dropbox_folder_name_invalid: "The folder name is not valid",
   dropbox_session_expired: "The sign-in expired · sign in again",
   dropbox_scan_expired: "Scan expired · sign in and scan again",
@@ -48,16 +45,15 @@ const errors: Record<string, string> = {
   dropbox_already_connected: "This folder is already connected · open its storage settings",
   dropbox_reconnect_required: "Dropbox access is no longer valid · reconnect to continue",
   dropbox_permission_denied: "Dropbox denied access · check the account and folder permissions",
-  dropbox_setup_outcome_unknown: "Dropbox did not confirm the folder operation · inspect Dropbox before a new setup",
-  dropbox_setup_share_pending: "Dropbox is still preparing the folder · try again to check the same operation",
+  dropbox_setup_share_pending: "Dropbox is still preparing the folder · find it in your Dropbox once it appears, or choose another name",
   dropbox_cancel_failed: "Could not stop the setup",
 };
 function errorCode(reason: unknown): string {
   const value = reason && typeof reason === "object" && "code" in reason ? reason.code : "dropbox_setup_failed";
   return typeof value === "string" ? value : "dropbox_setup_failed";
 }
-/** Errors that end a run for good: no Try again on the line. */
-const FINAL_CODES = new Set(["dropbox_setup_outcome_unknown", "dropbox_new_setup_required"]);
+/** The error that ends a run for good: no Try again on the line. */
+const FINAL_CODES = new Set(["dropbox_new_setup_required"]);
 
 export function useDropboxSetup({ enabled, draftId, mode, port, api = projectSyncApi }: {
   enabled: boolean; draftId: string | null; mode: DropboxSetupMode; port: StorageSetupPort; api?: Api;
@@ -113,16 +109,12 @@ export function useDropboxSetup({ enabled, draftId, mode, port, api = projectSyn
   };
 
   const start = (switchAccount = false) => {
-    if (switchAccount && current.current.creationStarted && mode === "create") {
-      patch({ error: "dropbox_new_setup_required" });
-      return;
-    }
     void run("login", async (saved, live) => {
       patch({ login: null, account: null, scan: null, chosen: null });
       const login = await api.authorizeDropboxSetup(saved.draft_id, saved.revision, mode, switchAccount, (progress) => {
         if (live()) patch({ link: progress.url });
       });
-      return live() ? { phase: "account", login, account: login.account, link: null, creationStarted: login.creation_started, name: login.folder_name ?? current.current.name } : null;
+      return live() ? { phase: "account", login, account: login.account, link: null } : null;
     });
   };
 
@@ -134,7 +126,7 @@ export function useDropboxSetup({ enabled, draftId, mode, port, api = projectSyn
     void run("folder", async (_saved, live) => {
       const kept = current.current.name;
       const name = kept || await api.proposeDropboxFolderName();
-      return live() ? { phase: "folder", name, ...(kept ? {} : { proposal: name }) } : null;
+      return live() ? { phase: "folder", name } : null;
     });
   };
 
@@ -153,7 +145,7 @@ export function useDropboxSetup({ enabled, draftId, mode, port, api = projectSyn
     if (!login || mode === "create" && dropboxFolderNameIssue(name)
       || mode === "existing" && (!candidate || !scan || !candidateSelectable(candidate))) return;
     void run("prepare", async (saved, live) => {
-      patch({ chosen: candidate ?? null, creationStarted: mode === "create" || current.current.creationStarted });
+      patch({ chosen: candidate ?? null });
       await api.prepareDropboxStorage(saved.draft_id, saved.revision, login.session_id,
         mode === "create" ? name : null, candidate ? scan!.scan_id : null, candidate?.candidate_id ?? null);
       if (!live()) return null;
@@ -182,7 +174,7 @@ export function useDropboxSetup({ enabled, draftId, mode, port, api = projectSyn
   };
   const suggest = () => void run("folder", async (_saved, live) => {
     const name = await api.proposeDropboxFolderName();
-    return live() ? { name, proposal: name, error: null } : null;
+    return live() ? { name, error: null } : null;
   });
   return { state, isRunning: () => running.current, start, confirmAccount, scan, prepare, cancel, dismiss, suggest,
     setName: (name: string) => patch({ name, error: null, phase: "folder" }),
@@ -252,7 +244,7 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
      they choose: the link is theirs to copy; opening it here is the shortcut. */
   const browserControls = (url: string) => (
     <>
-      {button(<><Icon name="copy" size={12} /> Copy authorization link</>, () => void copy(url), "primary", false)}
+      {button(<><Icon name="copy" size={12} /> Copy link</>, () => void copy(url), "primary", false)}
       {button(<><Icon name="external-link" size={12} /> Open browser</>, () => void open(url), "plain", false)}
       {cancelButton}
       {copyStatus}
@@ -268,9 +260,9 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     return (
       <>
         <span className="storage-setup-guide-copy">
-          {mode === "create" ? "Creates a shared folder and keeps a renewing connection to it. Sign-in and consent happen in a browser you choose. Dropbox consent covers your whole account, not only this folder."
-            : mode === "existing" ? "Lists your shared folders read-only, then keeps a renewing connection to the one you pick. Consent happens in a browser you choose and covers your whole account."
-            : "Renews the connection to this storage’s folder. Sign-in and consent happen in a browser you choose and cover your whole account."}
+          {mode === "create" ? "Covers your whole Dropbox account."
+            : mode === "existing" ? "Lists your shared folders, read-only. Covers your whole Dropbox account."
+            : "Renews access to this storage’s folder. Covers your whole Dropbox account."}
         </span>
         <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={() => flow.start()}>
           <Icon name="link" size={13} />{" "}
@@ -311,22 +303,21 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
   const statusOf = (key: string, first: number, last = first): StepStatus =>
     index > last ? "done" : index < first ? "todo" : failedKey === key ? "failed" : "doing";
   const reason = () => errors[state.error ?? ""] ?? "Dropbox setup could not finish";
-  const kept = state.creationStarted && mode === "create" ? " · the created folder is kept" : "";
   const settled = !state.running;
   const retryButton = state.error && FINAL_CODES.has(state.error) ? null : button("Try again", () => flow.start(), "primary");
-  const newSetupButton = mode === "create" && (state.creationStarted || state.error === "dropbox_new_setup_required")
+  const newSetupButton = mode === "create" && state.error === "dropbox_new_setup_required"
     ? button("New setup for another account", onNewSetup) : null;
-  /* Once creation has started the account is fixed to this draft, so the
-     way to another account is a new setup, offered where Change login was. */
+  /* A draft that already holds its folder is fixed to it, so the way to
+     another account is a new setup, offered where Change login was. */
   const changeLoginButton = newSetupButton ?? button(<><Icon name="user" size={12} /> Change login</>, () => flow.start(true));
 
   const signIn: StepView = (() => {
     const status = statusOf("login", 1);
     return {
       key: "login", title: "Sign in", status,
-      fact: status === "failed" ? `${reason()}${kept}`
-        : status === "doing" ? (state.link ? <>Approve access in a browser on this computer · <span className="r2-countdown">{budget}</span></> : "Starting sign-in…")
-        : "Approved · covers your whole Dropbox account",
+      fact: status === "failed" ? reason()
+        : status === "doing" ? (state.link ? <>Approve in your browser · <span className="r2-countdown">{budget}</span></> : "Starting sign-in…")
+        : "Approved · whole account",
       controls: status === "failed" ? <>{retryButton}{changeLoginButton}</>
         : status === "doing" ? (state.link ? browserControls(state.link) : cancelButton)
         : settled && state.phase !== "account" ? changeLoginButton
@@ -340,7 +331,7 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
       key: "account", title: "Account", status,
       fact: status === "failed" ? reason()
         : state.account ? <>{state.account.name || state.account.email} · <code>{state.account.email}</code></>
-        : "Confirmed before anything is created or listed",
+        : "Confirmed before anything changes",
       controls: status === "failed" ? <>{retryButton}{changeLoginButton}</>
         : status === "doing" ? <>{button("Continue", flow.confirmAccount, "primary")}{changeLoginButton}</>
         : undefined,
@@ -358,10 +349,10 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     return {
       key: "folders", title: "Folders", status,
       fact: status === "failed" ? reason()
-        : state.phase === "find" ? "Looking through your shared folders · read-only"
+        : state.phase === "find" ? "Scanning · read-only"
         : result && status === "doing" ? <>{result.candidates.length} checked · read-only</>
         : status === "done" && state.chosen ? <><code>{state.chosen.name}</code>{state.chosen.identity && <> · {state.chosen.identity}</>}</>
-        : "Lists your shared folders and reads one marker in each · read-only",
+        : "Your shared folders · read-only",
       controls: status === "failed" ? (expired ? scanAgainButton : retryButton)
         : state.phase === "find" ? cancelButton
         : state.phase === "pick" ? scanAgainButton
@@ -420,21 +411,21 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
           onChange={(event) => flow.setName(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && issue === null) flow.prepare(); }}
         />
-        {button(<><Icon name="refresh" size={12} /> Suggest another</>, flow.suggest)}
+        {button(<><Icon name="refresh" size={12} /> Suggest</>, flow.suggest)}
       </span>
     );
+    /* Only a taken or broken name is said beside the field. */
     const nameNote = taken ? "· already exists in your Dropbox · choose another name"
       : issue ? `· ${issue}`
-      : state.name === state.proposal ? "· proposed by Mallard"
-      : "· renamed";
+      : null;
     return {
       key: "folder", title: "Folder", status: naming ? "doing" : status,
-      fact: naming ? <>{nameField}<span>{nameNote}</span></>
-        : status === "failed" ? `${reason()}${kept}`
-        : mode === "reconnect" ? "This storage’s folder · kept"
-        : state.phase === "prepare" ? <>Creating <code>{state.name}</code> and connecting…</>
+      fact: naming ? <>{nameField}{nameNote && <span>{nameNote}</span>}</>
+        : status === "failed" ? reason()
+        : mode === "reconnect" ? "This storage’s folder"
+        : state.phase === "prepare" ? <>Creating <code>{state.name}</code>…</>
         : status === "done" ? <><code>{state.name}</code> · created</>
-        : "A new shared folder · a proposed name you can change",
+        : "New shared folder",
       controls: naming ? button("Create & connect", () => flow.prepare(), "primary", disabled || issue !== null)
         : status === "failed" ? retryButton
         : mode === "create" && state.phase === "prepare" ? cancelButton
@@ -448,15 +439,15 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
       key: "access", title: "Access", status,
       fact: status === "failed" ? reason()
         : status === "doing" ? (mode === "reconnect" ? "Renewing access…" : <>Connecting <code>{state.chosen?.name}</code>…</>)
-        : status === "done" ? "Refresh credential saved · renews automatically · your whole account"
-        : "Refresh credential · renews automatically · your whole account",
+        : status === "done" ? "Saved · renews automatically"
+        : "Renews automatically · whole account",
       controls: status === "failed" ? retryButton : status === "doing" ? cancelButton : undefined,
     };
   })();
 
   const review: StepView = {
     key: "review", title: "Review", status: "todo",
-    fact: mode === "reconnect" ? "Test connection, then Save storage" : "Test connection, then Finish setup",
+    fact: mode === "reconnect" ? "Test, then Save credential" : "Test, then Finish setup",
   };
 
   return (

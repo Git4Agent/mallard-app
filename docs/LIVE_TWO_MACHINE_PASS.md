@@ -1,4 +1,4 @@
-# Live two-machine pass: R2 and Dropbox
+# Live two-machine pass: R2, Dropbox, and Feishu
 
 - Status: To be run once, by the owner, on two computers. It closes the live rows of `DESIGN_CAS_FREE_STORAGE_REFACTOR.md` (step 8 and step 9), `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` and `PLAN_PULL_PINNED_VERSION.md` in one wipe-and-retest, at commit 77b0d68 or later
 - Written: September 22, 2026
@@ -78,14 +78,49 @@ the record by hand and keeping the claim.
 | 5.4 | B: Compare | "Another computer cleared <storage>. Push again." Push, then A pulls |
 | 5.5 | Library: link a skills scope on both; A pushes; B opens the Library Pull review; A pushes another skill; B applies | The reviewed version is applied ("Pull complete"), and the page then reads ahead |
 
+## 6. Feishu Drive (PLAN_FEISHU_DRIVE_STORAGE step 6)
+
+Two users of one Feishu tenant, Mallard's app available to both, a build
+that carries the app, one Drive folder shared between them in Feishu. Run parts 1 and 5 on a Feishu
+storage as written. Part 2 expects a different outcome: Feishu holds no
+claims, so both records land and "displaced" is what the next Compare says
+on the computer whose version lost. Part 3 does not apply (no claim, no
+unfinished push). Part 4 does not apply (Clear storage data is unavailable).
+
+- 6.1 Computer A: New storage → Feishu; Create new; Connect Feishu, sign in
+  in a browser, nothing typed; Continue on the Account line;
+  keep the proposed folder name; Create & connect; Test connection;
+  Finish setup. The storage page prints "Sign in again by" with a date about
+  a year out.
+- 6.2 Computer B: share the folder in Feishu with user B, then New storage →
+  Feishu; Use existing; Connect Feishu, sign in as user B; paste the
+  folder's link; Use & connect; Test connection; Finish
+  setup. The storage's folder token on both storage pages is the same.
+- 6.3 Part 1 (ordinary publication) on this storage, A then B.
+- 6.4 Part 2 (simultaneous pushes): both records land under `_commits`;
+  the loser's next Compare reports the displaced version; a Push again from
+  the loser builds on the winner.
+- 6.5 Leave computer A closed past one access token's life (over two hours),
+  then Push: the sign-in renews by itself; the storage page never asked to
+  reconnect, and `~/.mallard/feishu_connections/<id>.json` holds a new
+  `refresh_token` with `refresh_uncertain: false`.
+- 6.6 On computer A, make Mallard's app unavailable to user A in Feishu (or
+  revoke the sign-in), then Compare: "Feishu rejected the saved sign-in.
+  Reconnect Feishu in Storage settings." with the route, status, code, and
+  request ID; the sidebar marks the storage Reconnect; Reconnect Feishu on
+  the storage page, then Save credential; Compare again succeeds. Computer B is
+  unaffected throughout.
+- 6.7 Part 5 (Pull of a pinned version) on this storage.
+
 ## Record
 
-| Row | R2 | Dropbox | Notes |
-|---|---|---|---|
-| 1.1 to 1.5 | | | |
-| 2.1 to 2.3 | | | |
-| 3.1 to 3.6 | | | |
-| 4.1 to 4.4 | | | |
-| 5.1 to 5.5 | | | |
+| Row | R2 | Dropbox | Feishu | Notes |
+|---|---|---|---|---|
+| 1.1 to 1.5 | | | | |
+| 2.1 to 2.3 | | | (displaced, no claim) | |
+| 3.1 to 3.6 | | | n/a | |
+| 4.1 to 4.4 | | | n/a | |
+| 5.1 to 5.5 | | | | |
+| 6.1 to 6.7 | n/a | n/a | | |
 
 Date run: · Commit: · Computers:

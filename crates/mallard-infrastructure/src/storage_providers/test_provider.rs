@@ -3,13 +3,13 @@
 //! secret, and an object store backed by a local folder.
 
 use super::traits::{
-    StorageAdapterError, StorageFieldDescriptor, StorageFieldKind, StorageProviderAdapter,
-    StorageProviderDescriptor, StorageSecretDescriptor,
-     StorageSummaryField,
+    StorageAdapterError, StorageFieldDescriptor, StorageFieldKind, StorageNameSuggestion,
+    StorageProviderAdapter, StorageProviderDescriptor, StorageSecretDescriptor,
+    StorageSummaryField,
 };
 use crate::storage_core::{LocalObjectStore, ObjectStore};
 use mallard_domain::{
-    sha256_hex, validate_absolute_clean_path, BoundedConfigObject, FieldKey, SecretKey, SecretMap,
+    validate_absolute_clean_path, BoundedConfigObject, FieldKey, SecretKey, SecretMap,
     StorageConfig, StorageId, StorageProviderConfig, StorageProviderKey,
 };
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
             display_name: "Test storage".to_string(),
             description: "A test-only storage provider.".to_string(),
             default_name: "Test storage".to_string(),
-            name_suggestion: None,
+            name_suggestion: Some(StorageNameSuggestion::last_path_component("directory")),
             display_rank: 90,
             icon: "drive".to_string(),
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
@@ -110,6 +110,7 @@ impl StorageProviderAdapter for TestStorageAdapter {
             managed_secret_id: None,
             setup_guide_url: None,
             manual_setup_hint: None,
+            setup_doors: None,
             discovery: None,
         }
     }
@@ -155,19 +156,10 @@ impl StorageProviderAdapter for TestStorageAdapter {
         Ok(Some(PathBuf::from(typed.directory)))
     }
 
-    fn journal_facts(&self, config: &StorageProviderConfig) -> Result<BoundedConfigObject, String> {
-        let typed = decode(config).map_err(|error| error.to_string())?;
-        BoundedConfigObject::from_json(&serde_json::json!({
-            "directory_sha256": sha256_hex(typed.directory.as_bytes()),
-        }))
-    }
-
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        _setup_id: &str,
         _runtime: &Handle,
-        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let typed = decode(config)?;
         if Path::new(&typed.directory).is_dir() {
@@ -179,18 +171,6 @@ impl StorageProviderAdapter for TestStorageAdapter {
             ))
         }
     }
-
-    fn reconcile_probe(
-        &self,
-        _config: &StorageProviderConfig,
-        _setup_id: &str,
-        _runtime: &Handle,
-        _journal: &mut dyn super::traits::StorageProbeJournal,
-    ) -> Result<(), StorageAdapterError> {
-        Ok(())
-    }
-
-
 
     fn open(
         &self,

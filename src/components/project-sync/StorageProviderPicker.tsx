@@ -1,5 +1,5 @@
 import type { StorageProviderDescriptor, StorageProviderKey } from "../../types";
-import Icon, { iconNameFromHint } from "../Icons";
+import Icon, { storageIconName } from "../Icons";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 
 /**
@@ -65,7 +65,7 @@ export default function StorageProviderPicker({ providers, busy, appActions, onC
                     onClick={() => onChoose(provider.key)}
                   >
                     <span className="landing-picker-card-title">
-                      <Icon name={iconNameFromHint(provider.icon, "drive")} size={17} />
+                      <Icon name={storageIconName(provider.key, provider.icon)} size={17} />
                       <strong>{provider.display_name}</strong>
                     </span>
                     <span className="landing-picker-card-detail">{provider.description}</span>

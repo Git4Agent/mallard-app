@@ -9,7 +9,7 @@ import type { NoticeItem } from "../notice/Notice";
  * It shows while the comparison reports a missing, a replaced or a displaced
  * history, and it ends by itself once a Push or a Pull has replaced this
  * computer's stale bases. It asks for no unlink and no reset, and it carries
- * no action: Push and Pull are already on the page. Nothing is rolled back
+ * no recovery action: Push and Pull are already on the page. Nothing is rolled back
  * for a displaced push: recovery is a user action, and the user compares and
  * pushes again.
  *
@@ -39,7 +39,7 @@ export function clearedStorageNotice(
     key: "storage-cleared",
     severity: "warning",
     message: pushOpen
-      ? `Another computer cleared ${storageName}. Push again.`
+      ? `Another computer cleared ${storageName}.`
       : `Another computer cleared ${storageName}. Pull, then push again.`,
   };
 }

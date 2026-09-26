@@ -25,7 +25,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use super::{
-    library_object_key, ClaimOutcome, ObjectKey, ObjectPrefix, ObjectStore, MAX_LIST_PAGE,
+    library_object_key, ClaimOutcome, ListedObject, ObjectKey, ObjectPrefix, ObjectStore,
     REPOSITORY_CLAIMS_PREFIX, REPOSITORY_COMMITS_PREFIX,
 };
 
@@ -33,7 +33,7 @@ use super::{
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 /// The listing budget of one stream, and of bundle discovery. Reaching it
 /// reports an incomplete view; history is never truncated silently.
-const MAX_LISTED_RECORDS: usize = 100_000;
+pub const MAX_LISTED_RECORDS: usize = 100_000;
 /// A record is sent only while the listing that cleared it is at most this
 /// old on the wall clock. The monotonic clock is not enough: on macOS it
 /// stands still while the machine sleeps.
@@ -107,6 +107,10 @@ pub struct RecordStream {
 }
 
 impl RecordStream {
+    pub fn prefix(&self) -> &ObjectPrefix {
+        &self.prefix
+    }
+
     /// Project records live in the flat namespace beside the bundle folders.
     pub fn project(bundle_id: &BundleId) -> Result<Self, String> {
         Ok(Self {
@@ -227,18 +231,47 @@ pub fn record_name_of(
     )
 }
 
-/// What one listing of a stream holds: every record name, and the chain
-/// selected from them.
+/// What one listing holds: record names, operation-local read addresses,
+/// and the chain selected from those names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamView {
     names: Vec<RecordName>,
     mainline: Mainline,
+    objects: HashMap<RecordName, ListedObject>,
 }
 
 impl StreamView {
     fn from_names(names: Vec<RecordName>) -> Self {
         let mainline = Mainline::select(names.iter().cloned());
-        Self { names, mainline }
+        Self {
+            names,
+            mainline,
+            objects: HashMap::new(),
+        }
+    }
+
+    /// Preserve the listed address. Only a name absent from this scan uses
+    /// a key read, such as a cached name retained after direct confirmation.
+    pub fn object(&self, stream: &RecordStream, name: &RecordName) -> Result<ListedObject, String> {
+        match self.objects.get(name) {
+            Some(object) if object.key() == &stream.key(name)? => Ok(object.clone()),
+            Some(_) => Err("listed record belongs to another publication stream".to_string()),
+            None => Ok(ListedObject::by_key(stream.key(name)?)),
+        }
+    }
+
+    pub fn read_record<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        stream: &RecordStream,
+        name: &RecordName,
+    ) -> Result<Vec<u8>, String> {
+        read_records(
+            store,
+            &[(stream.clone(), name.clone(), self.object(stream, name)?)],
+        )?
+        .pop()
+        .ok_or_else(|| "publication record read returned nothing".to_string())
     }
 
     pub fn mainline(&self) -> &Mainline {
@@ -312,6 +345,28 @@ impl PublicationCache {
             .flatten()
     }
 
+    /// Remember one stream's listing and its selected record, both read
+    /// elsewhere than through this store: the coordinate answer Mallard
+    /// Cloud gives a Library refresh. A later `read_record` of the token
+    /// then costs nothing; a later listing is still a real listing.
+    pub fn prime(
+        &self,
+        stream: &RecordStream,
+        names: &[RecordName],
+        record: Option<(&PublicationToken, &[u8])>,
+    ) {
+        self.with_stream(stream, |memory| {
+            memory.seen = names.iter().cloned().collect();
+            let seen = &memory.seen;
+            memory
+                .records
+                .retain(|token, _| seen.iter().any(|name| name.token() == token));
+        });
+        if let Some((token, bytes)) = record {
+            self.remember_record(stream, token, bytes);
+        }
+    }
+
     fn remember_record(&self, stream: &RecordStream, token: &PublicationToken, bytes: &[u8]) {
         self.with_stream(stream, |memory| {
             if memory.records.len() >= MAX_CACHED_RECORDS_PER_STREAM {
@@ -319,30 +374,6 @@ impl PublicationCache {
             }
             memory.records.insert(token.clone(), bytes.to_vec());
         });
-    }
-}
-
-fn list_record_keys<S: ObjectStore + ?Sized>(
-    store: &S,
-    prefix: &ObjectPrefix,
-) -> Result<Vec<ObjectKey>, String> {
-    let mut keys = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        // A failed page fails the listing. It is never an empty stream.
-        let page = store.list_keys(prefix, cursor.as_deref(), MAX_LIST_PAGE)?;
-        keys.extend(page.keys);
-        if keys.len() > MAX_LISTED_RECORDS {
-            return Err(format!(
-                "the publication listing of '{}' exceeds the {}-record limit; the view is incomplete",
-                prefix.as_str(),
-                MAX_LISTED_RECORDS
-            ));
-        }
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(keys),
-        }
     }
 }
 
@@ -377,17 +408,39 @@ fn list_stream_at<S: ObjectStore + ?Sized>(
     stream: &RecordStream,
     wall_clock: &dyn Fn() -> SystemTime,
 ) -> Result<(StreamView, SystemTime), String> {
-    let keys = list_record_keys(store, &stream.prefix)?;
+    let objects = store.list_objects(&stream.prefix, MAX_LISTED_RECORDS)?;
     let listed_at = wall_clock();
+    Ok((select_listed_stream(store, stream, objects)?, listed_at))
+}
+
+/// Select a stream from a completed batch listing, using the same missing
+/// record checks as a single-stream listing. This does not list it again.
+pub fn select_listed_stream<S: ObjectStore + ?Sized>(
+    store: &S,
+    stream: &RecordStream,
+    objects: Vec<ListedObject>,
+) -> Result<StreamView, String> {
+    if objects.len() > MAX_LISTED_RECORDS {
+        return Err("publication listing exceeds its object limit; the view is incomplete".into());
+    }
     let mut names = Vec::new();
-    for key in keys {
-        match record_name_in(stream.prefix.as_str(), &key) {
-            Some(name) => names.push(name),
-            None => report_ignored_name(key.as_str()),
+    let mut references = HashMap::new();
+    for object in objects {
+        match record_name_in(stream.prefix.as_str(), object.key()) {
+            Some(name) => {
+                references.insert(name.clone(), object);
+                names.push(name);
+            }
+            None => report_ignored_name(object.key().as_str()),
         }
     }
+    let view = |names| {
+        let mut view = StreamView::from_names(names);
+        view.objects = references;
+        view
+    };
     let Some(cache) = store.publication_cache() else {
-        return Ok((StreamView::from_names(names), listed_at));
+        return Ok(view(names));
     };
     let listed = names.iter().cloned().collect::<HashSet<_>>();
     let mut missing = cache
@@ -422,17 +475,18 @@ fn list_stream_at<S: ObjectStore + ?Sized>(
             .records
             .retain(|token, _| seen.iter().any(|name| name.token() == token));
     });
-    Ok((StreamView::from_names(names), listed_at))
+    Ok(view(names))
 }
 
 /// List every project stream in one pass over the flat record namespace and
 /// select each. No payload key is listed, and no record is read.
 pub fn list_project_streams<S: ObjectStore + ?Sized>(
     store: &S,
-) -> Result<Vec<(BundleId, Mainline)>, String> {
+) -> Result<Vec<(BundleId, StreamView)>, String> {
     let prefix = ObjectPrefix::parse(REPOSITORY_COMMITS_PREFIX)?;
-    let mut streams = HashMap::<String, Vec<RecordName>>::new();
-    for key in list_record_keys(store, &prefix)? {
+    let mut streams = HashMap::<String, Vec<(RecordName, ListedObject)>>::new();
+    for object in store.list_objects(&prefix, MAX_LISTED_RECORDS)? {
+        let key = object.key();
         let parsed = key
             .as_str()
             .strip_prefix(REPOSITORY_COMMITS_PREFIX)
@@ -444,13 +498,21 @@ pub fn list_project_streams<S: ObjectStore + ?Sized>(
                 Some((bundle, RecordName::parse(name)?))
             });
         match parsed {
-            Some((bundle, name)) => streams.entry(bundle.to_string()).or_default().push(name),
+            Some((bundle, name)) => streams
+                .entry(bundle.to_string())
+                .or_default()
+                .push((name, object)),
             None => report_ignored_name(key.as_str()),
         }
     }
     let mut selected = streams
         .into_iter()
-        .map(|(bundle, names)| Ok((BundleId::parse(bundle)?, Mainline::select(names))))
+        .map(|(bundle, records)| {
+            let mut view =
+                StreamView::from_names(records.iter().map(|(name, _)| name.clone()).collect());
+            view.objects = records.into_iter().collect();
+            Ok((BundleId::parse(bundle)?, view))
+        })
         .collect::<Result<Vec<_>, String>>()?;
     selected.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(selected)
@@ -472,31 +534,37 @@ fn verify_record(name: &RecordName, key: &ObjectKey, bytes: &[u8]) -> Result<(),
 /// publication; selection never moves to another candidate because of it.
 pub fn read_records<S: ObjectStore + ?Sized>(
     store: &S,
-    requests: &[(RecordStream, RecordName)],
+    requests: &[(RecordStream, RecordName, ListedObject)],
 ) -> Result<Vec<Vec<u8>>, String> {
+    for (stream, name, object) in requests {
+        if object.key() != &stream.key(name)? {
+            return Err("listed record belongs to another publication stream".to_string());
+        }
+    }
     let cache = store.publication_cache();
     let mut records = requests
         .iter()
-        .map(|(stream, name)| cache.and_then(|cache| cache.record(stream, name.token())))
+        .map(|(stream, name, _)| cache.and_then(|cache| cache.record(stream, name.token())))
         .collect::<Vec<_>>();
     let pending = records
         .iter()
         .enumerate()
         .filter(|(_, record)| record.is_none())
-        .map(|(index, _)| Ok((index, requests[index].0.key(&requests[index].1)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    let keys = pending
-        .iter()
-        .map(|(_, key)| key.clone())
+        .map(|(index, _)| (index, requests[index].2.clone()))
         .collect::<Vec<_>>();
-    let fetched = store.get_metadata_many(&keys, MAX_RECORD_BYTES)?;
+    let objects = pending
+        .iter()
+        .map(|(_, object)| object.clone())
+        .collect::<Vec<_>>();
+    let fetched = store.get_listed_metadata_many(&objects, MAX_RECORD_BYTES)?;
     if fetched.len() != pending.len() {
         return Err("publication record read returned the wrong result count".to_string());
     }
-    for ((index, key), stored) in pending.into_iter().zip(fetched) {
-        let (stream, name) = &requests[index];
+    for ((index, object), stored) in pending.into_iter().zip(fetched) {
+        let key = object.key();
+        let (stream, name, _) = &requests[index];
         let stored = stored.ok_or_else(|| format!("publication record '{}' is missing", key))?;
-        verify_record(name, &key, &stored.bytes)?;
+        verify_record(name, key, &stored.bytes)?;
         if let Some(cache) = cache {
             cache.remember_record(stream, name.token(), &stored.bytes);
         }
@@ -513,9 +581,16 @@ pub fn read_record<S: ObjectStore + ?Sized>(
     stream: &RecordStream,
     name: &RecordName,
 ) -> Result<Vec<u8>, String> {
-    read_records(store, &[(stream.clone(), name.clone())])?
-        .pop()
-        .ok_or_else(|| "publication record read returned nothing".to_string())
+    read_records(
+        store,
+        &[(
+            stream.clone(),
+            name.clone(),
+            ListedObject::by_key(stream.key(name)?),
+        )],
+    )?
+    .pop()
+    .ok_or_else(|| "publication record read returned nothing".to_string())
 }
 
 /// Write one record with list-then-write and return the listing that selects
@@ -691,9 +766,8 @@ fn send_once<S: ObjectStore + ?Sized>(
             // The store acknowledged the record; a listing that lags behind
             // its own write does not unwrite it.
             Ok(_) => {
-                let mut names = std::mem::take(&mut view.names);
-                names.push(name.clone());
-                view = StreamView::from_names(names);
+                view.names.push(name.clone());
+                view.mainline = Mainline::select(view.names.iter().cloned());
             }
             Err(error) => return Err(error),
         }
@@ -894,7 +968,7 @@ pub(crate) mod parity {
         assert_eq!(
             discovered
                 .iter()
-                .map(|(id, mainline)| (id.clone(), mainline.selected().cloned()))
+                .map(|(id, view)| (id.clone(), view.mainline().selected().cloned()))
                 .collect::<Vec<_>>(),
             vec![(bundle(1), Some(second)), (bundle(2), Some(rival))]
         );
@@ -1192,7 +1266,7 @@ mod tests {
             list_project_streams(&store)
                 .unwrap()
                 .into_iter()
-                .map(|(id, mainline)| (id, mainline.selected().cloned()))
+                .map(|(id, view)| (id, view.mainline().selected().cloned()))
                 .collect::<Vec<_>>(),
             vec![(bundle(8), Some(first))]
         );

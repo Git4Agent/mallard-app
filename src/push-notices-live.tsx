@@ -1,10 +1,11 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import Notice, { NoticeZone } from "./components/notice/Notice";
+import { NoticeZone } from "./components/notice/Notice";
 import { clearedStorageNotice } from "./components/project-sync/clearedStorageNotice";
 import SyncOutcomeNotice from "./components/project-sync/SyncOutcomeNotice";
 import { REVIEW_EXPIRED, REVIEW_SUPERSEDED } from "./components/project-sync/pullReviewFlow";
 import { PUSH_FINISHED, ownUnfinishedPushSentence, unfinishedPushSentence } from "./unfinishedPush";
+import { pushFailureNotice } from "./components/project-sync/pushFailureNotice";
 import type { SyncOutcome } from "./components/project-sync/syncOutcome";
 import type { ScopeContinuity, ThreadSyncComparison } from "./types";
 import "./App.css";
@@ -92,6 +93,36 @@ function clearedComparison(
   };
 }
 
+/** The shell zone under the path bar, where a Push failure is drawn. */
+function ShellBanner({ error }: { error: string }) {
+  return (
+    <NoticeZone
+      items={[pushFailureNotice(error, "Attic R2", { busy: false, onFinishPush: () => undefined, onDismiss: () => undefined })]}
+      subject="messages from Mallard"
+      className="sync-backend-banner"
+      timing="blocking"
+    />
+  );
+}
+
+/** The Pull review's failure, as the head of its banner zone draws it. */
+function PullBanner({ error }: { error: string }) {
+  return (
+    <div className="sync-review-banners">
+      <NoticeZone
+        items={[{
+          key: "pull-failed",
+          severity: "danger",
+          message: error,
+          action: <button type="button" className="btn btn-ghost">Compare again</button>,
+        }]}
+        subject="notes about this Pull review"
+        timing="blocking"
+      />
+    </div>
+  );
+}
+
 function Specimen({ when, where, children }: { when: string; where: string; children: React.ReactNode }) {
   return (
     <section style={{ display: "grid", gap: 8 }}>
@@ -109,11 +140,9 @@ createRoot(document.getElementById("root")!).render(
     <main style={{ maxWidth: 860, margin: "32px auto", padding: "0 24px", display: "grid", gap: 32 }}>
       <Specimen
         when="RemoteChanged"
-        where="Push review error banner. Another computer pushed on the same version while this push ran: seen in the listing before the write, or selected by the listing after it. The push failed as a whole."
+        where="The shell banner under the path bar, while the Push review is open. Another computer pushed on the same version while this push ran: seen in the listing before the write, or selected by the listing after it. The push failed as a whole."
       >
-        <Notice severity="danger" timing="blocking" className="sync-pull-error">
-          The storage changed while pushing. Compare again.
-        </Notice>
+        <ShellBanner error="The storage changed while pushing. Compare again." />
       </Specimen>
       <Specimen
         when="A confirmed push was displaced afterwards"
@@ -182,56 +211,24 @@ createRoot(document.getElementById("root")!).render(
       </Specimen>
       <Specimen
         when="OutcomeUnknown"
-        where="Push review error banner, when the storage cannot be read after a claim or a record was sent, so the one check that would settle it cannot be made."
+        where="The shell banner under the path bar, when the storage cannot be read after a claim or a record was sent, so the one check that would settle it cannot be made."
       >
-        <Notice severity="danger" timing="blocking" className="sync-pull-error">
-          Couldn&apos;t confirm the push. Refresh to see whether it arrived.
-        </Notice>
+        <ShellBanner error="Couldn't confirm the push. Refresh to see whether it arrived." />
       </Specimen>
       <Specimen
         when="PushUnfinished"
-        where="Push review error banner, with Finish that push: a push onto this version claimed it and never wrote its record, another computer's or this computer's own for other content. The action writes that record once and lists, and the banner then reads Finished in the done tone, or the RemoteChanged or OutcomeUnknown sentence. The Library page has the same sentences and action."
+        where="The shell banner under the path bar, with Finish that push: a push onto this version claimed it and never wrote its record, another computer's or this computer's own for other content. The action writes that record once and lists, and the banner then reads Finished in the done tone, or the RemoteChanged or OutcomeUnknown sentence. The Library page has the same sentences and action."
       >
-        <Notice
-          severity="danger"
-          timing="blocking"
-          className="sync-pull-error"
-          action={<button type="button" className="btn btn-ghost">Finish that push</button>}
-        >
-          {unfinishedPushSentence("Attic R2")}
-        </Notice>
-        <Notice
-          severity="danger"
-          timing="blocking"
-          className="sync-pull-error"
-          action={<button type="button" className="btn btn-ghost">Finish that push</button>}
-        >
-          {ownUnfinishedPushSentence("Attic R2")}
-        </Notice>
-        <Notice severity="success" timing="blocking" className="sync-pull-error">
-          {PUSH_FINISHED}
-        </Notice>
+        <ShellBanner error={unfinishedPushSentence("Attic R2")} />
+        <ShellBanner error={ownUnfinishedPushSentence("Attic R2")} />
+        <ShellBanner error={PUSH_FINISHED} />
       </Specimen>
       <Specimen
         when="A Pull refused after its review"
-        where="The Pull review's error banner, with Compare again: the pinned version lost a race, the storage was cleared, or this computer synced past the review from another window (T3 to T5, T11); or the review is older than a day (T6)."
+        where="The head of the Pull review's banner zone, with Compare again: the pinned version lost a race, the storage was cleared, or this computer synced past the review from another window (T3 to T5, T11); or the review is older than a day (T6)."
       >
-        <Notice
-          severity="danger"
-          timing="blocking"
-          className="sync-pull-error"
-          action={<button type="button" className="btn btn-ghost">Compare again</button>}
-        >
-          {REVIEW_SUPERSEDED}
-        </Notice>
-        <Notice
-          severity="danger"
-          timing="blocking"
-          className="sync-pull-error"
-          action={<button type="button" className="btn btn-ghost">Compare again</button>}
-        >
-          {REVIEW_EXPIRED}
-        </Notice>
+        <PullBanner error={REVIEW_SUPERSEDED} />
+        <PullBanner error={REVIEW_EXPIRED} />
       </Specimen>
       <Specimen
         when="A Pull that stopped"

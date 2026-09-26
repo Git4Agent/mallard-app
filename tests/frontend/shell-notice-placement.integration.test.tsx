@@ -6,6 +6,20 @@ import SyncPathBar, { PathBarBelow } from "../../src/components/sync-review/Sync
 import { NoticeZone } from "../../src/components/notice/Notice";
 import StorageIndexPage from "../../src/components/project-sync/StorageIndexPage";
 import SettingsPage from "../../src/components/project-sync/SettingsPage";
+import type { AppUpdates } from "../../src/components/AppUpdater";
+
+/** The shell's updater with nothing to say: no release ready, no check run. */
+const idleUpdates: AppUpdates = {
+  readyVersion: null,
+  checking: false,
+  restarting: false,
+  operationRunning: false,
+  lastCheckedAt: null,
+  receiptVersion: null,
+  checkNow: () => undefined,
+  restart: () => undefined,
+  openReceipt: () => undefined,
+};
 
 /* The shell's notice zone — backend failures, action errors, the "Done ·"
  * receipts — is one box for the whole workspace, and it sits UNDER the top bar
@@ -79,7 +93,7 @@ test("a path-bar screen flattens to bar, zone, page in the workspace column", ()
 
   const settings = renderToStaticMarkup(
     <PathBarBelow.Provider value={zone}>
-      <SettingsPage appActions={[]} onLogsChanged={() => undefined} onDone={() => undefined} doneTarget="Projects" />
+      <SettingsPage appActions={[]} appUpdates={idleUpdates} onLogsChanged={() => undefined} onDone={() => undefined} doneTarget="Projects" />
     </PathBarBelow.Provider>,
   );
   assertOrder(settings, BAR, ZONE, PAGE);

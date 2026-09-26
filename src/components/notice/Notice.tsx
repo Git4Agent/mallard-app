@@ -1,21 +1,27 @@
-import type { ReactNode } from "react";
+import { Children, isValidElement, useEffect, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
 import type { NoticeSeverity } from "../../types";
 
 /* One notice recipe for the whole app.
  *
- * Three published rules are built into the types rather than left to review:
+ * Four published rules are built into the types rather than left to review:
  *
  *  - A zone shows ONE box, never a stack. `NoticeZone` takes every message a
  *    zone holds and renders a single box at the highest severity present.
  *    (GOV.UK notification banner: combine, never stack.)
  *  - The severity names itself in the text — "Error ·", "Warning ·", "Note ·",
  *    "Done ·" — so the meaning survives without the tint and without the
- *    glyph. (USWDS alert; WCAG 1.4.1.)
+ *    glyph. (USWDS alert; WCAG 1.4.1.) Each rung also has its own glyph shape:
+ *    error is the octagon, never warning's triangle.
  *  - The ARIA role is DERIVED from `timing`, never authored. Content that is
  *    already there when the view renders is not a status message, so it gets a
  *    named region instead of a live region. The union below makes `standing`
  *    unbuildable without a label. (WCAG 2.2 SC 4.1.3.)
+ *  - Every message closes, through one control, `DismissButton`: last in the
+ *    message, after any action, called "Dismiss". Closing hides the words,
+ *    never the condition, so a closed message comes back when it changes or
+ *    when its view is mounted again. (Fluent 2 message bar.) The one message
+ *    that never closes is an `Acknowledgement`: the flow waits on its tick.
  */
 
 /* The severity ladder itself lives in ../../types beside the rest of the
@@ -37,7 +43,7 @@ const SEVERITY_LABEL: Record<NoticeSeverity, string> = {
 };
 
 const SEVERITY_ICON: Record<NoticeSeverity, IconName> = {
-  danger: "alert-triangle",
+  danger: "octagon-x",
   warning: "alert-triangle",
   info: "info",
   success: "check-circle",
@@ -82,13 +88,92 @@ export interface NoticeItem {
   /** A short lead, printed bold before the sentence. */
   title?: ReactNode;
   message: ReactNode;
-  /** The one control this message offers, if any. */
+  /** The one control this message offers, if any. The close control is not
+   * one of these: the zone draws it after the action, for every message. */
   action?: ReactNode;
+  /** Extra condition identity when the same text can describe a new
+   * occurrence — an attempt counter, say, so a retry that fails the same way
+   * is shown again rather than staying closed. */
+  dismissalId?: string;
+  /** The owner's half of closing, when the message must stay closed past this
+   * view (a failure the owner holds in state). Closing never runs the action. */
+  onDismiss?: () => void;
   /** A glyph that says more than the severity does — a thread's status mark,
    * say, tying a banner to the rows it speaks for. It stands in for the
    * severity icon, which is safe precisely because the rung is named in the
    * text and never rested on the glyph. */
   mark?: ReactNode;
+}
+
+function noticeText(node: ReactNode): string {
+  return Children.toArray(node).map((child): string => {
+    if (typeof child === "string" || typeof child === "number") return String(child);
+    if (isValidElement<{ children?: ReactNode }>(child)) return noticeText(child.props.children);
+    return "";
+  }).join("");
+}
+
+/** The closed messages still worth remembering: a closed message that is no
+ * longer present has resolved, so it is forgotten, and if it occurs again it
+ * is shown again. Returns `closed` itself when nothing was forgotten. */
+export function forgetResolved(
+  closed: ReadonlySet<string>,
+  items: readonly NoticeItem[],
+): ReadonlySet<string> {
+  const present = new Set(items.map(noticeIdentity));
+  const remaining = new Set([...closed].filter((id) => present.has(id)));
+  return remaining.size === closed.size ? closed : remaining;
+}
+
+export function noticeIdentity(item: NoticeItem): string {
+  return JSON.stringify([item.key, item.dismissalId, noticeText(item.title), noticeText(item.message)]);
+}
+
+function useVisibleNotices(items: readonly NoticeItem[]) {
+  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set());
+  const active = JSON.stringify(items.map(noticeIdentity));
+  // A resolved message must be visible if it occurs again in this view.
+  useEffect(() => {
+    // Keyed on `active`, the items' identity: the array is new every render.
+    setDismissed((previous) => forgetResolved(previous, items));
+  }, [active]);
+  return {
+    visible: items.filter((item) => !dismissed.has(noticeIdentity(item))),
+    dismiss(closing: readonly NoticeItem[]) {
+      setDismissed((previous) => new Set([...previous, ...closing.map(noticeIdentity)]));
+      for (const item of closing) item.onDismiss?.();
+    },
+  };
+}
+
+/** The one close control, for every message in the app. `what` completes the
+ * accessible name: "Dismiss: <the message>". */
+export function DismissButton({ what, onClick, className }: {
+  what: string;
+  onClick: () => void;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`sync-notice-dismiss${className ? ` ${className}` : ""}`}
+      title="Dismiss"
+      aria-label={`Dismiss: ${what}`}
+      onClick={onClick}
+    >
+      <Icon name="x" size={12} />
+    </button>
+  );
+}
+
+/** The message as one spoken line for its close control's name: each part
+ * ends as a sentence, so "Scan incomplete." is not read with a second stop. */
+function itemText(item: NoticeItem): string {
+  return [SEVERITY_LABEL[item.severity], noticeText(item.title), noticeText(item.message)]
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => (/[.!?…:]$/.test(part) ? part : `${part}.`))
+    .join(" ");
 }
 
 type NoticeShellProps = NoticeTiming & {
@@ -118,10 +203,36 @@ export type NoticeProps = NoticeTiming & {
   action?: ReactNode;
   mark?: ReactNode;
   className?: string;
+  dismissalId?: string;
+  onDismiss?: () => void;
 };
 
 /** One message. The type name leads the sentence. */
-export default function Notice({ severity, title, children, action, mark, className, ...timing }: NoticeProps) {
+export default function Notice({ dismissalId, onDismiss, ...props }: NoticeProps) {
+  const item: NoticeItem = {
+    key: "notice",
+    severity: props.severity,
+    title: props.title,
+    message: props.children,
+    dismissalId,
+    onDismiss,
+  };
+  const { visible, dismiss } = useVisibleNotices([item]);
+  if (visible.length === 0) return null;
+  return (
+    <NoticeContent
+      {...props}
+      action={(
+        <>
+          {props.action}
+          <DismissButton what={itemText(item)} onClick={() => dismiss([item])} />
+        </>
+      )}
+    />
+  );
+}
+
+function NoticeContent({ severity, title, children, action, mark, className, ...timing }: NoticeProps) {
   return (
     <NoticeShell severity={severity} className={className} action={action} mark={mark} {...timing}>
       <p className="notice-line">
@@ -142,23 +253,29 @@ export type NoticeZoneProps = NoticeTiming & {
 };
 
 /** Every message a zone holds, in one box at the loudest rung present. */
-export function NoticeZone({ items, subject, className, ...timing }: NoticeZoneProps) {
+export function NoticeZone({ items: allItems, subject, className, ...timing }: NoticeZoneProps) {
+  const { visible: items, dismiss } = useVisibleNotices(allItems);
   const severity = highestSeverity(items.map((item) => item.severity));
   if (severity === null) return null;
 
   if (items.length === 1) {
     const only = items[0];
     return (
-      <Notice
+      <NoticeContent
         severity={only.severity}
         title={only.title}
-        action={only.action}
+        action={(
+          <>
+            {only.action}
+            <DismissButton what={itemText(only)} onClick={() => dismiss([only])} />
+          </>
+        )}
         mark={only.mark}
         className={className}
         {...timing}
       >
         {only.message}
-      </Notice>
+      </NoticeContent>
     );
   }
 
@@ -169,7 +286,12 @@ export function NoticeZone({ items, subject, className, ...timing }: NoticeZoneP
   const mixed = items.some((item) => item.severity !== severity);
 
   return (
-    <NoticeShell severity={severity} className={className} {...timing}>
+    <NoticeShell
+      severity={severity}
+      className={className}
+      action={<DismissButton what={`all ${items.length} ${subject}`} onClick={() => dismiss(items)} />}
+      {...timing}
+    >
       <p className="notice-line">
         <strong className="notice-type">{SEVERITY_LABEL[severity]} ·</strong>{" "}
         <strong className="notice-lead">{`${items.length} ${subject}`}</strong>
@@ -186,9 +308,88 @@ export function NoticeZone({ items, subject, className, ...timing }: NoticeZoneP
             {item.title ? " " : null}
             {item.message}
             {item.action}
+            <DismissButton what={itemText(item)} onClick={() => dismiss([item])} />
           </li>
         ))}
       </ul>
     </NoticeShell>
+  );
+}
+
+/** A warning the flow waits on: the box is the checkbox's label, and it never
+ * closes — ticking it is the only way past it. `verbs` is the trailing word,
+ * unticked then ticked ("Mark reviewed" → "Reviewed"). */
+export function Acknowledgement({ checked, onChange, disabled, title, children, verbs, ariaLabel, className }: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  title?: ReactNode;
+  children: ReactNode;
+  verbs?: readonly [string, string];
+  /** The whole sentence when the box shows a shortened one. */
+  ariaLabel?: string;
+  className?: string;
+}) {
+  return (
+    <label className={`notice warning notice-ack${className ? ` ${className}` : ""}`}>
+      <span className="sync-sync-row-choice notice-ack-choice">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+      </span>
+      <Icon name={SEVERITY_ICON.warning} size={13} className="notice-mark" />
+      <span className="notice-body">
+        <span className="notice-line">
+          <strong className="notice-type">{SEVERITY_LABEL.warning} ·</strong>{" "}
+          {title ? <strong className="notice-lead">{title}</strong> : null}
+          {title ? " " : null}
+          {children}
+        </span>
+      </span>
+      {verbs && <small className={`notice-ack-verb${checked ? " done" : ""}`}>{checked ? verbs[1] : verbs[0]}</small>}
+    </label>
+  );
+}
+
+/** The message under an invalid field: no box, the error's glyph and ink, a
+ * spoken "Error:" before it, and the same close control as every other
+ * message. Closing hides the sentence, never the field's invalid state; a new
+ * sentence shows again. */
+export function FieldMessage({ id, blocking, children }: {
+  /** The id the field's `aria-describedby` points at. */
+  id?: string;
+  /** Announce it (`role="alert"`) when it arrives after an action. */
+  blocking?: boolean;
+  children: ReactNode;
+}) {
+  const text = noticeText(children);
+  const [closed, setClosed] = useState<string | null>(null);
+  if (closed === text) return null;
+  return (
+    <div id={id} className="notice-field" role={blocking ? "alert" : undefined}>
+      <Icon name={SEVERITY_ICON.danger} size={13} />
+      <span><span className="sync-visually-hidden">Error: </span>{children}</span>
+      <DismissButton what={`Error. ${text}`} onClick={() => setClosed(text)} />
+    </div>
+  );
+}
+
+/** A row's or a bar's status in one word or a count: a pill in the rung's
+ * tint. The word names the state ("Reconnect", "Possible secret"), not the
+ * rung. */
+export function NoticeChip({ severity, children, className }: {
+  severity: NoticeSeverity;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <span className={`notice-chip ${severity}${className ? ` ${className}` : ""}`}>
+      <Icon name={SEVERITY_ICON[severity]} size={12} aria-hidden="true" />
+      {children}
+    </span>
   );
 }

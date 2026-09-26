@@ -6,8 +6,8 @@ use super::traits::{
 };
 use crate::storage_core::{LocalObjectStore, ObjectStore};
 use mallard_domain::{
-    sha256_hex, validate_absolute_clean_path, BoundedConfigObject, FieldKey, SecretMap,
-    StorageConfig, StorageId, StorageProviderConfig, StorageProviderKey,
+    validate_absolute_clean_path, BoundedConfigObject, FieldKey, SecretMap, StorageConfig,
+    StorageId, StorageProviderConfig, StorageProviderKey,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -120,11 +120,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
             display_name: "Local folder".to_string(),
             description: "A folder on this Mac or on a mounted drive.".to_string(),
             default_name: "Local storage".to_string(),
-            name_suggestion: Some(StorageNameSuggestion {
-                source: FieldKey::parse("directory").expect("static field key"),
-                pattern: r"([^/\\]+)[/\\]*$".to_string(),
-                group: 1,
-            }),
+            name_suggestion: Some(StorageNameSuggestion::last_path_component("directory")),
             display_rank: 30,
             icon: "drive".to_string(),
             clear_mode: super::traits::StorageClearMode::RevisionChecked,
@@ -143,6 +139,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
             local_setup: None,
             setup_guide_url: None,
             manual_setup_hint: None,
+            setup_doors: None,
             discovery: None,
         }
     }
@@ -195,21 +192,10 @@ impl StorageProviderAdapter for LocalFolderAdapter {
         Ok(Some(PathBuf::from(typed.directory)))
     }
 
-    fn journal_facts(&self, config: &StorageProviderConfig) -> Result<BoundedConfigObject, String> {
-        let typed = decode(config).map_err(|error| error.to_string())?;
-        // A digest identifies the folder for reconciliation without writing
-        // a machine-local path into the journal.
-        BoundedConfigObject::from_json(&serde_json::json!({
-            "directory_sha256": sha256_hex(typed.directory.as_bytes()),
-        }))
-    }
-
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        _setup_id: &str,
         _runtime: &Handle,
-        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let typed = decode(config)?;
         let metadata = std::fs::metadata(&typed.directory).map_err(|_| {
@@ -230,16 +216,6 @@ impl StorageProviderAdapter for LocalFolderAdapter {
                 "The local storage folder is read-only.",
             ));
         }
-        Ok(())
-    }
-
-    fn reconcile_probe(
-        &self,
-        _config: &StorageProviderConfig,
-        _setup_id: &str,
-        _runtime: &Handle,
-        _journal: &mut dyn super::traits::StorageProbeJournal,
-    ) -> Result<(), StorageAdapterError> {
         Ok(())
     }
 
@@ -308,11 +284,6 @@ mod tests {
             adapter.local_root(&config).unwrap(),
             Some(PathBuf::from("/tmp/mallard-store"))
         );
-        let facts = adapter.journal_facts(&config).unwrap();
-        assert!(facts.get_str("directory_sha256").is_some());
-        assert!(!String::from_utf8(facts.canonical_json())
-            .unwrap()
-            .contains("/tmp"));
         let summary = adapter.summary(&config).unwrap();
         assert_eq!(summary[0].value, "/tmp/mallard-store");
         assert!(summary[0].is_path);
@@ -352,24 +323,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let config = local_provider_config(&temp.path().to_string_lossy()).unwrap();
-        adapter
-            .probe(
-                &config,
-                "setup-0123456789abcdef01234567",
-                runtime.handle(),
-                &mut crate::storage_setup_journal::MemoryProbeJournal::default(),
-            )
-            .unwrap();
+        adapter.probe(&config, runtime.handle()).unwrap();
         assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
         let missing = local_provider_config(&temp.path().join("absent").to_string_lossy()).unwrap();
         assert_eq!(
             adapter
-                .probe(
-                    &missing,
-                    "setup-0123456789abcdef01234567",
-                    runtime.handle(),
-                    &mut crate::storage_setup_journal::MemoryProbeJournal::default()
-                )
+                .probe(&missing, runtime.handle())
                 .unwrap_err()
                 .code(),
             "local_directory_missing"

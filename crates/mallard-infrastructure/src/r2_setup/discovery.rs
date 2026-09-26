@@ -1,6 +1,7 @@
 //! Read-only discovery across one account's jurisdictions.
 use super::*;
 use crate::storage_core::{MAX_STORAGE_MARKER_BYTES, STORAGE_MARKER_KEY};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const MAX_BUCKETS: usize = 256;

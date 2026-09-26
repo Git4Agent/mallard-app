@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import SettingsPage from "../../src/components/project-sync/SettingsPage";
+import type { AppUpdates } from "../../src/components/AppUpdater";
 import {
   EMPTY_RECEIPTS,
   FADE_MS,
@@ -21,10 +22,24 @@ const appActions = [{
   items: [{ id: "reload", label: "Reload app data", icon: "computer" as const, onSelect: () => undefined }],
 }];
 
+/** The shell's updater with nothing to say: no release ready, no check run. */
+const idleUpdates: AppUpdates = {
+  readyVersion: null,
+  checking: false,
+  restarting: false,
+  operationRunning: false,
+  lastCheckedAt: null,
+  receiptVersion: null,
+  checkNow: () => undefined,
+  restart: () => undefined,
+  openReceipt: () => undefined,
+};
+
 function renderPage(doneTarget = "mallard-app"): string {
   return renderToStaticMarkup(
     <SettingsPage
       appActions={appActions}
+      appUpdates={idleUpdates}
       onLogsChanged={() => undefined}
       onDone={() => undefined}
       doneTarget={doneTarget}
@@ -156,8 +171,8 @@ test("receipts: a slow write says Saving…, and a failure stands until its stor
 
 test("preference writes report whether they stuck, and a refused theme keeps the stored one", () => {
   // No storage here at all: nothing persists, and the setter says so.
-  assert.equal(setPreference("refreshOnFocus", false), false);
-  assert.equal(getPreference("refreshOnFocus"), true);
+  assert.equal(setPreference("refreshOnFocus", true), false);
+  assert.equal(getPreference("refreshOnFocus"), false);
 
   const values = new Map<string, string>();
   let refuse = false;

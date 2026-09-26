@@ -384,7 +384,7 @@ test("Catalog Pull review keeps only cloud-outstanding and divergent rows", () =
 });
 
 const STORAGES = [
-  { id: "storage-a", name: "Vault", provider_label: "Local folder", icon: "drive", detail: "~/Vault", detailIsPath: true },
+  { id: "storage-a", name: "Vault", provider: "local", provider_label: "Local folder", icon: "drive", detail: "~/Vault", detailIsPath: true },
 ];
 
 test("the Catalog index is a stable root with empty and populated states", () => {
@@ -706,21 +706,22 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.match(page, /aria-label="Open in Terminal"[\s\S]{0,120}?<Icon name="terminal" size=\{14\}/);
   assert.match(page, /storageCatalogApi\.openProfileApp\(profile\.profile_id\)/);
   assert.match(page, /storageCatalogApi\.openProfileTerminal\(profile\.profile_id\)/);
-  // Acknowledgements are row-sized callouts inside the card that raised them:
-  // the warning tint for a scan finding, the danger tint for an overwrite,
-  // and the app's own checkbox rather than the platform's. The chip spans the
-  // card's full row — auto-placement dropped a second chip into the grid's
-  // auto-sized actions track and inflated it to the chip's whole sentence
-  // (the sheared-chips screenshot); the pet template starts the span after
-  // its preview column instead.
-  assert.match(page, /catalog-card-ack\$\{danger \? " danger" : ""\}/);
+  // Acknowledgements are the shared Acknowledgement inside the card that
+  // raised them, both at the Warning rung — an overwrite has not failed, so
+  // it is not an Error; its verb carries the risk. The box spans the card's
+  // full row — auto-placement dropped a second one into the grid's
+  // auto-sized actions track and inflated it to the whole sentence (the
+  // sheared-chips screenshot); the pet template starts the span after its
+  // preview column instead.
+  assert.equal(page.match(/<Acknowledgement\b/g)?.length, 2);
+  assert.doesNotMatch(page, /AckChip|catalog-card-ack|danger\s*\n\s*lead=/);
   assert.match(
     readFileSync("src/App.css", "utf8"),
-    /\.catalog-card-ack \{[^}]*grid-column: 1 \/ -1;/,
+    /\.catalog-card > \.notice-ack \{[^}]*grid-column: 1 \/ -1;/,
   );
   assert.match(
     readFileSync("src/App.css", "utf8"),
-    /\.catalog-card-pet > \.catalog-card-ack \{[^}]*grid-column: 2 \/ -1;/,
+    /\.catalog-card-pet > \.notice-ack \{[^}]*grid-column: 2 \/ -1;/,
   );
   // Payload first: the bold lead derives from warning.code with the raw
   // backend sentence as the fallback for unknown codes, and the ack verb is
@@ -730,7 +731,7 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.match(page, /warningParts\(warning\)/);
   assert.match(page, /aria-label=\{`Reviewed: \$\{warning\.message\}`\}|ariaLabel=\{`Reviewed: \$\{warning\.message\}`\}/);
   assert.match(page, /verbs=\{\["Mark reviewed", "Reviewed"\]\}/);
-  assert.match(page, /verbs=\{\["Approve", "Approved"\]\}/);
+  assert.match(page, /verbs=\{\["Approve overwrite", "Approved"\]\}/);
   assert.doesNotMatch(page, /Reviewed this warning — |I understand this replaces/);
   // The count rides the verb at the point of commitment.
   assert.match(page, /Push \{pushSelected\.size\}/);
@@ -1001,7 +1002,10 @@ test("provider, kind, and format are open keys with backend labels in the fronte
   assert.match(types, /export interface CatalogStorageRepository extends CatalogCoordinate, CatalogCoordinateLabels/);
   assert.match(types, /available: boolean;\s*unavailable_reason\?: string;/);
   assert.match(types, /expected_target_state: CatalogTargetExpectation;/);
-  assert.match(types, /storage_identity_sha256: string;\s*head: LibraryHeadCoordinate;/);
+  // The Pull review pins the coordinate repository's version, or, on a
+  // storage that holds one item per repository, every item's own.
+  assert.match(types, /head\?: LibraryHeadCoordinate;\s*item_heads\?: Record<string, LibraryHeadCoordinate>;/);
+  assert.match(types, /observed_items\?: Record<string, LibraryHeadCoordinate>;/);
   assert.match(types, /source_coordinate: CatalogCoordinate;/);
   assert.doesNotMatch(types, /resources: string\[\]|CatalogResourceFamily|kinds: /);
   // No closed union and no identity branch survives anywhere in the Library:

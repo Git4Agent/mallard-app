@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const projectUrl = new URL("../", import.meta.url);
@@ -76,16 +78,22 @@ test("application ships the signed in-app updater", async () => {
   assert.match(tauriBuildScript, /`\$\{stem\}-setup\.exe\.sig`/);
   assert.match(tauriBuildScript, /\.\.\.\(updaterArchivePath \? \[updaterArchivePath\] : \[\]\)/);
 
+  // The backend owns the update (`app_update.rs`): it checks, downloads,
+  // and installs on restart or quit. The webview can only ask it to, so it
+  // holds no updater or process permission and ships neither JS plugin.
   assert.match(cargoSource, /^tauri-plugin-updater = "2"$/m);
-  assert.match(cargoSource, /^tauri-plugin-process = "2"$/m);
-  assert.match(libSource, /\.plugin\(tauri_plugin_process::init\(\)\)/);
+  assert.doesNotMatch(cargoSource, /tauri-plugin-process/);
   assert.match(libSource, /\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/);
-  assert.ok(capability.permissions.includes("updater:default"));
-  assert.ok(capability.permissions.includes("process:allow-restart"));
-  assert.match(packageConfig.dependencies["@tauri-apps/plugin-updater"], /^\^2/);
-  assert.match(packageConfig.dependencies["@tauri-apps/plugin-process"], /^\^2/);
+  assert.match(libSource, /app_update::prepare_app_update,/);
+  assert.match(libSource, /app_update::restart_to_update,/);
+  assert.match(libSource, /tauri::RunEvent::Exit = event[\s\S]*?app_update::install_on_exit\(app\)/);
+  assert.deepEqual(capability.permissions.filter((permission) => (
+    typeof permission === "string" && /^(updater|process):/.test(permission)
+  )), []);
+  assert.equal(packageConfig.dependencies["@tauri-apps/plugin-updater"], undefined);
+  assert.equal(packageConfig.dependencies["@tauri-apps/plugin-process"], undefined);
 
-  // The scheduled check is the user's to switch off, and switching it must
+  // Automatic updates are the user's to switch off, and switching them must
   // not purge caches like a tuning change would.
   assert.match(settingsSource, /pub update_check_enabled: bool,/);
   assert.match(settingsSource, /update_check_enabled: true,/);
@@ -390,4 +398,38 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
   assert.doesNotMatch(releaseGuide, /Open Anyway/i);
   assert.match(releaseGuide, /Updater signing/);
   assert.match(releaseGuide, /gh release edit .* --draft/);
+});
+
+test("release builds take Mallard's Feishu app from the environment, local builds also from .env.feishu", async () => {
+  const { FEISHU_APP_ENV_FILE, parseFeishuAppEnv, applyFeishuAppEnv } = await import("../scripts/feishu-app-env.mjs");
+  // Vite refuses to serve `.env.*`, so the dev server never exposes the file.
+  assert.equal(FEISHU_APP_ENV_FILE, ".env.feishu");
+  assert.match(await read(".gitignore"), /^\.env\.feishu$/m);
+  assert.match(await read("scripts/tauri-build.mjs"), /^applyFeishuAppEnv\(process\.env\);$/m);
+  const workflow = await read(".github/workflows/release.yml");
+  for (const name of ["MALLARD_FEISHU_APP_ID", "MALLARD_FEISHU_APP_SECRET"]) {
+    const line = new RegExp(`^          ${name}: \\$\\{\\{ secrets\\.${name} \\}\\}$`, "gm");
+    assert.equal((workflow.match(line) ?? []).length, 4, `${name} on all release and dry-run build steps`);
+  }
+  await access(new URL("crates/mallard-infrastructure/build.rs", projectUrl)).then(
+    () => assert.fail("the infrastructure crate needs no build script"),
+    () => undefined,
+  );
+
+  assert.deepEqual(
+    parseFeishuAppEnv("# Mallard's app\nMALLARD_FEISHU_APP_ID = cli_probe\nMALLARD_FEISHU_APP_SECRET=\nOTHER=x\n\n"),
+    { MALLARD_FEISHU_APP_ID: "cli_probe" },
+  );
+  const file = join(tmpdir(), `mallard-feishu-env-${process.pid}`);
+  await writeFile(file, "MALLARD_FEISHU_APP_ID=cli_file\nMALLARD_FEISHU_APP_SECRET=file-secret\n");
+  try {
+    const env = { MALLARD_FEISHU_APP_ID: "cli_env", MALLARD_FEISHU_APP_SECRET: "" };
+    applyFeishuAppEnv(env, file);
+    assert.deepEqual(env, { MALLARD_FEISHU_APP_ID: "cli_env", MALLARD_FEISHU_APP_SECRET: "file-secret" });
+    const untouched = { MALLARD_FEISHU_APP_ID: "cli_env" };
+    applyFeishuAppEnv(untouched, join(tmpdir(), "mallard-feishu-env-missing"));
+    assert.deepEqual(untouched, { MALLARD_FEISHU_APP_ID: "cli_env" });
+  } finally {
+    await rm(file, { force: true });
+  }
 });

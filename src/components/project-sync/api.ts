@@ -1,13 +1,16 @@
 import { Channel, invoke } from "../../ipc";
 import type {
   DropboxSetupMode, DropboxSetupLogin, DropboxSetupProgress,
+  FeishuSetupLogin, FeishuSetupMode, FeishuSetupProgress,
   ManagedCloudLink, ManagedCloudRepository, ManagedCloudRepositoryResolution,
   ManagedCloudSetupLogin, ManagedCloudSetupMode, ManagedCloudSetupProgress,
   R2Account,
   R2Jurisdiction,
   R2SetupProgress,
   ActivityLogCleanupRequest,
+  AgentFolderList,
   AppSettings,
+  AppUpdateStatus,
   ActivityLogCleanupResult,
   ActivityLogPage,
   ActivityLogPolicy,
@@ -28,6 +31,7 @@ import type {
   ProjectActivityRefreshEvent,
   ProjectBinding,
   ProjectDetail,
+  ProjectFolderProbe,
   ProjectContentInventory,
   ProjectOperationResult,
   ProjectMarkdownImage,
@@ -90,6 +94,7 @@ export interface ActivityRefreshRequest {
   storageId: string;
   branch: string | null;
   windowDays: number;
+  review: boolean;
   bindingRevision: number | null;
   refreshEpoch: number;
 }
@@ -144,8 +149,8 @@ export function createActivityRefresh(
 const refreshProjectActivity = createActivityRefresh((request, onEvent) => {
   const onProgress = new Channel<ProjectActivityRefreshEvent>();
   onProgress.onmessage = onEvent;
-  const { localProjectId, storageId, branch, windowDays } = request;
-  return invoke<void>("refresh_project_activity", { localProjectId, storageId, branch, windowDays, onProgress });
+  const { localProjectId, storageId, branch, windowDays, review } = request;
+  return invoke<void>("refresh_project_activity", { localProjectId, storageId, branch, windowDays, review, onProgress });
 });
 
 /**
@@ -186,6 +191,12 @@ export const projectSyncApi = {
 
   updateAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("update_app_settings", { settings }),
+
+  prepareAppUpdate: () =>
+    invoke<AppUpdateStatus>("prepare_app_update"),
+
+  restartToUpdate: () =>
+    invoke<void>("restart_to_update"),
 
   listAgentProviders: () =>
     invoke<ProviderDescriptor[]>("list_agent_providers"),
@@ -284,16 +295,25 @@ export const projectSyncApi = {
     invoke<void>("prepare_dropbox_storage", { draftId, expectedRevision, sessionId, folderName, scanId, candidateId }),
   cancelDropboxSetup: (draftId: string, expectedRevision: number) =>
     invoke<void>("cancel_dropbox_setup", { draftId, expectedRevision }),
+  authorizeFeishuSetup: (draftId: string, expectedRevision: number, mode: FeishuSetupMode, onProgress: (progress: FeishuSetupProgress) => void) => {
+    const channel = new Channel<FeishuSetupProgress>();
+    channel.onmessage = onProgress;
+    return invoke<FeishuSetupLogin>("authorize_feishu_setup", { draftId, expectedRevision, mode, onProgress: channel });
+  },
+  proposeFeishuFolderName: () => invoke<string>("propose_feishu_folder_name"),
+  prepareFeishuStorage: (draftId: string, expectedRevision: number, sessionId: string, folderName: string | null, folderLink: string | null) =>
+    invoke<void>("prepare_feishu_storage", { draftId, expectedRevision, sessionId, folderName, folderLink }),
+  cancelFeishuSetup: (draftId: string, expectedRevision: number) =>
+    invoke<void>("cancel_feishu_setup", { draftId, expectedRevision }),
 
   /** The Mallard Cloud sign-in: the link arrives on the channel, the
-   *  callback lands on a loopback port, the session stays in Rust. */
-  authorizeManagedCloudSetup: (draftId: string, expectedRevision: number, mode: ManagedCloudSetupMode, onProgress: (progress: ManagedCloudSetupProgress) => void) => {
+   *  callback lands on a loopback port, and the account and its token are
+   *  written into the exact draft revision before the call returns. */
+  signInManagedCloudStorage: (draftId: string, expectedRevision: number, mode: ManagedCloudSetupMode, onProgress: (progress: ManagedCloudSetupProgress) => void) => {
     const channel = new Channel<ManagedCloudSetupProgress>();
     channel.onmessage = onProgress;
-    return invoke<ManagedCloudSetupLogin>("authorize_managed_cloud_setup", { draftId, expectedRevision, mode, onProgress: channel });
+    return invoke<ManagedCloudSetupLogin>("sign_in_managed_cloud_storage", { draftId, expectedRevision, mode, onProgress: channel });
   },
-  prepareManagedCloudStorage: (draftId: string, expectedRevision: number, sessionId: string) =>
-    invoke<void>("prepare_managed_cloud_storage", { draftId, expectedRevision, sessionId }),
   cancelManagedCloudSetup: (draftId: string, expectedRevision: number) =>
     invoke<void>("cancel_managed_cloud_setup", { draftId, expectedRevision }),
   /** The website page and release state of a project on a Mallard Cloud
@@ -397,6 +417,12 @@ export const projectSyncApi = {
   listSetupDrafts: () =>
     invoke<SetupDraftList>("list_setup_drafts"),
 
+  probeProjectFolder: (projectRoot: string) =>
+    invoke<ProjectFolderProbe>("probe_project_folder", { projectRoot }),
+
+  listAgentFolders: () =>
+    invoke<AgentFolderList>("list_agent_folders"),
+
   createSetupDraft: (projectRoot: string) =>
     invoke<CreateSetupDraftResult>("create_setup_draft", { projectRoot }),
 
@@ -452,6 +478,7 @@ export const projectSyncApi = {
     branch?: string | null,
     beforeTime?: number | null,
     windowDays = 30,
+    review = false,
   ) => {
     const request = {
       localProjectId,
@@ -459,6 +486,7 @@ export const projectSyncApi = {
       branch: branch ?? null,
       beforeTime: beforeTime ?? null,
       windowDays,
+      review,
     };
     return projectSyncSingleFlight(
       JSON.stringify(["get_project_activity", request]),

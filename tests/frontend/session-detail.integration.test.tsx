@@ -1035,6 +1035,20 @@ test("Markdown links clean project-relative paths and rejects every escape form"
   );
 });
 
+test("a file link's path card is not clipped by the card it sits in", () => {
+  // The path card opens above the link. On a card's first line that is over
+  // the stamp band and past the card's top edge, and an overflow clip on the
+  // card cut its top off and fused what was left into the band. The band
+  // rounds its own corners instead, at the card's 8px less its 2px edge.
+  const css = readFileSync("src/App.css", "utf8");
+  const rule = (selector: string) => css.match(new RegExp(`\\n${selector} \\{([^}]*)\\}`))?.[1] ?? "";
+  const card = rule("\\.session-detail-card");
+  assert.match(card, /border-radius: 8px;/);
+  assert.doesNotMatch(card, /overflow/);
+  assert.match(rule("\\.session-detail-card-head"), /border-radius: 6px 6px 0 0;/);
+  assert.match(rule("\\.session-detail-project-link\\[data-tooltip\\]::after"), /bottom: calc\(100% \+ 8px\);/);
+});
+
 test("timeline page merging is chronological, de-duplicated, and counts keep their quality", () => {
   const first: ProjectSessionTimelinePage = {
     resource_id: detail.resource_id,

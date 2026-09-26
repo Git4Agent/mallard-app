@@ -9,7 +9,6 @@ import {
   repositoryFingerprintsRequireAcknowledgement,
 } from "../../src/components/project-sync/model";
 import { expandHomePath } from "../../src/profilePath";
-import { acceptPullMetadata, beginPullReview, canAcceptPullMetadata } from "../../src/components/project-sync/pullReviewFlow";
 import { PROJECT_SYNC_SCHEMA } from "../../src/types";
 import {
   profilePathHint,
@@ -283,7 +282,7 @@ test("the titlebar stays silent for a project and names the screens without a tr
   // not named here either. Every screen without a trail still says what it is.
   assert.match(
     workspace,
-    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(addingCatalogScope \? "Add Catalog resource" : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
+    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(choosingProjectFolder \? "New project" : null\)\s*\?\? \(addingCatalogScope \? "Add Catalog resource" : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
   );
   assert.match(workspace, /\{workspaceTitle && \(/);
   assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);
@@ -429,10 +428,16 @@ test("host-scoped workflows keep their originating epoch across async continuati
     assert.ok(awaited > capture, `epoch must be captured before ${awaitExpression}`);
   };
 
-  const addProject = section(workspace, "beginAddProject", "openSetupDraft");
-  capturesBefore(addProject, "await open(");
-  assert.match(addProject, /await projectSyncApi\.createSetupDraft\(picked\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
-  assert.match(addProject, /refreshSetupDrafts\(undefined, workflowEpoch\)/);
+  // Add project writes nothing: it opens setup at the Folder field. The draft
+  // is born when that step chooses a folder, inside its own epoch.
+  const addProject = section(workspace, "beginAddProject", "chooseProjectFolder");
+  assert.match(addProject, /setSetupView\(\{ kind: "folder" \}\)/);
+  assert.doesNotMatch(addProject, /createSetupDraft|await open\(/);
+  const chooseFolder = section(workspace, "chooseProjectFolder", "refreshCatalogScopes");
+  capturesBefore(chooseFolder, "await projectSyncApi.createSetupDraft(");
+  assert.match(chooseFolder, /await projectSyncApi\.createSetupDraft\(projectRoot\);\s*if \(hostWorkflowEpoch\.current !== workflowEpoch\) return;/);
+  assert.match(chooseFolder, /current\?\.kind === "folder" \? \{ kind: "draft", draftId: created\.draft\.draft_id \} : current/);
+  assert.match(chooseFolder, /refreshSetupDrafts\(undefined, workflowEpoch\)/);
 
   // ensureProfileAtPath runs inside a caller's envelope: the epoch arrives as
   // a parameter, and every await re-checks it before touching state.
@@ -763,107 +768,152 @@ test("the empty storage slot is named, not marked as a fault", () => {
 });
 
 
-test("Connect includes metadata review in one click and preserves explicit file review", async () => {
+test("Connect completes without preparing or applying Pull", async () => {
   const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
-  const planStart = source.indexOf("  const planRestore = async (");
-  const planEnd = source.indexOf("\n  /** Finished-sync", planStart);
   const connectStart = source.indexOf("  const connectStorageBundle = async (");
   const connectEnd = source.indexOf("\n  const keepPendingBundle = async", connectStart);
-  assert.ok(planStart >= 0 && planEnd > planStart && connectStart >= 0 && connectEnd > connectStart);
+  assert.ok(connectStart >= 0 && connectEnd > connectStart);
   const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
-  const handler = transformSync(source.slice(planStart, planEnd) + source.slice(connectStart, connectEnd), { loader: "ts" }).code;
+  const handler = transformSync(source.slice(connectStart, connectEnd), { loader: "ts" }).code;
 
-  for (const scenario of ["matching", "adopt", "changes", "blocked", "stale", "read-failed", "host-changed", "no-binding"] as const) {
+  for (const scenario of ["active", "no-binding", "inactive-binding", "connect-failed", "refresh-failed", "host-changed"] as const) {
     const project = { local_project_id: "project-fixture", bundle_id: "bundle-fixture" };
-    const binding = scenario === "no-binding" ? null : { ...project, state: "active" };
-    const plan = {
-      revision: 3,
-      actions: scenario === "changes" ? [{ kind: { kind: "write_file" } }] : [],
-      conversation_review: scenario === "adopt" ? [{ action: "adopt_cloud_metadata", action_id: "metadata-id" }]
-        : scenario === "blocked" ? [{ action: "blocked", blocker: "busy" }] : [],
+    const binding = scenario === "no-binding" ? null : {
+      ...project, state: scenario === "inactive-binding" ? "unconfirmed" : "active",
     };
     const calls: string[] = [];
     const errors: string[] = [];
     const epoch = { current: 1 };
-    const restoreRequest = { current: 0 };
     const config = { links: [] };
     let busy = false;
     let closed = false;
-    let shownPlan: unknown = null;
-    let notice: { projectId: string; storageId: string } | null = { projectId: project.local_project_id, storageId: "storage-fixture" };
     const inFlight = { current: false };
+    const unexpectedPull = () => assert.fail("Link must not prepare or apply Pull");
     const context = {
-      registrations: [project], connectionInFlight: inFlight, hostWorkflowEpoch: epoch, restoreRequest,
-      activityOpenRef: { current: false }, configRef: { current: config },
-      setActivityOpen: () => undefined,
+      registrations: [project], connectionInFlight: inFlight, hostWorkflowEpoch: epoch,
       setBusy: (value: boolean) => { busy = value; },
       setError: (error: string | null) => { if (error) errors.push(error); },
-      setRestoreError: () => undefined, setFetchProgress: () => undefined, setPullApplyPhase: () => undefined,
-      setReviewSupportLoading: () => undefined, setRestoreBinding: () => undefined, setRestoreProjectName: () => undefined,
-      setRestorePlan: (value: unknown) => { shownPlan = value; },
-      setStorageNotice: (update: (current: typeof notice) => typeof notice) => { notice = update(notice); },
       setPendingBundleConnection: (value: unknown) => { assert.equal(value, null); closed = true; calls.push("close"); },
       setActiveProjectId: () => undefined, setActiveStorageByProject: () => undefined,
       loadShell: async () => ({ nextConfig: config, hostIdentityReady: true }),
-      loadProjectData: async () => { calls.push("refresh"); },
-      setHistoryRefreshEpoch: (update: (current: number) => number) => {
-        assert.equal(update(5), 6);
-        calls.push("refresh-comparison");
+      loadProjectData: async () => {
+        calls.push("refresh");
+        if (scenario === "refresh-failed") throw new Error("Refresh failed");
+        if (scenario === "host-changed") epoch.current += 1;
       },
-      projectLabel: () => "Fixture",
-      notify: () => { calls.push("notify"); },
-      errorMessage: (reason: unknown) => String(reason), storageFailureMessage: (_storage: string, reason: unknown) => String(reason),
-      beginPullReview, canAcceptPullMetadata, acceptPullMetadata,
+      notify: (message: string) => { assert.equal(message, "Storage linked."); calls.push("notify"); },
+      errorMessage: (reason: unknown) => String(reason),
+      planRestore: unexpectedPull,
       projectSyncApi: {
         connectProjectToRemoteBundle: async (request: unknown) => {
           calls.push("connect");
+          assert.equal(busy, true);
           assert.deepEqual(request, {
             local_project_id: project.local_project_id, storage_id: "storage-fixture", bundle_id: project.bundle_id,
             expected_bundle_id: project.bundle_id, pinned: true, allow_repository_mismatch: false,
           });
+          if (scenario === "connect-failed") throw new Error("Connection failed");
           return { project, binding };
         },
-        planRestore: async () => {
-          calls.push("plan");
-          assert.equal(busy, true);
-          if (scenario === "read-failed") throw new Error("Storage unavailable");
-          return plan;
-        },
-        getRestoreReadiness: async () => ({ state: "ready", issues: [] }),
-        applyRestore: async (actual: unknown, ids: string[]) => {
-          assert.equal(busy, true);
-          calls.push("accept");
-          assert.equal(actual, plan, "use the exact checked plan");
-          assert.deepEqual(ids, scenario === "adopt" ? ["metadata-id"] : []);
-          if (scenario === "stale") throw new Error("Plan expired");
-          if (scenario === "host-changed") { epoch.current += 1; restoreRequest.current += 1; }
-          return { success: true, reviewed_base_advanced: true };
-        },
+        planRestore: unexpectedPull,
+        getRestoreReadiness: unexpectedPull,
+        applyRestore: unexpectedPull,
       },
     };
     const run = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handler}; return connectStorageBundle("project-fixture", "storage-fixture", "bundle-fixture");`);
     await run(context);
     assert.equal(inFlight.current, false);
     if (scenario !== "host-changed") assert.equal(busy, false);
-    if (scenario === "matching" || scenario === "adopt") {
-      assert.deepEqual(calls, ["connect", "refresh", "plan", "accept", "refresh", "refresh-comparison", "notify", "close"]);
+    if (scenario === "active" || scenario === "no-binding" || scenario === "inactive-binding") {
+      assert.deepEqual(calls, ["connect", "refresh", "close", "notify"]);
       assert.equal(closed, true);
-      assert.equal(shownPlan, null, "no second confirmation or Pull review");
-      assert.equal(notice, null, "clear the obsolete storage warning");
-      assert.deepEqual(errors, []);
-    } else if (scenario === "changes" || scenario === "blocked") {
-      assert.equal(calls.includes("accept"), false);
-      assert.equal(closed, true);
-      assert.equal(shownPlan, plan, "open the existing explicit review");
       assert.deepEqual(errors, []);
     } else if (scenario === "host-changed") {
       assert.equal(closed, false);
-      assert.deepEqual(calls, ["connect", "refresh", "plan", "accept"]);
+      assert.deepEqual(calls, ["connect", "refresh"]);
+      assert.deepEqual(errors, []);
     } else {
       assert.equal(closed, false, "keep failures visible in the chooser");
-      assert.equal(errors.length, 1);
-      assert.ok(notice, "a failed operation must not hide the warning");
+      assert.deepEqual(calls, scenario === "connect-failed" ? ["connect"] : ["connect", "refresh"]);
+      assert.deepEqual(errors, [scenario === "connect-failed" ? "Error: Connection failed" : "Error: Refresh failed"]);
     }
+  }
+});
+
+test("link reloads skip sibling metadata checks and later project loads check again", async () => {
+  const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const section = (start: string, end: string) => {
+    const startAt = source.indexOf(start);
+    const endAt = source.indexOf(end, startAt);
+    assert.ok(startAt >= 0 && endAt > startAt);
+    return source.slice(startAt, endAt);
+  };
+  const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+  const handlers = transformSync([
+    section("  const loadProjectData = async (", "\n  useEffect(() => {"),
+    section("  const saveStorageLink = async (", "\n  const linkStorage = async"),
+    section("  const connectStorageBundle = async (", "\n  const keepPendingBundle = async"),
+  ].join("\n"), { loader: "ts" }).code;
+
+  for (const operation of ["saveStorageLink", "connectStorageBundle"] as const) {
+    const projectId = "project-fixture";
+    const storageId = "storage-fixture";
+    const bundleId = "bundle-fixture";
+    const project = { local_project_id: projectId, bundle_id: bundleId };
+    const config = { links: [{ local_project_id: projectId, storage_id: storageId }] };
+    const detail = { project, binding: { ...project, state: "active" }, links: config.links };
+    const inventory = { resources: [] };
+    const sibling = { state: "sibling_found", matches: [] };
+    const calls: string[] = [];
+    const errors: string[] = [];
+    let siblingNotice: unknown = { projectId, storageId, status: sibling };
+    let shownInventory: unknown = null;
+    let loading = false;
+    let busy = false;
+    const context = {
+      config, registrations: [project], activeStorageByProject: {},
+      hostWorkflowEpoch: { current: 1 }, projectRequest: { current: 0 }, connectionInFlight: { current: false },
+      setLoading: (value: boolean) => { loading = value; },
+      setBusy: (value: boolean) => { busy = value; },
+      setError: (error: string | null) => { if (error) errors.push(error); },
+      setDetail: () => undefined, setRegistrations: () => undefined, setBindings: () => undefined,
+      setActiveProjectId: () => undefined, setActiveStorageByProject: () => undefined,
+      setStorageNotice: () => undefined, setPendingBundleConnection: () => undefined,
+      setInventory: (value: unknown) => { shownInventory = value; },
+      setSiblingNotice: (value: unknown) => { siblingNotice = value; },
+      loadShell: async () => ({ nextConfig: config, hostIdentityReady: true }),
+      notify: (message: string) => assert.equal(message, "Storage linked."),
+      errorMessage: (reason: unknown) => String(reason),
+      planRestore: () => assert.fail("Link must not prepare Pull"),
+      projectSyncApi: {
+        saveLink: async () => { calls.push("save"); },
+        connectProjectToRemoteBundle: async () => { calls.push("connect"); return detail; },
+        getProject: async () => { calls.push("project"); return detail; },
+        getInventory: async () => { calls.push("inventory"); return inventory; },
+        getSiblingBundleStatus: async () => { calls.push("siblings"); return sibling; },
+      },
+    };
+    const link = operation === "saveStorageLink"
+      ? 'saveStorageLink("project-fixture", "storage-fixture")'
+      : 'connectStorageBundle("project-fixture", "storage-fixture", "bundle-fixture")';
+    const run = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handlers}; return {
+      link: () => ${link},
+      reload: () => loadProjectData("project-fixture"),
+    };`)(context);
+    await run.link();
+    const saved = operation === "saveStorageLink" ? "save" : "connect";
+    assert.deepEqual(calls, [saved, "project", "inventory"], operation);
+    assert.equal(siblingNotice, null, "clear the old advisory notice after linking");
+    assert.equal(shownInventory, inventory, "local inventory still loads");
+    assert.equal(loading, false);
+    assert.equal(busy, false);
+    assert.deepEqual(errors, []);
+
+    await run.reload();
+    assert.deepEqual(calls, [saved, "project", "inventory", "project", "inventory", "siblings"]);
+    assert.deepEqual(siblingNotice, { projectId, storageId, status: sibling });
+    assert.equal(loading, false);
+    assert.deepEqual(errors, []);
   }
 });
 

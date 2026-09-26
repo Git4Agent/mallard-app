@@ -1,5 +1,23 @@
 # Third-party notices
 
+## Storage provider artwork
+
+The storage icons use existing vector artwork from these projects:
+
+- Local folder: [Ant Design Icons](https://github.com/ant-design/ant-design-icons),
+  MIT; the two-tone folder is recolored amber.
+- Feishu: [Semi Design](https://github.com/DouyinFE/semi-design), MIT;
+  the Feishu mark is recolored blue and teal.
+- Cloudflare R2: [Lobe Icons](https://github.com/lobehub/lobe-icons), MIT;
+  the color Cloudflare mark is unchanged.
+- Dropbox: [Simple Icons](https://github.com/simple-icons/simple-icons), CC0;
+  the existing repository asset is colored Dropbox blue.
+
+The source URLs, revisions, asset hashes, and full licenses are included in
+`public/storage-provider-icons/`. Brand names and logos remain the property
+of their owners. The Mallard duck-and-cloud PNG was generated for the selected
+Mallard storage icon design.
+
 ## Pixel Icon Library
 
 Mallard's pixel-style UI glyphs are adapted from the

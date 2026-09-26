@@ -1221,6 +1221,7 @@ pub fn build_project_activity(
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
+    review: bool,
     mut warnings: Vec<String>,
 ) -> Result<ProjectActivity, String> {
     let remote_providers = remote
@@ -1245,7 +1246,9 @@ pub fn build_project_activity(
     let window_start = window_end.saturating_sub(window_days.saturating_mul(DAY_SECS));
     let sessions = all_sessions
         .iter()
-        .filter(|session| session.ended_at >= window_start && session.ended_at < window_end)
+        .filter(|session| {
+            review || (session.ended_at >= window_start && session.ended_at < window_end)
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -1407,14 +1410,20 @@ pub fn list_project_repository_kinds(
                         && binding.state == BindingState::Active
                 })
                 .and_then(|binding| fs::canonicalize(&binding.project_root).ok())?;
-            let is_git =
-                git_output(&root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|output| {
-                    output.status.success()
-                        && String::from_utf8_lossy(&output.stdout).trim() == "true"
-                });
-            Some((project.local_project_id.to_string(), is_git))
+            Some((
+                project.local_project_id.to_string(),
+                is_git_work_tree(&root),
+            ))
         })
         .collect())
+}
+
+/// Whether Git counts `root` as inside a work tree — the one rule that
+/// decides whether a project's ordinary files travel through Git.
+pub fn is_git_work_tree(root: &Path) -> bool {
+    git_output(root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+    })
 }
 
 // ---------------------------------------------------------------------------

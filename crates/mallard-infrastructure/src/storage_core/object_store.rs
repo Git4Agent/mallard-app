@@ -21,6 +21,14 @@ pub struct StoredMetadata {
     pub etag: String,
 }
 
+/// Resolve a recursive prefix or one exact metadata key. Folder-based
+/// stores can resolve a batch in one traversal of the shared ancestors.
+#[derive(Clone, Debug)]
+pub enum ObjectQuery {
+    Prefix(ObjectPrefix),
+    Key(ObjectKey),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpectedObject {
     pub size: u64,
@@ -167,6 +175,39 @@ pub enum ClaimOutcome {
     Taken(Vec<u8>),
 }
 
+/// An operation-local read address. It is never serialized or cached.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ListedObject {
+    pub(crate) key: ObjectKey,
+    pub(crate) feishu: Option<FeishuReadAddress>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct FeishuReadAddress {
+    pub root: String,
+    pub api: String,
+    pub token: String,
+}
+
+impl ListedObject {
+    pub fn by_key(key: ObjectKey) -> Self {
+        Self { key, feishu: None }
+    }
+
+    pub fn key(&self) -> &ObjectKey {
+        &self.key
+    }
+}
+
+impl std::fmt::Debug for ListedObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ListedObject")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One listed object with the opaque revision the store reported for it.
 /// A later conditional delete binds to exactly this revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,6 +270,66 @@ pub trait ObjectStore: Send + Sync {
             .collect()
     }
 
+    /// Read listed addresses in order. Key-addressed stores retain their bulk read.
+    fn get_listed_metadata_many(
+        &self,
+        objects: &[ListedObject],
+        max_bytes: u64,
+    ) -> Result<Vec<Option<StoredMetadata>>, String> {
+        if objects.iter().any(|object| object.feishu.is_some()) {
+            return Err("listed object belongs to another storage provider".to_string());
+        }
+        let keys = objects
+            .iter()
+            .map(|object| object.key.clone())
+            .collect::<Vec<_>>();
+        self.get_metadata_many(&keys, max_bytes)
+    }
+
+    /// Results follow query order, with an independent error per query.
+    /// An exact key may be absent when read. No result is retained between
+    /// calls. The object limit applies separately to each prefix.
+    fn list_objects_batch(
+        &self,
+        queries: &[ObjectQuery],
+        max_objects: usize,
+    ) -> Vec<Result<Vec<ListedObject>, String>> {
+        queries
+            .iter()
+            .map(|query| match query {
+                ObjectQuery::Prefix(prefix) => self.list_objects(prefix, max_objects),
+                ObjectQuery::Key(key) => Ok(vec![ListedObject::by_key(key.clone())]),
+            })
+            .collect()
+    }
+
+    /// A complete bounded scan. Stores that already walk the whole prefix
+    /// override this to return that walk once, without synthetic result pages.
+    fn list_objects(
+        &self,
+        prefix: &ObjectPrefix,
+        max_objects: usize,
+    ) -> Result<Vec<ListedObject>, String> {
+        let mut objects = Vec::new();
+        let mut cursor = None;
+        let mut cursors = std::collections::HashSet::new();
+        loop {
+            let page = self.list_keys(prefix, cursor.as_deref(), super::MAX_LIST_PAGE)?;
+            if objects.len().saturating_add(page.keys.len()) > max_objects {
+                return Err(
+                    "publication listing exceeds its object limit; the view is incomplete"
+                        .to_string(),
+                );
+            }
+            objects.extend(page.keys.into_iter().map(ListedObject::by_key));
+            match page.next_cursor {
+                Some(next) if cursors.insert(next.clone()) => cursor = Some(next),
+                Some(_) => return Err("publication listing repeated a cursor".to_string()),
+                None => return Ok(objects),
+            }
+        }
+    }
+
     fn stage_verified(
         &self,
         key: &ObjectKey,
@@ -245,6 +346,29 @@ pub trait ObjectStore: Send + Sync {
             .iter()
             .map(|(key, expected)| self.stage_verified(key, expected))
             .collect()
+    }
+
+    /// Fetch every verified object of one operation, reporting each
+    /// request's expected size once it is settled, whatever its outcome, in
+    /// the order the store settles them. Outcomes line up with `requests`.
+    /// The default sends one `stage_many_verified` per window of the
+    /// transfer-concurrency setting, as the upload path does; a store that
+    /// pays per folder rather than per object overrides this to resolve
+    /// every request together.
+    fn stage_many_with_progress(
+        &self,
+        requests: &[(ObjectKey, ExpectedObject)],
+        on_staged: &mut dyn FnMut(u64),
+    ) -> Result<Vec<StageOutcome>, String> {
+        let window = crate::app_settings::cloud_transfer_concurrency().max(1);
+        let mut outcomes = Vec::with_capacity(requests.len());
+        for batch in requests.chunks(window) {
+            outcomes.extend(self.stage_many_verified(batch)?);
+            for (_, expected) in batch {
+                on_staged(expected.size);
+            }
+        }
+        Ok(outcomes)
     }
 
     /// Store one object. No conforming writer ever writes different bytes to
@@ -264,6 +388,29 @@ pub trait ObjectStore: Send + Sync {
             .iter()
             .map(|(key, bytes)| self.put_immutable(key, bytes))
             .collect()
+    }
+
+    /// Store every pending object of one operation, reporting each object's
+    /// size once it is settled, present or written, in the order the store
+    /// settles them. The default sends one `put_many` per window of the
+    /// transfer-concurrency setting: the window and a store's bulk semaphore
+    /// read the same value, so effective parallelism is their minimum and
+    /// they only move together. A store that pays per folder rather than per
+    /// object overrides this to take the whole list at once.
+    fn put_many_with_progress(
+        &self,
+        objects: Vec<(ObjectKey, Bytes)>,
+        on_stored: &mut dyn FnMut(u64),
+    ) -> Result<Vec<ImmutablePutOutcome>, String> {
+        let window = crate::app_settings::cloud_transfer_concurrency().max(1);
+        let mut outcomes = Vec::with_capacity(objects.len());
+        for batch in objects.chunks(window) {
+            outcomes.extend(self.put_many(batch.to_vec())?);
+            for (_, bytes) in batch {
+                on_stored(bytes.len() as u64);
+            }
+        }
+        Ok(outcomes)
     }
 
     /// Write one publication record: one request, with no retry inside the
@@ -317,7 +464,7 @@ pub trait ObjectStore: Send + Sync {
 
     /// Bounded, deterministic listing. Every entry carries the object's
     /// current opaque revision so a caller can delete exactly what it saw;
-    /// only storage clear needs that, and everything else lists keys. A name
+    /// only storage clear needs that. Publication scans retain read addresses. A name
     /// the store cannot represent as a key is skipped and reported, never a
     /// failed listing. A completed write is visible to every later listing of
     /// its prefix.
@@ -328,10 +475,9 @@ pub trait ObjectStore: Send + Sync {
         limit: usize,
     ) -> Result<StoreListPage, String>;
 
-    /// `list` without revisions. Every record listing uses it: a record's
-    /// name already carries its digest, so refresh, list-then-write, and
-    /// bundle discovery never need one. A store whose `list` pays per entry
-    /// for a revision overrides this.
+    /// `list` without revisions. The default complete scan uses this because
+    /// a record's name already carries its digest. A store whose `list` pays
+    /// per entry for a revision overrides this.
     fn list_keys(
         &self,
         prefix: &ObjectPrefix,
@@ -419,5 +565,182 @@ mod tests {
 
         assert_eq!(&first_prefix, b"ab");
         assert_eq!(&second_prefix, b"ab");
+    }
+
+    /// Records the size of every `put_many` and `stage_many_verified`
+    /// window it receives.
+    struct WindowedStore {
+        inner: LocalObjectStore,
+        windows: Mutex<Vec<usize>>,
+        stage_windows: Mutex<Vec<usize>>,
+    }
+
+    impl ObjectStore for WindowedStore {
+        fn get_metadata(
+            &self,
+            key: &ObjectKey,
+            max_bytes: u64,
+        ) -> Result<Option<StoredMetadata>, String> {
+            self.inner.get_metadata(key, max_bytes)
+        }
+
+        fn stage_verified(
+            &self,
+            key: &ObjectKey,
+            expected: &ExpectedObject,
+        ) -> Result<StageOutcome, String> {
+            self.inner.stage_verified(key, expected)
+        }
+
+        fn stage_many_verified(
+            &self,
+            requests: &[(ObjectKey, ExpectedObject)],
+        ) -> Result<Vec<StageOutcome>, String> {
+            self.stage_windows.lock().unwrap().push(requests.len());
+            self.inner.stage_many_verified(requests)
+        }
+
+        fn put_immutable(
+            &self,
+            key: &ObjectKey,
+            bytes: &[u8],
+        ) -> Result<ImmutablePutOutcome, String> {
+            self.inner.put_immutable(key, bytes)
+        }
+
+        fn put_many(
+            &self,
+            objects: Vec<(ObjectKey, Bytes)>,
+        ) -> Result<Vec<ImmutablePutOutcome>, String> {
+            self.windows.lock().unwrap().push(objects.len());
+            self.inner.put_many(objects)
+        }
+
+        fn list(
+            &self,
+            prefix: &ObjectPrefix,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> Result<StoreListPage, String> {
+            self.inner.list(prefix, cursor, limit)
+        }
+    }
+
+    #[test]
+    fn the_default_progress_upload_sends_transfer_windows_and_reports_each_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WindowedStore {
+            inner: LocalObjectStore::open(temp.path().join("store")).unwrap(),
+            windows: Mutex::new(Vec::new()),
+            stage_windows: Mutex::new(Vec::new()),
+        };
+        let window = crate::app_settings::cloud_transfer_concurrency();
+        let objects: Vec<(ObjectKey, Bytes)> = (0..window * 2 + 1)
+            .map(|index| {
+                let bytes = Bytes::from(format!("object {index}"));
+                let key = ObjectKey::parse(format!(
+                    ".mallard/v1/repositories/{:032x}/_objects/{}",
+                    1,
+                    sha256_hex(&bytes)
+                ))
+                .unwrap();
+                (key, bytes)
+            })
+            .collect();
+        let sizes: Vec<u64> = objects
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .collect();
+
+        let mut reported = Vec::new();
+        let outcomes = store
+            .put_many_with_progress(objects.clone(), &mut |size| reported.push(size))
+            .unwrap();
+        assert_eq!(outcomes, vec![ImmutablePutOutcome::Written; objects.len()]);
+        assert_eq!(*store.windows.lock().unwrap(), vec![window, window, 1]);
+        assert_eq!(reported, sizes, "each object is reported once, in order");
+
+        // A present object is reported like any other and sent nowhere twice.
+        reported.clear();
+        let outcomes = store
+            .put_many_with_progress(objects[..1].to_vec(), &mut |size| reported.push(size))
+            .unwrap();
+        assert_eq!(outcomes, vec![ImmutablePutOutcome::AlreadyPresent]);
+        assert_eq!(reported, sizes[..1]);
+    }
+
+    #[test]
+    fn the_default_progress_staging_sends_transfer_windows_and_keeps_request_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = WindowedStore {
+            inner: LocalObjectStore::open(temp.path().join("store")).unwrap(),
+            windows: Mutex::new(Vec::new()),
+            stage_windows: Mutex::new(Vec::new()),
+        };
+        let window = crate::app_settings::cloud_transfer_concurrency();
+        let objects: Vec<(ObjectKey, Bytes)> = (0..window * 2)
+            .map(|index| {
+                let bytes = Bytes::from(format!("object {index}"));
+                let key = ObjectKey::parse(format!(
+                    ".mallard/v1/repositories/{:032x}/_objects/{}",
+                    1,
+                    sha256_hex(&bytes)
+                ))
+                .unwrap();
+                (key, bytes)
+            })
+            .collect();
+        store.put_many(objects.clone()).unwrap();
+        let mut requests: Vec<(ObjectKey, ExpectedObject)> = objects
+            .iter()
+            .map(|(key, bytes)| {
+                (
+                    key.clone(),
+                    ExpectedObject {
+                        size: bytes.len() as u64,
+                        sha256: sha256_hex(bytes),
+                    },
+                )
+            })
+            .collect();
+        // An absent object in the middle settles as missing in its place.
+        let absent = ObjectKey::parse(format!(
+            ".mallard/v1/repositories/{:032x}/_objects/{}",
+            1,
+            "0".repeat(64)
+        ))
+        .unwrap();
+        requests.insert(
+            1,
+            (
+                absent,
+                ExpectedObject {
+                    size: 3,
+                    sha256: "0".repeat(64),
+                },
+            ),
+        );
+        let sizes: Vec<u64> = requests.iter().map(|(_, expected)| expected.size).collect();
+
+        let mut reported = Vec::new();
+        let outcomes = store
+            .stage_many_with_progress(&requests, &mut |size| reported.push(size))
+            .unwrap();
+        assert_eq!(
+            *store.stage_windows.lock().unwrap(),
+            vec![window, window, 1]
+        );
+        assert_eq!(reported, sizes, "each request is reported once, in order");
+        assert_eq!(outcomes.len(), requests.len());
+        for (index, ((_, expected), outcome)) in requests.iter().zip(&outcomes).enumerate() {
+            if index == 1 {
+                assert!(matches!(outcome, StageOutcome::Missing));
+                continue;
+            }
+            let StageOutcome::Verified(body) = outcome else {
+                panic!("object {index} was not staged")
+            };
+            assert_eq!(body.sha256(), expected.sha256);
+        }
     }
 }

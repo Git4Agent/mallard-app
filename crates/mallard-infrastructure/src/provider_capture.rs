@@ -28,8 +28,8 @@ pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// The most bytes one capture may retain. Push Compare reports this limit and
 /// byte estimates; Push Apply enforces it on the selected resources.
 pub const MAX_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_METADATA_BYTES: usize = 1024 * 1024;
-const MAX_METADATA_LINES: usize = 128;
+pub(crate) const MAX_METADATA_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_METADATA_LINES: usize = 128;
 const MAX_TREE_DEPTH: usize = 32;
 
 /// The engine primitive one registered resource-kind coordinate resolves to

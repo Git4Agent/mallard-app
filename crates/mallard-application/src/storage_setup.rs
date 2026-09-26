@@ -20,10 +20,6 @@ use mallard_infrastructure::storage_providers::{
     StorageProviderDescriptor, StorageProviderRegistry,
     StorageSummaryField,
 };
-use mallard_infrastructure::storage_setup_journal::{
-    StorageSetupId, StorageSetupJournalEntry, StorageSetupJournalStore, StorageSetupStage,
-    STORAGE_SETUP_ID_PREFIX, STORAGE_SETUP_JOURNAL_SCHEMA,
-};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -57,7 +53,6 @@ pub enum StorageSetupErrorKind {
     Conflict,
     RemoteFailure,
     PersistenceFailure,
-    CleanupRequired,
 }
 
 impl StorageSetupErrorKind {
@@ -67,7 +62,6 @@ impl StorageSetupErrorKind {
             Self::Conflict => 3,
             Self::RemoteFailure => 4,
             Self::PersistenceFailure => 5,
-            Self::CleanupRequired => 6,
         }
     }
 }
@@ -80,7 +74,6 @@ pub struct StorageSetupError {
     kind: StorageSetupErrorKind,
     code: &'static str,
     message: String,
-    setup_id: Option<String>,
 }
 
 impl StorageSetupError {
@@ -89,7 +82,6 @@ impl StorageSetupError {
             kind,
             code,
             message: message.to_string(),
-            setup_id: None,
         }
     }
 
@@ -109,16 +101,7 @@ impl StorageSetupError {
         )
     }
 
-    fn cleanup_required(code: &'static str, message: &str, setup_id: &str) -> Self {
-        Self {
-            kind: StorageSetupErrorKind::CleanupRequired,
-            code,
-            message: message.to_string(),
-            setup_id: Some(setup_id.to_string()),
-        }
-    }
-
-    fn from_adapter(error: StorageAdapterError, setup_id: Option<&str>) -> Self {
+    fn from_adapter(error: StorageAdapterError) -> Self {
         match error.kind() {
             StorageAdapterErrorKind::Invalid => Self::invalid(error.code(), error.message()),
             StorageAdapterErrorKind::Remote | StorageAdapterErrorKind::Internal => Self::fixed(
@@ -126,9 +109,6 @@ impl StorageSetupError {
                 error.code(),
                 error.message(),
             ),
-            StorageAdapterErrorKind::CleanupRequired => {
-                Self::cleanup_required(error.code(), error.message(), setup_id.unwrap_or(""))
-            }
         }
     }
 
@@ -139,18 +119,11 @@ impl StorageSetupError {
     pub fn code(&self) -> &'static str {
         self.code
     }
-
-    pub fn setup_id(&self) -> Option<&str> {
-        self.setup_id.as_deref()
-    }
 }
 
 impl fmt::Display for StorageSetupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.setup_id {
-            Some(setup_id) => write!(formatter, "{} for setup '{}'.", self.message, setup_id),
-            None => formatter.write_str(&self.message),
-        }
+        formatter.write_str(&self.message)
     }
 }
 
@@ -232,7 +205,7 @@ fn validated_registered_adapter<'a>(
     };
     adapter
         .validate_config(&storage.provider_config)
-        .map_err(|error| StorageSetupError::from_adapter(error, None))?;
+        .map_err(StorageSetupError::from_adapter)?;
     Ok(Some(adapter))
 }
 
@@ -513,12 +486,17 @@ pub fn create_storage_setup_draft(
     })?;
     let descriptor = adapter.descriptor();
     let timestamp = unix_timestamp();
-    let config = repository
-        .load_config()
+    let (drafts, _) = repository
+        .list_storage_setup_drafts()
         .map_err(|_| StorageSetupError::persistence())?;
-    // The draft opens named, like a new storage always did: "<stem> <n>",
-    // numbered after the storages already configured.
-    let name = format!("{} {}", descriptor.default_name, config.storages.len() + 1);
+    // The draft opens under a placeholder numbered among this provider's
+    // open drafts. The real name follows the destination once it is known,
+    // and the commit makes it unique.
+    let open = drafts
+        .iter()
+        .filter(|draft| draft.storage.provider == descriptor.key)
+        .count();
+    let name = placeholder_name(&descriptor.default_name, open);
     let saved = save_draft(
         repository,
         StorageSetupDraft {
@@ -702,7 +680,6 @@ struct PinnedDraft<'a> {
     _operation: HostOperationGuard,
     draft: StorageSetupDraft,
     adapter: &'a dyn StorageProviderAdapter,
-    config: SyncConfig,
 }
 
 fn pin_draft<'a>(
@@ -728,14 +705,13 @@ fn pin_draft<'a>(
         .map_err(|_| storage_unavailable())?;
     adapter
         .validate_config(&draft.storage.provider_config)
-        .map_err(|error| StorageSetupError::from_adapter(error, None))?;
+        .map_err(StorageSetupError::from_adapter)?;
     validate_settings_locked(&config, &draft.storage)?;
     ensure_destination_available(registry, &config, &draft.storage)?;
     Ok(PinnedDraft {
         _operation: operation,
         draft,
         adapter,
-        config,
     })
 }
 
@@ -750,19 +726,7 @@ pub fn test_storage_setup_draft(
     expected_revision: u64,
 ) -> Result<TestStorageDraftResult, StorageSetupError> {
     let pinned = pin_draft(repository, registry, draft_id, expected_revision)?;
-    let stored = pinned
-        .config
-        .storages
-        .iter()
-        .find(|storage| storage.id == pinned.draft.storage.id)
-        .cloned();
-    probe_journaled(
-        repository,
-        pinned.adapter,
-        runtime,
-        &pinned.draft.storage,
-        stored.as_ref(),
-    )?;
+    probe(pinned.adapter, runtime, &pinned.draft.storage)?;
     Ok(TestStorageDraftResult {
         draft_id: pinned.draft.draft_id.clone(),
         draft_revision: pinned.draft.revision,
@@ -771,8 +735,8 @@ pub fn test_storage_setup_draft(
 }
 
 /// Verify and atomically create or replace one storage from its draft. The
-/// host operation stays held across journal reconciliation, the probe, and
-/// the storage-snapshot-guarded config transaction. `pre_commit` runs inside the
+/// host operation stays held across the probe and the
+/// storage-snapshot-guarded config transaction. `pre_commit` runs inside the
 /// transaction on the prospective document so the caller can add checks the
 /// application layer cannot see (local isolation, catalog links).
 pub fn commit_storage_setup_draft(
@@ -784,23 +748,12 @@ pub fn commit_storage_setup_draft(
     pre_commit: impl FnOnce(&SyncConfig) -> Result<(), String>,
 ) -> Result<CommitStorageDraftResult, StorageSetupError> {
     let pinned = pin_draft(repository, registry, draft_id, expected_draft_revision)?;
-    let stored = pinned
-        .config
-        .storages
-        .iter()
-        .find(|storage| storage.id == pinned.draft.storage.id)
-        .cloned();
-    probe_journaled(
-        repository,
-        pinned.adapter,
-        runtime,
-        &pinned.draft.storage,
-        stored.as_ref(),
-    )?;
+    probe(pinned.adapter, runtime, &pinned.draft.storage)?;
 
     let committed_draft = pinned.draft.clone();
-    let storage = committed_draft.storage.clone();
+    let mut storage = committed_draft.storage.clone();
     let source = committed_draft.source.clone();
+    let stem = pinned.adapter.descriptor().default_name;
     let (replaced, committed) = repository
         .transact_config(move |config| {
             committed_draft
@@ -808,6 +761,20 @@ pub fn commit_storage_setup_draft(
                 .map_err(|_| storage_setup_draft_target_conflict())?;
             validate_settings_locked(config, &storage)?;
             ensure_destination_available(registry, config, &storage)?;
+            // A committed name is unique: a placeholder falls back to the
+            // stem, and a duplicate takes the next free number.
+            let base = if is_placeholder_name(&storage.name, &stem) {
+                stem.clone()
+            } else {
+                storage.name.clone()
+            };
+            let id = storage.id.clone();
+            storage.name = unique_storage_name(&base, |candidate| {
+                config
+                    .storages
+                    .iter()
+                    .any(|other| other.id != id && other.name == candidate)
+            });
             let replaced = match &source {
                 StorageSetupDraftSource::New => {
                     config.storages.push(storage);
@@ -848,7 +815,6 @@ impl StorageSetupError {
             kind: StorageSetupErrorKind::InvalidInput,
             code,
             message,
-            setup_id: None,
         }
     }
 
@@ -860,7 +826,6 @@ impl StorageSetupError {
             kind: StorageSetupErrorKind::Conflict,
             code,
             message,
-            setup_id: None,
         }
     }
 }
@@ -880,6 +845,13 @@ pub fn rename_storage(
             if config.revision != expected_config_revision {
                 return Err(revision_conflict());
             }
+            // A duplicate takes the next free number, as at commit.
+            let name = unique_storage_name(&name, |candidate| {
+                config
+                    .storages
+                    .iter()
+                    .any(|other| other.id != storage_id && other.name == candidate)
+            });
             let storage = config
                 .storages
                 .iter_mut()
@@ -922,6 +894,9 @@ pub fn remove_storage(
     // Cross-document checks run under the host guard, outside either document lock.
     pre_remove(stored)
         .map_err(|message| StorageSetupError::invalid_text("storage_removal_rejected", message))?;
+    let removed_connection = (stored.provider
+        == mallard_infrastructure::storage_providers::feishu::provider_key())
+    .then(|| stored.provider_config.clone());
     let removed_id = storage_id.clone();
     let storage_id = storage_id.clone();
     let (_, committed) = repository
@@ -948,6 +923,11 @@ pub fn remove_storage(
             ConfigTransactionError::Persistence(_) => StorageSetupError::persistence(),
         })?;
     ConfiguredObjectStore::forget(&removed_id);
+    // The sign-in this computer kept for the storage goes with it; the
+    // folder in Feishu is untouched.
+    if let Some(config) = removed_connection {
+        mallard_infrastructure::storage_providers::feishu::forget_connection(&config);
+    }
     Ok(committed.revision)
 }
 
@@ -972,8 +952,8 @@ pub fn verify_storage(
         .map_err(|_| storage_unavailable())?;
     adapter
         .validate_config(&storage.provider_config)
-        .map_err(|error| StorageSetupError::from_adapter(error, None))?;
-    probe_journaled(repository, adapter, runtime, storage, None)?;
+        .map_err(StorageSetupError::from_adapter)?;
+    probe(adapter, runtime, storage)?;
     Ok(VerifyStorageResult {
         storage_id: storage.id.clone(),
         config_revision: config.revision,
@@ -1088,12 +1068,12 @@ pub fn prepare_storage_draft_in_operation(
         .map_err(|_| storage_unavailable())?;
     let settings = adapter
         .validate_settings(&prepared.settings)
-        .map_err(|error| StorageSetupError::from_adapter(error, None))?;
+        .map_err(StorageSetupError::from_adapter)?;
     let provider_config =
         StorageProviderConfig::new(operation.config_version, settings, prepared.secrets);
     adapter
         .validate_config(&provider_config)
-        .map_err(|error| StorageSetupError::from_adapter(error, None))?;
+        .map_err(StorageSetupError::from_adapter)?;
 
     let mut draft = load_storage_setup_draft_for_operation(repository, &operation.draft_id)?;
     validate_storage_setup_draft_target(&draft, operation.expected_revision, &operation.name)?;
@@ -1252,180 +1232,46 @@ fn ensure_destination_available(
     Ok(())
 }
 
-/// Reconcile interrupted probes for the candidate destination, journal one
-/// fresh probe, and verify the candidate configuration remotely. When the
-/// candidate replaces a stored configuration at the same destination, try
-/// the stored credentials first for old journals and the candidate credentials
-/// second, without persisting either.
-fn probe_journaled(
-    repository: &LocalStateRepository,
+/// Verify the candidate configuration remotely. Nothing is recorded
+/// locally: an adapter that writes names its probe object itself and
+/// removes it best effort.
+fn probe(
     adapter: &dyn StorageProviderAdapter,
     runtime: &Handle,
     pending: &StorageConfig,
-    stored: Option<&StorageConfig>,
 ) -> Result<(), StorageSetupError> {
-    let journal = StorageSetupJournalStore::new(repository);
-    let facts = adapter
-        .journal_facts(&pending.provider_config)
-        .map_err(|_| StorageSetupError::persistence())?;
-    let mut candidates: Vec<&StorageProviderConfig> = Vec::new();
-    if let Some(stored) = stored {
-        if stored.provider == pending.provider {
-            if let Ok(stored_facts) = adapter.journal_facts(&stored.provider_config) {
-                if stored_facts != facts {
-                    reconcile_journaled_probes(
-                        &journal,
-                        adapter,
-                        runtime,
-                        &stored.provider,
-                        &stored_facts,
-                        &[&stored.provider_config],
-                    )?;
-                }
-                candidates.push(&stored.provider_config);
-            }
-        }
-    }
-    candidates.push(&pending.provider_config);
-    reconcile_journaled_probes(
-        &journal,
-        adapter,
-        runtime,
-        &pending.provider,
-        &facts,
-        &candidates,
-    )?;
-
-    let (setup_id, mut entry) = start_probe_journal(
-        &journal,
-        &pending.provider,
-        pending.provider_config.version,
-        facts,
-    )?;
-    let result = adapter
-        .probe(
-            &pending.provider_config,
-            setup_id.as_str(),
-            runtime,
-            &mut mallard_infrastructure::storage_setup_journal::ProbeJournal {
-                store: &journal,
-                entry: &mut entry,
-            },
-        )
-        .map_err(|error| StorageSetupError::from_adapter(error, Some(setup_id.as_str())));
-    let result = finish_probe_journal(&journal, &mut entry, result);
-    if result.is_ok() {
-        // The probe proved the connection with a fresh transport; a shared
-        // store that recorded a rejection for this storage starts over.
-        ConfiguredObjectStore::forget(&pending.id);
-    }
-    result
-}
-
-fn start_probe_journal(
-    journal: &StorageSetupJournalStore,
-    provider: &StorageProviderKey,
-    config_version: u32,
-    facts: BoundedConfigObject,
-) -> Result<(StorageSetupId, StorageSetupJournalEntry), StorageSetupError> {
-    let setup_id = StorageSetupId::parse(
-        generated_named_id(STORAGE_SETUP_ID_PREFIX)
-            .map_err(|_| StorageSetupError::persistence())?,
-    )
-    .map_err(|_| StorageSetupError::persistence())?;
-    let timestamp = unix_timestamp();
-    let entry = StorageSetupJournalEntry {
-        schema: STORAGE_SETUP_JOURNAL_SCHEMA,
-        setup_id: setup_id.clone(),
-        provider: provider.clone(),
-        config_version,
-        stage: StorageSetupStage::ProbeRunning,
-        error_code: None,
-        created_at: timestamp,
-        updated_at: timestamp,
-        facts,
-        recovery: BoundedConfigObject::empty(),
-    };
-    journal
-        .save(&entry)
-        .map_err(|_| StorageSetupError::persistence())?;
-    Ok((setup_id, entry))
-}
-
-fn finish_probe_journal<T>(
-    journal: &StorageSetupJournalStore,
-    entry: &mut StorageSetupJournalEntry,
-    result: Result<T, StorageSetupError>,
-) -> Result<T, StorageSetupError> {
-    match result {
-        Ok(value) => {
-            journal
-                .remove(&entry.setup_id)
-                .map_err(|_| StorageSetupError::persistence())?;
-            Ok(value)
-        }
-        Err(error) if error.kind() == StorageSetupErrorKind::CleanupRequired => {
-            entry.stage = StorageSetupStage::CleanupRequired;
-            entry.error_code = Some(error.code().to_string());
-            entry.updated_at = entry.updated_at.saturating_add(1);
-            let _ = journal.save(entry);
-            Err(StorageSetupError::cleanup_required(
-                error.code(),
-                &error.message,
-                entry.setup_id.as_str(),
-            ))
-        }
-        Err(error) => {
-            journal
-                .remove(&entry.setup_id)
-                .map_err(|_| StorageSetupError::persistence())?;
-            Err(error)
-        }
-    }
-}
-
-fn reconcile_journaled_probes(
-    journal: &StorageSetupJournalStore,
-    adapter: &dyn StorageProviderAdapter,
-    runtime: &Handle,
-    provider: &StorageProviderKey,
-    facts: &BoundedConfigObject,
-    candidates: &[&StorageProviderConfig],
-) -> Result<(), StorageSetupError> {
-    let entries = journal
-        .find_matching(provider, facts)
-        .map_err(|_| StorageSetupError::persistence())?;
-    for mut entry in entries {
-        let setup_id = entry.setup_id.clone();
-        let reconciled = candidates.iter().any(|config| {
-            adapter
-                .reconcile_probe(
-                    config,
-                    setup_id.as_str(),
-                    runtime,
-                    &mut mallard_infrastructure::storage_setup_journal::ProbeJournal {
-                        store: journal,
-                        entry: &mut entry,
-                    },
-                )
-                .is_ok()
-        });
-        if !reconciled {
-            entry.stage = StorageSetupStage::CleanupRequired;
-            entry.error_code = Some("probe_cleanup_failed".to_string());
-            entry.updated_at = entry.updated_at.saturating_add(1);
-            let _ = journal.save(&entry);
-            return Err(StorageSetupError::cleanup_required(
-                "storage_probe_cleanup_required",
-                "Remote cleanup of an earlier interrupted storage probe is required",
-                entry.setup_id.as_str(),
-            ));
-        }
-        journal
-            .remove(&entry.setup_id)
-            .map_err(|_| StorageSetupError::persistence())?;
-    }
+    adapter
+        .probe(&pending.provider_config, runtime)
+        .map_err(StorageSetupError::from_adapter)?;
+    // The probe proved the connection with a fresh transport; a shared
+    // store that recorded a rejection for this storage starts over.
+    ConfiguredObjectStore::forget(&pending.id);
     Ok(())
+}
+
+/// The name a draft opens with, numbered among the provider's open drafts.
+fn placeholder_name(stem: &str, open_drafts: usize) -> String {
+    format!("{stem} draft {}", open_drafts + 1)
+}
+
+/// Whether `name` is still the placeholder a draft opened with.
+fn is_placeholder_name(name: &str, stem: &str) -> bool {
+    name.strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix(" draft "))
+        .is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// `name`, or the first of `name 2`, `name 3`, … that is not `taken`.
+fn unique_storage_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2u32..)
+        .map(|number| format!("{name} {number}"))
+        .find(|candidate| !taken(candidate))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn validate_name(name: &str) -> Result<(), StorageSetupError> {
@@ -1816,7 +1662,131 @@ mod tests {
     }
 
     #[test]
-    fn test_and_commit_probe_journal_and_commit_under_snapshot_checks() {
+    fn a_new_draft_opens_under_a_placeholder_numbered_among_its_provider_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = repository(&temp);
+        let registry = StorageProviderRegistry::with_test_provider();
+        let first = create_storage_setup_draft(&repository, &registry, &test_key()).unwrap();
+        assert_eq!(first.name, "Test storage draft 1");
+        let second = create_storage_setup_draft(&repository, &registry, &test_key()).unwrap();
+        assert_eq!(second.name, "Test storage draft 2");
+        // Another provider counts its own drafts.
+        let local = create_storage_setup_draft(
+            &repository,
+            &registry,
+            &mallard_infrastructure::storage_providers::local::provider_key(),
+        )
+        .unwrap();
+        assert_eq!(local.name, "Local storage draft 1");
+        assert!(is_placeholder_name("Test storage draft 12", "Test storage"));
+        for name in [
+            "Test storage",
+            "Test storage draft",
+            "Test storage draft x",
+            "myconfstorage",
+        ] {
+            assert!(!is_placeholder_name(name, "Test storage"), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_committed_name_is_unique_and_a_placeholder_falls_back_to_the_stem() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = repository(&temp);
+        let registry = StorageProviderRegistry::with_test_provider();
+        let runtime = runtime();
+        let commit = |name: Option<&str>, folder: &str| -> String {
+            let store_dir = temp.path().join(folder);
+            std::fs::create_dir_all(&store_dir).unwrap();
+            let draft = create_storage_setup_draft(&repository, &registry, &test_key()).unwrap();
+            let draft = update_storage_setup_draft(
+                &repository,
+                &registry,
+                UpdateStorageSetupDraftRequest {
+                    draft_id: draft.draft_id.clone(),
+                    revision: draft.revision,
+                    name: name.map(str::to_string).unwrap_or(draft.name),
+                    settings: test_settings(&store_dir),
+                    secrets: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            let committed = commit_storage_setup_draft(
+                &repository,
+                &registry,
+                runtime.handle(),
+                &draft.draft_id,
+                draft.revision,
+                |_| Ok(()),
+            )
+            .unwrap();
+            repository
+                .load_config()
+                .unwrap()
+                .storages
+                .into_iter()
+                .find(|storage| storage.id == committed.storage_id)
+                .unwrap()
+                .name
+        };
+        assert_eq!(
+            commit(Some("myconfstorage"), "a/myconfstorage"),
+            "myconfstorage"
+        );
+        assert_eq!(
+            commit(Some("myconfstorage"), "b/myconfstorage"),
+            "myconfstorage 2"
+        );
+        assert_eq!(
+            commit(Some("myconfstorage"), "c/myconfstorage"),
+            "myconfstorage 3"
+        );
+        // A draft committed under its placeholder takes the stem, then a number.
+        assert_eq!(commit(None, "d"), "Test storage");
+        assert_eq!(commit(None, "e"), "Test storage 2");
+    }
+
+    #[test]
+    fn rename_takes_the_next_free_number_for_a_duplicate() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = repository(&temp);
+        let first = StorageId::parse("storage-first").unwrap();
+        let second = StorageId::parse("storage-second").unwrap();
+        repository
+            .mutate_config(|config| {
+                config.storages.push(local_storage_config(
+                    first.clone(),
+                    "Backups",
+                    &temp.path().join("first"),
+                ));
+                config.storages.push(local_storage_config(
+                    second.clone(),
+                    "Other",
+                    &temp.path().join("second"),
+                ));
+                Ok(())
+            })
+            .unwrap();
+        let revision = repository.load_config().unwrap().revision;
+        rename_storage(&repository, &second, "Backups", revision).unwrap();
+        let names = || -> Vec<String> {
+            repository
+                .load_config()
+                .unwrap()
+                .storages
+                .iter()
+                .map(|storage| storage.name.clone())
+                .collect()
+        };
+        assert_eq!(names(), ["Backups", "Backups 2"]);
+        // A storage's own name is never a collision with itself.
+        let revision = repository.load_config().unwrap().revision;
+        rename_storage(&repository, &first, "Backups", revision).unwrap();
+        assert_eq!(names(), ["Backups", "Backups 2"]);
+    }
+
+    #[test]
+    fn test_and_commit_probe_and_commit_under_snapshot_checks() {
         let temp = tempfile::tempdir().unwrap();
         let repository = repository(&temp);
         let registry = StorageProviderRegistry::with_test_provider();
@@ -1836,8 +1806,8 @@ mod tests {
         )
         .unwrap();
 
-        // The folder does not exist yet: the adapter's probe fails remotely,
-        // nothing is committed, and no journal residue remains.
+        // The folder does not exist yet: the adapter's probe fails remotely
+        // and nothing is committed.
         let failed = test_storage_setup_draft(
             &repository,
             &registry,
@@ -1848,10 +1818,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(failed.kind(), StorageSetupErrorKind::RemoteFailure);
         assert_eq!(failed.code(), "teststore_unreachable");
-        assert!(StorageSetupJournalStore::new(&repository)
-            .list()
-            .unwrap()
-            .is_empty());
         assert!(repository.load_config().unwrap().storages.is_empty());
 
         std::fs::create_dir_all(&store_dir).unwrap();
@@ -2635,10 +2601,6 @@ mod dropbox_tests {
         )
         .unwrap_err();
         assert_eq!(moved.code(), "storage_settings_locked");
-        assert!(StorageSetupJournalStore::new(&repository)
-            .list()
-            .unwrap()
-            .is_empty());
         assert_eq!(server.probe_file_count(), 0);
     }
 

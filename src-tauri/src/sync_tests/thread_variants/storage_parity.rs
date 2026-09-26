@@ -724,3 +724,372 @@ async fn stub_s3_claims_the_parent_and_reports_an_unfinished_push() {
         "the first version's, the planted one, and the refused one"
     );
 }
+
+/// Mallard Cloud is the R2 store's twin: the same protocol, the same
+/// requests in the same order, and the session views beside the objects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_cloud_noop_fast_forward_views_and_stale_writer_match_local_protocol() {
+    use mallard_infrastructure::managed_cloud::client::ManagedCloudClient;
+    use mallard_infrastructure::managed_cloud::stub::StubManagedCloud;
+    use mallard_infrastructure::managed_cloud::ManagedObjectStore;
+
+    let stub = StubManagedCloud::start().await;
+    let (_, token) = stub.state.lock().unwrap().add_user("octocat");
+    let client = ManagedCloudClient::new(
+        &stub.endpoint,
+        Some(mallard_domain::SecretValue::parse(&token).unwrap()),
+    )
+    .unwrap();
+    let store = ManagedObjectStore::new(client, tokio::runtime::Handle::current());
+    let world = VariantWorld::new();
+    let origin_a = world.origin(&world.repo_a, "replica-a");
+    let origin_b = world.origin(&world.repo_b, "replica-b");
+    let t1_id = CloudThreadId::parse("cloudthread-v1").unwrap();
+    let thread = ThreadSpec::new(
+        t1_id.as_str(),
+        "source-thread",
+        chain("source-thread", &[("m-a", "one")]),
+        origin_a.clone(),
+        10,
+    );
+    let storage_id = mallard_domain::StorageId::parse("managed-variant-store").unwrap();
+    let open = |store: ManagedObjectStore, storage_id: mallard_domain::StorageId| {
+        BundleEngine::open(store, storage_id).unwrap()
+    };
+
+    let initial_request = publish_request(
+        world.bundle_id.clone(),
+        std::slice::from_ref(&thread),
+        origin_a.clone(),
+        10,
+        None,
+        PublishExpectation::Absent,
+    );
+    let initial = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        move || publish_with_head(&engine, initial_request).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(initial.published);
+    let repository_id = stub
+        .state
+        .lock()
+        .unwrap()
+        .repository_for_bundle(world.bundle_id.as_str())
+        .unwrap()
+        .id
+        .clone();
+
+    // A replica that captured the same content publishes nothing: one
+    // listing proves the compared publication is still selected.
+    let noop_request = publish_request(
+        world.bundle_id.clone(),
+        std::slice::from_ref(&thread),
+        origin_b.clone(),
+        20,
+        Some(&initial.snapshot.manifest),
+        PublishExpectation::Match(
+            Box::new(initial.snapshot.clone()),
+            initial.head_token.clone(),
+        ),
+    );
+    stub.clear_log();
+    let noop = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        move || publish_with_head(&engine, noop_request).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!noop.published);
+    assert_eq!(noop.snapshot.head.revision, 1);
+    assert!(stub
+        .requests()
+        .iter()
+        .all(|request| request.method == "GET"));
+
+    let mut advanced = thread.clone();
+    advanced.transcript = chain("source-thread", &[("m-a", "one"), ("m-b", "continued")]);
+    advanced.updated_at = 30;
+    let advance_request = publish_request(
+        world.bundle_id.clone(),
+        std::slice::from_ref(&advanced),
+        origin_a.clone(),
+        30,
+        Some(&noop.snapshot.manifest),
+        PublishExpectation::Match(Box::new(noop.snapshot.clone()), noop.head_token.clone()),
+    );
+    stub.clear_log();
+    let after_a = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        move || publish_with_head(&engine, advance_request).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(after_a.published);
+    assert_eq!(after_a.snapshot.head.revision, 2);
+    // The push: the object, then its view, then the manifest, then
+    // listing, claim, record, listing, and nothing else. What follows is
+    // the harness reading the head back through a store without a
+    // process cache.
+    let lines = stub.request_lines();
+    let shape = lines
+        .iter()
+        .take(7)
+        .map(|line| {
+            let (verb, rest) = line.split_once(' ').unwrap();
+            let class = [
+                "/_objects/",
+                "/_views/",
+                "/_manifests/",
+                "/_claims/",
+                "/_commits/",
+            ]
+            .into_iter()
+            .find(|class| rest.contains(class))
+            .unwrap_or("?");
+            if rest.contains("/store?prefix=") {
+                format!("{verb} listing")
+            } else {
+                format!("{verb} {class}")
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        vec![
+            "PUT /_objects/",
+            "PUT /_views/",
+            "PUT /_manifests/",
+            "GET listing",
+            "PUT /_claims/",
+            "PUT /_commits/",
+            "GET listing",
+        ],
+        "{lines:?}"
+    );
+
+    // A writer using the old apply observation lists a child under its
+    // parent and stops before its record.
+    let mut stale = thread;
+    stale.transcript = chain("source-thread", &[("m-a", "one"), ("m-c", "stale")]);
+    stale.updated_at = 31;
+    let stale_request = publish_request(
+        world.bundle_id.clone(),
+        &[stale],
+        origin_b,
+        31,
+        Some(&noop.snapshot.manifest),
+        PublishExpectation::Match(Box::new(noop.snapshot.clone()), noop.head_token),
+    );
+    let stale_error = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        move || engine.publish(stale_request).unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert_eq!(stale_error, REMOTE_CHANGED);
+
+    let snapshot = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        let bundle_id = world.bundle_id.clone();
+        move || {
+            let snapshot = engine.inspect(&bundle_id).unwrap();
+            assert_snapshot_consistent(&engine, &snapshot);
+            snapshot
+        }
+    })
+    .await
+    .unwrap();
+    snapshot.validate().unwrap();
+
+    // The prefix holds the layout every storage has, plus a view per
+    // pushed transcript; the index follows.
+    let t1_path = codex_scope(&after_a.snapshot.manifest).conversations[&t1_id].files[0]
+        .logical_path
+        .clone();
+    let transcript_sha = codex_scope(&after_a.snapshot.manifest).files[&t1_path]
+        .sha256
+        .clone();
+    let state = stub.state.lock().unwrap();
+    let repository = &state.repositories[&repository_id];
+    let bundle = world.bundle_id.as_str();
+    assert!(repository.objects.contains_key(".mallard/_storage.json"));
+    assert!(repository.objects.contains_key(&format!(
+        ".mallard/v1/repositories/{bundle}/_objects/{transcript_sha}"
+    )));
+    assert!(repository.objects.contains_key(&format!(
+        ".mallard/v1/repositories/{bundle}/_views/1-{transcript_sha}.json"
+    )));
+    assert_eq!(
+        repository
+            .keys_under(&format!(".mallard/v1/repositories/_commits/{bundle}"))
+            .len(),
+        2
+    );
+    assert_eq!(
+        repository
+            .keys_under(&format!(".mallard/v1/repositories/_claims/{bundle}"))
+            .len(),
+        2
+    );
+    assert_eq!(repository.private_revision, 2);
+    assert_eq!(repository.head().unwrap().manifest_revision, 2);
+    assert!(!repository
+        .objects
+        .keys()
+        .any(|key| key.ends_with("/_head.json") || key.contains("/_tags/")));
+}
+
+/// The same sequence against a running Worker: a local `wrangler dev` or
+/// staging. Ignored by default; run it with the origin and a desktop token
+/// of a signed-in account, and it proves the desktop store and the service
+/// agree on the wire (`STORE_API.md`), on a bundle it mints for the run:
+///
+/// ```sh
+/// MALLARD_LIVE_CLOUD_ORIGIN=http://localhost:8787 MALLARD_LIVE_CLOUD_TOKEN=… \
+///   cargo test --manifest-path src-tauri/Cargo.toml --lib managed_cloud_live_gateway -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a running Mallard Cloud Worker and a desktop token"]
+async fn managed_cloud_live_gateway_round_trip() {
+    use mallard_infrastructure::managed_cloud::client::ManagedCloudClient;
+    use mallard_infrastructure::managed_cloud::ManagedObjectStore;
+    use mallard_infrastructure::storage_core::publication::{list_stream, RecordStream};
+
+    let origin = std::env::var("MALLARD_LIVE_CLOUD_ORIGIN").expect("MALLARD_LIVE_CLOUD_ORIGIN");
+    let token = std::env::var("MALLARD_LIVE_CLOUD_TOKEN").expect("MALLARD_LIVE_CLOUD_TOKEN");
+    let client = ManagedCloudClient::new(
+        &origin,
+        Some(mallard_domain::SecretValue::parse(&token).unwrap()),
+    )
+    .unwrap();
+    let account = client.me().await.expect("the token signs in");
+    let store = ManagedObjectStore::new(client, tokio::runtime::Handle::current());
+    let mut world = VariantWorld::new();
+    // A bundle of this run alone, so the account's repository list may hold
+    // earlier runs.
+    world.bundle_id = mallard_domain::BundleId::parse(
+        mallard_domain::sha256_hex(format!("live-{}", mallard_domain::now_secs()).as_bytes())[..32]
+            .to_string(),
+    )
+    .unwrap();
+    let origin_a = world.origin(&world.repo_a, "replica-a");
+    let origin_b = world.origin(&world.repo_b, "replica-b");
+    let thread = ThreadSpec::new(
+        "cloudthread-live",
+        "source-thread",
+        chain("source-thread", &[("m-a", "one")]),
+        origin_a.clone(),
+        10,
+    );
+    let storage_id = mallard_domain::StorageId::parse("managed-live-store").unwrap();
+    let open = |store: ManagedObjectStore, storage_id: mallard_domain::StorageId| {
+        BundleEngine::open(store, storage_id).unwrap()
+    };
+
+    let initial = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        let request = publish_request(
+            world.bundle_id.clone(),
+            std::slice::from_ref(&thread),
+            origin_a.clone(),
+            10,
+            None,
+            PublishExpectation::Absent,
+        );
+        move || publish_with_head(&engine, request).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(initial.published);
+    eprintln!(
+        "signed in as {}; bundle {} published at revision {}",
+        account.user.github_login, world.bundle_id, initial.snapshot.head.revision
+    );
+
+    let noop = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        let request = publish_request(
+            world.bundle_id.clone(),
+            std::slice::from_ref(&thread),
+            origin_b.clone(),
+            20,
+            Some(&initial.snapshot.manifest),
+            PublishExpectation::Match(
+                Box::new(initial.snapshot.clone()),
+                initial.head_token.clone(),
+            ),
+        );
+        move || publish_with_head(&engine, request).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!noop.published);
+
+    let mut advanced = thread.clone();
+    advanced.transcript = chain("source-thread", &[("m-a", "one"), ("m-b", "continued")]);
+    advanced.updated_at = 30;
+    let after_a = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        let request = publish_request(
+            world.bundle_id.clone(),
+            std::slice::from_ref(&advanced),
+            origin_a.clone(),
+            30,
+            Some(&noop.snapshot.manifest),
+            PublishExpectation::Match(Box::new(noop.snapshot.clone()), noop.head_token.clone()),
+        );
+        move || publish_with_head(&engine, request).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(after_a.snapshot.head.revision, 2);
+
+    // A writer on the old observation stops before its record.
+    let mut stale = thread;
+    stale.transcript = chain("source-thread", &[("m-a", "one"), ("m-c", "stale")]);
+    stale.updated_at = 31;
+    let stale_error = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        let request = publish_request(
+            world.bundle_id.clone(),
+            &[stale],
+            origin_b,
+            31,
+            Some(&noop.snapshot.manifest),
+            PublishExpectation::Match(Box::new(noop.snapshot.clone()), noop.head_token),
+        );
+        move || engine.publish(request).unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert_eq!(stale_error, REMOTE_CHANGED);
+
+    // The stream holds two records, both listed by the service; the
+    // snapshot reads back whole; the repository is listed for discovery.
+    let (listed, snapshot, discovered) = tokio::task::spawn_blocking({
+        let engine = open(store.clone(), storage_id.clone());
+        let bundle_id = world.bundle_id.clone();
+        move || {
+            let stream = RecordStream::project(&bundle_id).unwrap();
+            let listed = list_stream(engine.store(), &stream).unwrap();
+            let snapshot = engine.inspect(&bundle_id).unwrap();
+            assert_snapshot_consistent(&engine, &snapshot);
+            let discovered = engine
+                .store()
+                .list_project_repositories()
+                .unwrap()
+                .into_iter()
+                .filter(|repository| repository.bundle_id.as_deref() == Some(bundle_id.as_str()))
+                .count();
+            (listed, snapshot, discovered)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(listed.mainline().names().len(), 2);
+    assert_eq!(snapshot.head.revision, 2);
+    assert_eq!(discovered, 1);
+    eprintln!("live round trip complete: two records, revision 2 selected, one repository listed");
+}

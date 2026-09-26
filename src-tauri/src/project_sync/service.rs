@@ -354,6 +354,7 @@ impl<'a> ProjectSyncService<'a> {
         branch: Option<&str>,
         before_time: Option<u64>,
         window_days: Option<u64>,
+        review: bool,
     ) -> Result<ProjectActivity, String> {
         get_project_activity_with_repository(
             self.repository,
@@ -362,6 +363,7 @@ impl<'a> ProjectSyncService<'a> {
             branch,
             before_time,
             window_days,
+            review,
         )
     }
 
@@ -1361,6 +1363,7 @@ fn build_activity_from_local_read(
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
+    review: bool,
     mut warnings: Vec<String>,
 ) -> Result<ProjectActivity, String> {
     let local_sessions = project_activity::scan_local_session_views(
@@ -1384,6 +1387,7 @@ fn build_activity_from_local_read(
         branch,
         before_time,
         window_days,
+        review,
         warnings,
     )
 }
@@ -1395,6 +1399,7 @@ pub(super) fn get_project_activity_with_repository(
     branch: Option<&str>,
     before_time: Option<u64>,
     window_days: Option<u64>,
+    review: bool,
 ) -> Result<ProjectActivity, String> {
     let state = repository.load_project_activity_state_snapshot()?;
     let local = load_project_local_read_from_state(repository.root(), &state, local_project_id)?;
@@ -1424,6 +1429,7 @@ pub(super) fn get_project_activity_with_repository(
         branch,
         before_time,
         window_days,
+        review,
         warnings,
     )
 }
@@ -1434,9 +1440,11 @@ pub(super) fn get_project_activity_with_repository(
 pub enum ProjectActivityRefreshEvent {
     Activity {
         activity: ProjectActivity,
+        storage_pending: bool,
     },
     ActivityError {
         message: String,
+        storage_pending: bool,
     },
     Comparison {
         comparison: ThreadSyncComparison,
@@ -1455,6 +1463,7 @@ pub(super) fn refresh_project_activity_with_progress(
     storage_id: &StorageId,
     branch: Option<&str>,
     window_days: Option<u64>,
+    review: bool,
     on_event: &mut dyn FnMut(ProjectActivityRefreshEvent) -> Result<(), String>,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<(), String> {
@@ -1463,28 +1472,36 @@ pub(super) fn refresh_project_activity_with_progress(
     let state = repository.load_project_activity_state_snapshot()?;
     let local = load_project_local_read_from_state(repository.root(), &state, local_project_id)?;
     on_phase("load binding and discover local state", started.elapsed());
-    let mut send_activity = |snapshot: Option<&BundleSnapshot>, warnings: Vec<String>| {
-        match build_activity_from_local_read(
-            repository,
-            &state,
-            &local,
-            snapshot,
-            branch,
-            None,
-            window_days,
-            warnings,
-        ) {
-            Ok(activity) => on_event(ProjectActivityRefreshEvent::Activity { activity }),
-            Err(message) => on_event(ProjectActivityRefreshEvent::ActivityError { message }),
-        }
-    };
-    send_activity(None, Vec::new())?;
+    let mut send_activity =
+        |snapshot: Option<&BundleSnapshot>, warnings: Vec<String>, storage_pending: bool| {
+            match build_activity_from_local_read(
+                repository,
+                &state,
+                &local,
+                snapshot,
+                branch,
+                None,
+                window_days,
+                review,
+                warnings,
+            ) {
+                Ok(activity) => on_event(ProjectActivityRefreshEvent::Activity {
+                    activity,
+                    storage_pending,
+                }),
+                Err(message) => on_event(ProjectActivityRefreshEvent::ActivityError {
+                    message,
+                    storage_pending,
+                }),
+            }
+        };
+    send_activity(None, Vec::new(), true)?;
     let started = Instant::now();
     let remote = load_project_remote_read(repository, local_project_id, storage_id);
     on_phase("inspect remote head", started.elapsed());
     match remote {
         Ok(remote) => {
-            send_activity(remote.current.as_ref(), Vec::new())?;
+            send_activity(remote.current.as_ref(), Vec::new(), false)?;
             match build_comparison_from_reads(
                 repository,
                 local_project_id,
@@ -1511,6 +1528,7 @@ pub(super) fn refresh_project_activity_with_progress(
                     "remote sessions are unavailable from '{}': {}",
                     storage_id, message
                 )],
+                false,
             )?;
             on_event(ProjectActivityRefreshEvent::ComparisonError {
                 managed_cloud_status: cloud_status_for(&state.config, local_project_id, storage_id),
@@ -3195,23 +3213,29 @@ fn list_bundle_snapshots_with_engine(
     engine: &StorageEngine,
 ) -> Result<Vec<BundleSnapshotSummary>, String> {
     let fetched_at = now_secs();
-    let mut snapshots = engine
-        .list_remote_bundles()?
-        .into_iter()
-        .map(|bundle| BundleSnapshotSummary {
-            storage_id: engine.storage_id().clone(),
-            bundle_id: bundle.bundle_id,
-            display_name: bundle.display_name,
-            kind: bundle.kind,
-            revision: bundle.revision,
-            updated_at: bundle.updated_at,
-            resource_count: bundle.resources as usize,
-            registration_only: bundle.registration_only,
-            providers: bundle.providers,
-            repository_fingerprint: bundle.repository_fingerprint,
-            fetched_at,
-        })
-        .collect::<Vec<_>>();
+    let mut snapshots = match engine.store().managed_cloud() {
+        // Mallard Cloud lists one repository at a time: discovery reads the
+        // account's repository list, whose rows carry each head's indexed
+        // summary (plan decision 10). Display only.
+        Some(cloud) => managed_cloud_bundle_snapshots(engine.storage_id(), cloud, fetched_at)?,
+        None => engine
+            .list_remote_bundles()?
+            .into_iter()
+            .map(|bundle| BundleSnapshotSummary {
+                storage_id: engine.storage_id().clone(),
+                bundle_id: bundle.bundle_id,
+                display_name: bundle.display_name,
+                kind: bundle.kind,
+                revision: bundle.revision,
+                updated_at: bundle.updated_at,
+                resource_count: bundle.resources as usize,
+                registration_only: bundle.registration_only,
+                providers: bundle.providers,
+                repository_fingerprint: bundle.repository_fingerprint,
+                fetched_at,
+            })
+            .collect::<Vec<_>>(),
+    };
     snapshots.sort_by(|left, right| {
         right
             .updated_at
@@ -3219,6 +3243,47 @@ fn list_bundle_snapshots_with_engine(
             .then_with(|| left.bundle_id.cmp(&right.bundle_id))
     });
     Ok(snapshots)
+}
+
+/// One discovery row per project repository the account belongs to whose
+/// index holds a private head. A row's facts are the head's record facts as
+/// the service indexed them.
+fn managed_cloud_bundle_snapshots(
+    storage_id: &StorageId,
+    cloud: &mallard_infrastructure::managed_cloud::ManagedObjectStore,
+    fetched_at: u64,
+) -> Result<Vec<BundleSnapshotSummary>, String> {
+    let mut rows = Vec::new();
+    for repository in cloud.list_project_repositories()? {
+        let (Some(bundle_id), Some(head), Some(summary)) = (
+            repository.bundle_id.as_deref(),
+            repository.private_head.as_ref(),
+            repository.private_summary.as_ref(),
+        ) else {
+            continue;
+        };
+        let Ok(bundle_id) = BundleId::parse(bundle_id.to_string()) else {
+            continue;
+        };
+        rows.push(BundleSnapshotSummary {
+            storage_id: storage_id.clone(),
+            bundle_id,
+            display_name: summary.display_name.clone(),
+            kind: BundleKind::Project,
+            revision: head.revision,
+            updated_at: head.updated_at,
+            resource_count: summary.resources as usize,
+            registration_only: summary.registration_only,
+            providers: summary
+                .providers
+                .iter()
+                .filter_map(|provider| ProviderKey::parse(provider.clone()).ok())
+                .collect(),
+            repository_fingerprint: repository.repository_fingerprint.clone(),
+            fetched_at,
+        });
+    }
+    Ok(rows)
 }
 
 /// Publish the registration claim that makes a just-linked bundle discoverable
@@ -15116,6 +15181,264 @@ pub struct CreateSetupDraftResult {
     pub resumed: bool,
 }
 
+/// What setup would make of one folder, answered without writing anything:
+/// the verdict the Folder field shows while a path is typed.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectFolderProbe {
+    /// Not an absolute path free of `.` and `..` parts.
+    Invalid { message: String },
+    /// Nothing exists at the path.
+    Missing,
+    /// Something is there but cannot be resolved, such as a folder that
+    /// cannot be read.
+    Unreadable { message: String },
+    /// A file; `parent` is the folder that holds it.
+    NotADirectory { parent: Option<String> },
+    /// The folder is Mallard's own data folder or lies inside it, or, with
+    /// `contains`, holds it.
+    MallardData { contains: bool },
+    /// A folder setup accepts.
+    Folder {
+        canonical_path: String,
+        is_git_repository: bool,
+        /// The draft already started for this folder: setting up resumes it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_draft_id: Option<SetupDraftId>,
+        /// Projects already bound to this folder. Another can still be set
+        /// up here with a different agent profile.
+        existing_project_ids: Vec<LocalProjectId>,
+    },
+}
+
+/// One folder recent sessions ran in, and what choosing it would do.
+#[derive(Serialize, Clone, Debug)]
+pub struct AgentFolder {
+    /// The folder as the sessions recorded it.
+    pub path: String,
+    pub providers: Vec<ProviderKey>,
+    /// Unix seconds of the newest session file that named the folder.
+    pub last_active: u64,
+    /// The Folder field's verdict, except that Git is read from a `.git`
+    /// entry on the folder or above it instead of by running Git per row.
+    pub probe: ProjectFolderProbe,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct AgentFolderList {
+    pub folders: Vec<AgentFolder>,
+}
+
+/// The most folders the list offers, newest first.
+const MAX_AGENT_FOLDERS: usize = 50;
+
+/// A folder setup refuses: the field's verdict, and the sentence
+/// `create_setup_draft` returns for it.
+struct ProjectFolderRefusal {
+    probe: ProjectFolderProbe,
+    message: String,
+}
+
+/// The checks every way into setup makes before a folder is used, in the
+/// order `create_setup_draft` has always made them.
+fn resolve_project_folder(
+    repository: &LocalStateRepository,
+    project_root: &str,
+) -> Result<PathBuf, ProjectFolderRefusal> {
+    if let Err(message) = validate_absolute_clean_path("project root", project_root) {
+        return Err(ProjectFolderRefusal {
+            probe: ProjectFolderProbe::Invalid {
+                message: message.clone(),
+            },
+            message,
+        });
+    }
+    let canonical = match fs::canonicalize(project_root) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            let probe = if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) {
+                ProjectFolderProbe::Missing
+            } else {
+                ProjectFolderProbe::Unreadable {
+                    message: error.to_string(),
+                }
+            };
+            return Err(ProjectFolderRefusal {
+                probe,
+                message: format!("resolve '{}': {}", project_root, error),
+            });
+        }
+    };
+    if !canonical.is_dir() {
+        return Err(ProjectFolderRefusal {
+            probe: ProjectFolderProbe::NotADirectory {
+                parent: canonical
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().into_owned()),
+            },
+            message: format!("project root '{}' is not a directory", project_root),
+        });
+    }
+    let repository_root =
+        prospective_canonical(repository.root()).map_err(|message| ProjectFolderRefusal {
+            probe: ProjectFolderProbe::Unreadable {
+                message: message.clone(),
+            },
+            message,
+        })?;
+    if paths_overlap(&canonical, &repository_root) {
+        return Err(ProjectFolderRefusal {
+            probe: ProjectFolderProbe::MallardData {
+                contains: canonical != repository_root && repository_root.starts_with(&canonical),
+            },
+            message: "project root overlaps Mallard application data".to_string(),
+        });
+    }
+    Ok(canonical)
+}
+
+/// What each folder already is on this machine, loaded once: the draft
+/// started there and the projects bound to it.
+struct ProjectFolderIndex {
+    drafts: Vec<(String, SetupDraftId)>,
+    bindings: Vec<(String, LocalProjectId)>,
+}
+
+impl ProjectFolderIndex {
+    fn load(
+        repository: &LocalStateRepository,
+        machine: &MachineProjectState,
+    ) -> Result<Self, String> {
+        let (drafts, _) = repository.list_setup_drafts()?;
+        Ok(Self {
+            drafts: drafts
+                .into_iter()
+                .map(|draft| (draft.canonical_project_root, draft.draft_id))
+                .collect(),
+            bindings: machine
+                .bindings
+                .iter()
+                .filter(|binding| binding.state == BindingState::Active)
+                .map(|binding| {
+                    (
+                        binding.canonical_project_root.to_lowercase(),
+                        binding.local_project_id.clone(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Drafts match the canonical folder exactly, as `create_setup_draft`
+    /// resumes them; bindings match it case-insensitively, as setup reserves
+    /// their profiles.
+    fn folder(&self, canonical: &Path, is_git_repository: bool) -> ProjectFolderProbe {
+        let canonical_path = canonical.to_string_lossy().into_owned();
+        let folded = canonical_path.to_lowercase();
+        let existing_project_ids: BTreeSet<LocalProjectId> = self
+            .bindings
+            .iter()
+            .filter(|(root, _)| *root == folded)
+            .map(|(_, project_id)| project_id.clone())
+            .collect();
+        ProjectFolderProbe::Folder {
+            existing_draft_id: self
+                .drafts
+                .iter()
+                .find(|(root, _)| *root == canonical_path)
+                .map(|(_, draft_id)| draft_id.clone()),
+            existing_project_ids: existing_project_ids.into_iter().collect(),
+            canonical_path,
+            is_git_repository,
+        }
+    }
+}
+
+pub(super) fn probe_project_folder_with_repository(
+    repository: &LocalStateRepository,
+    project_root: &str,
+) -> Result<ProjectFolderProbe, String> {
+    let canonical = match resolve_project_folder(repository, project_root) {
+        Ok(canonical) => canonical,
+        Err(refusal) => return Ok(refusal.probe),
+    };
+    let machine = repository.load_bindings()?;
+    let index = ProjectFolderIndex::load(repository, &machine)?;
+    Ok(index.folder(&canonical, project_activity::is_git_work_tree(&canonical)))
+}
+
+/// The folders the newest sessions of every registered profile ran in, each
+/// with the verdict choosing it would get. Each provider bounds its own read
+/// (`SessionAdapter::recent_session_homes`); a profile that cannot be read
+/// adds nothing.
+pub(super) fn list_agent_folders_with_repository(
+    repository: &LocalStateRepository,
+) -> Result<AgentFolderList, String> {
+    let machine = repository.load_bindings()?;
+    let mut sightings: BTreeMap<PathBuf, (BTreeSet<ProviderKey>, u64)> = BTreeMap::new();
+    for profile in &machine.profiles {
+        let Some(adapter) = provider_registry().get(&profile.provider) else {
+            continue;
+        };
+        let Ok(homes) = adapter.recent_session_homes(Path::new(&profile.path)) else {
+            continue;
+        };
+        for sighting in homes {
+            let (providers, last_active) = sightings.entry(sighting.home).or_default();
+            providers.insert(profile.provider.clone());
+            *last_active = (*last_active).max(sighting.last_active);
+        }
+    }
+    let index = ProjectFolderIndex::load(repository, &machine)?;
+    // Two recorded spellings of one folder (a link and its target) are one
+    // row, keyed by where they resolve.
+    let mut folders: BTreeMap<String, AgentFolder> = BTreeMap::new();
+    for (home, (providers, last_active)) in sightings {
+        let recorded = home.to_string_lossy().into_owned();
+        let probe = match resolve_project_folder(repository, &recorded) {
+            Ok(canonical) => index.folder(&canonical, has_git_entry(&canonical)),
+            Err(refusal) => refusal.probe,
+        };
+        let key = match &probe {
+            ProjectFolderProbe::Folder { canonical_path, .. } => canonical_path.clone(),
+            _ => recorded.clone(),
+        };
+        let folder = folders.entry(key).or_insert_with(|| AgentFolder {
+            path: recorded,
+            providers: Vec::new(),
+            last_active: 0,
+            probe,
+        });
+        for provider in providers {
+            if !folder.providers.contains(&provider) {
+                folder.providers.push(provider);
+            }
+        }
+        folder.providers.sort();
+        folder.last_active = folder.last_active.max(last_active);
+    }
+    let mut folders: Vec<AgentFolder> = folders.into_values().collect();
+    folders.sort_by(|left, right| {
+        right
+            .last_active
+            .cmp(&left.last_active)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    folders.truncate(MAX_AGENT_FOLDERS);
+    Ok(AgentFolderList { folders })
+}
+
+/// Whether a `.git` entry sits on the folder or above it: the list's cheap
+/// stand-in for `git rev-parse`, which the typed probe still runs.
+fn has_git_entry(folder: &Path) -> bool {
+    folder
+        .ancestors()
+        .any(|ancestor| fs::symlink_metadata(ancestor.join(".git")).is_ok())
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct SetupSectionStatus {
     pub section: String,
@@ -15201,18 +15524,8 @@ pub(super) fn create_setup_draft_with_repository(
     repository: &LocalStateRepository,
     project_root: &str,
 ) -> Result<CreateSetupDraftResult, String> {
-    validate_absolute_clean_path("project root", project_root)?;
-    let canonical = fs_canonicalize(Path::new(project_root))?;
-    if !canonical.is_dir() {
-        return Err(format!(
-            "project root '{}' is not a directory",
-            project_root
-        ));
-    }
-    let repository_root = prospective_canonical(repository.root())?;
-    if paths_overlap(&canonical, &repository_root) {
-        return Err("project root overlaps Mallard application data".to_string());
-    }
+    let canonical =
+        resolve_project_folder(repository, project_root).map_err(|refusal| refusal.message)?;
     let canonical_text = canonical.to_string_lossy().into_owned();
     let (existing, _) = repository.list_setup_drafts()?;
     if let Some(found) = existing
@@ -16948,7 +17261,20 @@ mod tests {
     }
 
     fn repository(temp: &tempfile::TempDir) -> LocalStateRepository {
-        LocalStateRepository::from_home_dir(temp.path()).unwrap()
+        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        // These sync fixtures exercise redacted exports with owned children.
+        // Set that mode explicitly; fresh-install defaults are tested separately.
+        mallard_infrastructure::app_settings::save_app_settings(
+            &repository,
+            &AppSettings {
+                credential_redaction_enabled: true,
+                push_codex_children: true,
+                push_claude_children: true,
+                ..AppSettings::default()
+            },
+        )
+        .unwrap();
+        repository
     }
 
     /// Readiness fixture for tests that already hold a binding.
@@ -19075,6 +19401,7 @@ mod tests {
             None,
             Some(1),
             Some(90),
+            false,
         )
         .unwrap();
         assert_eq!(activity.sessions.len(), 1, "{:?}", activity.sessions);
@@ -23457,7 +23784,8 @@ mod tests {
             &project.local_project_id,
             &storage_id,
             None,
-            Some(3650),
+            Some(30),
+            true,
             &mut |event| {
                 if matches!(event, ProjectActivityRefreshEvent::Activity { .. })
                     && events.len() == 1
@@ -23472,11 +23800,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(events.len(), 3);
-        let ProjectActivityRefreshEvent::Activity { activity: local } = &events[0] else {
+        let ProjectActivityRefreshEvent::Activity {
+            activity: local,
+            storage_pending: true,
+        } = &events[0]
+        else {
             panic!("local rows first")
         };
         assert_eq!(local.sessions.len(), 1);
-        let ProjectActivityRefreshEvent::Activity { activity: remote } = &events[1] else {
+        let ProjectActivityRefreshEvent::Activity {
+            activity: remote,
+            storage_pending: false,
+        } = &events[1]
+        else {
             panic!("remote rows second")
         };
         let ProjectActivityRefreshEvent::Comparison { comparison } = &events[2] else {
@@ -23496,7 +23832,8 @@ mod tests {
             &project.local_project_id,
             &storage_id,
             None,
-            Some(3650),
+            Some(30),
+            true,
             &mut |event| {
                 if events.is_empty() {
                     assert!(matches!(
@@ -23515,11 +23852,90 @@ mod tests {
             &events[2],
             ProjectActivityRefreshEvent::ComparisonError { .. }
         ));
-        let ProjectActivityRefreshEvent::Activity { activity } = &events[1] else {
+        let ProjectActivityRefreshEvent::Activity {
+            activity,
+            storage_pending: false,
+        } = &events[1]
+        else {
             panic!("local rows retained")
         };
         assert_eq!(activity.sessions.len(), 1);
         assert!(!activity.warnings.is_empty());
+    }
+
+    #[test]
+    fn review_activity_keeps_sessions_beyond_the_browse_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("review-history-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let root = temp.path().join("project");
+        let home = temp.path().join("codex-home");
+        bind_and_link_test_replica(&repo, &project, &storage_id, &root, &home);
+        write_codex_session(&home, "019f7500-0000-7000-8000-0000000000ab", &root);
+        // July fixture, January window: review must not inherit the 90-day cap.
+        let window_end = 1_800_000_000;
+        for review in [false, true] {
+            let activity = get_project_activity_with_repository(
+                &repo,
+                &project.local_project_id,
+                Some(&storage_id),
+                None,
+                Some(window_end),
+                Some(30),
+                review,
+            )
+            .unwrap();
+            assert_eq!(activity.sessions.len(), usize::from(review));
+        }
+        let state = repo.load_project_activity_state_snapshot().unwrap();
+        let local =
+            load_project_local_read_from_state(&repo.root(), &state, &project.local_project_id)
+                .unwrap();
+        let remote = [1, 60, 120].map(|days| project_activity::RemoteSessionRecord {
+            provider: codex_key(),
+            thread_id: CloudThreadId::parse(format!("cloudthread-age-{days}")).unwrap(),
+            source_thread_id: None,
+            display_title: Some(format!("Cloud session {days}")),
+            preserved: None,
+            presentation: mallard_domain::SessionPresentation {
+                started_at: Some(window_end - days * 86_400 - 60),
+                ended_at: Some(window_end - days * 86_400),
+                metrics: mallard_domain::SessionMetrics {
+                    user_rounds: 3,
+                    agent_messages: 4,
+                    tool_calls: 5,
+                    complete: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        });
+        for (review, expected) in [(false, 1), (true, 3)] {
+            let activity = project_activity::build_project_activity(
+                provider_registry(),
+                &local.activity_project,
+                &state.conversation_bindings,
+                &state.materializations,
+                &state.config,
+                Vec::new(),
+                remote.to_vec(),
+                None,
+                Some(window_end),
+                Some(30),
+                review,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(activity.sessions.len(), expected);
+            assert!(activity
+                .sessions
+                .iter()
+                .all(|session| session.user_round_count == 3
+                    && session.agent_message_count == 4
+                    && session.tool_call_count == 5));
+        }
     }
 
     #[test]
@@ -23550,6 +23966,7 @@ mod tests {
             None,
             Some(1_784_764_800),
             Some(30),
+            false,
         )
         .unwrap();
         let comparison = get_project_thread_sync_comparison_with_repository(
@@ -23709,6 +24126,7 @@ mod tests {
                 Some(branch),
                 Some(1_790_000_000),
                 Some(90),
+                false,
             )
             .unwrap()
         };
@@ -23829,6 +24247,7 @@ mod tests {
             None,
             Some(1_784_764_800),
             Some(30),
+            false,
         )
         .unwrap();
         assert_eq!(activity.sessions.len(), 1);
@@ -26363,6 +26782,7 @@ mod tests {
             None,
             Some(1),
             Some(1),
+            false,
         )
         .unwrap();
         assert_eq!(activity.sessions.len(), 1);
@@ -31150,6 +31570,283 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    /// The Folder field's verdict is `create_setup_draft`'s own checks, and
+    /// asking for it writes nothing: no draft and no profile appear.
+    #[test]
+    fn project_folder_probe_answers_setup_refusals_without_writing() {
+        let fixture = setup_fixture();
+        fixture.repo.load_config().unwrap();
+        let temp = fixture._temp.path();
+        let canonical_project = fs::canonicalize(&fixture.project_dir).unwrap();
+        let readme = fixture.project_dir.join("README.md");
+        fs::write(&readme, "notes").unwrap();
+        let profiles_before = fixture.repo.load_bindings().unwrap().profiles.len();
+        let probe = |path: &Path| {
+            probe_project_folder_with_repository(&fixture.repo, &path.to_string_lossy()).unwrap()
+        };
+
+        assert!(matches!(
+            probe_project_folder_with_repository(&fixture.repo, "work/app").unwrap(),
+            ProjectFolderProbe::Invalid { .. }
+        ));
+        assert!(matches!(
+            probe(&fixture.project_dir.join("../app")),
+            ProjectFolderProbe::Invalid { .. }
+        ));
+        assert_eq!(probe(&temp.join("work/gone")), ProjectFolderProbe::Missing);
+        assert_eq!(probe(&readme.join("inner")), ProjectFolderProbe::Missing);
+        assert_eq!(
+            probe(&readme),
+            ProjectFolderProbe::NotADirectory {
+                parent: Some(canonical_project.to_string_lossy().into_owned()),
+            }
+        );
+        assert_eq!(
+            probe(&temp.join("home")),
+            ProjectFolderProbe::MallardData { contains: true }
+        );
+        assert_eq!(
+            probe(fixture.repo.root()),
+            ProjectFolderProbe::MallardData { contains: false }
+        );
+        let expected_folder = ProjectFolderProbe::Folder {
+            canonical_path: canonical_project.to_string_lossy().into_owned(),
+            is_git_repository: false,
+            existing_draft_id: None,
+            existing_project_ids: Vec::new(),
+        };
+        assert_eq!(probe(&fixture.project_dir), expected_folder);
+        #[cfg(unix)]
+        {
+            let link = temp.join("app-link");
+            std::os::unix::fs::symlink(&fixture.project_dir, &link).unwrap();
+            assert_eq!(probe(&link), expected_folder);
+        }
+        assert!(fixture.repo.list_setup_drafts().unwrap().0.is_empty());
+        assert_eq!(
+            fixture.repo.load_bindings().unwrap().profiles.len(),
+            profiles_before
+        );
+
+        // Setup refuses with the sentences it always has.
+        let refused = |path: &Path| {
+            create_setup_draft_with_repository(&fixture.repo, &path.to_string_lossy()).unwrap_err()
+        };
+        assert!(refused(&readme).contains("is not a directory"));
+        assert!(refused(&temp.join("home")).contains("overlaps Mallard application data"));
+        assert!(refused(&temp.join("work/gone")).starts_with("resolve '"));
+
+        naming_test_git(&fixture.project_dir, &["init", "--initial-branch=main"]);
+        let created = create_setup_draft_with_repository(
+            &fixture.repo,
+            &fixture.project_dir.to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(
+            probe(&fixture.project_dir),
+            ProjectFolderProbe::Folder {
+                canonical_path: canonical_project.to_string_lossy().into_owned(),
+                is_git_repository: true,
+                existing_draft_id: Some(created.draft.draft_id),
+                existing_project_ids: Vec::new(),
+            }
+        );
+    }
+
+    /// The exact wire shape `src/types.ts` reads: a `kind` tag in snake case,
+    /// ids as plain strings, and no draft id when there is none.
+    #[test]
+    fn project_folder_probe_serializes_the_shape_the_frontend_reads() {
+        use serde_json::json;
+        let wire = |probe: ProjectFolderProbe| serde_json::to_value(probe).unwrap();
+        assert_eq!(
+            wire(ProjectFolderProbe::Invalid {
+                message: "bad".into()
+            }),
+            json!({ "kind": "invalid", "message": "bad" })
+        );
+        assert_eq!(
+            wire(ProjectFolderProbe::Missing),
+            json!({ "kind": "missing" })
+        );
+        assert_eq!(
+            wire(ProjectFolderProbe::Unreadable {
+                message: "denied".into()
+            }),
+            json!({ "kind": "unreadable", "message": "denied" })
+        );
+        assert_eq!(
+            wire(ProjectFolderProbe::NotADirectory {
+                parent: Some("/work".into())
+            }),
+            json!({ "kind": "not_a_directory", "parent": "/work" })
+        );
+        assert_eq!(
+            wire(ProjectFolderProbe::MallardData { contains: true }),
+            json!({ "kind": "mallard_data", "contains": true })
+        );
+        assert_eq!(
+            wire(ProjectFolderProbe::Folder {
+                canonical_path: "/work/app".into(),
+                is_git_repository: true,
+                existing_draft_id: None,
+                existing_project_ids: Vec::new(),
+            }),
+            json!({
+                "kind": "folder",
+                "canonical_path": "/work/app",
+                "is_git_repository": true,
+                "existing_project_ids": [],
+            })
+        );
+        let folder = AgentFolder {
+            path: "/work/app".into(),
+            providers: vec![codex_key()],
+            last_active: 7,
+            probe: ProjectFolderProbe::Folder {
+                canonical_path: "/work/app".into(),
+                is_git_repository: false,
+                existing_draft_id: Some(SetupDraftId::parse("draft-app").unwrap()),
+                existing_project_ids: vec![LocalProjectId::parse("project-app").unwrap()],
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(AgentFolderList {
+                folders: vec![folder]
+            })
+            .unwrap(),
+            json!({ "folders": [{
+                "path": "/work/app",
+                "providers": ["codex"],
+                "last_active": 7,
+                "probe": {
+                    "kind": "folder",
+                    "canonical_path": "/work/app",
+                    "is_git_repository": false,
+                    "existing_draft_id": "draft-app",
+                    "existing_project_ids": ["project-app"],
+                },
+            }]})
+        );
+    }
+
+    #[test]
+    fn project_folder_probe_names_the_projects_bound_to_a_folder() {
+        let fixture = setup_fixture();
+        let draft = draft_ready_to_finalize(&fixture);
+        let detail =
+            finalize_project_setup_with_repository(&fixture.repo, &draft.draft_id, draft.revision)
+                .unwrap();
+        let probe = probe_project_folder_with_repository(
+            &fixture.repo,
+            &fixture.project_dir.to_string_lossy(),
+        )
+        .unwrap();
+        let ProjectFolderProbe::Folder {
+            existing_draft_id,
+            existing_project_ids,
+            ..
+        } = probe
+        else {
+            panic!("a bound folder is still a folder setup accepts: {probe:?}");
+        };
+        assert_eq!(existing_draft_id, None);
+        assert_eq!(existing_project_ids, vec![detail.project.local_project_id]);
+    }
+
+    /// The suggestions come from each registered profile's newest sessions,
+    /// one row per folder with every agent that ran there, each carrying the
+    /// verdict choosing it would get.
+    #[test]
+    fn agent_folders_list_where_registered_profiles_ran() {
+        let fixture = setup_fixture();
+        let temp = fixture._temp.path();
+        let canonical_project = fs::canonicalize(&fixture.project_dir).unwrap();
+        let gone = temp.join("work/gone");
+        let rollouts = fixture.codex_home.join("sessions/2026/09/25");
+        fs::create_dir_all(&rollouts).unwrap();
+        let rollout = |name: &str, payload: serde_json::Value| {
+            let record = serde_json::json!({ "type": "session_meta", "payload": payload });
+            fs::write(rollouts.join(name), format!("{record}\n")).unwrap();
+        };
+        rollout(
+            "rollout-app.jsonl",
+            serde_json::json!({ "id": "app", "cwd": fixture.project_dir }),
+        );
+        rollout(
+            "rollout-gone.jsonl",
+            serde_json::json!({ "id": "gone", "cwd": gone }),
+        );
+        rollout(
+            "rollout-child.jsonl",
+            serde_json::json!({
+                "id": "child",
+                "cwd": temp.join("work/child-only"),
+                "thread_source": "subagent",
+            }),
+        );
+        let claude_home = temp.join("claude-profile/.claude");
+        for (bucket, cwd) in [
+            ("app", fixture.project_dir.clone()),
+            ("home", temp.join("home")),
+        ] {
+            let directory = claude_home.join("projects").join(bucket);
+            fs::create_dir_all(&directory).unwrap();
+            let lines = [
+                serde_json::json!({ "type": "summary", "summary": "Earlier" }),
+                serde_json::json!({ "type": "user", "sessionId": bucket, "cwd": cwd }),
+            ];
+            fs::write(
+                directory.join(format!("{bucket}.jsonl")),
+                lines.map(|line| format!("{line}\n")).concat(),
+            )
+            .unwrap();
+        }
+        let claude = ProviderKey::parse("claude").unwrap();
+        create_provider_profile_with_repository(
+            &fixture.repo,
+            &codex_key(),
+            "Codex",
+            &fixture.codex_home.to_string_lossy(),
+        )
+        .unwrap();
+        create_provider_profile_with_repository(
+            &fixture.repo,
+            &claude,
+            "Claude",
+            &claude_home.to_string_lossy(),
+        )
+        .unwrap();
+
+        let list = list_agent_folders_with_repository(&fixture.repo).unwrap();
+        let row = |path: &Path| {
+            list.folders
+                .iter()
+                .find(|folder| Path::new(&folder.path) == path)
+                .unwrap_or_else(|| panic!("no row for {}", path.display()))
+        };
+        let app = row(&fixture.project_dir);
+        assert_eq!(app.providers, vec![claude.clone(), codex_key()]);
+        assert!(app.last_active > 0);
+        assert_eq!(
+            app.probe,
+            ProjectFolderProbe::Folder {
+                canonical_path: canonical_project.to_string_lossy().into_owned(),
+                is_git_repository: false,
+                existing_draft_id: None,
+                existing_project_ids: Vec::new(),
+            }
+        );
+        assert_eq!(row(&gone).probe, ProjectFolderProbe::Missing);
+        assert_eq!(row(&gone).providers, vec![codex_key()]);
+        assert_eq!(
+            row(&temp.join("home")).probe,
+            ProjectFolderProbe::MallardData { contains: true }
+        );
+        assert_eq!(list.folders.len(), 3, "a subagent's folder is not offered");
+        assert!(fixture.repo.list_setup_drafts().unwrap().0.is_empty());
+    }
+
     #[test]
     fn setup_draft_preselects_every_registry_default() {
         let fixture = setup_fixture();
@@ -31805,6 +32502,7 @@ mod tests {
             None,
             None,
             Some(90),
+            false,
         )
         .unwrap();
         assert!(unchanged_activity
@@ -31870,6 +32568,7 @@ mod tests {
             None,
             None,
             Some(90),
+            false,
         )
         .unwrap();
         assert!(activity.sessions.iter().any(|session| {

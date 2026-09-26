@@ -28,7 +28,7 @@ pub use traits::{
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint,
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscovery,
     SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionFileMetadata,
-    SessionFileSummary, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
+    SessionFileSummary, SessionHomeSighting, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
     SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,

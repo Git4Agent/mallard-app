@@ -16,6 +16,7 @@ import {
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
 import { createActivityRefresh, createSingleFlight } from "../../src/components/project-sync/api";
+import { dismissStorageWarning, clearStorageWarningDismissal } from "../../src/preferences";
 import type {
   ConversationReviewAction,
   ProjectActivityRefreshEvent,
@@ -460,7 +461,7 @@ test("thread status badges use the outlined Default 24px pixel family", () => {
     divergent: {
       light: "#6d529d",
       dark: "#cbb4f3",
-      glyph: "M6 7h3v1h-3ZM7 8h3v1h-3ZM8 9h3v1h-3ZM9 10h3v1h-3ZM15 7h3v1h-3ZM14 8h3v1h-3ZM13 9h3v1h-3ZM12 10h3v1h-3ZM10 11h4v1h-4ZM10 12h4v6h-4Z",
+      glyph: "M6 6h4v4h-4ZM14 6h4v4h-4ZM7 10h2v1h-2ZM15 10h2v1h-2ZM7 11h3v1h-3ZM14 11h3v1h-3ZM8 12h8v1h-8ZM9 13h6v1h-6ZM11 14h2v2h-2ZM10 16h4v3h-4Z",
       filled: true,
     },
     pending: {
@@ -1322,6 +1323,50 @@ test("activity content renders commit and session rows without repeating project
   assert.doesNotMatch(html, /Load chat history|sync-history-chat-details/);
 });
 
+test("a cleared-storage dismissal survives reopening only for the same project, storage, and condition", () => {
+  const values = new Map<string, string>();
+  let refuse = false;
+  const scope = globalThis as { window?: unknown };
+  const originalWindow = scope.window;
+  scope.window = { localStorage: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (refuse) throw new Error("Storage unavailable");
+      values.set(key, value);
+    },
+    removeItem: (key: string) => values.delete(key),
+  } };
+  const comparison = emptyComparison({
+    remote_continuity: { state: "remote_missing", base_revision: 2 },
+  });
+  const render = (currentProject = project, currentComparison = comparison) => renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} project={currentProject} activity={activity} comparison={currentComparison} />,
+  );
+  const condition = JSON.stringify([
+    project.local_project_id, comparison.storage_id, comparison.remote_continuity,
+    "Another computer cleared Local storage 1.",
+  ]);
+  try {
+    assert.match(render(), /Another computer cleared/);
+    assert.equal(dismissStorageWarning(project.local_project_id, comparison.storage_id, condition), true);
+    // Each render mounts a fresh component, as reopening does.
+    assert.doesNotMatch(render(), /Another computer cleared/);
+    assert.match(render({ ...project, local_project_id: "another-project" }), /Another computer cleared/);
+    assert.match(render(project, { ...comparison, storage_id: "another-storage" }), /Another computer cleared/);
+    assert.match(render(project, {
+      ...comparison, remote_continuity: { state: "remote_missing", base_revision: 3 },
+    }), /Another computer cleared/);
+    clearStorageWarningDismissal(project.local_project_id, comparison.storage_id);
+    assert.match(render(), /Another computer cleared/);
+    refuse = true;
+    assert.equal(dismissStorageWarning(project.local_project_id, comparison.storage_id, condition), false);
+    assert.match(render(), /Another computer cleared/);
+  } finally {
+    if (originalWindow === undefined) delete scope.window;
+    else scope.window = originalWindow;
+  }
+});
+
 test("a storage another computer cleared shows one standing note with no unlink and no reset", () => {
   const writable = (scope: string, continuity: ThreadSyncComparison["scopes"][number]["continuity"]) => (
     { scope, access: "bound_ready" as const, continuity }
@@ -1343,11 +1388,13 @@ test("a storage another computer cleared shows one standing note with no unlink 
     scopes: [writable("project", { state: "fresh" }), writable("provider:codex", { state: "fresh" })],
   });
   const openHtml = render(cleared);
-  assert.match(openHtml, /Another computer cleared Local storage 1\. Push again\./);
+  assert.match(openHtml, /Another computer cleared Local storage 1\./);
+  assert.doesNotMatch(openHtml, /Push again\./);
+  assert.match(openHtml, /aria-label="Dismiss: Warning\. Another computer cleared Local storage 1\./);
   // Standing content in the warning tone: a named region, never an alert.
   assert.match(openHtml, /class="notice warning[^"]*" role="region" aria-label="Notes about this project activity"/);
   // The Push review shows the same note above its list.
-  assert.match(render(cleared, "push"), /Another computer cleared Local storage 1\. Push again\./);
+  assert.match(render(cleared, "push"), /Another computer cleared Local storage 1\./);
 
   // Story 2: another computer pushed into an area this computer writes, so a
   // Pull comes first. An area this computer only views never decides that.
@@ -1371,7 +1418,7 @@ test("a storage another computer cleared shows one standing note with no unlink 
       { scope: "provider:claude", provider: "claude", access: "view_only", continuity: { state: "unreviewed", remote_revision: 1 } },
     ],
   });
-  assert.match(render(elsewhere), /Another computer cleared Local storage 1\. Push again\./);
+  assert.match(render(elsewhere), /Another computer cleared Local storage 1\./);
 
   // The Pull review is an ordinary first Pull: no note.
   assert.doesNotMatch(render(recreated, "pull"), /Another computer cleared/);
@@ -2872,7 +2919,7 @@ test("an empty Storages rail prompts the way Projects and Catalog do", () => {
   const empty = storagePane(render([]));
   const tiles = [...empty.matchAll(/class="sidebar-door" title="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(tiles, ["Add Local folder storage", "Add Cloud A storage"]);
-  assert.match(empty, /aria-label="Add Local folder storage"[^]*?data-icon="drive"[^]*?data-icon="plus"/);
+  assert.match(empty, /aria-label="Add Local folder storage"[^]*?data-icon="storage-local"[^]*?data-icon="plus"/);
   assert.match(empty, /aria-label="Add Cloud A storage"[^]*?data-icon="cloud"/);
   assert.doesNotMatch(empty, /Add your first|sync-sidebar-empty/);
   // Before the descriptors arrive, the one tile is the picker itself.
@@ -3301,12 +3348,12 @@ test("activity refresh joins in-flight requests, replays rows, and clears comple
     emit = onEvent;
     await new Promise<void>((resolve) => { finish = resolve; });
   });
-  const request = { localProjectId: "project-a", storageId: "store-a", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const request = { localProjectId: "project-a", storageId: "store-a", branch: null, windowDays: 30, review: false, bindingRevision: 1, refreshEpoch: 0 };
   const first: ProjectActivityRefreshEvent[] = [];
   const second: ProjectActivityRefreshEvent[] = [];
   const pending = refresh(request, (event) => first.push(event));
   await Promise.resolve();
-  const local: ProjectActivityRefreshEvent = { stage: "activity", activity };
+  const local: ProjectActivityRefreshEvent = { stage: "activity", activity, storage_pending: true };
   emit(local);
   const joined = refresh(request, (event) => second.push(event));
   assert.equal(joined, pending);
@@ -3326,18 +3373,19 @@ test("activity refresh joins in-flight requests, replays rows, and clears comple
 test("activity refresh isolates project, storage, and branch requests and clears failures", async () => {
   let starts = 0;
   const refresh = createActivityRefresh(async () => { starts += 1; throw new Error("offline"); });
-  const request = { localProjectId: "project-a", storageId: "store-a", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const request = { localProjectId: "project-a", storageId: "store-a", branch: null, windowDays: 30, review: false, bindingRevision: 1, refreshEpoch: 0 };
   await Promise.all([
     request,
     { ...request, localProjectId: "project-b" },
     { ...request, storageId: "store-b" },
     { ...request, branch: "main" },
+    { ...request, review: true },
     { ...request, bindingRevision: 2 },
     { ...request, refreshEpoch: 1 },
   ].map((input) => assert.rejects(refresh(input, () => {}), /offline/)));
-  assert.equal(starts, 6);
-  await assert.rejects(refresh(request, () => {}), /offline/);
   assert.equal(starts, 7);
+  await assert.rejects(refresh(request, () => {}), /offline/);
+  assert.equal(starts, 8);
 });
 
 
@@ -3417,7 +3465,7 @@ test("a shared comparison replays recovered Cloud status without its earlier err
     emit = onEvent;
     await new Promise<void>((resolve) => { finish = resolve; });
   });
-  const request = { localProjectId: "project-cloud", storageId: "storage-cloud", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const request = { localProjectId: "project-cloud", storageId: "storage-cloud", branch: null, windowDays: 30, review: false, bindingRevision: 1, refreshEpoch: 0 };
   const pending = refresh(request, () => {});
   await Promise.resolve();
   emit({ stage: "comparison_error", message: "Access lost", managed_cloud_status: { repository_id: "repo_fixture", state: "inaccessible", link: null, message: "Access lost" } });
@@ -3436,7 +3484,7 @@ test("a refresh after a release discards older events and keeps the newer refres
   const refresh = createActivityRefresh(async (_request, emit) => {
     await new Promise<void>((finish) => { runs.push({ emit, finish }); });
   });
-  const request = { localProjectId: "cloud-project", storageId: "cloud-storage", branch: null, windowDays: 30, bindingRevision: 1, refreshEpoch: 0 };
+  const request = { localProjectId: "cloud-project", storageId: "cloud-storage", branch: null, windowDays: 30, review: false, bindingRevision: 1, refreshEpoch: 0 };
   const seen: ProjectActivityRefreshEvent[] = [];
   const old = refresh(request, (event) => seen.push(event));
   await Promise.resolve();
@@ -3466,4 +3514,77 @@ test("draft sync labels do not describe unpublished content as local only", () =
   assert.doesNotMatch(sessionSyncPresentation(missing, "Mallard Cloud").label, /Only on this computer/);
   const settingsChanged = { ...synced, push_decision: { action: "publish", selectable: true } } as Parameters<typeof sessionSyncPresentation>[0];
   assert.equal(sessionSyncPresentation(settingsChanged, "Mallard Cloud").status, "local-outstanding");
+});
+
+
+test("cloud loading is announced without a status panel and does not report a final empty list", () => {
+  const empty = { ...activity, sessions: [], unmapped: [], git: { ...activity.git, commits: [] } };
+  const pending = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={empty} storageLoading comparisonLoading />,
+  );
+  assert.match(pending, /role="status"/);
+  assert.match(pending, /Loading cloud sessions…/);
+  assert.doesNotMatch(pending, /0 items|No commits|No sessions|Load earlier/);
+
+  const withLocalRows = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} storageLoading comparisonLoading />,
+  );
+  assert.match(withLocalRows, /Loading cloud sessions…/);
+  assert.match(withLocalRows, /class="sync-visually-hidden" role="status"/);
+  assert.doesNotMatch(withLocalRows, /class="sync-history-state" role="status"/);
+  assert.match(withLocalRows, /Add project-scoped history/);
+
+  const failed = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={empty}
+      comparisonError="Storage unavailable" />,
+  );
+  assert.doesNotMatch(failed, /Loading cloud sessions/);
+  assert.match(failed, /Storage unavailable/);
+});
+
+test("old and recent cloud sessions share full rows in Pull review", () => {
+  const sessions = [1, 60, 120].map((days) => ({
+    ...codexSession,
+    resource_id: `codex:cloud-conversation:cloudthread-${days}`,
+    title: `Cloud session ${days}`,
+    source: "remote_only" as const,
+    provider_session_id: null,
+    transcript_path: null,
+    started_at: activity.window_end - days * 86_400 - 60,
+    ended_at: activity.window_end - days * 86_400,
+    actions: [],
+  }));
+  const entries = sessions.map((session): ThreadSyncEntry => ({
+    provider: "codex", provider_display_name: "Codex", access: "bound_ready",
+    thread_id: session.resource_id, conversation_resource_id: session.resource_id,
+    resource_id: session.resource_id, display_name: session.title,
+    state: "storage_only", local_present: false, storage_present: true,
+    storage_updated_at: activity.window_end,
+    compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+    push_decision: { action: "no_changes", selectable: false },
+    pull_decision: { action: "create_local", selectable: true },
+  }));
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} selectionMode="pull"
+      activity={{ ...activity, sessions, git: { ...activity.git, commits: [] },
+        unmapped: sessions.map((session) => ({ resource_id: session.resource_id, reason: "Storage only" })) }}
+      comparison={emptyComparison({ entries })} activeStorageName="Fixture storage" />,
+  );
+  assert.equal((html.match(/id="storage-only-heading"/g) ?? []).length, 1);
+  assert.equal((html.match(/aria-label="Session details"/g) ?? []).length, 3);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /Sessions without an activity row|sync-history-stored-thread-meta|Load earlier/);
+  for (const session of sessions) {
+    assert.ok(html.includes(new Date(session.ended_at * 1000).toISOString()));
+  }
+});
+
+test("both activity request paths explicitly select review scope", () => {
+  const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  assert.match(page, /getProjectActivity\([\s\S]*?30,\s*selectionMode != null,/);
+  assert.match(page, /refreshProjectActivity\(\{[\s\S]*?review: selectionMode != null,/);
+  assert.match(api, /invoke<void>\("refresh_project_activity", \{[^}]*review,/);
+  assert.doesNotMatch(page, /reviewWindowDays/);
 });

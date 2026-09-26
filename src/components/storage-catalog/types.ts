@@ -229,6 +229,8 @@ export interface CatalogScopePushPlan {
   storage_identity_sha256: string;
   /** Absent when the repository had no head yet. */
   observed_head?: LibraryHeadCoordinate;
+  /** On Mallard Cloud, which holds one item per repository: each stored item's head as the review observed it. */
+  observed_items?: Record<string, LibraryHeadCoordinate>;
   rows: CatalogScopePushRow[];
   warning_digests: string[];
   created_at: number;
@@ -313,7 +315,9 @@ export interface CatalogScopePullPlan {
   storage_id: string;
   repository_id: string;
   storage_identity_sha256: string;
-  head: LibraryHeadCoordinate;
+  /** The reviewed version of the coordinate repository; absent on Mallard Cloud, where `item_heads` carries each item's. */
+  head?: LibraryHeadCoordinate;
+  item_heads?: Record<string, LibraryHeadCoordinate>;
   items: CatalogScopePullItem[];
   created_at: number;
   expires_at: number;

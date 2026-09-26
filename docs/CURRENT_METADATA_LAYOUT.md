@@ -495,7 +495,10 @@ symlinks, special files, and known unsafe content.
 
 ## 5. Portable storage layout
 
-The local-folder and S3/R2 adapters expose the same object keys:
+The local-folder, S3/R2 and Dropbox adapters expose the same object keys, and
+Mallard Cloud holds them under one R2 prefix per repository behind its
+gateway (`PLAN_MANAGED_CLOUD_CAS_FREE.md`); only Mallard Cloud holds
+`_views/`:
 
 ```text
 <storage root or bucket>/
@@ -515,6 +518,8 @@ The local-folder and S3/R2 adapters expose the same object keys:
         |       |   `-- <payload-sha256>
         |       |-- _manifests/
         |       |   `-- <revision>-<commit-id>.json
+        |       |-- _views/                   # Mallard Cloud only: session views
+        |       |   `-- <view-schema>-<transcript-sha256>.json
         |       `-- _uploads/                 # reserved for project bundles
         `-- library/
             `-- <kind-repository-id>/
@@ -700,8 +705,12 @@ File tombstones may carry the last known SHA-256.
 
 ### 5.5 Library resource repository
 
-Each Library repository contains exactly one typed resource and advances
-independently from every other Library resource and project bundle. Its
+A Library repository holds the resources of one coordinate and advances
+independently from every project bundle. On Mallard Cloud, which holds one
+item per repository, each item publishes on its own stream instead, under
+`library-<32 hex>` derived from the coordinate and the resource id
+(`CatalogResourceRepositoryId::for_item`); its tag then also carries the
+`resource_id`, and its manifest holds exactly that one entry. The repository's
 `_tag.json` holds constant bytes derived from the coordinate alone:
 
 ```text

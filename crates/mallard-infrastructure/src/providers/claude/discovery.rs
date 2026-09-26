@@ -3,16 +3,101 @@
 use super::materialization::encode_claude_project_path;
 use crate::provider_capture::{
     canonical_existing_dir, collect_regular_tree_files, inspect_candidate_files,
-    inspect_candidate_files_with_limit, normalized_relative, provider_walk_entry,
-    session_home_is_project_root,
+    inspect_candidate_files_with_limit, modified_secs, normalized_relative, provider_walk_entry,
+    session_home_is_project_root, MAX_METADATA_BYTES, MAX_METADATA_LINES,
 };
 use crate::providers::traits::{
     DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar, DiscoveredStateFile,
-    SessionDiscovery, SessionDiscoveryContext,
+    SessionDiscovery, SessionDiscoveryContext, SessionHomeSighting,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// Bounds on one `recent_session_homes` pass.
+const MAX_RECENT_BUCKETS: usize = 4_096;
+const MAX_RECENT_BUCKET_FILES: usize = 20_000;
+/// Transcripts opened per project directory, newest first, until one names
+/// the folder it ran in.
+const RECENT_HEAD_READS_PER_BUCKET: usize = 3;
+
+/// The folders recent sessions ran in. Claude keeps one directory per
+/// project under `projects/`, so each directory costs a stat per transcript
+/// (for its newest date) and one bounded head read — never a scan of every
+/// transcript. The head names where the session started, which is a hint
+/// here; ownership stays with [`discover`].
+pub(super) fn recent_session_homes(
+    provider_home: &Path,
+) -> Result<Vec<SessionHomeSighting>, String> {
+    let canonical_home = canonical_existing_dir(provider_home, "Claude home")?;
+    let Ok(buckets) = std::fs::read_dir(canonical_home.join("projects")) else {
+        return Ok(Vec::new());
+    };
+    let mut homes: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    for bucket in buckets.take(MAX_RECENT_BUCKETS).flatten() {
+        // `DirEntry` type and metadata never follow a link.
+        if !bucket.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(bucket.path()) else {
+            continue;
+        };
+        let mut transcripts: Vec<(u64, PathBuf)> = files
+            .take(MAX_RECENT_BUCKET_FILES)
+            .flatten()
+            .filter(|file| {
+                file.file_type().is_ok_and(|kind| kind.is_file())
+                    && file.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
+            })
+            .filter_map(|file| {
+                let metadata = file.metadata().ok()?;
+                Some((modified_secs(&metadata), file.path()))
+            })
+            .collect();
+        transcripts.sort_by(|left, right| right.cmp(left));
+        let Some(&(newest, _)) = transcripts.first() else {
+            continue;
+        };
+        let home = transcripts
+            .iter()
+            .take(RECENT_HEAD_READS_PER_BUCKET)
+            .find_map(|(_, path)| first_recorded_cwd(path));
+        if let Some(home) = home {
+            let last_active = homes.entry(home).or_insert(0);
+            *last_active = (*last_active).max(newest);
+        }
+    }
+    Ok(homes
+        .into_iter()
+        .map(|(home, last_active)| SessionHomeSighting { home, last_active })
+        .collect())
+}
+
+/// The first absolute `cwd` a transcript records within the bounded head.
+fn first_recorded_cwd(path: &Path) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Head {
+        cwd: Option<String>,
+    }
+    crate::sync_metrics::record_file_head_read(path);
+    let file = crate::jsonl_tail_io::open_no_follow(path).ok()?;
+    let mut reader = BufReader::new(file.take(MAX_METADATA_BYTES as u64));
+    for _ in 0..MAX_METADATA_LINES {
+        let mut line = Vec::new();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            return None;
+        }
+        let Ok(Head { cwd: Some(cwd) }) = serde_json::from_slice::<Head>(&line) else {
+            continue;
+        };
+        let home = PathBuf::from(&cwd);
+        if home.is_absolute() && cwd.len() <= 4096 && !cwd.chars().any(char::is_control) {
+            return Some(home);
+        }
+    }
+    None
+}
 
 /// Whether a regular file shares its data with another name. Claude writes
 /// shared file-history snapshots as hard links on every platform.
@@ -233,6 +318,83 @@ pub(super) fn discover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One project directory is one folder: dated by its newest transcript,
+    /// named by the first `cwd` in that transcript's head. Nested transcripts
+    /// (subagents) and linked directories are never read.
+    #[test]
+    fn recent_session_homes_reads_one_head_per_project_directory() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join(".claude");
+        let bucket = home.join("projects/-work-app");
+        std::fs::create_dir_all(bucket.join("newest/subagents")).unwrap();
+        let app = temp.path().join("work/app");
+        let write = |name: &str, lines: &[serde_json::Value], age_secs: u64| {
+            let path = bucket.join(name);
+            let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            std::fs::write(&path, body).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+                .unwrap();
+        };
+        write(
+            "older.jsonl",
+            &[serde_json::json!({ "type": "user", "cwd": temp.path().join("work/elsewhere") })],
+            5_000,
+        );
+        write(
+            "newest.jsonl",
+            &[
+                serde_json::json!({ "type": "summary", "summary": "Earlier" }),
+                serde_json::json!({ "type": "user", "cwd": "relative/ignored" }),
+                serde_json::json!({ "type": "user", "cwd": app }),
+            ],
+            60,
+        );
+        std::fs::write(
+            bucket.join("newest/subagents/agent-1.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({ "cwd": temp.path().join("work/child") })
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let elsewhere = temp.path().join("linked-bucket");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(
+                elsewhere.join("linked.jsonl"),
+                format!(
+                    "{}\n",
+                    serde_json::json!({ "cwd": temp.path().join("work/linked") })
+                ),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&elsewhere, home.join("projects/linked")).unwrap();
+        }
+
+        let homes = recent_session_homes(&home).unwrap();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        assert_eq!(homes[0].home, app);
+        let newest = (SystemTime::now() - Duration::from_secs(60))
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(homes[0].last_active.abs_diff(newest) <= 2);
+    }
+
+    #[test]
+    fn recent_session_homes_is_empty_without_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join(".claude");
+        std::fs::create_dir_all(&home).unwrap();
+        assert!(recent_session_homes(&home).unwrap().is_empty());
+    }
 
     #[cfg(unix)]
     #[test]

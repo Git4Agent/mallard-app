@@ -10,7 +10,7 @@ import type {
   StorageProviderDescriptor,
   StorageProviderKey,
 } from "../../types";
-import { iconNameFromHint, type IconName } from "../Icons";
+import { storageIconName, type IconName } from "../Icons";
 
 /** A rename either landed, or failed with something to say, or was superseded
  *  by a host-identity change (`message: null`) and has nothing to report. */
@@ -105,6 +105,17 @@ export function fileKindLabel(name: string): string {
   return FILE_KIND_LABELS[extension] ?? extension.toUpperCase();
 }
 
+/* A scanned file's warning in one word pair, for the row chip on both the
+   Files activity and the Push file review: the chip names the finding. */
+const PROJECT_FILE_WARNING_LABELS: Record<string, string> = {
+  possible_secret: "Possible secret",
+  executable: "Executable",
+};
+
+export function projectFileWarningLabel(code: string): string {
+  return PROJECT_FILE_WARNING_LABELS[code] ?? code.replace(/_/g, " ");
+}
+
 export function inventoryResources(inventory: ResourceInventory | null): InventoryResource[] {
   return inventory?.resources ?? [];
 }
@@ -176,7 +187,7 @@ export function storageDoors(providers: readonly StorageProviderDescriptor[]): S
     if (doors.some((door) => door.key === provider.key)) continue;
     doors.push({
       key: provider.key,
-      icon: iconNameFromHint(provider.icon, "drive"),
+      icon: storageIconName(provider.key, provider.icon),
       label: provider.display_name,
     });
   }
@@ -185,7 +196,8 @@ export function storageDoors(providers: readonly StorageProviderDescriptor[]): S
 
 export function compactProjectPath(path?: string | null): string {
   if (!path) return "Not mapped on this machine";
-  return path.replace(/^\/Users\/[^/]+/, "~");
+  // macOS and Linux homes alike; the Folder field compacts by the real home.
+  return path.replace(/^\/(?:Users|home)\/[^/]+/, "~");
 }
 
 /**

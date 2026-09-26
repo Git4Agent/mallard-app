@@ -339,11 +339,8 @@ pub async fn request_managed_cloud_release(
         .client
         .create_release_request(&target.repository_id, expected_repository_revision)
         .await?;
-    Ok(target
-        .client
-        .repository_head(&target.repository_id)
-        .await?
-        .link)
+    let summary = target.client.get_repository(&target.repository_id).await?;
+    Ok(target.client.link_from_summary(&summary))
 }
 
 #[cfg(test)]
@@ -468,8 +465,9 @@ mod tests {
             .create_repository(&CreateRepository {
                 repository_class: "git_project",
                 name: "Horror Game".into(),
-                bundle_id: "b".repeat(32),
+                bundle_id: Some("b".repeat(32)),
                 repository_fingerprint: Some(fingerprint.clone()),
+                catalog: None,
             })
             .await
             .unwrap();
@@ -514,20 +512,27 @@ mod tests {
         {
             use mallard_infrastructure::managed_cloud::stub::Publication;
             let mut state = stub.state.lock().unwrap();
-            let manifest = bytes::Bytes::from_static(b"{}");
+            let manifest = b"{}";
+            let record_name = format!(
+                "0000000001.commit-{}-{}.root.0000000000700.json",
+                "1".repeat(24),
+                "2".repeat(64)
+            );
             let publication = Publication {
-                commit_id: "commit-1".into(),
-                manifest_sha256: sha256_hex(&manifest),
-                manifest_size: manifest.len() as u64,
-                manifest,
+                record_name: record_name.clone(),
+                commit_id: format!("commit-{}", "1".repeat(24)),
                 manifest_revision: 1,
+                manifest_key: format!("_manifests/1-commit-{}.json", "1".repeat(24)),
+                manifest_sha256: sha256_hex(manifest),
+                manifest_size: manifest.len() as u64,
                 summary: serde_json::json!({"display_name": "Horror-Game", "kind": "project", "revision": 1, "updated_at": 700, "resources": 0, "files": 0, "registration_only": true, "providers": []}),
-                views: Default::default(),
                 created_by: owner.id.clone(),
                 created_at: 700,
+                state: "available".into(),
             };
             let repository = state.repositories.get_mut(&created.id).unwrap();
-            repository.private_head = Some(publication);
+            repository.publications.push(publication);
+            repository.private_head = Some(record_name);
             repository.private_revision = 1;
             state.release(&created.id, Some(github));
         }
@@ -636,8 +641,9 @@ mod tests {
             .create_repository(&CreateRepository {
                 repository_class: "non_git_project",
                 name: "B".into(),
-                bundle_id: "e".repeat(32),
+                bundle_id: Some("e".repeat(32)),
                 repository_fingerprint: None,
+                catalog: None,
             })
             .await
             .unwrap();

@@ -5,7 +5,7 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
@@ -51,6 +51,7 @@ import SettingsPage from "./SettingsPage";
 import { getPreference } from "../../preferences";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import { PUSH_FINISHED } from "../../unfinishedPush";
+import { pushFailureNotice } from "./pushFailureNotice";
 import ProjectBindingEditor, {
   type BindingProfileSelection,
   type ProjectBindingDraft,
@@ -72,6 +73,7 @@ import PushResourceWorkspace, {
   sanitizePushSelection,
 } from "./PushResourceWorkspace";
 import ProjectSetupWorkspace from "./ProjectSetupWorkspace";
+import NewProjectFolderStep from "./NewProjectFolderStep";
 import ProjectSidebar from "./ProjectSidebar";
 import type {
   ActiveProjectSubview,
@@ -101,7 +103,7 @@ import {
   type SyncOutcomeAction,
 } from "./syncOutcome";
 import { projectSyncApi } from "./api";
-import { UpdateProgressDialog, useAppUpdates } from "../AppUpdater";
+import { UpdateCorner, useAppUpdates } from "../AppUpdater";
 
 /** The Settings › Privacy choice, read fresh at the moment a check is due. */
 const readAutoUpdateCheckEnabled = () =>
@@ -348,6 +350,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [hostIdentityStatus, setHostIdentityStatus] = useState<HostIdentityStatus | null>(null);
   const [hostIdentityShellReady, setHostIdentityShellReady] = useState(false);
   const [hostIdentityError, setHostIdentityError] = useState<string | null>(null);
+  /* Counts the shell loads that failed. A refresh never clears the backend or
+     host-identity error before it retries, so a closed message that fails
+     again in the same words would stay closed; the count is its dismissal
+     identity, so every new failure is a new message. */
+  const [shellFailures, setShellFailures] = useState(0);
   const [startupStage, setStartupStage] = useState<StartupStage>("installation");
   const [pendingBundleConnection, setPendingBundleConnection] = useState<PendingBundleConnection | null>(null);
   const [siblingNotice, setSiblingNotice] = useState<SiblingBundleNotice | null>(null);
@@ -401,7 +408,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const [setupDrafts, setSetupDrafts] = useState<SetupDraftSummary[]>([]);
   const [storageSetupDrafts, setStorageSetupDrafts] = useState<StorageSetupDraft[]>([]);
-  const [setupDraftId, setSetupDraftId] = useState<string | null>(null);
+  /* Setup is two views: the folder, before any draft exists, then the
+     draft's page. Every way out clears both at once. */
+  const [setupView, setSetupView] = useState<
+    { kind: "folder" } | { kind: "draft"; draftId: string } | null
+  >(null);
+  const setupDraftId = setupView?.kind === "draft" ? setupView.draftId : null;
+  const choosingProjectFolder = setupView?.kind === "folder";
   const [editingBinding, setEditingBinding] = useState<ProjectBindingDraft | null>(null);
 
   const [restorePlan, setRestorePlan] = useState<PullReview | null>(null);
@@ -750,7 +763,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const activeDraftSummary = setupDraftId
     ? setupDrafts.find((candidate) => candidate.draft_id === setupDraftId) ?? null
     : null;
-  const activeCatalogScope = catalogScopeId && !setupDraftId && !addingCatalogScope && !catalogIndexOpen
+  const activeCatalogScope = catalogScopeId && !setupView && !addingCatalogScope && !catalogIndexOpen
     ? catalogScopes.find((candidate) => candidate.scope.scope_id === catalogScopeId) ?? null
     : null;
   useEffect(() => {
@@ -759,6 +772,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   }, [activeCatalogScope?.scope.scope_id, catalogStorageMenuRequest]);
   const catalogStorages: CatalogStorageOption[] = config.storages.map((storage) => ({
     id: storage.storage_id,
+    provider: storage.provider,
     name: storage.name,
     provider_label: storage.provider_label,
     icon: storage.icon,
@@ -768,6 +782,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // The project workspace names itself in its path bar, so the titlebar stays
   // silent there and speaks only for the screens that carry no trail.
   const workspaceTitle = activeDraftSummary?.display_name
+    ?? (choosingProjectFolder ? "New project" : null)
     ?? (addingCatalogScope ? "Add Catalog resource" : null)
     ?? (activeSummary ? null : "Projects");
   const workspaceIcon = activeDraftSummary
@@ -780,7 +795,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // effect confirms it.
   const showsPathBar = !activeDraftSummary
     && !addingCatalogScope
-    && !setupDraftId
+    && !setupView
     && (!!activeSummary
       || !!activeCatalogScope
       || catalogIndexOpen
@@ -810,7 +825,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setActiveProjectSubview((current) => {
       if (current.kind !== "session_detail") return current;
       const leftProjectWorkspace = current.localProjectId !== activeProjectId
-        || setupDraftId != null
+        || setupView != null
         || addingCatalogScope
         || catalogIndexOpen
         || catalogScopeId != null
@@ -828,7 +843,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     catalogScopeId,
     pendingPush,
     restorePlan,
-    setupDraftId,
+    setupView,
   ]);
   const clearHostScopedWorkflows = useCallback(() => {
     hostWorkflowEpoch.current += 1;
@@ -848,7 +863,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setRestoreError(null);
     setPullApplyPhase("idle");
     setReviewSupportLoading(false);
-    setSetupDraftId(null);
+    setSetupView(null);
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogScopeId(null);
@@ -914,6 +929,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (shellRequest.current !== requestId) return unavailableResult();
       setHostIdentityStatus(null);
       setHostIdentityError(errorMessage(reason));
+      setShellFailures((count) => count + 1);
       setHostIdentityShellReady(false);
       clearHostScopedWorkflows();
       setLoading(false);
@@ -1020,6 +1036,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
     setStartupStage("workspace");
     setBackendError(failures.length > 0 ? failures.join(" · ") : null);
+    if (failures.length > 0) setShellFailures((count) => count + 1);
     let nextHostIdentity: HostIdentityStatus;
     try {
       nextHostIdentity = await projectSyncApi.getHostIdentityStatus();
@@ -1027,6 +1044,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (shellRequest.current !== requestId) return unavailableResult();
       setHostIdentityStatus(null);
       setHostIdentityError(errorMessage(reason));
+      setShellFailures((count) => count + 1);
       setHostIdentityShellReady(false);
       clearHostScopedWorkflows();
       setLoading(false);
@@ -1096,6 +1114,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     cfg = config,
     preferredStorage?: string | null,
     workflowEpoch?: number,
+    checkSiblings = true,
   ) => {
     const requestedWorkflowEpoch = workflowEpoch ?? hostWorkflowEpoch.current;
     if (hostWorkflowEpoch.current !== requestedWorkflowEpoch) return;
@@ -1144,8 +1163,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // Sibling detection (advisory): while this link's bundle has no
       // published content, the storage may hold this repository in another
       // repo. Failures stay silent — the banner is a hint, not evidence.
+      // Link completion skips this check; later selection or refresh runs it.
       let nextSibling: SiblingBundleNotice | null = null;
-      if (storageId) {
+      if (storageId && checkSiblings) {
         try {
           const status = await projectSyncApi.getSiblingBundleStatus(projectId, storageId);
           if (superseded()) return;
@@ -1438,7 +1458,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openStorageWorkspace = async (storageId: string) => {
     if (!(await saveStorageDraftBeforeNavigation())) return;
     closeProjectSubview();
-    setSetupDraftId(null);
+    setSetupView(null);
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogScopeId(null);
@@ -1458,7 +1478,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openStorageIndex = async () => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     setStorageIndexOpen(true);
     setStorageProviderPickerOpen(false);
   };
@@ -1466,7 +1486,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openProjectsIndex = async () => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     projectRequest.current += 1;
     setLoading(false);
     setActiveProjectId(null);
@@ -1478,32 +1498,37 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openCatalogIndex = async () => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     setCatalogIndexOpen(true);
   };
 
   const openSettings = async () => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     setSettingsOpen(true);
   };
 
+  /** Add project opens the setup page at its Folder field. Nothing is
+      written until a folder is chosen there. */
   const beginAddProject = async () => {
-    const workflowEpoch = hostWorkflowEpoch.current;
-    const picked = await open({ directory: true, multiple: false });
-    if (
-      hostWorkflowEpoch.current !== workflowEpoch
-      || typeof picked !== "string"
-      || !picked
-    ) return;
+    setError(null);
     if (!(await closeWorkspaceSettings())) return;
+    setSetupView({ kind: "folder" });
+  };
+
+  /** The folder step's commit: the draft is born here, or resumed. */
+  const chooseProjectFolder = async (projectRoot: string) => {
+    const workflowEpoch = hostWorkflowEpoch.current;
     setBusy(true);
     setError(null);
     try {
-      const created = await projectSyncApi.createSetupDraft(picked);
+      const created = await projectSyncApi.createSetupDraft(projectRoot);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      setSetupDraftId(created.draft.draft_id);
+      // Cancel while the draft was being made keeps the page it went to.
+      setSetupView((current) => (
+        current?.kind === "folder" ? { kind: "draft", draftId: created.draft.draft_id } : current
+      ));
       if (created.resumed) {
         notify(`Resumed setup draft for ${created.draft.display_name}.`);
       }
@@ -1544,7 +1569,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const beginAddCatalogScope = async (choiceKey?: string) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     setCatalogIndexOpen(false);
     setCatalogAddChoiceKey(choiceKey ?? null);
     setAddingCatalogScope(true);
@@ -1553,7 +1578,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openCatalogScope = async (scopeId: string) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     setCatalogIndexOpen(false);
     setCatalogScopeId(scopeId);
   };
@@ -1609,11 +1634,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openSetupDraft = async (draftId: string) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId((current) => current === draftId ? null : draftId);
+    setSetupView((current) => (
+      current?.kind === "draft" && current.draftId === draftId ? null : { kind: "draft", draftId }
+    ));
   };
 
   const closeSetupDraft = async () => {
-    setSetupDraftId(null);
+    setSetupView(null);
     await refreshSetupDrafts();
   };
 
@@ -1630,7 +1657,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       await projectSyncApi.discardSetupDraft(draftId);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (setupDraftId === draftId) setSetupDraftId(null);
+      if (setupDraftId === draftId) setSetupView(null);
       await refreshSetupDrafts(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Draft discarded — no files touched.");
@@ -1672,7 +1699,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     workflowEpoch: number,
   ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     const projectId = detail.project.local_project_id;
     const storageId = detail.links[0]?.storage_id ?? null;
     notify(`${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
@@ -1704,7 +1731,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
     setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
     setActiveProjectId(projectId);
-    await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
+    await loadProjectData(projectId, nextConfig, storageId, workflowEpoch, false);
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     notify("Storage linked.");
   };
@@ -2513,7 +2540,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const connected = await projectSyncApi.connectProjectToRemoteBundle({
+      await projectSyncApi.connectProjectToRemoteBundle({
         local_project_id: projectId,
         storage_id: storageId,
         bundle_id: bundleId,
@@ -2529,15 +2556,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         ...current,
         [projectId]: storageId,
       }));
-      await loadProjectData(projectId, nextConfig, storageId, workflowEpoch);
+      await loadProjectData(projectId, nextConfig, storageId, workflowEpoch, false);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (!connected.binding || connected.binding.state !== "active") {
-        throw new Error("Link saved. Set the project folder and provider profile to continue.");
-      }
-      const failure = await planRestore(storageId, bundleId, connected.binding, projectLabel(connected.project));
-      if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (failure) throw new Error(failure);
       setPendingBundleConnection(null);
+      notify("Storage linked.");
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -2739,7 +2761,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // One way into a project, shared by the sidebar and the path bar's repo crumb.
   const openProject = async (projectId: string) => {
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     if (restorePlan) closePullReview();
     await selectProject(projectId);
   };
@@ -3066,7 +3088,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openNewStorageConfiguration = async () => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupDraftId(null);
+    setSetupView(null);
     setStorageProviderPickerOpen(true);
   };
 
@@ -3081,7 +3103,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       on its storage's page). Every draft comes through this one door. */
   const openStorageDraftForm = (draft: StorageSetupDraft) => {
     closeProjectSubview();
-    setSetupDraftId(null);
+    setSetupView(null);
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogScopeId(null);
@@ -3204,7 +3226,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         selected={pushSelected}
         projectDefaults={pendingPush.projectDefaults}
         busy={busy || projectContentLoading}
-        error={pushError}
         threadComparisonError={pendingPush.threadComparisonError}
         project={pendingPush.project}
         binding={pendingPush.binding}
@@ -3252,7 +3273,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setPushWarningAcknowledgements(new Set());
           void beginProjectRestore(pendingPush.projectId, pendingPush.storageId);
         }}
-        onFinishPush={() => void finishUnfinishedPush()}
       />
     ),
   } : restorePlan && restoreBinding ? {
@@ -3281,6 +3301,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         supportLoading={reviewSupportLoading}
         busy={busy}
         error={restoreError}
+        onDismissError={() => setRestoreError(null)}
         onApply={(selection) => void applyReview(selection)}
         onBack={closePullReview}
         onRefreshPlan={() => void planRestore(
@@ -3313,7 +3334,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               the app failed to start and has to find the changed heading by
               hand. The alert is scoped to the one sentence saying what went
               wrong, not to the page. */}
-          <Notice severity="danger" timing="blocking">{hostIdentityError}</Notice>
+          <Notice severity="danger" timing="blocking" dismissalId={String(shellFailures)}>{hostIdentityError}</Notice>
           <button type="button" className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
             {loading ? "Checking…" : "Retry"}
           </button>
@@ -3334,6 +3355,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       severity: "danger",
       title: "Project-sync backend unavailable.",
       message: backendError,
+      dismissalId: String(shellFailures),
       action: <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>,
     });
   }
@@ -3350,68 +3372,58 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       severity: "danger",
       message: shellError,
       /* Shell-owned failures stay visible on every non-modal screen,
-         including failures from destructive actions. */
-      action: (
-        <>
-          {catalogRemovalErrorTarget?.message === shellError && (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                setCatalogStorageMenuRequest((current) => ({
-                  requestId: (current?.requestId ?? 0) + 1,
-                  scopeId: catalogRemovalErrorTarget.scopeId,
-                }));
-                setCatalogRemovalErrorTarget(null);
-                openCatalogScope(catalogRemovalErrorTarget.scopeId);
-              }}
-              title={`Open ${catalogRemovalErrorTarget.label}`}
-            >
-              Open storage menu
-            </button>
-          )}
-          <button
-            type="button"
-            className="sync-notice-dismiss"
-            onClick={() => {
-              setError(null);
-              setCatalogRemovalErrorTarget(null);
-            }}
-            title="Dismiss"
-            aria-label="Dismiss error"
-          >
-            <Icon name="x" size={12} />
-          </button>
-        </>
-      ),
+         including failures from destructive actions, until closed. */
+      action: catalogRemovalErrorTarget?.message === shellError ? (
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            setCatalogStorageMenuRequest((current) => ({
+              requestId: (current?.requestId ?? 0) + 1,
+              scopeId: catalogRemovalErrorTarget.scopeId,
+            }));
+            setCatalogRemovalErrorTarget(null);
+            openCatalogScope(catalogRemovalErrorTarget.scopeId);
+          }}
+          title={`Open ${catalogRemovalErrorTarget.label}`}
+        >
+          Open storage menu
+        </button>
+      ) : undefined,
+      onDismiss: () => {
+        setError(null);
+        setCatalogRemovalErrorTarget(null);
+      },
     });
   }
-  /* A newer release, a manual check's result, or the receipt of a restart:
-     one item, and it shares the box with whatever else the shell is saying. */
-  if (appUpdates.notice) shellNotices.push(appUpdates.notice);
+  /* The Push review's own failure. It belongs to the review, which clears it
+     on close, but it is drawn here: the review scrolls as one page with its
+     list, and this zone stays under the bar wherever that list was left. */
+  if (pendingPush && pushError) {
+    shellNotices.push(pushFailureNotice(pushError, pendingPush.storage.name, {
+      busy,
+      onFinishPush: () => void finishUnfinishedPush(),
+      onDismiss: () => setPushError(null),
+    }));
+  }
   if (notice) {
     shellNotices.push({
       key: "shell-notice",
       /* "attention" requires user action; "ok" is a successful receipt. */
       severity: notice.tone === "attention" ? "warning" : "success",
       message: notice.message,
-      action: (
-        <button type="button" className="sync-notice-dismiss" onClick={() => setNotice(null)}
-          title="Dismiss" aria-label="Dismiss notification">
-          <Icon name="x" size={12} />
-        </button>
-      ),
+      onDismiss: () => setNotice(null),
     });
   }
-  /* Every rung of this zone is an event. `shellError` reports that what the
-     user just did did not happen. `backendError` looks like standing
+  /* Every rung of this zone is an event. `shellError` and a Push failure
+     report that what the user just did did not happen. `backendError` looks like standing
      content because the startup load writes it, but the same `refresh()` runs
      behind "Reload app data" and the path-bar overflow, so a backend that
      falls over on an explicit refresh would go unannounced if this zone were
      a region — and the shell paints the startup screen until the load
      settles, so even the startup case arrives as a change. A notice is
      advisory. The loudest present event re-times the whole box. */
-  const shellNoticeTiming: NoticeTiming = shellError || backendError
+  const shellNoticeTiming: NoticeTiming = shellError || backendError || (pendingPush && pushError)
     ? { timing: "blocking" }
     : { timing: "progress" };
   /* Keeps `sync-backend-banner` for the shell's own geometry only: the zone is
@@ -3439,12 +3451,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         className="sync-sidebar-toggle"
         onClick={toggleSidebar}
         title={`Toggle sidebar ${sidebarShortcutLabel()}`}
-        aria-label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
+        aria-label={sidebarVisible
+          ? "Hide sidebar"
+          : appUpdates.readyVersion ? `Show sidebar, Mallard ${appUpdates.readyVersion} is ready` : "Show sidebar"}
         aria-controls="project-sidebar"
         aria-expanded={sidebarVisible}
         aria-keyshortcuts="Meta+B Control+B"
       >
         <Icon name={sidebarVisible ? "sidebar-collapse" : "sidebar-expand"} size={15} />
+        {/* The update pill lives in the sidebar; hidden, the toggle carries it. */}
+        {!sidebarVisible && appUpdates.readyVersion && <span className="sync-update-dot" aria-hidden="true" />}
       </button>
 
       <ProjectSidebar
@@ -3463,7 +3479,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           config.links.filter((link) => link.storage_id === storage.storage_id).length,
         ]))}
         storageIssues={storageIssues}
-        activeProjectId={activeProjectId}
+        activeProjectId={choosingProjectFolder ? null : activeProjectId}
         activeStorageId={activeStorageSettingsId}
         catalogScopes={catalogScopes}
         catalogCapabilities={catalogCapabilities}
@@ -3498,6 +3514,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onRemoveCatalogScope={(scopeId) => void removeCatalogScope(scopeId)}
         onOpenStorageIndex={openStorageIndex}
         onOpenSettings={openSettings}
+        versionAction={<UpdateCorner updates={appUpdates} />}
       />
 
       <div
@@ -3592,6 +3609,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         ) : settingsOpen ? (
           <SettingsPage
             appActions={appActions}
+            appUpdates={appUpdates}
             onLogsChanged={() => setLogRefreshEpoch((epoch) => epoch + 1)}
             onDone={() => void closeWorkspaceSettings()}
             doneTarget={activeSummary ? projectLabel(activeSummary) : "Projects"}
@@ -3693,6 +3711,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                   void completeSetup(detail, workflowEpoch)
                 )}
               />
+            ) : choosingProjectFolder ? (
+              <NewProjectFolderStep
+                workflowEpoch={hostWorkflowEpoch.current}
+                isWorkflowCurrent={(workflowEpoch) => (
+                  hostWorkflowEpoch.current === workflowEpoch
+                )}
+                projects={projects}
+                providers={agentProviders}
+                busy={busy}
+                onCancel={() => setSetupView(null)}
+                onChoose={(projectRoot) => void chooseProjectFolder(projectRoot)}
+                onOpenProject={openProject}
+              />
             ) : null}
           />
         )}
@@ -3748,9 +3779,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           onSubmit={(next) => void saveRemap(next)}
         />
       )}
-
-      {appUpdates.progress && <UpdateProgressDialog {...appUpdates.progress} />}
-
     </div>
   );
 }

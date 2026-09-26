@@ -87,10 +87,12 @@ fn open_context(root: &Path, args: &Value) -> Result<Context, String> {
         repository.save_config(config)?;
     }
     let mut settings = mallard_infrastructure::app_settings::AppSettings::default();
+    // The fixture expects redacted bodies and checks storage for credential leaks.
+    settings.credential_redaction_enabled = true;
     if let Some(workers) = args.get("workers").and_then(Value::as_u64) {
         settings.comparison_workers = workers as u32;
     }
-    settings.validate()?;
+    mallard_infrastructure::app_settings::save_app_settings(&repository, &settings)?;
     mallard_infrastructure::app_settings::install_app_settings(&settings);
     let service = ProjectSyncService::new(&repository);
     let existing = repository.load_config()?.projects.into_iter().next();
@@ -313,6 +315,7 @@ fn perform(context: &mut Context, request: &Request) -> Result<Value, String> {
             None,
             None,
             Some(36500),
+            false,
         )?)
         .map_err(|_| "activity serialization".into()),
         "timeline" | "timeline_first_page" => {

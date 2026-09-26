@@ -6,4 +6,5 @@
 
 pub mod storage_setup;
 pub mod dropbox_setup;
+pub mod feishu_setup;
 pub mod managed_cloud_setup;

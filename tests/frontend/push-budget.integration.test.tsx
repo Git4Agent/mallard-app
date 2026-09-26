@@ -10,7 +10,6 @@ import PushResourceWorkspace, {
 import { recipeWithSelection } from "../../src/components/project-sync/model";
 import {
   ProjectChatHistoryContent,
-  reviewWindowDays,
 } from "../../src/components/project-sync/ProjectActivityPage";
 import type {
   InventoryResource,
@@ -201,17 +200,6 @@ test("all eligible sessions stay selectable regardless of age or list position",
   assert.match(html, /<b>118 MB<\/b>/);
 });
 
-test("a review asks for the whole span back to the oldest outstanding session", () => {
-  // No comparison to measure by: ten years, so nothing is left behind a page.
-  assert.equal(reviewWindowDays(null, NOW), 3_650);
-  assert.equal(reviewWindowDays(comparison({ entries: [] }), NOW), 3_650);
-  // Measured: back to the oldest entry plus a day of slack…
-  const hundredDays = entry("old", { local_updated_at: NOW - 100 * 86_400 });
-  assert.equal(reviewWindowDays(comparison({ entries: [fits, hundredDays] }), NOW), 101);
-  // …and never less than the standing page.
-  assert.equal(reviewWindowDays(comparison({ entries: [fits] }), NOW), 30);
-});
-
 function conversationResource(threadEntry: ThreadSyncEntry): InventoryResource {
   return {
     resource_id: threadEntry.resource_id,
@@ -305,7 +293,6 @@ function renderWorkspace(selected: Set<string>, inventory: ProjectContentInvento
       selected={selected}
       projectDefaults={new Set([fits.resource_id])}
       busy={false}
-      error={null}
       threadComparison={comparison()}
       projectContentInventory={inventory}
       projectContentScanned={inventory != null}
@@ -494,7 +481,7 @@ test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () =
 test("Push review shows the selected redaction mode and the Off warning", () => {
   for (const enabled of [true, false]) {
     const html = renderToStaticMarkup(
-      <PushResourceWorkspace credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} error={null} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+      <PushResourceWorkspace credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
     );
     assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
     assert.equal(html.includes("Exported content can include API keys, tokens, and passwords."), !enabled);
@@ -507,7 +494,7 @@ test("current sessions remain selectable for a reviewed mode change", () => {
   const html = renderToStaticMarkup(
     <PushResourceWorkspace credentialRedactionEnabled={false} resources={[conversationResource(changed)]}
       selected={new Set([changed.resource_id])} projectDefaults={new Set([changed.resource_id])}
-      busy={false} error={null} threadComparison={comparison({ entries: [changed] })}
+      busy={false} threadComparison={comparison({ entries: [changed] })}
       onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
   );
   assert.match(html, /1 of 1 selected/);

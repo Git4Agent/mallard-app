@@ -3,7 +3,7 @@ import type { CSSProperties } from "react";
 import type { ProjectFileSyncEligibility } from "../../types";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
-import Notice from "../notice/Notice";
+import Notice, { Acknowledgement, NoticeChip } from "../notice/Notice";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { formatDateTime } from "../../clock";
 import { formatBytes } from "../../format";
@@ -11,6 +11,7 @@ import {
   PROJECT_FILE_CARD_RENDER_LIMIT,
   STORAGE_BLOCKING_STATES,
   fileKindLabel,
+  projectFileWarningLabel,
 } from "./model";
 import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
 
@@ -375,9 +376,7 @@ export default function ProjectFilesReviewPage({
               <span className="sync-history-branch-state history-only">Removes from storage</span>
             )}
             {row.warningCode && (
-              <span className="sync-project-file-warning">
-                <Icon name="alert-triangle" size={13} /> Warning
-              </span>
+              <NoticeChip severity="warning">{projectFileWarningLabel(row.warningCode)}</NoticeChip>
             )}
           </div>
           <div className="sync-history-thread-actions">
@@ -442,24 +441,16 @@ export default function ProjectFilesReviewPage({
           </div>
         </div>
         {row.warningDigest && row.warningCode && onToggleWarning && (
-          <label className="catalog-card-ack">
-            <span className="sync-sync-row-choice">
-              <input
-                type="checkbox"
-                checked={warningAcknowledged}
-                disabled={disabled || !selected}
-                aria-label={`Reviewed: ${warningLead(row.warningCode)} — ${row.relativePath}`}
-                onChange={() => onToggleWarning(row.warningDigest!)}
-              />
-            </span>
-            <Icon name="alert-triangle" size={12} />
-            <span className="catalog-card-ack-copy">
-              <strong>{warningLead(row.warningCode)}</strong> — {row.relativePath}
-            </span>
-            <small className={warningAcknowledged ? "done" : undefined}>
-              {warningAcknowledged ? "Reviewed" : "Mark reviewed"}
-            </small>
-          </label>
+          <Acknowledgement
+            title={warningLead(row.warningCode)}
+            checked={warningAcknowledged}
+            disabled={disabled || !selected}
+            ariaLabel={`Reviewed: ${warningLead(row.warningCode)} — ${row.relativePath}`}
+            verbs={["Mark reviewed", "Reviewed"]}
+            onChange={() => onToggleWarning(row.warningDigest!)}
+          >
+            {`— ${row.relativePath}`}
+          </Acknowledgement>
         )}
         {mode === "push" && STORAGE_BLOCKING_STATES.has(row.state) && onReviewPull && (
           /* Warning, not error: nothing has failed — the push has not run —
@@ -470,7 +461,7 @@ export default function ProjectFilesReviewPage({
           <Notice
             severity="warning"
             timing="inline"
-            className="sync-project-file-conflict"
+            className="sync-project-file-conflict notice-strip"
             action={<button type="button" className="btn btn-ghost" onClick={onReviewPull}>Open Pull review</button>}
           >
             Pull required

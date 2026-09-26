@@ -9,7 +9,7 @@
   of `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md`, without claims. *Implementation
   notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026
-- Scope: the desktop app — both sync engines, the Local, S3/R2 and Dropbox stores, and the Push error copy. Mallard Cloud follows in its own plan (section 14)
+- Scope: the desktop app — both sync engines, the Local, S3/R2 and Dropbox stores, and the Push error copy. Mallard Cloud followed in its own plan (section 14, landed September 23, 2026)
 - Compatibility: clean cutover; no migration, no legacy detection, no legacy execution path
 - Deployment assumption: no deployed user state must be preserved; the owner clears `~/.mallard` and the test storages before acceptance testing
 - Schemas: every schema and layout number stays `1`
@@ -65,7 +65,7 @@ Decisions, all final:
    again. Nothing is reset by hand either. There is no archive UI in this
    release.
 9. **No legacy handling of any kind.**
-10. **Desktop first.** Mallard Cloud is not offered by these builds.
+10. **Desktop first.** Mallard Cloud followed in its own plan (section 14) and is offered again since September 23, 2026.
 11. **Claim, then write.** On a store whose server refuses a write to a key
     that already holds other bytes, in the same request, a Push writes a
     create-only **claim** under its parent's token before it writes its record.
@@ -794,7 +794,7 @@ conditional write left, and only S3/R2 and Dropbox make it.
 | S3/R2 | Delete `compare_and_swap`, the `If-Match` branch and the ambiguous-CAS resolution. `put_record` runs with SDK retries off; the client is built with the SDK default of three attempts today. `list` skips and logs a key it cannot parse. The capability probe loses two stages. `put_claim` is the create-only put `put_immutable` already uses (`If-None-Match: *`), with SDK retries off; on a precondition failure one read tells this attempt's own bytes (mine) from another's (taken, with those bytes) |
 | Dropbox | Delete `compare_and_swap` and the update-by-revision write mode. `put_record` is one `files/upload` request, not a session start plus a batch commit with Mallard's code in between. `list` skips and logs a non-canonical or conflicted-copy path. The setup probe loses its update and stale-revision checks. `put_claim` is `put_record` at the claim key: `files/upload` in add mode without strict conflict answers identical bytes as written (mine) and other bytes as a conflict (taken); one download then returns them |
 | Shared wrapper | Its forwarding methods shrink with the trait, and forward `supports_claims` and `put_claim` |
-| Mallard Cloud | Unregistered (section 14) |
+| Mallard Cloud | The R2 store's twin through the service's gateway (section 14): `put_record` and `put_claim` are one `PUT` each, create-only on R2; `list_keys` is one listing request per stream; `supports_claims` is true |
 
 A setup probe tests a write, a verified read-back, and that a listing taken
 right after the write returns it. On a store with claims it also writes other
@@ -915,10 +915,10 @@ component prints the severity word itself, so the copy never names it:
 
 | When | Copy |
 |---|---|
-| `RemoteChanged` | "The storage changed while pushing. Compare again." in the Push review error banner. It replaces the CAS-conflict message. It covers every way another computer can get in first: the listing before the write shows its record, its claim is already there, or, on the local store, the listing after the write selects it |
-| `OutcomeUnknown` | "Couldn't confirm the push. Refresh to see whether it arrived." in the Push review error banner |
+| `RemoteChanged` | "The storage changed while pushing. Compare again." in the shell banner under the path bar while the Push review is open. It replaces the CAS-conflict message. It covers every way another computer can get in first: the listing before the write shows its record, its claim is already there, or, on the local store, the listing after the write selects it |
+| `OutcomeUnknown` | "Couldn't confirm the push. Refresh to see whether it arrived." in the shell banner under the path bar while the Push review is open |
 | `Displaced`: a confirmed Push, or a Pull, was outranked afterwards (section 9.4) | "Another computer pushed to <storage> first. This computer's last push is no longer part of its history. Compare again.", or "last pull" when the newest stale base was saved by a Pull. A standing note in the project activity notice zone, without an action, while the comparison reports `Displaced`. It replaces the one-time shell notice and its window event |
-| `PushUnfinished` | "A push to <storage> did not finish. Finish it, then compare again." in the Push review error banner, with the action *Finish that push*. When the unfinished push is this computer's own: "This computer's earlier push to <storage> did not finish. Finish it, then compare again." The action writes the record the claim holds, once, lists, and the banner then reads "Finished. Compare again.", or the `RemoteChanged` or `OutcomeUnknown` sentence. The Library Push review has the same banner and action |
+| `PushUnfinished` | "A push to <storage> did not finish. Finish it, then compare again." in the shell banner under the path bar while the Push review is open, with the action *Finish that push*. When the unfinished push is this computer's own: "This computer's earlier push to <storage> did not finish. Finish it, then compare again." The action writes the record the claim holds, once, lists, and the banner then reads "Finished. Compare again.", or the `RemoteChanged` or `OutcomeUnknown` sentence. The Library Push review has the same banner and action |
 
 A claim taken by a record the listing holds fails with the `RemoteChanged`
 sentence; one taken by a record that is not listed has its own row above.
@@ -940,28 +940,20 @@ any of them. `PLAN_CLEARED_STORAGE_PUSH_AGAIN.md` holds every case.
 
 ## 14. Mallard Cloud
 
-Mallard Cloud is not part of this plan. The engine stops writing `_head.json`
-and `_tags/`, which is where the managed adapter commits and lists today, so
-`managed_cloud` is removed from the production registry until its own plan
-lands. Its module keeps compiling against the trimmed trait.
-
-That later plan is small, because the manifest shape, `_objects/<sha256>` and
-`commit-<hex>` ids do not change, so the service's manifest validator, its
-inventory check, the website's manifest parsing, session views and the release
-flow stay valid. It needs four things:
-
-1. The upload carries the record bytes, stored verbatim and validated against
-   the manifest.
-2. The publications table gains the parent token and `created_at_ms`.
-3. A route lists a repository's record names, private scope included.
-4. The desktop adapter maps `put_record` to the upload commit and serves the
-   stream listing from that route; the stub follows.
-
-Open for that plan: who arbitrates. Recommended: the service keeps its commit
-guard and refuses a record whose parent is not its current head, which the
-adapter reports as `RemoteChanged`. The service then never forks, and its
-single-head schema, cleanup job, quota and release flow stay valid. Deploy the
-service before the desktop build that uses it.
+Landed on September 23, 2026 as `PLAN_MANAGED_CLOUD_CAS_FREE.md`. Mallard
+Cloud is the R2 store's twin: the service is a gateway onto one R2 prefix per
+repository laid out exactly like every other Mallard storage (marker,
+objects, manifests, records, claims, plus session views), reached through
+three store routes, `PUT`, `GET` and a prefix listing (`STORE_API.md` in the
+service tree). The managed store maps each engine key to the same key under
+the prefix, sends the same requests in the same order, and reports
+`supports_claims`: a claim is R2's own create-only write, made by the Worker
+in the same request, and the Worker stores a record only when the claim of
+its parent holds exactly those bytes. Nothing arbitrates in D1: the index is
+written after the R2 write it describes, and the desktop never reads it, so
+a Pull applies the version it reviewed on Mallard Cloud exactly as on R2.
+Discovery reads the repository list instead of the all-streams listing, and
+the Library publishes one item per Cloud repository on its own stream.
 
 ## 15. Work plan
 

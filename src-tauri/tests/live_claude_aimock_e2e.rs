@@ -1934,6 +1934,7 @@ fn activity_workspace(
             None,
             Some(before_time),
             Some(90),
+            false,
         ),
         "cannot load the Claude Activity list",
     );
@@ -4007,6 +4008,17 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         LocalStateRepository::from_home_dir(&machine_b_home),
         "cannot create replica-B Mallard repository",
     );
+    // Both replicas publish transcripts checked by the storage privacy scan.
+    let settings = mallard_infrastructure::app_settings::AppSettings {
+        credential_redaction_enabled: true,
+        ..Default::default()
+    };
+    for repository in [&repository_a, &repository_b] {
+        redacted(
+            mallard_infrastructure::app_settings::save_app_settings(repository, &settings),
+            "cannot enable credential redaction for Claude AIMock fixture",
+        );
+    }
     let service_a = ProjectSyncService::new(&repository_a);
     let service_b = ProjectSyncService::new(&repository_b);
     let storage = local_storage(&storage_root);

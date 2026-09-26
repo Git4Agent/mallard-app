@@ -26,6 +26,7 @@ import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { projectLabel } from "./model";
 import { clearedStorageNotice } from "./clearedStorageNotice";
+import { clearStorageWarningDismissal, dismissStorageWarning, useDismissedStorageWarning } from "../../preferences";
 import ProviderMark from "../sync-review/ProviderMark";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
@@ -128,6 +129,7 @@ interface ContentProps extends SessionSearchProps {
   ) => void;
   comparison?: ThreadSyncComparison | null;
   comparisonLoading?: boolean;
+  storageLoading?: boolean;
   comparisonError?: string | null;
   activeStorageName?: string | null;
   selectionMode?: "push" | "pull";
@@ -1601,7 +1603,7 @@ export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
   onSessionAction, onOpenSessionDetail, comparison = null,
-  comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
+  storageLoading = false, comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull,
   onChooseAgentProfile,
@@ -1609,6 +1611,8 @@ export function ProjectChatHistoryContent({
   searchQuery, onSearchQueryChange, onSearchResultsChange,
 }: ContentProps) {
   const [localQuery, setLocalQuery] = useState("");
+  const comparisonStorageId = comparison?.storage_id ?? "";
+  const dismissedClearedNotice = useDismissedStorageWarning(project.local_project_id, comparisonStorageId);
   const query = searchQuery ?? localQuery;
   const searching = query.trim().length > 0;
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
@@ -1747,11 +1751,13 @@ export function ProjectChatHistoryContent({
     }
     return { icon: "range" as IconName, title: "No commits", meta: windowRange };
   }, [activity?.older?.commits, windowRange]);
-  const refreshStatus = comparisonLoading
-    ? `Comparing threads with ${activeStorageName ?? "storage"}`
-    : loading
-      ? "Refreshing project activity"
-      : null;
+  const refreshStatus = storageLoading
+    ? "Loading cloud sessions…"
+    : comparisonLoading
+      ? `Comparing threads with ${activeStorageName ?? "storage"}`
+      : loading
+        ? "Refreshing project activity"
+        : null;
   const renderSession = (session: ProjectSessionSummary, key: string) => {
     const entry = syncBySessionResource.get(session.resource_id);
     const reviewResourceId = entry?.resource_id ?? session.resource_id;
@@ -1835,10 +1841,30 @@ export function ProjectChatHistoryContent({
   }
   /* A Pull of a cleared storage is an ordinary first Pull, so its review says
      nothing about the clear. */
-  const clearedNotice = selectionMode === "pull"
-    ? null
-    : clearedStorageNotice(comparison, comparisonStorageName);
-  if (clearedNotice) notices.push(clearedNotice);
+  const storageNotice = clearedStorageNotice(comparison, comparisonStorageName);
+  const clearedNotice = selectionMode === "pull" ? null : storageNotice;
+  const clearedNoticeId = comparison && clearedNotice?.key === "storage-cleared"
+    ? JSON.stringify([project.local_project_id, comparison.storage_id, comparison.remote_continuity, clearedNotice.message])
+    : null;
+  const continuityState = comparison?.remote_continuity?.state;
+  const storageWarningResolved = !comparisonLoading && !comparisonError && (
+    continuityState === "fresh" || continuityState === "unreviewed"
+    || continuityState === "in_sync" || continuityState === "advanced"
+  );
+  useEffect(() => {
+    if (storageWarningResolved && dismissedClearedNotice !== null) {
+      clearStorageWarningDismissal(project.local_project_id, comparisonStorageId);
+    }
+  }, [storageWarningResolved, project.local_project_id, comparisonStorageId, dismissedClearedNotice]);
+  if (clearedNotice && (clearedNoticeId === null || clearedNoticeId !== dismissedClearedNotice)) {
+    notices.push({
+      ...clearedNotice,
+      dismissalId: clearedNoticeId ?? undefined,
+      onDismiss: clearedNoticeId === null || !comparison ? undefined : () => {
+        dismissStorageWarning(project.local_project_id, comparison.storage_id, clearedNoticeId);
+      },
+    });
+  }
   /* One note per provider whose rows are visible but not fully actionable,
      straight from the backend's provider states — the page never derives
      access from a provider name. */
@@ -1889,15 +1915,20 @@ export function ProjectChatHistoryContent({
         aria-label={sectionTitle}
       >
         {/* The workspace path bar owns branch, counts, and refresh. */}
-        {refreshStatus && <span className="sync-visually-hidden" role="status">{refreshStatus}</span>}
+        {refreshStatus && (
+          <span className="sync-visually-hidden" role="status">
+            {refreshStatus}
+          </span>
+        )}
 
         <NoticeZone
+          key={JSON.stringify([project.local_project_id, comparisonStorageId])}
           items={notices}
           subject="notes about this project activity"
           className="sync-history-notices"
           {...noticeTiming}
         />
-        {hasBoundProvider && (
+        {hasBoundProvider && !(storageLoading && searchableIds.size === 0) && (
           <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
             label={selectionMode ? "Search sessions" : "Search loaded sessions"}
             matches={searchResults.resourceIds.size} total={searchableIds.size} hiddenSelected={hiddenSelected} />
@@ -1920,7 +1951,7 @@ export function ProjectChatHistoryContent({
               </button>
             )}
           </div>
-        ) : loading && !activity ? (
+        ) : (loading && !activity) || (storageLoading && allSessions.length === 0) ? (
           /* Not a status message: the scaffold is what the view renders with
              while its first read is in flight — the page's own row geometry
              in bones, so the list lands without a jump. On the one path that
@@ -1928,7 +1959,7 @@ export function ProjectChatHistoryContent({
              the list — the visually hidden line above is already announcing
              the refresh politely. Claiming a live region here only made a
              screen reader say it twice. */
-          <LoadingScaffold shape="rows" label="Loading project activity" />
+          <LoadingScaffold shape="rows" label={storageLoading ? "Loading cloud sessions" : "Loading project activity"} />
         ) : !activity ? (
           /* A failed first load is a page of its own, never a blank one: it
              names what failed and carries its own retry, because the trail's
@@ -2182,23 +2213,6 @@ export function ProjectChatHistoryContent({
   return <div className={`sync-history-page sync-history-embedded${compactSelectionReview ? " sync-history-selection-review" : ""}`}>{content}</div>;
 }
 
-/** How far back a review asks the activity to reach. A review shows every
- *  outstanding session at once, so it asks for the whole span back to the
- *  oldest one the comparison knows, plus a day of slack, instead of a 30-day
- *  page; with no comparison to measure by it asks for ten years. Never less
- *  than the standing page, so a young project reads the same either way. */
-export function reviewWindowDays(
-  comparison: ThreadSyncComparison | null | undefined,
-  nowSeconds = Date.now() / 1_000,
-): number {
-  const oldest = (comparison?.entries ?? [])
-    .map((entry) => entry.local_updated_at ?? entry.storage_updated_at ?? null)
-    .filter((value): value is number => value != null)
-    .reduce<number | null>((min, value) => (min == null || value < min ? value : min), null);
-  if (oldest == null) return 3_650;
-  return Math.max(30, Math.ceil((nowSeconds - oldest) / 86_400) + 1);
-}
-
 function mergePages(previous: ProjectActivity | null, next: ProjectActivity): ProjectActivity {
   if (!previous || previous.git?.selected_branch !== next.git?.selected_branch) return next;
   /* The merged page covers both windows, and everything between them: the
@@ -2256,6 +2270,7 @@ export default function ProjectActivityPage({
   );
   const [comparison, setComparison] = useState<ThreadSyncComparison | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [storageLoading, setStorageLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [managedCloudStatus, setManagedCloudStatus] = useState<ManagedCloudStatus | null>(null);
   const [branch, setBranch] = useState<string | null>(null);
@@ -2273,6 +2288,7 @@ export default function ProjectActivityPage({
     if (!hasBoundProvider) return false;
     const requestId = ++requestRef.current;
     if (beforeTime) setLoadingMore(true); else setLoading(true);
+    setStorageLoading(activeStorageId !== null);
     setActionError(null);
     setLoadError(null);
     try {
@@ -2281,7 +2297,8 @@ export default function ProjectActivityPage({
         activeStorageId,
         requestedBranch,
         beforeTime,
-        selectionMode ? reviewWindowDays(comparisonOverride) : 30,
+        30,
+        selectionMode != null,
       );
       if (requestId !== requestRef.current) return false;
       setPages((current) => beforeTime ? [...current, next] : [next]);
@@ -2291,7 +2308,7 @@ export default function ProjectActivityPage({
       // keeping them in one state made them indistinguishable on screen.
       if (requestId === requestRef.current) setLoadError(errorMessage(reason));
     } finally {
-      if (requestId === requestRef.current) { setLoading(false); setLoadingMore(false); }
+      if (requestId === requestRef.current) { setLoading(false); setLoadingMore(false); setStorageLoading(false); }
     }
     return requestId === requestRef.current;
   };
@@ -2311,6 +2328,7 @@ export default function ProjectActivityPage({
     const comparisonRequestId = ++comparisonRequestRef.current;
     setLoading(true);
     setComparisonLoading(true);
+    setStorageLoading(true);
     setLoadError(null);
     setComparisonError(null);
     setActionError(null);
@@ -2321,11 +2339,13 @@ export default function ProjectActivityPage({
         storageId: activeStorageId,
         branch: requestedBranch,
         windowDays: 30,
+        review: selectionMode != null,
         bindingRevision: binding?.revision ?? null,
         refreshEpoch,
       }, (event) => {
         if (event.stage === "activity" || event.stage === "activity_error") {
           if (requestId !== requestRef.current) return;
+          setStorageLoading(event.storage_pending);
           if (event.stage === "activity") {
             receivedActivity = true;
             setPages([event.activity]);
@@ -2357,7 +2377,7 @@ export default function ProjectActivityPage({
         setManagedCloudStatus(null);
       }
     } finally {
-      if (requestId === requestRef.current) setLoading(false);
+      if (requestId === requestRef.current) { setLoading(false); setStorageLoading(false); }
       if (comparisonRequestId === comparisonRequestRef.current) setComparisonLoading(false);
     }
   };
@@ -2369,13 +2389,13 @@ export default function ProjectActivityPage({
     // because their owning request had already been superseded.
     setPages([]); setBranch(null); setComparison(null); setManagedCloudStatus(null);
     setLoadError(null); setComparisonError(null); setActionError(null);
-    setLoading(false); setComparisonLoading(false); setLoadingMore(false);
+    setLoading(false); setComparisonLoading(false); setLoadingMore(false); setStorageLoading(false);
     void loadWorkspace(null);
     return () => { requestRef.current += 1; comparisonRequestRef.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride]);
+  }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride, selectionMode]);
 
-  const reviewListReady = activity !== null && !loading && comparison !== null && !comparisonLoading;
+  const reviewListReady = activity !== null && !loading && !storageLoading && comparison !== null && !comparisonLoading;
   useEffect(() => {
     onReviewListReadyChange?.(reviewListReady);
   }, [reviewListReady, onReviewListReadyChange]);
@@ -2481,5 +2501,5 @@ export default function ProjectActivityPage({
       setActionBusyActionId(null);
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
 }

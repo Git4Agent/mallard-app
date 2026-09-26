@@ -471,3 +471,63 @@ What landed:
 - Gate: `tests/frontend/shell-notice-placement.integration.test.tsx` —
   static render order for the bar and two real pages, source order for the
   shell's two branches, and a value-measured z-index comparison.
+
+## 13. One ladder, five tiers, every message closes (2026-09-25)
+
+An audit on 2026-09-24 measured eleven treatments for "something is wrong"
+back in the stylesheet: seven corner radii, three text sizes, five edge
+treatments, four glyph sizes, error sharing warning's triangle, only 7 of
+12 boxes naming their rung, and a close control keyed to colour (every
+warning closed — including the storage "Pull first" gate — while errors
+did not, save two hand-drawn ×s with their own labels). Checked against
+Carbon, Atlassian, Fluent 2, Polaris and GOV.UK; the owner picked each rule
+below from a specimen.
+
+The severity ladder is unchanged. Tiers differ only by containment and
+density, never by colour recipe:
+
+| Tier | Where | Recipe |
+|---|---|---|
+| Banner | shell zone under the path bar | `.notice.sync-backend-banner`: panel frame, opaque rung fill, 12px |
+| Section notice | pages, reviews, dialogs, the path-bar menu | `.notice` as it was |
+| Acknowledgement | setup repository mismatch, Library and file-review warnings | `Acknowledgement`: a warning `.notice` whose leading control is the checkbox; the whole box is its label |
+| Strip | storage gate, sync result, blocked file row | `.notice.notice-strip`: flush in the card, the rung's top edge only; `SyncOutcomeNotice` takes the same tokens and word |
+| Field message | under an invalid setup field | `FieldMessage`: no box, error glyph and ink, a hidden "Error:" |
+| Chip | storage and file rows | `NoticeChip`: a pill in the rung's tint; the word names the state |
+
+Rules, all in `Notice.tsx`:
+
+- **Every message closes except an acknowledgement.** One control,
+  `DismissButton`: last in the message after any action, titled "Dismiss",
+  named "Dismiss: <the message>". Owners that hold a failure in state pass
+  `onDismiss`; no call site draws its own ×. A closed message returns when
+  it changes or its view mounts again (`forgetResolved`); an acknowledgement
+  never closes because the flow waits on its tick. A failure that a retry
+  does not clear first carries an attempt count as its `dismissalId` (the
+  shell's backend and host-identity errors use `shellFailures`), so failing
+  again in the same words shows again. This is Fluent 2's rule;
+  Carbon, Atlassian and Polaris keep critical messages open, which the owner
+  declined.
+- **Error is the octagon** (`octagon-x`), everywhere a rung has a glyph.
+- The menu's "Push in progress" is a Note, not a warning, and it sits beside
+  the menu's list rather than in it: `role="menu"` moved to
+  `.sync-path-menu-list`, and Tab/Shift+Tab step between the note's close
+  control and the list the way they already did for the switcher's filter.
+- The Library overwrite approval is a Warning, not an Error: nothing has
+  failed; the verb ("Approve overwrite") carries the risk.
+
+Deleted: `.sync-path-menu-banner`, `.sync-setup-field-error`,
+`.sync-setup-acknowledge`, `.catalog-card-ack*`, `.sync-storage-index-warning`,
+`.sync-project-file-warning`, and the `.notice.sync-storage-notice` /
+`.notice.sync-project-file-conflict` wrapper rules that repainted a warning
+grey and untinted. Gate: `tests/frontend/notice.integration.test.tsx`.
+
+Chips are status labels, not messages, and carry no close control (owner
+decision 2026-09-25, over a specimen of closable chips): "Reconnect" or
+"Agent profile needed" names the row's state, and hiding it would leave the
+row unmarked while the state still holds. Messages close; labels do not;
+acknowledgements wait for their tick. (Atlassian Lozenge, Polaris Badge.)
+The rejected option also needed the storage landing card, the storage link
+dialog row and the project index row rebuilt, since a × inside a row that
+is itself a `<button>` is invalid. The path bar's attention chip keeps the
+bar's 26px control height.

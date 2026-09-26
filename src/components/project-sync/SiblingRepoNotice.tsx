@@ -38,7 +38,7 @@ export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
       severity="warning"
       timing="standing"
       label="Notes about this storage"
-      className="sync-storage-notice sync-sibling-repo-notice"
+      className="sync-storage-notice sync-sibling-repo-notice notice-strip"
       title={`This storage already has this repository — “${sibling.display_name}”`}
       action={(
         <button

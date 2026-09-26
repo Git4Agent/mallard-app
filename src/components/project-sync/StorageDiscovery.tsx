@@ -6,7 +6,8 @@ import type {
   StorageProviderDescriptor,
   StorageSummary,
 } from "../../types";
-import Icon, { iconNameFromHint, type IconName } from "../Icons";
+import Icon, { storageIconName, type IconName } from "../Icons";
+import Notice from "../notice/Notice";
 
 /**
  * The Use-existing half of a new storage draft: the look into the account,
@@ -94,7 +95,7 @@ function GroupHead({ label, count, open, onToggle }: {
  *  row carries its own verb — a connected candidate names its storage and
  *  opens it either way. */
 export function CandidateRow({ descriptor, candidate, disabled, connectedName, choice, verb, onOpenStorage }: {
-  descriptor: Pick<StorageProviderDescriptor, "icon">;
+  descriptor: Pick<StorageProviderDescriptor, "key" | "icon">;
   candidate: StorageDiscoveryCandidate;
   disabled: boolean;
   /** The configured storage already pointing here, by name. */
@@ -124,7 +125,7 @@ export function CandidateRow({ descriptor, candidate, disabled, connectedName, c
           aria-label={`Use ${candidate.name}`}
         />
       )}
-      <span className="sync-storage-repository-icon"><Icon name={iconNameFromHint(descriptor.icon, "drive")} size={14} /></span>
+      <span className="sync-storage-repository-icon"><Icon name={storageIconName(descriptor.key, descriptor.icon)} size={14} /></span>
       <span className="storage-found-text">
         <span className="storage-found-name">
           {candidate.name}
@@ -221,16 +222,9 @@ export function CandidateGroups({ result, unitPlural, choice, row }: {
  *  that scans again lives on the line above it, not here. */
 export function ScanIncompleteNotice({ issues }: { issues: string[] }) {
   return (
-    <div className="notice warning storage-found-notice" role="alert">
-      <Icon name="alert-triangle" size={13} className="notice-mark" />
-      <div className="notice-body">
-        <p className="notice-line">
-          <strong className="notice-type">Warning ·</strong>{" "}
-          <strong className="notice-lead">Scan incomplete.</strong>{" "}
-          {issues.join(" ")} A Mallard storage there would not be listed.
-        </p>
-      </div>
-    </div>
+    <Notice severity="warning" timing="blocking" className="storage-found-notice" title="Scan incomplete.">
+      {issues.join(" ")} A Mallard storage there would not be listed.
+    </Notice>
   );
 }
 
@@ -286,7 +280,7 @@ export function ManualEntryRow({ manualEntry, disabled, onToggle }: {
 }
 
 function DiscoveryResults({ descriptor, discovery, result, selectedId, storages, disabled, onSelect, onScan, onOpenStorage, onCreateInstead }: {
-  descriptor: Pick<StorageProviderDescriptor, "icon">;
+  descriptor: Pick<StorageProviderDescriptor, "key" | "icon">;
   discovery: StorageDiscoveryDescriptor;
   result: StorageDiscoveryResult;
   selectedId: string | null;
@@ -358,7 +352,7 @@ export function StorageDiscoveryPanel({
   onToggleManual,
   onCreateInstead,
 }: {
-  descriptor: Pick<StorageProviderDescriptor, "icon">;
+  descriptor: Pick<StorageProviderDescriptor, "key" | "icon">;
   /** The descriptor's discovery block, already known to be present. */
   discovery: StorageDiscoveryDescriptor;
   state: DiscoveryState;

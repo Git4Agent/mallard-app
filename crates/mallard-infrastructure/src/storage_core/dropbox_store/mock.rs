@@ -31,6 +31,9 @@ pub(super) struct State {
     payloads_until_failure: Option<usize>,
     pub(super) finish_fault: Option<&'static str>,
     pub(super) fail_upload: bool,
+    /// Answer every `files/delete_v2` with 500, as a folder whose token
+    /// cannot delete would.
+    pub(super) fail_delete: bool,
     /// Answer an add-mode upload of other bytes by overwriting, as a folder
     /// that cannot arbitrate a claim would.
     pub(super) overwrite_uploads: bool,
@@ -406,6 +409,9 @@ async fn serve(
                 missing()
             }
         }
+        "files/delete_v2" if state.fail_delete => {
+            reply(500, json!({"private_response":"must never escape"}))
+        }
         "files/delete_v2" => {
             assert!(args["parent_rev"].as_str().is_some());
             if let Some((m, _)) = state.entries.get(&path) {
@@ -641,35 +647,13 @@ impl StorageProviderAdapter for MockDropboxAdapter {
     ) -> std::result::Result<Option<PathBuf>, String> {
         DropboxAdapter.local_root(config)
     }
-    fn journal_facts(
-        &self,
-        config: &StorageProviderConfig,
-    ) -> std::result::Result<BoundedConfigObject, String> {
-        DropboxAdapter.journal_facts(config)
-    }
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        setup_id: &str,
         runtime: &Handle,
-        journal: &mut dyn StorageProbeJournal,
     ) -> std::result::Result<(), StorageAdapterError> {
         let store = self.connect(config, runtime.clone())?;
-        store
-            .probe(setup_id, journal)
-            .map_err(|error| store.adapter_error(error))
-    }
-    fn reconcile_probe(
-        &self,
-        config: &StorageProviderConfig,
-        setup_id: &str,
-        runtime: &Handle,
-        journal: &mut dyn StorageProbeJournal,
-    ) -> std::result::Result<(), StorageAdapterError> {
-        let store = self.connect(config, runtime.clone())?;
-        store
-            .reconcile_probe(setup_id, journal)
-            .map_err(|error| store.adapter_error(error))
+        store.probe().map_err(|error| store.adapter_error(error))
     }
     fn open(
         &self,

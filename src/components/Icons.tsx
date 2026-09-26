@@ -50,6 +50,11 @@ export type IconName =
   | "sidebar-collapse"
   | "sidebar-expand"
   | "storage"
+  | "storage-local"
+  | "storage-mallard"
+  | "storage-feishu"
+  | "storage-dropbox"
+  | "storage-r2"
   | "sun"
   | "token"
   | "tool"
@@ -81,6 +86,28 @@ export function iconNameFromHint(hint: string | null | undefined, fallback: Icon
   return hint && (HINTED_ICONS as readonly string[]).includes(hint) ? hint as IconName : fallback;
 }
 
+const STORAGE_PROVIDER_ICONS = new Map<string, IconName>([
+  ["local", "storage-local"],
+  ["managed_cloud", "storage-mallard"],
+  ["feishu", "storage-feishu"],
+  ["dropbox", "storage-dropbox"],
+  ["r2", "storage-r2"],
+]);
+
+const STORAGE_ICON_ASSETS: Partial<Record<IconName, string>> = {
+  "storage-local": "local.svg",
+  "storage-mallard": "mallard-cloud.png",
+  "storage-feishu": "feishu.svg",
+  "storage-dropbox": "dropbox.svg",
+  "storage-r2": "r2.svg",
+};
+
+/** Brand identity belongs to the provider key, not its generic transport hint.
+ * Unrecognised providers retain their descriptor's neutral glyph. */
+export function storageIconName(provider: string | null | undefined, hint?: string | null): IconName {
+  return STORAGE_PROVIDER_ICONS.get(provider ?? "") ?? iconNameFromHint(hint, "drive");
+}
+
 /**
  * Compact pixel shapes use the same 24-unit geometry as Mallard Cloud.
  * At fractional scale, geometricPrecision keeps thin steps and open counters
@@ -88,18 +115,21 @@ export function iconNameFromHint(hint: string | null | undefined, fallback: Icon
  * artwork always uses geometricPrecision. Sizes do not change control layout.
  */
 export default function Icon({ name, size = 14, ...props }: IconProps) {
+  const storageAsset = STORAGE_ICON_ASSETS[name];
   return (
     <svg
       aria-hidden="true"
       data-icon={name}
+      data-storage-provider={storageAsset ? name.slice("storage-".length) : undefined}
       focusable="false"
       fill="none"
       height={size}
-      shapeRendering={name === "openai" || name === "claude-mark" || size % 24 !== 0 ? "geometricPrecision" : "crispEdges"}
+      shapeRendering={storageAsset || name === "openai" || name === "claude-mark" || size % 24 !== 0 ? "geometricPrecision" : "crispEdges"}
       viewBox="0 0 24 24"
       width={size}
       {...props}
     >
+      {storageAsset && <image href={`/storage-provider-icons/${storageAsset}`} width="24" height="24" />}
       {name === "activity" && (
         <path
           className="icon-pixel-fill icon-pixelarticons"

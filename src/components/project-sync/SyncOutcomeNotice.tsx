@@ -1,6 +1,7 @@
 import { useId, useRef, useState } from "react";
 import { clockOptions } from "../../clock";
 import Icon, { type IconName } from "../Icons";
+import { DismissButton } from "../notice/Notice";
 import type {
   SyncOutcome,
   SyncOutcomeAction,
@@ -65,6 +66,9 @@ export default function SyncOutcomeNotice({
     setOpen(outcome.defaultOpen);
   }
   const bodyId = `sync-outcome-body-${useId().replace(/:/g, "")}`;
+  /* A strip of the storage card in the notice recipe: the rung's word leads
+     the title, the way every notice names its own severity. */
+  const word = outcome.tone === "success" ? "Done" : "Warning";
   const runnableActions = outcome.actions.filter((action) => (
     action.kind !== "after_pull_action" || action.offer.available
   ));
@@ -80,9 +84,9 @@ export default function SyncOutcomeNotice({
       className={`sync-outcome-notice ${outcome.tone}${open ? "" : " collapsed"}`}
     >
       <div className="sync-outcome-head">
-        <Icon name={outcome.tone === "success" ? "check-circle" : "alert-triangle"} size={18} />
+        <Icon name={outcome.tone === "success" ? "check-circle" : "alert-triangle"} size={13} className="notice-mark" />
         <span className="sync-outcome-summary" role="status">
-          <strong>{outcome.title}</strong>
+          <strong><span className="notice-type">{word} ·</span> {outcome.title}</strong>
           <span className="sync-outcome-stats">
             {outcome.stats.map((stat) => (
               <span key={`${stat.label}:${stat.value ?? ""}`} className="sync-outcome-stat">
@@ -122,15 +126,7 @@ export default function SyncOutcomeNotice({
           >
             <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
           </button>
-          <button
-            type="button"
-            className="sync-notice-dismiss"
-            title="Dismiss"
-            aria-label="Dismiss"
-            onClick={onDismiss}
-          >
-            <Icon name="x" size={12} />
-          </button>
+          <DismissButton what={`${word}. ${outcome.title}`} onClick={onDismiss} />
         </span>
       </div>
       {outcome.message && (

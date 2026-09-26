@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { applyFeishuAppEnv } from "./feishu-app-env.mjs";
 
 const args = process.argv.slice(2);
 const tauriCliScript = resolve("node_modules", "@tauri-apps", "cli", "tauri.js");
@@ -236,6 +237,7 @@ async function notarizeDmg(dmgPath, { keyId, issuer, keyPath }) {
 // Resolve the overlay first: a release job missing the updater key fails
 // here, before any compilation.
 const tauriArgs = withPackagedCliConfig(args);
+applyFeishuAppEnv(process.env);
 await stageCliBinary(args);
 await runChecked(process.execPath, [tauriCliScript, ...tauriArgs]);
 

@@ -276,8 +276,12 @@ impl ActivityLogStore {
     }
 
     pub fn from_repository(repository: &LocalStateRepository) -> Result<Self, String> {
+        Self::from_state_root(repository.root())
+    }
+
+    pub(crate) fn from_state_root(root: &Path) -> Result<Self, String> {
         let store = Self {
-            root: repository.root().join("logs"),
+            root: root.join("logs"),
         };
         store.ensure_root()?;
         Ok(store)

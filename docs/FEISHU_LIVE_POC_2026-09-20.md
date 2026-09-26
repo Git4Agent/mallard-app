@@ -2,6 +2,13 @@
 
 Date: 2026-09-20. Target: Feishu China. Data: synthetic files only.
 
+Follow-up: the [2026-09-23 CAS-free rerun](FEISHU_CAS_FREE_POC_2026-09-23.md)
+updates the local evidence and protocol assessment. The desktop results
+below remain evidence from 2026-09-20. The provider itself is implemented
+against a loopback mock ([design](DESIGN_FEISHU_DRIVE_STORAGE.md)); the
+live OAuth exchange, a refresh, and the two-machine pass remain the
+owner's to run and record.
+
 **The desktop file round trip passed. Production support remains unproven.**
 The Feishu desktop app uploaded and downloaded all eight fixture files.
 Every relative path, byte count, and SHA-256 digest matched.
@@ -133,14 +140,13 @@ permission was changed.
 The model still needs put, get, and complete listing. It does not need a
 conditional head update. SHA-256 verification and schema 1 remain intact.
 
-The current [`observe_linked_bundle` implementation](../src-tauri/src/project_sync/service.rs)
-also handles a Push that was confirmed and later outranked. It returns
-affected scope bases to the shared selected publication and removes the
-losing session acceptance. Read cursors and cloud ID mappings remain.
-The next Push can publish those sessions again. This behavior was checked
-in source; the complete application rollback flow was not run in this PoC.
+Correction on 2026-09-23: the earlier report described automatic rollback
+of local acceptance. Current [`observe_linked_bundle`](../src-tauri/src/project_sync/service.rs)
+classifies a displaced publication and writes nothing. Recovery requires
+user action. This was checked in source; the full desktop recovery flow
+was not run in this PoC.
 
-Rollback does not establish Feishu listing consistency. Cold-client
+Displacement handling does not establish Feishu listing consistency. Cold-client
 visibility, complete pagination, competing writes, and late responses
 still require API evidence. Desktop success cannot prove the documented
 `upload_prepare` / `upload_part` / `upload_finish` transport, even though a

@@ -103,6 +103,7 @@ mod tests {
             profile_pins: Vec::new(),
             target_pins: Vec::new(),
             observed_head: None,
+            observed_items: BTreeMap::new(),
             rows: Vec::new(),
             warning_digests: Vec::new(),
             created_at,

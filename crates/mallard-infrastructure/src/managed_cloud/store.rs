@@ -1,63 +1,84 @@
 //! The managed store: the bundle engine's object-store contract answered by
-//! the Mallard Cloud service. The storage marker is synthesized; objects are
-//! staged in memory until the manifest arrives, which turns into the upload;
-//! the record write is the commit.
-//!
-//! Mallard Cloud is not offered by this build. The engine reads by listing a
-//! stream of publication records; the service stores no records and lists
-//! none yet, so this store is not in the production registry
-//! (DESIGN_CAS_FREE_STORAGE_REFACTOR.md, section 14).
+//! the Mallard Cloud service, which is a gateway onto one R2 prefix per
+//! repository laid out like every other Mallard storage (`STORE_API.md` in
+//! the service tree; `PLAN_MANAGED_CLOUD_CAS_FREE.md` section 6.2). The
+//! store is the R2 store's twin: it maps each engine key to the same key
+//! under the repository's prefix, sends the same requests in the same
+//! order, reports `supports_claims`, and gives its users the same finality.
 //!
 //! | Engine key | Behaviour |
 //! | --- | --- |
-//! | `.mallard/_storage.json` | synthesized marker |
-//! | `_head.json` read | the repository status read: exact repository head when pinned, otherwise by bundle |
-//! | `_manifests/{rev}-{commit}.json` read | streamed manifest, digest checked |
-//! | `_objects/{sha}` read | streamed object, digest checked |
-//! | `_objects/{sha}` write | staged in memory |
-//! | `_manifests/…` write | create the upload, put the missing objects |
-//! | `_commits/{bundle}/{record}` write | commit the upload; the service refuses a parent that is not its head |
-//! | `_commits/…` read and list | absent and refused: the service stores no records yet |
+//! | `.mallard/_storage.json` read | the constant marker, synthesized: a store has no repository before a bundle names one; the Worker wrote the same bytes into every prefix |
+//! | `_objects/{sha}` write | staged in memory until the manifest arrives |
+//! | `_manifests/…` write | resolve the repository, or create it from the manifest; build the views from the staged transcripts; `PUT` every staged object and view, then the manifest |
+//! | `_commits/{bundle}/` listing | one listing request; the bundle's Cloud status is recorded from it |
+//! | `_commits/` listing over every stream | refused: Mallard Cloud lists one repository at a time |
+//! | `_claims/…` claim | one `PUT`, no transport retry: written or already present is `Mine`, taken is read back |
+//! | `_commits/{bundle}/{record}` record | one `PUT`, no transport retry |
+//! | reads | `GET`, streamed, digest verified by the shared body reader |
 //! | `_uploads/…` | refused: probes are for user-owned stores |
-//! | `.mallard/v1/library/…` | reads absent; writes refused |
+//! | `.mallard/v1/library/{stream}/…` | every class above, routed to the catalog repository whose item stream is `{stream}` |
 use super::client::{
-    CreateRepository, Error, ErrorKind, InventoryEntry, ManagedCloudClient, UploadRequest,
+    CreateCatalogItem, CreateRepository, Error, ErrorKind, ManagedCloudClient, ManagedCloudStatus,
+    PutOutcome,
 };
 use super::views::build_views_for_manifest;
 use crate::providers::AgentProviderRegistry;
-use crate::storage_core::publication::REMOTE_CHANGED;
+use crate::storage_core::publication::MAX_RECORD_BYTES;
 use crate::storage_core::{
-    ConnectionHealth, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix, ObjectStore,
-    StageOutcome, StorageMarker, StoreListPage, StoredMetadata, VerifiedBody, LIBRARY_PREFIX,
-    REPOSITORY_COMMITS_PREFIX, REPOSITORY_PREFIX, STORAGE_MARKER_KEY,
+    ClaimOutcome, ConnectionHealth, ExpectedObject, ImmutablePutOutcome, ObjectKey, ObjectPrefix,
+    ObjectStore, StageOutcome, StorageMarker, StoreKeyPage, StoreListEntry, StoreListPage,
+    StoredMetadata, VerifiedBody, LIBRARY_PREFIX, REPOSITORY_CLAIMS_PREFIX,
+    REPOSITORY_COMMITS_PREFIX, REPOSITORY_PREFIX, STORAGE_MARKER_KEY, TAG_FILE,
 };
 use bytes::Bytes;
-use mallard_domain::{sha256_hex, BundleHead, BundleId, BundleKind, BundleManifest, BUNDLE_SCHEMA};
+use mallard_domain::{sha256_hex, BundleId, BundleManifest};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
 
-pub const CATALOG_REFUSAL: &str =
-    "managed_catalog_uses_item_adapter: Library items on Mallard Cloud are synced through the catalog item adapter, not the storage namespace.";
+/// The all-streams listing bundle discovery makes on a user-owned storage;
+/// on Mallard Cloud discovery reads the repository list instead (decision
+/// 10 of the plan).
+pub const DISCOVERY_REFUSAL: &str = "Mallard Cloud lists one repository at a time.";
+
+/// Which repository a key or prefix belongs to: a project bundle's, or a
+/// catalog item stream's.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Scope {
+    Project(BundleId),
+    Library(String),
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Key {
     Marker,
-    Head(BundleId),
-    Manifest {
-        bundle_id: BundleId,
-        revision: u64,
-        commit_id: String,
-    },
-    Record(BundleId),
-    Object {
-        bundle_id: BundleId,
-        sha256: String,
-    },
-    Upload(BundleId),
-    Library,
+    Object { scope: Scope, sha256: String },
+    Manifest { scope: Scope },
+    Record { scope: Scope },
+    Claim { scope: Scope },
+    Tag { stream: String },
+    Upload,
+}
+
+impl Key {
+    fn scope(&self) -> Option<&Scope> {
+        match self {
+            Self::Object { scope, .. }
+            | Self::Manifest { scope }
+            | Self::Record { scope }
+            | Self::Claim { scope } => Some(scope),
+            Self::Tag { .. } | Self::Marker | Self::Upload => None,
+        }
+    }
+}
+
+fn valid_library_stream(stream: &str) -> bool {
+    stream
+        .strip_prefix("library-")
+        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 fn classify(key: &ObjectKey) -> Result<Key, String> {
@@ -65,14 +86,52 @@ fn classify(key: &ObjectKey) -> Result<Key, String> {
     if raw == STORAGE_MARKER_KEY {
         return Ok(Key::Marker);
     }
-    if raw.starts_with(&format!("{LIBRARY_PREFIX}/")) {
-        return Ok(Key::Library);
-    }
-    if let Some(rest) = raw.strip_prefix(&format!("{REPOSITORY_COMMITS_PREFIX}/")) {
-        let (bundle, _) = rest
+    if let Some(rest) = raw.strip_prefix(&format!("{LIBRARY_PREFIX}/")) {
+        let (stream, relative) = rest
             .split_once('/')
-            .ok_or_else(|| format!("unexpected record key '{raw}'"))?;
-        return Ok(Key::Record(BundleId::parse(bundle.to_string())?));
+            .ok_or_else(|| format!("unexpected Library key '{raw}'"))?;
+        if !valid_library_stream(stream) {
+            return Err(format!("unexpected Library key '{raw}'"));
+        }
+        let scope = Scope::Library(stream.to_owned());
+        return if relative == TAG_FILE {
+            Ok(Key::Tag {
+                stream: stream.to_owned(),
+            })
+        } else if let Some(sha256) = relative.strip_prefix("_objects/") {
+            mallard_domain::validate_sha256("managed object", sha256)?;
+            Ok(Key::Object {
+                scope,
+                sha256: sha256.to_owned(),
+            })
+        } else if relative.starts_with("_manifests/") {
+            Ok(Key::Manifest { scope })
+        } else if relative.starts_with("_commits/") {
+            Ok(Key::Record { scope })
+        } else if relative.starts_with("_claims/") {
+            Ok(Key::Claim { scope })
+        } else {
+            Err(format!("unexpected Library key '{raw}'"))
+        };
+    }
+    for (prefix, class) in [
+        (REPOSITORY_COMMITS_PREFIX, "record"),
+        (REPOSITORY_CLAIMS_PREFIX, "claim"),
+    ] {
+        if let Some(rest) = raw.strip_prefix(&format!("{prefix}/")) {
+            let (bundle, name) = rest
+                .split_once('/')
+                .ok_or_else(|| format!("unexpected {class} key '{raw}'"))?;
+            if name.is_empty() || name.contains('/') {
+                return Err(format!("unexpected {class} key '{raw}'"));
+            }
+            let scope = Scope::Project(BundleId::parse(bundle.to_string())?);
+            return Ok(if class == "record" {
+                Key::Record { scope }
+            } else {
+                Key::Claim { scope }
+            });
+        }
     }
     let rest = raw
         .strip_prefix(&format!("{REPOSITORY_PREFIX}/"))
@@ -80,60 +139,139 @@ fn classify(key: &ObjectKey) -> Result<Key, String> {
     let (bundle, relative) = rest
         .split_once('/')
         .ok_or_else(|| format!("unexpected repository key '{raw}'"))?;
-    let bundle_id = BundleId::parse(bundle.to_string())?;
-    if relative == "_head.json" {
-        return Ok(Key::Head(bundle_id));
-    }
-    if let Some(name) = relative.strip_prefix("_manifests/") {
-        let (revision, commit_id) = name
-            .strip_suffix(".json")
-            .and_then(|stem| stem.split_once('-'))
-            .ok_or_else(|| format!("unexpected manifest key '{raw}'"))?;
-        return Ok(Key::Manifest {
-            bundle_id,
-            revision: revision
-                .parse()
-                .map_err(|_| format!("unexpected manifest key '{raw}'"))?,
-            commit_id: commit_id.to_owned(),
-        });
+    let scope = Scope::Project(BundleId::parse(bundle.to_string())?);
+    if relative.starts_with("_manifests/") {
+        return Ok(Key::Manifest { scope });
     }
     if let Some(sha256) = relative.strip_prefix("_objects/") {
         mallard_domain::validate_sha256("managed object", sha256)?;
         return Ok(Key::Object {
-            bundle_id,
+            scope,
             sha256: sha256.to_owned(),
         });
     }
     if relative.starts_with("_uploads/") {
-        return Ok(Key::Upload(bundle_id));
+        return Ok(Key::Upload);
     }
     Err(format!("unexpected repository key '{raw}'"))
 }
 
-/// The upload created for a bundle's next snapshot, waiting for the record
-/// write that commits it.
-#[derive(Clone, Debug)]
-struct PendingUpload {
-    repository_id: String,
-    upload_id: String,
-    commit_id: String,
-    revision: u64,
+/// Where a listing prefix points: one repository's namespace, or the
+/// all-streams listing Mallard Cloud refuses.
+enum Listing {
+    Scoped(Scope),
+    Refused,
+}
+
+fn classify_prefix(prefix: &ObjectPrefix) -> Result<Listing, String> {
+    let raw = prefix.as_str();
+    if raw == REPOSITORY_PREFIX
+        || raw == REPOSITORY_COMMITS_PREFIX
+        || raw == REPOSITORY_CLAIMS_PREFIX
+        || raw == LIBRARY_PREFIX
+    {
+        return Ok(Listing::Refused);
+    }
+    if let Some(rest) = raw.strip_prefix(&format!("{LIBRARY_PREFIX}/")) {
+        let stream = rest.split('/').next().unwrap_or_default();
+        if !valid_library_stream(stream) {
+            return Err(format!("unexpected Library prefix '{raw}'"));
+        }
+        return Ok(Listing::Scoped(Scope::Library(stream.to_owned())));
+    }
+    for namespace in [
+        REPOSITORY_COMMITS_PREFIX,
+        REPOSITORY_CLAIMS_PREFIX,
+        REPOSITORY_PREFIX,
+    ] {
+        if let Some(rest) = raw.strip_prefix(&format!("{namespace}/")) {
+            let bundle = rest.split('/').next().unwrap_or_default();
+            return Ok(Listing::Scoped(Scope::Project(BundleId::parse(
+                bundle.to_string(),
+            )?)));
+        }
+    }
+    Err(format!("unexpected listing prefix '{raw}'"))
+}
+
+/// Whether a prefix is a bundle's own record stream: the one listing a
+/// refresh makes, which carries the repository's status.
+fn is_stream_prefix(prefix: &ObjectPrefix, scope: &Scope) -> bool {
+    match scope {
+        Scope::Project(bundle) => {
+            prefix.as_str() == format!("{REPOSITORY_COMMITS_PREFIX}/{bundle}")
+        }
+        Scope::Library(stream) => prefix.as_str() == format!("{LIBRARY_PREFIX}/{stream}/_commits"),
+    }
+}
+
+/// The facts of a Library manifest's one entry, from which the catalog
+/// repository is created on its first push.
+#[derive(Debug)]
+struct LibraryItem {
+    coordinate: CreateCatalogItem,
+    display_name: String,
+}
+
+fn library_item(stream: &str, manifest_bytes: &[u8]) -> Result<LibraryItem, String> {
+    let manifest: serde_json::Value = serde_json::from_slice(manifest_bytes)
+        .map_err(|error| format!("parse the Library manifest being pushed: {error}"))?;
+    if manifest["repository_id"].as_str() != Some(stream) {
+        return Err("the Library manifest being pushed names another item stream".to_string());
+    }
+    let resources = manifest["resources"]
+        .as_object()
+        .ok_or("the Library manifest being pushed has no resources")?;
+    if resources.len() != 1 {
+        return Err(format!(
+            "Mallard Cloud holds one item per repository; this Library manifest holds {}",
+            resources.len()
+        ));
+    }
+    let (resource_id, entry) = resources.iter().next().expect("one entry");
+    let resource = &entry["resource"];
+    let text = |value: &serde_json::Value, field: &str| -> Result<String, String> {
+        value[field]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("the Library manifest being pushed lacks '{field}'"))
+    };
+    let resource_kind = text(resource, "resource_kind")?;
+    let display_name = match resource_kind.as_str() {
+        "agent_skill" => text(&resource["identity"], "effective_name")?,
+        "plugin_install_intent" => text(&resource["identity"], "plugin_id")?,
+        "desktop_pet" => text(&resource["descriptor"], "display_name")?,
+        _ => resource_id.clone(),
+    };
+    Ok(LibraryItem {
+        coordinate: CreateCatalogItem {
+            provider: text(resource, "provider")?,
+            resource_kind,
+            format: text(resource, "format")?,
+            format_version: resource["format_version"]
+                .as_u64()
+                .and_then(|version| u32::try_from(version).ok())
+                .ok_or("the Library manifest being pushed lacks 'format_version'")?,
+            resource_id: text(resource, "resource_id")?,
+            library_repository_id: stream.to_owned(),
+        },
+        display_name,
+    })
 }
 
 struct Inner {
     client: ManagedCloudClient,
     runtime: Handle,
-    account_id: String,
-    /// Bundle → repository id, learned from heads, listings, and creates.
-    repositories: Mutex<BTreeMap<BundleId, String>>,
+    /// Scope → repository id, learned from lookups, listings and creates.
+    repositories: Mutex<BTreeMap<Scope, String>>,
     /// Exact repository destinations from link metadata.
     pinned: Mutex<BTreeMap<BundleId, String>>,
-    statuses: Mutex<BTreeMap<BundleId, super::client::ManagedCloudStatus>>,
+    statuses: Mutex<BTreeMap<BundleId, ManagedCloudStatus>>,
     // Keep a superseded refresh from overwriting the next status observation.
     status_read: tokio::sync::Mutex<()>,
-    /// Objects written before their manifest, per bundle.
-    staged: Mutex<BTreeMap<BundleId, BTreeMap<String, Bytes>>>,
-    pending: Mutex<BTreeMap<BundleId, PendingUpload>>,
+    /// Objects written before their manifest, per scope.
+    staged: Mutex<BTreeMap<Scope, BTreeMap<String, Bytes>>>,
 }
 
 #[derive(Clone)]
@@ -142,18 +280,16 @@ pub struct ManagedObjectStore {
 }
 
 impl ManagedObjectStore {
-    pub fn new(client: ManagedCloudClient, account_id: String, runtime: Handle) -> Self {
+    pub fn new(client: ManagedCloudClient, runtime: Handle) -> Self {
         Self {
             inner: Arc::new(Inner {
                 client,
                 runtime,
-                account_id,
                 repositories: Mutex::new(BTreeMap::new()),
                 pinned: Mutex::new(BTreeMap::new()),
                 statuses: Mutex::new(BTreeMap::new()),
                 status_read: tokio::sync::Mutex::new(()),
                 staged: Mutex::new(BTreeMap::new()),
-                pending: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -172,16 +308,20 @@ impl ManagedObjectStore {
             if previous.as_deref() != Some(id) {
                 Self::lock(&self.inner.statuses)?.remove(bundle);
             }
-            self.remember(bundle, id)
+            self.remember(&Scope::Project(bundle.clone()), id)
         } else {
             if Self::lock(&self.inner.pinned)?.remove(bundle).is_some() {
-                Self::lock(&self.inner.repositories)?.remove(bundle);
+                Self::lock(&self.inner.repositories)?.remove(&Scope::Project(bundle.clone()));
             }
             Self::lock(&self.inner.statuses)?.remove(bundle);
             Ok(())
         }
     }
-    pub fn status(&self, bundle: &BundleId) -> Option<super::client::ManagedCloudStatus> {
+
+    /// The Cloud status of a pinned bundle as its last stream listing
+    /// reported it, or the connection's own state while it suspends the
+    /// store.
+    pub fn status(&self, bundle: &BundleId) -> Option<ManagedCloudStatus> {
         let repository_id = Self::lock(&self.inner.pinned).ok()?.get(bundle)?.clone();
         if let Some(health) = self
             .inner
@@ -189,7 +329,7 @@ impl ManagedObjectStore {
             .health()
             .filter(|health| health.suspends())
         {
-            return Some(super::client::ManagedCloudStatus {
+            return Some(ManagedCloudStatus {
                 repository_id,
                 state: if health.state == crate::storage_core::ConnectionState::PermissionDenied {
                     super::client::ManagedCloudStatusState::Inaccessible
@@ -203,17 +343,53 @@ impl ManagedObjectStore {
         }
         Self::lock(&self.inner.statuses).ok()?.get(bundle).cloned()
     }
+
     pub fn resolve_repository(&self, bundle: &BundleId) -> Result<String, String> {
         self.inner
             .runtime
-            .block_on(self.repository_for(bundle))?
+            .block_on(self.repository_for(&Scope::Project(bundle.clone())))?
             .ok_or_else(|| {
                 "Cloud repository is unavailable. Complete project setup before linking."
                     .to_string()
             })
     }
+
     pub fn client(&self) -> &ManagedCloudClient {
         &self.inner.client
+    }
+
+    /// The one request a Library refresh of one coordinate makes: the
+    /// account's item repositories of that coordinate, each with its
+    /// stream's names and the selected record and manifest inline. Served to
+    /// the planning code only, never as a stream listing.
+    pub fn library_coordinate(
+        &self,
+        query: &super::client::CoordinateQuery,
+    ) -> Result<Vec<super::client::LibraryItemAnswer>, String> {
+        let answers = self
+            .inner
+            .runtime
+            .block_on(self.inner.client.library_coordinate(query))?;
+        for answer in &answers {
+            self.remember(
+                &Scope::Library(answer.library_repository_id.clone()),
+                &answer.repository_id,
+            )?;
+        }
+        Ok(answers)
+    }
+
+    /// The account's project repositories with their indexed heads: what
+    /// bundle discovery shows on Mallard Cloud instead of listing every
+    /// stream (decision 10 of the plan). Display only: no publish or
+    /// refresh depends on it.
+    pub fn list_project_repositories(
+        &self,
+    ) -> Result<Vec<super::client::RepositorySummary>, String> {
+        Ok(self
+            .inner
+            .runtime
+            .block_on(self.inner.client.list_project_repositories())?)
     }
 
     fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
@@ -222,114 +398,51 @@ impl ManagedObjectStore {
             .map_err(|_| "the managed store's table is poisoned".to_string())
     }
 
-    fn remember(&self, bundle_id: &BundleId, repository_id: &str) -> Result<(), String> {
-        Self::lock(&self.inner.repositories)?.insert(bundle_id.clone(), repository_id.to_owned());
+    fn remember(&self, scope: &Scope, repository_id: &str) -> Result<(), String> {
+        Self::lock(&self.inner.repositories)?.insert(scope.clone(), repository_id.to_owned());
         Ok(())
     }
 
-    /// The repository id for a bundle, from the table or the service.
-    /// `None` when the account knows no repository for the bundle.
-    async fn repository_for(&self, bundle_id: &BundleId) -> Result<Option<String>, String> {
-        if let Some(id) = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned() {
-            return Ok(Some(id));
-        }
-        if let Some(id) = Self::lock(&self.inner.repositories)?
-            .get(bundle_id)
-            .cloned()
-        {
-            return Ok(Some(id));
-        }
-        let Some(answer) = self.inner.client.head_by_bundle(bundle_id.as_str()).await? else {
-            return Ok(None);
-        };
-        self.remember(bundle_id, &answer.repository_id)?;
-        Ok(Some(answer.repository_id))
-    }
-
-    async fn head_bytes(&self, bundle_id: &BundleId) -> Result<Option<StoredMetadata>, String> {
-        let _status_read = self.inner.status_read.lock().await;
-        let pinned = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned();
-        let head = if let Some(id) = pinned {
-            match self.inner.client.repository_status(&id).await {
-                Ok((head, status)) => {
-                    Self::lock(&self.inner.statuses)?.insert(bundle_id.clone(), status);
-                    head
-                }
-                Err(error) => {
-                    let status = super::client::ManagedCloudStatus::failed(&id, &error);
-                    let message = status.message.clone().unwrap_or_else(|| error.message());
-                    Self::lock(&self.inner.statuses)?.insert(bundle_id.clone(), status);
-                    return Err(message);
-                }
+    /// The repository id for a scope, from the pin, the table, or the
+    /// service. `None` when the account knows no repository for it.
+    async fn repository_for(&self, scope: &Scope) -> Result<Option<String>, String> {
+        if let Scope::Project(bundle_id) = scope {
+            if let Some(id) = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned() {
+                return Ok(Some(id));
             }
-        } else {
-            // No Cloud status checks when the optional repository ID is absent.
-            let Some(answer) = self.inner.client.head_by_bundle(bundle_id.as_str()).await? else {
-                return Ok(None);
-            };
-            self.remember(bundle_id, &answer.repository_id)?;
-            answer.head
-        };
-        let Some(head) = head else {
-            return Ok(None);
-        };
-        if head.bundle_id.as_deref() != Some(bundle_id.as_str()) || head.kind != "project" {
-            return Err("Mallard Cloud answered with a head of another repository".to_string());
         }
-        let synthesized = BundleHead {
-            schema_version: BUNDLE_SCHEMA,
-            bundle_id: bundle_id.clone(),
-            kind: BundleKind::Project,
-            revision: head.revision,
-            commit_id: head.commit_id.clone(),
-            manifest_key: format!("_manifests/{}-{}.json", head.revision, head.commit_id),
-            manifest_sha256: head.manifest_sha256,
-            manifest_size: head.manifest_size,
-            updated_at: head.updated_at,
+        if let Some(id) = Self::lock(&self.inner.repositories)?.get(scope).cloned() {
+            return Ok(Some(id));
+        }
+        let answer = match scope {
+            Scope::Project(bundle_id) => {
+                self.inner
+                    .client
+                    .repository_by_bundle(bundle_id.as_str())
+                    .await?
+            }
+            Scope::Library(stream) => self.inner.client.repository_by_library(stream).await?,
         };
-        synthesized.validate()?;
-        Ok(Some(StoredMetadata {
-            bytes: serde_json::to_vec(&synthesized)
-                .map_err(|error| format!("encode bundle head: {error}"))?,
-            etag: head.commit_id,
-        }))
+        if let Some(id) = &answer {
+            self.remember(scope, id)?;
+        }
+        Ok(answer)
     }
 
     async fn download_into(
         &self,
-        key: &Key,
+        scope: &Scope,
+        key: &ObjectKey,
         max: u64,
         sink: &mut impl Write,
     ) -> Result<Option<super::client::Downloaded>, String> {
-        let (route, bundle_id, path) = match key {
-            Key::Manifest {
-                bundle_id,
-                commit_id,
-                ..
-            } => (
-                "v1/repositories/{id}/manifests/{commit}",
-                bundle_id,
-                format!("/manifests/{commit_id}"),
-            ),
-            Key::Object { bundle_id, sha256 } => (
-                "v1/repositories/{id}/objects/{sha256}",
-                bundle_id,
-                format!("/objects/{sha256}"),
-            ),
-            _ => return Err("only manifests and objects are downloaded".to_string()),
-        };
-        let Some(repository_id) = self.repository_for(bundle_id).await? else {
+        let Some(repository_id) = self.repository_for(scope).await? else {
             return Ok(None);
         };
         Ok(self
             .inner
             .client
-            .download(
-                route,
-                &format!("/v1/repositories/{repository_id}{path}"),
-                max,
-                sink,
-            )
+            .get_object(&repository_id, key.as_str(), max, sink)
             .await?)
     }
 
@@ -339,15 +452,14 @@ impl ManagedObjectStore {
         expected: &ExpectedObject,
     ) -> Result<StageOutcome, String> {
         let classified = classify(key)?;
-        match classified {
-            Key::Manifest { .. } | Key::Object { .. } => {}
-            Key::Library => return Ok(StageOutcome::Missing),
+        let scope = match &classified {
+            Key::Object { scope, .. } | Key::Manifest { scope } => scope,
             _ => return Err(format!("'{key}' is not a verified object")),
-        }
+        };
         mallard_domain::validate_sha256("expected object", &expected.sha256)?;
         let mut file = NamedTempFile::new().map_err(|error| format!("stage object: {error}"))?;
         let Some(downloaded) = self
-            .download_into(&classified, expected.size, &mut file)
+            .download_into(scope, key, expected.size, &mut file)
             .await?
         else {
             return Ok(StageOutcome::Missing);
@@ -368,36 +480,102 @@ impl ManagedObjectStore {
         key: &ObjectKey,
         max_bytes: u64,
     ) -> Result<Option<StoredMetadata>, String> {
-        match classify(key)? {
-            Key::Marker => Ok(Some(StoredMetadata {
-                bytes: serde_json::to_vec(&StorageMarker::current())
-                    .map_err(|error| format!("encode storage marker: {error}"))?,
-                etag: "managed".to_string(),
-            })),
-            Key::Head(bundle_id) => self.head_bytes(&bundle_id).await,
-            classified @ (Key::Manifest { .. } | Key::Object { .. }) => {
-                let mut bytes = Vec::new();
-                Ok(self
-                    .download_into(&classified, max_bytes, &mut bytes)
-                    .await?
-                    .map(|downloaded| StoredMetadata {
-                        bytes,
-                        etag: downloaded.etag,
-                    }))
+        let classified = classify(key)?;
+        let scope = match &classified {
+            Key::Marker => {
+                return Ok(Some(StoredMetadata {
+                    bytes: serde_json::to_vec(&StorageMarker::current())
+                        .map_err(|error| format!("encode storage marker: {error}"))?,
+                    etag: "managed".to_string(),
+                }))
             }
-            Key::Record(_) | Key::Library => Ok(None),
-            Key::Upload(_) => Err("Mallard Cloud has no probe namespace".to_string()),
-        }
+            Key::Upload => return Err("Mallard Cloud has no probe namespace".to_string()),
+            Key::Tag { stream } => Scope::Library(stream.clone()),
+            other => other.scope().expect("every other key has a scope").clone(),
+        };
+        let mut bytes = Vec::new();
+        Ok(self
+            .download_into(&scope, key, max_bytes, &mut bytes)
+            .await?
+            .map(|downloaded| StoredMetadata {
+                bytes,
+                etag: downloaded.etag,
+            }))
     }
 
-    /// The manifest write: resolve or create the repository, end an own
-    /// upload of this same manifest, build the views, create the upload, put
-    /// what the service says is missing, then end the account's own stale
-    /// uploads (the new upload already references the objects they carried).
-    /// The commit happens at the record write.
-    async fn begin_upload(
+    /// One create-only write through the gateway, for a scope whose
+    /// repository must already exist.
+    async fn put_once(&self, scope: &Scope, key: &str, bytes: Bytes) -> Result<PutOutcome, String> {
+        let repository_id = self.repository_for(scope).await?.ok_or_else(|| {
+            "Cloud repository is unavailable. Push the item's manifest before its other objects."
+                .to_string()
+        })?;
+        let sha256 = sha256_hex(&bytes);
+        Ok(self
+            .inner
+            .client
+            .put_object(&repository_id, key, bytes, &sha256)
+            .await?)
+    }
+
+    /// `PUT` every transfer, `cloud_transfer_concurrency()` at a time. An
+    /// object the repository already holds is fine; any other failure stops
+    /// the rest.
+    async fn transfer_all(
+        &self,
+        repository_id: &str,
+        transfers: Vec<(String, Bytes)>,
+    ) -> Result<(), String> {
+        let concurrency = crate::app_settings::cloud_transfer_concurrency().max(1);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let mut workers = tokio::task::JoinSet::new();
+        for (key, bytes) in transfers {
+            let client = self.inner.client.clone();
+            let repository_id = repository_id.to_owned();
+            let semaphore = semaphore.clone();
+            workers.spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| Error::local("v1/repositories/{id}/store/{key}"))?;
+                let sha256 = sha256_hex(&bytes);
+                client
+                    .put_object(&repository_id, &key, bytes, &sha256)
+                    .await
+            });
+        }
+        while let Some(joined) = workers.join_next().await {
+            let outcome =
+                joined.unwrap_or_else(|_| Err(Error::local("v1/repositories/{id}/store/{key}")));
+            if let Err(error) = outcome {
+                workers.abort_all();
+                while workers.join_next().await.is_some() {}
+                return Err(error.message());
+            }
+        }
+        Ok(())
+    }
+
+    fn take_staged(&self, scope: &Scope) -> Result<BTreeMap<String, Bytes>, String> {
+        Ok(Self::lock(&self.inner.staged)?
+            .get(scope)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn clear_staged(&self, scope: &Scope) -> Result<(), String> {
+        Self::lock(&self.inner.staged)?.remove(scope);
+        Ok(())
+    }
+
+    /// The bundle manifest write: resolve or create the repository, build
+    /// the views from the staged transcripts, put every staged object and
+    /// every view, then the manifest. The record write follows through the
+    /// shared protocol.
+    async fn publish_manifest(
         &self,
         bundle_id: &BundleId,
+        key: &ObjectKey,
         manifest_bytes: Bytes,
     ) -> Result<(), String> {
         let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)
@@ -406,8 +584,8 @@ impl ManagedObjectStore {
         if &manifest.bundle.bundle_id != bundle_id {
             return Err("the manifest being pushed names another bundle".to_string());
         }
-        let client = &self.inner.client;
-        let repository_id = match self.repository_for(bundle_id).await? {
+        let scope = Scope::Project(bundle_id.clone());
+        let repository_id = match self.repository_for(&scope).await? {
             Some(id) => id,
             None => {
                 let spec = CreateRepository {
@@ -418,229 +596,212 @@ impl ManagedObjectStore {
                     },
                     // The project title is the requested name; the service normalizes it.
                     name: manifest.bundle.display_name.clone(),
-                    bundle_id: bundle_id.as_str().to_owned(),
+                    bundle_id: Some(bundle_id.as_str().to_owned()),
                     repository_fingerprint: manifest.bundle.repository_fingerprint.clone(),
+                    catalog: None,
                 };
-                match client.create_repository(&spec).await {
-                    Ok(created) => {
-                        self.remember(bundle_id, &created.id)?;
-                        created.id
-                    }
-                    // Lost a race with another replica of this account.
-                    Err(error) if error.kind == ErrorKind::AccountExists => self
-                        .repository_for(bundle_id)
-                        .await?
-                        .ok_or_else(|| error.message())?,
-                    Err(error) => return Err(error.message()),
-                }
+                self.create(&scope, &spec).await?
             }
         };
-        let summary = client.get_repository(&repository_id).await?;
-        // Uploads run side by side on the service and the commit is the only
-        // compare-and-swap, so another account's open upload is left alone.
-        // An own upload of this very manifest is ended first, because the
-        // service claims a commit id per open upload; own stale uploads are
-        // ended only after the new upload exists, so the objects they carried
-        // stay protected and are reused instead of re-sent.
-        let own: Vec<_> = summary
-            .open_uploads
-            .iter()
-            .filter(|open| open.user_id == self.inner.account_id)
-            .cloned()
-            .collect();
-        for open in own
-            .iter()
-            .filter(|open| open.commit_id == manifest.commit_id)
-        {
-            client.abandon_upload(&repository_id, &open.id).await?;
-        }
-        let stale: Vec<_> = own
-            .iter()
-            .filter(|open| open.stale && open.commit_id != manifest.commit_id)
-            .collect();
-        let staged = Self::lock(&self.inner.staged)?
-            .get(bundle_id)
-            .cloned()
-            .unwrap_or_default();
+        let staged = self.take_staged(&scope)?;
         let views =
             build_views_for_manifest(AgentProviderRegistry::production(), &manifest, &staged)?;
-        let mut objects = BTreeMap::new();
-        for (_, entry) in manifest.all_files() {
-            objects.insert(
-                entry.sha256.clone(),
-                InventoryEntry {
-                    sha256: entry.sha256.clone(),
-                    size: entry.size,
-                    role: "payload",
-                    resource_id: None,
-                    source_sha256: None,
-                },
-            );
-        }
-        let mut view_bytes = BTreeMap::new();
-        for view in &views {
-            objects.insert(
-                view.sha256.clone(),
-                InventoryEntry {
-                    sha256: view.sha256.clone(),
-                    size: view.bytes.len() as u64,
-                    role: "view",
-                    resource_id: Some(view.resource_id.clone()),
-                    source_sha256: Some(view.source_sha256.clone()),
-                },
-            );
-            view_bytes.insert(view.sha256.clone(), view.bytes.clone());
-        }
-        let request = UploadRequest {
-            expected_repository_revision: summary.revision,
-            expected_private_revision: summary.private_revision,
-            objects: objects.into_values().collect(),
-        };
-        let mut stale_ended = false;
-        let created = match client
-            .create_upload(&repository_id, &request, manifest_bytes.clone())
-            .await
-        {
-            Ok(created) => created,
-            // Past the per-member cap: make room with the stale ones and retry once.
-            Err(error) if error.kind == ErrorKind::UploadInProgress && !stale.is_empty() => {
-                for open in &stale {
-                    client.abandon_upload(&repository_id, &open.id).await?;
-                }
-                stale_ended = true;
-                client
-                    .create_upload(&repository_id, &request, manifest_bytes)
-                    .await?
-            }
-            Err(error) => return Err(error.message()),
-        };
-        if !stale_ended {
-            for open in &stale {
-                let _ = client.abandon_upload(&repository_id, &open.id).await;
-            }
-        }
-        let mut transfers = Vec::with_capacity(created.missing.len());
-        for missing in &created.missing {
-            let bytes = staged
-                .get(&missing.sha256)
-                .or_else(|| view_bytes.get(&missing.sha256))
-                .cloned()
-                .ok_or_else(|| {
+        // The objects first: the service admits a view only once the
+        // transcript it was built from is stored.
+        let objects = staged
+            .iter()
+            .map(|(sha256, bytes)| {
+                (
+                    format!("{REPOSITORY_PREFIX}/{bundle_id}/_objects/{sha256}"),
+                    bytes.clone(),
+                )
+            })
+            .collect();
+        self.transfer_all(&repository_id, objects).await?;
+        let views = views
+            .iter()
+            .map(|view| {
+                (
                     format!(
-                        "Mallard Cloud needs object {} which this push did not capture; compare again before pushing",
-                        missing.sha256
-                    )
-                })?;
-            transfers.push((missing.sha256.clone(), bytes));
-        }
-        let concurrency = crate::app_settings::cloud_transfer_concurrency().max(1);
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-        let mut workers = tokio::task::JoinSet::new();
-        for (sha256, bytes) in transfers {
-            let client = client.clone();
-            let repository_id = repository_id.clone();
-            let upload_id = created.upload_id.clone();
-            let semaphore = semaphore.clone();
-            workers.spawn(async move {
-                let _permit = semaphore
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| Error::local("v1/repositories/{id}/uploads/{upload}/objects"))?;
-                client
-                    .put_object(&repository_id, &upload_id, &sha256, bytes)
-                    .await
-            });
-        }
-        while let Some(joined) = workers.join_next().await {
-            let outcome = joined.unwrap_or_else(|_| {
-                Err(Error::local(
-                    "v1/repositories/{id}/uploads/{upload}/objects",
-                ))
-            });
-            if let Err(error) = outcome {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-                let _ = client
-                    .abandon_upload(&repository_id, &created.upload_id)
-                    .await;
-                return Err(error.message());
-            }
-        }
-        Self::lock(&self.inner.pending)?.insert(
-            bundle_id.clone(),
-            PendingUpload {
-                repository_id,
-                upload_id: created.upload_id,
-                commit_id: created.commit_id,
-                revision: manifest.revision,
-            },
-        );
-        Ok(())
+                        "{REPOSITORY_PREFIX}/{bundle_id}/_views/{}-{}.json",
+                        super::views::VIEW_SCHEMA,
+                        view.source_sha256
+                    ),
+                    view.bytes.clone(),
+                )
+            })
+            .collect();
+        self.transfer_all(&repository_id, views).await?;
+        let sha256 = sha256_hex(&manifest_bytes);
+        self.inner
+            .client
+            .put_object(&repository_id, key.as_str(), manifest_bytes, &sha256)
+            .await?;
+        self.clear_staged(&scope)
     }
 
-    /// The record write commits the upload. The service keeps its commit
-    /// guard: it refuses a record whose parent is not its current head, which
-    /// is a changed remote with nothing written.
-    async fn commit_record(
+    /// The Library manifest write: resolve the item's repository, or create
+    /// it from the manifest's one entry; put the staged payloads, then the
+    /// manifest.
+    async fn publish_library_manifest(
         &self,
-        bundle_id: &BundleId,
-        bytes: &[u8],
-    ) -> Result<ImmutablePutOutcome, String> {
-        #[derive(serde::Deserialize)]
-        struct RecordFacts {
-            revision: u64,
-            commit_id: String,
-            #[serde(default)]
-            previous_commit_id: Option<String>,
-        }
-        let record: RecordFacts = serde_json::from_slice(bytes)
-            .map_err(|error| format!("parse the record being written: {error}"))?;
-        let pending = Self::lock(&self.inner.pending)?.remove(bundle_id);
-        Self::lock(&self.inner.staged)?.remove(bundle_id);
-        let Some(pending) = pending else {
-            return Err("a record cannot be written before its manifest was uploaded".to_string());
+        stream: &str,
+        key: &ObjectKey,
+        manifest_bytes: Bytes,
+    ) -> Result<(), String> {
+        let scope = Scope::Library(stream.to_owned());
+        let repository_id = match self.repository_for(&scope).await? {
+            Some(id) => id,
+            None => {
+                let item = library_item(stream, &manifest_bytes)?;
+                let spec = CreateRepository {
+                    repository_class: "catalog",
+                    name: item.display_name,
+                    bundle_id: None,
+                    repository_fingerprint: None,
+                    catalog: Some(item.coordinate),
+                };
+                self.create(&scope, &spec).await?
+            }
         };
-        if pending.commit_id != record.commit_id || pending.revision != record.revision {
-            let _ = self
-                .inner
-                .client
-                .abandon_upload(&pending.repository_id, &pending.upload_id)
-                .await;
-            return Err("the record being written does not name the uploaded manifest".to_string());
-        }
-        match self
-            .inner
+        let staged = self.take_staged(&scope)?;
+        let transfers = staged
+            .into_iter()
+            .map(|(sha256, bytes)| {
+                (
+                    format!("{LIBRARY_PREFIX}/{stream}/_objects/{sha256}"),
+                    bytes,
+                )
+            })
+            .collect();
+        self.transfer_all(&repository_id, transfers).await?;
+        let sha256 = sha256_hex(&manifest_bytes);
+        self.inner
             .client
-            .commit_upload(
-                &pending.repository_id,
-                &pending.upload_id,
-                record.previous_commit_id.as_deref(),
-            )
-            .await
-        {
-            Ok(_) => Ok(ImmutablePutOutcome::Written),
-            // The upload is stale now. It stays open so the next push, built
-            // on the moved head, reuses the objects it carried; that push ends
-            // it, or it expires.
-            Err(error) if error.kind == ErrorKind::HeadChanged => Err(REMOTE_CHANGED.to_string()),
+            .put_object(&repository_id, key.as_str(), manifest_bytes, &sha256)
+            .await?;
+        self.clear_staged(&scope)
+    }
+
+    /// Create the scope's repository, or, having lost a race with another
+    /// replica of this account, find the one it created.
+    async fn create(&self, scope: &Scope, spec: &CreateRepository) -> Result<String, String> {
+        match self.inner.client.create_repository(spec).await {
+            Ok(created) => {
+                self.remember(scope, &created.id)?;
+                Ok(created.id)
+            }
+            Err(error) if error.kind == ErrorKind::AccountExists => {
+                Self::lock(&self.inner.repositories)?.remove(scope);
+                self.repository_for(scope)
+                    .await?
+                    .ok_or_else(|| error.message())
+            }
             Err(error) => Err(error.message()),
         }
     }
 
-    /// Nothing is enumerable: Library reads are absent, and the service
-    /// lists no publication records yet.
-    fn enumerate(prefix: &ObjectPrefix, limit: usize) -> Result<StoreListPage, String> {
-        if limit == 0 {
-            return Err("listing limit must be positive".to_string());
+    async fn put_record_async(
+        &self,
+        scope: &Scope,
+        key: &ObjectKey,
+        bytes: Bytes,
+    ) -> Result<ImmutablePutOutcome, String> {
+        match self.put_once(scope, key.as_str(), bytes).await? {
+            PutOutcome::Written => Ok(ImmutablePutOutcome::Written),
+            PutOutcome::AlreadyPresent => Ok(ImmutablePutOutcome::AlreadyPresent),
+            PutOutcome::ClaimTaken => Err(format!("'{key}' is not a claim")),
         }
-        let raw = prefix.as_str();
-        if raw == LIBRARY_PREFIX || raw.starts_with(&format!("{LIBRARY_PREFIX}/")) {
-            return Ok(StoreListPage {
-                entries: vec![],
+    }
+
+    /// One create-only request at the claim key. Refused with these bytes
+    /// already there is this writer's; refused with other bytes is read
+    /// back, as the S3 store does.
+    async fn put_claim_async(
+        &self,
+        scope: &Scope,
+        key: &ObjectKey,
+        bytes: Bytes,
+    ) -> Result<ClaimOutcome, String> {
+        match self.put_once(scope, key.as_str(), bytes).await? {
+            PutOutcome::Written | PutOutcome::AlreadyPresent => Ok(ClaimOutcome::Mine),
+            PutOutcome::ClaimTaken => {
+                let mut found = Vec::new();
+                match self
+                    .download_into(scope, key, MAX_RECORD_BYTES, &mut found)
+                    .await?
+                {
+                    Some(_) => Ok(ClaimOutcome::Taken(found)),
+                    None => Err(format!(
+                        "Mallard Cloud refused the claim '{key}' but the claim is missing"
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn list_keys_async(
+        &self,
+        prefix: &ObjectPrefix,
+        cursor: Option<&str>,
+    ) -> Result<StoreKeyPage, String> {
+        let scope = match classify_prefix(prefix)? {
+            Listing::Refused => return Err(DISCOVERY_REFUSAL.to_string()),
+            Listing::Scoped(scope) => scope,
+        };
+        let stream = is_stream_prefix(prefix, &scope);
+        let _status_read = if stream {
+            Some(self.inner.status_read.lock().await)
+        } else {
+            None
+        };
+        let Some(repository_id) = self.repository_for(&scope).await? else {
+            // A bundle the account has no repository for lists empty.
+            return Ok(StoreKeyPage {
+                keys: Vec::new(),
                 next_cursor: None,
             });
+        };
+        let bundle = match &scope {
+            Scope::Project(bundle) if stream => Some(bundle.clone()),
+            _ => None,
+        };
+        let listing = match self
+            .inner
+            .client
+            .list_keys(&repository_id, prefix.as_str(), cursor)
+            .await
+        {
+            Ok(listing) => listing,
+            Err(error) => {
+                if let Some(bundle) = bundle {
+                    let status = ManagedCloudStatus::failed(&repository_id, &error);
+                    let message = status.message.clone().unwrap_or_else(|| error.message());
+                    Self::lock(&self.inner.statuses)?.insert(bundle, status);
+                    return Err(message);
+                }
+                return Err(error.message());
+            }
+        };
+        if let Some(bundle) = bundle {
+            Self::lock(&self.inner.statuses)?.insert(
+                bundle,
+                ManagedCloudStatus::observed(&repository_id, &listing),
+            );
         }
-        Err("Mallard Cloud does not list publication records yet".to_string())
+        let keys = listing
+            .keys
+            .iter()
+            .filter(|key| {
+                key.strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|key| ObjectKey::parse(key.as_str()))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(StoreKeyPage {
+            keys,
+            next_cursor: listing.next_cursor,
+        })
     }
 }
 
@@ -668,7 +829,6 @@ impl ObjectStore for ManagedObjectStore {
         keys: &[ObjectKey],
         max_bytes: u64,
     ) -> Result<Vec<Option<StoredMetadata>>, String> {
-        // Tag reads share one listing; heads and objects are few per call.
         self.inner.runtime.block_on(async {
             let mut out = Vec::with_capacity(keys.len());
             for key in keys {
@@ -748,29 +908,52 @@ impl ObjectStore for ManagedObjectStore {
         let mut outcomes = Vec::with_capacity(objects.len());
         for (key, bytes) in objects {
             match classify(&key)? {
-                Key::Object { bundle_id, sha256 } => {
+                Key::Object { scope, sha256 } => {
                     if sha256_hex(&bytes) != sha256 {
                         return Err(format!("object '{key}' does not match its digest"));
                     }
                     Self::lock(&self.inner.staged)?
-                        .entry(bundle_id)
+                        .entry(scope)
                         .or_default()
                         .insert(sha256, bytes);
                     outcomes.push(ImmutablePutOutcome::Written);
                 }
-                Key::Manifest { bundle_id, .. } => {
+                Key::Manifest {
+                    scope: Scope::Project(bundle_id),
+                } => {
                     self.inner
                         .runtime
-                        .block_on(self.begin_upload(&bundle_id, bytes))?;
+                        .block_on(self.publish_manifest(&bundle_id, &key, bytes))?;
                     outcomes.push(ImmutablePutOutcome::Written);
                 }
+                Key::Manifest {
+                    scope: Scope::Library(stream),
+                } => {
+                    self.inner
+                        .runtime
+                        .block_on(self.publish_library_manifest(&stream, &key, bytes))?;
+                    outcomes.push(ImmutablePutOutcome::Written);
+                }
+                Key::Tag { stream } => {
+                    let outcome = self.inner.runtime.block_on(self.put_once(
+                        &Scope::Library(stream),
+                        key.as_str(),
+                        bytes,
+                    ))?;
+                    outcomes.push(match outcome {
+                        PutOutcome::Written => ImmutablePutOutcome::Written,
+                        PutOutcome::AlreadyPresent => ImmutablePutOutcome::AlreadyPresent,
+                        PutOutcome::ClaimTaken => {
+                            return Err(format!("'{key}' is not a claim"));
+                        }
+                    });
+                }
                 Key::Marker => outcomes.push(ImmutablePutOutcome::AlreadyPresent),
-                Key::Library => return Err(CATALOG_REFUSAL.to_string()),
-                Key::Upload(_) => return Err("Mallard Cloud has no probe namespace".to_string()),
-                Key::Record(_) => {
+                Key::Upload => return Err("Mallard Cloud has no probe namespace".to_string()),
+                Key::Record { .. } => {
                     return Err(format!("'{key}' is written as a publication record only"))
                 }
-                Key::Head(_) => return Err(format!("'{key}' is never written")),
+                Key::Claim { .. } => return Err(format!("'{key}' is written as a claim only")),
             }
         }
         Ok(outcomes)
@@ -778,22 +961,66 @@ impl ObjectStore for ManagedObjectStore {
 
     fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         match classify(key)? {
-            Key::Record(bundle_id) => self
-                .inner
-                .runtime
-                .block_on(self.commit_record(&bundle_id, bytes)),
-            Key::Library => Err(CATALOG_REFUSAL.to_string()),
+            Key::Record { scope } => self.inner.runtime.block_on(self.put_record_async(
+                &scope,
+                key,
+                Bytes::copy_from_slice(bytes),
+            )),
             _ => Err(format!("'{key}' is not a publication record")),
+        }
+    }
+
+    /// The service refuses a second write of a key in the same request,
+    /// through R2's own create-only write.
+    fn supports_claims(&self) -> bool {
+        true
+    }
+
+    fn put_claim(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ClaimOutcome, String> {
+        match classify(key)? {
+            Key::Claim { scope } => self.inner.runtime.block_on(self.put_claim_async(
+                &scope,
+                key,
+                Bytes::copy_from_slice(bytes),
+            )),
+            _ => Err(format!("'{key}' is not a claim")),
         }
     }
 
     fn list(
         &self,
         prefix: &ObjectPrefix,
-        _cursor: Option<&str>,
+        cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreListPage, String> {
-        Self::enumerate(prefix, limit)
+        let page = self.list_keys(prefix, cursor, limit)?;
+        Ok(StoreListPage {
+            entries: page
+                .keys
+                .into_iter()
+                .map(|key| StoreListEntry {
+                    key,
+                    etag: String::new(),
+                })
+                .collect(),
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    /// Nothing on Mallard Cloud is deleted from the desktop, so a listing
+    /// never needs a revision: every listing is this one.
+    fn list_keys(
+        &self,
+        prefix: &ObjectPrefix,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<StoreKeyPage, String> {
+        if limit == 0 {
+            return Err("listing limit must be positive".to_string());
+        }
+        self.inner
+            .runtime
+            .block_on(self.list_keys_async(prefix, cursor))
     }
 }
 
@@ -814,54 +1041,144 @@ mod tests {
             classify(&ObjectKey::parse(STORAGE_MARKER_KEY).unwrap()).unwrap(),
             Key::Marker
         );
-        let head = ObjectKey::parse(format!("{REPOSITORY_PREFIX}/{id}/_head.json")).unwrap();
-        assert_eq!(classify(&head).unwrap(), Key::Head(id.clone()));
         assert_eq!(
-            classify(&object("_manifests/3-commit-abcdef12.json")).unwrap(),
+            classify(&object(&format!(
+                "_manifests/3-commit-{}.json",
+                "a".repeat(24)
+            )))
+            .unwrap(),
             Key::Manifest {
-                bundle_id: id.clone(),
-                revision: 3,
-                commit_id: "commit-abcdef12".into()
+                scope: Scope::Project(id.clone())
             }
         );
         let record =
             ObjectKey::parse(format!("{REPOSITORY_COMMITS_PREFIX}/{id}/record.json")).unwrap();
-        assert_eq!(classify(&record).unwrap(), Key::Record(id.clone()));
+        assert_eq!(
+            classify(&record).unwrap(),
+            Key::Record {
+                scope: Scope::Project(id.clone())
+            }
+        );
+        let claim = ObjectKey::parse(format!("{REPOSITORY_CLAIMS_PREFIX}/{id}/root.json")).unwrap();
+        assert_eq!(
+            classify(&claim).unwrap(),
+            Key::Claim {
+                scope: Scope::Project(id.clone())
+            }
+        );
         let sha = "a".repeat(64);
         assert_eq!(
             classify(&object(&format!("_objects/{sha}"))).unwrap(),
             Key::Object {
-                bundle_id: id.clone(),
+                scope: Scope::Project(id.clone()),
                 sha256: sha
             }
         );
+        assert_eq!(classify(&object("_uploads/probe")).unwrap(), Key::Upload);
+        let stream = "library-0123456789abcdef0123456789abcdef";
+        let library =
+            |relative: &str| crate::storage_core::library_object_key(stream, relative).unwrap();
         assert_eq!(
-            classify(&object("_uploads/probe")).unwrap(),
-            Key::Upload(id)
+            classify(&library(TAG_FILE)).unwrap(),
+            Key::Tag {
+                stream: stream.into()
+            }
         );
         assert_eq!(
-            classify(
-                &crate::storage_core::library_object_key(
-                    "library-0123456789abcdef0123456789abcdef",
-                    "_tag.json"
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            Key::Library
+            classify(&library("_commits/record.json")).unwrap(),
+            Key::Record {
+                scope: Scope::Library(stream.into())
+            }
         );
+        assert_eq!(
+            classify(&library("_claims/root.json")).unwrap(),
+            Key::Claim {
+                scope: Scope::Library(stream.into())
+            }
+        );
+        assert_eq!(
+            classify(&library(&format!("_objects/{}", "b".repeat(64)))).unwrap(),
+            Key::Object {
+                scope: Scope::Library(stream.into()),
+                sha256: "b".repeat(64)
+            }
+        );
+    }
+
+    #[test]
+    fn prefixes_scope_to_one_repository_and_refuse_every_stream() {
+        let id = bundle(9);
+        let stream = ObjectPrefix::parse(format!("{REPOSITORY_COMMITS_PREFIX}/{id}")).unwrap();
+        assert!(matches!(
+            classify_prefix(&stream).unwrap(),
+            Listing::Scoped(Scope::Project(ref scoped)) if scoped == &id
+        ));
+        assert!(is_stream_prefix(&stream, &Scope::Project(id.clone())));
+        let objects = ObjectPrefix::parse(format!("{REPOSITORY_PREFIX}/{id}/_objects")).unwrap();
+        assert!(!is_stream_prefix(&objects, &Scope::Project(id.clone())));
+        for refused in [
+            REPOSITORY_PREFIX,
+            REPOSITORY_COMMITS_PREFIX,
+            REPOSITORY_CLAIMS_PREFIX,
+            LIBRARY_PREFIX,
+        ] {
+            assert!(matches!(
+                classify_prefix(&ObjectPrefix::parse(refused).unwrap()).unwrap(),
+                Listing::Refused
+            ));
+        }
+        let library = ObjectPrefix::parse(format!(
+            "{LIBRARY_PREFIX}/library-0123456789abcdef0123456789abcdef/_commits"
+        ))
+        .unwrap();
+        let scope = Scope::Library("library-0123456789abcdef0123456789abcdef".into());
+        assert!(
+            matches!(classify_prefix(&library).unwrap(), Listing::Scoped(ref scoped) if scoped == &scope)
+        );
+        assert!(is_stream_prefix(&library, &scope));
+        assert!(classify_prefix(
+            &ObjectPrefix::parse(format!("{LIBRARY_PREFIX}/catalog-x")).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_library_manifest_names_the_item_its_repository_is_created_from() {
+        let stream = "library-0123456789abcdef0123456789abcdef";
+        let manifest = serde_json::json!({
+            "schema_version": 1, "repository_id": stream, "revision": 1, "commit_id": format!("commit-{}", "a".repeat(24)),
+            "resources": {"resource-1": {"resource": {"resource_id": "resource-1", "provider": "codex", "resource_kind": "agent_skill",
+                "format": "agentskills.io.skill", "format_version": 1, "identity": {"effective_name": "my-skill"}, "descriptor": {}}, "updated_at": 1}}
+        });
+        let item = library_item(stream, &serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(item.display_name, "my-skill");
+        assert_eq!(item.coordinate.resource_kind, "agent_skill");
+        assert_eq!(item.coordinate.library_repository_id, stream);
+        let mut two = manifest.clone();
+        two["resources"]["resource-2"] = two["resources"]["resource-1"].clone();
+        assert!(library_item(stream, &serde_json::to_vec(&two).unwrap())
+            .unwrap_err()
+            .contains("one item per repository"));
+        let mut other = manifest;
+        other["repository_id"] = serde_json::json!("library-ffffffffffffffffffffffffffffffff");
+        assert!(library_item(stream, &serde_json::to_vec(&other).unwrap()).is_err());
     }
 }
 
 #[cfg(test)]
 mod stub_tests {
     use super::*;
-    use crate::managed_cloud::stub::StubManagedCloud;
-    use crate::storage_core::publication::RecordStream;
-    use crate::storage_core::repository_object_key;
+    use crate::managed_cloud::client::{ManagedCloudStatusState, PublicationState, ReleaseState};
+    use crate::managed_cloud::stub::{Fault, StubManagedCloud};
+    use crate::storage_core::publication::{
+        finish_claimed_push, list_stream, read_record, write_record, RecordStream, WriteOutcome,
+        PUSH_UNFINISHED, REMOTE_CHANGED,
+    };
+    use crate::storage_core::{repository_object_key, ConfiguredObjectStore};
+    use crate::storage_providers::StorageProviderRegistry;
     use mallard_domain::{
-        BundleIdentity, OriginHostToken, OriginReplicaToken, PortableOrigin, PublicationToken,
-        RecordName, SecretValue,
+        BundleIdentity, BundleKind, OriginHostToken, OriginReplicaToken, PortableOrigin,
+        PublicationToken, RecordName, SecretValue, BUNDLE_SCHEMA,
     };
 
     fn origin() -> PortableOrigin {
@@ -885,15 +1202,56 @@ mod stub_tests {
         BundleId::parse(format!("{number:032x}")).unwrap()
     }
 
-    async fn store(stub: &StubManagedCloud, login: &str) -> (ManagedObjectStore, String) {
+    /// A store for `login`, signed in at the stub, with the process cache
+    /// a shared store has.
+    async fn store(stub: &StubManagedCloud, login: &str) -> (ConfiguredObjectStore, String) {
         let (user, token) = stub.state.lock().unwrap().add_user(login);
-        let client =
-            ManagedCloudClient::new(&stub.endpoint, Some(SecretValue::parse(&token).unwrap()))
-                .unwrap();
+        let mut secrets = mallard_domain::SecretMap::empty();
+        secrets
+            .insert(
+                crate::storage_providers::managed_cloud::token_key(),
+                SecretValue::parse(&token).unwrap(),
+            )
+            .unwrap();
+        let config = mallard_domain::StorageProviderConfig::new(
+            1,
+            mallard_domain::BoundedConfigObject::encode(
+                &crate::storage_providers::managed_cloud::ManagedCloudSettingsV1 {
+                    service_origin: stub.endpoint.clone(),
+                    account_id: user.id.clone(),
+                    account_login: login.into(),
+                },
+            )
+            .unwrap(),
+            secrets,
+        );
+        let storage = mallard_domain::StorageConfig {
+            id: mallard_domain::StorageId::parse(format!("storage-{}", user.id)).unwrap(),
+            name: "Mallard Cloud".into(),
+            provider: crate::storage_providers::managed_cloud::provider_key(),
+            provider_config: config,
+        };
         (
-            ManagedObjectStore::new(client, user.id.clone(), Handle::current()),
+            ConfiguredObjectStore::open_with(StorageProviderRegistry::production(), &storage)
+                .unwrap(),
             user.id,
         )
+    }
+
+    fn managed(store: &ConfiguredObjectStore) -> &ManagedObjectStore {
+        store.managed_cloud().unwrap()
+    }
+
+    fn manifest(identity: BundleIdentity, revision: u64, updated_at: u64) -> BundleManifest {
+        BundleManifest {
+            schema_version: BUNDLE_SCHEMA,
+            revision,
+            commit_id: mallard_domain::generated_named_id("commit").unwrap(),
+            updated_at,
+            bundle: identity,
+            published_by_origin: origin(),
+            scopes: BTreeMap::new(),
+        }
     }
 
     fn manifest_key(manifest: &BundleManifest) -> ObjectKey {
@@ -907,464 +1265,713 @@ mod stub_tests {
         .unwrap()
     }
 
-    /// The publication record of `manifest` on `parent`, and its key. The
-    /// service reads the commit facts from it and nothing else.
-    fn record_of(manifest: &BundleManifest, parent: Option<&str>) -> (ObjectKey, Vec<u8>) {
+    /// The publication record of `manifest` on `parent`, as the engine
+    /// builds it, and its name.
+    fn record_of(
+        manifest: &BundleManifest,
+        manifest_bytes: &[u8],
+        parent: Option<&RecordName>,
+        created_at_ms: u64,
+    ) -> (RecordName, Vec<u8>) {
         let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
             "bundle_id": manifest.bundle.bundle_id,
             "revision": manifest.revision,
             "commit_id": manifest.commit_id,
-            "previous_commit_id": parent,
+            "previous_commit_id": parent.map(|parent| parent.commit_id()),
+            "previous_record_sha256": parent.map(|parent| parent.token().record_sha256()),
+            "created_at_ms": created_at_ms,
+            "manifest_key": format!("_manifests/{}-{}.json", manifest.revision, manifest.commit_id),
+            "manifest_sha256": sha256_hex(manifest_bytes),
+            "manifest_size": manifest_bytes.len(),
+            "added_files": 0, "changed_files": 0, "removed_files": 0,
+            "published_by_origin": manifest.published_by_origin,
+            "summary": {"display_name": manifest.bundle.display_name, "kind": "project", "resources": 0, "files": 0,
+                "registration_only": manifest.revision == 1, "providers": []},
         }))
         .unwrap();
         let name = RecordName::new(
             manifest.revision,
             PublicationToken::new(manifest.commit_id.clone(), sha256_hex(&bytes)).unwrap(),
-            parent.map(|parent| PublicationToken::new(parent, "0".repeat(64)).unwrap()),
-            manifest.updated_at,
+            parent.map(|parent| parent.token().clone()),
+            created_at_ms,
         )
         .unwrap();
-        let key = RecordStream::project(&manifest.bundle.bundle_id)
-            .unwrap()
-            .key(&name)
-            .unwrap();
-        (key, bytes)
+        (name, bytes)
     }
 
-    /// Pushes a manifest on top of `parent`: the manifest write creates the
-    /// upload, the record write commits it.
-    async fn push(
-        store: &ManagedObjectStore,
+    /// The engine's push: the manifest, then the record with list-then-write.
+    fn push(
+        store: &ConfiguredObjectStore,
         manifest: &BundleManifest,
-        parent: Option<&str>,
-    ) -> Result<ImmutablePutOutcome, String> {
-        let manifest_key = manifest_key(manifest);
-        let manifest_bytes = Bytes::from(serde_json::to_vec(manifest).unwrap());
-        let (record_key, record_bytes) = record_of(manifest, parent);
-        let store = store.clone();
-        tokio::task::spawn_blocking(move || {
-            store
-                .put_many(vec![(manifest_key, manifest_bytes)])
-                .unwrap();
-            store.put_record(&record_key, &record_bytes)
-        })
-        .await
-        .unwrap()
+        parent: Option<&RecordName>,
+        created_at_ms: u64,
+    ) -> Result<(RecordName, WriteOutcome), String> {
+        let bytes = serde_json::to_vec(manifest).unwrap();
+        store.put_immutable(&manifest_key(manifest), &bytes)?;
+        let (name, record) = record_of(manifest, &bytes, parent, created_at_ms);
+        let stream = RecordStream::project(&manifest.bundle.bundle_id)?;
+        let outcome = write_record(store, &stream, &name, &record)?;
+        Ok((name, outcome))
     }
 
-    /// The empty registration manifest of a just-linked bundle, pushed as
-    /// the repository's first publication.
-    async fn register(store: &ManagedObjectStore, identity: BundleIdentity) -> BundleManifest {
-        let manifest = BundleManifest {
-            schema_version: BUNDLE_SCHEMA,
-            revision: 1,
-            commit_id: mallard_domain::generated_named_id("commit").unwrap(),
-            updated_at: 100,
-            bundle: identity,
-            published_by_origin: origin(),
-            scopes: BTreeMap::new(),
-        };
-        push(store, &manifest, None).await.unwrap();
-        manifest
+    fn stored(outcome: Result<(RecordName, WriteOutcome), String>) -> RecordName {
+        let (name, outcome) = outcome.unwrap();
+        assert!(matches!(outcome, WriteOutcome::Stored(_)), "{outcome:?}");
+        name
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pinned_status_shares_one_details_read_and_never_recreates_a_missing_repository() {
-        let stub = StubManagedCloud::start().await;
-        let (store, _) = store(&stub, "status-owner").await;
-        register(&store, identity(91)).await;
-        let id = stub
-            .state
-            .lock()
-            .unwrap()
-            .repository_for_bundle(bundle(91).as_str())
-            .unwrap()
-            .id
-            .clone();
-        store.set_pin(&bundle(91), Some(&id)).unwrap();
-        stub.state.lock().unwrap().log.clear();
-        assert!(store.head_bytes(&bundle(91)).await.unwrap().is_some());
-        let requests = stub.requests();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].path, format!("/v1/repositories/{id}"));
-        assert_eq!(requests[1].path, format!("/v1/repositories/{id}/head"));
-        let observed = store.status(&bundle(91)).unwrap();
-        assert_eq!(
-            observed.state,
-            super::super::client::ManagedCloudStatusState::Ready
-        );
-        assert_eq!(
-            observed.link.unwrap().release,
-            super::super::client::ReleaseState::NotPushed
-        );
-        stub.state.lock().unwrap().log.clear();
-        let bundle_id = bundle(91);
-        let (first, second) =
-            tokio::join!(store.head_bytes(&bundle_id), store.head_bytes(&bundle_id));
-        assert!(first.unwrap().is_some());
-        assert!(second.unwrap().is_some());
-        assert_eq!(
-            stub.requests()
-                .iter()
-                .map(|request| request.path.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                format!("/v1/repositories/{id}"),
-                format!("/v1/repositories/{id}/head"),
-                format!("/v1/repositories/{id}"),
-                format!("/v1/repositories/{id}/head"),
-            ]
-        );
-        stub.state.lock().unwrap().fail_next_summary = true;
-        assert!(store.head_bytes(&bundle(91)).await.unwrap().is_some());
-        let partial = store.status(&bundle(91)).unwrap();
-        assert_eq!(
-            partial.state,
-            super::super::client::ManagedCloudStatusState::Ready
-        );
-        assert_eq!(
-            partial.publication.unwrap().state,
-            super::super::client::PublicationState::Unavailable
-        );
-        stub.state.lock().unwrap().repositories.remove(&id);
-        assert!(store
-            .head_bytes(&bundle(91))
-            .await
-            .unwrap_err()
-            .contains("deleted or you no longer have access"));
-        assert_eq!(
-            store.status(&bundle(91)).unwrap().state,
-            super::super::client::ManagedCloudStatusState::Inaccessible
-        );
-        assert_eq!(
-            store.repository_for(&bundle(91)).await.unwrap().as_deref(),
-            Some(id.as_str())
-        );
-        assert!(!stub
-            .requests()
-            .iter()
-            .any(|request| request.method == "POST"));
-        // Removing optional metadata disables the new status path, even with a warm store.
-        store.set_pin(&bundle(91), None).unwrap();
-        assert!(store.status(&bundle(91)).is_none());
-        stub.state.lock().unwrap().log.clear();
-        assert!(store.head_bytes(&bundle(91)).await.unwrap().is_none());
-        assert!(stub.requests()[0].path.contains("/by-bundle/"));
+    async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        tokio::task::spawn_blocking(work).await.unwrap()
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pinned_status_detects_privacy_access_loss_and_recovers() {
-        let stub = StubManagedCloud::start().await;
-        let (owner, _) = store(&stub, "private-owner").await;
-        let (contributor, _) = store(&stub, "contributor").await;
-        register(&owner, identity(92)).await;
-        let id = stub
-            .state
-            .lock()
-            .unwrap()
-            .repository_for_bundle(bundle(92).as_str())
-            .unwrap()
-            .id
-            .clone();
-        stub.state.lock().unwrap().release(&id, None);
-        owner.set_pin(&bundle(92), Some(&id)).unwrap();
-        contributor.set_pin(&bundle(92), Some(&id)).unwrap();
-        contributor.head_bytes(&bundle(92)).await.unwrap();
+    fn repository_id(stub: &StubManagedCloud, number: u64) -> String {
         stub.state
             .lock()
             .unwrap()
-            .repositories
-            .get_mut(&id)
-            .unwrap()
-            .visibility = "private".into();
-        assert!(contributor.head_bytes(&bundle(92)).await.is_err());
-        owner.head_bytes(&bundle(92)).await.unwrap();
-        assert_eq!(
-            owner.status(&bundle(92)).unwrap().link.unwrap().visibility,
-            "private"
-        );
-        stub.state.lock().unwrap().release(&id, None);
-        contributor.head_bytes(&bundle(92)).await.unwrap();
-        assert_eq!(
-            contributor.status(&bundle(92)).unwrap().state,
-            super::super::client::ManagedCloudStatusState::Ready
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_first_publication_creates_the_repository_and_commits_on_the_record_write() {
-        let stub = StubManagedCloud::start().await;
-        let (store, _) = store(&stub, "octocat").await;
-        register(&store, identity(1)).await;
-        let state = stub.state.lock().unwrap();
-        assert_eq!(state.repositories.len(), 1);
-        let repository = state.repository_for_bundle(bundle(1).as_str()).unwrap();
-        assert_eq!(repository.class, "non_git_project");
-        assert_eq!(
-            repository.private_head.as_ref().unwrap().manifest_revision,
-            1
-        );
-        // Every create and commit carried an Idempotency-Key.
-        for request in state.log.iter().filter(|r| {
-            r.method == "POST"
-                && (r.path == "/v1/repositories"
-                    || r.path.ends_with("/commit")
-                    || r.path.ends_with("/uploads"))
-        }) {
-            assert!(request.idempotency_key.is_some(), "{request:?}");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn registration_keeps_the_requested_github_name_and_suffixes_conflicts() {
-        let stub = StubManagedCloud::start().await;
-        let (store, _) = store(&stub, "octocat").await;
-        for number in [1, 2] {
-            let mut requested = identity(number);
-            requested.display_name = "My--Repo".into();
-            requested.repository_fingerprint = Some("a".repeat(64));
-            register(&store, requested).await;
-        }
-        let state = stub.state.lock().unwrap();
-        assert_eq!(
-            state
-                .repository_for_bundle(bundle(1).as_str())
-                .unwrap()
-                .name,
-            "My--Repo"
-        );
-        assert_eq!(
-            state
-                .repository_for_bundle(bundle(2).as_str())
-                .unwrap()
-                .name,
-            "My--Repo-2"
-        );
-    }
-
-    fn next_manifest(previous: &BundleManifest) -> BundleManifest {
-        let mut manifest = previous.clone();
-        manifest.revision += 1;
-        manifest.commit_id = mallard_domain::generated_named_id("commit").unwrap();
-        manifest.updated_at += 1;
-        manifest
-    }
-
-    /// Creates the upload for a manifest without committing it; returns its id.
-    async fn open_upload(
-        stub: &StubManagedCloud,
-        store: &ManagedObjectStore,
-        manifest: &BundleManifest,
-    ) -> String {
-        let key = manifest_key(manifest);
-        let bytes = Bytes::from(serde_json::to_vec(manifest).unwrap());
-        let store = store.clone();
-        tokio::task::spawn_blocking(move || store.put_many(vec![(key, bytes)]).unwrap())
-            .await
-            .unwrap();
-        let state = stub.state.lock().unwrap();
-        state
-            .uploads
-            .values()
-            .find(|u| u.commit_id == manifest.commit_id && u.state == "open")
+            .repository_for_bundle(bundle(number).as_str())
             .unwrap()
             .id
             .clone()
     }
 
-    fn current_manifest(stub: &StubManagedCloud, number: u64) -> BundleManifest {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registration_creates_the_repository_and_publishes_with_the_shared_protocol() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let first = manifest(identity(1), 1, 100);
+        let name = blocking({
+            let store = store.clone();
+            let first = first.clone();
+            move || stored(push(&store, &first, None, 1_000))
+        })
+        .await;
+        let id = repository_id(&stub, 1);
+        assert_eq!(
+            stub.request_lines(),
+            vec![
+                format!("GET /v1/repositories/by-bundle/{}", bundle(1)),
+                "POST /v1/repositories".to_string(),
+                format!("PUT /v1/repositories/{id}/store/{}", manifest_key(&first)),
+                format!(
+                    "GET /v1/repositories/{id}/store?prefix={REPOSITORY_COMMITS_PREFIX}/{}",
+                    bundle(1)
+                ),
+                format!(
+                    "PUT /v1/repositories/{id}/store/{REPOSITORY_CLAIMS_PREFIX}/{}/root.json",
+                    bundle(1)
+                ),
+                format!(
+                    "PUT /v1/repositories/{id}/store/{REPOSITORY_COMMITS_PREFIX}/{}/{}",
+                    bundle(1),
+                    name.file_name()
+                ),
+                format!(
+                    "GET /v1/repositories/{id}/store?prefix={REPOSITORY_COMMITS_PREFIX}/{}",
+                    bundle(1)
+                ),
+            ]
+        );
         let state = stub.state.lock().unwrap();
-        let head = state
-            .repository_for_bundle(bundle(number).as_str())
-            .unwrap()
-            .private_head
-            .as_ref()
-            .unwrap();
-        serde_json::from_slice(&head.manifest).unwrap()
-    }
-
-    /// Positions in the stub's request log of the last upload creation and of
-    /// the abandon of `upload_id`: the replacement must exist before a stale
-    /// upload is ended, so the objects it carried stay protected.
-    fn created_before_ended(stub: &StubManagedCloud, upload_id: &str) -> bool {
-        let state = stub.state.lock().unwrap();
-        let created = state
-            .log
-            .iter()
-            .rposition(|r| r.method == "POST" && r.path.ends_with("/uploads"))
-            .unwrap();
-        let ended = state
-            .log
-            .iter()
-            .rposition(|r| {
-                r.method == "POST" && r.path.ends_with(&format!("/uploads/{upload_id}/abandon"))
-            })
-            .unwrap();
-        created < ended
+        let repository = &state.repositories[&id];
+        assert_eq!(repository.class, "non_git_project");
+        assert!(repository.objects.contains_key(".mallard/_storage.json"));
+        assert_eq!(
+            repository.private_head.as_deref(),
+            Some(name.file_name().as_str())
+        );
+        assert_eq!(repository.private_revision, 1);
+        assert!(repository.publications[0].summary["registration_only"] == true);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn own_uploads_are_ended_in_order_and_a_collaborators_push_coexists() {
+    async fn a_refresh_of_an_unchanged_bundle_makes_one_listing_request() {
         let stub = StubManagedCloud::start().await;
-        let (store, me) = store(&stub, "octocat").await;
-        let base = register(&store, identity(2)).await;
-        let id = bundle(2);
-        let revision_of = |stub: &StubManagedCloud| {
-            stub.state
-                .lock()
-                .unwrap()
-                .repository_for_bundle(id.as_str())
-                .unwrap()
-                .private_head
-                .as_ref()
-                .unwrap()
-                .manifest_revision
-        };
-
-        // Two own leftovers, never committed: one of the very manifest pushed next, one of another.
-        let second = next_manifest(&base);
-        let same = open_upload(&stub, &store, &second).await;
-        let other = open_upload(&stub, &store, &next_manifest(&base)).await;
-        assert_eq!(stub.state.lock().unwrap().uploads[&same].user_id, me);
-        // A new process knows neither.
-        store.inner.pending.lock().unwrap().clear();
-        push(&store, &second, Some(&base.commit_id)).await.unwrap();
-        {
-            let state = stub.state.lock().unwrap();
-            // The same-manifest leftover had to go first; the other is not stale yet and is left alone.
-            assert_eq!(state.uploads[&same].state, "abandoned");
-            assert_eq!(state.uploads[&other].state, "open");
-        }
-        assert_eq!(revision_of(&stub), 2);
-
-        // The head moved, so the other leftover is stale: the next push ends it, after its own upload exists.
-        let third = next_manifest(&current_manifest(&stub, 2));
-        push(&store, &third, Some(&second.commit_id)).await.unwrap();
-        assert_eq!(
-            stub.state.lock().unwrap().uploads[&other].state,
-            "abandoned"
-        );
-        assert!(created_before_ended(&stub, &other));
-        assert_eq!(revision_of(&stub), 3);
-
-        // A collaborator's open upload never blocks a push and is never touched.
-        let (rika_store, rika) = store_for_member(&stub, "rika321", id.as_str()).await;
-        let shared_base = current_manifest(&stub, 2);
-        let theirs_manifest = next_manifest(&shared_base);
-        let theirs = open_upload(&stub, &rika_store, &theirs_manifest).await;
-        let fourth = next_manifest(&shared_base);
-        push(&store, &fourth, Some(&third.commit_id)).await.unwrap();
-        {
-            let state = stub.state.lock().unwrap();
-            assert_eq!(state.uploads[&theirs].state, "open");
-            assert_eq!(state.uploads[&theirs].user_id, rika);
-        }
-
-        // Their record names a parent that is no longer the head: a changed
-        // remote that leaves the upload open...
-        let conflict = tokio::task::spawn_blocking({
-            let store = rika_store.clone();
-            let (record_key, record_bytes) = record_of(&theirs_manifest, Some(&third.commit_id));
-            move || store.put_record(&record_key, &record_bytes)
+        let (store, _) = store(&stub, "octocat").await;
+        let first = manifest(identity(2), 1, 100);
+        let (name, stream) = blocking({
+            let store = store.clone();
+            let first = first.clone();
+            move || {
+                let name = stored(push(&store, &first, None, 1_000));
+                let stream = RecordStream::project(&first.bundle.bundle_id).unwrap();
+                // The first refresh reads the record it has not seen.
+                assert_eq!(
+                    list_stream(&store, &stream).unwrap().mainline().selected(),
+                    Some(&name)
+                );
+                (name, stream)
+            }
         })
-        .await
-        .unwrap();
-        assert_eq!(conflict.unwrap_err(), REMOTE_CHANGED);
-        assert_eq!(stub.state.lock().unwrap().uploads[&theirs].state, "open");
-        // ...and their push on the moved head ends it only once the replacement exists.
-        let fifth = next_manifest(&current_manifest(&stub, 2));
-        push(&rika_store, &fifth, Some(&fourth.commit_id))
-            .await
-            .unwrap();
+        .await;
+        stub.clear_log();
+        blocking({
+            let store = store.clone();
+            let stream = stream.clone();
+            let name = name.clone();
+            move || {
+                let view = list_stream(&store, &stream).unwrap();
+                assert_eq!(view.mainline().selected(), Some(&name));
+                let bytes = read_record(&store, &stream, &name).unwrap();
+                assert_eq!(sha256_hex(&bytes), name.token().record_sha256());
+            }
+        })
+        .await;
+        let id = repository_id(&stub, 2);
         assert_eq!(
-            stub.state.lock().unwrap().uploads[&theirs].state,
-            "abandoned"
+            stub.request_lines(),
+            vec![format!(
+                "GET /v1/repositories/{id}/store?prefix={REPOSITORY_COMMITS_PREFIX}/{}",
+                bundle(2)
+            )]
         );
-        assert!(created_before_ended(&stub, &theirs));
-        assert_eq!(revision_of(&stub), 5);
     }
 
-    async fn store_for_member(
-        stub: &StubManagedCloud,
-        login: &str,
-        bundle_id: &str,
-    ) -> (ManagedObjectStore, String) {
-        let (store, user_id) = store(stub, login).await;
-        let repository_id = stub
-            .state
-            .lock()
-            .unwrap()
-            .repository_for_bundle(bundle_id)
-            .unwrap()
-            .id
-            .clone();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_push_is_listing_claim_record_listing_after_the_manifest() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let first = manifest(identity(3), 1, 100);
+        let second = manifest(identity(3), 2, 200);
+        let root = blocking({
+            let store = store.clone();
+            let first = first.clone();
+            move || stored(push(&store, &first, None, 1_000))
+        })
+        .await;
+        stub.clear_log();
+        let next = blocking({
+            let store = store.clone();
+            let second = second.clone();
+            let root = root.clone();
+            move || stored(push(&store, &second, Some(&root), 2_000))
+        })
+        .await;
+        let id = repository_id(&stub, 3);
+        let listing = format!(
+            "GET /v1/repositories/{id}/store?prefix={REPOSITORY_COMMITS_PREFIX}/{}",
+            bundle(3)
+        );
+        assert_eq!(
+            stub.request_lines(),
+            vec![
+                format!("PUT /v1/repositories/{id}/store/{}", manifest_key(&second)),
+                listing.clone(),
+                format!(
+                    "PUT /v1/repositories/{id}/store/{REPOSITORY_CLAIMS_PREFIX}/{}/{}.json",
+                    bundle(3),
+                    root.token()
+                ),
+                format!(
+                    "PUT /v1/repositories/{id}/store/{REPOSITORY_COMMITS_PREFIX}/{}/{}",
+                    bundle(3),
+                    next.file_name()
+                ),
+                listing,
+            ]
+        );
+        let state = stub.state.lock().unwrap();
+        let repository = &state.repositories[&id];
+        assert_eq!(
+            repository.private_head.as_deref(),
+            Some(next.file_name().as_str())
+        );
+        assert_eq!(repository.private_revision, 2);
+        assert_eq!(
+            repository
+                .publications
+                .iter()
+                .map(|p| p.state.as_str())
+                .collect::<Vec<_>>(),
+            ["retired", "available"]
+        );
+        // The claim of the root credits the pusher, and every object stays.
+        assert_eq!(
+            repository.objects[&format!("{REPOSITORY_CLAIMS_PREFIX}/{}/root.json", bundle(3))]
+                .user_id
+                .as_deref(),
+            Some(repository.owner_id.as_str())
+        );
+        assert_eq!(
+            repository
+                .keys_under(&format!("{REPOSITORY_PREFIX}/{}/_manifests", bundle(3)))
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_writers_on_one_version_the_claim_admits_one() {
+        let stub = StubManagedCloud::start().await;
+        let (owner, _) = store(&stub, "octocat").await;
+        let (member, member_id) = store(&stub, "rika321").await;
+        let base = manifest(identity(4), 1, 100);
+        let root = blocking({
+            let owner = owner.clone();
+            let base = base.clone();
+            move || stored(push(&owner, &base, None, 1_000))
+        })
+        .await;
+        let id = repository_id(&stub, 4);
         stub.state
             .lock()
             .unwrap()
-            .add_member(&repository_id, &user_id, "member");
-        (store, user_id)
+            .add_member(&id, &member_id, "member");
+        managed(&member).set_pin(&bundle(4), Some(&id)).unwrap();
+        let theirs = manifest(identity(4), 2, 200);
+        let ours = manifest(identity(4), 2, 201);
+        blocking({
+            let owner = owner.clone();
+            let member = member.clone();
+            let root = root.clone();
+            move || {
+                // Both list the same childless head. The owner claims and
+                // writes; the member's claim finds the owner's record.
+                let winner = stored(push(&owner, &theirs, Some(&root), 2_000));
+                let bytes = serde_json::to_vec(&ours).unwrap();
+                member.put_immutable(&manifest_key(&ours), &bytes).unwrap();
+                let (name, record) = record_of(&ours, &bytes, Some(&root), 2_001);
+                let stream = RecordStream::project(&bundle(4)).unwrap();
+                let claim = stream.claim_key(Some(root.token())).unwrap();
+                let ClaimOutcome::Taken(found) = member.put_claim(&claim, &record).unwrap() else {
+                    panic!("the member's claim was admitted");
+                };
+                assert_eq!(sha256_hex(&found), winner.token().record_sha256());
+                // A record without its claim is refused by the Worker.
+                let error = member
+                    .put_record(&stream.key(&name).unwrap(), &record)
+                    .unwrap_err();
+                assert!(error.contains("claim_mismatch"), "{error}");
+                // And the shared protocol, run whole, reads a changed storage.
+                assert_eq!(
+                    write_record(&member, &stream, &name, &record).unwrap_err(),
+                    REMOTE_CHANGED
+                );
+                assert_eq!(
+                    list_stream(&member, &stream).unwrap().mainline().selected(),
+                    Some(&winner)
+                );
+            }
+        })
+        .await;
+        let state = stub.state.lock().unwrap();
+        assert_eq!(state.repositories[&id].publications.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_moved_head_is_a_changed_remote_that_leaves_the_upload_open() {
+    async fn a_record_request_that_fails_after_its_claim_leaves_a_push_the_user_finishes() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "octocat").await;
-        let registered = register(&store, identity(3)).await;
-        stub.state.lock().unwrap().fail_next_commit = true;
-        let outcome = push(
-            &store,
-            &next_manifest(&registered),
-            Some(&registered.commit_id),
-        )
+        let base = manifest(identity(5), 1, 100);
+        let root = blocking({
+            let store = store.clone();
+            let base = base.clone();
+            move || stored(push(&store, &base, None, 1_000))
+        })
         .await;
-        assert_eq!(outcome.unwrap_err(), REMOTE_CHANGED);
+        let id = repository_id(&stub, 5);
+        stub.state.lock().unwrap().fail_next_record = Some(Fault::Before);
+        let interrupted = manifest(identity(5), 2, 200);
+        let (interrupted_name, stream) = blocking({
+            let store = store.clone();
+            let interrupted = interrupted.clone();
+            let root = root.clone();
+            move || {
+                let bytes = serde_json::to_vec(&interrupted).unwrap();
+                store
+                    .put_immutable(&manifest_key(&interrupted), &bytes)
+                    .unwrap();
+                let (name, record) = record_of(&interrupted, &bytes, Some(&root), 2_000);
+                let stream = RecordStream::project(&bundle(5)).unwrap();
+                let error = write_record(&store, &stream, &name, &record).unwrap_err();
+                assert!(error.contains("temporarily unavailable"), "{error}");
+                // The claim landed, the record did not.
+                assert!(list_stream(&store, &stream).unwrap().mainline().selected() == Some(&root));
+                (name, stream)
+            }
+        })
+        .await;
+        {
+            let state = stub.state.lock().unwrap();
+            let repository = &state.repositories[&id];
+            assert!(repository.objects.contains_key(&format!(
+                "{REPOSITORY_CLAIMS_PREFIX}/{}/{}.json",
+                bundle(5),
+                root.token()
+            )));
+            assert!(!repository.objects.contains_key(&format!(
+                "{REPOSITORY_COMMITS_PREFIX}/{}/{}",
+                bundle(5),
+                interrupted_name.file_name()
+            )));
+        }
+        // The next push onto that version, for other content, reads the
+        // unfinished push; nothing writes the claimed record by itself.
+        let other = manifest(identity(5), 2, 201);
+        blocking({
+            let store = store.clone();
+            let stream = stream.clone();
+            let root = root.clone();
+            let interrupted_name = interrupted_name.clone();
+            move || {
+                let bytes = serde_json::to_vec(&other).unwrap();
+                store.put_immutable(&manifest_key(&other), &bytes).unwrap();
+                let (name, record) = record_of(&other, &bytes, Some(&root), 2_002);
+                match write_record(&store, &stream, &name, &record).unwrap() {
+                    WriteOutcome::Unfinished(claimed) => assert_eq!(claimed.name, interrupted_name),
+                    WriteOutcome::Stored(_) => panic!("the unfinished push was overwritten"),
+                }
+                assert_eq!(
+                    write_record(&store, &stream, &name, &record)
+                        .unwrap()
+                        .stored()
+                        .unwrap_err(),
+                    PUSH_UNFINISHED
+                );
+            }
+        })
+        .await;
+        stub.clear_log();
+        blocking({
+            let store = store.clone();
+            let stream = stream.clone();
+            let interrupted_name = interrupted_name.clone();
+            move || {
+                let view = finish_claimed_push(&store, &stream).unwrap();
+                assert_eq!(view.mainline().selected(), Some(&interrupted_name));
+            }
+        })
+        .await;
+        let record_puts = stub
+            .request_lines()
+            .into_iter()
+            .filter(|line| line.starts_with("PUT") && line.contains("/_commits/"))
+            .count();
+        assert_eq!(record_puts, 1);
         let state = stub.state.lock().unwrap();
-        // The upload stays open: the next push, built on the moved head, reuses what it carried.
+        let repository = &state.repositories[&id];
         assert_eq!(
-            state.uploads.values().filter(|u| u.state == "open").count(),
-            1
+            repository.private_head.as_deref(),
+            Some(interrupted_name.file_name().as_str())
         );
-        assert!(store.inner.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_revoked_session_suspends_the_store_and_library_keys_are_inert() {
+    async fn discard_reads_as_cleared_and_the_next_push_restarts_without_reuploading() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let first = manifest(identity(6), 1, 100);
+        let second = manifest(identity(6), 2, 200);
+        blocking({
+            let store = store.clone();
+            let first = first.clone();
+            let second = second.clone();
+            move || {
+                let root = stored(push(&store, &first, None, 1_000));
+                stored(push(&store, &second, Some(&root), 2_000));
+            }
+        })
+        .await;
+        let id = repository_id(&stub, 6);
+        let objects_before = stub.state.lock().unwrap().repositories[&id].objects.len();
+        stub.state.lock().unwrap().discard(&id);
+        {
+            let state = stub.state.lock().unwrap();
+            let repository = &state.repositories[&id];
+            assert!(repository.private_head.is_none());
+            assert!(repository.publications.iter().all(|p| p.state == "removed"));
+            // Two claims and two records went; the marker and both manifests stay.
+            assert_eq!(repository.objects.len(), objects_before - 4);
+        }
+        let restart = manifest(identity(6), 1, 300);
+        blocking({
+            let store = store.clone();
+            let restart = restart.clone();
+            move || {
+                let stream = RecordStream::project(&bundle(6)).unwrap();
+                assert!(list_stream(&store, &stream).unwrap().mainline().is_empty());
+                stored(push(&store, &restart, None, 3_000));
+            }
+        })
+        .await;
+        let state = stub.state.lock().unwrap();
+        let repository = &state.repositories[&id];
+        assert_eq!(repository.private_revision, 3);
+        assert_eq!(
+            repository
+                .publication(repository.private_head.as_deref().unwrap())
+                .unwrap()
+                .manifest_revision,
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_store_never_reads_the_index() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let first = manifest(identity(7), 1, 100);
+        let second = manifest(identity(7), 2, 200);
+        let root = blocking({
+            let store = store.clone();
+            let first = first.clone();
+            move || stored(push(&store, &first, None, 1_000))
+        })
+        .await;
+        let id = repository_id(&stub, 7);
+        // The index lags behind the next record, and the head pointer is
+        // moved by hand: the desktop selects from the listing all the same.
+        stub.state.lock().unwrap().skip_next_index = true;
+        let next = blocking({
+            let store = store.clone();
+            let second = second.clone();
+            let root = root.clone();
+            move || stored(push(&store, &second, Some(&root), 2_000))
+        })
+        .await;
+        stub.state.lock().unwrap().misplace_head(&id, None);
+        let third = manifest(identity(7), 3, 300);
+        blocking({
+            let store = store.clone();
+            let next = next.clone();
+            move || {
+                let stream = RecordStream::project(&bundle(7)).unwrap();
+                assert_eq!(
+                    list_stream(&store, &stream).unwrap().mainline().selected(),
+                    Some(&next)
+                );
+                stored(push(&store, &third, Some(&next), 3_000));
+            }
+        })
+        .await;
+        let state = stub.state.lock().unwrap();
+        assert_eq!(state.repositories[&id].publications.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn discovery_is_refused_and_a_bundle_without_a_repository_lists_empty() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        blocking({
+            let store = store.clone();
+            move || {
+                let every_stream = ObjectPrefix::parse(REPOSITORY_COMMITS_PREFIX).unwrap();
+                assert_eq!(
+                    store.list_keys(&every_stream, None, 10).unwrap_err(),
+                    DISCOVERY_REFUSAL
+                );
+                let stream = RecordStream::project(&bundle(8)).unwrap();
+                assert!(list_stream(&store, &stream).unwrap().mainline().is_empty());
+                assert!(crate::storage_core::publication::list_project_streams(&store).is_err());
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pinned_status_comes_from_the_stream_listing() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let first = manifest(identity(9), 1, 100);
+        let second = manifest(identity(9), 2, 200);
+        let root = blocking({
+            let store = store.clone();
+            let first = first.clone();
+            move || stored(push(&store, &first, None, 1_000))
+        })
+        .await;
+        let id = repository_id(&stub, 9);
+        managed(&store).set_pin(&bundle(9), Some(&id)).unwrap();
+        let stream = RecordStream::project(&bundle(9)).unwrap();
+        let refresh = |store: ConfiguredObjectStore, stream: RecordStream| async move {
+            blocking(move || list_stream(&store, &stream)).await
+        };
+        refresh(store.clone(), stream.clone()).await.unwrap();
+        let registered = managed(&store).status(&bundle(9)).unwrap();
+        assert_eq!(registered.state, ManagedCloudStatusState::Ready);
+        assert_eq!(
+            registered.link.as_ref().unwrap().release,
+            ReleaseState::NotPushed
+        );
+        assert_eq!(
+            registered.publication.as_ref().unwrap().state,
+            PublicationState::NoDraft
+        );
+        assert_eq!(
+            registered.link.as_ref().unwrap().website_url,
+            format!("{}/octocat/Cloud-project", stub.endpoint)
+        );
+
+        blocking({
+            let store = store.clone();
+            let second = second.clone();
+            move || stored(push(&store, &second, Some(&root), 2_000))
+        })
+        .await;
+        let pushed = managed(&store).status(&bundle(9)).unwrap();
+        assert_eq!(pushed.link.as_ref().unwrap().release, ReleaseState::Private);
+        let publication = pushed.publication.as_ref().unwrap();
+        assert_eq!(publication.state, PublicationState::NotPublic);
+        assert_eq!(publication.private_revision, Some(2));
+
+        stub.state.lock().unwrap().release(&id, None);
+        refresh(store.clone(), stream.clone()).await.unwrap();
+        let released = managed(&store).status(&bundle(9)).unwrap();
+        assert_eq!(
+            released.link.as_ref().unwrap().release,
+            ReleaseState::Public
+        );
+        assert_eq!(
+            released.publication.as_ref().unwrap().state,
+            PublicationState::MatchesPublished
+        );
+
+        stub.state.lock().unwrap().fail_next_listing = true;
+        assert!(refresh(store.clone(), stream.clone()).await.is_err());
+        assert_eq!(
+            managed(&store).status(&bundle(9)).unwrap().state,
+            ManagedCloudStatusState::Unavailable
+        );
+        refresh(store.clone(), stream.clone()).await.unwrap();
+        assert_eq!(
+            managed(&store).status(&bundle(9)).unwrap().state,
+            ManagedCloudStatusState::Ready
+        );
+
+        stub.state.lock().unwrap().repositories.remove(&id);
+        let error = refresh(store.clone(), stream.clone()).await.unwrap_err();
+        assert!(
+            error.contains("deleted or you no longer have access"),
+            "{error}"
+        );
+        assert_eq!(
+            managed(&store).status(&bundle(9)).unwrap().state,
+            ManagedCloudStatusState::Inaccessible
+        );
+        // Removing the pin disables the status, even with a warm store.
+        managed(&store).set_pin(&bundle(9), None).unwrap();
+        assert!(managed(&store).status(&bundle(9)).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn library_keys_route_to_the_item_repository() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let stream_id = format!("library-{}", "3".repeat(32));
+        let resource_id = format!("resource-{}", "4".repeat(64));
+        let skill = b"---\nname: my-skill\n---\n".to_vec();
+        let skill_sha = sha256_hex(&skill);
+        let commit = mallard_domain::generated_named_id("commit").unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": 1, "repository_id": stream_id, "revision": 1, "commit_id": commit, "updated_at": 100,
+            "captured_with": {"app": "mallard", "version": "test"},
+            "published_by_origin": {"origin_host_token": "a".repeat(64), "origin_replica_token": "b".repeat(64)},
+            "resources": {resource_id.clone(): {"resource": {"resource_id": resource_id, "provider": "codex", "resource_kind": "agent_skill",
+                "format": "agentskills.io.skill", "format_version": 1, "identity": {"root": "provider-home.skills", "effective_name": "my-skill", "install_directory": "my-skill"},
+                "descriptor": {}, "content_sha256": "0".repeat(64), "files": [{"path": "SKILL.md", "sha256": skill_sha, "size": skill.len(), "mode": 420}]}, "updated_at": 100}}
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let tag = serde_json::to_vec(&serde_json::json!({"schema_version": 1, "repository_id": stream_id, "provider": "codex",
+            "resource_kind": "agent_skill", "format": "agentskills.io.skill", "format_version": 1})).unwrap();
+        let record = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1, "repository_id": stream_id, "revision": 1, "commit_id": commit, "created_at_ms": 1_000,
+            "manifest_key": format!("_manifests/1-{commit}.json"), "manifest_sha256": sha256_hex(&manifest_bytes), "manifest_size": manifest_bytes.len(),
+            "published_by_origin": {"origin_host_token": "a".repeat(64), "origin_replica_token": "b".repeat(64)},
+        })).unwrap();
+        let name = RecordName::new(
+            1,
+            PublicationToken::new(commit.clone(), sha256_hex(&record)).unwrap(),
+            None,
+            1_000,
+        )
+        .unwrap();
+        blocking({
+            let store = store.clone();
+            let stream_id = stream_id.clone();
+            let name = name.clone();
+            move || {
+                let key = |relative: &str| {
+                    crate::storage_core::library_object_key(&stream_id, relative).unwrap()
+                };
+                let stream = RecordStream::library(&stream_id).unwrap();
+                // Nothing yet: the account has no repository for the item.
+                assert!(list_stream(&store, &stream).unwrap().mainline().is_empty());
+                assert!(store.get_metadata(&key(TAG_FILE), 4096).unwrap().is_none());
+                store
+                    .put_immutable(&key(&format!("_objects/{skill_sha}")), &skill)
+                    .unwrap();
+                store
+                    .put_immutable(
+                        &key(&format!("_manifests/1-{commit}.json")),
+                        &manifest_bytes,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    store.put_immutable(&key(TAG_FILE), &tag).unwrap(),
+                    ImmutablePutOutcome::Written
+                );
+                assert_eq!(
+                    store.put_immutable(&key(TAG_FILE), &tag).unwrap(),
+                    ImmutablePutOutcome::AlreadyPresent
+                );
+                let view = write_record(&store, &stream, &name, &record)
+                    .unwrap()
+                    .stored()
+                    .unwrap();
+                assert_eq!(view.mainline().selected(), Some(&name));
+                assert_eq!(
+                    store
+                        .get_metadata(&key(TAG_FILE), 4096)
+                        .unwrap()
+                        .unwrap()
+                        .bytes,
+                    tag
+                );
+            }
+        })
+        .await;
+        let state = stub.state.lock().unwrap();
+        let repository = state.repository_for_library(&stream_id).unwrap();
+        assert_eq!(repository.class, "catalog");
+        assert_eq!(repository.name, "my-skill");
+        assert_eq!(
+            repository.catalog.as_ref().unwrap().resource_id,
+            resource_id
+        );
+        assert_eq!(
+            repository.private_head.as_deref(),
+            Some(name.file_name().as_str())
+        );
+        assert_eq!(repository.publications[0].summary["kind"], "catalog");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_revoked_session_suspends_the_store() {
         let stub = StubManagedCloud::start().await;
         let (user, token) = stub.state.lock().unwrap().add_user("octocat");
         let client =
             ManagedCloudClient::new(&stub.endpoint, Some(SecretValue::parse(&token).unwrap()))
                 .unwrap();
-        let store = ManagedObjectStore::new(client, user.id, Handle::current());
+        let store = ManagedObjectStore::new(client, Handle::current());
         let marker = ObjectKey::parse(STORAGE_MARKER_KEY).unwrap();
-        let library = crate::storage_core::library_object_key(
-            "library-0123456789abcdef0123456789abcdef",
-            "_tag.json",
-        )
-        .unwrap();
         stub.state.lock().unwrap().revoke_token(&token);
-        let (marker_read, head_read, health, library_read, library_write) =
-            tokio::task::spawn_blocking(move || {
-                let marker_read = store.get_metadata(&marker, 4096).unwrap();
-                let head_key =
-                    ObjectKey::parse(format!("{REPOSITORY_PREFIX}/{}/_head.json", bundle(4)))
-                        .unwrap();
-                let head_read = store.get_metadata(&head_key, 4096);
-                let health = store.connection_health().unwrap();
-                let library_read = store.get_metadata(&library, 4096).unwrap();
-                let library_write = store.put_immutable(&library, b"{}").unwrap_err();
-                (marker_read, head_read, health, library_read, library_write)
-            })
-            .await
-            .unwrap();
+        let _ = user;
+        let (marker_read, listing, health) = blocking(move || {
+            let marker_read = store.get_metadata(&marker, 4096).unwrap();
+            let stream =
+                ObjectPrefix::parse(format!("{REPOSITORY_COMMITS_PREFIX}/{}", bundle(4))).unwrap();
+            let listing = store.list_keys(&stream, None, 10);
+            let health = store.connection_health().unwrap();
+            (marker_read, listing, health)
+        })
+        .await;
         assert!(marker_read.is_some(), "the marker needs no request");
-        assert!(head_read.unwrap_err().contains("Reconnect"));
+        assert!(listing.unwrap_err().contains("Reconnect"));
         assert_eq!(
             health.state,
             crate::storage_core::ConnectionState::ReconnectRequired
         );
         assert!(health.suspends());
-        assert!(library_read.is_none());
-        assert!(library_write.starts_with("managed_catalog_uses_item_adapter"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

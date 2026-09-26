@@ -34,8 +34,6 @@ struct JsonError<'a> {
     exit_code: i32,
     code: &'a str,
     message: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    setup_id: Option<&'a str>,
 }
 
 pub(crate) fn setup(
@@ -130,7 +128,6 @@ pub(crate) fn error(writer: &mut dyn Write, json: bool, error: &CliError) {
                 exit_code: error.exit_code(),
                 code: error.code(),
                 message: error.message(),
-                setup_id: error.setup_id(),
             },
         )
     } else {

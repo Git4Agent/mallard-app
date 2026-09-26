@@ -77,10 +77,10 @@ test("with no projects the landing is the filled page ghosted: the head, one doo
   assert.match(html, /<h1 id="landing-picker-title" class="settings-section-title">Projects<\/h1>/);
   assert.match(html, /0 on this machine/);
   assert.match(html, /class="btn btn-primary"[^>]*>.*Add project…/);
-  // One door, because Add project opens the folder dialog straight away: a
-  // dashed card in the card's anatomy, wearing every agent the build knows.
+  // One door, because Add project opens setup at its Folder field: a dashed
+  // card in the card's anatomy, wearing every agent the build knows.
   assert.equal((html.match(/class="landing-picker-door"/g) ?? []).length, 1);
-  assert.match(html, /class="landing-picker-door" aria-label="Add project: pick a folder"[\s\S]*?data-icon="folder"[\s\S]*?<strong>Pick a folder…<\/strong>[\s\S]*?data-icon="plus"/);
+  assert.match(html, /class="landing-picker-door" aria-label="Add project"[\s\S]*?data-icon="folder"[\s\S]*?<strong>Add a folder…<\/strong>[\s\S]*?data-icon="plus"/);
   assert.match(html, /landing-picker-door-bar"[\s\S]*?landing-picker-door-marks"[\s\S]*?sync-provider-mark codex[\s\S]*?sync-provider-mark claude/);
   assert.match(html, /landing-picker-caption"[\s\S]*?data-icon="cloud"[\s\S]*?Sessions &amp; memory travel with it/);
   // No mark, no "No projects yet", no explainer.

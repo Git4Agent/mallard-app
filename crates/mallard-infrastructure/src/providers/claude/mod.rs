@@ -15,9 +15,9 @@ use super::traits::{
     ProviderCliLauncher, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
     SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
-    SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionTimelineContext,
-    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
-    SessionTimelineQuery,
+    SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionHomeSighting,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelineIndexEntry,
+    SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::validated_session_metadata;
@@ -305,6 +305,13 @@ impl SessionAdapter for ClaudeAdapter {
 
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {
         discovery::discover(context, |path| self.scan_metadata(path))
+    }
+
+    fn recent_session_homes(
+        &self,
+        provider_home: &Path,
+    ) -> Result<Vec<SessionHomeSighting>, String> {
+        discovery::recent_session_homes(provider_home)
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {

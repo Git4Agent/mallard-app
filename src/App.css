@@ -471,9 +471,7 @@ summary:focus-visible {
   }
 
   .icon-spin,
-  .icon-spin-frame.spinning,
-  .sync-settings-switch,
-  .sync-settings-switch::before { transition: none; animation: none; }
+  .icon-spin-frame.spinning { transition: none; animation: none; }
 }
 
 /* ── Log drawer ─────────────────────────────────── */
@@ -1401,6 +1399,70 @@ summary:focus-visible {
 .notice.info { color: var(--info-text); background: var(--info-soft); border-color: color-mix(in srgb, var(--blue) 45%, var(--border)); }
 .notice.success { color: var(--success-text); background: var(--success-soft); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
 
+/* Several messages in one box: each line carries its own close control at
+   the list's right edge, level with the box's own. */
+.notice-list > li { position: relative; padding-right: 24px; }
+.notice-list > li > .sync-notice-dismiss { position: absolute; top: -1px; right: -4px; width: 18px; height: 18px; }
+
+/* A strip: a notice flush inside a card rather than a box on a page — the
+   rung's edge on top only, no corners, no margin. The storage gate, a
+   finished sync's result and a blocked file row all wear it. Compounded so
+   it outranks the rung rules above, which set only ink, fill and edge
+   colour. */
+.notice.notice-strip { margin: 0; border-width: 1px 0 0; border-radius: 0; align-items: center; }
+
+/* An acknowledgement: a warning box whose leading control is the checkbox the
+   flow waits on. The whole box is the checkbox's label, and it is the one
+   message with no close control. */
+.notice.notice-ack { align-items: center; cursor: pointer; }
+.notice-ack > .notice-ack-choice { width: 20px; min-width: 20px; min-height: 20px; margin: -4px 0 -4px -4px; }
+.notice-ack > .notice-mark { margin-top: 0; }
+.notice-ack-verb {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+.notice-ack-verb.done { color: var(--success-text); }
+
+/* A field message: no box — the error's glyph and ink under the field it
+   speaks for, with the same close control as every other message, shrunk to
+   the sentence's line. */
+.notice-field {
+  width: fit-content;
+  max-width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--danger-text);
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  line-height: var(--leading-snug);
+}
+.notice-field > svg { flex: 0 0 auto; margin-top: 1px; }
+.notice-field > .sync-notice-dismiss { width: 18px; height: 18px; margin: -2px 0 -2px 2px; }
+
+/* A chip: a row's status in one word — a pill in the rung's tint, no edge.
+   The word names the state ("Reconnect", "Possible secret"), not the rung. */
+.notice-chip {
+  height: 22px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 6px;
+  border-radius: var(--r-pill);
+  font-size: var(--type-xs);
+  white-space: nowrap;
+}
+.notice-chip > svg { flex: 0 0 auto; }
+.notice-chip.danger { color: var(--danger-text); background: var(--danger-soft); }
+.notice-chip.warning { color: var(--warning-text); background: var(--warning-soft); }
+.notice-chip.info { color: var(--info-text); background: var(--info-soft); }
+.notice-chip.success { color: var(--success-text); background: var(--success-soft); }
+
 .sync-empty-state {
   min-height: 360px;
   display: flex;
@@ -1433,7 +1495,6 @@ summary:focus-visible {
   z-index: 5;
   margin: 0 0 10px;
   min-height: 42px;
-  font-size: var(--type-xs);
 }
 
 /* Opaque fills, one per rung, for this slot only. A translucent tint here sits
@@ -1509,12 +1570,6 @@ summary:focus-visible {
 /* A destination chooser asks one question off a short list, so it takes the
    narrowest measure of the three sheets. */
 .sync-storage-link-dialog { width: min(520px, 100vw - 72px); }
-/* The update download is a wait, not a question: a narrow sheet with one
-   native progress bar, closed only by the restart or by its own failure. */
-.app-update-dialog { width: min(460px, 100vw - 72px); }
-.app-update-dialog .sync-modal-body { padding: 18px 20px 20px; display: grid; gap: 10px; }
-.app-update-progress { width: 100%; height: 6px; accent-color: var(--accent); }
-.app-update-progress-label { margin: 0; color: var(--text-2); font-size: var(--type-xs); }
 .sync-storage-link-dialog .sync-modal-body { padding: 14px 18px 18px; }
 .sync-modal-header {
   padding: 18px 20px 15px;
@@ -1664,6 +1719,7 @@ summary:focus-visible {
   background: transparent;
 }
 .sync-field-grid input,
+.sync-project-folder-field input,
 .sync-storage-fields input,
 .sync-storage-reconnect input,
 .sync-folder-field input,
@@ -1932,7 +1988,6 @@ summary:focus-visible {
 }
 
 .sync-bundle-connection-dialog .notice { margin-top: 12px; }
-.sync-pull-error { margin: 14px 0; }
 
 .sync-pull-apply-button { min-width: 190px; min-height: 40px; padding: 0 15px; font-size: var(--type-sm); }
 
@@ -2437,6 +2492,87 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
 .r2-step-fact code { font-family: var(--font-mono); font-size: var(--type-xs); overflow-wrap: anywhere; }
 .r2-step-controls { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
 .r2-step-controls > input { width: 100%; }
+/* A failed line's diagnostics: values to hand over, not to act on. The fold
+   draws the in-house chevron like every other fold; open, the fields sit in
+   the settled storage page's read-only field (control edge, muted fill,
+   Copy on its right edge behind a divider) as a details list — a display
+   micro-label and a mono value per line. The muted fill costs text-2 its
+   AA at 9px, so the labels and the verb take text-1 and the values text-0. */
+.feishu-setup-diagnostics { flex-basis: 100%; min-width: 0; color: var(--text-2); }
+.feishu-setup-diagnostics > summary {
+  width: fit-content;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+  list-style: none;
+  cursor: pointer;
+}
+.feishu-setup-diagnostics > summary::-webkit-details-marker { display: none; }
+.feishu-setup-diagnostics > summary:hover { color: var(--text-0); }
+.feishu-setup-diagnostics[open] > summary > svg { transform: rotate(90deg); }
+.feishu-setup-diagnostics-sheet {
+  margin-top: 4px;
+  width: fit-content;
+  max-width: 100%;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  background: var(--surface-muted);
+}
+.feishu-setup-diagnostics-sheet > dl {
+  min-width: 0;
+  margin: 0;
+  padding: 7px 12px 8px;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 3px 14px;
+  align-items: baseline;
+}
+.feishu-setup-diagnostics-sheet dt {
+  color: var(--text-1);
+  font-family: var(--font-display);
+  font-size: var(--type-3xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.feishu-setup-diagnostics-sheet dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.feishu-setup-diagnostics-copy {
+  min-width: 56px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-left: 1px solid var(--button-border);
+  border-radius: 0 6px 6px 0;
+  color: var(--text-1);
+  background: transparent;
+  font: inherit;
+  font-family: var(--font-display);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+.feishu-setup-diagnostics-copy:hover:not(:disabled) { color: var(--text-0); background: var(--bg-hover); }
+.feishu-setup-diagnostics-copy:disabled { cursor: default; opacity: 0.58; }
+.feishu-setup-diagnostics > [role="status"] { display: block; margin-top: 4px; color: var(--text-2); font-size: var(--type-xs); }
+
 .r2-countdown { color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-xs); font-variant-numeric: tabular-nums; }
 /* The card header's segment, at the line's height. */
 .r2-segmented > button { height: 22px; padding: 0 8px; }
@@ -3664,6 +3800,14 @@ span.sync-path-crumb {
   display: flex;
   flex-direction: column;
 }
+/* The list inside the panel carries the menu role, and in a switcher the
+   column continues through it to the scrolling target list. */
+.sync-path-menu.switcher:not([hidden]) > .sync-path-menu-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}
 .sync-path-menu-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -3794,22 +3938,10 @@ span.sync-path-crumb {
 }
 
 /* Why the whole menu is inert, said once at the top — instead of a tooltip
-   repeated across every greyed row. */
-.sync-path-menu-banner {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 5px;
-  padding: 8px;
-  border-radius: var(--r);
-  background: var(--warning-soft);
-  color: var(--text-1);
-}
-
-.sync-path-menu-banner > svg {
-  flex: 0 0 auto;
-  color: var(--warning-text);
-}
+   repeated across every greyed row. A Note, not a warning: nothing is wrong.
+   It sits beside the menu list, not in it, so its close control is not an
+   item of the menu. */
+.sync-path-menu > .notice { margin: 0 0 5px; }
 
 .sync-path-menu-copy {
   min-width: 0;
@@ -4140,8 +4272,8 @@ span.sync-path-crumb {
 }
 
 /* The card's kind glyph stands on a tile in the box grammar: the shipped
-   icon at 20px, padded into a 44px box. A kind with a hue takes its tile
-   colour below; a storage's cloud or drive keeps the plain paper tile. */
+   icon at 20px, padded into a 44px box. Provider marks keep the same outer
+   dimensions and use their own color below. */
 .landing-picker-card-title > svg {
   flex: 0 0 auto;
   box-sizing: content-box;
@@ -4870,15 +5002,6 @@ span.sync-path-crumb {
   color: var(--text-0);
 }
 
-/* Glyph and word, not glyph alone: a storage in trouble reads as such without
-   the amber. Both children sit on one line with air between them. */
-.sync-storage-index-warning {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--warning-text);
-}
-
 .sync-storage-index-open {
   justify-self: center;
   color: var(--text-3);
@@ -4965,36 +5088,34 @@ span.sync-path-crumb {
 
 .sync-settings-control { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 
-/* The switch the palette always carried tokens for (--switch-off,
-   --switch-thumb). Same construction as the app's drawn checkboxes:
-   appearance none, state on the input, thumb on ::before. Checked rides
-   --accent with the thumb in --accent-contrast so both palettes keep the
-   thumb visible; motion is the skin's stepped transition. */
+/* A drawn switch: appearance none, state on the input, thumb on ::before.
+   Fill means On, as in Fluent and Material. Off is hollow, the card showing
+   through an ink edge, with a small quiet thumb at the left. On fills with
+   --accent, the ink every checkbox uses, and the thumb grows, turns to paper
+   and moves right. Off used to be a filled mid-brown bar, so both states read
+   as set and only the thumb's end told them apart. */
 .sync-settings-switch {
   appearance: none;
   position: relative;
-  width: 36px;
-  height: 20px;
+  width: 40px;
+  height: 22px;
   margin: 0;
   flex: 0 0 auto;
-  border: 1px solid var(--control-border);
+  border: 2px solid var(--control-border);
   border-radius: var(--r-pill);
-  background: var(--switch-off);
+  background: var(--surface-card);
   cursor: pointer;
-  transition: background 90ms steps(2, end), border-color 90ms steps(2, end);
 }
 
 .sync-settings-switch::before {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
+  top: 4px;
+  left: 4px;
+  width: 10px;
+  height: 10px;
   border-radius: 2px;
-  background: var(--switch-thumb);
-  transition: transform 90ms steps(2, end);
+  background: var(--text-2);
 }
 
 .sync-settings-switch:checked {
@@ -5003,9 +5124,45 @@ span.sync-path-crumb {
 }
 
 .sync-settings-switch:checked::before {
-  transform: translateX(16px);
+  top: 2px;
+  left: 20px;
+  width: 14px;
+  height: 14px;
   background: var(--accent-contrast);
 }
+
+.sync-settings-switch:hover:not(:disabled):not(:checked) { background: var(--surface-row-hover); }
+
+/* The word is the state said outright, the way Windows and Carbon print it:
+   after the switch, so it cannot merge with the receipt before it into
+   "Saved On", and on the far side from the row's name, so it cannot pass for
+   it. It holds the width of "Off" so the switches stay in one column. The
+   label makes the word part of the click target. */
+.sync-settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.sync-settings-state {
+  min-width: 3ch;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+}
+
+.sync-settings-toggle:has(:checked) .sync-settings-state {
+  color: var(--text-0);
+  font-weight: var(--weight-semibold);
+}
+
+/* Settings load after the page does, and a busy switch refuses input: say
+   so, or it reads as a live control that ignores the click. */
+.sync-settings-toggle:has(:disabled) { opacity: 0.45; cursor: default; }
+.sync-settings-toggle:has(:disabled) .sync-settings-switch { cursor: default; }
 
 /* Closed-vocabulary choices use the button tokens and the display face. */
 .sync-settings-segment {
@@ -5030,9 +5187,11 @@ span.sync-path-crumb {
 
 .sync-settings-segment > button:hover:not(.active) { background: var(--button-bg-hover); }
 
+/* The chosen segment is filled with ink, like an On switch. Honey paper on
+   cream was 1.19:1, too close to tell which one was set. */
 .sync-settings-segment > button.active {
-  background: var(--surface-row-active);
-  color: var(--text-0);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 /* A stated fact, not a control: the always-on redaction chip. */
@@ -5319,6 +5478,86 @@ span.sync-path-crumb {
    that one case, and only that one, spans the row. */
 .sync-setup-path-hint.spans-row { grid-column: 1 / -1; }
 
+/* ——— the project Folder field and the folders agents worked in ———————
+   The field wears the grid label's anatomy; its verdict line sits under the
+   whole row, and a way on (a file's folder, another profile) reads as a
+   link after the sentence. */
+.sync-project-folder-field {
+  min-width: 0;
+  max-width: var(--sync-setup-column);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+.sync-project-folder-field > label { color: var(--text-1); font-weight: var(--weight-semibold); }
+/* The value is a path, so mono; the placeholder is words, so it is not. */
+.sync-project-folder-field input { font-family: var(--font-mono); }
+.sync-project-folder-field input::placeholder { font-family: var(--font-sans); }
+.sync-project-folder-field .btn { min-height: 32px; padding: 0 10px; }
+.sync-project-folder-field .sync-setup-path-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+}
+.sync-project-folder-field .sync-setup-path-hint code { margin-left: 0; }
+.sync-project-folder-field .sync-setup-path-hint .btn-link {
+  color: var(--text-0);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* The recent folders are the Repository band's option rows: same box, same
+   radio, same mark and meta. Six rows, then a fold toggle — Show all / Show
+   less — as the box's last row: never a scroller inside the page. */
+.sync-folder-choices {
+  max-width: var(--sync-setup-column);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sync-folder-choices-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-1);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+}
+.sync-folder-choices-head small { color: var(--text-3); font-weight: var(--weight-regular); }
+.sync-folder-choices .sync-bundle-match-meta { gap: 3px; }
+.sync-folder-choice-marks { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); }
+.sync-folder-choices-more {
+  width: 100%;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--type-xs);
+  cursor: pointer;
+}
+.sync-folder-choices-more:hover:not(:disabled) { color: var(--text-0); background: var(--surface-row-hover); }
+.sync-folder-choices-state {
+  max-width: var(--sync-setup-column);
+  min-height: 46px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--retro-panel-radius-inner);
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+
 /* ——— the setup pages' choice vocabulary ———————————————————————————
    Add Catalog resource and project setup ask the same kinds of question, and
    the rest of the app already draws the answers — kind glyphs, storage hints,
@@ -5478,17 +5717,6 @@ span.sync-path-crumb {
 }
 .sync-setup-state.attention { color: var(--warning-text); }
 .sync-setup-state.blocked { color: var(--danger-text); }
-/* The sentence takes the prose red; the triangle stays on the signal red,
-   which a glyph may ride at 3:1 where text may not. */
-.sync-setup-field-error {
-  width: fit-content;
-  max-width: 100%;
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  color: var(--danger-text);
-}
-.sync-setup-field-error svg { margin-top: 1px; flex: 0 0 auto; color: var(--red); }
 .sync-setup-system-error { margin: 8px 0 12px; }
 .sync-setup-hint { color: var(--text-3); }
 .sync-setup-inline-status {
@@ -5498,46 +5726,6 @@ span.sync-path-crumb {
   color: var(--text-3);
 }
 .sync-setup-inline-status .status-loader { width: 11px; height: 11px; }
-/* Consent, not a banner: the sentence and its checkbox are one click target,
-   sitting on the same column the picker closes on. */
-.sync-setup-acknowledge {
-  margin-top: 2px;
-  padding: 9px 11px;
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--warning-soft);
-  cursor: pointer;
-}
-/* The same 14px square, 2px corner, and 6px filled mark as the repository
-   radios directly above — one control family for the whole picker. */
-.sync-setup-acknowledge input {
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  margin-top: 1px;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  border: 1px solid var(--border-strong);
-  border-radius: 2px;
-  background: transparent;
-  cursor: inherit;
-}
-.sync-setup-acknowledge input::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  background: transparent;
-}
-.sync-setup-acknowledge input:checked {
-  border-color: var(--text-0);
-}
-.sync-setup-acknowledge input:checked::before {
-  background: var(--text-0);
-}
 /* The actions close the form's own column, and their rule is the same hairline
    the sections are separated by — the commit bar is the last band of the form,
    not a slab of page chrome bolted under it. */
@@ -7074,8 +7262,10 @@ button.sync-history-branch-trigger:hover:not(:disabled),
      and the width falls back to auto. */
   --sync-history-commit-actions-column: 26px;
 }
-.sync-outcome-notice.success { border-color: color-mix(in srgb, var(--green) 30%, var(--border)); background: color-mix(in srgb, var(--green) 6%, transparent); }
-.sync-outcome-notice.warning { border-color: color-mix(in srgb, var(--yellow) 40%, var(--border)); background: var(--warning-soft); }
+/* The strip's fill, edge and ink are the notice rungs', so a result reads in
+   the same recipe as the gate that may sit under it. */
+.sync-outcome-notice.success { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); background: var(--success-soft); }
+.sync-outcome-notice.warning { border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); background: var(--warning-soft); }
 
 .sync-outcome-head {
   display: flex;
@@ -7084,8 +7274,10 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 8px 10px 8px 12px;
 }
 .sync-outcome-head > svg:first-child { flex: 0 0 auto; }
-.sync-outcome-notice.success > .sync-outcome-head > svg:first-child { color: var(--green); }
-.sync-outcome-notice.warning > .sync-outcome-head > svg:first-child { color: var(--warning-text); }
+.sync-outcome-notice.success > .sync-outcome-head > svg:first-child,
+.sync-outcome-notice.success .sync-outcome-summary > strong { color: var(--success-text); }
+.sync-outcome-notice.warning > .sync-outcome-head > svg:first-child,
+.sync-outcome-notice.warning .sync-outcome-summary > strong { color: var(--warning-text); }
 
 .sync-outcome-summary {
   min-width: 0;
@@ -7109,7 +7301,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 .sync-outcome-actions { flex: 0 0 auto; display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .sync-outcome-actions .btn { white-space: nowrap; }
-.sync-outcome-guidance { padding: 0 10px 8px 38px; color: var(--text-1); font-size: var(--type-xs); }
+.sync-outcome-guidance { padding: 0 10px 8px 33px; color: var(--text-1); font-size: var(--type-xs); }
 .sync-outcome-guidance p { margin: 0; }
 .sync-outcome-guidance p + p { margin-top: 4px; }
 
@@ -7220,19 +7412,9 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   white-space: pre-line;
 }
 
-/* A blocking gate fills the storage group and carries the way forward. The
-   block above clips it to the group's inner radius. Compounded
-   with .sync-callout because the theme restyles callout corners at one class
-   of specificity; this must win that, same as .sync-outcome-notice. */
-.notice.sync-storage-notice {
-  max-width: none;
-  margin: 0;
-  border: 0;
-  border-radius: 0;
-  align-items: center;
-}
-/* `.notice-body` owns the one-column title and sentence stack. */
-.sync-storage-notice > svg { flex: 0 0 auto; }
+/* A blocking gate is a strip of the storage group (`.notice-strip`) and
+   carries the way forward at its far edge. The block above clips it to the
+   group's inner radius. */
 .sync-storage-notice .sync-sync-review-recovery-actions { margin-left: auto; }
 .sync-storage-notice .sync-sync-review-recovery-actions .btn { white-space: nowrap; }
 
@@ -7514,40 +7696,15 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-name-search-count b { color: var(--text-0); font-weight: var(--weight-medium); }
 .sync-name-search-hidden { color: var(--warning-text); }
 
-.sync-project-file-warning {
-  font-size: var(--type-2xs);
-  white-space: nowrap;
-}
-
-.sync-project-file-warning { display: inline-flex; align-items: center; gap: 4px; color: var(--warning-text); }
-
 /* A card marked for removal wears the same red wash the old row wore, mixed
    into its own surface so the border and radius stay the card's. */
 .catalog-card.removal { background: color-mix(in srgb, var(--red) 7%, var(--surface-row)); }
 
+/* The blocked row's marker is a strip of the file card (`.notice-strip`),
+   inset to the card's text column. */
 .sync-project-file-conflict {
   min-height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
   padding: 5px 12px 5px 40px;
-  border-top: 1px dashed var(--border);
-  color: var(--text-2);
-  font-size: var(--type-2xs);
-}
-
-/* The blocked row's marker is a notice, but it is a strip inside a card
-   rather than a box on a page: it keeps the dashed divider and the card's
-   inset and drops the frame, the corners, the fill and the trailing margin.
-   Compounded so it outranks `.notice.warning`, which would otherwise paint a
-   rounded amber capsule with a dashed top edge crossing three solid ones. */
-.notice.sync-project-file-conflict {
-  margin: 0;
-  border: 0;
-  border-top: 1px dashed var(--border);
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-2);
 }
 .sync-project-file-limit { padding: 12px; color: var(--text-3); font-size: var(--type-2xs); text-align: center; }
 
@@ -7739,71 +7896,13 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   color: var(--danger-text);
 }
 
-/* The acknowledgement is a callout, row-sized: the tint and radius the banner
-   zone wears — warning for a scan finding, danger for an overwrite — and the
-   app's own monochrome checkbox, the one the title line already uses. It hugs
-   its sentence at line two's x, so it reads as furniture of the card rather
-   than a form under it.
-
-   The explicit span is load-bearing: auto-placing a chip in the card's
-   auto-sized second column would inflate that track to the full sentence.
-   An acknowledgement is a full row, never a column occupant. */
-.catalog-card-ack {
-  width: fit-content;
-  min-height: 28px;
-  display: flex;
+/* An acknowledgement in a card is a full row at line two's x. The explicit
+   span is load-bearing: auto-placing it in the card's auto-sized second
+   column would inflate that track to the full sentence. An acknowledgement is
+   a full row, never a column occupant. */
+.catalog-card > .notice-ack {
   grid-column: 1 / -1;
-  align-items: center;
-  gap: 7px;
-  margin-left: 26px;
-  padding: 2px 11px 2px 2px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 22%, transparent);
-  border-radius: 9px;
-  background: var(--warning-soft);
-  color: var(--warning-text);
-  font-size: var(--type-2xs);
-  cursor: pointer;
-}
-
-.catalog-card-ack.danger {
-  border-color: color-mix(in srgb, var(--red) 24%, transparent);
-  background: var(--danger-soft);
-  color: var(--danger-text);
-}
-
-.catalog-card-ack > .sync-sync-row-choice {
-  width: 24px;
-  min-width: 24px;
-  min-height: 24px;
-}
-
-.catalog-card-ack > svg {
-  flex: 0 0 auto;
-}
-
-/* Payload first: the bold lead names the finding, then the flagged paths —
-   free to wrap inside the chip's own row rather than pushing it wider. */
-.catalog-card-ack-copy {
-  min-width: 0;
-}
-
-.catalog-card-ack-copy > strong {
-  font-weight: var(--weight-semibold);
-}
-
-/* The ack verb is the chip's trailing word — Mark reviewed, Approve — taking
-   the chip's own ink once ticked. */
-.catalog-card-ack > small {
-  flex: 0 0 auto;
-  margin-left: 4px;
-  color: var(--text-2);
-  font-size: var(--type-2xs);
-  font-weight: var(--weight-semibold);
-  white-space: nowrap;
-}
-
-.catalog-card-ack > small.done {
-  color: inherit;
+  margin: 0 0 0 26px;
 }
 
 /* The pill is the popover's anchor. */
@@ -8323,9 +8422,12 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 /* Both speakers write in the same card: an ink box on the punchcard's 8px
    corner, whose only chrome is the stamp band. Who is talking is the node
    tile's job, so the card carries no name or mark. Every box in the column
-   runs to the content's right edge, flush with the SHOW bar above. */
+   runs to the content's right edge, flush with the SHOW bar above. No
+   overflow clip: a file link's path card opens above the link, and on the
+   first line it has to clear the stamp band and the card's top edge. The
+   band rounds its own corners instead; the prose wraps anywhere and code
+   blocks scroll in their own box, so nothing else needs the clip. */
 .session-detail-card {
-  overflow: hidden;
   border: var(--box-border);
   border-radius: 8px;
   background: var(--surface-row);
@@ -8347,6 +8449,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   gap: 4px 10px;
   padding: 5px 12px 4px;
   border-bottom: 1px solid var(--border-mid);
+  /* The card's 8px corner inside its 2px ink edge. */
+  border-radius: 6px 6px 0 0;
   background: var(--surface-subtle);
   color: var(--text-2);
   font-family: var(--font-mono);
@@ -9340,8 +9444,6 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --success-soft: rgba(126, 212, 154, 0.12);
   --accent-soft: rgba(233, 185, 73, 0.14);
   --accent-contrast: #211c14;
-  --switch-off: #6b5c40;
-  --switch-thumb: #fbf3dd;
   --editor-active-line: rgba(251, 243, 221, 0.055);
   /* High, medium, and low emphasis of the same cream — never raw white. */
   --text-0: #fbf3dd;
@@ -9458,11 +9560,6 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --success-soft: rgba(75, 150, 97, 0.09);
   --accent-soft: rgba(233, 185, 73, 0.16);
   --accent-contrast: #fffdf7;
-  /* The track is the ground the thumb is read against, and thumb position IS
-     the off/on state, so the track carries the 3:1 non-text floor rather than
-     the quiet role its name suggests: it holds the thumb at 3.6:1. */
-  --switch-off: #9a825f;
-  --switch-thumb: #fffdf7;
   --editor-active-line: rgba(51, 39, 27, 0.045);
   --text-0: #33271b;
   --text-1: #4c3d2c;
@@ -10211,6 +10308,32 @@ summary {
   color: var(--tile-red-ink);
 }
 
+/* Provider colors identify the transport, never its connection status. Pale
+   tiles keep the full-color artwork readable in both application themes. */
+svg[data-storage-provider="local"] { --storage-icon-tile: #f8e8bd; }
+svg[data-storage-provider="mallard"] { --storage-icon-tile: #d4eee6; }
+svg[data-storage-provider="feishu"] { --storage-icon-tile: #e0f0fc; }
+svg[data-storage-provider="dropbox"] { --storage-icon-tile: #dfeeff; }
+svg[data-storage-provider="r2"] { --storage-icon-tile: #ffe7d5; }
+
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg[data-storage-provider] {
+  background: var(--storage-icon-tile);
+}
+
+.landing-picker-card-title > svg[data-storage-provider] {
+  width: 24px;
+  height: 24px;
+  padding: 8px;
+}
+
+.sync-storage-icon:has(> svg[data-storage-provider]) { background: transparent; }
+.sync-storage-icon > svg[data-storage-provider] {
+  box-sizing: content-box;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--storage-icon-tile);
+}
+
 .sidebar-profile-actions button {
   border: 0;
   border-radius: var(--r);
@@ -10337,6 +10460,95 @@ summary {
   object-fit: contain;
 }
 
+/* The update corner (AppUpdater.tsx): the primary button's fill at the
+   version mark's scale, pushed to its far end so the duck and the number
+   keep their place. Sized to fit beside them at the narrowest sidebar. */
+.sync-update-pill {
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px 0 8px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  border: var(--box-border);
+  border-radius: var(--r-pill);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  box-shadow: var(--shadow-control);
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sync-update-pill:hover:not(:disabled) {
+  background: var(--button-primary-hover);
+}
+
+.sync-update-pill:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: none;
+}
+
+.sync-update-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sync-update-pill:disabled {
+  opacity: var(--button-disabled-opacity);
+  cursor: not-allowed;
+}
+
+/* Restarting is a status, not a button: full ink, no pointer, and the
+   shared ring drawn in the pill's own ink. */
+span.sync-update-pill {
+  cursor: default;
+}
+
+.sync-update-pill .status-loader {
+  width: 12px;
+  height: 12px;
+}
+
+.sync-update-pill .status-loader::before {
+  border-color: color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+}
+
+.sync-update-pill .status-loader::after {
+  background: currentColor;
+}
+
+/* The first launch after an update: quiet, in the version mark's ink. */
+.sync-update-pill.receipt {
+  padding: 0 10px;
+  border-color: var(--border-mid);
+  background: transparent;
+  color: var(--text-1);
+  box-shadow: none;
+}
+
+.sync-update-pill.receipt:hover {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+/* A hidden sidebar hides the pill; one dot on its toggle carries it. */
+.sync-sidebar-toggle .sync-update-dot {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--button-primary-bg);
+  box-shadow: 0 0 0 1.5px var(--ink-line);
+}
+
 /* Project identity and storage control strip */
 
 .sync-project-links-page {
@@ -10417,12 +10629,6 @@ summary {
 .sync-path-menu-current {
   font-family: var(--font-sans);
   font-size: var(--type-sm);
-}
-
-.sync-path-menu-banner {
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
-  line-height: var(--leading-snug);
 }
 
 .sync-path-rename label {
@@ -11244,7 +11450,7 @@ summary {
   grid-area: preview;
 }
 
-.catalog-card-pet > .catalog-card-ack {
+.catalog-card-pet > .notice-ack {
   grid-column: 2 / -1;
 }
 
@@ -11791,6 +11997,7 @@ summary {
 
 /* One 32px control height; values in the reading faces at whole sizes. */
 .sync-setup-workspace .sync-field-grid input,
+.sync-setup-workspace .sync-project-folder-field input,
 .sync-binding-dialog .sync-field-grid input {
   height: 32px;
   padding: 0 10px;
@@ -11868,26 +12075,7 @@ summary {
   font-variant-numeric: tabular-nums;
 }
 
-/* The acknowledge row borders in the callout family's warning mix; its
-   sentence is prose in the reading face. */
-.sync-setup-acknowledge {
-  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
-}
-
-.sync-setup-acknowledge > span {
-  color: var(--text-1);
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
-  line-height: var(--leading-snug);
-}
-
-/* Error sentences, hints, and the save state are prose, at whole sizes. */
-.sync-setup-field-error {
-  font-family: var(--font-sans);
-  font-size: var(--type-xs);
-  line-height: var(--leading-snug);
-}
-
+/* Hints and the save state are prose, at whole sizes. */
 .sync-setup-hint,
 .sync-setup-inline-status,
 .sync-setup-save-state {

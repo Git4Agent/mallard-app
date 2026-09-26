@@ -9,6 +9,7 @@ pub mod config_watcher;
 pub mod maintenance;
 pub mod r2_setup;
 pub mod dropbox_setup;
+pub mod feishu_setup;
 pub mod managed_cloud_link;
 pub mod managed_cloud_setup;
 pub mod service;

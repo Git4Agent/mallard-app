@@ -72,7 +72,7 @@ test("OAuth v3 uses PKCE, exact scopes and one callback; only the user token rea
   } });
   authorize = await probe.begin();
   assert.equal(authorize.origin, "https://accounts.feishu.cn");
-  assert.equal(authorize.pathname, "/open-apis/authen/v1/authorize");
+  assert.equal(authorize.pathname, "/oauth/v3/authorize");
   assert.equal(authorize.searchParams.get("code_challenge_method"), "S256");
   assert.equal(authorize.searchParams.get("scope"), USER_SCOPES.join(" "));
   assert.ok(!authorize.href.includes(secret));

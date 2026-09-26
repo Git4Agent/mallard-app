@@ -9,7 +9,7 @@ import type {
   StorageSetupDraft,
   StorageSummary,
 } from "../../types";
-import Icon, { iconNameFromHint, type IconName } from "../Icons";
+import Icon, { storageIconName, type IconName } from "../Icons";
 import { catalogDoors, catalogScopeIcon, catalogScopeLabel } from "../storage-catalog/model";
 import type { CatalogCapabilityDescriptor, CatalogScopeView } from "../storage-catalog/types";
 import { projectLabel, storageDoors } from "./model";
@@ -134,6 +134,8 @@ interface Props {
   onRemoveCatalogScope: (scopeId: string) => void;
   onOpenStorageIndex: () => void;
   onOpenSettings: () => void;
+  /** The version mark's one action, at its far end (the update pill). */
+  versionAction?: ReactNode;
 }
 
 export default function ProjectSidebar({
@@ -176,6 +178,7 @@ export default function ProjectSidebar({
   onRemoveCatalogScope,
   onOpenStorageIndex,
   onOpenSettings,
+  versionAction,
 }: Props) {
   /* The root the workspace is standing in. Three of the five destinations own
      a list; Settings is a leaf with none, so it reports null rather than
@@ -275,10 +278,10 @@ export default function ProjectSidebar({
       {loading && projects.length === 0 && drafts.length === 0 ? (
         <div className="sidebar-msg">Loading projects…</div>
       ) : projects.length === 0 && drafts.length === 0 ? (
-        /* One door: Add project opens the folder dialog straight away. */
+        /* One door: Add project opens setup at its Folder field. */
         <SidebarDoors
           busy={busy}
-          doors={[{ key: "folder", icon: "folder", label: "Add project: pick a folder", onOpen: onAddProject }]}
+          doors={[{ key: "folder", icon: "folder", label: "Add project", onOpen: onAddProject }]}
         />
       ) : projects.map((project) => {
         const profileRequired = Object.keys(project.profile_ids ?? {}).length === 0;
@@ -430,7 +433,7 @@ export default function ProjectSidebar({
                 ? `Open ${storageName}. Storage issue: ${storageIssue}`
                 : `Open ${storageName}`}
             >
-              <Icon name={iconNameFromHint(storage.icon, "drive")} size={16} />
+              <Icon name={storageIconName(storage.provider, storage.icon)} size={16} />
               <span>{storage.name || "(unnamed)"}</span>
               {storageIssue && (
                 <Icon
@@ -477,7 +480,7 @@ export default function ProjectSidebar({
               title={`Continue setting up ${draftName}`}
               aria-label={`Continue setting up ${draftName} — resumable storage draft`}
             >
-              <Icon name={iconNameFromHint(draftIcon, "drive")} size={16} />
+              <Icon name={storageIconName(draft.provider, draftIcon)} size={16} />
               <span>{draftName}</span>
               <span className="sync-draft-badge">Draft</span>
             </button>
@@ -599,6 +602,7 @@ export default function ProjectSidebar({
       <footer className="sync-sidebar-product-mark" aria-label={`Mallard version ${packageMetadata.version}`}>
         <img src="/mallard-logo-duck.svg" alt="" />
         <span>v{packageMetadata.version}</span>
+        {versionAction}
       </footer>
     </aside>
   );

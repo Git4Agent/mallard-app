@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import Icon, { iconNameFromHint, type IconName } from "../Icons";
+import Icon, { storageIconName, type IconName } from "../Icons";
 import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import { PUSH_FINISHED, finishPushOffered } from "../../unfinishedPush";
-import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import Notice, { Acknowledgement, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import LoadingScaffold from "../LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
@@ -57,6 +57,7 @@ import type {
 
 export interface CatalogStorageOption {
   id: string;
+  provider: string;
   name: string;
   /** The provider's own label — what a transport failure is blamed on. */
   provider_label: string;
@@ -101,7 +102,7 @@ function forkSeed(row: CatalogScopeRow): string {
   return cleaned ? `${cleaned}-copy` : "";
 }
 
-/** The acknowledgement chip's lead, keyed by the warning's code — the backend
+/** The acknowledgement's lead, keyed by the warning's code — the backend
  * mints `executable_content` and `secret_shaped` today (inventory.rs) — with
  * the prefix its message is known to carry. An unknown code, or a message
  * that stopped matching its prefix, keeps the whole backend sentence: the
@@ -452,36 +453,6 @@ function ForkDrawer({
         </span>
       )}
     </form>
-  );
-}
-
-/** The acknowledgement chip, payload-first: the bold lead names the finding,
- * the body carries the flagged paths, and the ack verb is the chip's trailing
- * word — livening once ticked — rather than a constant preamble in front of
- * every sentence. The chip spans the card's full row; the accessible name
- * still reads the backend's whole sentence. */
-function AckChip({ danger, lead, body, checked, ariaLabel, verbs, onToggle }: {
-  danger?: boolean;
-  lead: string | null;
-  body: string;
-  checked: boolean;
-  ariaLabel: string;
-  /** The trailing word, unticked then ticked: Mark reviewed → Reviewed for a
-   * scan finding, Approve → Approved for an overwrite. */
-  verbs: [string, string];
-  onToggle: (checked: boolean) => void;
-}) {
-  return (
-    <label className={`catalog-card-ack${danger ? " danger" : ""}`}>
-      <span className="sync-sync-row-choice">
-        <input type="checkbox" checked={checked} aria-label={ariaLabel} onChange={(event) => onToggle(event.target.checked)} />
-      </span>
-      <Icon name="alert-triangle" size={12} />
-      <span className="catalog-card-ack-copy">
-        {lead === null ? body : <><strong>{lead}</strong> — {body}</>}
-      </span>
-      <small className={checked ? "done" : undefined}>{checked ? verbs[1] : verbs[0]}</small>
-    </label>
   );
 }
 
@@ -1263,7 +1234,7 @@ export default function StorageCatalogPage({
     {
       id: "storage",
       label: storage?.name || (storageId ? "(unnamed)" : "No storage"),
-      icon: iconNameFromHint(storage?.icon, "drive"),
+      icon: storageIconName(storage?.provider, storage?.icon),
       tone: "root",
       warning: !storageId,
       title: storage ? `${storage.name || "Storage"} · ${storage.detail}` : undefined,
@@ -1273,7 +1244,7 @@ export default function StorageCatalogPage({
         label: storage?.name || "No storage linked",
         detail: storage?.detail,
         detailIsPath: storage?.detailIsPath,
-        icon: iconNameFromHint(storage?.icon, "drive"),
+        icon: storageIconName(storage?.provider, storage?.icon),
       },
       /* A row that can never push or pull is not invited to add a storage. */
       menuBanner: storageId || unavailable
@@ -1310,7 +1281,7 @@ export default function StorageCatalogPage({
               label: candidate.name || "(unnamed)",
               detail: candidate.detail,
               detailIsPath: candidate.detailIsPath,
-              icon: iconNameFromHint(candidate.icon, "drive"),
+              icon: storageIconName(candidate.provider, candidate.icon),
               disabled: busy,
               onSelect: () => {
                 setChosenStorageId(candidate.id);
@@ -1671,20 +1642,21 @@ export default function StorageCatalogPage({
                              about. */
                           const parts = warningParts(warning);
                           return (
-                            <AckChip
+                            <Acknowledgement
                               key={warning.digest}
-                              lead={parts.lead}
-                              body={parts.body}
+                              title={parts.lead ?? undefined}
                               checked={pushAcks.has(warning.digest)}
                               ariaLabel={`Reviewed: ${warning.message}`}
                               verbs={["Mark reviewed", "Reviewed"]}
-                              onToggle={(checked) => setPushAcks((current) => {
+                              onChange={(checked) => setPushAcks((current) => {
                                 const next = new Set(current);
                                 if (checked) next.add(warning.digest);
                                 else next.delete(warning.digest);
                                 return next;
                               })}
-                            />
+                            >
+                              {parts.lead === null ? parts.body : `— ${parts.body}`}
+                            </Acknowledgement>
                           );
                         })}
                       />
@@ -1859,20 +1831,22 @@ export default function StorageCatalogPage({
                           /* Part of the card it belongs to, not the footer:
                              the footer says why the button is off, this says
                              which row turned it off. */
-                          <AckChip
-                            danger
-                            lead="Overwrites this Mac’s copy"
-                            body={`replaces the current ${item.item.display_name} here with the stored version`}
+                          /* A Warning, not an Error: nothing has failed; the
+                             verb carries the risk. */
+                          <Acknowledgement
+                            title="Overwrites this Mac’s copy"
                             checked={pullAcks.has(resourceId)}
                             ariaLabel={`Approve overwriting ${item.item.display_name}`}
-                            verbs={["Approve", "Approved"]}
-                            onToggle={(checked) => setPullAcks((current) => {
+                            verbs={["Approve overwrite", "Approved"]}
+                            onChange={(checked) => setPullAcks((current) => {
                               const next = new Set(current);
                               if (checked) next.add(resourceId);
                               else next.delete(resourceId);
                               return next;
                             })}
-                          />
+                          >
+                            {`— replaces the current ${item.item.display_name} here with the stored version`}
+                          </Acknowledgement>
                         )}
                       />
                     );

@@ -12,6 +12,8 @@ mod app_reset;
 #[cfg_attr(test, allow(dead_code))]
 mod app_settings;
 #[cfg_attr(test, allow(dead_code))]
+mod app_update;
+#[cfg_attr(test, allow(dead_code))]
 mod project_sync;
 #[cfg_attr(test, allow(dead_code))]
 mod storage_catalog;
@@ -122,10 +124,14 @@ pub fn run() {
     tauri::Builder::default()
         .manage(project_sync::r2_setup::R2SetupControl::default())
         .manage(project_sync::dropbox_setup::DropboxSetupControl::default())
+        .manage(project_sync::feishu_setup::FeishuSetupControl::default())
         .manage(project_sync::managed_cloud_setup::ManagedCloudSetupControl::default())
+        .manage(app_update::AppUpdateState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
+        // The updater's configuration (endpoint, public key, Windows install
+        // mode); `app_update` drives it from Rust, and the webview holds no
+        // updater permission.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .menu(app_menu)
         .on_menu_event(on_menu_event)
@@ -158,6 +164,14 @@ pub fn run() {
             app.manage(std::sync::Mutex::new(watcher));
             project_sync::config_watcher::start_connection_forwarder(app.handle().clone());
             project_sync::config_watcher::start_ignored_name_forwarder(app.handle().clone());
+            // The Feishu sign-ins this computer keeps live beside the
+            // config; a launch that cannot find the state root keeps no
+            // store, and every Feishu storage then reads as reconnect.
+            if let Ok(repository) =
+                mallard_infrastructure::persistence::LocalStateRepository::from_user_home()
+            {
+                let _ = mallard_infrastructure::feishu_connections::install(&repository);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -170,6 +184,8 @@ pub fn run() {
             app_reset::reset_local_state,
             app_settings::get_app_settings,
             app_settings::update_app_settings,
+            app_update::prepare_app_update,
+            app_update::restart_to_update,
             project_sync::commands::get_project_sync_config,
             project_sync::commands::list_storage_providers,
             project_sync::commands::rename_storage,
@@ -184,8 +200,11 @@ pub fn run() {
             project_sync::dropbox_setup::discover_dropbox_storage,
             project_sync::dropbox_setup::prepare_dropbox_storage,
             project_sync::dropbox_setup::cancel_dropbox_setup,
-            project_sync::managed_cloud_setup::authorize_managed_cloud_setup,
-            project_sync::managed_cloud_setup::prepare_managed_cloud_storage,
+            project_sync::feishu_setup::authorize_feishu_setup,
+            project_sync::feishu_setup::propose_feishu_folder_name,
+            project_sync::feishu_setup::prepare_feishu_storage,
+            project_sync::feishu_setup::cancel_feishu_setup,
+            project_sync::managed_cloud_setup::sign_in_managed_cloud_storage,
             project_sync::managed_cloud_setup::cancel_managed_cloud_setup,
             project_sync::managed_cloud_link::request_managed_cloud_release,
             project_sync::managed_cloud_link::list_managed_cloud_repositories,
@@ -234,6 +253,8 @@ pub fn run() {
             project_sync::commands::apply_bundle_restore,
             project_sync::commands::get_restore_readiness,
             project_sync::commands::list_setup_drafts,
+            project_sync::commands::probe_project_folder,
+            project_sync::commands::list_agent_folders,
             project_sync::commands::create_setup_draft,
             project_sync::commands::get_setup_draft,
             project_sync::commands::update_setup_draft,
@@ -270,6 +291,11 @@ pub fn run() {
             storage_catalog::resource_commands::prepare_catalog_resource_fork,
             storage_catalog::resource_commands::apply_catalog_resource_fork,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building Tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app_update::install_on_exit(app);
+            }
+        });
 }

@@ -38,16 +38,18 @@ const R2: StorageProviderDescriptor = {
   managed_secret_id: null,
   setup_guide_url: "https://developers.cloudflare.com/r2/",
   manual_setup_hint: "Enter an existing R2 connection in the fields below.",
-  discovery: {
-    unit: "bucket",
-    unit_plural: "buckets",
-    place: "your Cloudflare account",
-    create_hint: "A new bucket in your Cloudflare account, made by the agent or by hand.",
-    existing_hint: "Use a shared R2 bucket with your team, or connect your own.",
+  setup_doors: {
+    create_hint: "A new bucket in your Cloudflare account.",
+    existing_hint: "A bucket Mallard already uses.",
     existing_help: {
       label: "Set up team access",
       url: "https://developers.cloudflare.com/fundamentals/manage-members/manage/",
     },
+  },
+  discovery: {
+    unit: "bucket",
+    unit_plural: "buckets",
+    place: "your Cloudflare account",
     find_label: "Find in my account",
     access_hint: "Uses your Wrangler sign-in. Read-only: lists the buckets and reads one marker file in each.",
     scanning_hint: "Looking through your Cloudflare account…",
@@ -74,12 +76,14 @@ const DROPBOX: StorageProviderDescriptor = {
   managed_secret_id: "refresh_token",
   setup_guide_url: "https://www.dropbox.com/developers",
   manual_setup_hint: "Enter an existing shared or team namespace and a user-linked token. Mallard stores data in .mallard within that namespace.",
+  setup_doors: {
+    create_hint: "A new shared folder in your Dropbox.",
+    existing_hint: "A shared folder Mallard already uses.",
+  },
   discovery: {
     unit: "shared folder",
     unit_plural: "shared folders",
     place: "your Dropbox",
-    create_hint: "A new Mallard shared folder in your Dropbox, made by the agent.",
-    existing_hint: "A shared folder Mallard already uses, found in your Dropbox — or a namespace you paste in.",
     find_label: "Find in my Dropbox",
     access_hint: "Read-only Dropbox access, approved in your browser: lists your shared folders and reads one marker file in each.",
     scanning_hint: "Approve access in your browser, then Mallard looks through your shared folders…",
@@ -170,7 +174,7 @@ function preparedForm(provider: StorageProviderDescriptor, name: string): { form
 /** The workspace's storage page, reduced to the state this feature reads. */
 function Page({ provider, outcome }: { provider: StorageProviderDescriptor; outcome: Outcome }) {
   const discovery = provider.discovery!;
-  const [form, setForm] = useState<StorageEditorForm>({ name: `${provider.default_name} 1`, settings: {}, typedSecrets: {} });
+  const [form, setForm] = useState<StorageEditorForm>({ name: `${provider.default_name} draft 1`, settings: {}, typedSecrets: {} });
   const [presence, setPresence] = useState<SecretPresence>({});
   const [mode, setMode] = useState<StorageSetupMode | null>(null);
   const [manualEntry, setManualEntry] = useState(false);

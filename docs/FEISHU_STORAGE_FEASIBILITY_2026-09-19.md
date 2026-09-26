@@ -2,6 +2,10 @@
 
 Research date: 2026-09-19. Scope: Feishu China Drive file storage.
 
+Follow-up: see the [2026-09-23 CAS-free rerun](FEISHU_CAS_FREE_POC_2026-09-23.md)
+for current tests and protocol behavior. Provider limits below are from
+the original research; they were not revalidated in that rerun.
+
 **Decision: proceed with a limited live pilot. Do not enable a production
 provider yet.** The current model removes the conditional-write obstacle.
 Feishu has the required transfer and listing APIs. Listing completeness,
@@ -32,7 +36,7 @@ bridge builds from those files, not from the base commit alone.
 | The smallest sibling rank wins; a longer losing branch cannot win | [`Mainline::select`](../crates/mallard-domain/src/publication.rs) |
 | A record is sent after a fresh stream listing; transport retries are forbidden | [`write_record`](../crates/mallard-infrastructure/src/storage_core/publication.rs) |
 | Payloads and manifests precede the publication record | [`bundle_engine`](../crates/mallard-infrastructure/src/bundle_engine.rs) |
-| Linked observations roll back local acceptance for a confirmed Push that is later outranked | [`observe_linked_bundle`](../src-tauri/src/project_sync/service.rs) |
+| Linked observations classify displacement without changing local acceptance; recovery requires user action (updated 2026-09-23) | [`observe_linked_bundle`](../src-tauri/src/project_sync/service.rs) |
 | Conditional deletion is an optional, separate capability | [`ObjectStore`](../crates/mallard-infrastructure/src/storage_core/object_store.rs) |
 
 The schemas stay at `1`. The marker is
@@ -112,9 +116,11 @@ clients, both token contexts, pagination, and concurrent activity. A
 provider guarantee or explicit acceptance of weaker semantics is still
 needed before release. No such weakening is proposed by this PoC.
 
-The current application also rolls back local acceptance when a later
-observation finds the confirmed Push outranked. This is part of the
-current model. It does not establish a provider's listing guarantee.
+Correction on 2026-09-23: current linked observations classify displacement
+and do not roll back local acceptance. Recovery requires user action.
+This does not establish a provider's listing guarantee. The new rerun also
+reproduces displacement with complete listings: a writer admitted before
+another Push completes can send an earlier-ranked sibling afterward.
 
 **2. File names are not file IDs.** A logical key must resolve through
 folder listings to a file token. The inspected upload contract does not

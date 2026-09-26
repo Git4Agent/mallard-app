@@ -29,7 +29,7 @@ const ACCOUNT = { name: "He Qu", email: "quhe1996@gmail.com" };
 const LINK = "https://www.dropbox.com/oauth2/authorize?client_id=abc123xyz&response_type=code&token_access_type=offline&redirect_uri=http%3A%2F%2F127.0.0.1%3A53682%2Fcallback&state=x9f2";
 const FOLDER = "Mallard fox";
 const NAMESPACE = "1234567890";
-const DESCRIPTOR = { icon: "cloud" };
+const DESCRIPTOR = { key: "dropbox", icon: "cloud" };
 const STORAGES = [{ storage_id: "storage-1", name: "Team notes" }];
 
 const SCAN: StorageDiscoveryResult = {

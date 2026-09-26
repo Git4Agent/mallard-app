@@ -5,7 +5,7 @@ import type {
   StorageSummary,
 } from "../../types";
 import Icon, { type IconName } from "../Icons";
-import Notice from "../notice/Notice";
+import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { openExternalUrl } from "./externalLink";
@@ -321,9 +321,7 @@ export default function RepositoryAddressPicker({
   const looking = lookup.kind === "resolving";
   const joining = join.kind === "joining";
 
-  const fieldError = (text: ReactNode) => (
-    <div className="sync-setup-field-error" role="alert"><Icon name="alert-triangle" size={13} /> {text}</div>
-  );
+  const fieldError = (text: ReactNode) => <FieldMessage blocking>{text}</FieldMessage>;
 
   let answer: ReactNode = null;
   if (lookup.kind === "resolving") {
@@ -422,19 +420,15 @@ export default function RepositoryAddressPicker({
   const needsAcknowledgement = selection?.kind === "existing"
     && repositoryFingerprintsRequireAcknowledgement(selection.repository_fingerprint, localFingerprint);
   const acknowledgement = needsAcknowledgement && selection?.kind === "existing" && (
-    <label className="sync-setup-acknowledge">
-      <input
-        type="checkbox"
-        checked={selection.mismatch_acknowledged}
-        disabled={disabled}
-        onChange={(event) => onSelect({ ...selection, mismatch_acknowledged: event.target.checked }, chosen)}
-      />
-      <span>
-        {chosen?.git_remote === "unknown" || (!selection.repository_fingerprint && !!localFingerprint)
-          ? "This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity."
-          : "This repository was pushed from a different Git remote than this checkout’s. Connect it anyway, then review its stored changes from Activity."}
-      </span>
-    </label>
+    <Acknowledgement
+      checked={selection.mismatch_acknowledged}
+      disabled={disabled}
+      onChange={(checked) => onSelect({ ...selection, mismatch_acknowledged: checked }, chosen)}
+    >
+      {chosen?.git_remote === "unknown" || (!selection.repository_fingerprint && !!localFingerprint)
+        ? "This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity."
+        : "This repository was pushed from a different Git remote than this checkout’s. Connect it anyway, then review its stored changes from Activity."}
+    </Acknowledgement>
   );
 
   const codeField = (

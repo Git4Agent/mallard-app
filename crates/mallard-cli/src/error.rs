@@ -5,42 +5,32 @@ pub const EXIT_INVALID_INPUT: i32 = 2;
 pub const EXIT_CONFLICT: i32 = 3;
 pub const EXIT_REMOTE_FAILURE: i32 = 4;
 pub const EXIT_PERSISTENCE_FAILURE: i32 = 5;
-pub const EXIT_CLEANUP_REQUIRED: i32 = 6;
 
 pub(crate) struct CliError {
     exit_code: i32,
     code: &'static str,
     message: String,
-    setup_id: Option<String>,
 }
 
 impl CliError {
     pub fn invalid(message: impl Into<String>) -> Self {
-        Self::new(EXIT_INVALID_INPUT, "cli_invalid_input", message, None)
+        Self::new(EXIT_INVALID_INPUT, "cli_invalid_input", message)
     }
 
     pub fn persistence(message: impl Into<String>) -> Self {
-        Self::new(
-            EXIT_PERSISTENCE_FAILURE,
-            "cli_persistence_failure",
-            message,
-            None,
-        )
+        Self::new(EXIT_PERSISTENCE_FAILURE, "cli_persistence_failure", message)
     }
 
     pub fn invalid_code(code: &'static str, message: &'static str) -> Self {
-        Self::new(EXIT_INVALID_INPUT, code, message, None)
+        Self::new(EXIT_INVALID_INPUT, code, message)
     }
 
     pub fn remote(code: &'static str, message: &'static str) -> Self {
-        Self::new(EXIT_REMOTE_FAILURE, code, message, None)
+        Self::new(EXIT_REMOTE_FAILURE, code, message)
     }
 
     pub fn from_setup(error: mallard_application::storage_setup::StorageSetupError) -> Self {
-        let exit_code = error.kind().exit_code();
-        let code = error.code();
-        let setup_id = error.setup_id().map(str::to_string);
-        Self::new(exit_code, code, error.to_string(), setup_id)
+        Self::new(error.kind().exit_code(), error.code(), error.to_string())
     }
 
     pub fn exit_code(&self) -> i32 {
@@ -55,22 +45,12 @@ impl CliError {
         self.code
     }
 
-    pub fn setup_id(&self) -> Option<&str> {
-        self.setup_id.as_deref()
-    }
-
-    fn new(
-        exit_code: i32,
-        code: &'static str,
-        message: impl Into<String>,
-        setup_id: Option<String>,
-    ) -> Self {
-        debug_assert!(matches!(exit_code, 2..=6));
+    fn new(exit_code: i32, code: &'static str, message: impl Into<String>) -> Self {
+        debug_assert!(matches!(exit_code, 2..=5));
         Self {
             exit_code,
             code,
             message: message.into(),
-            setup_id,
         }
     }
 }
@@ -88,7 +68,6 @@ impl fmt::Debug for CliError {
             .field("exit_code", &self.exit_code)
             .field("code", &self.code)
             .field("message", &self.message)
-            .field("setup_id", &self.setup_id)
             .finish()
     }
 }
@@ -112,10 +91,6 @@ mod tests {
         assert_eq!(
             StorageSetupErrorKind::PersistenceFailure.exit_code(),
             EXIT_PERSISTENCE_FAILURE
-        );
-        assert_eq!(
-            StorageSetupErrorKind::CleanupRequired.exit_code(),
-            EXIT_CLEANUP_REQUIRED
         );
     }
 }

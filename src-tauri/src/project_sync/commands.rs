@@ -13,11 +13,12 @@ use super::service::{
     get_project_session_timeline_page_with_repository, get_project_with_repository,
     get_push_destination_status_with_repository, get_restore_readiness_with_repository,
     get_setup_draft_with_repository, get_storage_setup_draft_with_repository,
-    inspect_project_files_with_repository, list_local_projects_with_repository,
-    list_project_bindings_with_repository, list_project_repository_kinds_with_repository,
-    list_provider_profiles_with_repository, list_remote_bundle_snapshots_with_repository,
-    list_setup_drafts_with_repository, list_storage_setup_drafts_with_repository,
-    load_project_sync_config_with_repository, probe_provider_profile_with_repository,
+    inspect_project_files_with_repository, list_agent_folders_with_repository,
+    list_local_projects_with_repository, list_project_bindings_with_repository,
+    list_project_repository_kinds_with_repository, list_provider_profiles_with_repository,
+    list_remote_bundle_snapshots_with_repository, list_setup_drafts_with_repository,
+    list_storage_setup_drafts_with_repository, load_project_sync_config_with_repository,
+    probe_project_folder_with_repository, probe_provider_profile_with_repository,
     project_open_commands, project_storage_log_context, pull_action_resource_label,
     pull_plan_action_counts, pull_review_resource_labels,
     read_project_markdown_image_with_repository, recover_startup_state_with_repository,
@@ -29,18 +30,19 @@ use super::service::{
     save_project_link_with_repository, session_detail_error, should_log_history_scan,
     sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
     test_storage_setup_draft_with_repository, test_storage_with_repository,
-    update_storage_setup_draft_with_repository, BundleReadiness, BundleSnapshotSummary,
-    CommitStorageDraftResult, ConnectProjectBundleRequest, CreateSetupDraftResult,
-    HostIdentityStatus, ProjectActivity, ProjectActivityRefreshEvent, ProjectContentInventory,
-    ProjectDetail, ProjectMarkdownImage, ProjectOperationResult, ProjectSessionTimelineRequest,
-    ProjectSyncConfigView, ProjectSyncMetadataResetResult, ProjectSyncService, ProviderDescriptor,
-    ProviderProfileProbe, ProviderProfileSummary, PushApproval, PushDestinationStatus,
-    PushReviewContext, ResourceInventory, RestoreResult, SaveProjectBindingRequest,
-    SaveProjectLinkRequest, SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind,
-    SessionToolCategory, SetupDraftInspection, SetupDraftList, SiblingBundleStatus,
-    StorageDataClearResult, StorageProviderDescriptor, StorageSetupDraftList,
-    StorageSetupDraftSummary, TestStorageDraftResult, UpdateStorageSetupDraftRequest,
-    VerifyStorageResult, HISTORY_SCAN_LOGGED_AT,
+    update_storage_setup_draft_with_repository, AgentFolderList, BundleReadiness,
+    BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
+    CreateSetupDraftResult, HostIdentityStatus, ProjectActivity, ProjectActivityRefreshEvent,
+    ProjectContentInventory, ProjectDetail, ProjectFolderProbe, ProjectMarkdownImage,
+    ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncConfigView,
+    ProjectSyncMetadataResetResult, ProjectSyncService, ProviderDescriptor, ProviderProfileProbe,
+    ProviderProfileSummary, PushApproval, PushDestinationStatus, PushReviewContext,
+    ResourceInventory, RestoreResult, SaveProjectBindingRequest, SaveProjectLinkRequest,
+    SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind, SessionToolCategory,
+    SetupDraftInspection, SetupDraftList, SiblingBundleStatus, StorageDataClearResult,
+    StorageProviderDescriptor, StorageSetupDraftList, StorageSetupDraftSummary,
+    TestStorageDraftResult, UpdateStorageSetupDraftRequest, VerifyStorageResult,
+    HISTORY_SCAN_LOGGED_AT,
 };
 use crate::activity_log::{emit_typed_log, ActivityLogScope};
 use mallard_domain::{
@@ -601,6 +603,7 @@ pub async fn get_project_activity(
     branch: Option<String>,
     before_time: Option<u64>,
     window_days: Option<u64>,
+    review: bool,
 ) -> Result<ProjectActivity, String> {
     let repository = repository()?;
     let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
@@ -621,6 +624,7 @@ pub async fn get_project_activity(
             branch.as_deref(),
             before_time,
             window_days,
+            review,
         )
     })
     .await;
@@ -659,6 +663,7 @@ pub async fn refresh_project_activity(
     storage_id: StorageId,
     branch: Option<String>,
     window_days: Option<u64>,
+    review: bool,
     on_progress: tauri::ipc::Channel<ProjectActivityRefreshEvent>,
 ) -> Result<(), String> {
     let repository = repository()?;
@@ -683,9 +688,10 @@ pub async fn refresh_project_activity(
             &storage_id,
             branch.as_deref(),
             window_days,
+            review,
             &mut |event| {
                 match &event {
-                    ProjectActivityRefreshEvent::ActivityError { message }
+                    ProjectActivityRefreshEvent::ActivityError { message, .. }
                     | ProjectActivityRefreshEvent::ComparisonError { message, .. } => {
                         phase_log.emit(&phase_app, "warning", "history.refresh_warning", message)
                     }
@@ -1776,6 +1782,21 @@ pub async fn get_push_destination_status(
 pub async fn list_setup_drafts() -> Result<SetupDraftList, String> {
     let repository = repository()?;
     run_blocking(move || list_setup_drafts_with_repository(&repository)).await
+}
+
+/// The Folder field's verdict for a typed path. Reads only.
+#[tauri::command]
+pub async fn probe_project_folder(project_root: String) -> Result<ProjectFolderProbe, String> {
+    let repository = repository()?;
+    run_blocking(move || probe_project_folder_with_repository(&repository, &project_root)).await
+}
+
+/// Folders the newest sessions of every registered profile ran in. Reads
+/// only, and a bounded number of session files per profile.
+#[tauri::command]
+pub async fn list_agent_folders() -> Result<AgentFolderList, String> {
+    let repository = repository()?;
+    run_blocking(move || list_agent_folders_with_repository(&repository)).await
 }
 
 #[tauri::command]

@@ -14,6 +14,8 @@ use mallard_domain::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The view's schema, which names its key: `_views/<schema>-<transcript sha256>.json`.
+pub const VIEW_SCHEMA: u32 = 1;
 /// The service's view bounds (`LIMITS.viewBytes`, `LIMITS.viewEvents`).
 pub const VIEW_BYTES: usize = 8 * 1024 * 1024;
 pub const VIEW_EVENTS: usize = 20_000;
@@ -64,7 +66,7 @@ struct ViewFacts<'a> {
 impl<'a> ViewFacts<'a> {
     fn view<'b>(&'b self, events: &'b [SessionTimelineEvent], truncated: bool) -> SessionView<'b> {
         SessionView {
-            schema_version: 1,
+            schema_version: VIEW_SCHEMA,
             resource_id: self.resource_id,
             provider: self.provider,
             provider_session_id: self.provider_session_id.clone(),

@@ -27,7 +27,11 @@ resources portable across teammates and machines.
 - Parses session summaries and conversation previews locally, with metrics for
   start and end times, user turns, tokens, agent messages, and tool calls.
 - Syncs selected project conversations and provider-home resources — memory
-  and session state — through a local folder, Cloudflare R2, or Dropbox.
+  and session state — through Mallard Cloud (sign in with GitHub; private
+  snapshots, collaborators, and a website that shows released sessions and
+  Library items), a local folder, Cloudflare R2, Dropbox, or Feishu Drive.
+  Every storage holds the same immutable layout, and Mallard Cloud runs the
+  same publication protocol as R2, with claims.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
 - Publishes immutable, SHA-256-verified bundle revisions after an explicit
@@ -71,10 +75,11 @@ The fastest path is the packaged macOS DMG (Apple Silicon or Intel) from the
 [latest release](https://github.com/Git4Agent/mallard-app/releases/latest).
 The app is Developer ID signed and notarized, so it opens without a security
 override. The first **Open in Terminal** or Codex App refresh asks for
-Automation permission; allow it. From 0.1.3, Mallard notices newer
-releases on its own and updates in place from **Update and restart**; the
-periodic check can be turned off under Settings › Privacy, where **Check for
-updates** always works.
+Automation permission; allow it. Mallard downloads newer releases in the
+background; **Update** in the sidebar's version mark restarts into one, and
+quitting installs it for the next launch. **Automatic updates** can be
+turned off under Settings › Privacy, where **Check for updates** always
+works.
 
 You will also need Git and a local Codex profile. The default profile is
 normally stored at `~/.codex`.
@@ -136,7 +141,7 @@ cannot be selected again.
 
 Select a Mallard bucket, then choose **Use selected**. Mallard checks the
 bucket's creation date and marker before and after browser authorization.
-**Copy authorization link**, **Open browser**, and **Cancel setup** work as
+**Copy link**, **Open browser**, and **Cancel setup** work as
 in the create flow; no browser opens automatically. Cancellation stops the
 local helper and callback listener. **Try again** repeats the stopped step;
 **Back to setup** clears the temporary scan and returns to **Find in my
@@ -171,7 +176,7 @@ and stops presenting that credential until it changes. The sidebar and the
 Storages index mark the storage **Reconnect**; the storage page, and a Push or
 Pull that failed on it, offer **Reconnect Dropbox**, which opens the same
 storage's settings. Select **Reconnect Dropbox** there, or paste a
-replacement token, then **Save changes**. Reconnection keeps the namespace,
+replacement token, then **Save credential**. Reconnection keeps the namespace,
 the storage ID, and the project links, and creates no folder. A manual token
 that expired is reported the same way and needs a replacement. Access that
 merely ran out under a renewable credential is renewed and the read repeated
@@ -184,6 +189,43 @@ Dropbox app with `account_info.read`, `files.metadata.read`,
 `files.content.read`, and `files.content.write`. Replace a manual token when
 it expires. The namespace is fixed after setup. Each machine must connect to
 the same namespace; creating another folder creates another storage.
+
+For **Feishu Drive**, your organization's Feishu admin installs Mallard's
+app once ([the guide](docs/FEISHU_APP_SETUP_GUIDE.md)); nothing is typed.
+Mallard runs no service on the Feishu path: sign-in and every file transfer
+happen between the computer and Feishu, Mallard can always fetch from
+Feishu with nothing of Mallard's in the way, and Mallard Cloud holds nothing
+about it. Choose **Create new** or **Use existing**, select **Connect
+Feishu**, sign in in a browser you choose, and confirm the account. Create
+new then makes a `Mallard <word>` folder in My Space under a name you can
+change; Use existing takes the link of a folder shared with you. There is no
+manual setup: a Feishu storage needs the sign-in only the setup mints.
+Feishu's consent covers every Drive folder you
+can reach, not only that folder; the sign-in stays on this computer, under
+`~/.mallard/feishu_connections/`, and renews by itself. Feishu requires a
+fresh sign-in within a year of consent; the storage page prints the date.
+Two computers share a storage by sharing the folder in Feishu and connecting
+each with its own sign-in. If Feishu rejects the saved sign-in, the storage
+reads **Reconnect**: **Reconnect Feishu**, then **Save credential**. A release
+build carries Mallard's Feishu app (`MALLARD_FEISHU_APP_ID` and
+`MALLARD_FEISHU_APP_SECRET` in the build environment; `npm run tauri` also
+takes them from a git-ignored `.env.feishu` at the repository root, and a
+development build reads them at run time); a build without it says so on
+the Sign in line,
+and an older build whose app secret was rotated says "update Mallard"
+without asking for a new sign-in.
+
+Feishu holds no claims, like a local folder: two computers that push the
+same version within seconds can displace one another, and the next Compare
+reports the displaced version. **Clear storage data** is unavailable on
+Feishu. One request is in flight at a time, 200 ms apart, within Feishu's
+documented 5 uploads or downloads per second and 10,000 per day; objects up
+to 20 MiB are one request, larger ones up to **100 MiB** go in parts. A Push
+that stops at a limit resumes on the next Push, which skips every object
+already present. Below the storage folder, payloads, manifests, and records
+each get one shard folder so no Drive folder outgrows Feishu's 1,500
+children; the logical layout is unchanged. See the
+[Feishu storage design](docs/DESIGN_FEISHU_DRIVE_STORAGE.md).
 
 Dropbox uses the same `.mallard/` layout. Each uploaded object must be at most
 **150 MiB (157,286,400 bytes)**. This Dropbox upload limit does not change
@@ -204,7 +246,8 @@ did not finish"; nothing finishes it by itself, and the Push review offers
 and one record request and never retries or resends them. A local folder
 writes no claim.
 
-**Clear storage data** is available for local-folder, R2, and Dropbox storage. The
+**Clear storage data** is available for local-folder, R2, and Dropbox storage,
+never for Feishu. The
 confirmation names the storage and requires you to confirm that sync has
 stopped on all machines. It deletes all synced repositories and Library
 resources under `.mallard/v1/repositories/` and `.mallard/v1/library/`,
@@ -240,31 +283,37 @@ loopback callback. Creation adds `sharing.write` to the four storage scopes.
 Discovery adds `sharing.read`; reconnection and refreshed access request only
 the storage scopes. Setup creates no invitations or public links.
 
-A bounded local journal records creation intent, the acknowledged folder ID,
-sharing job, and namespace. Restart resumes an acknowledged stage. An unknown
-create or share result stops without repeating the request. A created folder
-remains after cancellation or failure. After creation starts, another account
-requires a new draft. The original draft and folder remain available.
-See [Dropbox direct setup](docs/PLAN_DROPBOX_DIRECT_SETUP.md).
+Setup keeps no recovery state. A folder whose creation or sharing was
+interrupted stays in the account, and the next attempt with the same name
+reports it taken: choose another name, or connect the folder through
+**Find in my Dropbox**. Switching accounts is allowed until the draft holds
+its namespace. See [Dropbox direct setup](docs/PLAN_DROPBOX_DIRECT_SETUP.md).
 
 Mallard proposes `mallard-<word>` for a new R2 bucket and `Mallard <word>` for
 a new Dropbox folder, selecting from 1,155 distinct short words in the
 `petname` library's small English noun, adjective, and adverb lists. The
 display name does not select the destination.
 
+A storage is named after its destination once that is known: `R2 <bucket>`,
+`Dropbox <folder>`, `Feishu <folder>`, `Mallard Cloud <GitHub login>`, and a
+local folder's last path component. Until then a draft carries a placeholder,
+`<stem> draft <n>`. A typed name always wins. A committed name is unique: a
+duplicate takes the next free number, so a second `myconfstorage` becomes
+`myconfstorage 2`.
+
 For R2 the proposed name is shown in the setup lane's Bucket line before
 anything is created; the user can rename it under Cloudflare's rule (3 to 63
 lowercase letters, numbers, or hyphens, beginning and ending with a letter or
 number) or ask for another proposal. Setup passes the exact name to the CLI
 (`--bucket`). A name the account already has creates nothing and returns to
-the Bucket line as `bucket_name_taken`, with the name back in the field; the
-journal keeps that plan, so a renamed request replaces it, and the jurisdiction
-can still change until a bucket exists. Once one exists, the journal pins the
-account, jurisdiction, and name for that draft. Permission errors and unknown
-creation results never change the name.
+the Bucket line as `bucket_name_taken`, with the name back in the field.
+Nothing pins the account, jurisdiction, or name between attempts: a renamed
+request simply asks for that name. A creation Cloudflare did not confirm is
+reported once; the next attempt finds the bucket and reports the name taken.
+Permission errors never change the name.
 
 For Dropbox, a confirmed name conflict returns to the name field. Edit the
-name or select **Suggest another**, then approve creation again. Mallard
+name or select **Suggest**, then approve creation again. Mallard
 never adopts a conflicting folder or silently changes the approved name.
 All schemas remain at `1`. There is no migration or legacy setup path.
 
@@ -309,8 +358,9 @@ pulled onto a new machine.
    git clone https://github.com/Git4Agent/mallard_test_demo.git
    ```
 
-2. In Mallard, choose **Add project** and select the cloned
-   `mallard_test_demo` folder.
+2. In Mallard, choose **Add project**, type or paste the path of the cloned
+   `mallard_test_demo` folder (or pick it with **Browse…**), and choose
+   **Use this folder**.
 3. Select the local Codex profile and the R2 storage configured above.
 4. Under **Repository**, choose the existing remote repository marked
    **Git match** instead of creating a new repository.
@@ -337,8 +387,10 @@ This flow works with a new or existing Git project, or with a non-Git folder.
 1. Use the project from Codex so it has at least one project-scoped session.
    For the clearest Git mapping, make one or more commits after or during that
    work.
-2. In Mallard, choose **Add project**, select the folder and Codex profile,
-   choose the configured R2 storage, and select **New repository**.
+2. In Mallard, choose **Add project** and give it the folder: type its path,
+   pick it under **Where your agents have worked**, or use **Browse…**. Then
+   select the Codex profile, choose the configured R2 storage, and select
+   **New repository**.
 3. Finish setup and open **Project History**. Git projects show all project
    sessions against the selected branch's commit history; both Git and non-Git
    projects show summaries, conversation previews, and session metrics.
@@ -388,7 +440,7 @@ that branch.
   plans, receipts, backups, and local preferences stay on the machine.
 
 Settings > Sync has separate **Push Codex children** and **Push Claude children**
-switches. Both default to On and control the next Push. Each cloud task carries
+switches. Both default to Off and control the next Push. Each cloud task carries
 an On/Off child stamp: Compare uses the cloud stamp, while Push uses this
 computer's setting. Cloud Off compares only the parent. Cloud On includes
 supported owned children in Compare. A stamp difference permits reviewed Push
@@ -509,9 +561,13 @@ URL, and fails closed for a missing, malformed, symlinked, oversized, or
 over-permissive file. `.env.local` is covered by the repository's `*.local`
 ignore rule and must never be committed.
 
-The current rollout fixtures have a hard `codex-cli 0.154.x` prerequisite. The
+The current rollout fixtures have a hard `codex-cli 0.156.0` prerequisite. The
 test rejects another CLI version before making a model request; update the
 current-format fixture in place before moving the gate to another version.
+The resume checks accept Codex's unrecognized-configuration warning and the
+exact missing-metadata warning for the selected model only before the model
+turn starts. They still reject other error items and tool events. This does
+not change machine-managed configuration.
 
 Run it only when you intend to spend API tokens:
 
@@ -532,7 +588,7 @@ scenario, while the skill and pet phases use Mallard's isolated filesystem
 fixtures directly.
 
 The test runs exactly 25 Codex CLI turns with no retry path: five real,
-provider-backed `gpt-5.6-luna` conversation turns at low reasoning effort and
+provider-backed `gpt-6-luna` conversation turns at low reasoning effort and
 twenty deterministic loopback headless resumes. The count is deliberately a
 CLI-turn count; the first content tool-using turn can require more than one
 provider HTTP exchange. The scenario exercises two isolated machine homes
@@ -643,8 +699,8 @@ initialize its nested sandbox; the test still keeps Codex itself at
 detects the known nested-Seatbelt failure with a bounded, no-provider preflight
 before starting Cargo and prints a fixed ordinary-Terminal instruction.
 Implementation, protocol POCs, and the complete ignored live gate are verified.
-The current native-format gate requires Codex CLI `0.154.x`. The exact keyless
-gate passed on September 12, 2026 with `1 passed, 0 failed, 7 filtered` in 51.03
+The current native-format gate requires Codex CLI `0.156.0`. The exact keyless
+gate passed on September 22, 2026 with `1 passed, 0 failed, 10 filtered` in 51.61
 seconds. Every model-shaped response came from the one local
 aimock child; the run used no provider account, credential, remote model, GPU,
 or external model request.
@@ -688,7 +744,7 @@ The output layout, path-map, redaction, shared-index, and destination checks
 remain in place. A preparation or installation failure affects that thread.
 
 Settings > Privacy controls **Credential redaction** for this machine. It is
-On by default. On replaces detected credentials in exported sessions, child
+Off by default. On replaces detected credentials in exported sessions, child
 sessions, sidecars, provider-state content, and titles. Off preserves that
 content. Exported content can then include API keys, tokens, and passwords.
 Credential-file exclusions and diagnostic sanitization remain active.
@@ -922,8 +978,6 @@ implementation notes, and safety contract.
   fetch, integrity checks, restore planning, backups, and apply.
 - `crates/mallard-infrastructure/src/storage_core/` — the shared object-store
   transport, including the local-folder and S3/R2 stores.
-- `crates/mallard-infrastructure/src/storage_setup_journal.rs` — bounded,
-  provider-neutral recovery state for interrupted storage setup.
 - `src/components/storage-catalog/` and `src-tauri/src/storage_catalog/` — the
   independent scope-rowed Library UI, provider adapters, plans, persistence,
   per-resource remote protocol, and journaled apply behavior.

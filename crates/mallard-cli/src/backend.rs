@@ -4,9 +4,7 @@ use mallard_application::storage_setup::{
 };
 use mallard_domain::{BoundedConfigObject, SecretMap, StorageId, StorageSetupDraftId};
 use mallard_infrastructure::persistence::LocalStateRepository;
-use mallard_infrastructure::r2_setup::{
-    prepare_bucket, propose_bucket_name, R2SetupClient, R2SetupJournal,
-};
+use mallard_infrastructure::r2_setup::{prepare_bucket, propose_bucket_name, R2SetupClient};
 use mallard_infrastructure::storage_providers::r2::{
     parse_r2_api_url, provider_key as r2_provider_key, secret_access_key, R2Jurisdiction,
     R2SettingsV1,
@@ -204,14 +202,6 @@ impl StorageBackend for ProductionBackend {
             R2Target::Existing(bucket) => Some(bucket),
             R2Target::New { .. } => None,
         };
-        let mut journal = if selected.is_none() {
-            Some(
-                R2SetupJournal::open(&self.repository, &draft_id, &account_id, jurisdiction)
-                    .map_err(r2_setup_error)?,
-            )
-        } else {
-            None
-        };
         let selected_client = if selected.is_some() {
             Some(R2SetupClient::new(wrangler.oauth_token()?).map_err(r2_setup_error)?)
         } else {
@@ -273,7 +263,8 @@ impl StorageBackend for ProductionBackend {
                 .runtime
                 .block_on(prepare_bucket(
                     &client,
-                    journal.as_mut().unwrap(),
+                    &account_id,
+                    jurisdiction,
                     &requested,
                 ))
                 .map_err(r2_setup_error)?;
@@ -316,9 +307,6 @@ impl StorageBackend for ProductionBackend {
             PreparedProviderConfig { settings, secrets },
         )
         .map_err(CliError::from_setup)?;
-        if let Some(journal) = journal {
-            journal.finish().map_err(r2_setup_error)?;
-        }
         Ok(SetupOutcome { reconnected })
     }
 

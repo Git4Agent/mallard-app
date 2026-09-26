@@ -40,3 +40,5 @@ dist-ssr
 
 # Claude Code worktrees
 /.claude/worktrees/
+# Mallard's Feishu app for local builds (docs/FEISHU_APP_SETUP_GUIDE.md).
+.env.feishu

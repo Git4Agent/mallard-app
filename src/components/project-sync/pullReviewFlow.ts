@@ -82,7 +82,7 @@ export function canAcceptPullMetadata(plan: PullReview): boolean {
   });
 }
 
-/** Link and Pull accept matching data without changing files or publishing a version. */
+/** Pull accepts matching data without changing files or publishing a version. */
 export async function acceptPullMetadata(api: PullReviewApplyApi, plan: PullReview): Promise<void> {
   if (!canAcceptPullMetadata(plan)) {
     throw new Error("Review the changes before accepting this storage version.");

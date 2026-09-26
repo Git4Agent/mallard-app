@@ -6,12 +6,12 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
-import Notice from "../notice/Notice";
+import Notice, { NoticeChip } from "../notice/Notice";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { formatBytes } from "../../format";
 import { formatDateTime } from "../../clock";
 import { errorMessage } from "../../storageError";
-import { PROJECT_FILE_CARD_RENDER_LIMIT, fileKindLabel } from "./model";
+import { PROJECT_FILE_CARD_RENDER_LIMIT, fileKindLabel, projectFileWarningLabel } from "./model";
 import { projectSyncApi } from "./api";
 import { ProjectFilesLockedNotice } from "./ProjectFilesReviewPage";
 import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
@@ -77,11 +77,6 @@ function filePresentation(
       return { icon: "unknown", tone: "unknown", sentence: "State unknown. Rescan to compare." };
   }
 }
-
-const WARNING_LABELS: Record<string, string> = {
-  possible_secret: "Possible secret",
-  executable: "Executable",
-};
 
 function parentPath(path: string): string {
   const separator = path.lastIndexOf("/");
@@ -162,9 +157,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
   withPathPrefix?: boolean;
 }) {
   const presentation = filePresentation(entry, storageName);
-  const warningLabel = entry.warning_code
-    ? WARNING_LABELS[entry.warning_code] ?? entry.warning_code.replace(/_/g, " ")
-    : null;
+  const warningLabel = entry.warning_code ? projectFileWarningLabel(entry.warning_code) : null;
   const directory = parentPath(entry.relative_path);
   return (
     <article className="sync-history-thread-card catalog-card">
@@ -198,7 +191,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
             <span className="sync-history-branch-state history-only" title={entry.blocked_reason}>Blocked</span>
           )}
           {warningLabel && (
-            <span className="sync-project-file-warning"><Icon name="alert-triangle" size={13} /> {warningLabel}</span>
+            <NoticeChip severity="warning">{warningLabel}</NoticeChip>
           )}
         </div>
         <div className="sync-history-thread-actions">

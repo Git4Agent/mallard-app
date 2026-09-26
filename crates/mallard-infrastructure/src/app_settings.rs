@@ -49,11 +49,11 @@ fn default_cloud_transfer_concurrency() -> u32 {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppSettings {
-    #[serde(default = "default_enabled")]
+    #[serde(default)]
     pub push_codex_children: bool,
-    #[serde(default = "default_enabled")]
+    #[serde(default)]
     pub push_claude_children: bool,
-    #[serde(default = "default_enabled")]
+    #[serde(default)]
     pub credential_redaction_enabled: bool,
     /// Whether the desktop app asks GitHub for the latest published release
     /// on its own schedule. A manual check ignores this. Not a tuning value:
@@ -76,9 +76,9 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema: APP_SETTINGS_SCHEMA,
-            push_codex_children: true,
-            push_claude_children: true,
-            credential_redaction_enabled: true,
+            push_codex_children: false,
+            push_claude_children: false,
+            credential_redaction_enabled: false,
             update_check_enabled: true,
             conversation_file_limit_bytes: default_conversation_file_limit_bytes(),
             timeline_preview_limit_bytes: DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES,
@@ -245,6 +245,9 @@ mod tests {
     fn defaults_equal_the_constants_the_knobs_replaced() {
         let settings = AppSettings::default();
         assert_eq!(settings.schema, 1);
+        assert!(!settings.push_codex_children);
+        assert!(!settings.push_claude_children);
+        assert!(!settings.credential_redaction_enabled);
         assert_eq!(
             settings.conversation_file_limit_bytes,
             mallard_domain::MAX_CONVERSATION_FILE_BYTES
@@ -352,6 +355,9 @@ mod tests {
     fn save_then_load_round_trips_and_rejects_invalid() {
         let (_temp, repository) = repository();
         let settings = AppSettings {
+            push_codex_children: true,
+            push_claude_children: true,
+            credential_redaction_enabled: true,
             conversation_file_limit_bytes: 200 * 1024 * 1024,
             timeline_preview_limit_bytes: 512 * 1024,
             comparison_workers: 8,
@@ -390,11 +396,13 @@ mod tests {
     }
 
     #[test]
-    fn child_switches_default_on_and_round_trip_independently() {
+    fn child_switches_default_off_and_round_trip_independently() {
         let (_temp, repo) = repository();
         let defaults: AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(defaults.push_codex_children && defaults.push_claude_children);
-        for (codex, claude) in [(false, true), (true, false), (false, false)] {
+        assert!(!defaults.push_codex_children);
+        assert!(!defaults.push_claude_children);
+        assert!(!defaults.credential_redaction_enabled);
+        for (codex, claude) in [(false, true), (true, false), (false, false), (true, true)] {
             let settings = AppSettings {
                 push_codex_children: codex,
                 push_claude_children: claude,

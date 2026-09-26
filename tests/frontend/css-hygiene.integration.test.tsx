@@ -341,20 +341,58 @@ test("every graphic ink reads on the ground it is drawn on", () => {
   }
 });
 
+/** The colour a rule with exactly this selector gives the property, resolved
+ *  through the theme's tokens — the rule is read, so a rule that drifts to
+ *  another token is measured as it drifted. */
+function ruleColour(selector: string, property: string, tokens: Map<string, string>): string {
+  for (const block of stripComments(appCss).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (block[1].trim() !== selector) continue;
+    const decl = block[2].match(new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`));
+    if (!decl) continue;
+    const ref = decl[1].match(/var\(\s*(--[a-z0-9-]+)\s*\)/);
+    return ref ? resolve(ref[1], tokens) : decl[1].trim();
+  }
+  assert.fail(`no rule "${selector}" declares ${property}`);
+}
+
 test("the switch shows which way it is set", () => {
-  // Thumb position is the whole of the off/on state, so the thumb has to read
-  // against the track it sits on — 1.4.11 again, and the one place in the app
-  // where a state is carried by a shape rather than a word. The track's own
-  // edge is --control-border and already clears the floor; this is the layer
-  // inside it. Light --switch-off held the thumb at 2.50:1 before #8d7c70.
+  // Fill means On. Off is hollow, the card showing through an ink edge, and
+  // On is filled, so a lone switch reads without a neighbour to compare with.
+  // The old Off was a filled mid-brown bar 3.6:1 off the card: both states
+  // read as set and only the thumb's end told them apart. Every layer is
+  // measured against the one it sits on (1.4.11), and the word beside the
+  // switch is text (1.4.3). The Theme picker's chosen segment is the same
+  // question, and was 1.19:1 as honey paper on cream.
   for (const theme of ["light", "dark"] as const) {
     const tokens = tokensFor(theme);
-    const [track, thumb] = [resolve("--switch-off", tokens), resolve("--switch-thumb", tokens)];
-    const measured = contrast(thumb, track);
-    assert.ok(
-      measured >= 3,
-      `--switch-thumb ${thumb} on --switch-off ${track} is ${measured.toFixed(2)}:1 on ${theme} — needs 3`,
-    );
+    const card = resolve("--surface-card", tokens);
+    const offTrack = ruleColour(".sync-settings-switch", "background", tokens);
+    const edge = ruleColour(".sync-settings-switch", "border", tokens);
+    const offThumb = ruleColour(".sync-settings-switch::before", "background", tokens);
+    const onTrack = ruleColour(".sync-settings-switch:checked", "background", tokens);
+    const onThumb = ruleColour(".sync-settings-switch:checked::before", "background", tokens);
+    const offWord = ruleColour(".sync-settings-state", "color", tokens);
+    const onWord = ruleColour(".sync-settings-toggle:has(:checked) .sync-settings-state", "color", tokens);
+    const segment = ruleColour(".sync-settings-segment", "background", tokens);
+    const chosen = ruleColour(".sync-settings-segment > button.active", "background", tokens);
+    const chosenInk = ruleColour(".sync-settings-segment > button.active", "color", tokens);
+
+    const hollow = contrast(offTrack, card);
+    assert.ok(hollow < 1.5, `Off track ${offTrack} is ${hollow.toFixed(2)}:1 on the card on ${theme} — must read hollow (<1.5)`);
+    const floors: [string, string, string, number][] = [
+      ["the switch edge", edge, card, 3],
+      ["the Off thumb", offThumb, offTrack, 3],
+      ["the On fill", onTrack, card, 3],
+      ["the On thumb", onThumb, onTrack, 3],
+      ["the Off word", offWord, card, 4.5],
+      ["the On word", onWord, card, 4.5],
+      ["the chosen segment", chosen, segment, 3],
+      ["the chosen segment's word", chosenInk, chosen, 4.5],
+    ];
+    for (const [what, ink, ground, floor] of floors) {
+      const measured = contrast(ink, ground);
+      assert.ok(measured >= floor, `${what} ${ink} on ${ground} is ${measured.toFixed(2)}:1 on ${theme} — needs ${floor}`);
+    }
   }
 });
 

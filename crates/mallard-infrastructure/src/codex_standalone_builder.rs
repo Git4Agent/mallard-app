@@ -1439,6 +1439,123 @@ mod tests {
     }
 
     #[test]
+    fn unfamiliar_records_round_trip_with_paths_redaction_and_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let details = json!({
+            "nested": [null, true, 42, {"path": "/tmp/project/result.txt"}],
+            "text": "DB_PASSWORD=hunter2",
+            "literal": "/__mallard_root__/example"
+        });
+        let leaf = write(
+            &directory,
+            &mut files,
+            "source",
+            &[
+                meta_line("source", None),
+                message_line("m1", "hello"),
+                event_line(
+                    "2026-09-22T10:00:00Z",
+                    json!({"type": "task_started", "turn_id": "turn-1"}),
+                ),
+                event_line(
+                    "2026-09-22T10:00:01Z",
+                    json!({
+                        "type": "item_completed", "thread_id": "source", "turn_id": "turn-1",
+                        "item": {"type": "FunctionCallOutput", "id": "output-1",
+                            "name": "request_user_input", "output": "answer", "extra": details}
+                    }),
+                ),
+                event_line(
+                    "2026-09-22T10:00:02Z",
+                    json!({"type": "future_event", "extra": details}),
+                ),
+                event_line(
+                    "2026-09-22T10:00:03Z",
+                    json!({
+                        "type": "item_completed", "thread_id": "source", "turn_id": "turn-1",
+                        "extra_envelope": {"enabled": true},
+                        "item": {"type": "FunctionCallInput", "id": "input-1", "extra": details}
+                    }),
+                ),
+                event_line(
+                    "2026-09-22T10:00:04Z",
+                    json!({"type": "task_complete", "turn_id": "turn-1"}),
+                ),
+            ],
+        );
+        let source_bytes = std::fs::read(&leaf).unwrap();
+        let resolved = resolve_codex_root(&leaf, &|_| Ok(None)).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &PathOrigins::default(),
+        )
+        .unwrap();
+        let wire_text = std::str::from_utf8(&wire.root_bytes).unwrap();
+        assert!(!wire_text.contains(SOURCE_ROOT));
+        assert!(!wire_text.contains("hunter2"));
+        credential_redaction::shared()
+            .certify_wire_document(wire.root_bytes.clone().into_bytes())
+            .unwrap();
+
+        // Compare every retained record, including opaque nested fields and order.
+        let mut expected_wire = output_records(&source_bytes);
+        expected_wire[0] = output_records(&wire.root_bytes)[0].clone();
+        let mut wire_details = details.clone();
+        wire_details["nested"][3]["path"] = json!(format!("{ROOT_TOKEN}/result.txt"));
+        wire_details["text"] = json!("DB_PASSWORD=<password>");
+        wire_details["literal"] = json!("/__mallard_escape__/r/example");
+        for index in [3, 5] {
+            expected_wire[index]["payload"]["item"]["extra"] = wire_details.clone();
+        }
+        expected_wire[4]["payload"]["extra"] = wire_details;
+        assert_eq!(output_records(&wire.root_bytes), expected_wire);
+
+        let staged = directory.path().join("wire.jsonl");
+        std::fs::write(&staged, &wire.root_bytes).unwrap();
+        let restaged = resolve_codex_root(&staged, &|_| Ok(None)).unwrap();
+        let destination = "/fixture/destination";
+        let local =
+            decode_standalone_codex_root(&restaged, "restored", destination, None, None).unwrap();
+        assert_standalone_record_layout(&local.root_bytes);
+        let mut expected_local = output_records(&source_bytes);
+        expected_local[0] = output_records(&local.root_bytes)[0].clone();
+        let mut local_details = details;
+        local_details["nested"][3]["path"] = json!(format!("{destination}/result.txt"));
+        local_details["text"] = json!("DB_PASSWORD=<password>");
+        for index in [3, 5] {
+            expected_local[index]["payload"]["thread_id"] = json!("restored");
+            expected_local[index]["payload"]["item"]["extra"] = local_details.clone();
+        }
+        expected_local[4]["payload"]["extra"] = local_details;
+        assert_eq!(output_records(&local.root_bytes), expected_local);
+
+        let local_path = directory.path().join("restored.jsonl");
+        std::fs::write(&local_path, &local.root_bytes).unwrap();
+        let resolved_local = resolve_codex_root(&local_path, &|_| Ok(None)).unwrap();
+        let again = encode_standalone_codex_root(
+            &resolved_local,
+            destination,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &local.path_origins,
+        )
+        .unwrap();
+        expected_wire[0]["payload"]["id"] = json!("restored");
+        for index in [3, 5] {
+            expected_wire[index]["payload"]["thread_id"] = json!("restored");
+        }
+        assert_eq!(output_records(&again.root_bytes), expected_wire);
+        assert_eq!(again.portable_tail, wire.portable_tail);
+        assert_eq!(std::fs::read(&leaf).unwrap(), source_bytes);
+    }
+
+    #[test]
     fn encode_emits_token_wire_and_decode_restores_target_paths() {
         let directory = tempfile::tempdir().unwrap();
         let mut files = BTreeMap::new();

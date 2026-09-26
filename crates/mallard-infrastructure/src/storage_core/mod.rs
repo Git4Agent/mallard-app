@@ -9,6 +9,7 @@
 
 pub mod connection;
 pub mod dropbox_store;
+pub mod feishu_store;
 pub mod local_store;
 pub mod marker;
 pub mod object_store;
@@ -25,13 +26,11 @@ pub use local_store::LocalObjectStore;
 pub use marker::{ensure_storage_marker, StorageMarker, MarkerState, classify_storage_marker};
 pub(crate) use object_store::sha256_reader;
 pub use object_store::{
-    ClaimOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ObjectStore, StageOutcome,
-    StoreKeyPage, StoreListEntry, StoreListPage, StoredMetadata, VerifiedBody, VerifiedBodyReader,
+    ClaimOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ListedObject, ObjectQuery,
+    ObjectStore, StageOutcome, StoreKeyPage, StoreListEntry, StoreListPage, StoredMetadata,
+    VerifiedBody, VerifiedBodyReader,
 };
-pub use s3_store::{
-    R2CapabilityProbeError, R2CapabilityProbeErrorKind, R2CapabilityProbeReceipt,
-    R2CapabilityProbeStage, S3Connection, S3ObjectStore,
-};
+pub use s3_store::{R2CapabilityProbeError, R2CapabilityProbeStage, S3Connection, S3ObjectStore};
 
 use crate::storage_providers::StorageProviderRegistry;
 use mallard_domain::{BundleId, StorageConfig, StorageId};
@@ -464,12 +463,39 @@ impl ConfiguredObjectStore {
 }
 
 impl ObjectStore for ConfiguredObjectStore {
+    fn list_objects_batch(
+        &self,
+        queries: &[ObjectQuery],
+        max_objects: usize,
+    ) -> Vec<Result<Vec<ListedObject>, String>> {
+        match self.guarded(|store| Ok(store.list_objects_batch(queries, max_objects))) {
+            Ok(results) => results,
+            Err(error) => vec![Err(error); queries.len()],
+        }
+    }
+
     fn get_metadata(
         &self,
         key: &ObjectKey,
         max_bytes: u64,
     ) -> Result<Option<StoredMetadata>, String> {
         self.guarded(|store| store.get_metadata(key, max_bytes))
+    }
+
+    fn list_objects(
+        &self,
+        prefix: &ObjectPrefix,
+        max_objects: usize,
+    ) -> Result<Vec<ListedObject>, String> {
+        self.guarded(|store| store.list_objects(prefix, max_objects))
+    }
+
+    fn get_listed_metadata_many(
+        &self,
+        objects: &[ListedObject],
+        max_bytes: u64,
+    ) -> Result<Vec<Option<StoredMetadata>>, String> {
+        self.guarded(|store| store.get_listed_metadata_many(objects, max_bytes))
     }
 
     fn get_metadata_many(
@@ -495,6 +521,14 @@ impl ObjectStore for ConfiguredObjectStore {
         self.guarded(|store| store.stage_many_verified(requests))
     }
 
+    fn stage_many_with_progress(
+        &self,
+        requests: &[(ObjectKey, ExpectedObject)],
+        on_staged: &mut dyn FnMut(u64),
+    ) -> Result<Vec<StageOutcome>, String> {
+        self.guarded(|store| store.stage_many_with_progress(requests, on_staged))
+    }
+
     fn put_immutable(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {
         self.guarded(|store| store.put_immutable(key, bytes))
     }
@@ -504,6 +538,14 @@ impl ObjectStore for ConfiguredObjectStore {
         objects: Vec<(ObjectKey, bytes::Bytes)>,
     ) -> Result<Vec<ImmutablePutOutcome>, String> {
         self.guarded(|store| store.put_many(objects))
+    }
+
+    fn put_many_with_progress(
+        &self,
+        objects: Vec<(ObjectKey, bytes::Bytes)>,
+        on_stored: &mut dyn FnMut(u64),
+    ) -> Result<Vec<ImmutablePutOutcome>, String> {
+        self.guarded(|store| store.put_many_with_progress(objects, on_stored))
     }
 
     fn put_record(&self, key: &ObjectKey, bytes: &[u8]) -> Result<ImmutablePutOutcome, String> {

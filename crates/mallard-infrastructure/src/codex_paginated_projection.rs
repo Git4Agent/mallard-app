@@ -5,11 +5,13 @@
 //! `event_msg`/`item_completed` record. Legacy display events and ordinary
 //! `response_item` records are context, not display state. This module owns
 //! the frozen 0.147 adapter that makes a flattened standalone rollout
-//! displayable: it classifies every `event_msg` payload, converts recognized
+//! displayable: it converts recognized
 //! legacy display completions into current `TurnItem` projections, attaches
 //! out-of-turn completions to synthesized implicit `rollout-N` turns exactly
 //! as Codex's own canonicalizer does, and stays a fixpoint on its
 //! own output so rebuilds are byte-identical.
+//! Unfamiliar events and completed item kinds remain opaque JSON records.
+//! Transport does not require session-detail rendering support for them.
 //!
 //! Original non-metadata records always pass through unchanged, in order.
 //! The only inserted records are `item_completed` projections and implicit
@@ -25,45 +27,6 @@ use serde_json::{Map, Value};
 
 /// Upper bound for provider turn and item identifier strings.
 const MAX_IDENTIFIER_BYTES: usize = 256;
-
-/// The complete Codex 0.147 `TurnItem` kind set. A preserved current
-/// `item_completed` record must carry one of these; Mallard does not
-/// deep-validate payload fields it merely round-trips.
-const ITEM_KINDS: [&str; 18] = [
-    "AgentMessage",
-    "CollabAgentToolCall",
-    "CommandExecution",
-    "ContextCompaction",
-    "DynamicToolCall",
-    "EnteredReviewMode",
-    "ExitedReviewMode",
-    "Extension",
-    "FileChange",
-    "HookPrompt",
-    "ImageGeneration",
-    "ImageView",
-    "McpToolCall",
-    "Plan",
-    "Reasoning",
-    "SubAgentActivity",
-    "UserMessage",
-    "WebSearch",
-];
-
-/// `event_msg` payload types that are context, never display completions.
-/// Frozen to the 0.147 persistence surface plus every type observed in real
-/// rollouts. `view_image_tool_call` is deliberately context-only: the 0.147
-/// canonical mapping produces no item for it.
-const CONTEXT_ONLY_EVENTS: [&str; 8] = [
-    "error",
-    "item_started",
-    "thread_goal_updated",
-    "thread_name_updated",
-    "thread_rolled_back",
-    "thread_settings_applied",
-    "token_count",
-    "view_image_tool_call",
-];
 
 /// Complete a flattened standalone record sequence with the current-format
 /// projection records paginated Codex history requires. `records` holds the
@@ -295,6 +258,7 @@ impl<'a, 'r> Projector<'a, 'r> {
         let event_type = payload
             .get("type")
             .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
             .ok_or_else(|| "Codex event payload has no type".to_string())?
             .to_string();
         match event_type.as_str() {
@@ -548,14 +512,10 @@ impl<'a, 'r> Projector<'a, 'r> {
                     records, index, record, &timestamp, None, item_body, false,
                 )?;
             }
-            other if CONTEXT_ONLY_EVENTS.contains(&other) => {
+            _ => {
+                // Preserve context and unfamiliar events without inventing
+                // a display item or changing the known turn lifecycle.
                 self.push_source(Cow::Borrowed(record));
-            }
-            other => {
-                return Err(format!(
-                    "Codex adapter does not recognize event '{other}'; update the frozen 0.147 \
-                     projection mapping before publishing this conversation"
-                ));
             }
         }
         Ok(())
@@ -752,7 +712,7 @@ impl<'a, 'r> Projector<'a, 'r> {
 
     /// Envelope validation and identity normalization for a preserved
     /// current `item_completed` record. Payload fields Mallard round-trips
-    /// are not deep-validated; an unknown item kind fails closed.
+    /// are not deep-validated. Any nonempty item kind travels with its fields.
     fn normalize_current_item_record(&mut self, record: &Value) -> Result<Value, String> {
         let mut normalized = record.clone();
         let payload = normalized
@@ -770,16 +730,10 @@ impl<'a, 'r> Projector<'a, 'r> {
             .get("item")
             .and_then(Value::as_object)
             .ok_or_else(|| "Codex item_completed record has no item".to_string())?;
-        let kind = item
-            .get("type")
+        item.get("type")
             .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
             .ok_or_else(|| "Codex item_completed item has no type".to_string())?;
-        if !ITEM_KINDS.contains(&kind) {
-            return Err(format!(
-                "Codex adapter does not recognize item kind '{kind}'; update the frozen 0.147 \
-                 projection mapping before publishing this conversation"
-            ));
-        }
         let id = item
             .get("id")
             .and_then(Value::as_str)
@@ -2371,21 +2325,95 @@ mod tests {
     }
 
     #[test]
-    fn unknown_event_and_item_kinds_and_bad_timestamps_fail_closed() {
-        assert!(project_err(vec![event(
-            "2026-08-12T10:00:00Z",
-            json!({"type": "mystery_event"}),
-        )])
-        .contains("mystery_event"));
-        assert!(project_err(vec![
+    fn function_call_output_items_preserve_payload_and_normalize_thread_identity() {
+        for output_body in [
+            json!("answer"),
+            json!([{"type": "input_text", "text": "answer"}]),
+        ] {
+            let source = vec![
+                start("turn-1"),
+                event(
+                    "2026-08-12T10:01:00Z",
+                    json!({"type": "item_completed", "thread_id": "source", "turn_id": "turn-1",
+                        "item": {"type": "FunctionCallOutput", "id": "output-1",
+                            "name": "request_user_input", "namespace": "functions",
+                            "output": output_body, "extra": {"values": [null, true, 42]}}}),
+                ),
+                complete("turn-1"),
+            ];
+            let mut expected = source.clone();
+            expected[1]["payload"]["thread_id"] = json!(OUT);
+            let output = project(source);
+            assert_eq!(output, expected);
+            verify_projection_fixpoint(&output, OUT).unwrap();
+        }
+    }
+
+    #[test]
+    fn unfamiliar_records_preserve_fields_and_known_turn_state() {
+        let source = vec![
             start("turn-1"),
             event(
                 "2026-08-12T10:01:00Z",
-                json!({"type": "item_completed", "thread_id": OUT, "turn_id": "turn-1",
-                       "item": {"type": "FutureKind", "id": "x"}}),
+                json!({"type": "future_event", "turn_id": "unrelated-turn",
+                    "details": {"values": [null, true, 42], "text": "retained"}}),
             ),
-        ])
-        .contains("FutureKind"));
+            event(
+                "2026-08-12T10:01:01Z",
+                json!({"type": "item_completed", "thread_id": "source", "turn_id": "turn-1",
+                    "extra_envelope": ["retained"],
+                    "item": {"type": "FutureKind", "id": "item-1",
+                        "extra": {"values": [null, true, 42]}}}),
+            ),
+            user("hello"),
+            complete("turn-1"),
+        ];
+        let output = project(source.clone());
+        assert_eq!(output.len(), source.len() + 1);
+        assert_eq!(output[0], source[0]);
+        assert_eq!(output[1], source[1]);
+        let mut expected_item = source[2].clone();
+        expected_item["payload"]["thread_id"] = json!(OUT);
+        assert_eq!(output[2], expected_item);
+        assert_eq!(output[3], source[3]);
+        assert_eq!(output[4]["payload"]["turn_id"], "turn-1");
+        assert_eq!(output[4]["payload"]["item"]["id"], "item-2");
+        assert_eq!(output[5], source[4]);
+        verify_projection_fixpoint(&output, OUT).unwrap();
+    }
+
+    #[test]
+    fn malformed_envelopes_and_bad_timestamps_fail_closed() {
+        let valid = json!({"type": "item_completed", "thread_id": OUT, "turn_id": "turn-1",
+            "item": {"type": "FutureKind", "id": "item-1"}});
+        for pointer in ["/type", "/item/type", "/item/id", "/turn_id"] {
+            for invalid in [Value::Null, json!(""), json!(42)] {
+                let mut payload = valid.clone();
+                *payload.pointer_mut(pointer).unwrap() = invalid;
+                assert!(!project_err(vec![event("2026-08-12T10:01:00Z", payload)]).is_empty());
+            }
+            let mut payload = valid.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            payload
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(!project_err(vec![event("2026-08-12T10:01:00Z", payload)]).is_empty());
+        }
+        for pointer in ["/item/id", "/turn_id"] {
+            let mut payload = valid.clone();
+            *payload.pointer_mut(pointer).unwrap() = json!("x".repeat(MAX_IDENTIFIER_BYTES + 1));
+            assert!(!project_err(vec![event("2026-08-12T10:01:00Z", payload)]).is_empty());
+        }
+        for payload in [
+            Value::Null,
+            json!([]),
+            json!({"type": "item_completed", "turn_id": "turn-1", "item": []}),
+        ] {
+            assert!(!project_err(vec![event("2026-08-12T10:01:00Z", payload)]).is_empty());
+        }
         assert!(project_err(vec![
             start("turn-1"),
             json!({"type": "event_msg",

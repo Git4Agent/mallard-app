@@ -59,6 +59,52 @@ fn push_child_settings(
 }
 
 #[test]
+fn fresh_settings_push_without_redaction_or_subagents() {
+    for provider in ["codex", "claude"] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = LocalStateRepository::from_home_dir(temp.path()).unwrap();
+        let storage = StorageId::parse("default-settings").unwrap();
+        add_local_storage(&repo, &storage, &temp.path().join("store"));
+        let source = register(&repo);
+        let root = temp.path().join("source");
+        let home = temp.path().join("provider");
+        if provider == "codex" {
+            bind_and_link_test_replica(&repo, &source, &storage, &root, &home);
+        } else {
+            bind_and_link_claude_replica(&repo, &source, &storage, &root, &home);
+        }
+        child_settings_fixture(
+            &home,
+            &root,
+            provider,
+            "019fb002-0000-7000-8000-00000000aa01",
+            1,
+        );
+        let service = ProjectSyncService::new(&repo);
+        let review = service
+            .prepare_push_review(&source.local_project_id, &storage)
+            .unwrap();
+        assert!(!review.credential_redaction_enabled);
+        push_child_settings(&service, &source, &storage);
+        let snapshot = storage_engine(&repo, &storage)
+            .unwrap()
+            .1
+            .inspect(&source.bundle_id)
+            .unwrap();
+        let thread = snapshot.manifest.all_conversations().next().unwrap().2;
+        assert_eq!(thread.wire_children, ConversationWireChildren::Off);
+        assert_eq!(
+            thread.wire_redaction.as_ref().unwrap().codec,
+            mallard_infrastructure::credential_redaction::REDACTION_OFF_CODEC_V1
+        );
+        assert!(!thread.files.iter().any(|file| matches!(
+            file.role,
+            ConversationFileRole::SubagentTranscript { .. }
+        )));
+    }
+}
+
+#[test]
 fn pulled_children_excluded_hides_agent_cards_until_children_are_pulled() {
     for provider in ["codex", "claude"] {
         let temp = tempfile::tempdir().unwrap();

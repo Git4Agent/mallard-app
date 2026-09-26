@@ -1,0 +1,28 @@
+{
+  "local": {
+    "source": "https://raw.githubusercontent.com/ant-design/ant-design-icons/7f2516ac91226d2b41f93b35cb5197c8d94f7189/packages/icons-svg/svg/twotone/folder.svg",
+    "changes": "Recolored existing paths.",
+    "sha256": "4dacd14ab3fd51bdd045b52ae4a413fecbebe9133a0d16435621d14b1f1bdbae"
+  },
+  "feishu": {
+    "source": "https://raw.githubusercontent.com/DouyinFE/semi-design/82c5389c19730df4b6097842a61927596922f529/packages/semi-icons/src/svgs/feishu_logo.svg",
+    "changes": "Recolored existing paths.",
+    "sha256": "72a707e7834d173d132c6508fdbfdc08985076c9290ab4ca24ced6ca6f2f6e07"
+  },
+  "r2": {
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/329f378cbd1a88f45b60cd096b9111ce16f3ea39/packages/static-svg/icons/cloudflare-color.svg",
+    "changes": "None.",
+    "sha256": "cee35d3f0ecb7925ce0a89aeaff8b907cadae7c3fe44a23e4001cc8d5ee57502"
+  },
+  "dropbox": {
+    "source": "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/dropbox.svg",
+    "changes": "Reused repository source; applied Dropbox blue.",
+    "source_sha256": "1c9ea4ac8e318f3f6a598568df1a38ece03b7bc52a3a72d48c9e760340d7aeec",
+    "sha256": "c5185d1b95f8b646358e91a03135cf7ec81589be67b482641445921070385e0d"
+  },
+  "mallard-cloud": {
+    "source": "Generated with built-in ImageGen from the selected Color tiles mockup.",
+    "prompt": "Flat teal duck facing right with a small white cloud at lower right, transparent background, no tile, frame, text or shadow.",
+    "sha256": "b45ac69d315de1992bb21ebcfb70a1836f2c2f02ea0cb7291cadaaf5602e705a"
+  }
+}

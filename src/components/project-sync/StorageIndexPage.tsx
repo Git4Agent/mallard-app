@@ -1,4 +1,5 @@
-import Icon, { iconNameFromHint } from "../Icons";
+import { storageIconName } from "../Icons";
+import { NoticeChip } from "../notice/Notice";
 import type {
   ProjectStorageLink,
   StorageProviderDescriptor,
@@ -69,7 +70,7 @@ export default function StorageIndexPage({
       const linked = links.filter((link) => link.storage_id === storage.storage_id).length;
       return {
         key: storage.storage_id,
-        icon: iconNameFromHint(storage.icon, "drive"),
+        icon: storageIconName(storage.provider, storage.icon),
         title: name,
         ariaLabel: [
           `Open ${name}`,
@@ -87,23 +88,10 @@ export default function StorageIndexPage({
               <span>Projects</span>
               <b>{linked}</b>
             </span>
-            {!storage.available && (
-              <span className="sync-storage-index-warning">
-                <Icon name="alert-triangle" size={12} aria-hidden="true" />
-                <span>Unavailable</span>
-              </span>
-            )}
-            {reconnect ? (
-              <span className="sync-storage-index-warning">
-                <Icon name="alert-triangle" size={12} aria-hidden="true" />
-                <span>Reconnect</span>
-              </span>
-            ) : issue && (
-              <span className="sync-storage-index-warning">
-                <Icon name="alert-triangle" size={12} aria-hidden="true" />
-                <span>Issue</span>
-              </span>
-            )}
+            {!storage.available && <NoticeChip severity="warning">Unavailable</NoticeChip>}
+            {reconnect
+              ? <NoticeChip severity="warning">Reconnect</NoticeChip>
+              : issue && <NoticeChip severity="warning">Issue</NoticeChip>}
           </span>
         ),
         onOpen: () => onOpenStorage(storage.storage_id),
@@ -115,9 +103,9 @@ export default function StorageIndexPage({
       const name = draft.name || "(unnamed)";
       return {
         key: draft.draft_id,
-        icon: iconNameFromHint(
+        icon: storageIconName(
+          draft.provider,
           findStorageProvider(storageProviders, draft.provider, draft.config_version)?.icon,
-          "drive",
         ),
         title: name,
         ariaLabel: `Continue setting up ${name} — resumable storage draft`,

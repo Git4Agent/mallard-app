@@ -415,52 +415,30 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
         let total_bytes = pending
             .iter()
             .fold(0_u64, |sum, (_, entry)| sum.saturating_add(entry.size));
+        let requests = pending
+            .iter()
+            .map(|(_, entry)| {
+                Ok((
+                    repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)?,
+                    ExpectedObject {
+                        size: entry.size,
+                        sha256: entry.sha256.clone(),
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        // One operation over every pending object: the store owns its
+        // transfer windows and reports each object as it is settled.
         let mut fetched_bytes = 0_u64;
         let mut index = 0_usize;
-        // One concurrent store window per batch, with progress after each
-        // object. The batch size and the store's bulk semaphore read the same
-        // setting: effective parallelism is their minimum, so they only move
-        // together.
-        for batch in pending.chunks(crate::app_settings::cloud_transfer_concurrency()) {
-            let requests = batch
-                .iter()
-                .map(|(_, entry)| {
-                    Ok((
-                        repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)?,
-                        ExpectedObject {
-                            size: entry.size,
-                            sha256: entry.sha256.clone(),
-                        },
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let objects = self.engine.store.stage_many_verified(&requests)?;
-            for (((path, entry), (key, _)), outcome) in batch.iter().zip(&requests).zip(objects) {
-                let body = match outcome {
-                    StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
-                    StageOutcome::Mismatch => {
-                        return Err(format!(
-                            "bundle object '{}' does not match manifest size/hash",
-                            key
-                        ))
-                    }
-                    StageOutcome::Verified(body) => body,
-                };
-                if let Some(cache) = &self.cache {
-                    cache.insert(
-                        ObjectCacheKey {
-                            storage_id: self.snapshot.storage_id.clone(),
-                            bundle_id: self.snapshot.head.bundle_id.clone(),
-                            sha256: entry.sha256.clone(),
-                            size: entry.size,
-                        },
-                        body.clone(),
-                    );
-                }
-                self.loaded.insert(path.clone(), body);
+        let on_progress = &mut self.on_progress;
+        let outcomes = self
+            .engine
+            .store
+            .stage_many_with_progress(&requests, &mut |size| {
                 index += 1;
-                fetched_bytes = fetched_bytes.saturating_add(entry.size);
-                if let Some(on_progress) = self.on_progress.as_mut() {
+                fetched_bytes = fetched_bytes.saturating_add(size);
+                if let Some(on_progress) = on_progress.as_mut() {
                     on_progress(FetchProgress {
                         index,
                         total_objects,
@@ -468,7 +446,30 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
                         total_bytes,
                     });
                 }
+            })?;
+        for (((path, entry), (key, _)), outcome) in pending.iter().zip(&requests).zip(outcomes) {
+            let body = match outcome {
+                StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
+                StageOutcome::Mismatch => {
+                    return Err(format!(
+                        "bundle object '{}' does not match manifest size/hash",
+                        key
+                    ))
+                }
+                StageOutcome::Verified(body) => body,
+            };
+            if let Some(cache) = &self.cache {
+                cache.insert(
+                    ObjectCacheKey {
+                        storage_id: self.snapshot.storage_id.clone(),
+                        bundle_id: self.snapshot.head.bundle_id.clone(),
+                        sha256: entry.sha256.clone(),
+                        size: entry.size,
+                    },
+                    body.clone(),
+                );
             }
+            self.loaded.insert(path.clone(), body);
         }
         Ok(())
     }
@@ -741,10 +742,16 @@ impl<S: ObjectStore> BundleEngine<S> {
         &self,
         bundle_id: &BundleId,
     ) -> Result<Option<(BundleHead, HeadToken)>, String> {
-        list_stream(&self.store, &RecordStream::project(bundle_id)?)?
-            .into_mainline()
+        let stream = RecordStream::project(bundle_id)?;
+        let view = list_stream(&self.store, &stream)?;
+        view.mainline()
             .selected()
-            .map(|name| self.read_head_at(bundle_id, name))
+            .map(|name| {
+                let bytes = view.read_record(&self.store, &stream, name)?;
+                let head = CommitRecord::parse(bundle_id, name, &bytes)?.head()?;
+                let token = head_token(&head, name);
+                Ok((head, token))
+            })
             .transpose()
     }
 
@@ -807,11 +814,28 @@ impl<S: ObjectStore> BundleEngine<S> {
     /// chain, and later hands the observed publication to `publish` as the
     /// parent.
     pub fn observe(&self, bundle_id: &BundleId) -> Result<BundleObservation, String> {
-        let (mainline, unselected) = self.select(bundle_id)?;
-        let current = mainline
+        let stream = RecordStream::project(bundle_id)?;
+        let view = list_stream(&self.store, &stream)?;
+        let current = view
+            .mainline()
             .selected()
-            .map(|name| self.snapshot_at(bundle_id, name))
+            .map(|name| {
+                let bytes = view.read_record(&self.store, &stream, name)?;
+                let head = CommitRecord::parse(bundle_id, name, &bytes)?.head()?;
+                let token = head_token(&head, name);
+                let manifest = self.read_manifest(&head)?;
+                Ok::<_, String>((
+                    BundleSnapshot {
+                        storage_id: self.storage_id.clone(),
+                        head,
+                        manifest,
+                        fetched_at: now_secs(),
+                    },
+                    token,
+                ))
+            })
             .transpose()?;
+        let (mainline, unselected) = view.into_selection();
         Ok(BundleObservation {
             mainline,
             unselected,
@@ -1294,31 +1318,28 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .values()
                 .map(|bytes| bytes.len() as u64)
                 .sum();
-            let pending = pending_uploads.into_iter().collect::<Vec<_>>();
+            let mut pending = Vec::with_capacity(total_objects);
+            for (digest, bytes) in pending_uploads {
+                let key = repository_object_key(
+                    &request.identity.bundle_id,
+                    &format!("_objects/{}", digest),
+                )?;
+                pending.push((key, bytes));
+            }
+            // One operation over every pending object: the store owns its
+            // transfer windows and reports each object as it is settled.
             let mut uploaded_objects = 0;
             let mut uploaded_bytes = 0_u64;
-            // Same shape as the prefetch batching, with progress after each object.
-            for chunk in pending.chunks(crate::app_settings::cloud_transfer_concurrency()) {
-                let mut batch = Vec::with_capacity(chunk.len());
-                for (digest, bytes) in chunk {
-                    let key = repository_object_key(
-                        &request.identity.bundle_id,
-                        &format!("_objects/{}", digest),
-                    )?;
-                    batch.push((key, bytes.clone()));
-                }
-                self.store.put_many(batch)?;
-                for (_, bytes) in chunk {
-                    uploaded_objects += 1;
-                    uploaded_bytes = uploaded_bytes.saturating_add(bytes.len() as u64);
-                    on_progress(FetchProgress {
-                        index: uploaded_objects,
-                        total_objects,
-                        fetched_bytes: uploaded_bytes,
-                        total_bytes,
-                    });
-                }
-            }
+            self.store.put_many_with_progress(pending, &mut |size| {
+                uploaded_objects += 1;
+                uploaded_bytes = uploaded_bytes.saturating_add(size);
+                on_progress(FetchProgress {
+                    index: uploaded_objects,
+                    total_objects,
+                    fetched_bytes: uploaded_bytes,
+                    total_bytes,
+                });
+            })?;
             on_phase("publish: upload objects", phase_started.elapsed());
 
             let phase_started = Instant::now();
@@ -1421,9 +1442,11 @@ impl<S: ObjectStore> BundleEngine<S> {
     /// and no manifest is read; the rows come from each record's summary.
     pub fn list_remote_bundles(&self) -> Result<Vec<RemoteBundleSummary>, String> {
         let mut requests = Vec::new();
-        for (bundle_id, mainline) in list_project_streams(&self.store)? {
-            if let Some(name) = mainline.selected() {
-                requests.push((RecordStream::project(&bundle_id)?, name.clone(), bundle_id));
+        for (bundle_id, view) in list_project_streams(&self.store)? {
+            if let Some(name) = view.mainline().selected() {
+                let stream = RecordStream::project(&bundle_id)?;
+                let object = view.object(&stream, name)?;
+                requests.push((stream, name.clone(), object, bundle_id));
             }
             if requests.len() > MAX_LISTED_BUNDLES {
                 return Err(format!(
@@ -1436,13 +1459,13 @@ impl<S: ObjectStore> BundleEngine<S> {
             &self.store,
             &requests
                 .iter()
-                .map(|(stream, name, _)| (stream.clone(), name.clone()))
+                .map(|(stream, name, object, _)| (stream.clone(), name.clone(), object.clone()))
                 .collect::<Vec<_>>(),
         )?;
         requests
             .iter()
             .zip(records)
-            .map(|((_, name, bundle_id), bytes)| {
+            .map(|((_, name, _, bundle_id), bytes)| {
                 let record = CommitRecord::parse(bundle_id, name, &bytes)?;
                 Ok(RemoteBundleSummary {
                     bundle_id: record.bundle_id,
@@ -2061,6 +2084,100 @@ mod tests {
             fs::read(target.join("note.md")).unwrap(),
             b"shared project content"
         );
+    }
+
+    /// Two computers, two sign-ins, one Feishu folder: a Push on the mock,
+    /// a Pull of it, with the request count printed for the record.
+    #[test]
+    fn feishu_two_sign_ins_publish_review_and_restore_project_content() {
+        let server = crate::storage_core::feishu_store::mock::MockFeishuServer::new();
+        let second =
+            crate::storage_core::feishu_store::mock::ListedReadStore(server.second_store());
+        let first = BundleEngine::open(server.store.clone(), storage_id()).unwrap();
+        let second = BundleEngine::open(second, storage_id()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        write(&source.join("note.md"), b"shared project content");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(96);
+        publish_captured(
+            &first,
+            identity(id.clone(), "Feishu project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let pushed = server.requests();
+        assert_eq!(second.list_remote_bundles().unwrap().len(), 1);
+        assert!(second.read_head(&id).unwrap().is_some());
+        assert!(second.observe(&id).unwrap().current.is_some());
+        let snapshot = second.inspect(&id).unwrap();
+        let binding = active_binding(id.clone(), &target);
+        let homes = BTreeMap::new();
+        let plan = second
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &homes,
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
+        let mut bytes = second.byte_source(&snapshot, None);
+        second
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &homes,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(target.join("note.md")).unwrap(),
+            b"shared project content"
+        );
+        let pulled = server.requests() - pushed;
+        println!("feishu mock round trip: push={pushed} requests, pull={pulled} requests");
+        // Every object landed one shard folder down, and the record in its
+        // thousand's folder; no claim was written.
+        let paths = server.file_paths();
+        assert!(paths
+            .iter()
+            .any(|path| path.contains(&format!("_commits/{id}/0000000/0000000001."))));
+        assert!(paths
+            .iter()
+            .filter(|path| path.contains("/_objects/"))
+            .all(|path| path.split('/').nth_back(1).unwrap().len() == 2));
+        assert!(!paths.iter().any(|path| path.contains("_claims")));
+        // A second Push onto the same version from the other sign-in
+        // displaces nothing here: it builds on the version it read.
+        write(&source.join("note.md"), b"second version");
+        let head = second.read_head(&id).unwrap();
+        publish_captured(
+            &second,
+            identity(id.clone(), "Feishu project"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            head,
+            20,
+        )
+        .unwrap();
+        assert_eq!(first.read_head(&id).unwrap().unwrap().1.revision, 2);
     }
 
     #[test]
@@ -4660,6 +4777,82 @@ mod tests {
         }
         assert!(store.keys.lock().unwrap().is_empty());
         assert!(events.is_empty());
+    }
+
+    /// A Pull's prefetch on Feishu resolves every object of the phase
+    /// together: the folders are listed once and each object is one
+    /// download by token, whatever the transfer window is elsewhere.
+    #[test]
+    fn a_feishu_prefetch_lists_each_folder_once_and_downloads_by_token() {
+        use crate::storage_core::feishu_store::mock::MockFeishuServer;
+        let server = MockFeishuServer::new();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        let count = crate::app_settings::cloud_transfer_concurrency() + 2;
+        for index in 0..count {
+            write(
+                &source.join(format!("file-{index}.md")),
+                format!("payload {index}").as_bytes(),
+            );
+        }
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(
+            inventory
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id.clone()),
+        );
+        let engine = BundleEngine::open(server.store.clone(), storage_id()).unwrap();
+        let snapshot = publish_captured(
+            &engine,
+            identity(bundle_id(46), "Feishu prefetch"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap()
+        .into_snapshot();
+        let files = &project_scope(&snapshot.manifest).files;
+        let paths = files.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(paths.len(), count);
+        let shards = files
+            .values()
+            .map(|entry| entry.sha256[..2].to_owned())
+            .collect::<BTreeSet<_>>();
+
+        // Another computer's store over the same folder: nothing cached.
+        let other = BundleEngine::open(server.second_store(), storage_id()).unwrap();
+        let listings = server.count("files");
+        let downloads = server.count("download");
+        let mut events: Vec<FetchProgress> = Vec::new();
+        {
+            let mut on_progress = |progress| events.push(progress);
+            let mut bytes = other.byte_source(&snapshot, Some(&mut on_progress));
+            bytes.prefetch(&paths).unwrap();
+            for (path, entry) in files {
+                assert_eq!(
+                    sha256_hex(&bytes.read_bounded(path, 1024, "payload").unwrap()),
+                    entry.sha256
+                );
+            }
+        }
+        // Five ancestors and the objects folder once, then each shard folder
+        // once; a download adds no lookup.
+        assert_eq!(server.count("files") - listings, 6 + shards.len());
+        assert_eq!(server.count("download") - downloads, count);
+        assert_eq!(events.len(), count);
+        assert_eq!(events.last().unwrap().index, count);
+        assert_eq!(events.last().unwrap().total_objects, count);
+
+        // The tokens are remembered: a later phase downloads without listing.
+        let listings = server.count("files");
+        let mut bytes = other.byte_source(&snapshot, None);
+        bytes.prefetch(&paths).unwrap();
+        assert_eq!(server.count("files"), listings);
+        assert_eq!(server.count("download") - downloads, count * 2);
     }
 
     #[test]

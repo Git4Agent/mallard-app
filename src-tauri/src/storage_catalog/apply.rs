@@ -1078,8 +1078,9 @@ fn execute_native_action(
     }
 }
 
-/// Fetch one verified payload object by digest and exact size.
-pub type PayloadFetcher<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + 'a;
+/// Fetch the verified payload objects of one resource together, each by
+/// digest and exact size, in request order.
+pub type PayloadFetcher<'a> = dyn Fn(&[(&str, u64)]) -> Result<Vec<Vec<u8>>, String> + 'a;
 
 pub struct PullApplyEnvironment<'a> {
     pub repository: &'a CatalogStateRepository,
@@ -1097,12 +1098,22 @@ fn incoming_payload_for(
     fetch: &PayloadFetcher<'_>,
 ) -> Result<IncomingDirectoryPayload, String> {
     capability.codec.validate(resource)?;
+    // Every file of this resource in one fetch, before any local mutation.
+    let requests = resource
+        .files
+        .iter()
+        .map(|file| (file.sha256.as_str(), file.size))
+        .collect::<Vec<_>>();
+    let payloads = fetch(&requests)?;
+    if payloads.len() != resource.files.len() {
+        return Err("the fetched payload does not match the stored resource".to_string());
+    }
     let mut files = BTreeMap::new();
-    for file in &resource.files {
+    for (file, bytes) in resource.files.iter().zip(payloads) {
         files.insert(
             file.path.clone(),
             CapturedFile {
-                bytes: fetch(&file.sha256, file.size)?,
+                bytes,
                 mode: file.mode,
             },
         );

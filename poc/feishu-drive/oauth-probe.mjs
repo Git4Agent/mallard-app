@@ -12,7 +12,7 @@ export const USER_SCOPES = Object.freeze([
   "space:document:retrieve", "space:folder:create", "drive:file:upload",
   "drive:file:download", "auth:user.id:read",
 ]);
-const AUTHORIZE_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize";
+const AUTHORIZE_URL = "https://accounts.feishu.cn/oauth/v3/authorize";
 const TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token";
 const escapeHtml = (value) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
   .replaceAll(">", "&gt;").replaceAll('"', "&quot;");

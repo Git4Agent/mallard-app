@@ -48,12 +48,37 @@ pub struct StorageFieldDescriptor {
 }
 
 /// A suggested storage name: capture group `group` of `pattern` matched
-/// against the `source` field.
+/// against the `source` setting, placed into `template` where it says
+/// `{1}`. The form applies it while the name is still Mallard's own, so a
+/// typed name always wins; the commit makes the result unique.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StorageNameSuggestion {
     pub source: FieldKey,
     pub pattern: String,
     pub group: u32,
+    pub template: String,
+}
+
+impl StorageNameSuggestion {
+    /// The whole trimmed value of the `source` setting, in `template`.
+    pub fn whole_setting(source: &str, template: &str) -> Self {
+        Self {
+            source: FieldKey::parse(source).expect("static field key"),
+            pattern: r"^\s*(\S.*?)\s*$".to_string(),
+            group: 1,
+            template: template.to_string(),
+        }
+    }
+
+    /// The last component of the path in the `source` setting, alone.
+    pub fn last_path_component(source: &str) -> Self {
+        Self {
+            source: FieldKey::parse(source).expect("static field key"),
+            pattern: r"([^/\\]+)[/\\]*$".to_string(),
+            group: 1,
+            template: "{1}".to_string(),
+        }
+    }
 }
 
 /// One declarative extraction: when `source` matches `pattern` (a regular
@@ -85,18 +110,34 @@ pub struct StorageSecretDescriptor {
 pub enum StorageLocalSetup {
     Wrangler,
     Dropbox,
+    Feishu,
     ManagedCloud,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StorageDiscoveryHelp {
+pub struct StorageSetupHelp {
     pub label: String,
     pub url: String,
 }
 
+/// The New-storage question, Create new or Use existing, for a provider
+/// whose setup lane can reach a destination Mallard already uses — by
+/// looking in the account or by a pasted link. The page prints these
+/// sentences, so it never names a provider.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StorageSetupDoors {
+    /// The Create-new door's sentence.
+    pub create_hint: String,
+    /// The Use-existing door's sentence.
+    pub existing_hint: String,
+    /// Optional access guide beside the Use-existing choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_help: Option<StorageSetupHelp>,
+}
+
 /// A provider that can look in the signed-in account for destinations
-/// Mallard already uses. Every sentence the New-storage card's Use-existing
-/// door and lane print comes from here, so the page never names a provider.
+/// Mallard already uses. Every sentence the look prints comes from here,
+/// so the page never names a provider.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StorageDiscoveryDescriptor {
     /// What one candidate is called: "bucket", "shared folder".
@@ -104,13 +145,6 @@ pub struct StorageDiscoveryDescriptor {
     pub unit_plural: String,
     /// Where the look happens, for prose: "your Cloudflare account".
     pub place: String,
-    /// The Create-new door's sentence.
-    pub create_hint: String,
-    /// The Use-existing door's sentence.
-    pub existing_hint: String,
-    /// Optional access guide beside the Use-existing choice.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub existing_help: Option<StorageDiscoveryHelp>,
     /// The lane's verb: "Find in my account".
     pub find_label: String,
     /// What the look signs in with, and that it only reads.
@@ -168,8 +202,12 @@ pub struct StorageProviderDescriptor {
     /// generic one naming the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_setup_hint: Option<String>,
-    /// Absent for a provider that cannot look in an account: the New-storage
-    /// card then has no Use-existing door.
+    /// Absent for a provider whose setup cannot reach an existing
+    /// destination: a new draft then opens without the Create new / Use
+    /// existing question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_doors: Option<StorageSetupDoors>,
+    /// Absent for a provider that cannot look in an account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<StorageDiscoveryDescriptor>,
 }
@@ -188,7 +226,6 @@ pub struct StorageSummaryField {
 pub enum StorageAdapterErrorKind {
     Invalid,
     Remote,
-    CleanupRequired,
     Internal,
 }
 
@@ -215,14 +252,6 @@ impl StorageAdapterError {
     pub fn remote(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             kind: StorageAdapterErrorKind::Remote,
-            code,
-            message: message.into(),
-        }
-    }
-
-    pub fn cleanup_required(code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            kind: StorageAdapterErrorKind::CleanupRequired,
             code,
             message: message.into(),
         }
@@ -257,12 +286,6 @@ impl fmt::Display for StorageAdapterError {
 
 impl std::error::Error for StorageAdapterError {}
 
-/// The adapter must save recovery data before a remote mutation.
-pub trait StorageProbeJournal {
-    fn recovery(&self) -> &BoundedConfigObject;
-    fn checkpoint(&mut self, recovery: BoundedConfigObject) -> Result<(), String>;
-}
-
 pub trait StorageProviderAdapter: Send + Sync {
     fn descriptor(&self) -> StorageProviderDescriptor;
 
@@ -289,31 +312,14 @@ pub trait StorageProviderAdapter: Send + Sync {
     /// checks. Remote providers return `None`.
     fn local_root(&self, config: &StorageProviderConfig) -> Result<Option<PathBuf>, String>;
 
-    /// Bounded, non-secret facts identifying the destination for the setup
-    /// journal. Never a credential, token, HTTP material, or local path.
-    fn journal_facts(&self, config: &StorageProviderConfig) -> Result<BoundedConfigObject, String>;
-
     /// Verify the connection and every capability the common layer relies
-    /// on. Remote residue is scoped to `setup_id`.
+    /// on. Nothing is recorded locally: an adapter that writes names its
+    /// probe object itself and removes it best effort.
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        setup_id: &str,
         runtime: &Handle,
-        journal: &mut dyn StorageProbeJournal,
     ) -> Result<(), StorageAdapterError>;
-
-    /// Remove the residue of one interrupted probe.
-    fn reconcile_probe(
-        &self,
-        config: &StorageProviderConfig,
-        setup_id: &str,
-        runtime: &Handle,
-        journal: &mut dyn StorageProbeJournal,
-    ) -> Result<(), StorageAdapterError>;
-
-    /// Render the declared setup assistant's instruction for one exact draft.
-
 
     /// Open the object store. Remote providers need the runtime handle.
     fn open(

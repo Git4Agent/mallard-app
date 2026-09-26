@@ -6,11 +6,8 @@ use mallard_infrastructure::{
         AuthError, AuthorizationGrant, AuthorizationRequest, DropboxClient, CALLBACK_PORT,
         DISCOVERY_SCOPES, DROPBOX_CALLBACK, SETUP_SCOPES, STORAGE_SCOPES,
     },
+    dropbox_setup::discovery::{self, Account, Scan},
     loopback_browser,
-    dropbox_setup::{
-        discovery::{self, Account, Scan},
-        DropboxSetupJournal,
-    },
     persistence::LocalStateRepository,
     storage_core::MarkerState,
     storage_providers::{dropbox::provider_key, StorageProviderRegistry},
@@ -60,8 +57,6 @@ pub enum Progress {
 pub struct Login {
     session_id: String,
     account: Account,
-    folder_name: Option<String>,
-    creation_started: bool,
 }
 
 struct Session {
@@ -261,15 +256,6 @@ pub async fn authorize_dropbox_setup(
         return Err(Failure::code("dropbox_new_setup_required"));
     }
     let (run, _) = control.begin(&draft_id, expected_revision, None)?;
-    let journal =
-        DropboxSetupJournal::open(&repository, &draft_id).map_err(|e| Failure::code(e.code()))?;
-    let pinned = journal
-        .pinned_account()
-        .map_err(|e| Failure::code(e.code()))?;
-    if switch_account && pinned.is_some() && mode == Mode::Create {
-        return Err(Failure::code("dropbox_new_setup_required"));
-    }
-    let folder_name = journal.folder_name().map_err(|e| Failure::code(e.code()))?;
     let scopes = match mode {
         Mode::Create => SETUP_SCOPES,
         Mode::Existing => DISCOVERY_SCOPES,
@@ -310,17 +296,12 @@ pub async fn authorize_dropbox_setup(
     })
     .await?;
     draft(&repository, &draft_id, expected_revision, mode)?;
-    if pinned.as_ref().is_some_and(|id| *id != account.id) {
-        return Err(Failure::code("dropbox_new_setup_required"));
-    }
     let id = HostId::generate()
         .map_err(|_| Failure::local())?
         .to_string();
     let result = Login {
         session_id: id.clone(),
         account: account.clone(),
-        folder_name,
-        creation_started: pinned.is_some(),
     };
     control.keep(
         Session {
@@ -538,7 +519,7 @@ pub async fn prepare_dropbox_storage(
     })
     .await;
     // A confirmed name conflict is editable with the same grant. Other failures
-    // require a fresh sign-in; the journal retains safe provisioning checkpoints.
+    // require a fresh sign-in.
     if result
         .as_ref()
         .is_err_and(|e| e.code == "dropbox_folder_name_taken")

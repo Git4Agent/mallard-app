@@ -106,7 +106,7 @@ test("Push and Pull open the activity log at its live tail", () => {
     syncSource.indexOf("const refreshRestore = async"),
   );
 
-  // Gated, defaulting on: the preference suppresses the auto-open, and the
+  // Gated, defaulting off: the preference enables the auto-open, and the
   // unread badge keeps counting either way.
   assert.match(pushHandler, /if \(getPreference\("openLogsOnSync"\)\) openActivity\(\);/);
   assert.match(pullHandler, /if \(getPreference\("openLogsOnSync"\)\) openActivity\(\);/);

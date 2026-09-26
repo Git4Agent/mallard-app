@@ -1,9 +1,15 @@
 # Managed Cloud: desktop wiring plan
 
-Status: implemented 2026-09-14 through Phase 3 (uncommitted). Phase 4 (catalog items) is not
-started; Phase 5's production deploy and the super admin grant remain the user's. Stars are out
-of scope for this plan. Deltas from the plan as written are listed in the architecture doc,
-section 5.8; the staging exit checks of Phase 1 and Phase 2 have not been run yet.
+Status: Phases 0 to 3 implemented 2026-09-14; superseded on 2026-09-23 by
+`PLAN_MANAGED_CLOUD_CAS_FREE.md`, which replaced the upload protocol this plan wired with the
+store gateway (`STORE_API.md` in the service tree) and delivered Phase 4 (catalog items, one per
+Cloud repository, each on its own stream) as its section 6.6. On September 23, 2026,
+staging and production D1/R2 were reset and the service was deployed to both.
+Both live staging tests passed. Rika321 has super_admin in both environments.
+The 15-row manual desktop pass in section 13 remains untested; no installed
+desktop build or real ~/.mallard was used.
+Stars are out of scope for this plan. Deltas from the plan as written are listed in the
+architecture doc, section 5.8.
 Companion to `CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md` (section 5 is the design this plan
 implements). The service lives in `mallardInternal/cloudflare/managed-cloud` and is live on
 staging and production.

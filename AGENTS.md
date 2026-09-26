@@ -77,7 +77,10 @@ The integration tests intentionally enforce this cutover.
 - `storage_core/` (in `crates/mallard-infrastructure`) is the neutral
   transport shared by both storage protocols: the closed `.mallard/` object
   keys with separate repository and catalog constructors, the object-store
-  trait, the local-folder and S3/R2 stores, and the storage marker.
+  trait, the local-folder, S3/R2, Dropbox, and Feishu stores, and the
+  storage marker. `feishu_connections.rs` and `feishu_auth.rs` beside it
+  keep a Feishu sign-in's refresh chain under `~/.mallard/feishu_connections/`
+  and renew it; no Mallard service takes part.
 - `src-tauri/src/storage_catalog/` owns the storage-scoped catalog:
   Tauri-free domain and plans, machine-local persistence, profile and skill
   root resolution, provider adapters, inventory, the remote catalog engine,

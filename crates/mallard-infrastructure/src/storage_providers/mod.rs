@@ -7,6 +7,7 @@
 //! built-in storage provider is an adapter module plus one registry entry.
 
 pub mod dropbox;
+pub mod feishu;
 pub mod local;
 pub mod managed_cloud;
 pub mod r2;
@@ -19,6 +20,5 @@ pub use registry::StorageProviderRegistry;
 pub use traits::{
     StorageAdapterError, StorageAdapterErrorKind, StorageDiscoveryDescriptor,
     StorageFieldDescriptor, StorageFieldKind, StorageProviderAdapter, StorageProviderDescriptor,
-    StorageSecretDescriptor,
-    StorageSummaryField,
+    StorageSecretDescriptor, StorageSetupDoors, StorageSetupHelp, StorageSummaryField,
 };

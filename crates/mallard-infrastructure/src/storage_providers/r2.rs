@@ -7,12 +7,12 @@
 //! prepares an ordinary storage draft for review.
 
 use super::traits::{
-    StorageAdapterError, StorageDiscoveryDescriptor, StorageDiscoveryHelp, StorageFieldDerivation,
+    StorageAdapterError, StorageDiscoveryDescriptor, StorageFieldDerivation,
     StorageFieldDescriptor, StorageFieldKind, StorageLocalSetup, StorageNameSuggestion,
-    StorageProviderAdapter, StorageProviderDescriptor, StorageSecretDescriptor,
-    StorageSummaryField,
+    StorageProviderAdapter, StorageProviderDescriptor, StorageSecretDescriptor, StorageSetupDoors,
+    StorageSetupHelp, StorageSummaryField,
 };
-use crate::storage_core::{ObjectStore, R2CapabilityProbeErrorKind, S3Connection, S3ObjectStore};
+use crate::storage_core::{ObjectStore, S3Connection, S3ObjectStore};
 use mallard_domain::{
     BoundedConfigObject, FieldKey, SecretKey, StorageProviderConfig, StorageProviderKey,
 };
@@ -375,22 +375,16 @@ fn require_secret(config: &StorageProviderConfig) -> Result<&str, StorageAdapter
 }
 
 fn probe_error(error: crate::storage_core::R2CapabilityProbeError) -> StorageAdapterError {
-    match error.kind() {
-        // The probe keeps no SDK error by design, so the cause cannot be
-        // narrowed further than the stage that refused. Name the fields a
-        // person can check and the step that re-runs the check.
-        R2CapabilityProbeErrorKind::Remote => StorageAdapterError::remote(
-            "r2_capability_verification_failed",
-            format!(
-                "R2 refused the {} check. Check the Account ID, bucket name, and API token permissions, then test again.",
-                error.stage()
-            ),
+    // The probe keeps no SDK error by design, so the cause cannot be
+    // narrowed further than the stage that refused. Name the fields a
+    // person can check and the step that re-runs the check.
+    StorageAdapterError::remote(
+        "r2_capability_verification_failed",
+        format!(
+            "R2 refused the {} check. Check the Account ID, bucket name, and API token permissions, then test again.",
+            error.stage()
         ),
-        R2CapabilityProbeErrorKind::CleanupRequired => StorageAdapterError::cleanup_required(
-            "r2_probe_cleanup_required",
-            "R2 remote cleanup is required",
-        ),
-    }
+    )
 }
 
 fn open_store(
@@ -427,11 +421,7 @@ impl StorageProviderAdapter for R2Adapter {
             display_name: "Cloudflare R2".to_string(),
             description: "An R2 bucket reached through its S3 API.".to_string(),
             default_name: "R2 storage".to_string(),
-            name_suggestion: Some(StorageNameSuggestion {
-                source: FieldKey::parse("bucket").expect("static field key"),
-                pattern: r"^\s*(\S.*?)\s*$".to_string(),
-                group: 1,
-            }),
+            name_suggestion: Some(StorageNameSuggestion::whole_setting("bucket", "R2 {1}")),
             display_rank: 10,
             icon: "cloud".to_string(),
             clear_mode: super::traits::StorageClearMode::Unconditional,
@@ -500,16 +490,18 @@ impl StorageProviderAdapter for R2Adapter {
             local_setup: Some(StorageLocalSetup::Wrangler),
             setup_guide_url: Some(R2_SETUP_DOC.to_string()),
             manual_setup_hint: Some("Enter an existing R2 connection in the fields below.".to_string()),
+            setup_doors: Some(StorageSetupDoors {
+                create_hint: "A new bucket in your Cloudflare account.".to_string(),
+                existing_hint: "A bucket Mallard already uses.".to_string(),
+                existing_help: Some(StorageSetupHelp {
+                    label: "Set up team access".to_string(),
+                    url: "https://developers.cloudflare.com/fundamentals/manage-members/manage/".to_string(),
+                }),
+            }),
             discovery: Some(StorageDiscoveryDescriptor {
                 unit: "bucket".to_string(),
                 unit_plural: "buckets".to_string(),
                 place: "your Cloudflare account".to_string(),
-                create_hint: "A new bucket in your Cloudflare account, created with Wrangler or by hand.".to_string(),
-                existing_hint: "Use a shared R2 bucket with your team, or connect your own.".to_string(),
-                existing_help: Some(StorageDiscoveryHelp {
-                    label: "Set up team access".to_string(),
-                    url: "https://developers.cloudflare.com/fundamentals/manage-members/manage/".to_string(),
-                }),
                 find_label: "Find in my account".to_string(),
                 access_hint: "Uses your Wrangler sign-in. Read-only: lists the buckets and reads one marker file in each.".to_string(),
                 scanning_hint: "Looking through your Cloudflare account…".to_string(),
@@ -581,40 +573,13 @@ impl StorageProviderAdapter for R2Adapter {
         Ok(None)
     }
 
-    fn journal_facts(&self, config: &StorageProviderConfig) -> Result<BoundedConfigObject, String> {
-        let typed = decode_config(config).map_err(|error| error.to_string())?;
-        BoundedConfigObject::from_json(&serde_json::json!({
-            "account_id": typed.destination.account_id(),
-            "bucket": typed.destination.bucket(),
-            "jurisdiction": typed.destination.jurisdiction().as_str(),
-        }))
-    }
-
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        setup_id: &str,
         runtime: &Handle,
-        _journal: &mut dyn super::traits::StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let store = open_store(config, runtime.clone())?;
-        store
-            .probe_r2_capabilities(setup_id)
-            .map(|_| ())
-            .map_err(probe_error)
-    }
-
-    fn reconcile_probe(
-        &self,
-        config: &StorageProviderConfig,
-        setup_id: &str,
-        runtime: &Handle,
-        _journal: &mut dyn super::traits::StorageProbeJournal,
-    ) -> Result<(), StorageAdapterError> {
-        let store = open_store(config, runtime.clone())?;
-        store
-            .reconcile_r2_capability_probe(setup_id)
-            .map_err(probe_error)
+        store.probe_r2_capabilities().map_err(probe_error)
     }
 
     fn open(
@@ -812,12 +777,6 @@ mod tests {
                 "team-backup".to_string()
             ]
         );
-        let facts = adapter.journal_facts(&config).unwrap();
-        assert_eq!(facts.get_str("jurisdiction"), Some("eu"));
-        assert_eq!(facts.get_str("bucket"), Some("team-backup"));
-        assert!(!String::from_utf8(facts.canonical_json())
-            .unwrap()
-            .contains("canary"));
         assert_eq!(adapter.local_root(&config).unwrap(), None);
     }
 

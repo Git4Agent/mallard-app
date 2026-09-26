@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { BundleSnapshotSummary, ManagedCloudRepository, StorageSummary } from "../../types";
-import Icon, { iconNameFromHint } from "../Icons";
+import Icon, { storageIconName } from "../Icons";
 import Notice, { NoticeZone, type NoticeItem } from "../notice/Notice";
 import { formatRelativeTime } from "./model";
 import RepositoryAddressPicker, {
@@ -86,8 +86,8 @@ function ManagedCloudBody({
   const footerNote = selection?.kind === "new"
     ? "Creates the private repository shown above. The name is checked again when you connect."
     : contributor
-      ? "Anyone signed in can push. Connects and accepts matching data. File changes need review."
-      : "Connects and accepts matching data. File changes need review.";
+      ? "Anyone signed in can push. Choose Pull when you are ready to review stored changes."
+      : "Choose Pull when you are ready to review stored changes.";
   const connect = () => {
     if (!selection) return;
     if (selection.kind === "new") {
@@ -127,7 +127,7 @@ function ManagedCloudBody({
 
       <div className="sync-modal-body repo-connect">
         <div className="sync-bundle-context">
-          <Icon name={iconNameFromHint(storage.icon, "cloud")} size={17} />
+          <Icon name={storageIconName(storage.provider, storage.icon)} size={17} />
           <span><strong>{storage.name} · {account.login}</strong><small>{account.host}</small></span>
         </div>
         <RepositoryAddressPicker
@@ -216,15 +216,11 @@ function BundleListBody({
       message: "This repo has no Git fingerprint, so Mallard cannot verify that it belongs to this checkout.",
     });
   }
-  /* `info`, not `warning`: this sentence says what connecting will NOT do. It
-     is reassurance about the operation's blast radius, it asks for nothing,
-     and it is unconditional — at `warning` the dialog printed "Warning ·" over
-     a plain fact every single time it opened, which is also what stopped a
-     real mismatch below from raising the box's rung. */
+  // Pull remains a separate user action after connecting.
   notices.push({
     key: "metadata-only",
     severity: "info",
-    message: "Connects and accepts matching data. File changes need review.",
+    message: "Choose Pull when you are ready to review stored changes.",
   });
 
   return (
@@ -243,7 +239,7 @@ function BundleListBody({
             {sibling
               ? `${storage.name} already has this repository in another repo. Connecting adopts it, so pushes and pulls from every machine converge; the current empty registration is abandoned.`
               : missing
-                ? `${projectName} has a local-only identity. Pull from an existing repo, or publish this one separately.`
+                ? `${projectName} has a local-only identity. Connect to an existing repo, or publish this one separately.`
                 : `${storage.name} contains the repos below. Git matches are recommended, but every repo remains available.`}
           </p>
         </div>
@@ -254,7 +250,7 @@ function BundleListBody({
 
       <div className="sync-modal-body">
         <div className="sync-bundle-context">
-          <Icon name={iconNameFromHint(storage.icon, "drive")} size={17} />
+          <Icon name={storageIconName(storage.provider, storage.icon)} size={17} />
           <span><strong>{storage.name}</strong><small>Current local repo {currentBundleId.slice(0, 12)}…</small></span>
         </div>
 

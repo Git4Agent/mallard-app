@@ -71,7 +71,9 @@ impl StorageProviderAdapter for DropboxAdapter {
         let guide = "https://www.dropbox.com/developers/reference/auth-types";
         StorageProviderDescriptor {
             key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"A shared folder in your Dropbox, new or one you already use. Uploads up to 150 MiB per object.".into(),
-            default_name:"Dropbox storage".into(),name_suggestion:None,display_rank:20,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,
+            default_name:"Dropbox storage".into(),
+            name_suggestion:Some(StorageNameSuggestion::whole_setting("folder_name", "Dropbox {1}")),
+            display_rank:20,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,
             fields:vec![StorageFieldDescriptor {field_id:FieldKey::parse("namespace_id").expect("static key"),label:"Namespace ID".into(),kind:StorageFieldKind::Text,required:true,
                 placeholder:Some("Shared or team namespace ID".into()),help:Some("Use the same namespace ID on each machine. This value cannot change after setup.".into()),help_url:Some(guide.into()),derive:None}],
             secrets:vec![StorageSecretDescriptor {secret_id:token_key(),label:"Access token".into(),required:true,placeholder:Some("User-linked Dropbox access token".into()),
@@ -80,13 +82,15 @@ impl StorageProviderAdapter for DropboxAdapter {
                 help:Some("Browser setup saves this token to renew access automatically. Show it to review the value, or enter a replacement issued for this Mallard app and Dropbox account.".into()),help_url:Some(guide.into())}],
             local_setup: Some(StorageLocalSetup::Dropbox),
             managed_secret_id: Some(refresh_token_key()),setup_guide_url:Some(guide.into()),manual_setup_hint:Some("Enter an existing shared or team namespace and a user-linked token. Mallard stores data in .mallard within that namespace.".into()),
+            setup_doors: Some(StorageSetupDoors {
+                create_hint: "A new shared folder in your Dropbox.".into(),
+                existing_hint: "A shared folder Mallard already uses.".into(),
+                existing_help: None,
+            }),
             discovery: Some(StorageDiscoveryDescriptor {
                 unit: "shared folder".into(),
                 unit_plural: "shared folders".into(),
                 place: "your Dropbox".into(),
-                create_hint: "A new Mallard shared folder in your Dropbox, created after browser consent.".into(),
-                existing_hint: "A shared folder Mallard already uses, found in your Dropbox — or a namespace you paste in.".into(),
-                existing_help: None,
                 find_label: "Find in my Dropbox".into(),
                 access_hint: "Discovery lists accessible folders and reads their Mallard markers without changing them.".into(),
                 scanning_hint: "Approve access in your browser, then Mallard looks through your shared folders…".into(),
@@ -156,32 +160,13 @@ impl StorageProviderAdapter for DropboxAdapter {
     fn local_root(&self, _config: &StorageProviderConfig) -> Result<Option<PathBuf>, String> {
         Ok(None)
     }
-    fn journal_facts(&self, config: &StorageProviderConfig) -> Result<BoundedConfigObject, String> {
-        BoundedConfigObject::encode(&decode(config).map_err(|e| e.to_string())?)
-    }
     fn probe(
         &self,
         config: &StorageProviderConfig,
-        setup_id: &str,
         runtime: &Handle,
-        journal: &mut dyn StorageProbeJournal,
     ) -> Result<(), StorageAdapterError> {
         let store = store(config, runtime.clone())?;
-        store
-            .probe(setup_id, journal)
-            .map_err(|error| store.adapter_error(error))
-    }
-    fn reconcile_probe(
-        &self,
-        config: &StorageProviderConfig,
-        setup_id: &str,
-        runtime: &Handle,
-        journal: &mut dyn StorageProbeJournal,
-    ) -> Result<(), StorageAdapterError> {
-        let store = store(config, runtime.clone())?;
-        store
-            .reconcile_probe(setup_id, journal)
-            .map_err(|error| store.adapter_error(error))
+        store.probe().map_err(|error| store.adapter_error(error))
     }
     fn open(
         &self,
@@ -281,9 +266,8 @@ mod tests {
             descriptor.managed_secret_id,
             Some(refresh_token_key())
         );
-        let text = serde_json::to_string(&DropboxAdapter.journal_facts(&managed).unwrap()).unwrap();
-        assert!(!text.contains("refresh-canary"));
-
+        let summary = serde_json::to_string(&DropboxAdapter.summary(&managed).unwrap()).unwrap();
+        assert!(!summary.contains("refresh-canary"));
     }
     #[test]
     fn namespace_identity_does_not_depend_on_token() {
@@ -296,10 +280,6 @@ mod tests {
         assert_eq!(
             DropboxAdapter.continuity_coordinates(&first).unwrap(),
             DropboxAdapter.continuity_coordinates(&second).unwrap()
-        );
-        assert_eq!(
-            DropboxAdapter.journal_facts(&first).unwrap(),
-            DropboxAdapter.journal_facts(&second).unwrap()
         );
         let summary = serde_json::to_string(&DropboxAdapter.summary(&first).unwrap()).unwrap();
         assert!(!summary.contains("first-token"));

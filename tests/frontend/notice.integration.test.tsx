@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Notice, {
+  Acknowledgement,
+  FieldMessage,
+  NoticeChip,
   NoticeZone,
+  forgetResolved,
   highestSeverity,
+  noticeIdentity,
   type NoticeItem,
 } from "../../src/components/notice/Notice";
 
@@ -16,6 +22,82 @@ const NOTES: NoticeItem[] = [
   { key: "a", severity: "info", message: "Mallard rebuilt its local timeline cache." },
   { key: "b", severity: "warning", message: "At least one message is shown as a truncated preview." },
 ];
+
+test("every message closes through one Dismiss control, after its action", () => {
+  // Every rung closes — not only warnings — and a message's action does not
+  // stop it closing. One control, one word: "Dismiss".
+  const html = renderToStaticMarkup(
+    <NoticeZone
+      items={[
+        ...NOTES,
+        { key: "c", severity: "warning", message: "Pull first.", action: <button>Open Pull review</button> },
+        { key: "d", severity: "danger", message: "Storage failed." },
+      ]}
+      subject="notices"
+      timing="standing"
+      label="Notices"
+    />,
+  );
+  assert.equal(html.match(/aria-label="Dismiss: /g)?.length, 5, "each of four lines, and the box itself");
+  assert.match(html, /aria-label="Dismiss: all 4 notices"/);
+  assert.match(html, /Open Pull review<\/button><button type="button" class="sync-notice-dismiss" title="Dismiss" aria-label="Dismiss: Warning\. Pull first\."/);
+  assert.doesNotMatch(html, /Close warning|Dismiss error|Dismiss notification/);
+  for (const severity of ["danger", "warning", "info", "success"] as const) {
+    const single = renderToStaticMarkup(<Notice severity={severity} timing="inline">Pull first.</Notice>);
+    assert.equal(single.match(/class="sync-notice-dismiss"/g)?.length, 1, `${severity} closes once`);
+  }
+  // The spoken name ends each part as a sentence, never with a double stop.
+  const titled = renderToStaticMarkup(<Notice severity="warning" timing="inline" title="Scan incomplete.">1 bucket was skipped.</Notice>);
+  assert.match(titled, /aria-label="Dismiss: Warning\. Scan incomplete\. 1 bucket was skipped\."/);
+});
+
+test("an acknowledgement is the one message that never closes", () => {
+  const html = renderToStaticMarkup(
+    <Acknowledgement checked={false} onChange={() => undefined} title="Executable content" verbs={["Mark reviewed", "Reviewed"]}>
+      — scripts/install.sh
+    </Acknowledgement>,
+  );
+  assert.match(html, /^<label class="notice warning notice-ack">/);
+  assert.match(html, /type="checkbox"/);
+  assert.match(html, /Warning ·<\/strong> <strong class="notice-lead">Executable content<\/strong> — scripts\/install\.sh/);
+  assert.match(html, />Mark reviewed<\/small>/);
+  assert.doesNotMatch(html, /sync-notice-dismiss/);
+});
+
+test("each rung has its own glyph: an error is the octagon, never the warning triangle", () => {
+  const glyph = (severity: "danger" | "warning" | "info" | "success") => (
+    renderToStaticMarkup(<Notice severity={severity} timing="inline">Text.</Notice>).match(/data-icon="([^"]+)"[^>]*class="notice-mark"/)?.[1]
+  );
+  assert.equal(glyph("danger"), "octagon-x");
+  assert.equal(glyph("warning"), "alert-triangle");
+  assert.equal(glyph("info"), "info");
+  assert.equal(glyph("success"), "check-circle");
+  assert.match(renderToStaticMarkup(<FieldMessage>Choose a folder.</FieldMessage>), /data-icon="octagon-x"/);
+  assert.match(renderToStaticMarkup(<NoticeChip severity="danger">1</NoticeChip>), /data-icon="octagon-x"/);
+});
+
+test("a field message has no box, speaks its type, and closes", () => {
+  const html = renderToStaticMarkup(<FieldMessage id="field-error">This folder no longer exists.</FieldMessage>);
+  assert.match(html, /^<div id="field-error" class="notice-field">/);
+  assert.match(html, /<span class="sync-visually-hidden">Error: <\/span>This folder no longer exists\./);
+  assert.match(html, /aria-label="Dismiss: Error\. This folder no longer exists\."/);
+  assert.doesNotMatch(html, /role=/);
+  assert.match(renderToStaticMarkup(<FieldMessage blocking>Taken.</FieldMessage>), /role="alert"/);
+});
+
+test("a closed message is forgotten once it resolves, so it shows again if it recurs", () => {
+  const failed: NoticeItem = { key: "push", severity: "danger", message: "Push failed." };
+  const closed = new Set([noticeIdentity(failed)]);
+  // Still present: it stays closed, and the set is kept as is.
+  assert.equal(forgetResolved(closed, [failed]), closed);
+  // Gone for one render — the retry cleared it — so it is forgotten, and the
+  // same failure on the next attempt is shown again.
+  assert.equal(forgetResolved(closed, []).size, 0);
+  // A counter in the identity separates two failures with the same words.
+  const retried = { ...failed, dismissalId: "attempt-2" };
+  assert.notEqual(noticeIdentity(retried), noticeIdentity(failed));
+  assert.equal(forgetResolved(closed, [retried]).size, 0);
+});
 
 test("a zone is one box, whatever the message count", () => {
   const two = renderToStaticMarkup(
@@ -112,4 +194,24 @@ test("the role is derived from timing, so standing content never announces", () 
 
   // role="status" already implies aria-live="polite"; writing both is noise.
   assert.doesNotMatch(progress, /aria-live/);
+});
+
+test("the stylesheet has one recipe per tier, and the eleven one-off treatments are gone", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  // A strip is the notice flush in a card: the rung's edge on top only.
+  assert.match(css, /\.notice\.notice-strip \{[^}]*border-width: 1px 0 0;[^}]*border-radius: 0;/);
+  // Every chip rung is the notice rung's ink on its tint.
+  for (const rung of ["danger", "warning", "info", "success"]) {
+    assert.match(css, new RegExp(`\\.notice-chip\\.${rung} \\{ color: var\\(--${rung}-text\\); background: var\\(--${rung}-soft\\); \\}`));
+  }
+  // A finished sync's strip takes the notice tokens, not a private mix.
+  assert.match(css, /\.sync-outcome-notice\.success \{ border-color: color-mix\(in srgb, var\(--green\) 45%, var\(--border\)\); background: var\(--success-soft\); \}/);
+  // The shell banner's text is the notice's 12px, not a size of its own.
+  assert.doesNotMatch(css.match(/\.sync-backend-banner \{[^}]*\}/)?.[0] ?? "", /font-size/);
+  // The one-off treatments this replaced, and the wrapper rules that
+  // silently restored a grey, untinted "warning", stay deleted.
+  assert.doesNotMatch(
+    css,
+    /\.notice\.sync-project-file-conflict|\.notice\.sync-storage-notice|\.sync-path-menu-banner|\.sync-setup-field-error|\.sync-setup-acknowledge|\.catalog-card-ack|\.sync-storage-index-warning|\.sync-project-file-warning/,
+  );
 });

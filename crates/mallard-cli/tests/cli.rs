@@ -164,7 +164,6 @@ fn invalid_setup_name_fails_before_wrangler_and_is_never_echoed_or_persisted() {
     assert_eq!(error["status"], "error");
     assert_eq!(error["exit_code"], 2);
     assert_eq!(error["code"], "storage_name_invalid");
-    assert!(error.get("setup_id").is_none());
     let combined = combined_output(&output);
     assert!(!combined.contains(name_canary));
     assert!(!combined.contains(&temp.path().to_string_lossy().to_string()));
@@ -217,7 +216,6 @@ fn valid_setup_with_unavailable_wrangler_has_a_fixed_sanitized_error() {
             "wrangler_not_found"
         }
     );
-    assert!(error.get("setup_id").is_none());
     let combined = combined_output(&output);
     assert!(!combined.contains(name_canary));
     assert!(!combined.contains(&temp.path().to_string_lossy().to_string()));
@@ -295,7 +293,6 @@ fn removed_dropbox_setup_is_rejected_without_remote_work() {
     let output = command(home.path()).args(["storage", "dropbox", "setup", "--json"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(!home.path().join(".mallard/dropbox_setup_journal").exists());
 }
 
 #[test]
@@ -353,7 +350,6 @@ fn inaccessible_local_state_has_an_actionable_sanitized_json_error() {
     assert_eq!(error["exit_code"], 5);
     assert_eq!(error["code"], "cli_persistence_failure");
     assert_eq!(error["message"], ACTIONABLE_LOCAL_CONFIG_MESSAGE);
-    assert!(error.get("setup_id").is_none());
 
     let combined = combined_output(&output);
     assert!(!combined.contains(state_canary));
@@ -382,7 +378,6 @@ fn malformed_local_config_uses_the_stable_persistence_exit_status() {
     assert_eq!(error["exit_code"], 5);
     assert_eq!(error["code"], "local_config_unavailable");
     assert_eq!(error["message"], ACTIONABLE_LOCAL_CONFIG_MESSAGE);
-    assert!(error.get("setup_id").is_none());
     assert!(!String::from_utf8_lossy(&output.stderr)
         .contains(&temp.path().to_string_lossy().to_string()));
 }

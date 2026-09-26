@@ -10,7 +10,7 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
-import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
@@ -27,7 +27,6 @@ import { STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { formatBytes } from "../../format";
-import { PUSH_FINISHED, finishPushOffered } from "../../unfinishedPush";
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -42,7 +41,6 @@ interface Props {
   selected: Set<string>;
   projectDefaults: Set<string>;
   busy: boolean;
-  error: string | null;
   /* The backend opened the review without a conversation comparison. */
   threadComparisonError?: string | null;
   project?: LocalProjectSummary;
@@ -72,9 +70,6 @@ interface Props {
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
-  /** Finish that push: the record an earlier push claimed and never wrote is
-   *  written once. Offered only while the error is that sentence. */
-  onFinishPush?: () => void;
 }
 
 function countSelected(items: InventoryResource[], selected: ReadonlySet<string>): number {
@@ -542,7 +537,6 @@ export default function PushResourceWorkspace({
   selected,
   projectDefaults,
   busy,
-  error,
   threadComparisonError = null,
   project,
   binding = null,
@@ -568,7 +562,6 @@ export default function PushResourceWorkspace({
   onClose,
   onPush,
   onPull,
-  onFinishPush,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
@@ -1002,30 +995,6 @@ export default function PushResourceWorkspace({
           )}
 
         </div>
-
-        {error && (
-          /* The push the user just started failed. That is an event — the
-             review rendered without it — and it stops the flow, so the box
-             announces assertively. A push onto this version that did not
-             finish offers the one verb that finishes it, and once it did the
-             same box reads so in the done tone: the box prints its severity
-             word, so a finished push is never an "Error". */
-          <Notice
-            severity={error === PUSH_FINISHED ? "success" : "danger"}
-            timing="blocking"
-            className="sync-pull-error"
-            action={finishPushOffered(error, storageName) && onFinishPush
-              ? (
-                <button type="button" className="btn btn-ghost" onClick={onFinishPush} disabled={busy}>
-                  <Icon name="upload" size={13} />
-                  Finish that push
-                </button>
-              )
-              : undefined}
-          >
-            {error}
-          </Notice>
-        )}
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">

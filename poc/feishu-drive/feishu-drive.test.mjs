@@ -277,6 +277,47 @@ test("losing siblings stay stored and a longer losing branch cannot win", async 
   assert.deepEqual(await store.get(`${STREAM}/${loser.name}`, expected(loser.bytes)), loser.bytes);
 });
 
+test("a sibling that wins before confirmation fails this push without retry or deletion", async () => {
+  const { mock, store, peer } = fixture();
+  const root = makeRecord(selector, id("a"), null, 100);
+  await publish(store, selector, root);
+  const winner = makeRecord(selector, id("b"), root, 101);
+  const loser = makeRecord(selector, id("c"), root, 102);
+  mock.requests = [];
+  // The other writer lands after this writer's admission listing.
+  mock.afterUpload = (_token, entry) => {
+    if (entry.name === loser.name) mock.add(entry.parent_token, winner.name, "file", winner.bytes);
+  };
+  await rejects(() => publish(store, selector, loser), "remote_changed");
+  assert.equal(mock.requests.filter((call) => call.path === "/files/upload_all").length, 1);
+  assert.ok(mock.requests.every((call) => call.method === "GET" || call.method === "POST"));
+  assert.equal((await listStream(peer, selector)).chain.at(-1), winner.name);
+  assert.deepEqual(await peer.get(`${STREAM}/${loser.name}`, expected(loser.bytes)), loser.bytes);
+});
+
+test("a delayed admitted writer can displace a confirmed push even with complete listings", async () => {
+  const { mock, store, peer, writer } = fixture();
+  const root = makeRecord(selector, id("a"), null, 100);
+  await publish(store, selector, root);
+  const delayed = makeRecord(selector, id("b"), root, 101);
+  const firstToFinish = makeRecord(selector, id("c"), root, 102);
+  const location = await store.location(`${STREAM}/${delayed.name}`);
+  assert.equal((await listStream(store, selector)).chain.at(-1), root.name);
+  const admittedAt = Date.now();
+  mock.requests = [];
+  assert.equal(await publish(peer, selector, firstToFinish), "selected");
+  assert.equal((await listStream(store, selector)).chain.at(-1), firstToFinish.name);
+  // Resume the first writer after admission, within the 10-second window.
+  // No listing entry is hidden and each record is sent once.
+  assert.ok(Date.now() - admittedAt <= 10_000);
+  await writer.upload(location.parent, delayed.name, delayed.bytes);
+  assert.equal(mock.hidden.size, 0);
+  assert.equal(mock.requests.filter((call) => call.path === "/files/upload_all").length, 2);
+  assert.deepEqual((await listStream(store, selector)).chain, [root.name, delayed.name]);
+  assert.deepEqual((await listStream(peer, selector)).chain, [root.name, delayed.name]);
+  assert.deepEqual(await peer.get(`${STREAM}/${firstToFinish.name}`, expected(firstToFinish.bytes)), firstToFinish.bytes);
+});
+
 test("a hidden earlier sibling demonstrates the unresolved cross-client consistency risk", async () => {
   const { mock, store, peer, writer } = fixture();
   const root = makeRecord(selector, id("a"), null, 100);

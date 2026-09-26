@@ -357,7 +357,7 @@ mod poc_tests {
         .unwrap();
         assert_eq!(revision, 2);
         let draft = repository.load_storage_setup_draft(&id).unwrap().unwrap();
-        assert_eq!(draft.storage.name, "Dropbox storage 1");
+        assert_eq!(draft.storage.name, "Dropbox storage draft 1");
         assert!(mock.state.lock().unwrap().create_paths[0].starts_with("/Mallard "));
         assert_eq!(mock.count("files/create_folder_v2"), 1);
         assert_eq!(mock.count("sharing/share_folder"), 1);

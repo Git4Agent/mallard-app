@@ -3,6 +3,8 @@
 Status: local tests and a live desktop file round trip pass. The Open API
 probe remains a separate test. This is not a registered Mallard storage
 provider. See the [live results](../../docs/FEISHU_LIVE_POC_2026-09-20.md).
+The [2026-09-23 CAS-free rerun](../../docs/FEISHU_CAS_FREE_POC_2026-09-23.md)
+records current tests, race results, and the remaining live API gate.
 
 Read the [feasibility report](../../docs/FEISHU_STORAGE_FEASIBILITY_2026-09-19.md)
 for the decision, API sources, remaining constraints, and production work.
@@ -229,10 +231,20 @@ test demonstrates this limit.
 
 The probe uses the production `RecordName` and `Mainline` code. Its record
 and manifest **bodies are transport fixtures**, not complete Mallard
-DTOs. Its one-attempt publication helper is not the production
-`write_record` loop. It rejects an acknowledged-but-unlisted record;
-the production helper can retain its own acknowledged record in memory.
+DTOs. Its one-attempt publication helper is a transport check, not a call
+to production `write_record`. Production can repeat a stale admission
+listing, but sends each record once. The probe rejects an acknowledged
+record absent from the next listing; production can retain its own
+acknowledged record in memory. The probe reports an unacknowledged and
+unlisted record as `outcome_unknown`; production returns the send error
+when its settlement listing succeeds and the record is absent.
 Do not import this folder into a real Mallard storage.
+
+The Feishu path has no parent claim. Two admitted writers can send sibling
+records. A later arrival with an earlier rank can displace a confirmed
+Push even when every listing is complete. The local suite tests this
+separately from hidden-record faults. Current linked observations classify
+displacement without changing local acceptance; recovery requires user action.
 
 The adapter has no sharding or path cache. Duplicate folders stop a run.
 The published namespace has no mutable head, index, or lock file. Files

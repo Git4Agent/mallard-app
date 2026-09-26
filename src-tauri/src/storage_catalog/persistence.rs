@@ -577,9 +577,13 @@ impl CatalogStateRepository {
             .iter_mut()
             .filter(|link| &link.storage_id == storage_id)
         {
-            if link.accepted_head.is_some() || !link.accepted_resources.is_empty() {
+            if link.accepted_head.is_some()
+                || !link.accepted_resources.is_empty()
+                || !link.accepted_items.is_empty()
+            {
                 link.accepted_head = None;
                 link.accepted_resources.clear();
+                link.accepted_items.clear();
                 link.revision = link.revision.saturating_add(1);
                 link.updated_at = link.updated_at.max(now);
                 links_reset = links_reset.saturating_add(1);
@@ -917,6 +921,7 @@ mod tests {
                 repository_id: skills_repository(),
                 accepted_head: None,
                 accepted_resources: BTreeMap::new(),
+                accepted_items: BTreeMap::new(),
                 revision: 1,
                 created_at: 1,
                 updated_at: 1,
@@ -955,6 +960,7 @@ mod tests {
                     CatalogResourceId::parse(format!("resource-{}", "d".repeat(64))).unwrap(),
                     "c".repeat(64),
                 )]),
+                accepted_items: BTreeMap::new(),
                 revision: 1,
                 created_at: 1,
                 updated_at: 1,

@@ -3,7 +3,6 @@ use super::*;
 use crate::dropbox_setup::mock::MockDropboxSetup;
 use crate::storage_core::{connection_events, ConfiguredObjectStore, ConnectionState};
 use crate::storage_providers::StorageProviderRegistry;
-use crate::storage_setup_journal::MemoryProbeJournal;
 fn key(suffix: &str) -> ObjectKey {
     ObjectKey::parse(format!(
         ".mallard/v1/repositories/0123456789abcdef0123456789abcdef/{suffix}"
@@ -213,15 +212,10 @@ fn permission_and_manual_expiry_classify_apart_from_rejection() {
         (Error::Unreachable, "dropbox_unreachable"),
         (Error::Unknown, "dropbox_request_failed"),
         (Error::RateLimit, "dropbox_rate_limited"),
-        (Error::Cleanup, "dropbox_probe_cleanup_required"),
         (Error::Invalid, "dropbox_probe_failed"),
     ] {
         assert_eq!(store.adapter_error(error).code(), code);
     }
-    assert_eq!(
-        store.adapter_error(Error::Cleanup).kind(),
-        crate::storage_providers::StorageAdapterErrorKind::CleanupRequired
-    );
 }
 
 #[test]
@@ -239,12 +233,7 @@ fn refreshed_credential_supports_probe_and_verified_transport_without_mutation_r
         &server.store.content,
     )
     .unwrap();
-    store
-        .probe(
-            "setup-111111111111111111111111",
-            &mut MemoryProbeJournal::default(),
-        )
-        .unwrap();
+    store.probe().unwrap();
     let object = key("_objects/refresh-proof");
     assert_eq!(
         store.put_immutable(&object, b"proof").unwrap(),
@@ -551,11 +540,10 @@ fn noncanonical_keys_and_credential_errors_fail_closed() {
     assert!(!error.contains("must never escape"));
 }
 #[test]
-fn probe_cleans_known_revisions_and_preserves_unknown_writes() {
+fn probe_removes_its_file_and_passes_when_the_delete_is_refused() {
     let server = Server::new();
-    let id = "setup-0123456789abcdef01234567";
-    let mut journal = MemoryProbeJournal::default();
-    server.store.probe(id, &mut journal).unwrap();
+    server.store.probe().unwrap();
+    assert_eq!(server.probe_file_count(), 0);
     assert!(server
         .state
         .lock()
@@ -563,19 +551,13 @@ fn probe_cleans_known_revisions_and_preserves_unknown_writes() {
         .entries
         .values()
         .all(|(m, _)| m.kind == "folder"));
-    server.state.lock().unwrap().fail_upload = true;
-    assert_eq!(server.store.probe(id, &mut journal), Err(Error::Cleanup));
-    assert_eq!(
-        server.store.reconcile_probe(id, &mut journal),
-        Err(Error::Cleanup)
-    );
-    assert!(server
-        .state
-        .lock()
-        .unwrap()
-        .entries
-        .values()
-        .any(|(m, _)| m.kind == "file"));
+    assert_eq!(server.state.lock().unwrap().routes["files/delete_v2"], 1);
+    // The final delete is best effort: a refused delete leaves the probe
+    // file behind and changes no verdict.
+    server.state.lock().unwrap().fail_delete = true;
+    server.store.probe().unwrap();
+    assert_eq!(server.probe_file_count(), 1);
+    assert_eq!(server.state.lock().unwrap().routes["files/delete_v2"], 2);
 }
 /// The claim is one add-mode upload without a strict conflict check:
 /// identical bytes are written, other bytes are a conflict, and one download
@@ -617,40 +599,22 @@ fn a_claim_is_one_add_mode_upload_and_a_taken_claim_returns_what_it_found() {
 }
 
 /// A folder that overwrites an add-mode upload cannot arbitrate a claim and
-/// cannot be set up: the probe's refusal stage fails, and the overwritten
-/// probe object is not a revision the journal knows, so cleanup asks for
-/// reconciliation instead of deleting it.
+/// cannot be set up: the probe's refusal stage fails. The overwritten probe
+/// file stays, because the best-effort delete names the revision the upload
+/// returned and the overwrite replaced it.
 #[test]
 fn probe_refuses_a_folder_that_overwrites() {
     let server = Server::new();
     server.state.lock().unwrap().overwrite_uploads = true;
-    let mut journal = MemoryProbeJournal::default();
-    assert_eq!(
-        server
-            .store
-            .probe("setup-0123456789abcdef01234567", &mut journal),
-        Err(Error::Cleanup)
-    );
-    assert!(server
-        .state
-        .lock()
-        .unwrap()
-        .entries
-        .values()
-        .any(|(m, _)| m.kind == "file"));
+    assert_eq!(server.store.probe(), Err(Error::Invalid));
+    assert_eq!(server.probe_file_count(), 1);
 }
 
 #[test]
 fn probe_rejects_account_home_before_remote_mutation() {
     let server = Server::new();
     server.state.lock().unwrap().home = true;
-    assert_eq!(
-        server.store.probe(
-            "setup-0123456789abcdef01234567",
-            &mut MemoryProbeJournal::default()
-        ),
-        Err(Error::Namespace)
-    );
+    assert_eq!(server.store.probe(), Err(Error::Namespace));
     assert!(server.state.lock().unwrap().entries.is_empty());
 }
 #[test]
@@ -740,64 +704,6 @@ fn managed_clear_keeps_marker_folders_and_unmanaged_files() {
         .any(|(m, _)| m.kind == "folder"));
 }
 #[test]
-fn recovery_uses_the_durable_revision_after_restart() {
-    use crate::persistence::LocalStateRepository;
-    use crate::storage_providers::traits::StorageProbeJournal;
-    use crate::storage_setup_journal::{
-        ProbeJournal, StorageSetupId, StorageSetupJournalEntry, StorageSetupJournalStore,
-        StorageSetupStage,
-    };
-    use mallard_domain::BoundedConfigObject;
-    let temp = tempfile::tempdir().unwrap();
-    let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-    let disk = StorageSetupJournalStore::new(&repository);
-    let id = "setup-0123456789abcdef01234567";
-    let path = format!("/.mallard/v1/_setup_probes/{id}.bin");
-    let server = Server::new();
-    let metadata = server
-        .store
-        .runtime
-        .block_on(server.store.upload(&path, Bytes::from_static(b"known")))
-        .unwrap();
-    let mut entry = StorageSetupJournalEntry {
-        schema: 1,
-        setup_id: StorageSetupId::parse(id).unwrap(),
-        provider: crate::storage_providers::dropbox::provider_key(),
-        config_version: 1,
-        stage: StorageSetupStage::ProbeRunning,
-        error_code: None,
-        created_at: 1,
-        updated_at: 1,
-        facts: BoundedConfigObject::from_json(&json!({"namespace_id":"shared"})).unwrap(),
-        recovery: BoundedConfigObject::empty(),
-    };
-    ProbeJournal {
-        store: &disk,
-        entry: &mut entry,
-    }
-    .checkpoint(
-        BoundedConfigObject::from_json(
-            &json!({"revision":metadata.rev,"size":5,"sha256":sha256_hex(b"known")}),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let mut reloaded = disk.load(&entry.setup_id).unwrap().unwrap();
-    server
-        .store
-        .reconcile_probe(
-            id,
-            &mut ProbeJournal {
-                store: &disk,
-                entry: &mut reloaded,
-            },
-        )
-        .unwrap();
-    assert!(!server.state.lock().unwrap().entries.contains_key(&path));
-    assert!(!format!("{reloaded:?}").contains("test-token"));
-}
-
-#[test]
 fn content_routes_reject_wrong_types_and_symlinks() {
     let server = Server::new();
     let key = key("_objects/file");
@@ -854,6 +760,32 @@ fn put_at(
         .store
         .runtime
         .block_on(server.store.put_many_async(objects, concurrency))
+}
+
+#[test]
+fn bulk_progress_uploads_keep_the_transfer_window_and_report_each_object() {
+    let server = Server::new();
+    let bound = crate::app_settings::cloud_transfer_concurrency();
+    server.state.lock().unwrap().start_barrier = Some(Arc::new(tokio::sync::Barrier::new(bound)));
+    let objects = upload_objects(bound * 2);
+    let mut reported = Vec::new();
+    let outcomes = server
+        .store
+        .put_many_with_progress(objects.clone(), &mut |size| reported.push(size))
+        .unwrap();
+    assert_eq!(outcomes, vec![ImmutablePutOutcome::Written; objects.len()]);
+    assert_eq!(
+        reported,
+        objects
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .collect::<Vec<_>>()
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.max_active_starts, bound);
+    assert_eq!(state.active_starts, 0);
+    assert_eq!(state.routes["files/upload_session/start"], bound * 2);
+    assert_eq!(state.routes["files/upload_session/finish_batch_v2"], 2);
 }
 
 #[test]
@@ -1053,6 +985,50 @@ fn reads_listing_and_deletion_cost_one_request_each() {
 }
 
 #[test]
+fn bulk_progress_reads_keep_the_transfer_window_and_report_each_object() {
+    let server = Server::new();
+    let bound = crate::app_settings::cloud_transfer_concurrency();
+    let objects = upload_objects(bound * 2);
+    put_at(&server, objects.clone(), bound).unwrap();
+    server.state.lock().unwrap().download_barrier =
+        Some(Arc::new(tokio::sync::Barrier::new(bound)));
+    let requests: Vec<_> = objects
+        .iter()
+        .map(|(key, bytes)| {
+            (
+                key.clone(),
+                ExpectedObject {
+                    size: bytes.len() as u64,
+                    sha256: sha256_hex(bytes),
+                },
+            )
+        })
+        .collect();
+    let mut reported = Vec::new();
+    let staged = server
+        .store
+        .stage_many_with_progress(&requests, &mut |size| reported.push(size))
+        .unwrap();
+    for ((_, bytes), outcome) in objects.iter().zip(&staged) {
+        let StageOutcome::Verified(body) = outcome else {
+            panic!("object was not staged")
+        };
+        assert_eq!(body.read_bounded(64, "object").unwrap(), bytes.as_ref());
+    }
+    assert_eq!(
+        reported,
+        objects
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .collect::<Vec<_>>()
+    );
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.max_active_downloads, bound);
+    assert_eq!(state.active_downloads, 0);
+    assert_eq!(state.routes["files/download"], bound * 2);
+}
+
+#[test]
 fn bulk_reads_run_concurrently_at_the_transfer_bound_and_keep_input_order() {
     let server = Server::new();
     let objects = upload_objects(12);
@@ -1079,8 +1055,12 @@ fn bulk_reads_run_concurrently_at_the_transfer_bound_and_keep_input_order() {
         };
         assert_eq!(body.read_bounded(64, "object").unwrap(), bytes.as_ref());
     }
-    let keys: Vec<_> = objects.iter().map(|(key, _)| key.clone()).collect();
-    let stored = server.store.get_metadata_many(&keys, 64).unwrap();
+    let prefix =
+        ObjectPrefix::parse(key("_objects/probe").as_str().rsplit_once('/').unwrap().0).unwrap();
+    let listed = server.store.list_objects(&prefix, 12).unwrap();
+    let before = server.state.lock().unwrap().requests;
+    let stored = server.store.get_listed_metadata_many(&listed, 64).unwrap();
+    assert_eq!(server.state.lock().unwrap().requests - before, 12);
     for ((_, bytes), stored) in objects.iter().zip(stored) {
         assert_eq!(stored.unwrap().bytes, bytes.as_ref());
     }

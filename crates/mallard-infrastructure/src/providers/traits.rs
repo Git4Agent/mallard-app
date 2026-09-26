@@ -169,6 +169,17 @@ pub struct SessionFileMetadata {
     pub is_internal_subagent: bool,
 }
 
+/// A folder a profile's recent sessions ran in. A hint for adding a project,
+/// read from a bounded number of files — never ownership evidence, which
+/// stays with [`SessionAdapter::discover`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionHomeSighting {
+    pub home: PathBuf,
+    /// The newest modification time, in Unix seconds, among the session
+    /// files that named this folder.
+    pub last_active: u64,
+}
+
 /// Normalized typed-codec output the core reconciliation engine consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionAnalysis {
@@ -836,6 +847,15 @@ pub trait SessionAdapter: Send + Sync {
     /// one provider home. Ownership is proven through each session's
     /// recorded cwd; the adapter must not scan outside `provider_home`.
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String>;
+    /// The folders the newest sessions under one provider home ran in,
+    /// from a bounded read that never follows links. A provider without a
+    /// cheap way to answer offers none.
+    fn recent_session_homes(
+        &self,
+        _provider_home: &Path,
+    ) -> Result<Vec<SessionHomeSighting>, String> {
+        Ok(Vec::new())
+    }
     /// Bounded head-of-file metadata scan.
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String>;
     /// Full typed-codec analysis of one transcript.

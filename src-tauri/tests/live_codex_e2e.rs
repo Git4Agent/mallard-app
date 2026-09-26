@@ -10,6 +10,8 @@
 //! as the only test process so its temporary `HOME` override cannot affect
 //! other tests.
 
+#[path = "support/codex_output.rs"]
+mod codex_output;
 mod support;
 
 use bytes::Bytes;
@@ -60,7 +62,7 @@ use walkdir::WalkDir;
 use support::catalog_flow::{run_catalog_flow, storage_snapshot, CatalogFlowInputs};
 
 const LIVE_TEST_GATE: &str = "MALLARD_RUN_LIVE_CODEX_E2E";
-const MODEL: &str = "gpt-5.6-luna";
+const MODEL: &str = "gpt-6-luna";
 const PROVIDER_ID: &str = "mallard_live";
 const PROVIDER_KEY_ENV: &str = "MALLARD_CODEX_PROVIDER_API_KEY";
 const HEADLESS_REOPEN_PROMPT: &str =
@@ -107,7 +109,7 @@ const MAX_CAPTURE_HEADER_BYTES: usize = 32 * 1024;
 const MAX_CAPTURE_INPUT_ITEMS: usize = 4_096;
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
-const EXPECTED_CODEX_VERSION_PREFIX: &str = "codex-cli 0.154.";
+const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.156.0";
 const EXPECTED_PAID_CODEX_TURNS: usize = 5;
 const EXPECTED_HEADLESS_RESUMES: usize = 20;
 const EXPECTED_CODEX_CLI_TURNS: usize = EXPECTED_PAID_CODEX_TURNS + EXPECTED_HEADLESS_RESUMES;
@@ -175,9 +177,10 @@ fn assert_supported_codex_version() {
         "Codex version output exceeds the test safety bound"
     );
     let version = String::from_utf8(output.stdout).expect("Codex version must be UTF-8");
-    assert!(
-        version.trim().starts_with(EXPECTED_CODEX_VERSION_PREFIX),
-        "the live fixture requires Codex 0.154.x; update the current-format writer before running against another version"
+    assert_eq!(
+        version.trim(),
+        EXPECTED_CODEX_VERSION,
+        "the live fixture requires Codex 0.156.0; update the current-format writer before running against another version"
     );
     assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
     assert_process_home_has_no_sensitive_state(&process_home, &[]);
@@ -1816,7 +1819,7 @@ fn session_meta_record(
             "timestamp": "2026-08-18T00:00:00Z",
             "cwd": cwd.to_string_lossy(),
             "originator": "codex_exec",
-            "cli_version": "0.154.0",
+            "cli_version": "0.156.0",
             "source": "exec",
             "model_provider": PROVIDER_ID,
             "base_instructions": null,
@@ -2984,12 +2987,17 @@ fn run_headless_history_verification(
     );
     let mut started_thread_ids = Vec::new();
     let mut final_messages = Vec::new();
+    let mut turn_started = false;
     for line in stdout.lines() {
         let event: Value = redacted(
             serde_json::from_str(line),
             "headless Codex emitted malformed JSONL",
         );
+        if codex_output::is_startup_warning(&event, turn_started, MODEL) {
+            continue;
+        }
         match event.get("type").and_then(Value::as_str) {
+            Some("turn.started") => turn_started = true,
             Some("thread.started") => {
                 started_thread_ids.push(
                     event

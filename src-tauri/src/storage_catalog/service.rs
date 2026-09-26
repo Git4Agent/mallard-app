@@ -8,11 +8,18 @@
 //! unavailable and cannot be operated on.
 
 use bytes::Bytes;
-use mallard_domain::{now_secs, Mainline, StorageConfig, StorageId, SyncConfig};
+use mallard_domain::{
+    now_secs, sha256_hex, Mainline, RecordName, StorageConfig, StorageId, SyncConfig,
+};
 use mallard_infrastructure::bundle_engine::{NOT_PULLED, VERSION_INCOMPLETE};
-use mallard_infrastructure::storage_core::publication::unfinished_push_sentence;
+use mallard_infrastructure::managed_cloud::client::CoordinateQuery;
+use mallard_infrastructure::managed_cloud::ManagedObjectStore;
 use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::storage_core::publication::{
+    unfinished_push_sentence, RecordStream, REMOTE_CHANGED,
+};
 use mallard_infrastructure::storage_core::ConfiguredObjectStore;
+use mallard_infrastructure::storage_core::ObjectStore;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -27,12 +34,11 @@ use super::domain::{
     CatalogActionOutcome, CatalogActionResult, CatalogCapturedWith, CatalogCoordinate,
     CatalogCoordinateLabels, CatalogFormatKey, CatalogLinkId, CatalogLinkState,
     CatalogPlanActionId, CatalogPlanId, CatalogProviderConfig, CatalogPullItem,
-    CatalogResourceEnvelope,
-    CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey,
-    CatalogResourcePlanDocument, CatalogResourceWarning, CatalogScope, CatalogScopeId,
-    CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan, CatalogTargetConfig,
-    LibraryResourceManifest, LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId,
-    ProviderKey, PublishedResourceEntry,
+    CatalogResourceEnvelope, CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey,
+    CatalogResourcePlanDocument, CatalogResourceRepositoryId, CatalogResourceWarning, CatalogScope,
+    CatalogScopeId, CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan,
+    CatalogTargetConfig, LibraryHeadCoordinate, LibraryResourceManifest, LibraryResourceTag,
+    LocalCatalogProfile, LocalCatalogProfileId, ProviderKey, PublishedResourceEntry,
 };
 use super::inventory::{inventory_local, CatalogLocalInventory, LocalResourceRecord};
 use super::persistence::CatalogStateRepository;
@@ -43,9 +49,9 @@ use super::profiles::{
 };
 use super::registry::{CatalogCapability, CatalogCapabilityDescriptor, CatalogRegistry};
 use super::resource_engine::{
-    head_coordinate, storage_identity_for_config, verify_library_continuity, LibraryContinuity,
-    LibraryResourceEngine, ObservedLibraryHead, PublishLibraryResourceRequest,
-    PublishedLibraryResource,
+    head_coordinate, parse_library_record, storage_identity_for_config, verify_library_continuity,
+    DiscoveredLibraryRepository, LibraryContinuity, LibraryResourceEngine, ObservedLibraryHead,
+    PublishLibraryResourceRequest, PublishedLibraryResource,
 };
 use super::resource_planning::{
     build_resource_fork_plan, build_scope_pull_plan, build_scope_push_plan, conflicting_claim_pins,
@@ -268,8 +274,7 @@ pub struct CatalogScopePullOutcomeDto {
 /// The refusal of a Library Pull whose reviewed version is no longer part of
 /// the selected history: it lost its race, or the repository was cleared,
 /// with or without a push since (PLAN_PULL_PINNED_VERSION.md, G2).
-pub const LIBRARY_REVIEW_SUPERSEDED: &str =
-    "The storage changed since this review. Review again.";
+pub const LIBRARY_REVIEW_SUPERSEDED: &str = "The storage changed since this review. Review again.";
 
 /// One Library repository as the storage page lists it: the coordinate it
 /// derives from with its labels, the head facts when the repository reads,
@@ -1023,20 +1028,212 @@ struct ResolvedScopeWorkspace {
     /// has: `link` carries it as absent, nothing was written, and the next
     /// Push or Pull drops the saved acceptances and saves its own.
     stale_acceptance: bool,
+    /// The same, per item, on a storage that holds one item per repository.
+    stale_items: BTreeSet<CatalogResourceId>,
     /// The selected chain of the one listing this workspace made, for a Pull
     /// apply to look its reviewed version up on.
     mainline: Option<Mainline>,
     observed: Option<ObservedLibraryHead>,
     manifest: Option<LibraryResourceManifest>,
+    /// One item per repository (Mallard Cloud): each stored item's stream,
+    /// selection, selected record and manifest, from the one coordinate
+    /// request the refresh made. `None` on a coordinate repository.
+    items: Option<BTreeMap<CatalogResourceId, ObservedItem>>,
+    /// Every item stream the storage answered for the coordinate, stored
+    /// or not yet.
+    item_streams: BTreeMap<CatalogResourceId, CatalogResourceRepositoryId>,
+    /// The stored resources, whichever model the storage holds.
+    remote: BTreeMap<CatalogResourceId, CatalogResourceEnvelope>,
+    remote_updated: BTreeMap<CatalogResourceId, u64>,
+}
+
+/// One item's stream on a storage that holds one item per repository, as
+/// the coordinate answer observed it.
+struct ObservedItem {
+    stream: CatalogResourceRepositoryId,
+    mainline: Mainline,
+    observed: ObservedLibraryHead,
+    manifest: LibraryResourceManifest,
 }
 
 impl ResolvedScopeWorkspace {
     fn remote_map(&self) -> BTreeMap<CatalogResourceId, CatalogResourceEnvelope> {
-        self.manifest
+        self.remote.clone()
+    }
+
+    /// The reviewed head of every stored item, on a per-item storage.
+    fn item_heads(
+        &self,
+        storage_identity: &str,
+    ) -> BTreeMap<CatalogResourceId, LibraryHeadCoordinate> {
+        self.items
             .as_ref()
-            .map(LibraryResourceManifest::resource_map)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|(resource_id, item)| {
+                        (
+                            resource_id.clone(),
+                            head_coordinate(&item.observed.head, storage_identity),
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
+
+    /// The stream an item publishes to: its own on a per-item storage, the
+    /// coordinate's repository otherwise.
+    fn stream_for(&self, resource_id: &CatalogResourceId) -> CatalogResourceRepositoryId {
+        match &self.items {
+            Some(_) => CatalogResourceRepositoryId::for_item(&self.scope.coordinate(), resource_id),
+            None => self.capability.repository_id(),
+        }
+    }
+
+    fn storage_revision(&self) -> Option<u64> {
+        match &self.items {
+            Some(items) => items.values().map(|item| item.observed.head.revision).max(),
+            None => self
+                .observed
+                .as_ref()
+                .map(|observed| observed.head.revision),
+        }
+    }
+}
+
+/// The one request a Library refresh makes on Mallard Cloud: the account's
+/// item repositories of the coordinate, each with its stream's names and
+/// the selected record and manifest inline. Names and bytes are R2's; the
+/// selection is this desktop's; a stream the answer could not carry whole
+/// is read the ordinary way. Nothing here is a stream listing: a later
+/// Push still lists before it writes.
+fn observe_managed_items(
+    cloud: &ManagedObjectStore,
+    engine: &LibraryResourceEngine<ConfiguredObjectStore>,
+    capability: &CatalogCapability,
+    coordinate: &CatalogCoordinate,
+) -> Result<
+    (
+        BTreeMap<CatalogResourceId, ObservedItem>,
+        BTreeMap<CatalogResourceId, CatalogResourceRepositoryId>,
+    ),
+    String,
+> {
+    let answers = cloud.library_coordinate(&CoordinateQuery {
+        provider: coordinate.provider.as_str().to_string(),
+        resource_kind: coordinate.resource_kind.as_str().to_string(),
+        format: coordinate.format.as_str().to_string(),
+        format_version: coordinate.format_version,
+    })?;
+    let mut items = BTreeMap::new();
+    let mut streams = BTreeMap::new();
+    for answer in answers {
+        let resource_id = CatalogResourceId::parse(answer.resource_id.clone())?;
+        let stream = CatalogResourceRepositoryId::parse(answer.library_repository_id.clone())?;
+        if stream != CatalogResourceRepositoryId::for_item(coordinate, &resource_id) {
+            return Err(
+                "Mallard Cloud answered with an item stream its coordinate does not derive"
+                    .to_string(),
+            );
+        }
+        streams.insert(resource_id.clone(), stream.clone());
+        let inline = answer.record.as_ref().filter(|_| !answer.truncated);
+        let (mainline, observed, manifest) = if let Some(record) = inline {
+            let names = answer
+                .names
+                .iter()
+                .filter_map(|name| RecordName::parse(name))
+                .collect::<Vec<_>>();
+            let mainline = Mainline::select(names.iter().cloned());
+            let Some(selected) = mainline.selected().cloned() else {
+                continue;
+            };
+            if sha256_hex(record) != selected.token().record_sha256() {
+                return Err(format!(
+                    "the record of item '{}' does not match the digest in its name",
+                    stream
+                ));
+            }
+            let commit = parse_library_record(&stream, &selected, record)?;
+            let head = commit.head();
+            head.validate()?;
+            let manifest = match &answer.manifest {
+                Some(bytes)
+                    if bytes.len() as u64 == head.manifest_size
+                        && sha256_hex(bytes) == head.manifest_sha256 =>
+                {
+                    let manifest: LibraryResourceManifest = serde_json::from_slice(bytes)
+                        .map_err(|error| format!("parse Library resource manifest: {}", error))?;
+                    manifest.validate()?;
+                    if manifest.repository_id != head.repository_id
+                        || manifest.revision != head.revision
+                        || manifest.commit_id != head.commit_id
+                    {
+                        return Err(
+                            "Library manifest coordinates do not match its head".to_string()
+                        );
+                    }
+                    manifest
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "the manifest of item '{}' does not match its record",
+                        stream
+                    ))
+                }
+                None => engine.read_manifest(&head)?,
+            };
+            if let Some(cache) = engine.store().publication_cache() {
+                cache.prime(
+                    &RecordStream::library(stream.as_str())?,
+                    &names,
+                    Some((selected.token(), record.as_slice())),
+                );
+            }
+            let observed = ObservedLibraryHead {
+                record_sha256: selected.token().record_sha256().to_string(),
+                head,
+            };
+            (mainline, observed, manifest)
+        } else {
+            let (mainline, observed) = engine.observe(&stream)?;
+            let Some(observed) = observed else {
+                continue;
+            };
+            let manifest = engine.read_manifest(&observed.head)?;
+            (mainline, observed, manifest)
+        };
+        if !manifest.is_item_stream() {
+            return Err(format!(
+                "the item stream '{}' holds a set that is not one item",
+                stream
+            ));
+        }
+        let Some(entry) = manifest.resources.get(&resource_id) else {
+            return Err(format!(
+                "the item stream '{}' holds another item than the one it is derived from",
+                stream
+            ));
+        };
+        if entry.resource.coordinate() != *coordinate {
+            return Err("the stored repository holds a resource of another coordinate".to_string());
+        }
+        capability
+            .codec
+            .validate(&entry.resource)
+            .map_err(|error| format!("a stored resource failed validation: {}", error))?;
+        items.insert(
+            resource_id,
+            ObservedItem {
+                stream,
+                mainline,
+                observed,
+                manifest,
+            },
+        );
+    }
+    Ok((items, streams))
 }
 
 fn resolve_scope_workspace(
@@ -1085,56 +1282,104 @@ fn resolve_scope_workspace(
     let mut observed = None;
     let mut manifest = None;
     let mut stale_acceptance = false;
+    let mut stale_items = BTreeSet::new();
     let mut chain = None;
+    let mut items = None;
+    let mut item_streams = BTreeMap::new();
+    let mut remote = BTreeMap::new();
+    let mut remote_updated = BTreeMap::new();
     if let Some(storage) = &storage {
         let engine = engine_for(storage)?;
-        let (mainline, selected) = engine.observe(&repository_id)?;
-        observed = selected;
-        let continuity = verify_library_continuity(
-            link.as_ref().and_then(|link| link.accepted_head.as_ref()),
-            &mainline,
-            &repository_id,
-            &storage_identity_for_config(storage)?,
-        );
-        // The accepted state names a history this storage does not hold:
-        // it is read as absent, and nothing is written. Every row then
-        // compares as unreviewed, and the next Push or Pull drops the saved
-        // acceptances and saves its own. Nothing is reset (CAS-free plan,
-        // decision 12: recovery is a user action).
-        stale_acceptance = continuity == LibraryContinuity::Replaced;
-        if stale_acceptance {
+        let storage_identity = storage_identity_for_config(storage)?;
+        if let Some(cloud) = engine.store().managed_cloud() {
+            // One item per repository: one request observes every item of
+            // the coordinate. Continuity is per item; an accepted item head
+            // off its stream's chain, or of a stream the storage no longer
+            // answers for, is read as absent, and nothing is written.
+            let (observed_items, streams) =
+                observe_managed_items(cloud, &engine, &capability, &coordinate)?;
             if let Some(link) = link.as_mut() {
-                link.accepted_head = None;
-                link.accepted_resources.clear();
-            }
-        }
-        if let Some(observed) = &observed {
-            // The tag freezes the coordinate; read_tag validates the
-            // derivation, so a repository written under a foreign identity
-            // fails the page closed here.
-            let (tag, _) = engine
-                .read_tag(&repository_id)?
-                .ok_or("the stored repository is missing its discovery tag")?;
-            if tag.coordinate() != coordinate {
-                return Err("the stored repository belongs to another coordinate".to_string());
-            }
-            let read = engine.read_manifest(&observed.head)?;
-            // Structural validation proved the set; the registered codec
-            // proves every entry is a resource of this exact coordinate.
-            for entry in read.resources.values() {
-                if entry.resource.coordinate() != coordinate {
-                    return Err(
-                        "the stored repository holds a resource of another coordinate".to_string(),
-                    );
+                let accepted: Vec<_> = link.accepted_items.keys().cloned().collect();
+                for resource_id in accepted {
+                    let replaced = match observed_items.get(&resource_id) {
+                        Some(item) => {
+                            verify_library_continuity(
+                                link.accepted_items.get(&resource_id),
+                                &item.mainline,
+                                &item.stream,
+                                &storage_identity,
+                            ) == LibraryContinuity::Replaced
+                        }
+                        None => true,
+                    };
+                    if replaced {
+                        link.accepted_items.remove(&resource_id);
+                        link.accepted_resources.remove(&resource_id);
+                        stale_items.insert(resource_id);
+                    }
                 }
-                capability
-                    .codec
-                    .validate(&entry.resource)
-                    .map_err(|error| format!("a stored resource failed validation: {}", error))?;
             }
-            manifest = Some(read);
+            for (resource_id, item) in &observed_items {
+                let entry = &item.manifest.resources[resource_id];
+                remote.insert(resource_id.clone(), entry.resource.clone());
+                remote_updated.insert(resource_id.clone(), entry.updated_at);
+            }
+            items = Some(observed_items);
+            item_streams = streams;
+        } else {
+            let (mainline, selected) = engine.observe(&repository_id)?;
+            observed = selected;
+            let continuity = verify_library_continuity(
+                link.as_ref().and_then(|link| link.accepted_head.as_ref()),
+                &mainline,
+                &repository_id,
+                &storage_identity,
+            );
+            // The accepted state names a history this storage does not hold:
+            // it is read as absent, and nothing is written. Every row then
+            // compares as unreviewed, and the next Push or Pull drops the saved
+            // acceptances and saves its own. Nothing is reset (CAS-free plan,
+            // decision 12: recovery is a user action).
+            stale_acceptance = continuity == LibraryContinuity::Replaced;
+            if stale_acceptance {
+                if let Some(link) = link.as_mut() {
+                    link.accepted_head = None;
+                    link.accepted_resources.clear();
+                }
+            }
+            if let Some(observed) = &observed {
+                // The tag freezes the coordinate; read_tag validates the
+                // derivation, so a repository written under a foreign identity
+                // fails the page closed here.
+                let (tag, _) = engine
+                    .read_tag(&repository_id)?
+                    .ok_or("the stored repository is missing its discovery tag")?;
+                if tag.coordinate() != coordinate {
+                    return Err("the stored repository belongs to another coordinate".to_string());
+                }
+                let read = engine.read_manifest(&observed.head)?;
+                // Structural validation proved the set; the registered codec
+                // proves every entry is a resource of this exact coordinate.
+                for (resource_id, entry) in &read.resources {
+                    if entry.resource.coordinate() != coordinate {
+                        return Err(
+                            "the stored repository holds a resource of another coordinate"
+                                .to_string(),
+                        );
+                    }
+                    capability
+                        .codec
+                        .validate(&entry.resource)
+                        .map_err(|error| {
+                            format!("a stored resource failed validation: {}", error)
+                        })?;
+                    remote.insert(resource_id.clone(), entry.resource.clone());
+                    remote_updated.insert(resource_id.clone(), entry.updated_at);
+                }
+                manifest = Some(read);
+            }
+            chain = Some(mainline);
         }
-        chain = Some(mainline);
     }
     Ok(ResolvedScopeWorkspace {
         scope,
@@ -1145,9 +1390,14 @@ fn resolve_scope_workspace(
         storage,
         link,
         stale_acceptance,
+        stale_items,
         mainline: chain,
         observed,
         manifest,
+        items,
+        item_streams,
+        remote,
+        remote_updated,
     })
 }
 
@@ -1170,17 +1420,7 @@ fn list_catalog_scope_resources_with_repositories(
         resolve_scope_workspace(registry, state, catalog, scope_id, storage_id, user_home)?;
     let codec = workspace.capability.codec.as_ref();
     let remote = workspace.remote_map();
-    let remote_updated: BTreeMap<&CatalogResourceId, u64> = workspace
-        .manifest
-        .as_ref()
-        .map(|manifest| {
-            manifest
-                .resources
-                .iter()
-                .map(|(resource_id, entry)| (resource_id, entry.updated_at))
-                .collect()
-        })
-        .unwrap_or_default();
+    let remote_updated = &workspace.remote_updated;
 
     let mut resource_ids: BTreeSet<&CatalogResourceId> =
         workspace.inventory.resources.keys().collect();
@@ -1286,6 +1526,7 @@ fn list_catalog_scope_resources_with_repositories(
     });
 
     let recovery = recover_catalog_operations(registry, catalog, now_secs())?;
+    let storage_revision = workspace.storage_revision();
     Ok(CatalogScopeResourcesDto {
         scope: workspace.scope,
         profile: profile_dto(registry, &workspace.profile),
@@ -1299,10 +1540,7 @@ fn list_catalog_scope_resources_with_repositories(
             link_id: link.link_id.clone(),
             revision: link.revision,
         }),
-        storage_revision: workspace
-            .observed
-            .as_ref()
-            .map(|observed| observed.head.revision),
+        storage_revision,
         rows,
         warnings: workspace.inventory.warnings,
         recovery,
@@ -1383,8 +1621,8 @@ fn get_catalog_resource_preview_with_repositories(
 }
 
 /// The storage page's Catalog listing: every repository this build can
-/// derive — one per registered capability — inspected with one head read
-/// each. Nothing is scanned: a repository is either derivable and read, or
+/// derive — one per registered capability — inspected in one metadata batch.
+/// Only derived repositories are read; other repositories are
 /// invisible to this build by construction. A derived id that answers but
 /// fails its tag or manifest checks is returned as a refusal row, never
 /// omitted — on a listing, a silent hole reads as "nothing stored".
@@ -1395,15 +1633,30 @@ fn list_catalog_storage_repositories_with_repository(
 ) -> Result<Vec<CatalogStorageRepositoryDto>, String> {
     let storage = storage_for(state, storage_id)?;
     let engine = engine_for(&storage)?;
+    if let Some(cloud) = engine.store().managed_cloud() {
+        return Ok(registry
+            .capabilities()
+            .filter_map(|capability| read_managed_storage_repository(cloud, &engine, capability))
+            .collect());
+    }
+    let repositories = registry
+        .capabilities()
+        .map(|capability| capability.repository_id())
+        .collect::<Vec<_>>();
+    let discovered = engine.discover_repositories(&repositories)?;
     Ok(registry
         .capabilities()
-        .filter_map(|capability| read_storage_repository(&engine, capability))
+        .zip(discovered)
+        .filter_map(|(capability, discovered)| {
+            read_storage_repository(&engine, capability, discovered)
+        })
         .collect())
 }
 
-/// `None` when the repository does not exist in this storage; a refusal row
-/// when something exists under the derived id but cannot be read.
-fn read_storage_repository(
+/// One coordinate's items on a storage that holds one item per repository,
+/// from the coordinate answer: `None` when the account holds none.
+fn read_managed_storage_repository(
+    cloud: &ManagedObjectStore,
     engine: &LibraryResourceEngine<ConfiguredObjectStore>,
     capability: &CatalogCapability,
 ) -> Option<CatalogStorageRepositoryDto> {
@@ -1418,12 +1671,69 @@ fn read_storage_repository(
         resource_names: Vec::new(),
         error: Some(message),
     };
-    let observed = match engine.read_head(&repository_id) {
+    let (items, _) = match observe_managed_items(cloud, engine, capability, &coordinate) {
         Ok(observed) => observed,
         Err(message) => return Some(refusal(message)),
     };
-    let tag = match engine.read_tag(&repository_id) {
-        Ok(tag) => tag,
+    if items.is_empty() {
+        return None;
+    }
+    let names = items
+        .iter()
+        .map(|(resource_id, item)| {
+            capability
+                .codec
+                .display_name(&item.manifest.resources[resource_id].resource)
+        })
+        .collect::<Result<Vec<String>, String>>();
+    let mut resource_names = match names {
+        Ok(names) => names,
+        Err(message) => {
+            return Some(refusal(format!(
+                "a stored resource failed validation: {}",
+                message
+            )))
+        }
+    };
+    resource_names.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    Some(CatalogStorageRepositoryDto {
+        repository_id: repository_id.as_str().to_string(),
+        coordinate,
+        labels: capability.labels(),
+        revision: items.values().map(|item| item.observed.head.revision).max(),
+        updated_at: items.values().map(|item| item.manifest.updated_at).max(),
+        resource_names,
+        error: None,
+    })
+}
+
+/// `None` when the repository does not exist in this storage; a refusal row
+/// when something exists under the derived id but cannot be read.
+fn read_storage_repository(
+    engine: &LibraryResourceEngine<ConfiguredObjectStore>,
+    capability: &CatalogCapability,
+    discovered: Result<DiscoveredLibraryRepository, String>,
+) -> Option<CatalogStorageRepositoryDto> {
+    let repository_id = capability.repository_id();
+    let coordinate = capability.coordinate();
+    let refusal = |message: String| CatalogStorageRepositoryDto {
+        repository_id: repository_id.as_str().to_string(),
+        coordinate: coordinate.clone(),
+        labels: capability.labels(),
+        revision: None,
+        updated_at: None,
+        resource_names: Vec::new(),
+        error: Some(message),
+    };
+    let DiscoveredLibraryRepository {
+        head: observed,
+        tag,
+    } = match discovered {
+        Ok(discovered) => discovered,
         Err(message) => return Some(refusal(message)),
     };
     let Some(observed) = observed else {
@@ -1433,7 +1743,7 @@ fn read_storage_repository(
             refusal("the stored repository has a discovery tag but no publication".to_string())
         });
     };
-    let Some((tag, _)) = tag else {
+    let Some(tag) = tag else {
         return Some(refusal(
             "the stored repository is missing its discovery tag".to_string(),
         ));
@@ -1536,11 +1846,17 @@ fn link_catalog_scope_storage_with_repositories(
         }
     }
     let full_agreement = accepted_resources.len() == remote.len();
+    let storage_identity = storage_identity_for_config(storage)?;
+    // On a per-item storage every agreeing item pins its own head; on a
+    // coordinate repository the head is pinned only when every stored
+    // resource agreed.
+    let accepted_items: BTreeMap<CatalogResourceId, LibraryHeadCoordinate> = workspace
+        .item_heads(&storage_identity)
+        .into_iter()
+        .filter(|(resource_id, _)| accepted_resources.contains_key(resource_id))
+        .collect();
     let accepted_head = match (&workspace.observed, full_agreement) {
-        (Some(observed), true) => Some(head_coordinate(
-            &observed.head,
-            &storage_identity_for_config(storage)?,
-        )),
+        (Some(observed), true) => Some(head_coordinate(&observed.head, &storage_identity)),
         _ => None,
     };
     let completion = if full_agreement {
@@ -1562,6 +1878,7 @@ fn link_catalog_scope_storage_with_repositories(
             repository_id: repository_id.clone(),
             accepted_head: accepted_head.clone(),
             accepted_resources: accepted_resources.clone(),
+            accepted_items: accepted_items.clone(),
             revision: 1,
             created_at: now,
             updated_at: now,
@@ -1729,6 +2046,7 @@ fn prepare_push_with_repositories(
             .observed
             .as_ref()
             .map(|observed| head_coordinate(&observed.head, &storage_identity)),
+        observed_items: workspace.item_heads(&storage_identity),
         now,
     })?;
     discard_scope_plans(catalog, scope_id, storage_id);
@@ -1780,8 +2098,27 @@ fn finish_unfinished_push_with_repositories(
         .storage
         .as_ref()
         .expect("a linked workspace always has its storage");
+    let engine = engine_for(storage)?;
+    if workspace.items.is_some() {
+        // One item per repository: finish the unfinished push of every item
+        // stream that holds one; a stream that holds none is not a change.
+        let mut finished = 0;
+        for stream in workspace.item_streams.values() {
+            let _publication = catalog.acquire_publication_lock(storage_id, stream)?;
+            match engine.finish_unfinished_push(stream) {
+                Ok(()) => finished += 1,
+                Err(error) if error == REMOTE_CHANGED => {}
+                Err(error) => return Err(unfinished_push_sentence(&storage.name, error)),
+            }
+        }
+        return if finished == 0 {
+            Err(REMOTE_CHANGED.to_string())
+        } else {
+            Ok(())
+        };
+    }
     let _publication = catalog.acquire_publication_lock(storage_id, &link.repository_id)?;
-    engine_for(storage)?
+    engine
         .finish_unfinished_push(&link.repository_id)
         .map_err(|error| unfinished_push_sentence(&storage.name, error))
 }
@@ -1883,6 +2220,19 @@ fn apply_push_with_repositories(
         selected_records.push((resource_id, record));
     }
 
+    if workspace.items.is_some() {
+        return apply_push_items(
+            catalog,
+            &workspace,
+            &plan,
+            storage,
+            &storage_identity,
+            &selected_records,
+            state.load_or_create_host_identity()?.host_id.as_str(),
+            now,
+        );
+    }
+
     // The new set is the observed set plus the reviewed upserts — never a
     // replace, so a push can never delete another replica's resources.
     let mut resources = workspace
@@ -1914,15 +2264,15 @@ fn apply_push_with_repositories(
     let host = state.load_or_create_host_identity()?;
     let published = engine
         .publish(PublishLibraryResourceRequest {
-        repository_id: repository_id.clone(),
-        tag: LibraryResourceTag::new(&workspace.scope.coordinate(), repository_id.clone()),
-        observed: workspace.observed.clone(),
-        resources,
-        payloads,
-        captured_with: CatalogCapturedWith {
-            app: "mallard".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
+            repository_id: repository_id.clone(),
+            tag: LibraryResourceTag::new(&workspace.scope.coordinate(), repository_id.clone()),
+            observed: workspace.observed.clone(),
+            resources,
+            payloads,
+            captured_with: CatalogCapturedWith {
+                app: "mallard".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
             published_by_origin: super::domain::derive_library_origin(
                 host.host_id.as_str(),
                 link.link_id.as_str(),
@@ -1992,6 +2342,149 @@ fn apply_push_with_repositories(
     })
 }
 
+/// The Push apply on a storage that holds one item per repository: every
+/// selected item is published on its own stream, in row order, through the
+/// Library engine and the shared protocol; each item's accepted state
+/// advances as its record lands. A row that fails stops the apply and is
+/// named; the rows before it stay published, each being its own
+/// repository, and their acceptance is saved before the error is reported.
+#[allow(clippy::too_many_arguments)]
+fn apply_push_items(
+    catalog: &CatalogStateRepository,
+    workspace: &ResolvedScopeWorkspace,
+    plan: &CatalogScopePushPlan,
+    storage: &StorageConfig,
+    storage_identity: &str,
+    selected_records: &[(&CatalogResourceId, &LocalResourceRecord)],
+    host_id: &str,
+    now: u64,
+) -> Result<CatalogScopePushOutcomeDto, String> {
+    let link = require_link(workspace)?;
+    let observed_items = workspace.item_heads(storage_identity);
+    for (resource_id, _) in selected_records {
+        if plan.observed_items.get(*resource_id) != observed_items.get(*resource_id) {
+            return Err("the storage head changed after review".to_string());
+        }
+    }
+    let items = workspace
+        .items
+        .as_ref()
+        .expect("a per-item workspace holds its items");
+    let coordinate = workspace.scope.coordinate();
+    let engine = engine_for(storage)?;
+    let mut accepted: Vec<(CatalogResourceId, String, LibraryHeadCoordinate)> = Vec::new();
+    let mut published = false;
+    let mut failure: Option<String> = None;
+    for row in &plan.rows {
+        let Some((resource_id, record)) = selected_records
+            .iter()
+            .find(|(resource_id, _)| **resource_id == row.row.resource_id)
+        else {
+            continue;
+        };
+        let stream = workspace.stream_for(resource_id);
+        // Local single-flight per item stream: a second Apply of this review
+        // must not list the same childless parent and write a sibling.
+        let _publication = catalog.acquire_publication_lock(&plan.storage_id, &stream)?;
+        let observed = items.get(*resource_id).map(|item| item.observed.clone());
+        let outcome = engine.publish(PublishLibraryResourceRequest {
+            repository_id: stream.clone(),
+            tag: LibraryResourceTag::for_item(&coordinate, resource_id),
+            observed,
+            resources: BTreeMap::from([(
+                (*resource_id).clone(),
+                PublishedResourceEntry {
+                    resource: record.resource.clone(),
+                    updated_at: now,
+                },
+            )]),
+            payloads: record
+                .captured
+                .as_ref()
+                .map(|captured| captured.payloads())
+                .unwrap_or_default(),
+            captured_with: CatalogCapturedWith {
+                app: "mallard".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            published_by_origin: super::domain::derive_library_origin(
+                host_id,
+                link.link_id.as_str(),
+                &stream,
+            )?,
+            updated_at: now,
+        });
+        match outcome {
+            Ok(result) => {
+                published |= result.stored();
+                accepted.push((
+                    (*resource_id).clone(),
+                    record.resource.content_sha256.clone(),
+                    head_coordinate(result.head(), storage_identity),
+                ));
+            }
+            Err(error) => {
+                failure = Some(format!(
+                    "{}: {}",
+                    row.row.display_name,
+                    unfinished_push_sentence(&storage.name, error)
+                ));
+                break;
+            }
+        }
+    }
+    let stale_items = workspace.stale_items.clone();
+    if !accepted.is_empty() || !stale_items.is_empty() {
+        let link_id = link.link_id.clone();
+        let link_revision = plan.link_revision;
+        catalog.mutate_scope_links(|document| {
+            let link = document
+                .links
+                .iter_mut()
+                .find(|link| link.link_id == link_id)
+                .ok_or("the scope link disappeared while publishing")?;
+            if link.revision != link_revision {
+                return Err("the scope link changed while publishing".to_string());
+            }
+            // An accepted item head off its stream's chain describes a
+            // history the storage no longer has: from here on only what
+            // this Push accepted counts for it.
+            for resource_id in &stale_items {
+                link.accepted_items.remove(resource_id);
+                link.accepted_resources.remove(resource_id);
+            }
+            for (resource_id, content, head) in &accepted {
+                link.accepted_resources
+                    .insert(resource_id.clone(), content.clone());
+                link.accepted_items
+                    .insert(resource_id.clone(), head.clone());
+            }
+            link.revision = link.revision.saturating_add(1);
+            link.updated_at = now;
+            Ok(())
+        })?;
+    }
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    plan_store::discard(catalog.root(), &plan.plan_id);
+    let count = accepted.len();
+    Ok(CatalogScopePushOutcomeDto {
+        plan_id: plan.plan_id.clone(),
+        published,
+        revision: accepted.iter().map(|(_, _, head)| head.revision).max(),
+        message: if published {
+            format!(
+                "Published {} {}",
+                count,
+                if count == 1 { "item" } else { "items" }
+            )
+        } else {
+            "The linked storage already had this content".to_string()
+        },
+    })
+}
+
 /// Whether a copy name is already taken beside a target: by an inventoried
 /// occupant of the same root, or by anything else sitting in that directory.
 fn name_taken_index(
@@ -2048,11 +2541,13 @@ fn prepare_pull_with_repositories(
         .storage
         .as_ref()
         .expect("a linked workspace always has its storage");
-    let observed = workspace
-        .observed
-        .as_ref()
-        .ok_or("the storage has nothing of this coordinate to Pull")?;
     let storage_identity = storage_identity_for_config(storage)?;
+    let item_heads = workspace.item_heads(&storage_identity);
+    let head = match (&workspace.observed, &workspace.items) {
+        (Some(observed), _) => Some(head_coordinate(&observed.head, &storage_identity)),
+        (None, Some(items)) if !items.is_empty() => None,
+        _ => return Err("the storage has nothing of this coordinate to Pull".to_string()),
+    };
     let remote = workspace.remote_map();
     let claims = catalog.load_materializations()?.claims;
     let name_taken = name_taken_index(&workspace.inventory);
@@ -2064,7 +2559,8 @@ fn prepare_pull_with_repositories(
         context: &workspace.context,
         inventory: &workspace.inventory,
         remote: &remote,
-        head: head_coordinate(&observed.head, &storage_identity),
+        head,
+        item_heads,
         claims: &claims,
         requested_copy_names: &requested_copy_names,
         name_taken: &name_taken,
@@ -2126,15 +2622,31 @@ fn apply_pull_with_repositories(
     // its digest. A version that lost its race, or a cleared repository,
     // refuses the Pull before anything changes (PLAN_PULL_PINNED_VERSION.md,
     // section 4.7).
-    let reviewed_on_chain = workspace.mainline.as_ref().is_some_and(|mainline| {
-        mainline.contains(plan.head.revision, plan.head.commit_id.as_str())
-    });
+    let acknowledged: BTreeSet<CatalogResourceId> = destructive_acknowledged.into_iter().collect();
+    let selections = validate_scope_pull_selection(&plan, &choices, &acknowledged)?;
+    let reviewed_on_chain = match (&plan.head, &workspace.items) {
+        (Some(head), _) => workspace
+            .mainline
+            .as_ref()
+            .is_some_and(|mainline| mainline.contains(head.revision, head.commit_id.as_str())),
+        // One item per repository: every item acted on must still have its
+        // reviewed version on its own stream's chain.
+        (None, Some(items)) => selections.iter().all(|selection| {
+            selection.action.is_none()
+                || plan
+                    .item_heads
+                    .get(&selection.item.item.resource_id)
+                    .zip(items.get(&selection.item.item.resource_id))
+                    .is_some_and(|(head, item)| {
+                        item.mainline
+                            .contains(head.revision, head.commit_id.as_str())
+                    })
+        }),
+        (None, None) => false,
+    };
     if !reviewed_on_chain {
         return Err(LIBRARY_REVIEW_SUPERSEDED.to_string());
     }
-
-    let acknowledged: BTreeSet<CatalogResourceId> = destructive_acknowledged.into_iter().collect();
-    let selections = validate_scope_pull_selection(&plan, &choices, &acknowledged)?;
     let claims = catalog.load_materializations()?.claims;
     for selection in &selections {
         let Some(action) = selection.action else {
@@ -2174,15 +2686,6 @@ fn apply_pull_with_repositories(
         })
         .collect();
     let engine = engine_for(storage)?;
-    let repository_id = plan.repository_id.clone();
-    let fetch = |sha256: &str, size: u64| engine.fetch_payload(&repository_id, sha256, size);
-    let environment = PullApplyEnvironment {
-        repository: catalog,
-        runner,
-        registry,
-        capability: workspace.capability.clone(),
-        fetch_payload: &fetch,
-    };
     let mut results = Vec::new();
     let mut accepted_updates: Vec<(CatalogResourceId, String)> = Vec::new();
     let mut all_accepted = true;
@@ -2200,6 +2703,17 @@ fn apply_pull_with_repositories(
             all_accepted = false;
             continue;
         }
+        // Payloads come from the stream the item was published on: its
+        // own on a per-item storage, the coordinate's repository otherwise.
+        let stream = workspace.stream_for(&selection.item.item.resource_id);
+        let fetch = |payloads: &[(&str, u64)]| engine.fetch_payloads(&stream, payloads);
+        let environment = PullApplyEnvironment {
+            repository: catalog,
+            runner,
+            registry,
+            capability: workspace.capability.clone(),
+            fetch_payload: &fetch,
+        };
         let mut result = execute_scope_pull_item(
             &environment,
             &plan.storage_id,
@@ -2247,12 +2761,26 @@ fn apply_pull_with_repositories(
     // accepted would sit under a head off the chain, be read as absent
     // again, and the rows it installed would ask for review once more.
     let stale_acceptance = workspace.stale_acceptance;
+    let stale_items = workspace.stale_items.clone();
     let advance_head = all_accepted || stale_acceptance;
+    // On a per-item storage each accepted item pins its own reviewed head.
+    let accepted_items: Vec<(CatalogResourceId, LibraryHeadCoordinate)> = accepted_updates
+        .iter()
+        .filter_map(|(resource_id, _)| {
+            plan.item_heads
+                .get(resource_id)
+                .map(|head| (resource_id.clone(), head.clone()))
+        })
+        .collect();
     let base_changed = stale_acceptance
-        || accepted_updates
+        || !stale_items.is_empty()
+        || accepted_updates.iter().any(|(resource_id, content)| {
+            link.accepted_resources.get(resource_id) != Some(content)
+        })
+        || accepted_items
             .iter()
-            .any(|(resource_id, content)| link.accepted_resources.get(resource_id) != Some(content))
-        || (advance_head && link.accepted_head.as_ref() != Some(&plan.head));
+            .any(|(resource_id, head)| link.accepted_items.get(resource_id) != Some(head))
+        || (advance_head && plan.head.is_some() && link.accepted_head != plan.head);
     if base_changed {
         let link_id = link.link_id.clone();
         let link_revision = plan.link_revision;
@@ -2269,12 +2797,22 @@ fn apply_pull_with_repositories(
             if stale_acceptance {
                 link.accepted_resources.clear();
             }
+            for resource_id in &stale_items {
+                link.accepted_items.remove(resource_id);
+                link.accepted_resources.remove(resource_id);
+            }
             for (resource_id, content) in &accepted_updates {
                 link.accepted_resources
                     .insert(resource_id.clone(), content.clone());
             }
+            for (resource_id, item_head) in &accepted_items {
+                link.accepted_items
+                    .insert(resource_id.clone(), item_head.clone());
+            }
             if advance_head {
-                link.accepted_head = Some(head.clone());
+                if let Some(head) = &head {
+                    link.accepted_head = Some(head.clone());
+                }
             }
             link.revision = link.revision.saturating_add(1);
             link.updated_at = now;
@@ -3527,6 +4065,36 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_without_a_publication_remains_a_refusal_in_batch_discovery() {
+        let fixture = library_fixture();
+        let row = skill_scope(&fixture);
+        link_scope(&fixture, &row.scope.scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &row.scope.scope_id, &fixture.storage.id);
+        let repository = CatalogResourceRepositoryId::for_coordinate(&codex_skills());
+        fs::remove_dir_all(
+            fixture
+                .storage_path
+                .join(".mallard/v1/library")
+                .join(repository.as_str())
+                .join("_commits"),
+        )
+        .unwrap();
+        let listed = list_catalog_storage_repositories_with_repository(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.storage.id,
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].repository_id, repository.as_str());
+        assert!(listed[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("discovery tag but no publication"));
+    }
+
+    #[test]
     fn profile_names_derive_from_the_folder_and_deduplicate() {
         let fixture = library_fixture();
         let first_home = fixture.user_home.join("homes/myconf");
@@ -3846,8 +4414,8 @@ mod tests {
     /// as new afterwards instead of counting as accepted on a history the
     /// storage no longer has.
     #[test]
-    fn a_recreated_library_repository_reads_the_link_as_absent_and_a_push_keeps_its_own_acceptance(
-    ) {
+    fn a_recreated_library_repository_reads_the_link_as_absent_and_a_push_keeps_its_own_acceptance()
+    {
         let fixture = library_fixture();
         let notes = fixture.user_home.join("codex-home/skills/notes");
         fs::create_dir_all(&notes).unwrap();
@@ -3938,10 +4506,7 @@ mod tests {
             saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
             vec![review_id]
         );
-        assert_eq!(
-            state_of(&fixture, "review"),
-            Some(CatalogLinkState::InSync)
-        );
+        assert_eq!(state_of(&fixture, "review"), Some(CatalogLinkState::InSync));
         assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::New));
         assert_eq!(
             state_of(&fixture, "extra"),
@@ -4152,10 +4717,7 @@ mod tests {
 
         // The page loads, writes nothing, and reads the rows without the
         // displaced acceptances.
-        assert_eq!(
-            state_of(&fixture, "review"),
-            Some(CatalogLinkState::InSync)
-        );
+        assert_eq!(state_of(&fixture, "review"), Some(CatalogLinkState::InSync));
         assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::New));
         assert_eq!(link_of(&fixture), accepted);
 
@@ -4181,14 +4743,8 @@ mod tests {
             saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
             vec![notes_id]
         );
-        assert_eq!(
-            state_of(&fixture, "review"),
-            Some(CatalogLinkState::InSync)
-        );
-        assert_eq!(
-            state_of(&fixture, "notes"),
-            Some(CatalogLinkState::InSync)
-        );
+        assert_eq!(state_of(&fixture, "review"), Some(CatalogLinkState::InSync));
+        assert_eq!(state_of(&fixture, "notes"), Some(CatalogLinkState::InSync));
     }
 
     /// The Pull half of the save rule (cleared plan, section 4.5), from B2:
@@ -4198,8 +4754,7 @@ mod tests {
     /// the cleared history. Afterwards the installed skill reads in sync,
     /// and the own skill still reads as new, ready to push.
     #[test]
-    fn a_pull_from_an_accepted_state_read_as_absent_saves_the_reviewed_head_and_what_it_accepted(
-    ) {
+    fn a_pull_from_an_accepted_state_read_as_absent_saves_the_reviewed_head_and_what_it_accepted() {
         let fixture = library_fixture();
         let row = skill_scope(&fixture);
         let scope_id = row.scope.scope_id.clone();
@@ -4300,10 +4855,7 @@ mod tests {
             saved.accepted_resources.keys().cloned().collect::<Vec<_>>(),
             vec![extra_id]
         );
-        assert_eq!(
-            state_of(&fixture, "extra"),
-            Some(CatalogLinkState::InSync)
-        );
+        assert_eq!(state_of(&fixture, "extra"), Some(CatalogLinkState::InSync));
         assert_eq!(state_of(&fixture, "review"), Some(CatalogLinkState::New));
         let plan = prepare_push(&fixture, &scope_id, &fixture.storage.id);
         let offered = plan.push_row(&resource_id_of(&plan, "review")).unwrap();
@@ -4386,7 +4938,7 @@ mod tests {
         push_all(&fixture, &scope_id, &fixture.storage.id);
         let (other, other_scope) = puller(&fixture);
         let plan = prepare_pull(&other, &other_scope);
-        assert_eq!(plan.head.revision, 1);
+        assert_eq!(plan.head.as_ref().unwrap().revision, 1);
 
         // Version 2: the skill revised on the first computer.
         fs::write(
@@ -4410,10 +4962,7 @@ mod tests {
         );
         let loaded = page(&other, &other_scope, Some(&other.storage.id)).unwrap();
         assert_eq!(loaded.rows.len(), 1);
-        assert_eq!(
-            loaded.rows[0].state,
-            Some(CatalogLinkState::StorageChanged)
-        );
+        assert_eq!(loaded.rows[0].state, Some(CatalogLinkState::StorageChanged));
     }
 
     /// G2: the reviewed version lost its race, and then the repository was
@@ -4448,7 +4997,7 @@ mod tests {
 
         let (other, other_scope) = puller(&fixture);
         let plan = prepare_pull(&other, &other_scope);
-        assert_eq!(plan.head.revision, 2);
+        assert_eq!(plan.head.as_ref().unwrap().revision, 2);
         let link_before = link_of(&other, &other_scope);
 
         // The reviewed version loses its race to a record stamped earlier.
@@ -4521,8 +5070,19 @@ mod tests {
             .user_home
             .join(format!("codex-home/skills/{first}/SKILL.md"))
             .exists());
-        assert!(!other.user_home.join(format!("codex-home/skills/{}/SKILL.md", plan.items[1].item.display_name)).exists());
-        assert!(!other.catalog.load_materializations().unwrap().claims.is_empty());
+        assert!(!other
+            .user_home
+            .join(format!(
+                "codex-home/skills/{}/SKILL.md",
+                plan.items[1].item.display_name
+            ))
+            .exists());
+        assert!(!other
+            .catalog
+            .load_materializations()
+            .unwrap()
+            .claims
+            .is_empty());
         let link = link_of(&other, &other_scope).unwrap();
         assert!(link.accepted_head.is_none());
         assert_eq!(link.accepted_resources.len(), 1);
@@ -5036,5 +5596,522 @@ mod tests {
             .iter()
             .any(|descriptor| descriptor.coordinate() == coordinate));
         assert_eq!(CATALOG_SCHEMA, 1);
+    }
+
+    /// The Library on Mallard Cloud: one item per repository, one request per
+    /// refresh, the shared protocol per item (`PLAN_MANAGED_CLOUD_CAS_FREE.md`
+    /// section 6.6), against the in-process stub of the service.
+    #[cfg(test)]
+    mod managed_cloud_tests {
+        use super::*;
+        use mallard_domain::{BoundedConfigObject, SecretMap, SecretValue, StorageProviderConfig};
+        use mallard_infrastructure::managed_cloud::stub::StubManagedCloud;
+        use mallard_infrastructure::storage_providers::managed_cloud::{
+            provider_key, token_key, ManagedCloudSettingsV1,
+        };
+        use std::sync::Arc;
+
+        /// A machine signed in to the stub as `login`, with one Codex profile
+        /// holding the skills in `skills`, and Mallard Cloud as its storage.
+        fn managed_machine(
+            root: &Path,
+            stub: &StubManagedCloud,
+            login: &str,
+            skills: &[(&str, &[u8])],
+        ) -> Arc<LibraryFixture> {
+            let (user, token) = stub.state.lock().unwrap().add_user(login);
+            let user_home = root.join(login);
+            let codex_home = user_home.join("codex-home");
+            fs::create_dir_all(codex_home.join("skills")).unwrap();
+            for (name, body) in skills {
+                let skill = codex_home.join("skills").join(name);
+                fs::create_dir_all(&skill).unwrap();
+                fs::write(skill.join("SKILL.md"), body).unwrap();
+            }
+            let registry = CatalogRegistry::production();
+            let state = LocalStateRepository::from_home_dir(&user_home).unwrap();
+            let catalog = CatalogStateRepository::from_home_dir(&user_home).unwrap();
+            let profile = save_catalog_resource_profile_with_repository(
+                &registry,
+                &catalog,
+                ProviderKey::parse("codex").unwrap(),
+                codex_home.to_string_lossy().to_string(),
+                1,
+            )
+            .unwrap();
+            let mut secrets = SecretMap::empty();
+            secrets
+                .insert(token_key(), SecretValue::parse(&token).unwrap())
+                .unwrap();
+            let storage = StorageConfig {
+                id: StorageId::parse(format!("managed-{login}")).unwrap(),
+                name: "Mallard Cloud".to_string(),
+                provider: provider_key(),
+                provider_config: StorageProviderConfig::new(
+                    1,
+                    BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
+                        service_origin: stub.endpoint.clone(),
+                        account_id: user.id.clone(),
+                        account_login: login.to_string(),
+                    })
+                    .unwrap(),
+                    secrets,
+                ),
+            };
+            let mut config = SyncConfig::default();
+            config.storages.push(storage.clone());
+            state.save_config(config).unwrap();
+            Arc::new(LibraryFixture {
+                _temporary: tempfile::tempdir().unwrap(),
+                registry,
+                user_home,
+                skill_path: codex_home.join("skills/review"),
+                storage_path: root.join("unused"),
+                state,
+                catalog,
+                profile,
+                storage,
+            })
+        }
+
+        async fn blocking<T: Send + 'static>(
+            fixture: &Arc<LibraryFixture>,
+            work: impl FnOnce(&LibraryFixture) -> T + Send + 'static,
+        ) -> T {
+            let fixture = fixture.clone();
+            tokio::task::spawn_blocking(move || work(&fixture))
+                .await
+                .unwrap()
+        }
+
+        fn coordinate_request(kind: &str, format: &str, version: u32) -> String {
+            format!(
+                "GET /v1/repositories/library?provider=codex&resource_kind={kind}&format={format}&format_version={version}"
+            )
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn items_push_one_per_repository_and_a_refresh_is_one_coordinate_request() {
+            let stub = StubManagedCloud::start().await;
+            let root = tempfile::tempdir().unwrap();
+            let machine = managed_machine(
+                root.path(),
+                &stub,
+                "octocat",
+                &[
+                    ("review", b"---\nname: review\n---\nReview.\n"),
+                    ("extra", b"---\nname: extra\n---\nExtra.\n"),
+                ],
+            );
+            let (scope_id, storage_id) = blocking(&machine, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                let link = link_scope(fixture, &scope, &fixture.storage.id, 3);
+                assert_eq!(link.completion, "open");
+                push_all(fixture, &scope, &fixture.storage.id);
+                (scope, fixture.storage.id.clone())
+            })
+            .await;
+
+            // Two items, two repositories, each with one record and one claim
+            // under its own item stream, and the website's names.
+            {
+                let state = stub.state.lock().unwrap();
+                let mut names = state
+                    .repositories
+                    .values()
+                    .map(|repository| (repository.class.clone(), repository.name.clone()))
+                    .collect::<Vec<_>>();
+                names.sort();
+                assert_eq!(
+                    names,
+                    vec![
+                        ("catalog".to_string(), "extra".to_string()),
+                        ("catalog".to_string(), "review".to_string())
+                    ]
+                );
+                for repository in state.repositories.values() {
+                    let stream = &repository.catalog.as_ref().unwrap().library_repository_id;
+                    assert_eq!(
+                        repository
+                            .keys_under(&format!(".mallard/v1/library/{stream}/_commits"))
+                            .len(),
+                        1
+                    );
+                    assert_eq!(
+                        repository
+                            .keys_under(&format!(".mallard/v1/library/{stream}/_claims"))
+                            .len(),
+                        1
+                    );
+                    assert!(repository
+                        .objects
+                        .contains_key(&format!(".mallard/v1/library/{stream}/_tag.json")));
+                    assert_eq!(repository.private_revision, 1);
+                }
+            }
+            let links = machine.catalog.load_scope_links().unwrap();
+            assert_eq!(links.links[0].accepted_items.len(), 2);
+            assert_eq!(links.links[0].accepted_resources.len(), 2);
+            assert!(links.links[0].accepted_head.is_none());
+
+            // A refresh with nothing changed: one request, naming the
+            // coordinate, and nothing read or decoded beyond it.
+            stub.clear_log();
+            let refreshed = blocking(&machine, {
+                let scope_id = scope_id.clone();
+                let storage_id = storage_id.clone();
+                move |fixture| page(fixture, &scope_id, Some(&storage_id)).unwrap()
+            })
+            .await;
+            assert_eq!(refreshed.rows.len(), 2);
+            assert!(refreshed
+                .rows
+                .iter()
+                .all(|row| row.state == Some(CatalogLinkState::InSync)));
+            assert_eq!(refreshed.storage_revision, Some(1));
+            assert_eq!(
+                stub.request_lines(),
+                vec![coordinate_request("agent_skill", "agentskills.io.skill", 1)]
+            );
+
+            // Another coordinate's page names only its own coordinate.
+            stub.clear_log();
+            let pets = blocking(&machine, {
+                let storage_id = storage_id.clone();
+                move |fixture| {
+                    let scope = create_catalog_scope_with_repositories(
+                        &fixture.registry,
+                        &fixture.catalog,
+                        CatalogCoordinate::new("codex", "desktop_pet", "openai.codex-pet", 2)
+                            .unwrap(),
+                        fixture.profile.profile_id.clone(),
+                        5,
+                    )
+                    .unwrap()
+                    .scope
+                    .scope_id;
+                    page(fixture, &scope, Some(&storage_id)).unwrap()
+                }
+            })
+            .await;
+            assert!(pets.rows.is_empty());
+            assert_eq!(
+                stub.request_lines(),
+                vec![coordinate_request("desktop_pet", "openai.codex-pet", 2)]
+            );
+
+            // The Storages page lists the coordinate's items from the same answer.
+            let repositories = blocking(&machine, {
+                let storage_id = storage_id.clone();
+                move |fixture| {
+                    list_catalog_storage_repositories_with_repository(
+                        &fixture.registry,
+                        &fixture.state,
+                        &storage_id,
+                    )
+                    .unwrap()
+                }
+            })
+            .await;
+            assert_eq!(repositories.len(), 1);
+            assert_eq!(repositories[0].resource_names, vec!["extra", "review"]);
+
+            // A second push of an unchanged item publishes nothing; the plan
+            // offers nothing selectable.
+            let plan = blocking(&machine, {
+                let scope_id = scope_id.clone();
+                let storage_id = storage_id.clone();
+                move |fixture| prepare_push(fixture, &scope_id, &storage_id)
+            })
+            .await;
+            assert!(plan.rows.iter().all(|row| !row.row.selectable));
+            assert_eq!(plan.observed_items.len(), 2);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_item_pushed_by_one_account_is_pulled_by_another_and_a_stale_writer_is_refused()
+        {
+            let stub = StubManagedCloud::start().await;
+            let root = tempfile::tempdir().unwrap();
+            let alice = managed_machine(
+                root.path(),
+                &stub,
+                "alice",
+                &[("review", b"---\nname: review\n---\nAlice's review.\n")],
+            );
+            let bob = managed_machine(root.path(), &stub, "bob", &[]);
+            let alice_scope = blocking(&alice, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                link_scope(fixture, &scope, &fixture.storage.id, 3);
+                push_all(fixture, &scope, &fixture.storage.id);
+                scope
+            })
+            .await;
+            let (repository_id, bob_id) = {
+                let state = stub.state.lock().unwrap();
+                let repository = state.repositories.values().next().unwrap();
+                let bob_id = state
+                    .users
+                    .values()
+                    .find(|user| user.login == "bob")
+                    .unwrap()
+                    .id
+                    .clone();
+                (repository.id.clone(), bob_id)
+            };
+            stub.state
+                .lock()
+                .unwrap()
+                .add_member(&repository_id, &bob_id, "member");
+
+            // Bob links, reviews the Pull, and installs Alice's skill.
+            let bob_scope = blocking(&bob, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                let link = link_scope(fixture, &scope, &fixture.storage.id, 4);
+                assert_eq!(link.completion, "review_pull");
+                let plan = prepare_pull(fixture, &scope);
+                assert!(plan.head.is_none());
+                assert_eq!(plan.item_heads.len(), 1);
+                assert_eq!(plan.items.len(), 1);
+                let outcome = apply_pull_defaults(fixture, &plan).unwrap();
+                assert!(outcome.remote_accepted, "{:?}", outcome.results);
+                assert_eq!(
+                    outcome.results[0].outcome,
+                    CatalogActionOutcome::Installed,
+                    "{:?}",
+                    outcome.results
+                );
+                scope
+            })
+            .await;
+            assert_eq!(
+                fs::read(bob.user_home.join("codex-home/skills/review/SKILL.md")).unwrap(),
+                b"---\nname: review\n---\nAlice's review.\n"
+            );
+            let bob_links = bob.catalog.load_scope_links().unwrap();
+            assert_eq!(bob_links.links[0].accepted_items.len(), 1);
+
+            // Alice reviews a change; Bob pushes his own before she applies:
+            // her review is stale, nothing of hers is written, and her page
+            // reads the storage's change.
+            let alice_plan = blocking(&alice, {
+                let scope = alice_scope.clone();
+                move |fixture| {
+                    fs::write(
+                        fixture.skill_path.join("SKILL.md"),
+                        b"---\nname: review\n---\nAlice's second review.\n",
+                    )
+                    .unwrap();
+                    prepare_push(fixture, &scope, &fixture.storage.id)
+                }
+            })
+            .await;
+            assert!(alice_plan.rows[0].row.selectable);
+            blocking(&bob, {
+                let scope = bob_scope.clone();
+                move |fixture| {
+                    fs::write(
+                        fixture.user_home.join("codex-home/skills/review/SKILL.md"),
+                        b"---\nname: review\n---\nBob's review.\n",
+                    )
+                    .unwrap();
+                    push_all(fixture, &scope, &fixture.storage.id);
+                }
+            })
+            .await;
+            let refused = blocking(&alice, {
+                let plan = alice_plan.clone();
+                move |fixture| {
+                    apply_push(fixture, &plan, vec![plan.rows[0].row.resource_id.clone()])
+                        .unwrap_err()
+                }
+            })
+            .await;
+            assert!(refused.contains("changed after review"), "{refused}");
+            {
+                let state = stub.state.lock().unwrap();
+                let repository = &state.repositories[&repository_id];
+                assert_eq!(repository.private_revision, 2);
+                assert_eq!(
+                    state.users[&repository.head().unwrap().created_by].login,
+                    "bob"
+                );
+            }
+            let alice_page = blocking(&alice, {
+                let scope = alice_scope.clone();
+                move |fixture| page(fixture, &scope, Some(&fixture.storage.id)).unwrap()
+            })
+            .await;
+            assert_eq!(alice_page.rows[0].state, Some(CatalogLinkState::Diverged));
+
+            // A Pull review pinned on Bob's version installs it even after
+            // Bob pushes again: the reviewed version is still on the chain.
+            let alice_pull = blocking(&alice, {
+                let scope = alice_scope.clone();
+                move |fixture| prepare_pull(fixture, &scope)
+            })
+            .await;
+            blocking(&bob, {
+                let scope = bob_scope.clone();
+                move |fixture| {
+                    fs::write(
+                        fixture.user_home.join("codex-home/skills/review/SKILL.md"),
+                        b"---\nname: review\n---\nBob's third review.\n",
+                    )
+                    .unwrap();
+                    push_all(fixture, &scope, &fixture.storage.id);
+                }
+            })
+            .await;
+            let outcome = blocking(&alice, {
+                let plan = alice_pull.clone();
+                move |fixture| apply_pull_defaults(fixture, &plan).unwrap()
+            })
+            .await;
+            assert!(outcome.remote_accepted, "{:?}", outcome.results);
+            assert!(
+                fs::read_to_string(alice.skill_path.join("SKILL.md"))
+                    .unwrap()
+                    .contains("Bob's review."),
+                "the reviewed version, not the newest"
+            );
+        }
+
+        /// The same Library flow against a running Worker (a local `wrangler
+        /// dev` or staging), on an account whose token the environment
+        /// supplies; ignored by default. It pushes two skills of a fresh
+        /// machine, refreshes with one coordinate request, and reviews a
+        /// Pull on a second machine of the same account:
+        ///
+        /// ```sh
+        /// MALLARD_LIVE_CLOUD_ORIGIN=http://localhost:8787 MALLARD_LIVE_CLOUD_TOKEN=… \
+        /// MALLARD_LIVE_CLOUD_ACCOUNT_ID=usr_… MALLARD_LIVE_CLOUD_LOGIN=octocat \
+        ///   cargo test --manifest-path src-tauri/Cargo.toml --lib managed_cloud_live_library -- --ignored --nocapture
+        /// ```
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "needs a running Mallard Cloud Worker and a desktop token"]
+        async fn managed_cloud_live_library_round_trip() {
+            let origin = std::env::var("MALLARD_LIVE_CLOUD_ORIGIN").unwrap();
+            let token = std::env::var("MALLARD_LIVE_CLOUD_TOKEN").unwrap();
+            let account_id = std::env::var("MALLARD_LIVE_CLOUD_ACCOUNT_ID").unwrap();
+            let login = std::env::var("MALLARD_LIVE_CLOUD_LOGIN").unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let stamp = now_secs();
+            let machine = |name: &str, skills: &[(&str, &[u8])]| {
+                let user_home = root.path().join(name);
+                let codex_home = user_home.join("codex-home");
+                fs::create_dir_all(codex_home.join("skills")).unwrap();
+                for (skill, body) in skills {
+                    let path = codex_home.join("skills").join(skill);
+                    fs::create_dir_all(&path).unwrap();
+                    fs::write(path.join("SKILL.md"), body).unwrap();
+                }
+                let registry = CatalogRegistry::production();
+                let state = LocalStateRepository::from_home_dir(&user_home).unwrap();
+                let catalog = CatalogStateRepository::from_home_dir(&user_home).unwrap();
+                let profile = save_catalog_resource_profile_with_repository(
+                    &registry,
+                    &catalog,
+                    ProviderKey::parse("codex").unwrap(),
+                    codex_home.to_string_lossy().to_string(),
+                    1,
+                )
+                .unwrap();
+                let mut secrets = SecretMap::empty();
+                secrets
+                    .insert(token_key(), SecretValue::parse(&token).unwrap())
+                    .unwrap();
+                let storage = StorageConfig {
+                    id: StorageId::parse(format!("managed-live-{name}")).unwrap(),
+                    name: "Mallard Cloud".to_string(),
+                    provider: provider_key(),
+                    provider_config: StorageProviderConfig::new(
+                        1,
+                        BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
+                            service_origin: origin.clone(),
+                            account_id: account_id.clone(),
+                            account_login: login.clone(),
+                        })
+                        .unwrap(),
+                        secrets,
+                    ),
+                };
+                let mut config = SyncConfig::default();
+                config.storages.push(storage.clone());
+                state.save_config(config).unwrap();
+                Arc::new(LibraryFixture {
+                    _temporary: tempfile::tempdir().unwrap(),
+                    registry,
+                    user_home,
+                    skill_path: codex_home.join(format!("skills/live-{stamp}-a")),
+                    storage_path: root.path().join("unused"),
+                    state,
+                    catalog,
+                    profile,
+                    storage,
+                })
+            };
+            let first_name = format!("live-{stamp}-a");
+            let second_name = format!("live-{stamp}-b");
+            let first_body = format!("---\nname: {first_name}\n---\nLive skill A.\n");
+            let second_body = format!("---\nname: {second_name}\n---\nLive skill B.\n");
+            let pusher = machine(
+                "pusher",
+                &[
+                    (first_name.as_str(), first_body.as_bytes()),
+                    (second_name.as_str(), second_body.as_bytes()),
+                ],
+            );
+            let (scope_id, rows) = blocking(&pusher, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                link_scope(fixture, &scope, &fixture.storage.id, 3);
+                push_all(fixture, &scope, &fixture.storage.id);
+                let refreshed = page(fixture, &scope, Some(&fixture.storage.id)).unwrap();
+                (scope, refreshed.rows)
+            })
+            .await;
+            let mine = rows
+                .iter()
+                .filter(|row| row.display_name.starts_with(&format!("live-{stamp}-")))
+                .collect::<Vec<_>>();
+            assert_eq!(mine.len(), 2, "{rows:?}");
+            assert!(mine
+                .iter()
+                .all(|row| row.state == Some(CatalogLinkState::InSync)));
+            let plan = blocking(&pusher, {
+                let scope_id = scope_id.clone();
+                move |fixture| prepare_push(fixture, &scope_id, &fixture.storage.id)
+            })
+            .await;
+            assert!(plan
+                .rows
+                .iter()
+                .filter(|row| row.row.display_name.starts_with(&format!("live-{stamp}-")))
+                .all(|row| !row.row.selectable));
+
+            // A second machine of the same account reads both items in one
+            // request and reviews a Pull of them.
+            let puller = machine("puller", &[]);
+            let pull = blocking(&puller, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                let link = link_scope(fixture, &scope, &fixture.storage.id, 4);
+                assert_eq!(link.completion, "review_pull");
+                let plan = prepare_pull(fixture, &scope);
+                let outcome = apply_pull_defaults(fixture, &plan).unwrap();
+                assert!(outcome.remote_accepted, "{:?}", outcome.results);
+                plan
+            })
+            .await;
+            assert!(pull.head.is_none());
+            assert!(pull.item_heads.len() >= 2);
+            assert!(puller
+                .user_home
+                .join(format!("codex-home/skills/{first_name}/SKILL.md"))
+                .is_file());
+            eprintln!(
+                "live Library round trip complete: {} items pushed, pulled on a second machine",
+                mine.len()
+            );
+        }
     }
 }

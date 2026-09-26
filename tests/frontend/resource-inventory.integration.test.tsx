@@ -10,6 +10,8 @@ import PushResourceWorkspace, {
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import { PUSH_FINISHED, unfinishedPushSentence } from "../../src/unfinishedPush";
+import { pushFailureNotice } from "../../src/components/project-sync/pushFailureNotice";
+import { NoticeZone } from "../../src/components/notice/Notice";
 import ResourceInventory from "../../src/components/project-sync/ResourceInventory";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
 import type {
@@ -466,7 +468,6 @@ test("the push review is one screen: header actions, list, Push in the footer", 
       selected={new Set([resource.resource_id])}
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
-      error={null}
       onToggle={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
@@ -494,7 +495,34 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   assert.doesNotMatch(html, /Remote history is missing/);
 });
 
-test("a Push error names itself and offers no local-state reset", () => {
+/* A Push failure is drawn by the shell zone under the path bar, not by the
+   review: the review scrolls as one page with its list. */
+function renderPushFailure(error: string) {
+  return renderToStaticMarkup(
+    <NoticeZone
+      items={[pushFailureNotice(error, "Attic R2", {
+        busy: false,
+        onFinishPush: () => undefined,
+        onDismiss: () => undefined,
+      })]}
+      subject="messages from Mallard"
+      className="sync-backend-banner"
+      timing="blocking"
+    />,
+  );
+}
+
+test("a Push error names itself, closes, and offers no local-state reset", () => {
+  const html = renderPushFailure("Feishu returned an invalid response or a name Mallard cannot store.");
+  assert.match(html, /notice danger sync-backend-banner/);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /Error ·<\/strong> Feishu returned an invalid response/);
+  assert.equal(html.match(/class="sync-notice-dismiss"/g)?.length, 1, "one close control, drawn by the zone");
+  assert.match(html, /class="sync-notice-dismiss"[^>]*aria-label="Dismiss: Error\. Feishu returned an invalid response/);
+  assert.doesNotMatch(html, /Reset local sync state|Finish that push/);
+});
+
+test("the Push review no longer draws a failure of its own", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
@@ -503,47 +531,30 @@ test("a Push error names itself and offers no local-state reset", () => {
       selected={new Set([resource.resource_id])}
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
-      error="conversation Push action 'action-a' is stale at LineageDigest"
       onToggle={() => undefined}
       onClose={() => undefined}
       onPush={() => undefined}
     />,
   );
-
-  assert.match(html, /stale at LineageDigest/);
-  assert.doesNotMatch(html, /Reset local sync state/);
+  assert.doesNotMatch(html, /notice danger|sync-pull-error/);
 });
 
 test("a push that did not finish offers Finish that push, and a finished one reads done", () => {
-  const resource = memoryResource("review");
-  const render = (error: string, onFinishPush?: () => void) => renderToStaticMarkup(
-    <PushResourceWorkspace
-      credentialRedactionEnabled={true}
-      resources={[resource]}
-      selected={new Set([resource.resource_id])}
-      projectDefaults={new Set([resource.resource_id])}
-      busy={false}
-      error={error}
-      storageName="Attic R2"
-      onToggle={() => undefined}
-      onClose={() => undefined}
-      onPush={() => undefined}
-      onFinishPush={onFinishPush}
-    />,
-  );
-  const unfinished = render(unfinishedPushSentence("Attic R2"), () => undefined);
+  const unfinished = renderPushFailure(unfinishedPushSentence("Attic R2"));
   assert.match(unfinished, /A push to Attic R2 did not finish\. Finish it, then compare again\./);
   assert.match(unfinished, /Finish that push<\/button>/);
   assert.match(unfinished, /notice danger/);
+  // The action does not stop it closing: Finish that push, then the ×.
+  assert.match(unfinished, /Finish that push<\/button><button type="button" class="sync-notice-dismiss" title="Dismiss" aria-label="Dismiss: Error\./);
   // The same sentence for another storage, or any other error, offers nothing.
-  assert.doesNotMatch(render(unfinishedPushSentence("Other storage"), () => undefined), /Finish that push/);
-  assert.doesNotMatch(render("The storage changed while pushing. Compare again.", () => undefined), /Finish that push/);
-  assert.doesNotMatch(render(unfinishedPushSentence("Attic R2")), /Finish that push/);
-  // Once the record was written, the box reads done, not error.
-  const finished = render(PUSH_FINISHED, () => undefined);
+  assert.doesNotMatch(renderPushFailure(unfinishedPushSentence("Other storage")), /Finish that push/);
+  assert.doesNotMatch(renderPushFailure("The storage changed while pushing. Compare again."), /Finish that push/);
+  // Once the record was written, the box reads done, not error, and still closes.
+  const finished = renderPushFailure(PUSH_FINISHED);
   assert.match(finished, /notice success/);
   assert.match(finished, /Done ·/);
   assert.match(finished, /Finished\. Compare again\./);
+  assert.match(finished, /aria-label="Dismiss: Done\. Finished\. Compare again\."/);
   assert.doesNotMatch(finished, /Finish that push/);
 });
 
@@ -556,7 +567,6 @@ test("a failed comparison names the error and offers no reset", () => {
       selected={new Set()}
       projectDefaults={new Set()}
       busy={false}
-      error={null}
       threadComparisonError={threadComparisonError}
       onToggle={() => undefined}
       onClose={() => undefined}
@@ -584,7 +594,6 @@ test("two steps render two plain tabs — never a Review tab", () => {
       selected={new Set([resource.resource_id])}
       projectDefaults={new Set([resource.resource_id])}
       busy={false}
-      error={null}
       showProjectFiles
       onToggle={() => undefined}
       onClose={() => undefined}
@@ -708,7 +717,6 @@ test("held threads and storage blockers share one banner with one way forward", 
       selected={new Set([pushable.resource_id])}
       projectDefaults={new Set([pushable.resource_id])}
       busy={false}
-      error={null}
       storageName="Local storage 1"
       threadComparison={comparison}
       onToggle={() => undefined}
@@ -747,7 +755,6 @@ test("held threads and storage blockers share one banner with one way forward", 
       selected={new Set()}
       projectDefaults={new Set([pushable.resource_id])}
       busy={false}
-      error={null}
       storageName="Local storage 1"
       threadComparison={comparison}
       onToggle={() => undefined}
@@ -818,7 +825,6 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
       selected={new Set(rows.slice(0, 9).map((row) => row.resource_id))}
       projectDefaults={new Set()}
       busy={false}
-      error={null}
       storageName="Local storage 1"
       threadComparison={comparison}
       onToggle={() => undefined}
@@ -870,7 +876,6 @@ test("a selected item that cannot be captured reports in the footer, not above t
       selected={selected}
       projectDefaults={new Set()}
       busy={false}
-      error={null}
       storageName="Local storage 1"
       threadComparison={comparison}
       onToggle={() => undefined}

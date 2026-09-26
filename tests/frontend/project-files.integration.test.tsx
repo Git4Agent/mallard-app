@@ -147,7 +147,6 @@ test("an explicit Push scan presents new entries selected and locks both directo
       selected={selected}
       projectDefaults={selected}
       busy={false}
-      error={null}
       projectContentInventory={inventory}
       projectContentScanned
       showProjectFiles
@@ -188,7 +187,6 @@ test("Project file controls stay on the dedicated page", () => {
       selected={selected}
       projectDefaults={selected}
       busy={false}
-      error={null}
       projectContentInventory={inventory}
       projectContentScanned
       showProjectFiles
@@ -211,7 +209,6 @@ test("the footer carries the step navigator beside Push, forward then back", () 
       selected={selected}
       projectDefaults={selected}
       busy={false}
-      error={null}
       projectContentInventory={inventory}
       projectContentScanned
       showProjectFiles
@@ -262,7 +259,13 @@ test("warnings acknowledge through the catalog chip, and removal is the card's t
       onToggleWarning={() => undefined}
     />,
   );
-  assert.match(html, /catalog-card-ack/);
+  // The warning is an acknowledgement: the push waits on its tick, so it is
+  // the one message with no close control.
+  const ack = html.match(/<label class="notice warning notice-ack">[\s\S]*?<\/label>/)?.[0] ?? "";
+  assert.match(ack, /type="checkbox"/);
+  assert.doesNotMatch(ack, /sync-notice-dismiss/);
+  // The row chip names the finding in the same words as Files activity.
+  assert.match(html, /class="notice-chip warning"><svg[\s\S]*?<\/svg>Possible secret<\/span>/);
   assert.match(html, /Credential-shaped content<\/strong> — notes\/api_key\.txt/);
   assert.match(html, />Mark reviewed</);
   assert.match(html, /aria-label="Remove notes\/old_draft\.md from storage"/);
@@ -315,7 +318,6 @@ test("Push review shows only local-outstanding project files", () => {
       selected={selected}
       projectDefaults={selected}
       busy={false}
-      error={null}
       projectContentInventory={mixedInventory}
       projectContentScanned
       showProjectFiles
@@ -372,7 +374,6 @@ test("Push gates storage deletions and Pull omits conflict deletions", () => {
       selected={new Set()}
       projectDefaults={new Set()}
       busy={false}
-      error={null}
       projectContentInventory={removalInventory}
       projectContentScanned
       projectContentRemovals={removals}
@@ -463,7 +464,6 @@ test("opening the files step scans by itself — no interstitial, just the scaff
       selected={new Set()}
       projectDefaults={new Set()}
       busy={false}
-      error={null}
       projectContentInventory={null}
       projectContentScanned={false}
       showProjectFiles
@@ -642,6 +642,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
       supportLoading={false}
       busy={false}
       error={null}
+      onDismissError={() => undefined}
       onApply={() => undefined}
       onBack={() => undefined}
       onRefreshPlan={() => undefined}
@@ -753,6 +754,7 @@ test("generic pull rows wear the same operation chips", () => {
       supportLoading={false}
       busy={false}
       error={null}
+      onDismissError={() => undefined}
       onApply={() => undefined}
       onBack={() => undefined}
     />,

@@ -9,7 +9,7 @@ import type {
   StorageSetupDraft,
   StorageSummary,
 } from "../../types";
-import Icon, { iconNameFromHint, type IconName } from "../Icons";
+import Icon, { storageIconName, type IconName } from "../Icons";
 import { openExternalUrl } from "./externalLink";
 import { compactProjectPath, formatRelativeTime } from "./model";
 import { rowReceipt, useSettingsReceipts } from "./settingsReceipts";
@@ -243,21 +243,30 @@ function HelpMark({ text, url }: { text: string; url?: string | null }) {
   );
 }
 
-/** The lane row's glyph and label per direct-setup route. The Dropbox and
- *  Mallard Cloud routes are browser sign-ins; Wrangler is a terminal. */
+/** The lane row's glyph and label per direct-setup route. The Dropbox,
+ *  Feishu and Mallard Cloud routes are browser sign-ins; Wrangler is a
+ *  terminal. */
 export function setupRouteIcon(route: StorageProviderDescriptor["local_setup"]): "cloud" | "link" | "terminal" {
-  return route === "managed_cloud" ? "cloud" : route === "dropbox" ? "link" : "terminal";
+  return route === "managed_cloud" ? "cloud" : route === "dropbox" || route === "feishu" ? "link" : "terminal";
 }
 export function setupRouteLabel(route: StorageProviderDescriptor["local_setup"], verb: "setup" | "sign-in"): string {
   if (route === "managed_cloud") return `Mallard Cloud ${verb}`;
   if (route === "dropbox") return `Dropbox ${verb}`;
+  if (route === "feishu") return `Feishu ${verb}`;
   return "Wrangler setup";
+}
+
+/** A draft's settings as the naming rule reads them: every value as text,
+ *  including the ones the adapter keeps that no field shows, such as a
+ *  Dropbox folder's name or a Mallard Cloud login. */
+export function settingStrings(settings: StorageSettings): Record<string, string> {
+  return Object.fromEntries(Object.entries(settings).map(([key, value]) => [key, settingString(value)]));
 }
 
 /** The name the descriptor's suggestion rule proposes for these settings,
  *  or null when the rule is absent, unmatched, or invalid. */
 export function suggestStorageName(
-  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "local_setup">,
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion">,
   settings: Record<string, string>,
 ): string | null {
   const rule = descriptor.name_suggestion;
@@ -265,41 +274,51 @@ export function suggestStorageName(
   try {
     const matched = (settings[rule.source] ?? "").match(new RegExp(rule.pattern));
     const suggested = matched?.[rule.group]?.trim() ?? "";
-    return suggested.length > 0 ? descriptor.local_setup === "wrangler" ? `R2 ${suggested}` : suggested : null;
+    return suggested.length > 0 ? rule.template.replace("{1}", suggested) : null;
   } catch {
     return null;
   }
+}
+
+/** The smallest free `name`, `name 2`, `name 3`, … among the taken ones. */
+export function uniqueStorageName(name: string, taken: readonly string[]): string {
+  let candidate = name;
+  for (let n = 2; taken.includes(candidate); n += 1) candidate = `${name} ${n}`;
+  return candidate;
 }
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Whether the name is still Mallard's — empty, the numbered default a new
- *  draft opens with, or the suggestion its current settings produce — so a
- *  later suggestion may replace it. A name the user typed is never touched. */
+/** Whether the name is still Mallard's — empty, the placeholder a new draft
+ *  opens with, the stem alone, or the suggestion these settings produce with
+ *  or without its uniqueness number — so a later suggestion may replace it.
+ *  A name the user typed is never touched. */
 export function storageNameIsAuto(
-  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name" | "local_setup">,
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name">,
   form: Pick<StorageEditorForm, "name" | "settings">,
+  settings: Record<string, string> = form.settings,
 ): boolean {
   const name = form.name.trim();
   if (name.length === 0) return true;
   const stem = descriptor.default_name?.trim();
-  if (stem && (name === stem || new RegExp(`^${escapeRegExp(stem)} \\d+$`).test(name))) return true;
-  return name === suggestStorageName(descriptor, form.settings);
+  if (stem && (name === stem || new RegExp(`^${escapeRegExp(stem)} draft \\d+$`).test(name))) return true;
+  const suggested = suggestStorageName(descriptor, settings);
+  return suggested !== null && (name === suggested || new RegExp(`^${escapeRegExp(suggested)} \\d+$`).test(name));
 }
 
-/** Use the same naming rule for typed settings and a prepared Wrangler draft. */
+/** The name for `settings`: the suggestion made unique among `taken`, or
+ *  the stem while the source is cleared — unless the user typed a name. */
 export function storageNameForSettings(
-  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name" | "local_setup">,
+  descriptor: Pick<StorageProviderDescriptor, "name_suggestion" | "default_name">,
   form: Pick<StorageEditorForm, "name" | "settings">,
   settings: Record<string, string>,
+  taken: readonly string[] = [],
 ): string {
   if (!storageNameIsAuto(descriptor, form)) return form.name;
-  // Clearing a bucket keeps the name automatic while its replacement is typed.
-  return suggestStorageName(descriptor, settings)
-    ?? (descriptor.local_setup === "wrangler" ? descriptor.default_name : null)
-    ?? form.name;
+  const suggested = suggestStorageName(descriptor, settings);
+  return suggested ? uniqueStorageName(suggested, taken) : descriptor.default_name ?? form.name;
 }
 
 /** Apply every declared derivation whose source is `changedFieldId`: a match
@@ -412,6 +431,7 @@ export function StorageEditor({
   discoverySlot,
   manualEntry,
   setupDone = false,
+  takenNames = [],
 }: {
   descriptor: StorageProviderDescriptor;
   /** Every provider this build offers, in the backend's order: the header's
@@ -442,6 +462,9 @@ export function StorageEditor({
   manualEntry?: boolean;
   /** The setup lane reached the final connection review. */
   setupDone?: boolean;
+  /** Names the configured storages already use: a suggested name that
+   *  collides takes the next free number. */
+  takenNames?: readonly string[];
 }) {
   const fieldIdPrefix = useId();
   const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
@@ -451,7 +474,7 @@ export function StorageEditor({
     const settings = applyFieldDerivations(descriptor, { ...form.settings, [fieldId]: value }, fieldId);
     // The name follows the settings only while it is still Mallard's own;
     // a typed name stays, and the field stays editable either way.
-    onChange({ ...form, settings, name: storageNameForSettings(descriptor, form, settings) });
+    onChange({ ...form, settings, name: storageNameForSettings(descriptor, form, settings, takenNames) });
   };
   const setSecret = (secretId: string, value: string) => onChange({
     ...form,
@@ -465,26 +488,31 @@ export function StorageEditor({
   const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
   const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
   const managed = hasManagedCredentials(descriptor, secretPresence);
-  /* A new draft on a provider that can look in its account is asked Create
-     new or Use existing before it shows a lane. The doors are the editor's;
-     what each door leads to is the workspace's. A provider that cannot look
-     is past the question. */
-  const doors = setupMode && descriptor.discovery
-    ? { ...setupMode, discovery: descriptor.discovery }
+  /* A new draft on a provider whose lane can reach an existing destination
+     is asked Create new or Use existing before it shows a lane. The doors
+     are the editor's; what each door leads to is the workspace's. Any
+     other provider is past the question. */
+  const doors = setupMode && descriptor.setup_doors
+    ? { ...setupMode, sentences: descriptor.setup_doors }
     : null;
   const usingExisting = doors?.mode === "existing";
   const showLanes = doors === null || doors.mode === "create";
   /* Direct setup is available for both creation and discovery. */
   const wranglerLane = !!descriptor.local_setup && !managed;
-  // Keep review available when a prepared draft is reopened or edited.
-  const wranglerReviewReady = setupDone || descriptor.secrets.some((secret) => secretPresence[secret.secret_id]);
+  // Keep review available when a prepared draft is reopened or edited: a
+  // stored secret says the lane ran; a provider with no secret says so
+  // through its required fields.
+  const wranglerReviewReady = setupDone
+    || descriptor.secrets.some((secret) => secretPresence[secret.secret_id])
+    || (descriptor.secrets.length === 0 && descriptor.fields.length > 0
+      && descriptor.fields.every((field) => !field.required || (form.settings[field.field_id] ?? "").trim().length > 0));
   const showFields = wranglerLane
     ? wranglerReviewReady || manualExpanded
     : showLanes || (usingExisting && !!manualEntry);
   return (
     <article className="sync-storage-card">
       <header>
-        <span className="sync-storage-icon"><Icon name={iconNameFromHint(descriptor.icon, "drive")} size={18} /></span>
+        <span className="sync-storage-icon"><Icon name={storageIconName(descriptor.key, descriptor.icon)} size={18} /></span>
         <input
           value={form.name}
           onChange={(event) => setName(event.target.value)}
@@ -519,7 +547,7 @@ export function StorageEditor({
           <ModeDoor
             icon="plus"
             title="Create new"
-            detail={doors.discovery.create_hint}
+            detail={doors.sentences.create_hint}
             checked={doors.mode === "create"}
             disabled={disabled}
             onChoose={() => doors.onChoose("create")}
@@ -527,8 +555,8 @@ export function StorageEditor({
           <ModeDoor
             icon="search"
             title="Use existing"
-            detail={doors.discovery.existing_hint}
-            help={doors.discovery.existing_help}
+            detail={doors.sentences.existing_hint}
+            help={doors.sentences.existing_help}
             checked={doors.mode === "existing"}
             disabled={disabled}
             onChoose={() => doors.onChoose("existing")}
@@ -593,7 +621,10 @@ export function StorageEditor({
         </div>
       )}
       {usingExisting && discoverySlot}
-      {(showLanes || usingExisting && wranglerLane) && !managed && (wranglerLane || !setupDone) && (wranglerLane && descriptor.fields.length > 0 || descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
+      {/* Beside a lane, Manual setup is offered only by a provider that can
+          be entered by hand; one whose lane is the only way in (a sign-in
+          only Mallard can mint) declares no manual hint and gets no row. */}
+      {(showLanes || usingExisting && wranglerLane) && !managed && (wranglerLane || !setupDone) && !!(wranglerLane ? descriptor.manual_setup_hint : descriptor.manual_setup_hint || descriptor.setup_guide_url) && (
         <>
 
           <div className="storage-setup-route-row" role="note">
@@ -853,6 +884,13 @@ export function StorageLockedForm({
   const presence = Object.fromEntries(storage.secrets.map((secret) => [secret.secret_id, secret.present]));
   const folderFields = descriptor.fields.filter((field) => field.kind === "directory");
   const gridFields = descriptor.fields.filter((field) => field.kind !== "directory");
+  /* What the adapter reports about the storage beyond its typed fields: a
+     folder's name, the signed-in account, the date a sign-in runs out.
+     Read-only facts in the fields' grammar; a path fact is the folder
+     field's own. */
+  const extraFacts = storage.summary.filter((fact) => (
+    !fact.is_path && !descriptor.fields.some((field) => field.field_id === fact.field_id)
+  ));
   const managed = hasManagedCredentials(descriptor, presence);
   const suspended = connectionSuspends(storage.connection);
   const lock = <span className="sync-storage-lock" title="Fixed for this storage"><Icon name="lock" size={11} /></span>;
@@ -866,7 +904,7 @@ export function StorageLockedForm({
   return (
     <article className="sync-storage-card sync-storage-locked">
       <header>
-        <span className="sync-storage-icon"><Icon name={iconNameFromHint(descriptor.icon, "drive")} size={18} /></span>
+        <span className="sync-storage-icon"><Icon name={storageIconName(descriptor.key, descriptor.icon)} size={18} /></span>
         {/* The name saves the way a project rename does: Save and Cancel
             appear beside the field as soon as it differs from what is
             saved; Enter saves, Escape cancels; the receipt says it landed. */}
@@ -936,7 +974,7 @@ export function StorageLockedForm({
         </label>
       ))}
 
-      {(gridFields.length > 0 || descriptor.secrets.length > 0) && (
+      {(gridFields.length > 0 || extraFacts.length > 0 || descriptor.secrets.length > 0) && (
         <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
           {gridFields.map((field) => (
             <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
@@ -952,6 +990,14 @@ export function StorageLockedForm({
                 spellCheck={false}
               />
               {field.help && <small className="sync-storage-field-help">{field.help}</small>}
+            </div>
+          ))}
+          {extraFacts.map((fact) => (
+            <div key={fact.field_id} className="storage-provider-field storage-provider-fact">
+              <span className="form-label-row">
+                <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-fact-${fact.field_id}`}>{fact.label}</label>
+              </span>
+              <input type="text" id={`${fieldIdPrefix}-fact-${fact.field_id}`} value={fact.value} readOnly spellCheck={false} />
             </div>
           ))}
           {descriptor.secrets.map((secret) => {

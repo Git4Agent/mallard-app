@@ -6,6 +6,7 @@ import type {
   DraftProfileSelection,
   LocalProjectSummary,
   ProjectDetail,
+  ProjectFolderProbe,
   ProjectSetupDraft,
   ProviderDescriptor,
   ProviderKey,
@@ -15,19 +16,26 @@ import type {
   SetupSectionStatus,
   StorageSummary,
 } from "../../types";
-import Icon, { iconNameFromHint } from "../Icons";
-import Notice from "../notice/Notice";
+import Icon, { storageIconName } from "../Icons";
+import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
 import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import {
-  compactProjectPath,
   formatRelativeTime,
   projectLabel,
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
 } from "./model";
+import ProjectFolderField from "./ProjectFolderField";
+import {
+  compactFolderPath,
+  folderVerdict,
+  readFolderInput,
+  settledProbe,
+  useProjectFolderProbe,
+} from "./projectFolder";
 import RepositoryAddressPicker, {
   isManagedCloudStorage,
   useManagedCloudRepositories,
@@ -413,6 +421,34 @@ export default function ProjectSetupWorkspace({
   ), [draft?.profiles, homePath, providers]);
   const pathProbes = useProfilePathProbes(probeTargets, workflowIsActive);
 
+  // The Folder row shows the draft's folder until it is edited, and an edit
+  // moves the draft only on Enter or a Browse result: every prefix of a real
+  // path is a folder too, so typing must never save one.
+  const [folderText, setFolderText] = useState<string | null>(null);
+  const shownFolder = folderText ?? (draft ? compactFolderPath(draft.project_root, homePath) : "");
+  const folderInput = readFolderInput(shownFolder, homePath);
+  const folderProbeState = useProjectFolderProbe(
+    draft && folderInput.kind === "path" ? folderInput.path : null,
+    workflowIsActive,
+  );
+  const folderUncommitted = folderText !== null
+    && !(folderInput.kind === "path" && folderInput.path === draft?.project_root);
+  const moveFolder = (path: string, probe: ProjectFolderProbe | null) => {
+    // Another draft's folder is not somewhere this one can move.
+    if (probe?.kind !== "folder" || (probe.existing_draft_id && probe.existing_draft_id !== draftId)) return;
+    if (path !== draft?.project_root) edit((current) => ({ ...current, project_root: path }));
+    setFolderText(null);
+  };
+  const browsedFolder = async (picked: string) => {
+    setFolderText(compactFolderPath(picked, homePath));
+    try {
+      const probe = await projectSyncApi.probeProjectFolder(picked);
+      if (workflowIsActive()) moveFolder(picked, probe);
+    } catch {
+      // The field's own probe reports the failure.
+    }
+  };
+
   const sections = inspection?.sections ?? [];
   const usesExistingRepo = draft?.repository.kind === "existing";
   const exactMatches = useMemo(() => (
@@ -456,12 +492,6 @@ export default function ProjectSetupWorkspace({
         return { ...current, profiles: rest };
       });
     }
-  };
-
-  const changeProjectFolder = async () => {
-    const picked = await open({ directory: true, multiple: false });
-    if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
-    edit((current) => ({ ...current, project_root: picked }));
   };
 
   const finalize = async () => {
@@ -556,7 +586,9 @@ export default function ProjectSetupWorkspace({
     && !bundlesLoading
     && !(managedStorage && managedListing.state === "loading")
     && saveState !== "saving"
-    && saveState !== "error";
+    && saveState !== "error"
+    // Finish sets up the folder the draft holds, never one still being typed.
+    && !folderUncommitted;
   // The repository decision is always explicit once a storage is chosen:
   // either the user picks from the repos already in the storage, or they see
   // the statement that Finish creates a new one. No silent default.
@@ -747,20 +779,27 @@ export default function ProjectSetupWorkspace({
                 onChange={(event) => edit((current) => ({ ...current, display_name: event.target.value }))}
               />
             </label>
-            <label>
-              <span>Folder</span>
-              <div className="sync-profile-select-row">
-                <input value={compactProjectPath(draft.project_root)} readOnly title={draft.project_root} aria-describedby={projectErrorId} />
-                {/* The same glyph Browse wears two bands down: both buttons
-                    open the same folder picker. */}
-                <button type="button" className="btn" onClick={() => void changeProjectFolder()} disabled={working}>
-                  <Icon name="folder" size={13} /> Change…
-                </button>
-              </div>
-            </label>
+            <ProjectFolderField
+              value={shownFolder}
+              verdict={folderVerdict(folderInput, folderProbeState, {
+                compact: (path) => compactFolderPath(path, homePath),
+                projects,
+                draftId,
+              })}
+              disabled={working}
+              placeholder="~/code/my-app"
+              describedBy={projectErrorId}
+              onChange={setFolderText}
+              onEnter={() => {
+                if (folderInput.kind === "path") {
+                  moveFolder(folderInput.path, settledProbe(folderInput, folderProbeState));
+                }
+              }}
+              onBrowsed={(picked) => void browsedFolder(picked)}
+            />
           </div>
           {projectSection?.message && projectSection.state === "blocked" && (
-            <div id={projectErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {projectSection.message}</div>
+            <FieldMessage id={projectErrorId}>{projectSection.message}</FieldMessage>
           )}
           {usesExistingRepo && (
             <small className="sync-setup-hint">The project name follows the connected remote repo.</small>
@@ -801,7 +840,7 @@ export default function ProjectSetupWorkspace({
             })}
           </div>
           {profileErrorMessage && (
-            <div id="sync-setup-error-agent" className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {profileErrorMessage}</div>
+            <FieldMessage id="sync-setup-error-agent">{profileErrorMessage}</FieldMessage>
           )}
         </section>
 
@@ -867,7 +906,7 @@ export default function ProjectSetupWorkspace({
                   disabled={working || !storage.available}
                   onClick={() => chooseStorage(storage.storage_id)}
                 >
-                  <Icon name={iconNameFromHint(storage.icon, "drive")} size={12} />
+                  <Icon name={storageIconName(storage.provider, storage.icon)} size={12} />
                   <span className="setup-pill-label">{name}{storage.available ? "" : " (unavailable)"}</span>
                   <span className="setup-pill-check" aria-hidden="true">
                     {active && <Icon name="check" size={12} />}
@@ -877,7 +916,7 @@ export default function ProjectSetupWorkspace({
             })}
           </div>
           {storageSection?.message && storageSection.state === "blocked" && (
-            <div id={storageErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {storageSection.message}</div>
+            <FieldMessage id={storageErrorId}>{storageSection.message}</FieldMessage>
           )}
           {bundlesLoading && (
             <small className="sync-setup-inline-status"><span className="status-loader" /> Checking repositories…</small>
@@ -891,7 +930,7 @@ export default function ProjectSetupWorkspace({
               {sectionBadge(repositorySection)}
             </div>
             {repositorySection?.message && repositorySection.state === "blocked" && (
-              <div id={repositoryErrorId} className="sync-setup-field-error"><Icon name="alert-triangle" size={13} /> {repositorySection.message}</div>
+              <FieldMessage id={repositoryErrorId}>{repositorySection.message}</FieldMessage>
             )}
             {managedStorage && selectedStorage ? (
               /* Mallard Cloud: the repository is named by its website
@@ -1009,19 +1048,15 @@ export default function ProjectSetupWorkspace({
                 draft.repository.repository_fingerprint,
                 repositoryFingerprint,
               ) && (
-              <label className="sync-setup-acknowledge">
-                <input
-                  type="checkbox"
-                  checked={draft.repository.mismatch_acknowledged}
-                  disabled={working}
-                  onChange={(event) => edit((current) => current.repository.kind === "existing"
-                    ? { ...current, repository: { ...current.repository, mismatch_acknowledged: event.target.checked } }
-                    : current)}
-                />
-                <span>
-                  This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity.
-                </span>
-              </label>
+              <Acknowledgement
+                checked={draft.repository.mismatch_acknowledged}
+                disabled={working}
+                onChange={(checked) => edit((current) => current.repository.kind === "existing"
+                  ? { ...current, repository: { ...current.repository, mismatch_acknowledged: checked } }
+                  : current)}
+              >
+                This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity.
+              </Acknowledgement>
             )}
           </section>
         )}
@@ -1034,9 +1069,13 @@ export default function ProjectSetupWorkspace({
       </div>
 
       <footer className="sync-modal-footer sync-setup-footer">
-        {(saveState === "saving" || saveState === "error") && (
+        {(saveState === "saving" || saveState === "error") ? (
           <span className="sync-setup-save-state" aria-live="polite">
             {saveState === "saving" ? "Saving…" : "Not saved"}
+          </span>
+        ) : folderUncommitted && (
+          <span className="sync-setup-save-state" aria-live="polite">
+            Press Enter to use the new folder
           </span>
         )}
         <div>

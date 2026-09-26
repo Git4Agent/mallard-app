@@ -67,10 +67,8 @@ export interface R2SetupState {
   accounts: R2Account[];
   account: R2Account | null;
   jurisdiction: R2Jurisdiction;
-  /** The name in the Bucket line's field: the proposal until it is edited. */
+  /** The name in the Bucket line's field: Mallard's proposal until it is edited. */
   name: string;
-  /** The last name Mallard proposed. */
-  proposal: string | null;
   /** The bucket the helper created, or found created, for this draft. */
   bucket: string | null;
   scan: StorageDiscoveryResult | null;
@@ -81,7 +79,7 @@ export interface R2SetupState {
 export function idleR2State(): R2SetupState {
   return {
     phase: "idle", running: false, failed: null, cancelled: false, cancelling: false, cancelError: null, link: null,
-    wrangler: null, accounts: [], account: null, jurisdiction: "default", name: "", proposal: null, bucket: null, scan: null, chosen: null,
+    wrangler: null, accounts: [], account: null, jurisdiction: "default", name: "", bucket: null, scan: null, chosen: null,
   };
 }
 
@@ -114,7 +112,7 @@ const FAILURE_FACTS: Record<R2SetupErrorCode, string> = {
   account_unavailable: "No longer available · check the login",
   draft_changed: "The draft changed · open it again",
   setup_busy: "Another storage operation is running · wait, then try again",
-  creation_unknown: "Creation result unknown · check the bucket in Cloudflare before continuing",
+  creation_unknown: "Cloudflare did not confirm the bucket · check the account, then try again or use an existing one",
   permission_denied: "Cloudflare refused access · check the account permissions",
   r2_not_enabled: "R2 is not enabled for this account. Complete R2 setup in the Cloudflare dashboard, then try again.",
   authentication_failed: "Cloudflare could not verify the sign-in. Select Change login, then sign in again.",
@@ -140,8 +138,8 @@ export function r2SetupErrorCode(reason: unknown): R2SetupErrorCode {
 const DEPENDENCY_CODES = new Set<R2SetupErrorCode>([
   "wrangler_not_found", "wrangler_runtime_unavailable", "wrangler_update_required", "helper_unavailable",
 ]);
-/** Only a fresh draft gets past these. */
-const FINAL_CODES = new Set<R2SetupErrorCode>(["creation_unknown", "identity_mismatch"]);
+/** Only a fresh draft gets past this. */
+const FINAL_CODES = new Set<R2SetupErrorCode>(["identity_mismatch"]);
 
 /** The step a failure belongs to: the helper checks Wrangler and the session
  *  on every run, so those failures go to their own lines whatever ran. */
@@ -287,8 +285,8 @@ export function useR2Setup({ enabled, draftId, mode, port, api = projectSyncApi 
      the create. A proposal that cannot be fetched fails the Bucket step. */
   const propose = async () => {
     try {
-      const proposal = await api.proposeR2BucketName();
-      if (phaseRef.current === "bucket") patch({ name: proposal, proposal, failed: null });
+      const name = await api.proposeR2BucketName();
+      if (phaseRef.current === "bucket") patch({ name, failed: null });
     } catch (reason) {
       if (phaseRef.current === "bucket") patch({ failed: r2SetupErrorCode(reason) });
     }
@@ -297,7 +295,7 @@ export function useR2Setup({ enabled, draftId, mode, port, api = projectSyncApi 
     const account = stateRef.current.accounts.find((candidate) => candidate.id === accountId);
     if (!account) return;
     if (mode === "existing") return scan(account);
-    patch({ phase: "bucket", account, name: "", proposal: null });
+    patch({ phase: "bucket", account, name: "" });
     if (mode === "create") void propose();
   };
   const setName = (name: string) => patch(stateRef.current.failed === "bucket_name_taken" ? { name, failed: null } : { name });
@@ -393,7 +391,7 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
   /** The page is busy — the lane's run included. A run keeps its own Cancel
    *  and browser verbs live. */
   disabled: boolean;
-  descriptor: Pick<StorageProviderDescriptor, "icon">;
+  descriptor: Pick<StorageProviderDescriptor, "key" | "icon">;
   /** Every configured storage, to name the one a found bucket is already
    *  connected as. */
   storages: readonly StorageSummary[];
@@ -440,11 +438,11 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
   /* A browser step is the user's turn, in whichever browser or profile they
      choose: the link is theirs to copy; opening it here is the shortcut. */
   const browserFact = (stage: "login" | "bucket", budget: string) => (
-    <>{stage === "login" ? "Sign in to Cloudflare in a browser on this computer" : "Approve access in a browser on this computer"} · <span className="r2-countdown">{budget}</span></>
+    <>{stage === "login" ? "Sign in to Cloudflare in your browser" : "Approve in your browser"} · <span className="r2-countdown">{budget}</span></>
   );
-  const browserControls = (stage: "login" | "bucket", url: string) => (
+  const browserControls = (url: string) => (
     <>
-      {button(<><Icon name="copy" size={12} /> {stage === "login" ? "Copy login link" : "Copy authorization link"}</>, () => void copy(url, "Link", url), "primary", false)}
+      {button(<><Icon name="copy" size={12} /> Copy link</>, () => void copy(url, "Link", url), "primary", false)}
       {button(<><Icon name="external-link" size={12} /> Open browser</>, () => void openExternalUrl(url), "plain", false)}
       {cancelButton}
       {copyStatus}
@@ -472,7 +470,7 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
       key: "wrangler", title: "Wrangler", status,
       fact: status === "failed" ? (dependency ? <>{failure()} · <code>{WRANGLER_INSTALL_COMMAND}</code></> : failure())
         : status === "stopped" ? "Stopped"
-        : status === "doing" ? "Checking the install…"
+        : status === "doing" ? "Checking…"
         : state.wrangler ? <>{state.wrangler.version} · <code>{state.wrangler.path}</code></>
         : status === "done" ? "Checked"
         : "Checks the install",
@@ -496,10 +494,10 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
       fact: status === "failed" ? failure()
         : status === "stopped" ? "Stopped"
         : status === "doing" ? (state.link ? browserFact("login", loginBudget) : "Starting sign-in…")
-        : status === "done" ? "Wrangler session on this Mac"
-        : "Uses the Wrangler session; asks for a browser sign-in if there is none",
+        : status === "done" ? "Wrangler session"
+        : "Wrangler session, or your browser",
       controls: status === "failed" || status === "stopped" ? retryButton
-        : status === "doing" ? (state.link ? browserControls("login", state.link.url) : cancelButton)
+        : status === "doing" ? (state.link ? browserControls(state.link.url) : cancelButton)
         : status === "done" && settled && !confirming ? changeLoginButton
         : undefined,
     };
@@ -514,7 +512,7 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
       fact: status === "failed" ? failure()
         : state.account ? <>{state.account.name || state.account.id} · <code>{shortId(state.account.id)}</code></>
         : status === "doing" ? `${state.accounts.length} accounts in this session`
-        : "Confirmed before anything is created or listed",
+        : "Confirmed before anything changes",
       controls: status === "failed" ? <>{retryButton}{changeLoginButton}</>
         : status === "doing" ? (
           <>
@@ -547,10 +545,10 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
           : state.failed === "identity_mismatch" ? "The bucket changed or is no longer available"
           : failure())
         : status === "stopped" ? "Stopped"
-        : state.phase === "find" ? "Looking across Default, EU, US and FedRAMP · read-only"
+        : state.phase === "find" ? "Scanning all jurisdictions · read-only"
         : result && status === "doing" ? <>{result.candidates.length} checked · read-only</>
         : status === "done" && state.chosen ? <><code>{state.chosen.name}</code> · {state.chosen.facts.find((fact) => fact.label === "Jurisdiction")?.value ?? "Default"}</>
-        : "Lists your buckets and reads one marker in each · read-only",
+        : "Your buckets · read-only",
       controls: status === "failed" ? (expired ? scanAgainButton : retryButton)
         : status === "stopped" ? retryButton
         : state.phase === "find" ? cancelButton
@@ -606,8 +604,8 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
     const taken = state.failed === "bucket_name_taken";
     /* Until a bucket exists the name is the user's: proposed in the field,
        editable, and back in the field with the reason when it was taken.
-       The note after the field says whose the name is, spells the rule a
-       wrong one breaks, or names the conflict; the segments stay live. */
+       The note after the field spells the rule a wrong one breaks, or
+       names the conflict; the segments stay live. */
     const naming = !reconnect && state.phase === "bucket" && (!interrupted || taken);
     const issue = bucketNameIssue(state.name);
     const nameField = (
@@ -622,22 +620,21 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
           onChange={(event) => flow.setName(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && issue === null) flow.createAndAuthorize(); }}
         />
-        {button(<><Icon name="refresh" size={12} /> Suggest another</>, flow.suggestAnother)}
+        {button(<><Icon name="refresh" size={12} /> Suggest</>, flow.suggestAnother)}
       </span>
     );
     const nameNote = taken ? "· already exists in this account · choose another name"
       : issue ? `· ${issue}`
-      : state.name === state.proposal ? "· proposed by Mallard"
-      : "· renamed";
+      : null;
     return {
       key: "bucket", title: "Bucket", status,
-      fact: naming ? <>{nameField}<span>{nameNote}</span></>
+      fact: naming ? <>{nameField}{nameNote && <span>{nameNote}</span>}</>
         : status === "failed" ? `${failure()}${kept}`
         : status === "stopped" ? `Stopped${kept}`
         : state.phase === "create" ? (named ? <><code>{named}</code> · {reconnect ? "kept" : `${jurisdictionLabel(state.jurisdiction)} · created`}</> : reconnect ? "Checking the bucket…" : <>Creating <code>{state.name}</code>…</>)
         : status === "done" ? (named ? <><code>{named}</code> · {reconnect ? "kept" : `${jurisdictionLabel(state.jurisdiction)} · created`}</> : "Created")
         : reconnect ? <><code>{bucketName}</code> · this storage’s bucket</>
-        : "A new bucket · a proposed name you can change",
+        : "New bucket",
       controls: naming ? (
         <>
           <div className="sync-segmented r2-segmented" role="radiogroup" aria-label="Jurisdiction">
@@ -676,14 +673,14 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
         : "Object Read & Write · this bucket only",
       controls: status === "failed" || status === "stopped" ? retryButton
         : state.phase === "verify" ? cancelButton
-        : state.phase === "authorize" ? (state.link ? browserControls("bucket", state.link.url) : cancelButton)
+        : state.phase === "authorize" ? (state.link ? browserControls(state.link.url) : cancelButton)
         : undefined,
     };
   })();
 
   const review: StepView = {
     key: "review", title: "Review", status: state.phase === "review" ? "done" : "todo",
-    fact: mode === "reconnect" ? "Test connection, then Save storage" : "Test connection, then Finish setup",
+    fact: mode === "reconnect" ? "Test, then Save credential" : "Test, then Finish setup",
   };
 
   const steps = [wrangler, signIn, account, bucket, key, review];
@@ -697,9 +694,9 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
     return (
       <>
         <span className="storage-setup-guide-copy">
-          {mode === "create" ? "Creates a bucket and issues its key. Sign-in and consent happen in a browser you choose."
-            : mode === "existing" ? "Lists your buckets read-only, then issues a key for the one you pick."
-            : "Issues a new key for this bucket. Sign-in and consent happen in a browser you choose."}
+          {mode === "create" ? "Creates a bucket and a key for it only."
+            : mode === "existing" ? "Lists your buckets, read-only, then issues a key."
+            : "Issues a new key for this bucket."}
         </span>
         <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={flow.start}>
           <Icon name="terminal" size={13} />{" "}

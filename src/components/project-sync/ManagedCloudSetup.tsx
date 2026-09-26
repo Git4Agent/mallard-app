@@ -6,22 +6,22 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import Icon from "../Icons";
 import { Step, useCountdown, type StepStatus, type StepView, type StorageSetupPort } from "./StorageSetupStep";
 
-/** Where the sign-in stands. Each phase belongs to one line of the lane;
- *  `review` is past the last one. */
-type Phase = "idle" | "login" | "account" | "access" | "review";
+/** Where the sign-in stands: one run signs in and saves the account, so
+ *  the lane is either waiting on the browser or past its last line. */
+type Phase = "idle" | "login" | "review";
 interface State {
   phase: Phase;
   running: boolean;
   cancelling: boolean;
   error: string | null;
   link: string | null;
-  login: ManagedCloudSetupLogin | null;
-  /** The signed-in account, kept past review for the ready line. */
+  /** The signed-in account: the one the draft now holds, or the one a
+   *  failure is about (already connected, or not this storage's). */
   account: ManagedCloudSetupLogin["account"] | null;
   serviceOrigin: string | null;
 }
-const idle = (): State => ({ phase: "idle", running: false, cancelling: false, error: null, link: null, login: null, account: null, serviceOrigin: null });
-type Api = Pick<typeof projectSyncApi, "authorizeManagedCloudSetup" | "prepareManagedCloudStorage" | "cancelManagedCloudSetup">;
+const idle = (): State => ({ phase: "idle", running: false, cancelling: false, error: null, link: null, account: null, serviceOrigin: null });
+type Api = Pick<typeof projectSyncApi, "signInManagedCloudStorage" | "cancelManagedCloudSetup">;
 
 const errors: Record<string, string> = {
   managed_cloud_authorization_timeout: "Expired after 3 minutes",
@@ -30,7 +30,6 @@ const errors: Record<string, string> = {
   managed_cloud_callback_invalid: "The sign-in callback was not valid · sign in again",
   managed_cloud_setup_cancelled: "Stopped",
   managed_cloud_setup_busy: "Another storage operation is running · wait, then try again",
-  managed_cloud_session_expired: "The sign-in expired · sign in again",
   managed_cloud_draft_changed: "The draft changed · sign in again for the current draft",
   managed_cloud_account_mismatch: "This storage belongs to another GitHub account · sign in with that account",
   storage_managed_account_exists: "This account is already connected · open its storage",
@@ -40,17 +39,22 @@ const errors: Record<string, string> = {
   managed_cloud_service_rejected: "Mallard Cloud rejected the request",
   managed_cloud_cancel_failed: "Could not stop the setup",
 };
+const ACCOUNT_CODES = new Set(["managed_cloud_account_mismatch", "storage_managed_account_exists"]);
 function errorCode(reason: unknown): string {
   const value = reason && typeof reason === "object" && "code" in reason ? reason.code : "managed_cloud_setup_failed";
   return typeof value === "string" ? value : "managed_cloud_setup_failed";
+}
+/** The account a failure after sign-in is about, when the backend named it. */
+function failedAccount(reason: unknown): ManagedCloudSetupLogin["account"] | null {
+  const account = reason && typeof reason === "object" && "account" in reason ? reason.account : null;
+  return account && typeof account === "object" && "id" in account && "login" in account
+    && typeof account.id === "string" && typeof account.login === "string" ? { id: account.id, login: account.login } : null;
 }
 
 export function useManagedCloudSetup({ enabled, draftId, mode, port, api = projectSyncApi }: {
   enabled: boolean; draftId: string | null; mode: ManagedCloudSetupMode; port: StorageSetupPort; api?: Api;
 }) {
   const [state, setState] = useState<State>(idle);
-  const current = useRef(state);
-  current.current = state;
   const portRef = useRef(port);
   portRef.current = port;
   const running = useRef(false);
@@ -71,7 +75,9 @@ export function useManagedCloudSetup({ enabled, draftId, mode, port, api = proje
     };
   }, [enabled, draftId, mode, api]);
 
-  const run = async (phase: Phase, task: (saved: StorageSetupDraft, live: () => boolean) => Promise<Partial<State> | null>) => {
+  /* One run: save the draft, sign in through the browser, and let the
+     backend write the account and its token into that exact revision. */
+  const start = () => {
     if (!enabled || running.current || portRef.current.blocked()) return;
     running.current = true;
     cancelled.current = false;
@@ -79,43 +85,30 @@ export function useManagedCloudSetup({ enabled, draftId, mode, port, api = proje
     const { persist, isCurrent } = portRef.current.beginRun();
     const live = () => generation.current === token && !cancelled.current && isCurrent();
     portRef.current.onRunStarted();
-    patch({ phase, running: true, cancelling: false, error: null, link: null });
-    try {
-      // The sign-in pins this revision. Later steps must not save it again.
-      const saved = phase === "login" ? await persist() : target.current;
-      if (!saved || !live()) return;
-      target.current = saved;
-      const next = await task(saved, live);
-      if (next && generation.current === token && !cancelled.current) patch(next);
-    } catch (reason) {
-      if (generation.current === token) patch({ error: cancelled.current ? "managed_cloud_setup_cancelled" : errorCode(reason), link: null });
-    } finally {
-      if (generation.current === token) {
-        running.current = false;
-        patch({ running: false, cancelling: false, link: null, ...(cancelled.current ? { error: "managed_cloud_setup_cancelled" } : {}) });
+    patch({ phase: "login", running: true, cancelling: false, error: null, link: null, account: null, serviceOrigin: null });
+    void (async () => {
+      try {
+        const saved = await persist();
+        if (!saved || !live()) return;
+        target.current = saved;
+        const login = await api.signInManagedCloudStorage(saved.draft_id, saved.revision, mode, (progress) => {
+          if (live()) patch({ link: progress.url });
+        });
+        if (!live()) return;
+        patch({ account: login.account, serviceOrigin: login.service_origin, link: null });
+        const adopted = await portRef.current.adoptPrepared(saved, live);
+        if (adopted && live()) patch({ phase: "review" });
+      } catch (reason) {
+        if (generation.current === token) {
+          patch({ error: cancelled.current ? "managed_cloud_setup_cancelled" : errorCode(reason), account: failedAccount(reason), link: null });
+        }
+      } finally {
+        if (generation.current === token) {
+          running.current = false;
+          patch({ running: false, cancelling: false, link: null, ...(cancelled.current ? { error: "managed_cloud_setup_cancelled" } : {}) });
+        }
       }
-    }
-  };
-
-  const start = () => {
-    void run("login", async (saved, live) => {
-      patch({ login: null, account: null });
-      const login = await api.authorizeManagedCloudSetup(saved.draft_id, saved.revision, mode, (progress) => {
-        if (live()) patch({ link: progress.url });
-      });
-      return live() ? { phase: "account", login, account: login.account, serviceOrigin: login.service_origin, link: null } : null;
-    });
-  };
-
-  const confirmAccount = () => {
-    const login = current.current.login;
-    if (!login) return;
-    void run("access", async (saved, live) => {
-      await api.prepareManagedCloudStorage(saved.draft_id, saved.revision, login.session_id);
-      if (!live()) return null;
-      const adopted = await portRef.current.adoptPrepared(saved, live);
-      return adopted ? { phase: "review", login: null } : null;
-    });
+    })();
   };
 
   const cancel = async () => {
@@ -136,20 +129,18 @@ export function useManagedCloudSetup({ enabled, draftId, mode, port, api = proje
     target.current = null;
     setState(idle());
   };
-  return { state, isRunning: () => running.current, start, confirmAccount, cancel, dismiss };
+  return { state, isRunning: () => running.current, start, cancel, dismiss };
 }
 
-const PHASES: Phase[] = ["idle", "login", "account", "access", "review"];
 const chip = (label: string, value: string) => (
   <span key={label} className="sync-storage-repo-chip"><span>{label}</span><b>{value}</b></span>
 );
 const RESET_TITLE = "Discards this setup draft and all of its progress, then opens a fresh one. Nothing on Mallard Cloud changes.";
 
 /** The Mallard Cloud lane in the R2 lane's grammar: Sign in (the link
- *  copied or opened, never printed), Account (confirmed before anything is
- *  saved), Access (the session saved into the draft), Review. What this
- *  lane alone must say: what collaborators can read, and that a release
- *  makes a snapshot public. */
+ *  copied or opened, never printed), Account (whose session the draft
+ *  keeps), Review. What this lane alone must say: what collaborators can
+ *  read, and that a release makes a snapshot public. */
 export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenStorage, onReset }: {
   flow: ReturnType<typeof useManagedCloudSetup>; mode: ManagedCloudSetupMode;
   storages: readonly StorageSummary[]; disabled: boolean; onOpenStorage: (id: string) => void;
@@ -240,16 +231,11 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
     );
   }
 
-  const index = PHASES.indexOf(state.phase);
-  const failedKey = !state.error ? null
-    : state.error === "managed_cloud_account_mismatch" || state.error === "storage_managed_account_exists" ? "account"
-    : state.phase === "login" ? "login"
-    : state.phase === "account" ? "account"
-    : "access";
-  const statusOf = (key: string, first: number, last = first): StepStatus =>
-    index > last ? "done" : index < first ? "todo" : failedKey === key ? "failed" : "doing";
+  /* One run covers both lines: a failure about the account is the Account
+     line's to explain, after a sign-in that did happen; any other failure
+     is the Sign in line's. */
+  const accountFailed = state.error !== null && ACCOUNT_CODES.has(state.error);
   const reason = () => errors[state.error ?? ""] ?? "Mallard Cloud setup could not finish";
-  const settled = !state.running;
   const retryButton = button("Try again", () => flow.start(), "primary");
   const changeLoginButton = button(<><Icon name="user" size={12} /> Change login</>, () => flow.start());
   const existing = state.error === "storage_managed_account_exists" && state.account
@@ -257,7 +243,7 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
     : null;
 
   const signIn: StepView = (() => {
-    const status = statusOf("login", 1);
+    const status: StepStatus = accountFailed ? "done" : state.error ? "failed" : "doing";
     return {
       key: "login", title: "Sign in", status,
       fact: status === "failed" ? reason()
@@ -265,34 +251,20 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
         : "Signed in with GitHub",
       controls: status === "failed" ? retryButton
         : status === "doing" ? (state.link ? browserControls(state.link) : cancelButton)
-        : settled && state.phase !== "account" ? changeLoginButton
         : undefined,
     };
   })();
 
   const account: StepView = (() => {
-    const status = statusOf("account", 2);
+    const status: StepStatus = accountFailed ? "failed" : "todo";
     return {
       key: "account", title: "Account", status,
       fact: status === "failed" ? reason()
-        : state.account ? <><code>{state.account.login}</code> on GitHub{mode === "reconnect" ? " · this storage’s account" : ""}</>
-        : "Confirmed before anything is saved",
+        : mode === "reconnect" ? "This storage’s account · a renewed 90-day session"
+        : "Whichever GitHub account signs in · a 90-day session, private to you and your collaborators",
       controls: status === "failed"
         ? <>{existing ? button(`Open ${existing.name}`, () => onOpenStorage(existing.storage_id), "primary") : retryButton}{changeLoginButton}</>
-        : status === "doing" ? <>{button("Continue", flow.confirmAccount, "primary")}{changeLoginButton}</>
         : undefined,
-    };
-  })();
-
-  const access: StepView = (() => {
-    const status = statusOf("access", 3);
-    return {
-      key: "access", title: "Access", status,
-      fact: status === "failed" ? reason()
-        : status === "doing" ? "Saving the session…"
-        : status === "done" ? "Session saved · 90 days · reconnect here to renew"
-        : "A 90-day session · private to you and your collaborators",
-      controls: status === "failed" ? retryButton : status === "doing" ? cancelButton : undefined,
     };
   })();
 
@@ -304,7 +276,7 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
   return (
     <>
       {resetButton}
-      <ol className="r2-steps">{[signIn, account, access, review].map((step) => <Step key={step.key} step={step} />)}</ol>
+      <ol className="r2-steps">{[signIn, account, review].map((step) => <Step key={step.key} step={step} />)}</ol>
     </>
   );
 }

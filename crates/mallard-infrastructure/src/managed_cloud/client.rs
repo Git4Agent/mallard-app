@@ -3,6 +3,11 @@
 //! answer classified into a typed error. The token never enters a message;
 //! evidence keeps the route literal, the status, the service's fixed error
 //! code, and its request ID.
+//!
+//! The service is a gateway onto one R2 prefix per repository
+//! (`STORE_API.md` in the service tree): the store routes carry the
+//! desktop's own keys, and the three operations a store needs, put, get and
+//! list, are the three requests here. A put is one request with no retry.
 use crate::storage_core::{
     ConnectionEvidence, ConnectionHealth, ConnectionHealthCell, ConnectionState,
 };
@@ -18,18 +23,22 @@ use zeroize::Zeroizing;
 const JSON_LIMIT: u64 = 16 * 1024 * 1024;
 const ERROR_BODY_LIMIT: u64 = 64 * 1024;
 
-/// The service's fixed error codes (section 7.1). Nothing outside this list
-/// is retained from an error body.
-pub const SERVICE_ERROR_CODES: [&str; 22] = [
+/// The service's fixed error codes (`STORE_API.md` section 7 and the
+/// architecture's section 7.1). Nothing outside this list is retained from
+/// an error body.
+pub const SERVICE_ERROR_CODES: [&str; 25] = [
     "authentication_required",
     "forbidden",
     "not_found",
+    "absent",
     "invalid_request",
     "manifest_invalid",
     "revision_conflict",
-    "head_changed",
-    "upload_in_progress",
-    "upload_expired",
+    "already_present",
+    "claim_taken",
+    "claim_mismatch",
+    "key_invalid",
+    "object_invalid",
     "object_too_large",
     "object_integrity_failed",
     "quota_exceeded",
@@ -51,19 +60,23 @@ pub enum ErrorKind {
     Auth,
     /// The account or membership lacks the permission.
     Permission,
+    /// No such repository, or none the account may see.
     NotFound,
-    /// The private head moved under a push.
-    HeadChanged,
-    /// Too many of the account's own uploads of the repository are open.
-    UploadInProgress,
-    UploadExpired,
+    /// The repository exists and the key does not: an absent object.
+    Absent,
+    /// A create-only write of a key that already holds these bytes.
+    AlreadyPresent,
+    /// A claim key that holds another writer's bytes.
+    ClaimTaken,
+    /// A record whose parent's claim is absent or holds another record.
+    ClaimMismatch,
     /// The service's revision guard refused a stale request.
     Conflict,
     /// A repository for this bundle already exists for the account.
     AccountExists,
     Quota,
     TooLarge,
-    /// The service rejected the request shape or the manifest.
+    /// The service rejected the request shape, the key, or the bytes.
     Invalid,
     Integrity,
     RateLimit,
@@ -125,10 +138,11 @@ impl Error {
         let fixed = match self.kind {
             ErrorKind::Auth => "Mallard Cloud rejected the saved sign-in. Reconnect Mallard Cloud in storage settings.",
             ErrorKind::Permission => "Mallard Cloud refused this request. You are not a collaborator of this repository, or the account is suspended.",
-            ErrorKind::NotFound => "Mallard Cloud has no such repository or object.",
-            ErrorKind::HeadChanged => "The Mallard Cloud snapshot changed since it was compared. Compare again before pushing.",
-            ErrorKind::UploadInProgress => "Too many of your pushes of this repository are still open on Mallard Cloud. Wait for them to finish or expire, then push again.",
-            ErrorKind::UploadExpired => "The Mallard Cloud upload expired before it was committed. Push again.",
+            ErrorKind::NotFound => "Mallard Cloud has no such repository, or you no longer have access to it.",
+            ErrorKind::Absent => "Mallard Cloud has no such object.",
+            ErrorKind::AlreadyPresent => "Mallard Cloud already holds this object.",
+            ErrorKind::ClaimTaken => "Another computer claimed this version on Mallard Cloud.",
+            ErrorKind::ClaimMismatch => "Mallard Cloud refused the record: the claim of its parent does not hold it.",
             ErrorKind::Conflict => "Mallard Cloud refused a stale request. Refresh and try again.",
             ErrorKind::AccountExists => "This account already has a Mallard Cloud repository for this project.",
             ErrorKind::Quota => "The Mallard Cloud repository is out of quota.",
@@ -214,7 +228,9 @@ pub struct PushedBy {
     pub github_login: String,
 }
 
-/// The head body of section 7.3.
+/// A head as the index describes it (architecture section 7.3): the facts
+/// of the selected record, as the service indexed them. Display only; the
+/// store never reads it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct HeadBody {
     pub scope: String,
@@ -234,14 +250,7 @@ pub struct HeadBody {
     pub pushed_by: Option<PushedBy>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct HeadByBundle {
-    pub repository_id: String,
-    #[serde(default)]
-    pub head: Option<HeadBody>,
-}
-
-/// The publication summary a tag row is synthesized from (section 5.3).
+/// The publication summary a listing row is synthesized from (section 5.3).
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct TagSummary {
     pub display_name: String,
@@ -257,25 +266,25 @@ pub struct TagSummary {
     pub providers: Vec<String>,
 }
 
-/// An upload in flight. `stale` means its pins no longer match the repository,
-/// so it can never commit; the store ends its own stale ones once the next
-/// upload exists.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct OpenUpload {
-    pub id: String,
-    pub user_id: String,
-    pub commit_id: String,
-    pub expires_at: u64,
-    pub created_at: u64,
-    pub stale: bool,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct OpenReleaseRequest {
     pub id: String,
     pub state: String,
     pub requested_by: String,
     pub created_at: u64,
+}
+
+/// The coordinate a catalog repository is bound to, with the item's
+/// resource id and the item stream the desktop publishes to.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CatalogBinding {
+    pub provider: String,
+    pub resource_kind: String,
+    pub format: String,
+    pub format_version: u32,
+    pub resource_id: String,
+    #[serde(default)]
+    pub library_repository_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -289,6 +298,8 @@ pub struct RepositorySummary {
     pub bundle_id: Option<String>,
     #[serde(default)]
     pub repository_fingerprint: Option<String>,
+    #[serde(default)]
+    pub catalog: Option<CatalogBinding>,
     pub revision: u64,
     pub state: String,
     pub visibility: String,
@@ -318,8 +329,6 @@ pub struct RepositorySummary {
     pub public_summary: Option<TagSummary>,
     #[serde(default)]
     pub open_release_request: Option<OpenReleaseRequest>,
-    #[serde(default)]
-    pub open_uploads: Vec<OpenUpload>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -339,6 +348,19 @@ struct MemberList {
     members: Vec<Member>,
 }
 
+/// The catalog half of a create request: the item's coordinate, its
+/// resource id, and the item stream id the desktop derived, which the
+/// service derives again and checks.
+#[derive(Clone, Debug, Serialize)]
+pub struct CreateCatalogItem {
+    pub provider: String,
+    pub resource_kind: String,
+    pub format: String,
+    pub format_version: u32,
+    pub resource_id: String,
+    pub library_repository_id: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CreateRepository {
     pub repository_class: &'static str,
@@ -347,52 +369,12 @@ pub struct CreateRepository {
     /// `-2`, `-3`, … while the account already holds it; the summary it
     /// answers with carries the stored `name`.
     pub name: String,
-    pub bundle_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_fingerprint: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct InventoryEntry {
-    pub sha256: String,
-    pub size: u64,
-    pub role: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resource_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_sha256: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct UploadRequest {
-    pub expected_repository_revision: u64,
-    pub expected_private_revision: u64,
-    pub objects: Vec<InventoryEntry>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct MissingObject {
-    pub sha256: String,
-    pub size: u64,
-    pub role: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct UploadCreated {
-    pub upload_id: String,
-    pub repository_id: String,
-    pub commit_id: String,
-    pub manifest_sha256: String,
-    pub manifest_size: u64,
-    pub expires_at: u64,
-    pub reserved_bytes: u64,
-    pub missing: Vec<MissingObject>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct CommitResponse {
-    pub head: HeadBody,
-    pub repository_revision: u64,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CreateCatalogItem>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -401,12 +383,82 @@ pub struct ReleaseRequest {
     pub state: String,
 }
 
-/// What a streamed manifest or object answered with.
+/// What a streamed object answered with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Downloaded {
     pub size: u64,
     pub sha256: String,
     pub etag: String,
+}
+
+/// What one create-only write ended in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PutOutcome {
+    Written,
+    /// The key already holds these bytes.
+    AlreadyPresent,
+    /// A claim key that holds another writer's bytes; the caller reads it.
+    ClaimTaken,
+}
+
+/// One page of a store listing. The stream form carries the repository's
+/// status beside the keys (`STORE_API.md` section 3).
+#[derive(Clone, Debug, Deserialize)]
+pub struct StoreKeyListing {
+    pub keys: Vec<String>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub link: Option<ManagedCloudLink>,
+    #[serde(default)]
+    pub publication: Option<PublicationStatus>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryReference {
+    repository_id: String,
+}
+
+/// The coordinate the Library page asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoordinateQuery {
+    pub provider: String,
+    pub resource_kind: String,
+    pub format: String,
+    pub format_version: u32,
+}
+
+/// One item of the caller's, as the coordinate route answers it: the
+/// stream's record names, and the selected record and manifest inline.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct LibraryItemAnswer {
+    pub repository_id: String,
+    pub resource_id: String,
+    pub library_repository_id: String,
+    pub names: Vec<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, deserialize_with = "base64_bytes")]
+    pub record: Option<Vec<u8>>,
+    #[serde(default, deserialize_with = "base64_bytes")]
+    pub manifest: Option<Vec<u8>>,
+}
+
+fn base64_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<u8>>, D::Error> {
+    let encoded: Option<String> = Option::deserialize(deserializer)?;
+    encoded
+        .map(|encoded| {
+            aws_smithy_types::base64::decode(&encoded)
+                .map_err(|_| serde::de::Error::custom("bytes are not base64"))
+        })
+        .transpose()
+}
+
+#[derive(Deserialize)]
+struct LibraryCoordinateAnswer {
+    repositories: Vec<LibraryItemAnswer>,
 }
 
 #[derive(Deserialize)]
@@ -556,10 +608,11 @@ impl ManagedCloudClient {
         let kind = match (status, code) {
             (StatusCode::UNAUTHORIZED, _) => ErrorKind::Auth,
             (StatusCode::FORBIDDEN, _) => ErrorKind::Permission,
+            (_, Some("absent")) => ErrorKind::Absent,
             (StatusCode::NOT_FOUND, _) => ErrorKind::NotFound,
-            (_, Some("head_changed")) => ErrorKind::HeadChanged,
-            (_, Some("upload_in_progress")) => ErrorKind::UploadInProgress,
-            (_, Some("upload_expired")) => ErrorKind::UploadExpired,
+            (_, Some("already_present")) => ErrorKind::AlreadyPresent,
+            (_, Some("claim_taken")) => ErrorKind::ClaimTaken,
+            (_, Some("claim_mismatch")) => ErrorKind::ClaimMismatch,
             (_, Some("storage_managed_account_exists")) => ErrorKind::AccountExists,
             (_, Some("quota_exceeded")) => ErrorKind::Quota,
             (_, Some("object_too_large")) => ErrorKind::TooLarge,
@@ -589,7 +642,10 @@ impl ManagedCloudClient {
             request_id,
             detail: matches!(
                 kind,
-                ErrorKind::Invalid | ErrorKind::Integrity | ErrorKind::Conflict
+                ErrorKind::Invalid
+                    | ErrorKind::Integrity
+                    | ErrorKind::Conflict
+                    | ErrorKind::ClaimMismatch
             )
             .then_some(detail)
             .flatten(),
@@ -629,6 +685,24 @@ impl ManagedCloudClient {
         serde_json::from_slice(&bytes).map_err(|_| Error::of(ErrorKind::Limit, route))
     }
 
+    /// A read that answers `204` when there is nothing.
+    async fn optional_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        route: &'static str,
+        request: RequestBuilder,
+    ) -> Result<Option<T>> {
+        let response = self.send(route, true, request).await?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let bytes = bounded(response, JSON_LIMIT)
+            .await
+            .map_err(|_| Error::of(ErrorKind::Limit, route))?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| Error::of(ErrorKind::Limit, route))
+    }
+
     pub async fn desktop_start(
         &self,
         code_challenge: &str,
@@ -661,24 +735,59 @@ impl ManagedCloudClient {
         self.json(route, true, request).await
     }
 
-    /// `None` when the bundle is unknown to the caller (204).
-    pub async fn head_by_bundle(&self, bundle_id: &str) -> Result<Option<HeadByBundle>> {
-        let route = "v1/repositories/by-bundle/head";
+    /// The repository the caller may push to under a bundle: their own
+    /// first, else an open public one. `None` when the bundle is unknown
+    /// to the caller (204).
+    pub async fn repository_by_bundle(&self, bundle_id: &str) -> Result<Option<String>> {
+        let route = "v1/repositories/by-bundle";
         let request = self.request(
             Method::GET,
             route,
-            &format!("/v1/repositories/by-bundle/{bundle_id}/head"),
+            &format!("/v1/repositories/by-bundle/{bundle_id}"),
         )?;
-        let response = self.send(route, true, request).await?;
-        if response.status() == StatusCode::NO_CONTENT {
-            return Ok(None);
-        }
-        let bytes = bounded(response, JSON_LIMIT)
-            .await
-            .map_err(|_| Error::of(ErrorKind::Limit, route))?;
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| Error::of(ErrorKind::Limit, route))
+        Ok(self
+            .optional_json::<RepositoryReference>(route, request)
+            .await?
+            .map(|reference| reference.repository_id))
+    }
+
+    /// The same for a catalog repository, by its item stream id.
+    pub async fn repository_by_library(
+        &self,
+        library_repository_id: &str,
+    ) -> Result<Option<String>> {
+        let route = "v1/repositories/by-library";
+        let request = self.request(
+            Method::GET,
+            route,
+            &format!("/v1/repositories/by-library/{library_repository_id}"),
+        )?;
+        Ok(self
+            .optional_json::<RepositoryReference>(route, request)
+            .await?
+            .map(|reference| reference.repository_id))
+    }
+
+    /// The caller's catalog repositories of one coordinate, each with its
+    /// item stream's names and, inline, the selected record and manifest:
+    /// the one request a Library refresh makes.
+    pub async fn library_coordinate(
+        &self,
+        query: &CoordinateQuery,
+    ) -> Result<Vec<LibraryItemAnswer>> {
+        let route = "v1/repositories/library";
+        let path = format!(
+            "/v1/repositories/library?{}",
+            query_string(&[
+                ("provider", query.provider.as_str()),
+                ("resource_kind", query.resource_kind.as_str()),
+                ("format", query.format.as_str()),
+                ("format_version", &query.format_version.to_string()),
+            ])
+        );
+        let request = self.request(Method::GET, route, &path)?;
+        let answer: LibraryCoordinateAnswer = self.json(route, true, request).await?;
+        Ok(answer.repositories)
     }
 
     pub async fn list_project_repositories(&self) -> Result<Vec<RepositorySummary>> {
@@ -754,122 +863,58 @@ impl ManagedCloudClient {
         self.json(route, false, request).await
     }
 
-    /// Section 6.5 step 1: the multipart create with the inventory and the
-    /// raw manifest bytes.
-    pub async fn create_upload(
-        &self,
-        repository_id: &str,
-        upload: &UploadRequest,
-        manifest: Bytes,
-    ) -> Result<UploadCreated> {
-        let route = "v1/repositories/{id}/uploads";
-        let request_json = serde_json::to_string(upload).map_err(|_| Error::local(route))?;
-        let form = reqwest::multipart::Form::new()
-            .text("request", request_json)
-            .part(
-                "manifest",
-                reqwest::multipart::Part::stream(manifest)
-                    .file_name("manifest.json")
-                    .mime_str("application/json")
-                    .map_err(|_| Error::local(route))?,
-            );
-        let request = self
-            .request(
-                Method::POST,
-                route,
-                &format!("/v1/repositories/{repository_id}/uploads"),
-            )?
-            .header("Idempotency-Key", idempotency_key()?)
-            .multipart(form);
-        self.json(route, false, request).await
-    }
-
-    /// Section 6.5 step 2. The service verifies the digest against the bytes.
+    /// One create-only write of a desktop key under the repository's
+    /// prefix: one request, no retry. `sha256` is the digest of `bytes`.
     pub async fn put_object(
         &self,
         repository_id: &str,
-        upload_id: &str,
-        sha256: &str,
+        key: &str,
         bytes: Bytes,
-    ) -> Result<()> {
-        let route = "v1/repositories/{id}/uploads/{upload}/objects";
+        sha256: &str,
+    ) -> Result<PutOutcome> {
+        let route = "v1/repositories/{id}/store/{key}";
+        let content_type = if key.ends_with(".json") {
+            "application/json"
+        } else {
+            "application/octet-stream"
+        };
         let request = self
             .request(
                 Method::PUT,
                 route,
-                &format!("/v1/repositories/{repository_id}/uploads/{upload_id}/objects/{sha256}"),
+                &format!("/v1/repositories/{repository_id}/store/{key}"),
             )?
             .header("Content-Length", bytes.len())
             .header("X-Mallard-Sha256", sha256)
-            .header("Content-Type", "application/octet-stream")
+            .header("Content-Type", content_type)
             .body(bytes);
-        self.send(route, false, request).await?;
-        Ok(())
+        match self.send(route, false, request).await {
+            Ok(_) => Ok(PutOutcome::Written),
+            Err(error) if error.kind == ErrorKind::AlreadyPresent => Ok(PutOutcome::AlreadyPresent),
+            Err(error) if error.kind == ErrorKind::ClaimTaken => Ok(PutOutcome::ClaimTaken),
+            Err(error) => Err(error),
+        }
     }
 
-    /// Section 6.5 step 3. `expected_commit_id` names the private head the
-    /// push was compared against; `None` expects no private head.
-    pub async fn commit_upload(
+    /// Stream one key's bytes into `sink`, verifying nothing but the
+    /// declared size bound; the caller checks the digest. `None` when the
+    /// key is absent.
+    pub async fn get_object(
         &self,
         repository_id: &str,
-        upload_id: &str,
-        expected_commit_id: Option<&str>,
-    ) -> Result<CommitResponse> {
-        let route = "v1/repositories/{id}/uploads/{upload}/commit";
-        let request = self
-            .request(
-                Method::POST,
-                route,
-                &format!("/v1/repositories/{repository_id}/uploads/{upload_id}/commit"),
-            )?
-            .header("Idempotency-Key", idempotency_key()?)
-            .json(&serde_json::json!({"expected_commit_id": expected_commit_id}));
-        self.json(route, false, request).await
-    }
-
-    pub async fn abandon_upload(&self, repository_id: &str, upload_id: &str) -> Result<()> {
-        let route = "v1/repositories/{id}/uploads/{upload}/abandon";
-        let request = self.request(
-            Method::POST,
-            route,
-            &format!("/v1/repositories/{repository_id}/uploads/{upload_id}/abandon"),
-        )?;
-        self.send(route, false, request).await?;
-        Ok(())
-    }
-
-    pub async fn create_release_request(
-        &self,
-        repository_id: &str,
-        expected_repository_revision: u64,
-    ) -> Result<ReleaseRequest> {
-        let route = "v1/repositories/{id}/release-requests";
-        let request = self
-            .request(
-                Method::POST,
-                route,
-                &format!("/v1/repositories/{repository_id}/release-requests"),
-            )?
-            .header("Idempotency-Key", idempotency_key()?)
-            .json(
-                &serde_json::json!({"expected_repository_revision": expected_repository_revision}),
-            );
-        self.json(route, false, request).await
-    }
-
-    /// Stream one manifest or object into `sink`, verifying nothing but the
-    /// declared size bound; the caller checks the digest. `None` on 404.
-    pub async fn download(
-        &self,
-        route: &'static str,
-        path: &str,
+        key: &str,
         max: u64,
         sink: &mut impl Write,
     ) -> Result<Option<Downloaded>> {
-        let request = self.request(Method::GET, route, path)?;
+        let route = "v1/repositories/{id}/store/{key}";
+        let request = self.request(
+            Method::GET,
+            route,
+            &format!("/v1/repositories/{repository_id}/store/{key}"),
+        )?;
         let mut response = match self.send(route, true, request).await {
             Ok(response) => response,
-            Err(error) if error.kind == ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind == ErrorKind::Absent => return Ok(None),
             Err(error) => return Err(error),
         };
         if response.content_length().is_some_and(|size| size > max) {
@@ -910,6 +955,124 @@ impl ManagedCloudClient {
             etag,
         }))
     }
+
+    /// One page of the keys under a desktop prefix, from one R2 listing.
+    pub async fn list_keys(
+        &self,
+        repository_id: &str,
+        prefix: &str,
+        cursor: Option<&str>,
+    ) -> Result<StoreKeyListing> {
+        let route = "v1/repositories/{id}/store";
+        let mut query = vec![("prefix", prefix)];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor));
+        }
+        let request = self.request(
+            Method::GET,
+            route,
+            &format!(
+                "/v1/repositories/{repository_id}/store?{}",
+                query_string(&query)
+            ),
+        )?;
+        let mut listing: StoreKeyListing = self.json(route, true, request).await?;
+        if listing.keys.len() > 1_000 {
+            return Err(Error::of(ErrorKind::Limit, route));
+        }
+        if let Some(link) = listing.link.as_mut() {
+            if link.repository_id != repository_id {
+                return Err(Error::of(ErrorKind::Limit, route));
+            }
+            link.website_url = self.website_url(&link.owner_login, &link.name);
+        }
+        Ok(listing)
+    }
+
+    pub async fn create_release_request(
+        &self,
+        repository_id: &str,
+        expected_repository_revision: u64,
+    ) -> Result<ReleaseRequest> {
+        let route = "v1/repositories/{id}/release-requests";
+        let request = self
+            .request(
+                Method::POST,
+                route,
+                &format!("/v1/repositories/{repository_id}/release-requests"),
+            )?
+            .header("Idempotency-Key", idempotency_key()?)
+            .json(
+                &serde_json::json!({"expected_repository_revision": expected_repository_revision}),
+            );
+        self.json(route, false, request).await
+    }
+
+    fn website_url(&self, owner_login: &str, name: &str) -> String {
+        format!("{}/{}/{}", self.origin(), owner_login, name)
+    }
+
+    /// The link a summary describes: what the stream listing carries,
+    /// read from the index instead. A release the Owner turned down is
+    /// not on the summary, so it reads as `private` here.
+    pub fn link_from_summary(&self, summary: &RepositorySummary) -> ManagedCloudLink {
+        let registration_only = summary
+            .private_summary
+            .as_ref()
+            .is_some_and(|tag| tag.registration_only);
+        let release = match (&summary.private_head, &summary.open_release_request) {
+            (None, _) => ReleaseState::NotPushed,
+            (Some(_), _) if registration_only => ReleaseState::NotPushed,
+            (Some(_), Some(request)) if request.state == "pending_super_admin" => {
+                ReleaseState::WaitingSuperAdmin
+            }
+            (Some(_), Some(request)) if request.state == "pending_owner" => {
+                ReleaseState::WaitingOwner {
+                    requested_by: request.requested_by.clone(),
+                }
+            }
+            (Some(private), _) if summary.visibility == "public" => {
+                if summary
+                    .public_head
+                    .as_ref()
+                    .is_some_and(|public| public.commit_id == private.commit_id)
+                {
+                    ReleaseState::Public
+                } else {
+                    ReleaseState::SnapshotChanged
+                }
+            }
+            (Some(_), _) => ReleaseState::Private,
+        };
+        let can_request_release = summary.writer
+            && matches!(
+                release,
+                ReleaseState::Private
+                    | ReleaseState::SnapshotChanged
+                    | ReleaseState::Rejected { .. }
+            );
+        ManagedCloudLink {
+            visibility: summary.visibility.clone(),
+            can_pull: true,
+            repository_id: summary.id.clone(),
+            website_url: self.website_url(&summary.owner.github_login, &summary.name),
+            owner_login: summary.owner.github_login.clone(),
+            name: summary.name.clone(),
+            release,
+            repository_revision: summary.revision,
+            can_request_release,
+            role: summary.role.clone(),
+            can_push: summary.writer,
+        }
+    }
+}
+
+fn query_string(pairs: &[(&str, &str)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in pairs {
+        serializer.append_pair(name, value);
+    }
+    serializer.finish()
 }
 
 async fn bounded(mut response: Response, max: u64) -> std::result::Result<Vec<u8>, ()> {
@@ -924,45 +1087,6 @@ async fn bounded(mut response: Response, max: u64) -> std::result::Result<Vec<u8
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn origins_are_bare_http_origins() {
-        assert!(parse_origin("https://mallard-ai.com").is_ok());
-        assert!(parse_origin("http://localhost:8787").is_ok());
-        for bad in [
-            "https://mallard-ai.com/",
-            "https://mallard-ai.com/v1",
-            "https://user:pw@mallard-ai.com",
-            "ftp://mallard-ai.com",
-            "mallard-ai.com",
-            "https://mallard-ai.com?x=1",
-        ] {
-            assert!(parse_origin(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn messages_carry_evidence_but_never_the_token() {
-        let error = Error {
-            kind: ErrorKind::HeadChanged,
-            route: "v1/repositories/{id}/uploads/{upload}/commit",
-            status: Some(409),
-            code: Some("head_changed"),
-            request_id: Some("req-1".into()),
-            detail: None,
-        };
-        assert_eq!(
-            error.message(),
-            "The Mallard Cloud snapshot changed since it was compared. Compare again before pushing. (v1/repositories/{id}/uploads/{upload}/commit, HTTP 409, head_changed, request req-1)"
-        );
-        assert_eq!(error.evidence().error_tag, Some("head_changed"));
-        assert_eq!(idempotency_key().unwrap().len(), "idem-".len() + 24);
-    }
 }
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1020,7 +1144,10 @@ pub enum ManagedCloudStatusState {
     Unavailable,
 }
 
-/// Computed for the current observation only. Never stored in sync metadata.
+/// Where the private snapshot stands against the public one, as the stream
+/// listing reports it: the head it describes is the selection over the
+/// names just listed. Computed for the current observation only. Never
+/// stored in sync metadata.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicationStatus {
     pub state: PublicationState,
@@ -1039,57 +1166,12 @@ pub enum PublicationState {
 }
 
 impl PublicationStatus {
-    fn unavailable() -> Self {
+    pub fn unavailable() -> Self {
         Self {
             state: PublicationState::Unavailable,
             private_revision: None,
             public_revision: None,
         }
-    }
-
-    /// Do not combine heads observed at different repository revisions.
-    fn observe(summary: &RepositorySummary, answer: &RepositoryHead) -> Option<Self> {
-        let expected = match answer.head.as_ref().map(|head| head.scope.as_str()) {
-            Some("private") => summary.private_head.as_ref(),
-            Some("public") => summary.public_head.as_ref(),
-            None if summary.private_head.is_none() => None,
-            _ => return None,
-        };
-        if summary.id != answer.repository_id
-            || summary.revision != answer.link.repository_revision
-            || summary.visibility != answer.link.visibility
-            || summary.writer != answer.link.can_push
-            || expected != answer.head.as_ref()
-        {
-            return None;
-        }
-        let has_draft = summary.private_head.is_some()
-            && !summary
-                .private_summary
-                .as_ref()
-                .is_some_and(|tag| tag.registration_only);
-        let live = summary.visibility == "public" && summary.public_head.is_some();
-        let state = if !has_draft {
-            PublicationState::NoDraft
-        } else if !live {
-            PublicationState::NotPublic
-        } else if summary.private_head.as_ref().unwrap().commit_id
-            == summary.public_head.as_ref().unwrap().commit_id
-        {
-            if summary.private_head.as_ref().unwrap().manifest_sha256
-                != summary.public_head.as_ref().unwrap().manifest_sha256
-            {
-                return None;
-            }
-            PublicationState::MatchesPublished
-        } else {
-            PublicationState::UnpublishedDraft
-        };
-        Some(Self {
-            state,
-            private_revision: has_draft.then_some(summary.private_revision),
-            public_revision: live.then_some(summary.public_revision),
-        })
     }
 }
 
@@ -1102,7 +1184,26 @@ pub struct ManagedCloudStatus {
     pub publication: Option<PublicationStatus>,
     pub message: Option<String>,
 }
+
 impl ManagedCloudStatus {
+    /// The status a stream listing reports: the link and the publication
+    /// state the listing carried, or `Unavailable` when the service left
+    /// them out.
+    pub fn observed(repository_id: &str, listing: &StoreKeyListing) -> Self {
+        Self {
+            repository_id: repository_id.to_owned(),
+            state: ManagedCloudStatusState::Ready,
+            link: listing.link.clone(),
+            publication: Some(
+                listing
+                    .publication
+                    .clone()
+                    .unwrap_or_else(PublicationStatus::unavailable),
+            ),
+            message: None,
+        }
+    }
+
     pub fn failed(repository_id: &str, error: &Error) -> Self {
         let state = if error.code == Some("repository_removed") {
             ManagedCloudStatusState::Deleting
@@ -1131,135 +1232,172 @@ impl ManagedCloudStatus {
         }
     }
 }
-#[derive(Deserialize)]
-pub struct RepositoryHead {
-    pub repository_id: String,
-    pub head: Option<HeadBody>,
-    pub link: ManagedCloudLink,
-}
-impl ManagedCloudClient {
-    /// The draft head remains authoritative for sync. Details are supplemental;
-    /// a failed details read cannot turn an existing draft into missing content.
-    pub async fn repository_status(
-        &self,
-        repository_id: &str,
-    ) -> Result<(Option<HeadBody>, ManagedCloudStatus)> {
-        let summary = self.get_repository(repository_id).await.ok();
-        let mut answer = self.repository_head(repository_id).await?;
-        let mut publication = summary
-            .as_ref()
-            .and_then(|value| PublicationStatus::observe(value, &answer));
-        if summary.is_some() && publication.is_none() {
-            // One bounded recheck when a Push or release crossed the reads.
-            answer = self.repository_head(repository_id).await?;
-            publication = summary
-                .as_ref()
-                .and_then(|value| PublicationStatus::observe(value, &answer));
-        }
-        Ok((
-            answer.head,
-            ManagedCloudStatus {
-                repository_id: repository_id.to_owned(),
-                state: ManagedCloudStatusState::Ready,
-                link: Some(answer.link),
-                publication: Some(publication.unwrap_or_else(PublicationStatus::unavailable)),
-                message: None,
-            },
-        ))
-    }
-
-    pub async fn repository_head(&self, repository_id: &str) -> Result<RepositoryHead> {
-        let route = "v1/repositories/id/head";
-        let request = self.request(
-            Method::GET,
-            route,
-            &format!("/v1/repositories/{repository_id}/head"),
-        )?;
-        let mut answer: RepositoryHead = self.json(route, true, request).await?;
-        if answer.repository_id != repository_id || answer.link.repository_id != repository_id {
-            return Err(Error::of(ErrorKind::Limit, route));
-        }
-        answer.link.website_url = format!(
-            "{}/{}/{}",
-            self.origin(),
-            answer.link.owner_login,
-            answer.link.name
-        );
-        Ok(answer)
-    }
-}
 
 #[cfg(test)]
-mod publication_tests {
+mod tests {
     use super::*;
     use serde_json::json;
 
-    fn observation() -> (RepositorySummary, RepositoryHead) {
+    #[test]
+    fn origins_are_bare_http_origins() {
+        assert!(parse_origin("https://mallard-ai.com").is_ok());
+        assert!(parse_origin("http://localhost:8787").is_ok());
+        for bad in [
+            "https://mallard-ai.com/",
+            "https://mallard-ai.com/v1",
+            "https://user:pw@mallard-ai.com",
+            "ftp://mallard-ai.com",
+            "mallard-ai.com",
+            "https://mallard-ai.com?x=1",
+        ] {
+            assert!(parse_origin(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn messages_carry_evidence_but_never_the_token() {
+        let error = Error {
+            kind: ErrorKind::ClaimMismatch,
+            route: "v1/repositories/{id}/store/{key}",
+            status: Some(409),
+            code: Some("claim_mismatch"),
+            request_id: Some("req-1".into()),
+            detail: None,
+        };
+        assert_eq!(
+            error.message(),
+            "Mallard Cloud refused the record: the claim of its parent does not hold it. (v1/repositories/{id}/store/{key}, HTTP 409, claim_mismatch, request req-1)"
+        );
+        assert_eq!(error.evidence().error_tag, Some("claim_mismatch"));
+        assert_eq!(idempotency_key().unwrap().len(), "idem-".len() + 24);
+    }
+
+    #[test]
+    fn a_create_request_flattens_the_catalog_half_and_omits_it_for_a_project() {
+        let project = CreateRepository {
+            repository_class: "non_git_project",
+            name: "Project".into(),
+            bundle_id: Some("a".repeat(32)),
+            repository_fingerprint: None,
+            catalog: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&project).unwrap(),
+            json!({"repository_class": "non_git_project", "name": "Project", "bundle_id": "a".repeat(32)})
+        );
+        let item = CreateRepository {
+            repository_class: "catalog",
+            name: "my-skill".into(),
+            bundle_id: None,
+            repository_fingerprint: None,
+            catalog: Some(CreateCatalogItem {
+                provider: "codex".into(),
+                resource_kind: "agent_skill".into(),
+                format: "agentskills.io.skill".into(),
+                format_version: 1,
+                resource_id: format!("resource-{}", "1".repeat(64)),
+                library_repository_id: format!("library-{}", "2".repeat(32)),
+            }),
+        };
+        let value = serde_json::to_value(&item).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["format_version"], 1);
+        assert_eq!(
+            value["library_repository_id"],
+            format!("library-{}", "2".repeat(32))
+        );
+        assert!(value.get("bundle_id").is_none());
+    }
+
+    #[test]
+    fn a_coordinate_answer_decodes_its_inline_bytes() {
+        let answer: LibraryItemAnswer = serde_json::from_value(json!({
+            "repository_id": "repo_1", "resource_id": format!("resource-{}", "1".repeat(64)),
+            "library_repository_id": format!("library-{}", "2".repeat(32)),
+            "names": ["a", "b"], "truncated": false,
+            "record": aws_smithy_types::base64::encode(b"record"), "manifest": null
+        }))
+        .unwrap();
+        assert_eq!(answer.record.as_deref(), Some(b"record".as_slice()));
+        assert!(answer.manifest.is_none());
+        assert!(!answer.truncated);
+    }
+
+    fn summary(value: serde_json::Value) -> RepositorySummary {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_link_of_a_summary_reads_release_from_the_heads_and_the_open_request() {
+        let client = ManagedCloudClient::new("https://mallard-ai.com", None).unwrap();
         let head = json!({"scope":"private", "revision":4, "commit_id":"commit-draft", "manifest_sha256":"a".repeat(64), "manifest_size":10, "updated_at":5, "kind":"project", "bundle_id":"b".repeat(32)});
         let mut public = head.clone();
         public["scope"] = json!("public");
         public["commit_id"] = json!("commit-public");
-        let summary = serde_json::from_value(json!({"id":"repo_one", "owner":{"user_id":"user_one", "github_login":"owner"}, "name":"Project", "repository_class":"git_project", "revision":7, "state":"active", "visibility":"public", "private_revision":4, "public_revision":2, "writer":true, "private_head":head, "public_head":public})).unwrap();
-        let answer = serde_json::from_value(json!({"repository_id":"repo_one", "head":head, "link":{"repository_id":"repo_one", "visibility":"public", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"rejected", "reason":"Revise it"}, "repository_revision":7, "can_request_release":true, "role":"owner", "can_push":true}})).unwrap();
-        (summary, answer)
-    }
+        let base = json!({"id":"repo_one", "owner":{"user_id":"user_one", "github_login":"owner"}, "name":"Project", "repository_class":"git_project", "revision":7, "state":"active", "visibility":"public", "private_revision":4, "public_revision":2, "writer":true, "role":"owner", "private_head":head, "public_head":public});
+        let link = client.link_from_summary(&summary(base.clone()));
+        assert_eq!(link.release, ReleaseState::SnapshotChanged);
+        assert!(link.can_request_release);
+        assert_eq!(link.website_url, "https://mallard-ai.com/owner/Project");
 
-    #[test]
-    fn review_changes_never_change_the_draft_or_its_publication_relation() {
-        let (summary, mut answer) = observation();
-        let draft = answer.head.clone();
-        for release in [
-            ReleaseState::Rejected {
-                reason: Some("Revise it".into()),
-            },
-            ReleaseState::SnapshotChanged,
-            ReleaseState::WaitingOwner {
-                requested_by: "user_one".into(),
-            },
-            ReleaseState::WaitingSuperAdmin,
-        ] {
-            answer.link.release = release;
-            assert_eq!(
-                PublicationStatus::observe(&summary, &answer),
-                Some(PublicationStatus {
-                    state: PublicationState::UnpublishedDraft,
-                    private_revision: Some(4),
-                    public_revision: Some(2),
-                })
-            );
-            assert_eq!(answer.head, draft);
-        }
-    }
-
-    #[test]
-    fn publishing_hiding_and_registration_have_distinct_display_states() {
-        let (mut summary, mut answer) = observation();
-        summary.public_head.as_mut().unwrap().commit_id = "commit-draft".into();
+        let mut same = base.clone();
+        same["public_head"]["commit_id"] = json!("commit-draft");
         assert_eq!(
-            PublicationStatus::observe(&summary, &answer).unwrap().state,
-            PublicationState::MatchesPublished
+            client.link_from_summary(&summary(same)).release,
+            ReleaseState::Public
         );
-        summary.visibility = "private".into();
-        answer.link.visibility = "private".into();
-        let hidden = PublicationStatus::observe(&summary, &answer).unwrap();
-        assert_eq!(hidden.state, PublicationState::NotPublic);
-        assert_eq!(hidden.public_revision, None);
-        summary.private_summary = Some(serde_json::from_value(json!({"display_name":"Project", "kind":"project", "revision":4, "updated_at":5, "resources":0, "files":0, "registration_only":true})).unwrap());
-        let empty = PublicationStatus::observe(&summary, &answer).unwrap();
-        assert_eq!(empty.state, PublicationState::NoDraft);
-        assert_eq!(empty.private_revision, None);
+
+        let mut waiting = base.clone();
+        waiting["open_release_request"] = json!({"id":"rel_1", "state":"pending_owner", "requested_by":"user_two", "created_at":9});
+        let link = client.link_from_summary(&summary(waiting));
+        assert_eq!(
+            link.release,
+            ReleaseState::WaitingOwner {
+                requested_by: "user_two".into()
+            }
+        );
+        assert!(!link.can_request_release);
+
+        let mut registered = base.clone();
+        registered["visibility"] = json!("private");
+        registered["public_head"] = json!(null);
+        registered["private_summary"] = json!({"display_name":"Project", "kind":"project", "revision":4, "updated_at":5, "resources":0, "files":0, "registration_only":true});
+        assert_eq!(
+            client.link_from_summary(&summary(registered)).release,
+            ReleaseState::NotPushed
+        );
+
+        let mut private = base;
+        private["visibility"] = json!("private");
+        private["public_head"] = json!(null);
+        assert_eq!(
+            client.link_from_summary(&summary(private)).release,
+            ReleaseState::Private
+        );
     }
 
     #[test]
-    fn mismatched_observations_cannot_claim_a_publication_relation() {
-        let (summary, mut answer) = observation();
-        answer.head.as_mut().unwrap().commit_id = "commit-moved".into();
-        assert!(PublicationStatus::observe(&summary, &answer).is_none());
-        let (summary, mut answer) = observation();
-        answer.link.repository_revision += 1;
-        assert!(PublicationStatus::observe(&summary, &answer).is_none());
-        let (summary, mut answer) = observation();
-        answer.repository_id = "repo_other".into();
-        assert!(PublicationStatus::observe(&summary, &answer).is_none());
+    fn a_status_observed_from_a_listing_carries_its_link_and_publication() {
+        let listing: StoreKeyListing = serde_json::from_value(json!({
+            "keys": [], "next_cursor": null,
+            "link": {"repository_id":"repo_one", "visibility":"private", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"private"}, "repository_revision":3, "can_request_release":true, "role":"owner", "can_push":true},
+            "publication": {"state":"not_public", "private_revision":2, "public_revision":null}
+        }))
+        .unwrap();
+        let status = ManagedCloudStatus::observed("repo_one", &listing);
+        assert_eq!(status.state, ManagedCloudStatusState::Ready);
+        assert_eq!(status.link.unwrap().release, ReleaseState::Private);
+        assert_eq!(
+            status.publication.unwrap().state,
+            PublicationState::NotPublic
+        );
+        let bare: StoreKeyListing = serde_json::from_value(json!({"keys": ["k"]})).unwrap();
+        assert_eq!(
+            ManagedCloudStatus::observed("repo_one", &bare)
+                .publication
+                .unwrap()
+                .state,
+            PublicationState::Unavailable
+        );
     }
 }

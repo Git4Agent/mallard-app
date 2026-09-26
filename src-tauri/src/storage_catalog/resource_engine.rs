@@ -11,11 +11,12 @@ use bytes::Bytes;
 use mallard_domain::{Mainline, PublicationToken, RecordName, StorageConfig};
 use mallard_infrastructure::bundle_engine::VERSION_INCOMPLETE;
 use mallard_infrastructure::storage_core::publication::{
-    finish_claimed_push, list_stream, read_record, write_claimed_record, write_record,
-    ClaimedRecord, RecordStream, WriteOutcome, OWN_PUSH_UNFINISHED, PUSH_UNFINISHED,
+    finish_claimed_push, list_stream, select_listed_stream, write_claimed_record, write_record,
+    ClaimedRecord, RecordStream, StreamView, WriteOutcome, MAX_LISTED_RECORDS, OWN_PUSH_UNFINISHED,
+    PUSH_UNFINISHED,
 };
 use mallard_infrastructure::storage_core::{
-    library_object_key, ExpectedObject, ObjectStore, StageOutcome, TAG_FILE,
+    library_object_key, ExpectedObject, ObjectKey, ObjectQuery, ObjectStore, StageOutcome, TAG_FILE,
 };
 use mallard_infrastructure::storage_providers::StorageProviderRegistry;
 use std::collections::BTreeMap;
@@ -35,6 +36,38 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
 /// the one its review was computed from. The Library does not rebase across
 /// a remote change.
 pub const CHANGED_AFTER_REVIEW: &str = "Library resource head changed after review";
+
+fn payload_request(
+    repository_id: &CatalogResourceRepositoryId,
+    sha256: &str,
+    size: u64,
+) -> Result<(ObjectKey, ExpectedObject), String> {
+    Ok((
+        library_object_key(repository_id.as_str(), &format!("_objects/{}", sha256))?,
+        ExpectedObject {
+            size,
+            sha256: sha256.to_string(),
+        },
+    ))
+}
+
+/// A payload of a published version that the storage does not hold names
+/// no cause: the repository was cleared, or a folder that a sync product
+/// replicates has not received it yet.
+fn payload_bytes(
+    key: &ObjectKey,
+    expected: &ExpectedObject,
+    outcome: StageOutcome,
+) -> Result<Vec<u8>, String> {
+    match outcome {
+        StageOutcome::Missing => Err(VERSION_INCOMPLETE.to_string()),
+        StageOutcome::Mismatch => Err(format!(
+            "Library payload '{}' failed integrity verification",
+            key
+        )),
+        StageOutcome::Verified(body) => body.read_bounded(expected.size, "Library payload"),
+    }
+}
 
 /// The continuity identity of one storage: the provider key hashed with the
 /// adapter's canonical coordinates. Never a credential or display name.
@@ -171,9 +204,31 @@ pub struct LibraryResourceEngine<S> {
     store: S,
 }
 
+pub struct DiscoveredLibraryRepository {
+    pub head: Option<ObservedLibraryHead>,
+    pub tag: Option<LibraryResourceTag>,
+}
+
+fn parse_tag(
+    repository_id: &CatalogResourceRepositoryId,
+    bytes: &[u8],
+) -> Result<(LibraryResourceTag, String), String> {
+    let tag: LibraryResourceTag = serde_json::from_slice(bytes)
+        .map_err(|error| format!("parse Library resource tag: {}", error))?;
+    tag.validate()?;
+    if &tag.repository_id != repository_id {
+        return Err("Library resource tag is stored under another repository".to_string());
+    }
+    Ok((tag, sha256_hex(bytes)))
+}
+
 impl<S: ObjectStore> LibraryResourceEngine<S> {
     pub fn new(store: S) -> Self {
         Self { store }
+    }
+
+    pub fn store(&self) -> &S {
+        &self.store
     }
 
     pub fn read_tag(
@@ -184,13 +239,58 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
         let Some(stored) = self.store.get_metadata(&key, MAX_TAG_BYTES)? else {
             return Ok(None);
         };
-        let tag: LibraryResourceTag = serde_json::from_slice(&stored.bytes)
-            .map_err(|error| format!("parse Library resource tag: {}", error))?;
-        tag.validate()?;
-        if &tag.repository_id != repository_id {
-            return Err("Library resource tag is stored under another repository".to_string());
+        parse_tag(repository_id, &stored.bytes).map(Some)
+    }
+
+    /// Discover only the supplied repositories. The store can resolve their
+    /// streams and tags together without repeating shared folder reads.
+    /// Each repository retains its own result so an unreadable one cannot
+    /// hide other rows. No folder-list cache is used for discovery.
+    pub fn discover_repositories(
+        &self,
+        repositories: &[CatalogResourceRepositoryId],
+    ) -> Result<Vec<Result<DiscoveredLibraryRepository, String>>, String> {
+        let mut queries = Vec::with_capacity(repositories.len() * 2);
+        for repository in repositories {
+            let stream = RecordStream::library(repository.as_str())?;
+            queries.push(ObjectQuery::Prefix(stream.prefix().clone()));
+            queries.push(ObjectQuery::Key(library_object_key(
+                repository.as_str(),
+                TAG_FILE,
+            )?));
         }
-        Ok(Some((tag, sha256_hex(&stored.bytes))))
+        let results = self.store.list_objects_batch(&queries, MAX_LISTED_RECORDS);
+        if results.len() != queries.len() {
+            return Err("Library discovery returned an incomplete batch".into());
+        }
+        let mut results = results.into_iter();
+        Ok(repositories
+            .iter()
+            .map(|repository| {
+                let records = results.next().expect("checked batch length");
+                let tags = results.next().expect("checked batch length");
+                (|| {
+                    let stream = RecordStream::library(repository.as_str())?;
+                    let view = select_listed_stream(&self.store, &stream, records?)?;
+                    let head = self.observe_view(repository, &stream, view)?.1;
+                    let tags = tags?;
+                    let tag_key = library_object_key(repository.as_str(), TAG_FILE)?;
+                    if tags.len() > 1 || tags.iter().any(|tag| tag.key() != &tag_key) {
+                        return Err("Library discovery returned an invalid tag address".into());
+                    }
+                    let mut stored = self.store.get_listed_metadata_many(&tags, MAX_TAG_BYTES)?;
+                    if stored.len() != tags.len() {
+                        return Err("Library discovery returned an incomplete tag read".into());
+                    }
+                    let tag = stored
+                        .pop()
+                        .flatten()
+                        .map(|stored| parse_tag(repository, &stored.bytes).map(|(tag, _)| tag))
+                        .transpose()?;
+                    Ok(DiscoveredLibraryRepository { head, tag })
+                })()
+            })
+            .collect())
     }
 
     /// Select, then read: list the repository's stream, select from the
@@ -202,18 +302,27 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
         repository_id: &CatalogResourceRepositoryId,
     ) -> Result<(Mainline, Option<ObservedLibraryHead>), String> {
         let stream = RecordStream::library(repository_id.as_str())?;
-        let mainline = list_stream(&self.store, &stream)?.into_mainline();
-        let Some(name) = mainline.selected() else {
-            return Ok((mainline, None));
+        let view = list_stream(&self.store, &stream)?;
+        self.observe_view(repository_id, &stream, view)
+    }
+
+    fn observe_view(
+        &self,
+        repository_id: &CatalogResourceRepositoryId,
+        stream: &RecordStream,
+        view: StreamView,
+    ) -> Result<(Mainline, Option<ObservedLibraryHead>), String> {
+        let Some(name) = view.mainline().selected() else {
+            return Ok((view.into_mainline(), None));
         };
-        let bytes = read_record(&self.store, &stream, name)?;
-        let head = parse_record(repository_id, name, &bytes)?.head();
+        let bytes = view.read_record(&self.store, stream, name)?;
+        let head = parse_library_record(repository_id, name, &bytes)?.head();
         head.validate()?;
         let observed = ObservedLibraryHead {
             head,
             record_sha256: name.token().record_sha256().to_string(),
         };
-        Ok((mainline, Some(observed)))
+        Ok((view.into_mainline(), Some(observed)))
     }
 
     pub fn read_head(
@@ -270,22 +379,30 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
         sha256: &str,
         size: u64,
     ) -> Result<Vec<u8>, String> {
-        let key = library_object_key(repository_id.as_str(), &format!("_objects/{}", sha256))?;
-        let expected = ExpectedObject {
-            size,
-            sha256: sha256.to_string(),
-        };
-        // A payload of a published version that the storage does not hold
-        // names no cause: the repository was cleared, or a folder that a
-        // sync product replicates has not received it yet.
-        match self.store.stage_verified(&key, &expected)? {
-            StageOutcome::Missing => Err(VERSION_INCOMPLETE.to_string()),
-            StageOutcome::Mismatch => Err(format!(
-                "Library payload '{}' failed integrity verification",
-                key
-            )),
-            StageOutcome::Verified(body) => body.read_bounded(size, "Library payload"),
-        }
+        let (key, expected) = payload_request(repository_id, sha256, size)?;
+        let outcome = self.store.stage_verified(&key, &expected)?;
+        payload_bytes(&key, &expected, outcome)
+    }
+
+    /// Every payload of one resource together, verified and in request
+    /// order: one grouped fetch before that resource is applied.
+    pub fn fetch_payloads(
+        &self,
+        repository_id: &CatalogResourceRepositoryId,
+        payloads: &[(&str, u64)],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let requests = payloads
+            .iter()
+            .map(|(sha256, size)| payload_request(repository_id, sha256, *size))
+            .collect::<Result<Vec<_>, String>>()?;
+        let outcomes = self
+            .store
+            .stage_many_with_progress(&requests, &mut |_| {})?;
+        requests
+            .iter()
+            .zip(outcomes)
+            .map(|((key, expected), outcome)| payload_bytes(key, expected, outcome))
+            .collect()
     }
 
     /// *Finish that push*: write the record that the claim of the selected
@@ -506,7 +623,7 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
         built_manifest: &LibraryResourceManifest,
         claimed: &ClaimedRecord,
     ) -> Result<PublishedLibraryResource, String> {
-        let record = parse_record(&built.repository_id, &claimed.name, &claimed.bytes)?;
+        let record = parse_library_record(&built.repository_id, &claimed.name, &claimed.bytes)?;
         if record.published_by_origin.origin_replica_token
             != built.published_by_origin.origin_replica_token
         {
@@ -531,7 +648,7 @@ impl<S: ObjectStore> LibraryResourceEngine<S> {
 
 /// Parse verified record bytes. A name is self-certifying: the bytes already
 /// hash to the digest in it, and the fields must equal its facts.
-fn parse_record(
+pub fn parse_library_record(
     repository_id: &CatalogResourceRepositoryId,
     name: &RecordName,
     bytes: &[u8],
@@ -672,6 +789,65 @@ mod tests {
     }
 
     #[test]
+    fn payloads_of_one_resource_are_fetched_together_verified_and_in_order() {
+        let temp = tempdir().unwrap();
+        let engine =
+            LibraryResourceEngine::new(LocalObjectStore::open(temp.path().join("store")).unwrap());
+        let id = plugin_repository();
+        let first = b"first payload".to_vec();
+        let second = b"second payload".to_vec();
+        for bytes in [&first, &second] {
+            engine
+                .store()
+                .put_immutable(
+                    &library_object_key(id.as_str(), &format!("_objects/{}", sha256_hex(bytes)))
+                        .unwrap(),
+                    bytes,
+                )
+                .unwrap();
+        }
+        let (first_digest, second_digest) = (sha256_hex(&first), sha256_hex(&second));
+        assert_eq!(
+            engine
+                .fetch_payloads(
+                    &id,
+                    &[
+                        (second_digest.as_str(), second.len() as u64),
+                        (first_digest.as_str(), first.len() as u64),
+                    ]
+                )
+                .unwrap(),
+            vec![second.clone(), first.clone()]
+        );
+        assert!(engine.fetch_payloads(&id, &[]).unwrap().is_empty());
+        // One absent object makes the version incomplete; a wrong size is
+        // an integrity failure. Neither advances anything.
+        let absent = "0".repeat(64);
+        assert_eq!(
+            engine
+                .fetch_payloads(
+                    &id,
+                    &[
+                        (first_digest.as_str(), first.len() as u64),
+                        (absent.as_str(), 1)
+                    ]
+                )
+                .unwrap_err(),
+            VERSION_INCOMPLETE
+        );
+        assert!(engine
+            .fetch_payloads(&id, &[(first_digest.as_str(), first.len() as u64 + 1)])
+            .unwrap_err()
+            .contains("integrity"));
+        assert_eq!(
+            engine
+                .fetch_payload(&id, &first_digest, first.len() as u64)
+                .unwrap(),
+            first
+        );
+    }
+
+    #[test]
     fn dropbox_two_users_publish_read_and_reject_stale_library_writes() {
         let server =
             mallard_infrastructure::storage_core::dropbox_store::mock::MockDropboxServer::new();
@@ -724,6 +900,82 @@ mod tests {
                 .get(&changed.resource_id),
             Some(&changed)
         );
+    }
+
+    #[test]
+    fn feishu_two_sign_ins_publish_read_and_reject_stale_library_writes() {
+        let server = mallard_infrastructure::storage_core::feishu_store::mock::MockFeishuServer::new();
+        let second = mallard_infrastructure::storage_core::feishu_store::mock::ListedReadStore(
+            server.second_store(),
+        );
+        let first = LibraryResourceEngine::new(server.store.clone());
+        let second = LibraryResourceEngine::new(second);
+        let id = plugin_repository();
+        let resource = plugin("review@review-market", "main");
+        first
+            .publish(request(
+                &id,
+                tag(&plugin_coordinate()),
+                None,
+                std::slice::from_ref(&resource),
+                1,
+            ))
+            .unwrap();
+        let (observed, manifest) = second.inspect(&id).unwrap().unwrap();
+        let absent = CatalogResourceRepositoryId::for_coordinate(
+            &CatalogCoordinate::new("claude", "agent_skill", "agentskills.io.skill", 1).unwrap(),
+        );
+        let mut discovered = second
+            .discover_repositories(&[id.clone(), absent])
+            .unwrap()
+            .into_iter();
+        let present = discovered.next().unwrap().unwrap();
+        assert_eq!(present.head.unwrap().head, observed.head);
+        assert_eq!(present.tag.unwrap().repository_id, id);
+        let absent = discovered.next().unwrap().unwrap();
+        assert!(absent.head.is_none() && absent.tag.is_none());
+        assert_eq!(
+            manifest.resource_map().get(&resource.resource_id),
+            Some(&resource)
+        );
+        let changed = plugin("review@review-market", "next");
+        second
+            .publish(request(
+                &id,
+                tag(&plugin_coordinate()),
+                Some(observed.clone()),
+                std::slice::from_ref(&changed),
+                2,
+            ))
+            .unwrap();
+        let error = first
+            .publish(request(
+                &id,
+                tag(&plugin_coordinate()),
+                Some(observed),
+                &[resource],
+                3,
+            ))
+            .unwrap_err();
+        assert_eq!(error, CHANGED_AFTER_REVIEW);
+        assert_eq!(
+            first
+                .inspect(&id)
+                .unwrap()
+                .unwrap()
+                .1
+                .resource_map()
+                .get(&changed.resource_id),
+            Some(&changed)
+        );
+        println!(
+            "feishu mock Library round trip: {} requests",
+            server.requests()
+        );
+        assert!(!server
+            .file_paths()
+            .iter()
+            .any(|path| path.contains("_claims")));
     }
 
     #[test]
@@ -1014,10 +1266,13 @@ mod tests {
             })
             .expect("the record that was not selected is kept");
         let stream = RecordStream::library(repository_id.as_str()).unwrap();
-        let kept_head = parse_record(
+        let kept_head = parse_library_record(
             &repository_id,
             &kept,
-            &read_record(&shared, &stream, &kept).unwrap(),
+            &mallard_infrastructure::storage_core::publication::read_record(
+                &shared, &stream, &kept,
+            )
+            .unwrap(),
         )
         .unwrap()
         .head();

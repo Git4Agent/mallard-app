@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
+import Notice from "../notice/Notice";
 import { menuOptions, moveMenuFocus } from "./menuKeyboard";
 
 /**
@@ -158,6 +159,7 @@ export function PathBarMenu({
   // Type-ahead per the menu pattern: printable characters accumulate for
   // 500ms and focus the next label with that prefix.
   const typeahead = useRef({ buffer: "", at: 0 });
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [query, setQuery] = useState("");
   useEffect(() => {
     if (!open) setQuery("");
@@ -246,11 +248,11 @@ export function PathBarMenu({
 
   return (
     <div
-      ref={registerRef}
-      id={id}
+      ref={(node) => {
+        panelRef.current = node;
+        registerRef(node);
+      }}
       className={`sync-path-menu${switcher ? " switcher" : ""}${align === "end" ? " end" : ""}`}
-      role="menu"
-      aria-label={label}
       hidden={!open}
       onBlur={(event) => {
         // Focus that lands outside the menu closes it — a Tab that walked
@@ -267,12 +269,28 @@ export function PathBarMenu({
           // takes it.
           const search = event.currentTarget.querySelector<HTMLInputElement>(".sync-path-menu-search");
           const tabOptions = search ? menuOptions(event.currentTarget) : [];
+          // The note's close control is one more stop, ahead of the list:
+          // Shift+Tab from the list's first stop reaches it, Tab returns.
+          const dismiss = event.currentTarget.querySelector<HTMLButtonElement>(":scope > .notice .sync-notice-dismiss");
+          if (dismiss) {
+            const firstStop = search ?? menuOptions(event.currentTarget)[0] ?? null;
+            if (!event.shiftKey && event.target === dismiss && firstStop) {
+              event.preventDefault();
+              firstStop.focus();
+              return;
+            }
+            if (event.shiftKey && event.target !== dismiss && (!search || event.target === search)) {
+              event.preventDefault();
+              dismiss.focus();
+              return;
+            }
+          }
           if (search && !event.shiftKey && event.target === search && tabOptions.length > 0) {
             event.preventDefault();
             tabOptions[0]?.focus();
             return;
           }
-          if (search && event.shiftKey && event.target !== search) {
+          if (search && event.shiftKey && event.target !== search && event.target !== dismiss) {
             event.preventDefault();
             search.focus();
             return;
@@ -324,73 +342,84 @@ export function PathBarMenu({
         }
       }}
     >
-      {/* No live region here. The banner is prose the menu is built with — it
-          is in the DOM before the menu opens and never changes while it is
-          open — so it is not a status message (WCAG 2.2 SC 4.1.3). A
-          `role="menu"` admits only the menuitem family. */}
-      {banner && (
-        <div className="sync-path-menu-banner">
-          <Icon name="refresh" size={14} />
-          <span>{banner}</span>
-        </div>
+      {/* Why the list is inert, as a Note: nothing is wrong. It sits beside
+          the menu list, not in it — a `role="menu"` admits only the menuitem
+          family, and the note closes like every other message. No live
+          region: it is prose the menu opens with, not a status message (WCAG
+          2.2 SC 4.1.3). It renders only while the menu is open, so a closed
+          note comes back the next time the menu opens under the same lock. */}
+      {open && banner && (
+        <Notice
+          severity="info"
+          timing="inline"
+          onDismiss={() => window.requestAnimationFrame(() => {
+            const root = panelRef.current;
+            if (!root) return;
+            (root.querySelector<HTMLInputElement>(".sync-path-menu-search") ?? menuOptions(root)[0])?.focus();
+          })}
+        >
+          {banner}
+        </Notice>
       )}
-      {header && (
-        <div className="sync-path-menu-current" aria-current="true">
-          {header.icon && <Icon name={header.icon} size={14} />}
-          <span className="sync-path-menu-copy">
-            <span>{header.label}</span>
-            {header.detail && (
-              <small className={header.detailIsPath ? undefined : "phrase"}>{header.detail}</small>
-            )}
-          </span>
-          <Icon name="check" size={13} className="sync-path-menu-check" />
-        </div>
-      )}
-      {searchable && (
-        <input
-          type="search"
-          className="sync-path-menu-search"
-          placeholder={`Switch ${label.toLowerCase()}…`}
-          aria-label={`Filter ${label.toLowerCase()} list`}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      )}
-      {switcher ? (
-        <>
-          {/* One scrollport for every target list, so a long one scrolls
-              under the current row and the filter while the footer verbs stay
-              in reach; the panel's ceiling is the room left below the bar. */}
-          <div className="sync-path-menu-scroll">
-            {lists.map((group) => {
-              const shown = group.items.filter(matches);
-              return (
-                <div key={group.label} className="sync-path-menu-group" aria-label={group.label}>
-                  {shown.map((item) => renderItem(item, true))}
-                  {shown.length === 0 && <p className="sync-path-menu-empty">No match.</p>}
-                </div>
-              );
-            })}
-          </div>
-          {(verbs.length > 0 || tails.length > 0) && (
-            <div className="sync-path-menu-foot">
-              {caption && <span className="sync-path-menu-cap">{caption}</span>}
-              {verbs.length > 0 && (
-                <div className="sync-path-menu-verbs">{verbs.map((item) => renderPill(item, false))}</div>
+      <div id={id} className="sync-path-menu-list" role="menu" aria-label={label}>
+        {header && (
+          <div className="sync-path-menu-current" aria-current="true">
+            {header.icon && <Icon name={header.icon} size={14} />}
+            <span className="sync-path-menu-copy">
+              <span>{header.label}</span>
+              {header.detail && (
+                <small className={header.detailIsPath ? undefined : "phrase"}>{header.detail}</small>
               )}
-              {tails.map((item) => renderPill(item, true))}
-            </div>
-          )}
-        </>
-      ) : (
-        populated.map((group, groupIndex) => (
-          <div key={group.label ?? `group-${groupIndex}`} className="sync-path-menu-group">
-            {groupIndex > 0 && <div className="sync-path-menu-separator" role="separator" />}
-            {group.label && <div className="sync-path-menu-label">{group.label}</div>}
-            {group.items.map((item) => renderItem(item, false))}
+            </span>
+            <Icon name="check" size={13} className="sync-path-menu-check" />
           </div>
-        ))
-      )}
+        )}
+        {searchable && (
+          <input
+            type="search"
+            className="sync-path-menu-search"
+            placeholder={`Switch ${label.toLowerCase()}…`}
+            aria-label={`Filter ${label.toLowerCase()} list`}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        )}
+        {switcher ? (
+          <>
+            {/* One scrollport for every target list, so a long one scrolls
+                under the current row and the filter while the footer verbs stay
+                in reach; the panel's ceiling is the room left below the bar. */}
+            <div className="sync-path-menu-scroll">
+              {lists.map((group) => {
+                const shown = group.items.filter(matches);
+                return (
+                  <div key={group.label} className="sync-path-menu-group" aria-label={group.label}>
+                    {shown.map((item) => renderItem(item, true))}
+                    {shown.length === 0 && <p className="sync-path-menu-empty">No match.</p>}
+                  </div>
+                );
+              })}
+            </div>
+            {(verbs.length > 0 || tails.length > 0) && (
+              <div className="sync-path-menu-foot">
+                {caption && <span className="sync-path-menu-cap">{caption}</span>}
+                {verbs.length > 0 && (
+                  <div className="sync-path-menu-verbs">{verbs.map((item) => renderPill(item, false))}</div>
+                )}
+                {tails.map((item) => renderPill(item, true))}
+              </div>
+            )}
+          </>
+        ) : (
+          populated.map((group, groupIndex) => (
+            <div key={group.label ?? `group-${groupIndex}`} className="sync-path-menu-group">
+              {groupIndex > 0 && <div className="sync-path-menu-separator" role="separator" />}
+              {group.label && <div className="sync-path-menu-label">{group.label}</div>}
+              {group.items.map((item) => renderItem(item, false))}
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }
