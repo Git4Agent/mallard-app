@@ -65,6 +65,7 @@ test("Settings saves as you go and says so: a status line and Done in the bar, n
   assert.deepEqual(rows, [
     "theme",
     "credential_redaction_enabled",
+    "update_check_enabled",
     "push_codex_children",
     "push_claude_children",
     "openLogsOnSync",

@@ -317,7 +317,7 @@ pub struct StorageCatalogService {
 
 impl StorageCatalogService {
     pub fn from_user_home() -> Result<Self, String> {
-        let user_home = dirs::home_dir()
+        let user_home = mallard_infrastructure::persistence::user_home_dir()
             .ok_or_else(|| "could not resolve the user home directory".to_string())?;
         let registry = CatalogRegistry::production();
         Self::with_registry(

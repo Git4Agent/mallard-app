@@ -1,7 +1,7 @@
 {
   "name": "mallard",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.4",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "typecheck:frontend-tests": "tsc --project tsconfig.frontend-tests.json",
     "test:frontend-integration": "npm run typecheck:frontend-tests && node scripts/run-frontend-integration-tests.mjs",
-    "test:release-config": "node --test tests/release-config.test.mjs",
+    "test:release-config": "node --test tests/release-config.test.mjs tests/updater-manifest.test.mjs",
     "test:aimock-servers": "node --test scripts/live-codex-aimock-server.test.mjs scripts/live-claude-aimock-server.test.mjs",
     "test:backend-integration": "cargo test --workspace --all-targets && npm run test:aimock-servers && npm run test:mixed-aimock-harness",
     "test:storage-catalog-e2e": "cargo test --manifest-path src-tauri/Cargo.toml --test storage_catalog_e2e",
@@ -32,6 +32,8 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.12.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

@@ -21,6 +21,7 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { LoadingBone } from "../LoadingScaffold";
 import { rowReceipt, statusLine, useSettingsReceipts, type RowReceipt, type StatusLine } from "./settingsReceipts";
+import { AUTO_CHECK_INTERVAL_HOURS, requestAppUpdateCheck, useInstalledVersion } from "../AppUpdater";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages
@@ -66,6 +67,7 @@ const THEME_CHOICES: Array<{ value: ThemeChoice; label: string }> = [
    error clears when its next apply starts. */
 const TUNING_KEYS = [
   "credential_redaction_enabled",
+  "update_check_enabled",
   "push_codex_children",
   "push_claude_children",
   "conversation_file_limit_bytes",
@@ -84,6 +86,7 @@ type SettingKey = LocalKey | TuningKey | PolicyKey;
 const SETTING_LABELS: Record<SettingKey, string> = {
   theme: "Theme",
   credential_redaction_enabled: "Credential redaction",
+  update_check_enabled: "Automatic update checks",
   push_codex_children: "Push Codex subagents",
   push_claude_children: "Push Claude subagents",
   openLogsOnSync: "Open Logs on Push and Pull",
@@ -237,6 +240,7 @@ function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailu
 export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTarget }: Props) {
   const themeChoice = useThemeChoice();
   const receipts = useSettingsReceipts();
+  const { version: appVersion, supported: updatesSupported } = useInstalledVersion();
   const [stats, setStats] = useState<ActivityLogStats | null>(null);
   const [logsBusy, setLogsBusy] = useState(false);
   const [logsError, setLogsError] = useState<string | null>(null);
@@ -349,7 +353,7 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
     if (!tuning) return;
     const key = Object.keys(patch)[0] as TuningKey;
     setTuningBusy(true);
-    setTuningSection("credential_redaction_enabled" in patch ? "privacy"
+    setTuningSection("credential_redaction_enabled" in patch || "update_check_enabled" in patch ? "privacy"
       : "push_codex_children" in patch || "push_claude_children" in patch ? "sync" : "performance");
     setTuningFromAction(true);
     setTuningError(null);
@@ -639,6 +643,43 @@ export default function SettingsPage({ appActions, onLogsChanged, onDone, doneTa
                 Hide detected credentials in exports from this machine. Off can expose secrets.
                 Changes re-upload all synced sessions on the next Push.
                 Earlier unredacted copies remain readable in storage history.
+              </SettingsRow>
+              <SettingsRow
+                label="Automatic update checks"
+                setting="update_check_enabled"
+                receipt={receiptFor("update_check_enabled")}
+                control={(
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    className="sync-settings-switch"
+                    checked={shownTuning?.update_check_enabled ?? true}
+                    disabled={tuningBusy || !tuning}
+                    onChange={(event) => void applyTuning({ update_check_enabled: event.target.checked })}
+                    aria-label="Automatic update checks"
+                  />
+                )}
+              >
+                Ask github.com for the latest published Mallard release shortly after
+                startup and every {AUTO_CHECK_INTERVAL_HOURS} hours. Nothing about you or
+                your projects is sent. Off never disables Check for updates below.
+              </SettingsRow>
+              <SettingsRow
+                label="App version"
+                control={(
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={!updatesSupported}
+                    onClick={() => requestAppUpdateCheck()}
+                    title={updatesSupported ? "Check GitHub for a newer Mallard release" : "Update checks are available in the desktop app"}
+                  >
+                    Check for updates
+                  </button>
+                )}
+              >
+                {appVersion ? `Mallard ${appVersion}.` : "Mallard."} Updates are signed releases
+                from GitHub; the result appears at the top of the window.
               </SettingsRow>
             </div>
             {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}

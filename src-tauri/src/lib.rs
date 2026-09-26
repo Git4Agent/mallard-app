@@ -125,6 +125,8 @@ pub fn run() {
         .manage(project_sync::managed_cloud_setup::ManagedCloudSetupControl::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .menu(app_menu)
         .on_menu_event(on_menu_event)
         .setup(|app| {

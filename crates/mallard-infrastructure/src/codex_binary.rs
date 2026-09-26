@@ -167,7 +167,7 @@ pub fn find_binary(name: &str) -> Result<PathBuf, String> {
                 }
             }
         }
-        let home = dirs::home_dir().unwrap_or_default();
+        let home = crate::persistence::user_home_dir().unwrap_or_default();
         for candidate in [
             home.join(format!(".local/bin/{}", name)),
             PathBuf::from(format!("/opt/homebrew/bin/{}", name)),

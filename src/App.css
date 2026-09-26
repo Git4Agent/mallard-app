@@ -1509,6 +1509,12 @@ summary:focus-visible {
 /* A destination chooser asks one question off a short list, so it takes the
    narrowest measure of the three sheets. */
 .sync-storage-link-dialog { width: min(520px, 100vw - 72px); }
+/* The update download is a wait, not a question: a narrow sheet with one
+   native progress bar, closed only by the restart or by its own failure. */
+.app-update-dialog { width: min(460px, 100vw - 72px); }
+.app-update-dialog .sync-modal-body { padding: 18px 20px 20px; display: grid; gap: 10px; }
+.app-update-progress { width: 100%; height: 6px; accent-color: var(--accent); }
+.app-update-progress-label { margin: 0; color: var(--text-2); font-size: var(--type-xs); }
 .sync-storage-link-dialog .sync-modal-body { padding: 14px 18px 18px; }
 .sync-modal-header {
   padding: 18px 20px 15px;

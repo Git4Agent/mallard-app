@@ -39,11 +39,13 @@ pub(crate) fn left_boundary_valid(bytes: &[u8], start: usize) -> bool {
     start <= bytes.len() && (start == 0 || is_left_boundary_byte(bytes[start - 1]))
 }
 
-pub(crate) fn boundary_valid(bytes: &[u8], start: usize, end: usize) -> bool {
+/// `separators` are the bytes that may continue a matched root: `/` for
+/// POSIX roots, `\` or `/` for Windows roots.
+pub(crate) fn boundary_valid(bytes: &[u8], start: usize, end: usize, separators: &[u8]) -> bool {
     if start > end || end > bytes.len() {
         return false;
     }
-    left_boundary_valid(bytes, start) && (end == bytes.len() || bytes[end] == b'/')
+    left_boundary_valid(bytes, start) && (end == bytes.len() || separators.contains(&bytes[end]))
 }
 
 pub(crate) fn valid_json_text(input: &str) -> bool {
@@ -75,7 +77,7 @@ pub(crate) fn replace_boundary_valid_occurrences(
         };
         let start = search_from + relative_start;
         let end = start + needle.len();
-        if boundary_valid(bytes, start, end) {
+        if boundary_valid(bytes, start, end, b"/") {
             output.push_str(&input[last_emit..start]);
             output.push_str(replacement);
             last_emit = end;

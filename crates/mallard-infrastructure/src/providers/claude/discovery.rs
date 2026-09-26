@@ -11,8 +11,17 @@ use crate::providers::traits::{
     SessionDiscovery, SessionDiscoveryContext,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// Whether a regular file shares its data with another name. Claude writes
+/// shared file-history snapshots as hard links on every platform.
+fn is_hard_linked_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .and_then(|meta| crate::persistence::hard_link_count(&meta, path))
+        .is_some_and(|links| links > 1)
+}
 
 fn sidecar_session_id(
     sidecar_kind: &str,
@@ -161,17 +170,10 @@ pub(super) fn discover(
                     continue;
                 }
             };
-            #[cfg(unix)]
-            if directory == "file-history" {
-                use std::os::unix::fs::MetadataExt;
-
-                // Shared snapshots are excluded; other failures still go
-                // through the normal sidecar validation below.
-                if std::fs::symlink_metadata(entry.path())
-                    .is_ok_and(|meta| meta.is_file() && meta.nlink() > 1)
-                {
-                    continue;
-                }
+            // Shared snapshots are excluded; other failures still go
+            // through the normal sidecar validation below.
+            if directory == "file-history" && is_hard_linked_file(entry.path()) {
+                continue;
             }
             discovery.sidecars.push(DiscoveredSidecar {
                 session_id,

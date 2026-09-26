@@ -1,9 +1,21 @@
 name: Release macOS and Windows apps
 
+# A pushed v* tag builds, signs, notarizes, verifies, and attaches every
+# artifact to one draft GitHub Release, then writes the updater manifest from
+# the three build jobs' signatures. Manual dispatch is a dry run: the same
+# build, signing, and verification, but artifacts go to the workflow run
+# instead of a release, so signing problems never consume a version tag.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which platforms the dry run builds
+        default: all
+        type: choice
+        options: [all, macos, macos-intel, windows]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -12,16 +24,17 @@ concurrency:
 jobs:
   publish_macos:
     name: macOS Apple Silicon
+    if: github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'macos'
     permissions:
       contents: write
     runs-on: macos-latest
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -40,6 +53,7 @@ jobs:
         run: npm ci
 
       - name: Verify release version
+        if: github.event_name == 'push'
         run: npm run check:release-version -- "${{ github.ref_name }}"
 
       - name: Run frontend integration tests
@@ -51,36 +65,247 @@ jobs:
       - name: Test packaged CLI behavior
         run: npm run test:cli
 
-      - name: Build and upload release draft
-        id: tauri
+      - name: Install App Store Connect API key
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          if [ -z "$APPLE_API_KEY_CONTENT" ]; then
+            echo "The App Store Connect API key secret is not set." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build, notarize, and upload release draft
+        if: github.event_name == 'push'
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           MALLARD_VERIFY_MACOS_BUNDLE: "1"
+          MALLARD_REQUIRE_TRUSTED_MACOS: "1"
+          MALLARD_REQUIRE_UPDATER_ARTIFACTS: "1"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Mallard ${{ github.ref_name }}"
-          releaseBody: "Tester builds for Apple Silicon macOS and x64 Windows. The macOS app is ad-hoc signed and unnotarized; the Windows installer is unsigned. Verify both artifacts before publishing this draft."
+          releaseBody: "Apple Silicon and Intel macOS DMGs (Developer ID signed and notarized), an x64 Windows installer (unsigned), and the signed updater archives and latest.json that let installed copies update in-app. Verify every artifact before publishing this draft; publishing is what makes the update visible to users."
           releaseDraft: true
           prerelease: false
           retryAttempts: 2
           args: >-
             --target aarch64-apple-darwin
-            --bundles dmg
+            --bundles app,dmg
+
+      # tauri-action attaches the DMG; the renamed updater archive and its
+      # signature are attached here, behind the same draft guard the other
+      # jobs use, and never overwriting an existing asset.
+      - name: Upload Apple Silicon updater archive to draft
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "true" ]; then
+            echo "Refusing to upload updater artifacts to a published release." >&2
+            exit 1
+          fi
+          archives=(target/aarch64-apple-darwin/release/bundle/macos/Mallard_*_aarch64.app.tar.gz)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "Expected exactly one Apple Silicon updater archive, found ${#archives[@]}." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${archives[0]}" "${archives[0]}.sig" --repo "$GITHUB_REPOSITORY"
+
+      - name: Build and notarize (dry run)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          MALLARD_VERIFY_MACOS_BUNDLE: "1"
+          MALLARD_REQUIRE_TRUSTED_MACOS: "1"
+          MALLARD_REQUIRE_UPDATER_ARTIFACTS: "1"
+        run: >-
+          npm run tauri build --
+          --target aarch64-apple-darwin
+          --bundles app,dmg
+
+      - name: Upload dry-run DMG and updater archive to the workflow run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-aarch64-dmg
+          path: |
+            target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            target/aarch64-apple-darwin/release/bundle/macos/Mallard_*_aarch64.app.tar.gz
+            target/aarch64-apple-darwin/release/bundle/macos/Mallard_*_aarch64.app.tar.gz.sig
+          if-no-files-found: error
+
+      # The manifest job reads every platform's signature from a workflow
+      # artifact, in both modes, so a dry run exercises the manifest too.
+      - name: Hand the updater signature to the manifest job
+        uses: actions/upload-artifact@v6
+        with:
+          name: updater-sig-darwin-aarch64
+          path: target/aarch64-apple-darwin/release/bundle/macos/Mallard_*_aarch64.app.tar.gz.sig
+          if-no-files-found: error
+
+  # Tag releases and full dry runs need the Apple Silicon job's draft or
+  # verification first; a single-platform dry run may skip it.
+  publish_macos_intel:
+    name: macOS Intel
+    needs: publish_macos
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'macos-intel')
+      && (needs.publish_macos.result == 'success'
+          || (github.event_name == 'workflow_dispatch' && needs.publish_macos.result == 'skipped'))
+    permissions:
+      contents: write
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: x86_64-apple-darwin
+
+      # The verifier runs the packaged x86_64 CLI on this Apple Silicon host.
+      - name: Ensure Rosetta 2
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        if: github.event_name == 'push'
+        run: npm run check:release-version -- "${{ github.ref_name }}"
+
+      - name: Test packaged CLI behavior
+        run: npm run test:cli
+
+      - name: Install App Store Connect API key
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          if [ -z "$APPLE_API_KEY_CONTENT" ]; then
+            echo "The App Store Connect API key secret is not set." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build, sign, and notarize Intel DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          MALLARD_VERIFY_MACOS_BUNDLE: "1"
+          MALLARD_REQUIRE_TRUSTED_MACOS: "1"
+          MALLARD_REQUIRE_UPDATER_ARTIFACTS: "1"
+        run: >-
+          npm run tauri build --
+          --target x86_64-apple-darwin
+          --bundles app,dmg
+
+      - name: Upload verified Intel DMG and updater archive to draft
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "true" ]; then
+            echo "Refusing to upload the Intel DMG to a published release." >&2
+            exit 1
+          fi
+          dmgs=(target/x86_64-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "Expected exactly one Intel DMG, found ${#dmgs[@]}." >&2
+            exit 1
+          fi
+          archives=(target/x86_64-apple-darwin/release/bundle/macos/Mallard_*_x64.app.tar.gz)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "Expected exactly one Intel updater archive, found ${#archives[@]}." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${dmgs[0]}" "${archives[0]}" "${archives[0]}.sig" --repo "$GITHUB_REPOSITORY"
+
+      - name: Upload dry-run Intel DMG and updater archive to the workflow run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-x64-dmg
+          path: |
+            target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            target/x86_64-apple-darwin/release/bundle/macos/Mallard_*_x64.app.tar.gz
+            target/x86_64-apple-darwin/release/bundle/macos/Mallard_*_x64.app.tar.gz.sig
+          if-no-files-found: error
+
+      - name: Hand the updater signature to the manifest job
+        uses: actions/upload-artifact@v6
+        with:
+          name: updater-sig-darwin-x86_64
+          path: target/x86_64-apple-darwin/release/bundle/macos/Mallard_*_x64.app.tar.gz.sig
+          if-no-files-found: error
 
   publish_windows:
     name: Windows x64
     needs: publish_macos
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push' || inputs.platforms == 'all' || inputs.platforms == 'windows')
+      && (needs.publish_macos.result == 'success'
+          || (github.event_name == 'workflow_dispatch' && needs.publish_macos.result == 'skipped'))
     permissions:
       contents: write
     runs-on: windows-latest
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -99,12 +324,17 @@ jobs:
         run: npm ci
 
       - name: Verify release version
+        if: github.event_name == 'push'
         run: npm run check:release-version -- "${{ github.ref_name }}"
 
       - name: Test Windows CLI behavior
         run: npm run test:cli
 
       - name: Build Windows NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          MALLARD_REQUIRE_UPDATER_ARTIFACTS: "1"
         run: >-
           npm run tauri build --
           --target x86_64-pc-windows-msvc
@@ -119,7 +349,8 @@ jobs:
           -TemporaryRoot "$env:RUNNER_TEMP"
           -GitHubOutputPath "$env:GITHUB_OUTPUT"
 
-      - name: Upload verified Windows installer to draft
+      - name: Upload verified Windows installer and updater signature to draft
+        if: github.event_name == 'push'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -130,7 +361,99 @@ jobs:
           if (-not $release.isDraft) {
             throw "Refusing to upload the Windows installer to a published release."
           }
-          gh release upload $env:RELEASE_TAG $env:INSTALLER_PATH --repo $env:GITHUB_REPOSITORY
+          $signature = "$env:INSTALLER_PATH.sig"
+          if (-not (Test-Path -LiteralPath $signature)) {
+            throw "The Windows installer has no updater signature at $signature."
+          }
+          gh release upload $env:RELEASE_TAG $env:INSTALLER_PATH $signature --repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -ne 0) {
             throw "Uploading the verified Windows installer failed."
           }
+
+      - name: Upload dry-run installer to the workflow run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64-nsis
+          path: |
+            ${{ steps.verify_windows.outputs.installer_path }}
+            ${{ steps.verify_windows.outputs.installer_path }}.sig
+          if-no-files-found: error
+
+      - name: Hand the updater signature to the manifest job
+        uses: actions/upload-artifact@v6
+        with:
+          name: updater-sig-windows-x86_64
+          path: ${{ steps.verify_windows.outputs.installer_path }}.sig
+          if-no-files-found: error
+
+  # Written once, whole, after every platform's artifact is on the draft. A
+  # missing job means no manifest, and a draft without latest.json must not be
+  # published: installed copies would never learn about the release.
+  publish_updater_manifest:
+    name: Updater manifest
+    needs: [publish_macos, publish_macos_intel, publish_windows]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Collect updater signatures
+        uses: actions/download-artifact@v7
+        with:
+          pattern: updater-sig-*
+          path: updater-signatures
+
+      - name: Build latest.json
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tag="${RELEASE_TAG:-v$version}"
+          sig() { find "updater-signatures/updater-sig-$1" -type f -name '*.sig' | head -n 1; }
+          node scripts/build-updater-manifest.mjs \
+            --version "$version" --tag "$tag" --output latest.json \
+            --signature "darwin-aarch64=$(sig darwin-aarch64)" \
+            --signature "darwin-x86_64=$(sig darwin-x86_64)" \
+            --signature "windows-x86_64=$(sig windows-x86_64)"
+          cat latest.json
+
+      - name: Upload latest.json to draft
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "true" ]; then
+            echo "Refusing to upload latest.json to a published release." >&2
+            exit 1
+          fi
+          # Every asset the manifest points at must already be on the draft.
+          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for url in $(node -p "Object.values(require('./latest.json').platforms).map((p) => p.url).join(' ')"); do
+            name="${url##*/}"
+            if ! printf '%s\n' "$assets" | grep -qx "$name"; then
+              echo "latest.json references $name, which is not attached to the draft." >&2
+              exit 1
+            fi
+          done
+          gh release upload "$RELEASE_TAG" latest.json --repo "$GITHUB_REPOSITORY"
+
+      - name: Upload dry-run latest.json to the workflow run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v6
+        with:
+          name: updater-manifest
+          path: latest.json
+          if-no-files-found: error
