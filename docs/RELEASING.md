@@ -145,7 +145,7 @@ profile home pinned in its environment. Project roots and conversation paths
 use the Windows path grammar described in
 [`PLAN_WINDOWS_PATH_HANDLING.md`](./PLAN_WINDOWS_PATH_HANDLING.md).
 
-## Prepare version 0.1.5
+## Prepare version 0.1.6
 
 The version must match in these files:
 
@@ -163,7 +163,7 @@ the dry-run workflow's signing step is what proves the pair matches.
 Run the release checks before creating a tag:
 
 ```bash
-npm run check:release-version -- v0.1.5
+npm run check:release-version -- v0.1.6
 npm run test:integration
 npm run build
 cargo check --workspace
