@@ -3,6 +3,11 @@
 //! bytes that are being pushed, in a private temporary provider home with
 //! an empty project root: no checkpoint rows, no child tail facts. The
 //! service validates its shape and the website renders it as-is.
+use crate::codex_paginated_projection::complete_paginated_item_projection;
+use crate::codex_rollout::{
+    authoritative_session_meta_with_record, structural_record_type, MAX_CODEX_RECORDS,
+};
+use crate::conversation_codec::parsed_records;
 use crate::providers::traits::{
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
     SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineQuery, SessionToolCategory,
@@ -12,6 +17,7 @@ use mallard_domain::{
     sha256_hex, BundleManifest, ConversationFileRole, NoticeSeverity, ProviderKey,
 };
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The view's schema, which names its key: `_views/<schema>-<transcript sha256>.json`.
@@ -113,7 +119,13 @@ pub fn build_view(
     std::fs::create_dir_all(&sessions).map_err(|error| format!("view workspace: {error}"))?;
     std::fs::create_dir_all(&root).map_err(|error| format!("view workspace: {error}"))?;
     let path = sessions.join(format!("{}.jsonl", safe_stem(provider_session_id)));
-    std::fs::write(&path, transcript).map_err(|error| format!("view workspace: {error}"))?;
+    let display_transcript = if provider.as_str() == "codex" {
+        Cow::Owned(codex_display_transcript(transcript)?)
+    } else {
+        Cow::Borrowed(transcript)
+    };
+    std::fs::write(&path, display_transcript)
+        .map_err(|error| format!("view workspace: {error}"))?;
     let context = SessionTimelineContext {
         resource_id,
         provider_session_id,
@@ -226,6 +238,40 @@ pub fn build_view(
     }
 }
 
+/// Push omits reproducible Codex display records. Recreate them only for
+/// the preview; its source digest still identifies the original wire bytes.
+fn codex_display_transcript(transcript: &[u8]) -> Result<Vec<u8>, String> {
+    let (metadata, header) =
+        authoritative_session_meta_with_record(transcript).map_err(|error| error.to_string())?;
+    let mut records = Vec::new();
+    for (index, record) in parsed_records(transcript).enumerate() {
+        if index >= MAX_CODEX_RECORDS {
+            return Err("Codex view transcript has too many records".to_string());
+        }
+        let mut record =
+            record.map_err(|_| "Codex view transcript contains malformed JSON".to_string())?;
+        if structural_record_type(&record) == Some("session_meta") {
+            continue;
+        }
+        record
+            .as_object_mut()
+            .ok_or("Codex view transcript record is not an object")?
+            .remove("ordinal");
+        records.push(record);
+    }
+    let projected = complete_paginated_item_projection(records, &metadata.id, &mut |_| Ok(()))?;
+    let mut bytes = Vec::new();
+    for record in std::iter::once(header).chain(projected) {
+        serde_json::to_writer(&mut bytes, &record)
+            .map_err(|error| format!("encode Codex view transcript: {error}"))?;
+        bytes.push(b'\n');
+        if bytes.len() as u64 > crate::app_settings::conversation_file_limit_bytes() {
+            return Err("Codex view transcript exceeds the bounded transcript limit".to_string());
+        }
+    }
+    Ok(bytes)
+}
+
 /// Views for every conversation whose transcript object is in `staged`:
 /// an unchanged transcript keeps the view the service already holds.
 pub fn build_views_for_manifest(
@@ -306,6 +352,122 @@ fn safe_stem(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    fn mixed_codex_records() -> Vec<Value> {
+        let mut records = vec![json!({
+            "type": "session_meta",
+            "payload": {"id": "wire-root", "cwd": "/__mallard_root__/b;", "history_base": null}
+        })];
+        for turn in 0..6 {
+            let turn_id = format!("turn-{turn}");
+            let event = |second: u8, payload: Value| {
+                json!({
+                    "timestamp": format!("2026-08-07T00:{turn:02}:{second:02}Z"),
+                    "type": "event_msg",
+                    "payload": payload
+                })
+            };
+            records.push(event(
+                0,
+                json!({"type": "task_started", "turn_id": turn_id}),
+            ));
+            if turn < 5 {
+                records.push(event(
+                    1,
+                    json!({"type": "user_message", "message": format!("Prompt {turn}")}),
+                ));
+                if turn < 3 {
+                    records.push(event(2, json!({"type": "agent_message", "message": "Working", "phase": "commentary"})));
+                    records.push(event(3, json!({
+                        "type": "patch_apply_end", "turn_id": turn_id, "call_id": format!("patch-{turn}"),
+                        "stdout": "", "stderr": "", "success": true, "changes": {}, "status": "completed"
+                    })));
+                }
+                records.push(event(4, json!({"type": "agent_message", "message": format!("Reply {turn}"), "phase": "final_answer"})));
+            } else {
+                records.push(event(1, json!({
+                    "type": "item_completed", "thread_id": "wire-root", "turn_id": turn_id,
+                    "item": {"type": "UserMessage", "id": "native-prompt", "content": [{"type": "text", "text": format!("Prompt {turn}")}]}
+                })));
+                records.push(event(4, json!({
+                    "type": "item_completed", "thread_id": "wire-root", "turn_id": turn_id,
+                    "item": {"type": "AgentMessage", "id": "native-reply", "phase": "final_answer", "content": [{"type": "Text", "text": format!("Reply {turn}")}]}
+                })));
+            }
+            records.push(event(
+                5,
+                json!({"type": "task_complete", "turn_id": turn_id}),
+            ));
+        }
+        records.push(json!({
+            "type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 1200, "output_tokens": 60, "total_tokens": 1260}
+            }}
+        }));
+        records
+    }
+
+    fn codex_view(records: Vec<Value>) -> (Vec<u8>, BuiltView, Value) {
+        let mut wire = Vec::new();
+        for (ordinal, mut record) in records.into_iter().enumerate() {
+            record["ordinal"] = json!(ordinal);
+            serde_json::to_writer(&mut wire, &record).unwrap();
+            wire.push(b'\n');
+        }
+        let view = build_view(
+            AgentProviderRegistry::production(),
+            &ProviderKey::parse("codex").unwrap(),
+            "resource-view-test",
+            "source-session",
+            None,
+            &wire,
+        )
+        .unwrap();
+        let value = serde_json::from_slice(&view.bytes).unwrap();
+        (wire, view, value)
+    }
+
+    #[test]
+    fn mixed_codex_wire_keeps_every_turn_and_original_digest() {
+        let (wire, view, value) = codex_view(mixed_codex_records());
+        assert_eq!(value["event_counts"]["prompts"]["value"], 6);
+        assert_eq!(value["event_counts"]["responses"]["value"], 6);
+        assert_eq!(value["event_counts"]["intermediate_steps"]["value"], 3);
+        assert_eq!(value["event_counts"]["tool_calls"]["value"], 3);
+        assert_eq!(value["tokens"]["value"], 1260);
+        assert_eq!(value["provider_session_id"], "wire-root");
+        assert_eq!(view.events, 18);
+        assert!(!view.truncated);
+        assert_eq!(view.source_sha256, sha256_hex(&wire));
+        assert_eq!(view.sha256, sha256_hex(&view.bytes));
+        let messages = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "prompt" || event["kind"] == "response")
+            .map(|event| event["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        let expected = (0..6)
+            .flat_map(|turn| [format!("Prompt {turn}"), format!("Reply {turn}")])
+            .collect::<Vec<_>>();
+        assert_eq!(messages, expected);
+    }
+
+    #[test]
+    fn complete_codex_display_records_are_not_duplicated() {
+        let mut records = mixed_codex_records();
+        let header = records.remove(0);
+        let projected =
+            complete_paginated_item_projection(records, "wire-root", &mut |_| Ok(())).unwrap();
+        let (wire, view, value) = codex_view(std::iter::once(header).chain(projected).collect());
+        assert_eq!(value["event_counts"]["prompts"]["value"], 6);
+        assert_eq!(value["event_counts"]["responses"]["value"], 6);
+        assert_eq!(value["event_counts"]["intermediate_steps"]["value"], 3);
+        assert_eq!(value["event_counts"]["tool_calls"]["value"], 3);
+        assert_eq!(view.events, 18);
+        assert_eq!(view.source_sha256, sha256_hex(&wire));
+    }
 
     #[test]
     fn a_standalone_codex_wire_rollout_builds_a_view_without_a_provider_home() {
