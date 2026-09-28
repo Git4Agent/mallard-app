@@ -753,3 +753,109 @@ fn prepare_claude_owned_ui_fixture() {
     assert!(result.success);
     std::fs::remove_file(&children[0]).unwrap();
 }
+
+
+#[test]
+#[cfg(unix)]
+fn local_session_delete_cleans_binding_after_provider_failure_and_keeps_other_sessions() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    for failure in ["none", "provider", "metadata"] {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage = StorageId::parse("delete-store").unwrap();
+        add_local_storage(&repo, &storage, &temp.path().join("store"));
+        let project = register(&repo);
+        let root = temp.path().join("project");
+        let home = temp.path().join("claude");
+        bind_and_link_claude_replica(&repo, &project, &storage, &root, &home);
+        let selected = "11111111-1111-4111-8111-111111111111";
+        let kept = "22222222-2222-4222-8222-222222222222";
+        let (main, children) = write_claude_owned_fixture(&home, &root, selected, 2);
+        let (other, _) = write_claude_owned_fixture(&home, &root, kept, 1);
+        let service = ProjectSyncService::new(&repo);
+        let review = service
+            .prepare_push_review(&project.local_project_id, &storage)
+            .unwrap();
+        let result = service
+            .push_reviewed(
+                &project.local_project_id,
+                &storage,
+                PushApproval::recommended(&review, &storage),
+            )
+            .unwrap();
+        assert!(result.success, "{}", result.message);
+        let before = repo.load_conversation_bindings().unwrap();
+        let selected_binding = before
+            .bindings
+            .iter()
+            .find(|row| row.provider_thread_id.as_deref() == Some(selected))
+            .unwrap();
+        let kept_binding = before
+            .bindings
+            .iter()
+            .find(|row| row.provider_thread_id.as_deref() == Some(kept))
+            .unwrap();
+        let resource = conversation_resource_id(
+            &ProviderKey::parse("claude").unwrap(),
+            &selected_binding.thread_id,
+        )
+        .unwrap();
+        let config_before = repo.load_config().unwrap();
+        let materials_before = repo.load_materializations().unwrap();
+        let children_dir = main.parent().unwrap().join(selected);
+        let moved = temp.path().join("saved-children");
+        if failure == "provider" {
+            std::fs::rename(&children_dir, &moved).unwrap();
+            symlink(&moved, &children_dir).unwrap();
+        }
+        let permissions = std::fs::metadata(repo.root()).unwrap().permissions();
+        if failure == "metadata" {
+            std::fs::set_permissions(repo.root(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let result = delete_local_project_session_with_repository(
+            &repo,
+            &project.local_project_id,
+            resource.as_str(),
+        )
+        .unwrap();
+        std::fs::set_permissions(repo.root(), permissions).unwrap();
+        assert_eq!(
+            result.provider_error.is_some(),
+            failure == "provider",
+            "{result:?}"
+        );
+        assert_eq!(
+            result.metadata_error.is_some(),
+            failure == "metadata",
+            "{result:?}"
+        );
+        assert_eq!(main.exists(), failure == "provider");
+        assert!(other.exists());
+        let after = repo.load_conversation_bindings().unwrap();
+        assert!(after.bindings.contains(kept_binding));
+        assert_eq!(
+            after.bindings.contains(selected_binding),
+            failure == "metadata"
+        );
+        let config_after = repo.load_config().unwrap();
+        for (old, new) in config_before.links.iter().zip(&config_after.links) {
+            assert_eq!(old.scope_bases, new.scope_bases);
+            for (scope, checkpoints) in &old.conversation_checkpoints {
+                for (thread, checkpoint) in checkpoints {
+                    if thread == &selected_binding.thread_id && failure != "metadata" {
+                        assert!(!new.conversation_checkpoints[scope].contains_key(thread));
+                    } else {
+                        assert_eq!(&new.conversation_checkpoints[scope][thread], checkpoint);
+                    }
+                }
+            }
+        }
+        assert_eq!(repo.load_materializations().unwrap(), materials_before);
+        if failure == "none" {
+            assert!(children.iter().all(|path| !path.exists()));
+        }
+        if failure == "provider" {
+            assert!(moved.exists());
+        }
+    }
+}

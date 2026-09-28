@@ -18,11 +18,15 @@ export default function SyncReviewSelectionBar({
   clearDisabled,
   onClear,
   searchActive = false,
+  listPending = false,
   close,
 }: {
   count: number;
   total: number;
   busy?: boolean;
+  /** The rows have not landed: a count and the controls that change a
+   *  selection would speak for rows nobody can see, so only close stays. */
+  listPending?: boolean;
   recommendedTitle: string;
   recommendedAriaLabel: string;
   recommendedDisabled: boolean;
@@ -37,39 +41,43 @@ export default function SyncReviewSelectionBar({
 }) {
   return (
     <div className="sync-push-resource-actions">
-      {/* The recommend button's own count is a property of the resource set,
-          not of the selection, so it never moves when a row is ticked. Shown
-          as a bare number beside a tick it read as "N selected"; the live
-          count below is the one that answers that question. */}
-      <span
-        className="sync-sync-review-selected"
-        style={{ "--review-count-digits": String(total).length } as CSSProperties}
-        aria-live="polite"
-        aria-label={`${count} of ${total} selected`}
-        title={`${count} of ${total} selected`}
-      >
-        <b>{count}</b>/{total}
-      </span>
-      <button
-        type="button"
-        className="btn btn-ghost sync-sync-review-icon-action"
-        onClick={onRecommended}
-        disabled={busy || recommendedDisabled}
-        title={recommendedTitle}
-        aria-label={recommendedAriaLabel}
-      >
-        <Icon name="check-circle" size={15} />
-      </button>
-      <button
-        type="button"
-        className="btn btn-ghost sync-sync-review-icon-action"
-        onClick={onClear}
-        disabled={busy || clearDisabled}
-        title={searchActive ? "Clear matching selection" : "Clear current selection"}
-        aria-label={searchActive ? "Clear matching selection" : "Clear current selection"}
-      >
-        <Icon name="trash" size={15} />
-      </button>
+      {!listPending && (
+        <>
+          {/* The recommend button's own count is a property of the resource set,
+              not of the selection, so it never moves when a row is ticked. Shown
+              as a bare number beside a tick it read as "N selected"; the live
+              count below is the one that answers that question. */}
+          <span
+            className="sync-sync-review-selected"
+            style={{ "--review-count-digits": String(total).length } as CSSProperties}
+            aria-live="polite"
+            aria-label={`${count} of ${total} selected`}
+            title={`${count} of ${total} selected`}
+          >
+            <b>{count}</b>/{total}
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost sync-sync-review-icon-action"
+            onClick={onRecommended}
+            disabled={busy || recommendedDisabled}
+            title={recommendedTitle}
+            aria-label={recommendedAriaLabel}
+          >
+            <Icon name="check-circle" size={15} />
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost sync-sync-review-icon-action"
+            onClick={onClear}
+            disabled={busy || clearDisabled}
+            title={searchActive ? "Clear matching selection" : "Clear current selection"}
+            aria-label={searchActive ? "Clear matching selection" : "Clear current selection"}
+          >
+            <Icon name="trash" size={15} />
+          </button>
+        </>
+      )}
       {close && (
         <button
           type="button"

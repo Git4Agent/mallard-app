@@ -7,6 +7,7 @@ import BundleConnectionDialog from "../../src/components/project-sync/BundleConn
 import { mergeSavedSetupDraft } from "../../src/components/project-sync/ProjectSetupWorkspace";
 import RepositoryAddressPicker, {
   gitRemoteWord,
+  inListing,
   isInvitationCodeShaped,
   managedCloudAccount,
   normalizeRepositoryName,
@@ -55,6 +56,7 @@ function repository(overrides: Partial<ManagedCloudRepository>): ManagedCloudRep
     can_push: true,
     repository_fingerprint: CHECKOUT,
     git_remote: "matches",
+    github_url: null,
     revision: 4,
     updated_at: 1_787_298_240,
     resources: 3,
@@ -99,6 +101,17 @@ test("the found row's words follow role and remote", () => {
   assert.ok(isInvitationCodeShaped("abcde-fghjk-mnpqr-stvwx"));
   assert.ok(isInvitationCodeShaped(" ABCDE FGHJK MNPQR STVWX "));
   assert.ok(!isInvitationCodeShaped("ABCDE-FGHJK"));
+  assert.ok(!isInvitationCodeShaped(""));
+  // An address always has a slash, even one that is 20 characters long.
+  assert.ok(!isInvitationCodeShaped("abcdefghij/klmnopqrs"));
+  assert.ok(!isInvitationCodeShaped("mallard-ai.com/Rika321/HorrorGame"));
+  assert.ok(!isInvitationCodeShaped("abcdefghij.klmnopqrs"));
+  // The alphabet is the service's to refuse, so a mistyped code still joins
+  // and gets the code's error rather than the address's.
+  assert.ok(isInvitationCodeShaped("OOOOO-00000-IIIII-11111"));
+  assert.ok(inListing({ bundle_id: BUNDLE }, [{ bundle_id: "a".repeat(32) }, { bundle_id: BUNDLE }]));
+  assert.ok(!inListing({ bundle_id: BUNDLE }, [{ bundle_id: "a".repeat(32) }]));
+  assert.ok(!inListing({ bundle_id: null }, [{ bundle_id: null }]), "a repository with no bundle is never a row's twin");
 });
 
 test("the picker names repositories by address and never by bundle id", () => {
@@ -120,13 +133,13 @@ test("the picker names repositories by address and never by bundle id", () => {
       onSelect={() => undefined}
     />,
   );
-  assert.match(html, /Repository address/);
-  assert.match(html, /placeholder="mallard-ai\.com\/owner\/name"/);
+  assert.match(html, /Address or invitation code<\/span>/, "the code has a place before any lookup");
+  assert.match(html, /placeholder="mallard-ai\.com\/owner\/name, or XXXXX-XXXXX-XXXXX-XXXXX"/);
+  assert.equal(html.match(/<input/g)?.length, 1, "one field takes the address or the code");
   assert.match(html, /Look up/);
-  assert.match(html, /Invitation code \(optional\)<\/span>/, "the code field is visible before any lookup");
-  assert.match(html, /placeholder="XXXXX-XXXXX-XXXXX-XXXXX"/);
-  assert.match(html, /Join repository/);
-  assert.match(html, /No repository address is needed/);
+  assert.doesNotMatch(html, /Invitation code \(optional\)|Join repository/);
+  assert.match(html, /or a code from the repository’s owner or an admin/);
+  assert.match(html, /class="repo-list-head">Your repositories<small>3<\/small><\/div>/);
   assert.doesNotMatch(html, /read-only/i);
   assert.match(html, /Rika321\/HorrorGame<small class="sync-bundle-recommended">Git match<\/small>/);
   assert.match(html, /Private · Owner/);
@@ -172,6 +185,26 @@ test("the picker names repositories by address and never by bundle id", () => {
   );
   assert.match(acknowledging, /pushed from a different Git remote than this checkout/);
   assert.doesNotMatch(acknowledging, /New repository/);
+
+  // No rows: a heading and one quiet line, never an empty bordered list.
+  const empty = renderToStaticMarkup(
+    <RepositoryAddressPicker
+      storage={cloud}
+      projectName=""
+      localFingerprint={null}
+      listing={{ state: "ready", repositories: [] }}
+      selection={null}
+      rows="match-option"
+      offerNew={false}
+      mode="clone"
+      disabled={false}
+      onSelect={() => undefined}
+    />,
+  );
+  assert.match(empty, /class="repo-list-head">Your repositories<\/div>/);
+  assert.match(empty, /<p class="repo-list-empty">None yet\. Repositories you create or join appear here\.<\/p>/);
+  assert.doesNotMatch(empty, /radiogroup|sync-bundle-match-options/);
+  assert.doesNotMatch(empty, /Paste the page address/, "clone mode says fewer words");
 });
 
 test("the connect dialog for a Mallard Cloud storage takes an address, empty account or not", () => {
@@ -191,11 +224,11 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
     />,
   );
   assert.match(html, /Connect HorrorGame to Mallard Cloud/);
-  assert.match(html, /Paste a repository address, enter an invitation code, or select a repository below/);
+  assert.match(html, /Paste a repository address or an invitation code, or choose one of your repositories/);
   assert.match(html, /Mallard Cloud · Rika321/);
-  assert.match(html, /Repository address/);
+  assert.match(html, /Address or invitation code/);
   assert.match(html, /Checking repositories you belong to/);
-  assert.match(html, /Look up an address, join with a code, or select a row/);
+  assert.match(html, /Paste an address or a code, or select a row/);
   assert.doesNotMatch(html, /Current local repo/, "no bundle id in the context line");
   assert.doesNotMatch(html, /Create separate repo/);
   assert.match(html, />Connect<\/button>/);
@@ -242,9 +275,11 @@ test("linking a Mallard Cloud storage always opens the address dialog, and setup
 
   // A public repository the account does not belong to is a contributor's, not read-only.
   const card = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(card, /link\.role === null/);
-  assert.match(card, /Contributor/);
+  const cloud = readFileSync("src/components/project-sync/managedCloudLink.ts", "utf8");
+  assert.match(cloud, /link\.role === null && link\.visibility === "public" && link\.can_push/);
+  assert.match(cloud, /"Contributor"/);
   assert.doesNotMatch(card, /Read-only/);
+  assert.doesNotMatch(cloud, /Read-only/);
   const dialog = readFileSync("src/components/project-sync/BundleConnectionDialog.tsx", "utf8");
   assert.doesNotMatch(dialog, /read-only/i);
 });

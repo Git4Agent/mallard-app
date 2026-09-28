@@ -70,7 +70,7 @@ impl StorageProviderAdapter for DropboxAdapter {
     fn descriptor(&self) -> StorageProviderDescriptor {
         let guide = "https://www.dropbox.com/developers/reference/auth-types";
         StorageProviderDescriptor {
-            key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"A shared folder in your Dropbox, new or one you already use. Uploads up to 150 MiB per object.".into(),
+            key:provider_key(),config_version:1,display_name:"Dropbox".into(),description:"A Dropbox folder. Up to 150 MiB per object.".into(),
             default_name:"Dropbox storage".into(),
             name_suggestion:Some(StorageNameSuggestion::whole_setting("folder_name", "Dropbox {1}")),
             display_rank:20,icon:"cloud".into(),clear_mode:StorageClearMode::RevisionChecked,

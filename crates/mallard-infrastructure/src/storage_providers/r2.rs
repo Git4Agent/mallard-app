@@ -419,7 +419,7 @@ impl StorageProviderAdapter for R2Adapter {
             key: provider_key(),
             config_version: R2_CONFIG_VERSION,
             display_name: "Cloudflare R2".to_string(),
-            description: "An R2 bucket reached through its S3 API.".to_string(),
+            description: "Store snapshots in your R2 bucket.".to_string(),
             default_name: "R2 storage".to_string(),
             name_suggestion: Some(StorageNameSuggestion::whole_setting("bucket", "R2 {1}")),
             display_rank: 10,

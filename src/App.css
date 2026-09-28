@@ -231,6 +231,24 @@ summary:focus-visible {
   border-top: 1px solid var(--border-mid);
 }
 
+/* A review's session list (`sessions`). The caption stands in the search
+   field's slot — its 38px and the 12px under it, without its rule — so the
+   field lands where the caption was; the rows are the session card at its
+   landed 63px, not the shorter row `rows` still draws. Block flow, not the
+   scaffold's flex column, so the caption's margin collapses into the
+   storage-only group's exactly as the search field's does. */
+.loading-scaffold.sessions { display: block; }
+
+.loading-scaffold.sessions > .loading-scaffold-caption {
+  min-height: 38px;
+  margin: 0 0 12px;
+  font-size: var(--type-sm);
+}
+
+.loading-scaffold-sessions > .loading-scaffold-row {
+  padding: 15px 12px 17px;
+}
+
 .loading-scaffold-topline {
   display: flex;
   align-items: center;
@@ -1977,16 +1995,6 @@ summary:focus-visible {
 .sync-pull-item-detail-grid span { color: var(--text-3); }
 .sync-pull-item-detail-grid code { overflow-wrap: anywhere; color: var(--text-1); font-family: var(--font-mono); font-size: var(--type-2xs); }
 
-.sync-pull-support-loading {
-  min-height: 42px;
-  padding: 8px 13px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-2);
-  font-size: var(--type-xs);
-}
-
 .sync-bundle-connection-dialog .notice { margin-top: 12px; }
 
 .sync-pull-apply-button { min-width: 190px; min-height: 40px; padding: 0 15px; font-size: var(--type-sm); }
@@ -2134,6 +2142,12 @@ summary:focus-visible {
   width: 1px;
   background: var(--border);
   pointer-events: none;
+}
+/* Alone — while a review prepares or waits on its rows — close parts
+   nothing from nothing: no rule, and it keeps the slot the full cluster ends
+   in, so the header does not shift when the cluster fills in. */
+.sync-push-resource-actions .sync-inline-action-close:only-child::before {
+  content: none;
 }
 .sync-sync-review-icon-action > span {
   color: var(--text-2);
@@ -3654,14 +3668,15 @@ span.sync-path-crumb {
   }
 
   /* The trail has nothing left to give here, and the action cluster does not
-     shrink, so the air between the actions is what goes. Measured on a Git
-     page at 580px: 24px back, which is what the Mallard Cloud mark costs. */
-  .sync-pathbar {
-    gap: 6px;
-  }
-
+     shrink, so the air between the actions is what goes, and half the bar's
+     12px gap before them. The bar is the container this rung queries, and a
+     container never matches its own query, so that half comes off the
+     cluster's side: a `gap` set on `.sync-pathbar` here never applies.
+     Measured on a Git page: 32px back, more than the 27px the Mallard Cloud
+     mark costs. */
   .sync-path-actions {
     gap: 4px;
+    margin-left: -6px;
   }
 
   .sync-path-action-group {
@@ -6776,6 +6791,13 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   display: none;
 }
 
+/* On the rail the last commit's 10px bottom margin parts it from the foot.
+   The flat list's frame has no margin, so without its own the foot sat flush
+   against the list's shadow. */
+.sync-history-rail-foot.no-rail {
+  margin-top: 10px;
+}
+
 /* Equal slots, so one control fills the foot the way the load bar always did
    and two split it evenly. */
 .sync-history-rail-step {
@@ -7025,6 +7047,9 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   min-height: 44px;
   padding: 4px 20px;
   gap: 8px;
+  /* Wraps for the meter's refusal row and for nothing else: while the
+     selection fits, that row is not rendered at all. */
+  flex-wrap: wrap;
 }
 
 .sync-sync-review-footer > .btn {
@@ -7039,15 +7064,16 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 5px 20px;
 }
 
-/* The push meter is drawn twice, in the review's two pinned zones: a glance in
-   the header and the gauge pill against the Push button. The list between them
-   scrolls, so a meter that lived only in the footer's sentence slot — a 4px
-   hairline the width of a paragraph, a panel away from the button it disables —
-   was legible from one end of the review only. Both instances measure the same
-   thing, live as rows are ticked: what this push carries against the limit, in
-   the local-outstanding ink because it measures what leaves this computer, in
-   the danger ink once it no longer fits. */
-.sync-push-budget-glance {
+/* The review meter is drawn twice, in a review's two pinned zones: a glance in
+   the header and the gauge pill against the apply button. The list between
+   them scrolls, so a meter that lived only in the footer's sentence slot — a
+   4px hairline the width of a paragraph, a panel away from the button it
+   disables — was legible from one end of the review only. Both instances
+   measure the same thing, live as rows are ticked: what this apply carries
+   against the limit, in the ink of its direction — local-outstanding for a
+   push, which measures what leaves this computer, cloud-outstanding for a pull,
+   which measures what arrives — and in the danger ink once it no longer fits. */
+.sync-review-budget-glance {
   display: inline-flex;
   align-items: center;
   gap: 9px;
@@ -7057,7 +7083,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 /* Scaled to max(total, limit): while the push fits, the track's right end IS
    the limit; past it the limit is the tick and the fill runs beyond it. */
-.sync-push-budget-track {
+.sync-review-budget-track {
   position: relative;
   display: flex;
   width: 96px;
@@ -7079,10 +7105,18 @@ button.sync-history-branch-trigger:hover:not(:disabled),
    was drawn first and does not survive measurement: --text-3 sits 1.05:1 from
    --thread-status-local on cream, so two of the three segments were the same
    colour. The breakdown stays in the title, where it already was. */
-.sync-push-budget-track > i {
+.sync-review-budget-track > i {
   display: block;
   height: 100%;
   background: var(--thread-status-local);
+}
+
+/* The pull fill, in the cloud-outstanding ink. Measured like the local one:
+   --thread-status-cloud on --loader-track holds 4.00:1 on cream and 4.76 on
+   dark, and --text-1 on its 34% gauge wash 6.24 and 4.65. Declared before the
+   over hatch, which shares its specificity and must win. */
+.sync-review-budget-track.pull > i {
+  background: var(--thread-status-cloud);
 }
 
 /* Hatched rather than only recoloured: a striped bar tells the over state from
@@ -7091,7 +7125,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
    a 45% stripe, under the 3:1 a mark that carries meaning has to hold. At 65%
    it reads 3.07 on cream and 3.99 on dark, and the two stripes still part
    company by eye. */
-.sync-push-budget-track.over > i {
+.sync-review-budget-track.over > i {
   background: repeating-linear-gradient(
     135deg,
     var(--danger-text) 0 3px,
@@ -7103,7 +7137,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
    paper rather than drawn in ink: a --text-0 line held 2.90:1 against the
    danger fill on cream and 1.96 on dark, while the paper clears 5.67 and 7.66
    against the same fill and 3.07/3.99 against the hatch's pale stripe. */
-.sync-push-budget-track > b {
+.sync-review-budget-track > b {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -7111,7 +7145,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   background: var(--surface-card);
 }
 
-.sync-push-budget-figure {
+.sync-review-budget-figure {
   color: var(--text-1);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
@@ -7119,20 +7153,20 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   white-space: nowrap;
 }
 
-.sync-push-budget-figure > b {
+.sync-review-budget-figure > b {
   color: var(--text-0);
   font-weight: var(--weight-semibold);
 }
 
-.sync-push-budget-figure.over,
-.sync-push-budget-figure.over > b {
+.sync-review-budget-figure.over,
+.sync-review-budget-figure.over > b {
   color: var(--danger-text);
 }
 
 /* The pill is the readout and the gauge at once, at the button's own height
    and hard against it: the quantity and the act that spends it read as one
    object rather than as a sentence at the far end of the same strip. */
-.sync-push-budget-gauge {
+.sync-review-budget-gauge {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -7147,32 +7181,32 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 /* Not drawn past the limit — the component stops rendering it, because the
    pill is full and a danger wash under a danger figure measured 3.42:1 on
    cream against 5.03 on the plate alone. */
-.sync-push-budget-fill {
+.sync-review-budget-fill {
   position: absolute;
   inset: 0 auto 0 0;
   background: color-mix(in srgb, var(--thread-status-local) 34%, transparent);
 }
 
+.sync-review-budget-gauge.pull .sync-review-budget-fill {
+  background: color-mix(in srgb, var(--thread-status-cloud) 34%, transparent);
+}
+
 /* Over the fill, which is painted across the whole pill. */
-.sync-push-budget-gauge > .sync-push-budget-figure {
+.sync-review-budget-gauge > .sync-review-budget-figure {
   position: relative;
 }
 
 /* --danger-soft is a tint, not a colour: on its own it would let the footer
    read through at 12%, so it is laid over the pill's own surface. */
-.sync-push-budget-gauge.over {
+.sync-review-budget-gauge.over {
   border-color: var(--danger-text);
   background: linear-gradient(var(--danger-soft), var(--danger-soft)), var(--surface-card);
 }
 
 /* The refusal takes a row of its own above the cluster, so it sits with the
-   gauge and the button rather than squeezing them. The footer wraps for it and
-   for nothing else: while the push fits, the row is not rendered at all. */
-.sync-push-resource-footer {
-  flex-wrap: wrap;
-}
-
-.sync-push-budget-sentence {
+   gauge and the button rather than squeezing them; the footer rule above
+   wraps for it. */
+.sync-review-budget-sentence {
   flex: 1 0 100%;
   order: -1;
   margin: 0;
@@ -10368,7 +10402,16 @@ svg[data-storage-provider="r2"] { --storage-icon-tile: #ffe7d5; }
   min-height: 3.25rem;
   flex-basis: auto;
   margin-bottom: var(--retro-gutter);
-  padding-right: 10px;
+  /* The right inset is the corner radius: the 16px inner curve plus the 2px a
+     control's shadow, and its press, hang past its box. The bar does not clip
+     and the path bar's action cluster runs its full height, so at 10px that
+     cluster's box reached 8px into both right corners. In the live WebKit view
+     a repaint that stays inside the bar's border but reaches into a corner
+     redraws the bar's background there and not the border's curve: pressing
+     Push, Pull or ⋯ left both right corners squared off, and nothing repainted
+     them afterwards. At the radius, the last control's shadow ends 16px from
+     the inner edge, the same inset the trail starts at on the left. */
+  padding-right: var(--retro-panel-radius);
   background: var(--bg-2);
 }
 
@@ -10753,20 +10796,60 @@ span.sync-update-pill {
   transform: translate(2px, 2px);
 }
 
-/* The Mallard Cloud release state: the one Cloud fact the bar carries. Its
-   verbs live in the project menu, because the action cluster never shrinks —
-   whatever it takes, the trail loses, and past the trail's floor the crumbs
-   paint under the chips. */
-.sync-path-cloud-status {
-  gap: 6px;
-  padding-inline: 9px;
-  border-color: var(--accent);
-  color: var(--text-0);
-  box-shadow: var(--shadow-control);
+/* The Mallard Cloud chip (docs/PLAN_CLOUD_STATUS_CHIP.md): whatever the
+   service answered, as a mark and a word, and the button that opens the
+   repository's facts and verbs. The action cluster never shrinks — whatever
+   it takes, the trail loses, and past the trail's floor the crumbs paint
+   under the chips — so the word goes long before the crumbs do. */
+.sync-path-popover {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
 }
 
-/* The label is data ("Waiting for Super Admin"), so it is capped rather than
-   trusted; the whole state stays in the tooltip and the accessible name. */
+.sync-path-cloud-status {
+  --icon-badge: currentColor;
+  gap: 5px;
+  padding-inline: 5px 7px;
+  border-color: var(--accent);
+  background: transparent;
+  color: var(--text-0);
+  box-shadow: var(--shadow-control);
+  cursor: pointer;
+}
+
+.sync-path-cloud-status[data-tooltip] {
+  cursor: pointer;
+}
+
+.sync-path-cloud-status:not(.warning):not(.danger):hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.sync-path-cloud-status:active:not(:disabled) {
+  box-shadow: none;
+  transform: translate(2px, 2px);
+}
+
+/* Before the first answer: present, so the bar never shifts, and inert. */
+.sync-path-cloud-status:disabled {
+  opacity: .62;
+  cursor: default;
+}
+
+/* The badge carries the tone; the cloud keeps the text colour. A warning or a
+   danger also tints the chip, as the attention count does. */
+.sync-path-cloud-status.success { --icon-badge: var(--success-text); }
+.sync-path-cloud-status.info { --icon-badge: var(--info-text); }
+.sync-path-cloud-status.warning { --icon-badge: var(--warning-text); }
+.sync-path-cloud-status.danger { --icon-badge: var(--danger-text); }
+
+.icon-badge {
+  fill: var(--icon-badge, currentColor);
+}
+
+/* The word is capped rather than trusted; the whole state stays in the
+   tooltip and the accessible name. */
 .sync-path-cloud-status > b {
   min-width: 0;
   max-width: 17ch;
@@ -10775,32 +10858,173 @@ span.sync-update-pill {
   white-space: nowrap;
 }
 
+.sync-path-cloud-status > .sync-path-chevron {
+  margin-left: -2px;
+}
+
 /* The chip goes down to its mark well before the crumbs do. Measured with an
    attention count on a session page, the trail has 55px to spare at an 800px
    bar and 125px at 900 — less than it has at 760, where the crumb ladder
-   below has already cut the ancestors to icons — and a capped label costs
-   147px. Tinted states still read as tinted with the words gone. */
+   below has already cut the ancestors to icons — and a capped word costs
+   ~110px. The badge keeps the state's shape with the words gone. */
 @container sync-pathbar (max-width: 960px) {
-  .sync-path-cloud-status {
-    padding-inline: 6px;
-  }
-
-  .sync-path-cloud-status > b {
-    display: none;
-  }
-}
-
-/* At the floor an attention count and the release mark do not both fit. The
-   count outranks the mark: it is about threads on this machine, and the mark
-   comes back as soon as the bar is wider. */
-@container sync-pathbar (max-width: 640px) {
   .sync-path-cloud-status {
     padding-inline: 4px;
   }
 
-  .sync-path-actions:has(> .sync-path-attention:not(.sync-path-cloud-status)) > .sync-path-cloud-status {
+  .sync-path-cloud-status > b,
+  .sync-path-cloud-status > .sync-path-chevron {
     display: none;
   }
+}
+
+/* At the floor the mark stays even beside an attention count: the chip is
+   where the repository's verbs live. */
+@container sync-pathbar (max-width: 640px) {
+  .sync-path-cloud-status {
+    padding-inline: 3px;
+  }
+}
+
+/* The chip's panel: the state and the repository, one line, the facts, then
+   the verbs. A link row opens its page; the button at its end copies it. */
+.sync-cloud-panel {
+  width: 300px;
+  max-width: 100%;
+}
+
+.sync-cloud-panel-head {
+  --icon-badge: currentColor;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 4px;
+  color: var(--text-0);
+}
+
+.sync-cloud-panel-head > svg {
+  flex: 0 0 auto;
+}
+
+.sync-cloud-panel-head.success { --icon-badge: var(--success-text); }
+.sync-cloud-panel-head.info { --icon-badge: var(--info-text); }
+.sync-cloud-panel-head.warning { --icon-badge: var(--warning-text); }
+.sync-cloud-panel-head.danger { --icon-badge: var(--danger-text); }
+
+.sync-cloud-panel-head .sync-path-menu-copy > span {
+  font-family: var(--font-display);
+  font-size: var(--type-md);
+  font-weight: var(--weight-bold);
+}
+
+.sync-cloud-panel-head .sync-path-menu-copy > small {
+  font-family: var(--font-mono);
+}
+
+.sync-cloud-panel-head.warning .sync-path-menu-copy > span {
+  color: var(--warning-text);
+}
+
+.sync-cloud-panel-head.danger .sync-path-menu-copy > span {
+  color: var(--danger-text);
+}
+
+.sync-cloud-panel-line {
+  margin: 2px 8px 8px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  line-height: 1.35;
+}
+
+.sync-cloud-panel-line.quiet {
+  margin-top: -2px;
+  color: var(--text-3);
+}
+
+.sync-cloud-panel-line.error {
+  margin-top: 6px;
+  color: var(--danger-text);
+}
+
+.sync-cloud-panel-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  margin: 0 8px 6px;
+}
+
+.sync-cloud-panel-facts > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sync-cloud-panel-facts dt {
+  color: var(--text-3);
+  font-family: var(--font-display);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.sync-cloud-panel-facts dd {
+  margin: 0;
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.sync-cloud-panel-action {
+  margin: 0 8px 4px;
+}
+
+.sync-cloud-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sync-cloud-panel-row > .sync-path-menu-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sync-cloud-panel-copy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 2px solid transparent;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sync-cloud-panel-copy:hover {
+  background: var(--surface-row-hover);
+  color: var(--text-0);
+}
+
+.sync-cloud-panel-copy:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.sync-cloud-panel-copy.copied {
+  color: var(--success-text);
+}
+
+.sync-cloud-panel-copy small {
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
 }
 
 /* Counts and the attention tally are measurements: mono, tabular, holding
@@ -12567,8 +12791,34 @@ span.sync-update-pill {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.sync-bundle-connection-dialog .storage-found-row.with-verb { grid-template-columns: 26px minmax(0, 1fr) auto; row-gap: 6px; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .sync-storage-repository-icon { grid-row: 1; grid-column: 1; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-text { grid-row: 1; grid-column: 2; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-facts { grid-row: 2; grid-column: 2 / -1; justify-content: flex-start; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-verb { grid-row: 1; grid-column: 3; }
+/* New project › From Mallard Cloud wraps the same way: its Git chip names
+   the address a clone comes from, too long to share the name's line. */
+.sync-bundle-connection-dialog .storage-found-row.with-verb,
+.cloud-project-repository .storage-found-row.with-verb { grid-template-columns: 26px minmax(0, 1fr) auto; row-gap: 6px; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .sync-storage-repository-icon,
+.cloud-project-repository .storage-found-row.with-verb > .sync-storage-repository-icon { grid-row: 1; grid-column: 1; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-text,
+.cloud-project-repository .storage-found-row.with-verb > .storage-found-text { grid-row: 1; grid-column: 2; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-facts,
+.cloud-project-repository .storage-found-row.with-verb > .storage-found-facts { grid-row: 2; grid-column: 2 / -1; justify-content: flex-start; }
+.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-verb,
+.cloud-project-repository .storage-found-row.with-verb > .storage-found-verb { grid-row: 1; grid-column: 3; }
+/* One field takes an address or an invitation code; its verb keeps one
+   width as it turns from Look up to Join. Under the field, "Your
+   repositories" heads the rows. With no rows there is no box, only a quiet
+   line: an empty bordered list read as a disabled text field. An answer
+   that is already a row points at it instead of repeating it. */
+.repo-connect .sync-folder-field > div > .btn.repo-verb { min-width: 104px; }
+.repo-list-head {
+  margin-top: 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-1);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+}
+.repo-list-head small { color: var(--text-3); font-weight: var(--weight-regular); }
+.repo-list-empty { margin: -4px 0 0; color: var(--text-3); font-family: var(--font-sans); font-size: var(--type-xs); }
+.repo-answer-line { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); font-family: var(--font-sans); font-size: var(--type-xs); }
+.repo-answer-line svg { color: var(--success-text); }

@@ -207,6 +207,14 @@ function withPackagedCliConfig(buildArgs) {
   ];
 }
 
+function withMacosDevIconConfig(devArgs) {
+  if (process.platform !== "darwin" || devArgs[0] !== "dev") return devArgs;
+  // Tauri sets the dev Dock icon directly. It needs the rounded rendition;
+  // packaged apps keep the opaque source that macOS masks itself.
+  const overlay = JSON.stringify({ bundle: { icon: ["icons/macos-dev.icns"] } });
+  return [devArgs[0], "--config", overlay, ...devArgs.slice(1)];
+}
+
 // Tauri notarizes and staples Mallard.app but not the disk image around it.
 // Notarizing the DMG as well lets Gatekeeper accept the download itself.
 function notarizationCredentials() {
@@ -236,7 +244,7 @@ async function notarizeDmg(dmgPath, { keyId, issuer, keyPath }) {
 
 // Resolve the overlay first: a release job missing the updater key fails
 // here, before any compilation.
-const tauriArgs = withPackagedCliConfig(args);
+const tauriArgs = withMacosDevIconConfig(withPackagedCliConfig(args));
 applyFeishuAppEnv(process.env);
 await stageCliBinary(args);
 await runChecked(process.execPath, [tauriCliScript, ...tauriArgs]);

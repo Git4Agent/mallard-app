@@ -384,7 +384,9 @@ export function findDestinationConflict(
  *  already writes to. Only asked on a provider that can look in its account. */
 export type StorageSetupMode = "create" | "existing";
 
-function ModeDoor({ icon, title, detail, help, checked, disabled, onChoose }: {
+/** One of two ways in, as a radio door: New storage's Create new / Use
+ *  existing, and New project's On this computer / From Mallard Cloud. */
+export function ModeDoor({ icon, title, detail, help, checked, disabled, onChoose }: {
   icon: IconName;
   title: string;
   detail: string;

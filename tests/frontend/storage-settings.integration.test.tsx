@@ -2361,6 +2361,64 @@ function renderManagedCloud(state: Partial<ManagedCloudFlow["state"]>, mode: "cr
 }
 const managedCloudLogin = { account: { id: "user_1", login: "octocat" }, service_origin: "https://mallard-ai.com" };
 
+for (const outcome of ["accepted", "refused", "cancelled", "left"] as const) {
+  test(`Mallard Cloud draft adoption handles ${outcome} after the editor session changes`, async () => {
+    const source = readFileSync("src/components/project-sync/ManagedCloudSetup.tsx", "utf8");
+    const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+    const hook = transformSync(source.slice(source.indexOf("const idle ="), source.indexOf("const chip ="))
+      .replace("export function useManagedCloudSetup", "function useManagedCloudSetup"), { loader: "ts" }).code;
+    let state = managedCloudFlow({}).state;
+    let cleanup: () => void = noop;
+    let session = 1;
+    let adoptionCalls = 0;
+    const context = {
+      useState: (initial: () => ManagedCloudFlow["state"]) => {
+        state = initial();
+        return [state, (next: ManagedCloudFlow["state"] | ((previous: ManagedCloudFlow["state"]) => ManagedCloudFlow["state"])) => {
+          state = typeof next === "function" ? next(state) : next;
+        }];
+      },
+      useRef: (current: unknown) => ({ current }),
+      useEffect: (effect: () => () => void) => { cleanup = effect(); },
+    };
+    const create = new Function("context", "options", `const { useState, useRef, useEffect } = context; ${hook}; return useManagedCloudSetup(options);`);
+    const flow: ManagedCloudFlow = create(context, {
+      enabled: true, draftId: "fixture-draft", mode: "create",
+      port: {
+        blocked: () => false,
+        beginRun: () => {
+          const captured = session;
+          return { isCurrent: () => session === captured, persist: async () => cloudDraft() };
+        },
+        onRunStarted: noop,
+        adoptPrepared: async (_saved: StorageSetupDraft, isCurrent: () => boolean) => {
+          assert.equal(isCurrent(), true);
+          adoptionCalls += 1;
+          // Seating the prepared draft resets the editor session in the workspace.
+          session += 1;
+          if (outcome === "cancelled") await flow.cancel();
+          if (outcome === "left") cleanup();
+          return outcome !== "refused";
+        },
+      },
+      api: {
+        signInManagedCloudStorage: async () => managedCloudLogin,
+        cancelManagedCloudSetup: async () => {},
+      },
+    });
+    flow.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(adoptionCalls, 1);
+    assert.equal(flow.isRunning(), false);
+    assert.equal(state.phase, outcome === "accepted" ? "review" : "login");
+    if (outcome === "accepted") {
+      assert.equal(state.error, null);
+      assert.match(renderManagedCloud(state), /Ready for review\./);
+    }
+    if (outcome === "cancelled") assert.equal(state.error, "managed_cloud_setup_cancelled");
+  });
+}
+
 test("lanes name the storage after the destination they prepared", () => {
   const whole = { pattern: "^\\s*(\\S.*?)\\s*$", group: 1 };
   const dropbox = { ...dropboxProvider, name_suggestion: { ...whole, source: "folder_name", template: "Dropbox {1}" } };
@@ -2399,8 +2457,8 @@ test("Mallard Cloud declares a sign-in lane, no manual fields, and one managed s
 test("Mallard Cloud before start says what the lane does and who can read a push", () => {
   const html = renderManagedCloud({ phase: "idle" });
   assert.match(html, /storage-setup-agent-cta[^>]*>(?:<svg[^]*?<\/svg>)? Sign in with GitHub</);
-  assert.match(html, /private to you and the collaborators you invite/);
-  assert.match(html, /public only when you request a release/);
+  assert.match(html, /private to you and invited collaborators/);
+  assert.match(html, /Public snapshots require a release request on the website/);
   assert.match(renderManagedCloud({ phase: "idle" }, "reconnect"), /Reconnect Mallard Cloud/);
 });
 test("Mallard Cloud sign-in offers the link to copy or open with Cancel on the line, never printed", () => {
@@ -2443,58 +2501,291 @@ test("Mallard Cloud review names the account and the service, and reconnect ends
   assert.match(mismatch, /Change login/);
 });
 
-// The website bridge: one chip in the path bar for the release state; Open on
-// Mallard Cloud and Request public release (only when a request would be
-// accepted) in the project crumb's menu.
-import { cloudStatusChip, cloudVersionUrl, releaseChip } from "../../src/components/project-sync/managedCloudLink";
-test("Mallard Cloud release chips name each state and only a rejection reads as danger", () => {
-  assert.deepEqual(releaseChip({ kind: "public" }).label, "Published");
-  assert.deepEqual(releaseChip({ kind: "waiting_owner", requested_by: "user_2" }), {
-    label: "Pending approval",
-    severity: "plain",
-    detail: "Public release awaits Owner approval.",
-  });
-  assert.deepEqual(releaseChip({ kind: "waiting_super_admin" }), {
-    label: "Pending approval",
-    severity: "plain",
-    detail: "Public release awaits Admin approval.",
-  });
-  assert.equal(releaseChip({ kind: "snapshot_changed" }).severity, "plain");
-  assert.equal(releaseChip({ kind: "rejected", reason: "Not yet" }).severity, "danger");
-  assert.match(releaseChip({ kind: "rejected", reason: "Not yet" }).detail, /Not yet/);
-  assert.equal(releaseChip({ kind: "private" }).severity, "plain");
+// The website bridge: one chip in the path bar for whatever the service
+// answered, and the repository's verbs in the chip's panel
+// (docs/PLAN_CLOUD_STATUS_CHIP.md).
+import {
+  canDiscardDraft, cloudContributor, cloudFacts, cloudHeadline, cloudPinMoved, cloudReleaseUrl, cloudRepositoryGone, cloudReviewWord,
+  cloudStatusNotice, cloudSyncBlocked, cloudVerbs, cloudVersionUrl, discardCloudDraft, discardDraftQuestion,
+} from "../../src/components/project-sync/managedCloudLink";
+import { ManagedCloudPanel } from "../../src/components/project-sync/ManagedCloudChip";
+import type { ManagedCloudLink, ManagedCloudStatus } from "../../src/types";
+test("the Cloud verbs live in the chip's panel, and the project menu keeps only the project's own", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  const chip = readFileSync("src/components/project-sync/ManagedCloudChip.tsx", "utf8");
   assert.doesNotMatch(workspace, /getManagedCloudLink/);
   assert.match(workspace, /activityHeader\.managedCloudStatus/);
   assert.match(workspace, /managedCloudRepositoryId \? workspaceActionPrefix : null/);
-  assert.match(workspace, /label: "View draft"[^]*?cloudVersionUrl\(link, "private"\)/);
-  assert.match(workspace, /label: "View published version"[^]*?cloudVersionUrl\(link, "public"\)/);
-  assert.match(workspace, /if \(link\.can_request_release\) \{[^]*?requestManagedCloudRelease\(/);
-  assert.match(workspace, /\.\.\.managedCloudMenuItems,/);
+  // The chip renders for every answer, ready or not; with none it checks only while this pair's read is in flight.
+  assert.match(workspace, /\{managedCloudKey && \(cloudStatus \|\| cloudChecking\) && \(\s*<ManagedCloudChip\s+status=\{cloudStatus\}/);
+  assert.match(workspace, /const cloudChecking = !cloudStatus\s+&& !!managedCloudKey\s+&& activityHeader\?\.projectId === managedCloudProjectId\s+&& activityHeader\?\.storageId === managedCloudStorageId\s+&& !!activityHeader\.refreshing;/);
+  // Every verb but Storage settings hands focus back to the chip.
+  assert.equal(chip.match(/close\(true\)/g)?.length, 3);
+  assert.match(chip, /close\(note\.action !== "storage_settings"\)/);
+  assert.doesNotMatch(chip, /close\(false\)/);
+  assert.doesNotMatch(workspace, /managedCloudMenuItems|open-managed-cloud|view-published-cloud|request-managed-cloud-release|discard-managed-cloud-draft/);
+  assert.match(workspace, /const requestCloudRelease = \(\) => \{[^]*?requestManagedCloudRelease\(/);
+  assert.match(workspace, /const discardCloudDraftNow = \(\) => \{[^]*?discardCloudDraft\(cloudStatus, \{[^]*?discardManagedCloudDraft\(/);
+  assert.match(chip, /cloudVersionUrl\(link, "private"\)/);
+  assert.match(chip, /cloudVersionUrl\(link, "public"\)/);
+  assert.match(chip, /cloudReleaseUrl\(link\)/);
+  assert.match(chip, /writeClipboardText\(url\)/);
+  // Push and Pull read the one decision, and the note carries a control only when the decision names one.
+  assert.equal(workspace.match(/\|\| cloudBlocksSync/g)?.length, 2);
+  assert.match(workspace, /const cloudBlocksSync = !!managedCloudKey && cloudSyncBlocked\(cloudStatus\);/);
+  assert.match(workspace, /action: cloudNotice\.action === null \? undefined : \(/);
   assert.doesNotMatch(workspace, /sync-path-cloud-controls/);
   assert.match(workspace, /window\.addEventListener\("focus", refresh\)/);
 });
 
+test("the Cloud popover shares the bar's one open menu, its Escape and its focus return", () => {
+  const bar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
+  assert.match(bar, /export function PathBarPopover\(/);
+  assert.match(bar, /<PathBarMenus\.Provider value=\{menuControl\}>/);
+  // An open popover is a menu the bar knows, so a crumb menu opening closes it.
+  assert.match(bar, /\(openMenu !== null && popoverKeys\.current\.has\(openMenu\)\)/);
+  assert.match(bar, /toggle: \(key: string\) => setOpenMenu\(\(current\) => \(current === key \? null : key\)\)/);
+  assert.match(bar, /role="dialog" aria-label=\{label\}/);
+  assert.match(bar, /data-tooltip=\{open \? undefined : tooltip\}/);
+});
 
-test("Cloud status separates a saved draft, public visibility, and the current review", () => {
-  const link = {
-    repository_id: "repo_one", visibility: "public" as const, can_pull: true, can_push: true,
-    website_url: "https://mallard-ai.com/owner/project", owner_login: "owner", name: "project",
-    repository_revision: 7, can_request_release: true, role: "owner" as const,
-    release: { kind: "rejected" as const, reason: "Revise B" },
+/* A Mallard Cloud repository gone or being deleted, and a draft discarded
+   (PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md). */
+const cloudLink: ManagedCloudLink = {
+  repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
+  website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
+  repository_revision: 7, can_request_release: true, role: "owner",
+  release: { kind: "snapshot_changed" },
+};
+const cloudReady = (overrides: Partial<ManagedCloudStatus> = {}, link: Partial<ManagedCloudLink> = {}): ManagedCloudStatus => ({
+  repository_id: "repo_one", state: "ready", message: null,
+  link: { ...cloudLink, ...link },
+  publication: { state: "unpublished_draft", private_revision: 5, public_revision: 2 },
+  ...overrides,
+});
+const cloudFailed = (state: ManagedCloudStatus["state"], message: string): ManagedCloudStatus => (
+  { repository_id: "repo_one", state, link: null, message }
+);
+
+test("a repository gone or being deleted keeps Push and Pull open and offers nothing to retry", () => {
+  const gone = cloudFailed("gone", "Deleted, or this account lost access. Push creates it again.");
+  const deleting = cloudFailed("deleting", "Push creates it again.");
+  for (const status of [gone, deleting]) {
+    assert.equal(cloudRepositoryGone(status), true);
+    assert.equal(cloudSyncBlocked(status), false);
+    // Nothing of the repository is left to open, release or discard.
+    assert.deepEqual(cloudVerbs(status), { viewDraft: false, viewPublished: false, requestRelease: false, viewRelease: false, discardDraft: false });
+  }
+  assert.deepEqual(cloudStatusNotice(gone), {
+    title: "Repository gone",
+    message: "— Deleted, or this account lost access. Push creates it again.",
+    action: null,
+  });
+  assert.deepEqual(cloudStatusNotice(deleting), { title: "Being deleted", message: "— Push creates it again.", action: null });
+  assert.equal(cloudStatusNotice(cloudReady()), null);
+  assert.equal(cloudStatusNotice(null), null);
+  assert.equal(cloudSyncBlocked(cloudReady()), false);
+  assert.equal(cloudSyncBlocked(null), false);
+});
+
+test("every other answer keeps Push and Pull closed and offers its one control", () => {
+  const refused = cloudFailed("inaccessible", "Mallard Cloud refused this account. It may be suspended.");
+  const unavailable = cloudFailed("unavailable", "Mallard Cloud is temporarily unavailable. Try again shortly.");
+  const signedOut = cloudFailed("sign_in_required", "Mallard Cloud rejected the saved sign-in.");
+  for (const status of [refused, unavailable, signedOut]) {
+    assert.equal(cloudRepositoryGone(status), false);
+    assert.equal(cloudSyncBlocked(status), true);
+  }
+  assert.deepEqual(cloudStatusNotice(refused), {
+    title: "Repository unavailable",
+    message: "Mallard Cloud refused this account. It may be suspended.",
+    action: "retry",
+  });
+  assert.equal(cloudStatusNotice(unavailable)?.title, "Status unavailable");
+  assert.equal(cloudStatusNotice(unavailable)?.action, "retry");
+  assert.deepEqual(cloudStatusNotice(signedOut), {
+    title: "Sign-in required",
+    message: "Mallard Cloud rejected the saved sign-in.",
+    action: "storage_settings",
+  });
+  assert.equal(cloudStatusNotice({ ...unavailable, message: null })?.message, "Could not check Mallard Cloud.");
+});
+
+test("a repository created again is read in place of the link's, and the verbs that name the link wait", () => {
+  // The link saved repo_one; another computer of the account created repo_two.
+  const moved = cloudReady({}, { repository_id: "repo_two", website_url: "https://mallard-ai.com/rika/portal" });
+  assert.equal(cloudPinMoved(moved), true);
+  assert.equal(cloudPinMoved(cloudReady()), false);
+  assert.equal(cloudPinMoved(cloudFailed("gone", "")), false);
+  assert.equal(cloudSyncBlocked(moved), false);
+  // The chip and View draft describe the repository that was read.
+  assert.equal(cloudHeadline(moved).word, "Draft v5");
+  assert.equal(cloudVersionUrl(moved.link!, "private"), "https://mallard-ai.com/rika/portal?version=private");
+  assert.deepEqual(cloudVerbs(moved), { viewDraft: true, viewPublished: true, requestRelease: false, viewRelease: false, discardDraft: false });
+  assert.deepEqual(cloudVerbs(cloudReady()), { viewDraft: true, viewPublished: true, requestRelease: true, viewRelease: false, discardDraft: true });
+});
+
+test("Discard draft is the Owner's, over a public version, and for nothing else", () => {
+  assert.equal(canDiscardDraft(cloudReady()), true);
+  const refused: Array<[string, ManagedCloudStatus | null]> = [
+    ["an Admin", cloudReady({}, { role: "admin" })],
+    ["a Member", cloudReady({}, { role: "member" })],
+    ["a contributor", cloudReady({}, { role: null })],
+    ["a private repository", cloudReady({ publication: { state: "not_public", private_revision: 5, public_revision: null } }, { visibility: "private" })],
+    ["one made private after a release", cloudReady({ publication: { state: "not_public", private_revision: 5, public_revision: null } }, { visibility: "private", release: { kind: "private" } })],
+    ["a private repository the service still calls unpublished", cloudReady({}, { visibility: "private" })],
+    ["a draft that is the public version", cloudReady({ publication: { state: "matches_published", private_revision: 2, public_revision: 2 } }, { release: { kind: "public" } })],
+    ["no draft", cloudReady({ publication: { state: "no_draft", private_revision: null, public_revision: 2 } })],
+    ["a status without its publication", cloudReady({ publication: null })],
+    ["a repository read in place of the link's", cloudReady({}, { repository_id: "repo_two" })],
+    ["a repository that is gone", cloudFailed("gone", "")],
+    ["a repository being deleted", cloudFailed("deleting", "")],
+    ["a status that failed", cloudFailed("unavailable", "")],
+    ["no status", null],
+  ];
+  for (const [who, status] of refused) {
+    assert.equal(canDiscardDraft(status), false, who);
+    assert.equal(cloudVerbs(status).discardDraft, false, who);
+  }
+});
+
+test("Discard draft asks first: Cancel sends nothing, Discard sends the revision and compares again, a refusal is reported", async () => {
+  const status = cloudReady();
+  const question = discardDraftQuestion(status.link!, status.publication);
+  assert.equal(question.title, "Discard draft?");
+  assert.equal(
+    question.message,
+    "Discard the draft of “rika/portal”?\n\nRemoves every push after public version 2 from Mallard Cloud. The draft returns to the public version.\n\nNothing is deleted on this computer. This cannot be undone.",
+  );
+  assert.equal(question.kept, "public version 2");
+  assert.match(
+    discardDraftQuestion({ ...status.link!, release: { kind: "waiting_owner", requested_by: "user_two" } }, status.publication).message,
+    /returns to the public version\. The open release request is withdrawn\.\n\nNothing is deleted on this computer\./,
+  );
+  const run = async (answer: boolean, outcome: "accepted" | "refused", of: ManagedCloudStatus | null = status) => {
+    const log: string[] = [];
+    await discardCloudDraft(of, {
+      confirm: async (message, options) => {
+        log.push(`ask ${options.title} [${options.cancelLabel}] [${options.okLabel}] ${options.kind} ${message === question.message}`);
+        return answer;
+      },
+      discard: async (revision) => {
+        log.push(`discard ${revision}`);
+        if (outcome === "refused") throw new Error("Mallard Cloud refused a stale request. Refresh and try again.");
+      },
+      report: (refusal) => log.push(`report ${refusal}`),
+      refresh: () => log.push("refresh"),
+    });
+    return log;
   };
-  const publication = { state: "unpublished_draft" as const, private_revision: 4, public_revision: 2 };
-  const rejected = cloudStatusChip(link, publication);
-  assert.equal(rejected.label, "Public version 2 · Unpublished draft · Rejected");
-  assert.match(rejected.detail, /Revise B/);
-  const pushed = cloudStatusChip({ ...link, release: { kind: "snapshot_changed" } }, publication);
-  assert.match(pushed.label, /Unpublished draft · Not requested/);
-  const pending = cloudStatusChip({ ...link, release: { kind: "waiting_owner", requested_by: "user_one" } }, publication);
-  assert.equal(pending.label, "Public version 2 · Unpublished draft · Pending approval");
-  assert.doesNotMatch(pending.detail, /Revise B|rejected/);
-  assert.match(cloudStatusChip(link).label, /Public · Publication status unavailable · Rejected/);
-  assert.equal(cloudVersionUrl(link, "private"), "https://mallard-ai.com/owner/project?version=private");
-  assert.equal(cloudVersionUrl(link, "public"), "https://mallard-ai.com/owner/project?version=public");
+  assert.deepEqual(await run(false, "accepted"), ["ask Discard draft? [Cancel] [Discard] warning true"]);
+  assert.deepEqual(await run(true, "accepted"), [
+    "ask Discard draft? [Cancel] [Discard] warning true", "discard 7", "report null", "refresh",
+  ]);
+  assert.deepEqual(await run(true, "refused"), [
+    "ask Discard draft? [Cancel] [Discard] warning true", "discard 7",
+    "report Mallard Cloud refused a stale request. Refresh and try again.", "refresh",
+  ]);
+  // A status that no longer offers the verb asks nothing and sends nothing.
+  assert.deepEqual(await run(true, "accepted", cloudReady({}, { role: "admin" })), []);
+  assert.deepEqual(await run(true, "accepted", null), []);
+});
+
+test("the Cloud chip says the first state that applies, from the account down to the draft", () => {
+  const published = cloudReady({ publication: { state: "matches_published", private_revision: 2, public_revision: 2 } }, { release: { kind: "public" } });
+  const cases: Array<[string, ManagedCloudStatus | null, { rank: number; word: string; mark: string; tone: string }]> = [
+    ["no answer yet", null, { rank: 0, word: "Checking…", mark: "cloud", tone: "plain" }],
+    ["signed out", cloudFailed("sign_in_required", "Mallard Cloud rejected the saved sign-in."), { rank: 1, word: "Sign in", mark: "cloud-user", tone: "warning" }],
+    ["refused", cloudFailed("inaccessible", "Mallard Cloud refused this account."), { rank: 2, word: "No access", mark: "cloud-alert", tone: "warning" }],
+    ["unreachable", cloudFailed("unavailable", "Could not reach Mallard Cloud."), { rank: 2, word: "Can't check", mark: "cloud-alert", tone: "warning" }],
+    ["no comparison", cloudReady({ publication: null }), { rank: 2, word: "Can't compare", mark: "cloud-alert", tone: "warning" }],
+    ["being deleted", cloudFailed("deleting", "Push creates it again."), { rank: 3, word: "Being deleted", mark: "cloud-off", tone: "warning" }],
+    ["gone", cloudFailed("gone", "Deleted, or this account lost access. Push creates it again."), { rank: 3, word: "Gone", mark: "cloud-off", tone: "warning" }],
+    ["rejected", cloudReady({}, { release: { kind: "rejected", reason: "Revise B" } }), { rank: 4, word: "Rejected", mark: "cloud-x", tone: "danger" }],
+    ["the Owner decides", cloudReady({}, { release: { kind: "waiting_owner", requested_by: "user_2" } }), { rank: 5, word: "In review", mark: "cloud-clock", tone: "info" }],
+    ["an Admin decides", cloudReady({}, { release: { kind: "waiting_super_admin" } }), { rank: 5, word: "In review", mark: "cloud-clock", tone: "info" }],
+    ["a newer draft", cloudReady(), { rank: 6, word: "Draft v5", mark: "cloud-dot", tone: "plain" }],
+    ["published", published, { rank: 7, word: "Published v2", mark: "cloud-check", tone: "success" }],
+    ["private", cloudReady({ publication: { state: "not_public", private_revision: 5, public_revision: null } }, { visibility: "private", release: { kind: "private" } }), { rank: 8, word: "Private", mark: "cloud-lock", tone: "plain" }],
+    ["nothing pushed", cloudReady({ publication: { state: "no_draft", private_revision: null, public_revision: null } }, { visibility: "private", release: { kind: "not_pushed" } }), { rank: 9, word: "Not pushed", mark: "cloud", tone: "plain" }],
+  ];
+  for (const [what, status, expected] of cases) {
+    const { rank, word, mark, tone } = cloudHeadline(status);
+    assert.deepEqual({ rank, word, mark, tone }, expected, what);
+  }
+  // The line is the service's own sentence when it sent one, and the reason of a rejection.
+  assert.equal(cloudHeadline(cases[1][1]).line, "Mallard Cloud rejected the saved sign-in.");
+  assert.equal(cloudHeadline(cloudReady({}, { release: { kind: "rejected", reason: "Revise B" } })).line, "Revise B");
+  assert.equal(cloudHeadline(cloudReady()).line, "Newer than public v2. Not in review.");
+  // The requester is the service's user id, never printed.
+  assert.doesNotMatch(cloudHeadline(cases[8][1]).line, /user_2/);
+  // A rejection outranks the newer draft it was about; a wait outranks it too.
+  assert.ok(cloudHeadline(cases[7][1]).rank < cloudHeadline(cloudReady()).rank);
+});
+
+test("the Cloud panel's facts, and the release page a request is read on", () => {
+  const status = cloudReady();
+  assert.deepEqual(cloudFacts(status.link!, status.publication), [
+    { label: "Draft", value: "v5" },
+    { label: "Public", value: "v2" },
+    { label: "Review", value: "Not asked" },
+    { label: "You", value: "Owner" },
+  ]);
+  assert.deepEqual(cloudFacts({ ...cloudLink, visibility: "private", role: null }, null).map((fact) => fact.value), ["—", "Private", "Not asked", "Contributor"]);
+  assert.equal(cloudReviewWord({ kind: "waiting_owner", requested_by: "user_2" }), "Owner's turn");
+  assert.equal(cloudReviewWord({ kind: "waiting_super_admin" }), "Admin's turn");
+  assert.equal(cloudReviewWord({ kind: "public" }), "Approved");
+  assert.equal(cloudReleaseUrl(cloudLink), "https://mallard-ai.com/rika/portal?tab=release");
+  assert.equal(cloudVersionUrl(cloudLink, "public"), "https://mallard-ai.com/rika/portal?version=public");
+  assert.equal(cloudContributor({ ...cloudLink, role: null }), true);
+  assert.equal(cloudContributor(cloudLink), false);
+  // The release page is offered once there is a request to read, to a collaborator, when the request itself is not.
+  const waiting = cloudReady({}, { release: { kind: "waiting_owner", requested_by: "user_2" }, can_request_release: false });
+  assert.equal(cloudVerbs(waiting).viewRelease, true);
+  assert.equal(cloudVerbs(cloudReady({}, { release: { kind: "rejected", reason: null }, can_request_release: true })).viewRelease, false);
+  assert.equal(cloudVerbs(cloudReady({}, { release: { kind: "rejected", reason: null }, can_request_release: false })).viewRelease, true);
+  assert.equal(cloudVerbs(cloudReady({}, { release: { kind: "waiting_super_admin" }, can_request_release: false, role: null })).viewRelease, false);
+  assert.equal(cloudVerbs(cloudReady({}, { can_request_release: false })).viewRelease, false);
+});
+
+const panelActions = { onOpenUrl: () => {}, onRequestRelease: () => {}, onDiscardDraft: () => {}, onRetry: () => {}, onStorageSettings: () => {} };
+const renderPanel = (status: ManagedCloudStatus, busy = false) => renderToStaticMarkup(
+  <ManagedCloudPanel status={status} storageName="Mallard Cloud Rika" busy={busy} refreshing={false} close={() => {}} {...panelActions} />,
+);
+
+test("every link row in the Cloud panel copies its address from a button at its end", () => {
+  const html = renderPanel(cloudReady());
+  assert.match(html, /Draft v5[^]*?rika\/portal/);
+  assert.match(html, /<dt>Draft<\/dt><dd>v5<\/dd>/);
+  // The request carries the release page's link; the verbs are a group, not a menu.
+  assert.match(html, /role="group" aria-label="Mallard Cloud actions"/);
+  assert.doesNotMatch(html, /role="menu"/);
+  assert.match(html, /Request public release<[^]*?aria-label="Copy release link" title="Copy release link\nhttps:\/\/mallard-ai\.com\/rika\/portal\?tab=release"/);
+  assert.match(html, /View draft[^]*?aria-label="Copy draft link" title="Copy draft link\nhttps:\/\/mallard-ai\.com\/rika\/portal\?version=private"/);
+  assert.match(html, /View published version[^]*?aria-label="Copy published link" title="Copy published link\nhttps:\/\/mallard-ai\.com\/rika\/portal\?version=public"/);
+  assert.equal(html.match(/sync-cloud-panel-copy/g)?.length, 3);
+  // Discard is the Owner's, in danger ink, last, and has nothing to copy.
+  assert.match(html, /sync-path-menu-item danger"[^>]*title="Discard draft… · back to public version 2"[^]*?Discard draft…/);
+  assert.doesNotMatch(html, /Copy discard/);
+  // While a Push or Pull runs, the release and the discard wait; the links do not.
+  const busy = renderPanel(cloudReady(), true);
+  assert.equal(busy.match(/aria-disabled="true"/g)?.length, 2);
+  // While a request waits, the release row is the request's page.
+  const waiting = renderPanel(cloudReady({}, { release: { kind: "waiting_super_admin" }, can_request_release: false }));
+  assert.match(waiting, /View release request[^]*?aria-label="Copy release link"/);
+  assert.doesNotMatch(waiting, /Request public release/);
+  // A contributor reads their standing.
+  assert.match(renderPanel(cloudReady({}, { role: null, can_request_release: false })), /Not a collaborator/);
+});
+
+test("the Cloud panel for a status without a repository names the storage and offers the notice's control", () => {
+  const signedOut = renderPanel(cloudFailed("sign_in_required", "Mallard Cloud rejected the saved sign-in."));
+  assert.match(signedOut, /Sign in[^]*?Mallard Cloud Rika[^]*?Mallard Cloud rejected the saved sign-in\.[^]*?Storage settings/);
+  assert.doesNotMatch(signedOut, /Copy|View draft/);
+  assert.match(renderPanel(cloudFailed("unavailable", "Could not reach Mallard Cloud.")), /Can(’|'|&#x27;)t check[^]*?Retry/);
+  const gone = renderPanel(cloudFailed("gone", "Deleted, or this account lost access. Push creates it again."));
+  assert.match(gone, /Gone[^]*?Push creates it again\./);
+  assert.doesNotMatch(gone, /Retry|Storage settings|Copy/);
 });
 
 

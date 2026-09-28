@@ -5,6 +5,7 @@ use super::service::{
     commit_storage_setup_draft_with_repository, connect_project_to_remote_bundle_with_repository,
     create_provider_profile_with_repository, create_storage_edit_draft_with_repository,
     create_storage_setup_draft_with_repository, current_binding_for_restore_plan,
+    delete_local_project_sessions_with_repository,
     discard_setup_draft_with_repository, discard_storage_setup_draft_with_repository,
     execute_project_session_action_with_repository, format_fetch_started_message, format_mb,
     get_bundle_inventory_with_repository, get_host_identity_status_with_repository,
@@ -25,7 +26,7 @@ use super::service::{
     refresh_project_activity_with_progress, remove_local_project_with_repository,
     remove_project_link_with_repository, remove_storage_with_repository,
     rename_local_project_with_repository, rename_storage_with_repository, repository,
-    reset_project_sync_metadata_with_repository, resolve_project_markdown_path_with_repository,
+    resolve_project_markdown_path_with_repository,
     reveal_storage_secret_with_repository, save_project_binding_with_repository,
     save_project_link_with_repository, session_detail_error, should_log_history_scan,
     sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
@@ -34,8 +35,8 @@ use super::service::{
     BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
     CreateSetupDraftResult, HostIdentityStatus, ProjectActivity, ProjectActivityRefreshEvent,
     ProjectContentInventory, ProjectDetail, ProjectFolderProbe, ProjectMarkdownImage,
-    ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncConfigView,
-    ProjectSyncMetadataResetResult, ProjectSyncService, ProviderDescriptor, ProviderProfileProbe,
+    ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSessionsDeleteResult,
+    ProjectSyncConfigView, ProjectSyncService, ProviderDescriptor, ProviderProfileProbe,
     ProviderProfileSummary, PushApproval, PushDestinationStatus, PushReviewContext,
     ResourceInventory, RestoreResult, SaveProjectBindingRequest, SaveProjectLinkRequest,
     SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind, SessionToolCategory,
@@ -866,6 +867,22 @@ pub async fn read_project_markdown_image(
 }
 
 #[tauri::command]
+pub async fn delete_local_project_session(
+    local_project_id: LocalProjectId,
+    resource_id: String,
+) -> Result<mallard_infrastructure::project_activity::LocalSessionDeleteResult, String> {
+    let repository = repository()?;
+    run_blocking(move || {
+        super::service::delete_local_project_session_with_repository(
+            &repository,
+            &local_project_id,
+            &resource_id,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn execute_project_session_action(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
@@ -902,22 +919,22 @@ pub async fn remove_local_project(local_project_id: LocalProjectId) -> Result<bo
 }
 
 #[tauri::command]
-pub async fn reset_project_sync_metadata(
+pub async fn delete_local_project_sessions(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     expected_project_revision: u64,
-) -> Result<ProjectSyncMetadataResetResult, String> {
+) -> Result<ProjectSessionsDeleteResult, String> {
     let repository = repository()?;
     let project_for_work = local_project_id.clone();
     let log = ActivityLogScope::new(ActivityLogType::Repair).project(&local_project_id, None);
     log.emit(
         &app,
         "warning",
-        "repair.project_sync_metadata_reset_started",
-        "Resetting this project's local sync metadata…",
+        "repair.project_sessions_delete_started",
+        "Deleting this project's local sessions…",
     );
     let result = run_blocking(move || {
-        reset_project_sync_metadata_with_repository(
+        delete_local_project_sessions_with_repository(
             &repository,
             &project_for_work,
             expected_project_revision,
@@ -925,22 +942,33 @@ pub async fn reset_project_sync_metadata(
     })
     .await;
     match &result {
-        Ok(summary) => log.emit(
-            &app,
-            "ok",
-            "repair.project_sync_metadata_reset_completed",
-            &format!(
-                "Reset local sync metadata: {} conversation mappings, {} checkpoints, and {} saved results removed",
-                summary.conversation_bindings_removed,
-                summary.conversation_checkpoints_removed,
-                summary.materializations_removed,
-            ),
-        ),
-        Err(error) => log.emit(
+        Ok(summary) => {
+            let metadata = if summary.metadata_reset.is_some() {
+                "completed"
+            } else {
+                "failed"
+            };
+            log.emit(
+                &app,
+                if summary.provider_errors.is_empty() && summary.metadata_error.is_none() {
+                    "ok"
+                } else {
+                    "warning"
+                },
+                "repair.project_sessions_delete_completed",
+                &format!(
+                    "Session deletion: {} completed, {} failed; {} provider issues; metadata reset {metadata}",
+                    summary.sessions_deleted,
+                    summary.sessions_failed,
+                    summary.provider_errors.len(),
+                ),
+            )
+        }
+        Err(_) => log.emit(
             &app,
             "error",
-            "repair.project_sync_metadata_reset_failed",
-            &format!("Local sync metadata reset failed: {error}"),
+            "repair.project_sessions_delete_failed",
+            "Project session deletion could not start.",
         ),
     }
     result
@@ -1484,7 +1512,12 @@ pub async fn plan_bundle_restore(
             &format!("✗  Pull comparison failed: {}", error),
         ),
     }
-    result.and_then(PullReview::try_from)
+    result.and_then(|plan| {
+        PullReview::from_plan(
+            plan,
+            mallard_infrastructure::provider_capture::MAX_CAPTURE_BYTES,
+        )
+    })
 }
 
 #[tauri::command]

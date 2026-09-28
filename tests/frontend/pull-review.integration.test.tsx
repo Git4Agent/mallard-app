@@ -7,6 +7,7 @@ import type {
   ConversationBlocker,
   ConversationReviewAction,
   ConversationReviewRow,
+  LocalProjectSummary,
   ProjectBinding,
   PullReview,
   RestoreResult,
@@ -23,9 +24,12 @@ import { REVIEW_EXPIRED, REVIEW_SUPERSEDED, compareAgainOffered } from "../../sr
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
+  fitPullRecommendation,
   pullActionResourceIds,
+  pullBudgetTotal,
   recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
+import { reviewBudgetSentence } from "../../src/components/sync-review/ReviewBudgetMeter";
 import {
   applyPullReview,
   beginPullReview,
@@ -70,7 +74,11 @@ const cloudThreadId = "cloudthread-019fac21-4aba-7fc2-bb7d-df711c950987";
 const preservedThreadId = "019fac21-4aba-7fc2-bb7d-df711c950988";
 const preservedDisplayTitle = "Diverged conversation (Preserved 1 · Machine A)";
 
+const MB = 1024 * 1024;
+const LIMIT = 512 * MB;
+
 const restorePlan: PullReview = {
+  apply_limit_bytes: LIMIT,
   schema_version: 1,
   plan_id: "plan-restore",
   storage_id: "storage-local",
@@ -105,6 +113,8 @@ function conversationRow(
   actionId: string | null = null,
   blocker: ConversationBlocker | null = null,
   displayTitle: string | null = null,
+  sourceSize: number | null = null,
+  storedEndedAt: number | null = null,
 ): ConversationReviewRow {
   return {
     stored_without_credential_redaction: false,
@@ -116,6 +126,18 @@ function conversationRow(
     action_id: actionId,
     blocker,
     display_title: displayTitle,
+    source_size: sourceSize,
+    stored_ended_at: storedEndedAt,
+  };
+}
+
+/** A storage-only session of its own identity, sized and timed. */
+function storedSession(key: string, sourceSize: number, storedEndedAt: number): ConversationReviewRow {
+  return {
+    ...conversationRow("create_local", `selection-${key}`, null, `Stored ${key}`, sourceSize, storedEndedAt),
+    thread_id: null,
+    cloud_thread_id: `cloudthread-${key}`,
+    resource_id: `codex:conversation:cloudthread-${key}`,
   };
 }
 
@@ -907,4 +929,236 @@ test("automatic acceptance rejects stale pins and incomplete acknowledgement", a
   for (const update of [{ success: false }, { reviewed_base_advanced: false }, { reviewed_base_advanced: undefined }]) {
     await assert.rejects(acceptPullMetadata({ applyRestore: async () => result({ ...update, message: "Check again" }) }, plan), /Check again/);
   }
+});
+
+test("the Pull review meters what it would install in both pinned zones, and each row prints its size", () => {
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [],
+    conversation_review: [storedSession("a", 96 * MB, 300)],
+  };
+  const html = renderReview(plan);
+  // The header glance and the footer gauge carry the same figure, in the
+  // pull direction; only the footer's announces.
+  assert.equal(html.match(/class="sync-review-budget-figure"/g)?.length, 2);
+  assert.match(html, /class="sync-review-budget-glance" title="Sessions 0 B · Setup &amp; tools 0 B · Project files 0 B"/);
+  assert.match(html, /class="sync-review-budget-track pull"/);
+  assert.match(html, /class="sync-review-budget-gauge pull"[^>]*role="status"/);
+  assert.equal(html.match(/class="sync-review-budget[^"]*"[^>]*role="status"/g)?.length, 1);
+  assert.match(html, /role="meter"[^>]*aria-label="Pull size"[^>]*aria-valuemax="536870912"[^>]*aria-valuenow="0"/);
+  assert.match(html, /aria-valuetext="This pull · 0 B of 512 MB"/);
+  // Nothing is ticked at open, so nothing refuses and the meter is empty.
+  assert.doesNotMatch(html, /sync-review-budget-sentence|class="sync-review-budget-track pull over"/);
+  // The list row prints what a pull of it installs.
+  assert.match(html, /Conversation · Codex · 96 MB/);
+});
+
+test("pullBudgetTotal sums sessions, setup & tools and project files by their stored sizes, and the sentence refuses past the limit", () => {
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [
+      {
+        action_id: "write-recording",
+        resource_id: "file-recording",
+        kind: { kind: "write_project_file", logical_path: "project/assets/recording.mov", mode: 0o644, source_mtime: 1 },
+        target_path: "/Users/test/project/gam2/assets/recording.mov",
+        source_sha256: "d".repeat(64),
+        expected_target_sha256: null,
+        source_size: 500 * MB,
+        requires_explicit_approval: true,
+      },
+      {
+        action_id: "write-memory",
+        resource_id: "codex:memory",
+        kind: { kind: "write_file", logical_path: "state/providers/codex/memory.md" },
+        target_path: "/Users/test/.codex/memory.md",
+        source_sha256: "e".repeat(64),
+        expected_target_sha256: null,
+        source_size: 4 * MB,
+        requires_explicit_approval: false,
+      },
+    ],
+    conversation_review: [storedSession("a", 96 * MB, 300), storedSession("b", 118 * MB, 200)],
+  };
+  const items = buildPullReviewItems(plan);
+  const everything = new Set(items.map((item) => item.resourceId));
+  const total = pullBudgetTotal(items, everything, plan.apply_limit_bytes);
+  assert.deepEqual(total, {
+    sessions: (96 + 118) * MB,
+    other: 4 * MB,
+    projectFiles: 500 * MB,
+    total: (96 + 118 + 4 + 500) * MB,
+    limit: LIMIT,
+  });
+  assert.equal(
+    reviewBudgetSentence(total, "pull"),
+    "206 MB over the 512 MB pull limit — exclude sessions or files to pull.",
+  );
+  assert.equal(
+    reviewBudgetSentence(pullBudgetTotal(items, new Set(["codex:conversation:cloudthread-a"]), LIMIT), "pull"),
+    "This pull · 96 MB of 512 MB",
+  );
+  // A row the review did not size weighs nothing, and the item says so.
+  const unsized = buildPullReviewItems({ ...plan, actions: [], conversation_review: [conversationRow("materialize_cloud", "selection-x")] });
+  assert.equal(unsized[0].pullBytes, null);
+  assert.equal(pullBudgetTotal(unsized, new Set([unsized[0].resourceId]), LIMIT).total, 0);
+});
+
+test("the sessions step's recommended selection is the newest sessions that fit, after setup & tools and whatever the files step ticked", () => {
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [
+      {
+        action_id: "write-recording",
+        resource_id: "file-recording",
+        kind: { kind: "write_project_file", logical_path: "project/assets/recording.mov", mode: 0o644, source_mtime: 1 },
+        target_path: "/Users/test/project/gam2/assets/recording.mov",
+        source_sha256: "d".repeat(64),
+        expected_target_sha256: null,
+        source_size: 500 * MB,
+        requires_explicit_approval: true,
+      },
+      {
+        action_id: "write-memory",
+        resource_id: "codex:memory",
+        kind: { kind: "write_file", logical_path: "state/providers/codex/memory.md" },
+        target_path: "/Users/test/.codex/memory.md",
+        source_sha256: "e".repeat(64),
+        expected_target_sha256: null,
+        source_size: 4 * MB,
+        requires_explicit_approval: false,
+      },
+    ],
+    // Listed oldest first on purpose: the walk sorts by the stored session's
+    // last-message time, not by review order.
+    conversation_review: [
+      storedSession("oldest", 10 * MB, 100),
+      storedSession("older", 300 * MB, 200),
+      storedSession("newest", 300 * MB, 300),
+    ],
+  };
+  const items = buildPullReviewItems(plan);
+  const sessionsStep = items.filter((item) => item.category !== "project_content");
+  // Setup & tools first, then the newest session; the older 300 MB does not
+  // fit and ends the walk, so the 10 MB oldest stays unticked — a strict
+  // time prefix, one block at the top of the list.
+  assert.deepEqual(
+    [...fitPullRecommendation(items, sessionsStep, new Set(), LIMIT)].sort(),
+    ["codex:conversation:cloudthread-newest", "codex:memory"].sort(),
+  );
+  // A ticked project file is charged before any session: 500 MB of it and
+  // 4 MB of memory leave 8 MB, which no session fits, and none is ticked.
+  assert.deepEqual(
+    [...fitPullRecommendation(items, sessionsStep, new Set(["file-recording"]), LIMIT)],
+    ["codex:memory"],
+  );
+  // A session that could not fit an empty pull is skipped, not the end of
+  // the walk.
+  const withHuge = buildPullReviewItems({
+    ...plan,
+    actions: [],
+    conversation_review: [storedSession("huge", 600 * MB, 400), storedSession("newest", 96 * MB, 300)],
+  });
+  assert.deepEqual(
+    [...fitPullRecommendation(withHuge, withHuge, new Set(), LIMIT)],
+    ["codex:conversation:cloudthread-newest"],
+  );
+  // The review's ✓ reads the fitted set: two sessions are safe, one fits.
+  const html = renderReview({
+    ...plan,
+    actions: [],
+    conversation_review: [storedSession("older", 300 * MB, 200), storedSession("newest", 300 * MB, 300)],
+  });
+  assert.match(html, /title="Select the newest sessions that fit this pull \(1\)"[^>]*aria-label="Use recommended selection \(1\)"/);
+});
+
+test("a review with sessions paints its list in bone on the first render and holds what measures rows", () => {
+  // Regression: the review's list painted nothing until its load effect ran,
+  // then nothing again between the sessions read and the comparison, while
+  // the meters, the count and a greyed "Mark as reviewed" spoke for rows
+  // nobody could see.
+  const project: LocalProjectSummary = {
+    local_project_id: binding.local_project_id,
+    bundle_id: binding.bundle_id,
+    display_name: "gam2",
+    revision: 1,
+    project_root: binding.project_root,
+    canonical_project_root: binding.canonical_project_root,
+    profile_ids: binding.profile_ids,
+  };
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [],
+    conversation_review: [storedSession("older", 3 * MB, 200), storedSession("newest", 5 * MB, 300)],
+  };
+  const html = renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      project={project}
+      storageName="Local storage 1"
+      plan={plan}
+      binding={binding}
+      phase="idle"
+      supportLoading={false}
+      busy={false}
+      error={null}
+      onDismissError={() => undefined}
+      onApply={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+
+  // Placeholders from the first frame: the review's own ungated shape, the
+  // plan's two sessions, both under the "Only in …" heading they land in.
+  assert.match(html, /class="loading-scaffold sessions" role="region" aria-label="Loading sessions"/);
+  assert.match(html, /Loading sessions…/);
+  assert.equal(html.match(/class="loading-scaffold-row"/g)?.length, 2);
+  assert.match(html, /<section class="sync-history-storage-only"><div class="sync-history-section-heading">/);
+  assert.doesNotMatch(html, /Search sessions/);
+
+  // Nothing measures rows that have not landed; only close stays.
+  assert.doesNotMatch(html, /sync-review-budget-glance|sync-review-budget-gauge|sync-sync-review-selected/);
+  assert.match(html, /aria-label="Close pull review for gam2"/);
+
+  // The primary wears the wait itself, with its reason, and spins.
+  const primary = html.match(/<button type="button" class="btn btn-primary sync-pull-apply-button"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.match(primary, /disabled=""/);
+  assert.match(primary, /title="Loading sessions…"/);
+  assert.match(primary, /icon-spin/);
+  assert.match(primary, /Loading sessions…<\/button>/);
+  assert.doesNotMatch(primary, /Mark as reviewed/);
+
+  // The "ready" line is there and empty: it speaks only when the rows land.
+  assert.match(html, /<span class="sync-visually-hidden" role="status"><\/span>/);
+});
+
+test("the tools row says Checking… while its readiness checks run", () => {
+  const plan: PullReview = {
+    ...restorePlan,
+    actions: [{
+      ...restorePlan.actions[0],
+      action_id: "action-skill",
+      resource_id: "codex:skill:level-lint",
+      kind: { kind: "write_file", logical_path: "skills/level-lint/SKILL.md" } as PullReview["actions"][number]["kind"],
+    }],
+  };
+  const render = (supportLoading: boolean) => renderToStaticMarkup(
+    <RestorePlanView
+      projectName="gam2"
+      storageName="Local storage 1"
+      plan={plan}
+      binding={binding}
+      phase="idle"
+      supportLoading={supportLoading}
+      busy={false}
+      error={null}
+      onDismissError={() => undefined}
+      onApply={() => undefined}
+      onBack={() => undefined}
+    />,
+  );
+  const checking = render(true);
+  assert.match(checking, /<summary>[\s\S]*?Checking…[\s\S]*?<\/summary>/);
+  assert.doesNotMatch(checking, /Checking readiness/);
+  assert.match(render(false), /<summary>[\s\S]*?0 selected[\s\S]*?<\/summary>/);
 });

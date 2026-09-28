@@ -2945,6 +2945,18 @@ pub struct ConversationThread {
 }
 
 impl ConversationThread {
+    /// The stored session's last-message time, read the way the activity
+    /// projection reads it for a storage-only row: the presentation's end,
+    /// its start when no end was recorded, and never earlier than the start.
+    /// `None` when the presentation recorded neither.
+    pub fn last_message_at(&self) -> Option<u64> {
+        let started_at = self.presentation.started_at;
+        self.presentation
+            .ended_at
+            .or(started_at)
+            .map(|ended_at| ended_at.max(started_at.unwrap_or(0)))
+    }
+
     fn validate(&self) -> Result<(), String> {
         self.lineage_status.validate()?;
         if let Some(title) = &self.display_title {
@@ -3625,6 +3637,19 @@ pub struct ConversationReviewRow {
     /// untitled, and the reviewer says so rather than naming it after an id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_title: Option<String>,
+    /// The storage-side bytes a pull of this row installs: every file the
+    /// manifest lists for the stored thread (transcript, sidecars, child
+    /// transcripts, index fragment). `None` for a row whose action writes no
+    /// payload (`adopt_cloud_metadata`, the report rows). The review meter
+    /// sums it, as it sums `RestoreAction::source_size` for file writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_size: Option<u64>,
+    /// The stored session's last-message time, as its presentation metadata
+    /// recorded it: the key the review's recommended selection walks newest
+    /// first. `None` for a row with no stored thread, or one whose
+    /// presentation carries no time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_ended_at: Option<u64>,
 }
 
 impl ConversationReviewRow {
@@ -5063,6 +5088,18 @@ impl BundleManifest {
         self.scopes
             .iter()
             .find_map(|(key, scope)| scope.files.get(path).map(|entry| (key, entry)))
+    }
+
+    /// What a pull of `thread` installs: the sizes of every file the manifest
+    /// lists for it. A validated manifest resolves each of them (`validate`
+    /// rejects a thread that names a missing file), so a miss counts nothing
+    /// rather than failing a read-only sum.
+    pub fn conversation_bytes(&self, thread: &ConversationThread) -> u64 {
+        thread
+            .files
+            .iter()
+            .filter_map(|file| self.find_file(&file.logical_path))
+            .fold(0_u64, |sum, (_, entry)| sum.saturating_add(entry.size))
     }
 
     /// The scope coordinates the continuity and mutation-firewall layers

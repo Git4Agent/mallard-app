@@ -134,6 +134,8 @@ Pull Compare:
 4. Reads the current storage head and manifest.
 5. Builds review rows for files and conversations.
 6. Returns ephemeral selection IDs with the review.
+7. Returns each row's storage-side size (every file the manifest lists for a
+   stored session; a file write's own size) and the aggregate Apply limit.
 
 Pull Compare does not:
 
@@ -144,6 +146,22 @@ Pull Compare does not:
 - save a Restore plan; or
 - create a conversation recovery journal.
 
+### Selection
+
+Every row stays selectable. The review meter calculates:
+
+```text
+selected session bytes (as stored)
++ selected setup and tools file bytes
++ selected project-file bytes
+```
+
+Nothing is reserved: a Pull carries nothing it does not show as a row. The UI
+disables Apply past the same 512 MiB limit Push uses. The sessions step's
+recommended selection is the newest sessions that fit, keyed on the stored
+session's last-message time, after the safe setup and tools rows and
+whatever the files step has ticked (`PLAN_PULL_APPLY_LIMIT.md`).
+
 ### Apply
 
 Pull Apply:
@@ -151,7 +169,9 @@ Pull Apply:
 1. Validates the in-memory review anchor.
 2. Rechecks the current storage head.
 3. Builds a fresh schema-1 `RestorePlan` value in memory for the existing
-   restore engine.
+   restore engine, and refuses the whole Apply before its first write when
+   the approved selection, priced again from the pinned manifest, exceeds
+   the limit.
 4. Captures only selected local counterparts with bounded workers.
 5. Builds fresh conversation actions and target pins.
 6. Downloads only selected remote payloads.

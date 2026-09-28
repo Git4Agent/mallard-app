@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentFolder, LocalProjectSummary, ProviderDescriptor } from "../../types";
+import type {
+  AgentFolder,
+  LocalProjectSummary,
+  ProjectDetail,
+  ProviderDescriptor,
+  ProviderProfileSummary,
+  StorageSummary,
+} from "../../types";
 import Icon from "../Icons";
 import ProviderMark from "../sync-review/ProviderMark";
 import { projectSyncApi } from "./api";
+import CloudProjectSource, { type CloneFallback } from "./CloudProjectSource";
 import ProjectFolderField from "./ProjectFolderField";
+import { ModeDoor } from "./StorageSettings";
 import {
   compactFolderPath,
   folderChoice,
@@ -18,16 +27,28 @@ import {
 } from "./projectFolder";
 import { useHomePath } from "./ProjectSetupWorkspace";
 
+/** Where a new project comes from: a folder this computer has, or a
+ *  Mallard Cloud repository that gets its folder here. */
+export type NewProjectSource = "folder" | "cloud";
+
 interface Props {
   workflowEpoch: number;
   isWorkflowCurrent: (workflowEpoch: number) => boolean;
   projects: LocalProjectSummary[];
   providers: ProviderDescriptor[];
+  profiles: ProviderProfileSummary[];
+  storages: StorageSummary[];
   busy: boolean;
+  /** The door open at first, and for From Mallard Cloud the account. */
+  initialSource?: NewProjectSource;
+  initialStorageId?: string | null;
   onCancel: () => void;
   /** Make the draft for this folder, or resume the one already there. */
   onChoose: (projectRoot: string) => void;
   onOpenProject: (projectId: string) => void;
+  /** From Mallard Cloud with no account yet: set one up. */
+  onAddCloudAccount: () => void;
+  onCloudProjectDone: (detail: ProjectDetail, fallback: CloneFallback | null, workflowEpoch: number) => void;
 }
 
 /** Rows while the list is folded: it never becomes a scroller of its own. */
@@ -62,22 +83,30 @@ function matchingFolders(
 }
 
 /**
- * The setup page before a draft exists: one Folder band — the field, and the
- * folders recent sessions ran in drawn as the Repository band draws its
- * choices. Pick a row or type a path, then Use this folder; the draft is
- * made (or resumed) and the rest of the page follows. Nothing is written
- * while the field is typed.
+ * The setup page before a draft exists, with two doors. On this computer:
+ * one Folder band — the field, and the folders recent sessions ran in drawn
+ * as the Repository band draws its choices. Pick a row or type a path, then
+ * Use this folder; the draft is made (or resumed) and the rest of the page
+ * follows. Nothing is written while the field is typed. From Mallard Cloud:
+ * `CloudProjectSource`, a repository that gets its folder here.
  */
 export default function NewProjectFolderStep({
   workflowEpoch,
   isWorkflowCurrent,
   projects,
   providers,
+  profiles,
+  storages,
   busy,
+  initialSource = "folder",
+  initialStorageId = null,
   onCancel,
   onChoose,
   onOpenProject,
+  onAddCloudAccount,
+  onCloudProjectDone,
 }: Props) {
+  const [source, setSource] = useState<NewProjectSource>(initialSource);
   const homePath = useHomePath();
   const [text, setText] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
@@ -149,6 +178,26 @@ export default function NewProjectFolderStep({
   const providerName = (key: string) => (
     providers.find((descriptor) => descriptor.key === key)?.display_name ?? key
   );
+  const doors = (
+    <div className="storage-mode-doors" role="radiogroup" aria-label="Where the project comes from">
+      <ModeDoor
+        icon="folder"
+        title="On this computer"
+        detail="A folder you have."
+        checked={source === "folder"}
+        disabled={busy}
+        onChoose={() => setSource("folder")}
+      />
+      <ModeDoor
+        icon="storage-mallard"
+        title="From Mallard Cloud"
+        detail="A repository you can open."
+        checked={source === "cloud"}
+        disabled={busy}
+        onChoose={() => setSource("cloud")}
+      />
+    </div>
+  );
   return (
     <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-labelledby="sync-new-project-title">
       <header className="sync-modal-header">
@@ -160,110 +209,133 @@ export default function NewProjectFolderStep({
         </button>
       </header>
 
-      <div className="sync-modal-body">
-        <section className="sync-setup-section">
-          <div className="sync-card-heading">
-            <div><strong>Folder</strong></div>
-          </div>
-          <ProjectFolderField
-            value={text}
-            verdict={verdict}
-            disabled={busy}
-            autoFocus
-            labelHidden
-            placeholder={folders && folders.length > 0 ? "Path or search" : "Path, such as ~/code/app"}
-            onChange={(next) => {
-              setText(next);
-              setPicked(null);
-            }}
-            onEnter={() => commit(choice)}
-            onBrowsed={(path) => void browsed(path)}
-            onAnotherProfile={anotherProfilePath ? () => onChoose(anotherProfilePath) : undefined}
-          />
-          {folders === null ? (
-            <div className="sync-folder-choices-state">
-              <span className="status-loader" /> Finding recent folders…
-            </div>
-          ) : folders.length > 0 && (
-            /* A machine with no sessions yet has nothing to offer: the field alone. */
-            <div className="sync-folder-choices">
-              <div className="sync-folder-choices-head" id="sync-folder-choices-title">
-                Recent
-                <small>{listed.length}</small>
+      {source === "cloud" ? (
+        <CloudProjectSource
+          doors={doors}
+          storages={storages}
+          initialStorageId={initialStorageId}
+          providers={providers}
+          profiles={profiles}
+          projects={projects}
+          busy={busy}
+          workflowEpoch={workflowEpoch}
+          isWorkflowCurrent={isWorkflowCurrent}
+          onCancel={onCancel}
+          onAddAccount={onAddCloudAccount}
+          onOpenProject={onOpenProject}
+          onDone={onCloudProjectDone}
+        />
+      ) : (
+        <>
+          <div className="sync-modal-body">
+            {doors}
+            <section className="sync-setup-section">
+              <div className="sync-card-heading">
+                <div><strong>Folder</strong></div>
               </div>
-              {listed.length === 0 ? (
-                <div className="sync-folder-choices-state">No recent folder matches.</div>
-              ) : (
-                <div className="sync-bundle-match-options" role="radiogroup" aria-labelledby="sync-folder-choices-title">
-                  {visible.map((folder) => {
-                    const rowTarget = rowChoice(folder, projects);
-                    const active = pickedFolder?.path === folder.path;
-                    const name = folderName(folder.path);
-                    const stamp = formatRecentStamp(folder.last_active);
-                    const isGit = folder.probe.kind === "folder" && folder.probe.is_git_repository;
-                    const badge = rowTarget?.kind === "open"
-                      ? "Added"
-                      : rowTarget?.kind === "setup" && rowTarget.resumes ? "Draft" : null;
-                    return (
-                      <button
-                        key={folder.path}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        aria-label={[name, badge, compact(folder.path), stamp].filter(Boolean).join(", ")}
-                        className={`sync-bundle-match-option${active ? " active" : ""}`}
-                        disabled={busy}
-                        onClick={() => setPicked(folder.path)}
-                        onDoubleClick={() => commit(rowTarget)}
-                      >
-                        <span className="sync-bundle-radio"><span /></span>
-                        <span className="setup-choice-mark" aria-hidden="true">
-                          <Icon name={isGit ? "git-folder" : "folder"} size={24} />
-                        </span>
-                        <span className="sync-bundle-match-copy">
-                          <strong>{name}{badge && <small className="sync-bundle-recommended">{badge}</small>}</strong>
-                          <span>{compact(folder.path)}</span>
-                        </span>
-                        <span className="sync-bundle-match-meta">
-                          {stamp}
-                          <span className="sync-folder-choice-marks">
-                            {folder.providers.map((provider) => (
-                              <ProviderMark key={provider} provider={provider} displayName={providerName(provider)} size={12} />
-                            ))}
-                          </span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                  {!filtered && listed.length > FIRST_FOLDERS && (
-                    <button
-                      type="button"
-                      className="sync-folder-choices-more"
-                      aria-expanded={showAll}
-                      onClick={() => setShowAll((open) => !open)}
-                      disabled={busy}
-                    >
-                      <Icon name={showAll ? "chevron-up" : "chevron-down"} size={12} />
-                      {showAll ? "Show less" : `Show all ${listed.length}`}
-                    </button>
+              <ProjectFolderField
+                value={text}
+                verdict={verdict}
+                disabled={busy}
+                autoFocus
+                labelHidden
+                placeholder={folders && folders.length > 0 ? "Path or search" : "Path, such as ~/code/app"}
+                onChange={(next) => {
+                  setText(next);
+                  setPicked(null);
+                }}
+                onEnter={() => commit(choice)}
+                onBrowsed={(path) => void browsed(path)}
+                onRun={(run) => {
+                  if (run === "another-profile" && anotherProfilePath) onChoose(anotherProfilePath);
+                }}
+              />
+              {folders === null ? (
+                <div className="sync-folder-choices-state">
+                  <span className="status-loader" /> Finding recent folders…
+                </div>
+              ) : folders.length > 0 && (
+                /* A machine with no sessions yet has nothing to offer: the field alone. */
+                <div className="sync-folder-choices">
+                  <div className="sync-folder-choices-head" id="sync-folder-choices-title">
+                    Recent
+                    <small>{listed.length}</small>
+                  </div>
+                  {listed.length === 0 ? (
+                    <div className="sync-folder-choices-state">No recent folder matches.</div>
+                  ) : (
+                    <div className="sync-bundle-match-options" role="radiogroup" aria-labelledby="sync-folder-choices-title">
+                      {visible.map((folder) => {
+                        const rowTarget = rowChoice(folder, projects);
+                        const active = pickedFolder?.path === folder.path;
+                        const name = folderName(folder.path);
+                        const stamp = formatRecentStamp(folder.last_active);
+                        const isGit = folder.probe.kind === "folder" && folder.probe.is_git_repository;
+                        const badge = rowTarget?.kind === "open"
+                          ? "Added"
+                          : rowTarget?.kind === "setup" && rowTarget.resumes ? "Draft" : null;
+                        return (
+                          <button
+                            key={folder.path}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            aria-label={[name, badge, compact(folder.path), stamp].filter(Boolean).join(", ")}
+                            className={`sync-bundle-match-option${active ? " active" : ""}`}
+                            disabled={busy}
+                            onClick={() => setPicked(folder.path)}
+                            onDoubleClick={() => commit(rowTarget)}
+                          >
+                            <span className="sync-bundle-radio"><span /></span>
+                            <span className="setup-choice-mark" aria-hidden="true">
+                              <Icon name={isGit ? "git-folder" : "folder"} size={24} />
+                            </span>
+                            <span className="sync-bundle-match-copy">
+                              <strong>{name}{badge && <small className="sync-bundle-recommended">{badge}</small>}</strong>
+                              <span>{compact(folder.path)}</span>
+                            </span>
+                            <span className="sync-bundle-match-meta">
+                              {stamp}
+                              <span className="sync-folder-choice-marks">
+                                {folder.providers.map((provider) => (
+                                  <ProviderMark key={provider} provider={provider} displayName={providerName(provider)} size={12} />
+                                ))}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                      {!filtered && listed.length > FIRST_FOLDERS && (
+                        <button
+                          type="button"
+                          className="sync-folder-choices-more"
+                          aria-expanded={showAll}
+                          onClick={() => setShowAll((open) => !open)}
+                          disabled={busy}
+                        >
+                          <Icon name={showAll ? "chevron-up" : "chevron-down"} size={12} />
+                          {showAll ? "Show less" : `Show all ${listed.length}`}
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
-            </div>
-          )}
-        </section>
-      </div>
+            </section>
+          </div>
 
-      <footer className="sync-modal-footer sync-setup-footer">
-        <div>
-          <button type="button" className="btn btn-ghost" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="button" className="btn btn-primary" disabled={!choice || busy} onClick={() => commit(choice)}>
-            {primaryLabel}
-          </button>
-        </div>
-      </footer>
+          <footer className="sync-modal-footer sync-setup-footer">
+            <div>
+              <button type="button" className="btn btn-ghost" onClick={onCancel}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-primary" disabled={!choice || busy} onClick={() => commit(choice)}>
+                {primaryLabel}
+              </button>
+            </div>
+          </footer>
+        </>
+      )}
     </section>
   );
 }

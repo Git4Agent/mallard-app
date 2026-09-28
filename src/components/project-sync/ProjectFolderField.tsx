@@ -1,7 +1,7 @@
-import { useId, useState } from "react";
+import { Fragment, useId, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Icon from "../Icons";
-import type { FolderVerdict } from "./projectFolder";
+import type { FolderRun, FolderVerdict } from "./projectFolder";
 
 /**
  * A project folder as a field: typed, pasted, or picked with Browse. It
@@ -14,12 +14,13 @@ export default function ProjectFolderField({
   disabled,
   autoFocus,
   labelHidden,
+  heading,
   placeholder,
   describedBy,
   onChange,
   onEnter,
   onBrowsed,
-  onAnotherProfile,
+  onRun,
 }: {
   value: string;
   verdict: FolderVerdict | null;
@@ -27,13 +28,17 @@ export default function ProjectFolderField({
   autoFocus?: boolean;
   /** For a band already headed Folder: the label stays for screen readers. */
   labelHidden?: boolean;
+  /** A control in the label's place, such as a switch that says what kind
+   *  of folder this is; the label stays for screen readers. */
+  heading?: ReactNode;
   placeholder: string;
   /** Another message about the field, such as a section's refusal. */
   describedBy?: string;
   onChange: (value: string) => void;
   onEnter: () => void;
   onBrowsed: (path: string) => void;
-  onAnotherProfile?: () => void;
+  /** Carries out a way on the line offers that is not new text. */
+  onRun?: (run: FolderRun) => void;
 }) {
   const id = useId();
   const hintId = `${id}-hint`;
@@ -51,10 +56,10 @@ export default function ProjectFolderField({
   const line: FolderVerdict | null = browseFailed
     ? { tone: "warn", message: "The folder dialog didn’t open. Type or paste the path instead." }
     : verdict;
-  const action = line?.action;
   return (
     <div className="sync-project-folder-field">
-      <label htmlFor={id} className={labelHidden ? "sync-visually-hidden" : undefined}>Folder</label>
+      <label htmlFor={id} className={labelHidden || heading ? "sync-visually-hidden" : undefined}>Folder</label>
+      {heading}
       <div className="sync-profile-select-row">
         <input
           id={id}
@@ -87,16 +92,19 @@ export default function ProjectFolderField({
         <p id={hintId} className={`sync-setup-path-hint ${line.tone}`} aria-live="polite">
           {line.message}
           {line.path && <code>{line.path}</code>}
-          {action && (
-            <button
-              type="button"
-              className="btn-link"
-              disabled={disabled}
-              onClick={() => ("value" in action ? onChange(action.value) : onAnotherProfile?.())}
-            >
-              {action.label}
-            </button>
-          )}
+          {line.actions?.map((action, index) => (
+            <Fragment key={action.label}>
+              {index > 0 && <span aria-hidden="true">·</span>}
+              <button
+                type="button"
+                className="btn-link"
+                disabled={disabled}
+                onClick={() => ("value" in action ? onChange(action.value) : onRun?.(action.run))}
+              >
+                {action.label}
+              </button>
+            </Fragment>
+          ))}
         </p>
       )}
     </div>

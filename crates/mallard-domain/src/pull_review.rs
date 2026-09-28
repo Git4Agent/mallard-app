@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PullReview {
+    /// The most bytes one Pull Apply installs. The review meter refuses a
+    /// selection past it; Apply recomputes the selection from the pinned
+    /// manifest and refuses the same way before its first write.
+    pub apply_limit_bytes: u64,
     pub schema_version: u32,
     pub plan_id: PlanId,
     pub storage_id: StorageId,
@@ -32,12 +36,13 @@ pub struct PullReview {
     pub remote_continuity: Option<RemoteContinuity>,
 }
 
-impl TryFrom<RestorePlan> for PullReview {
-    type Error = String;
-
-    fn try_from(plan: RestorePlan) -> Result<Self, Self::Error> {
+impl PullReview {
+    /// The review the frontend sees, carrying the Apply limit the caller
+    /// enforces. The domain does not own that constant.
+    pub fn from_plan(plan: RestorePlan, apply_limit_bytes: u64) -> Result<Self, String> {
         plan.validate_review()?;
         Ok(Self {
+            apply_limit_bytes,
             schema_version: plan.schema_version,
             plan_id: plan.plan_id,
             storage_id: plan.storage_id,
@@ -120,13 +125,18 @@ mod tests {
         .unwrap()
     }
 
+    const LIMIT: u64 = 512 * 1024 * 1024;
+
     #[test]
     fn review_round_trip_preserves_approval_pins_and_rows_without_executable_actions() {
         let plan = review_plan();
-        let review = PullReview::try_from(plan.clone()).unwrap();
+        let review = PullReview::from_plan(plan.clone(), LIMIT).unwrap();
         let json = serde_json::to_value(&review).unwrap();
         assert!(json.get("conversation_actions").is_none());
         assert!(json["conversation_review"][0].get("pins").is_none());
+        // The limit rides the review out and is dropped on the way back in:
+        // Apply enforces the constant, never a number the frontend sent.
+        assert_eq!(json["apply_limit_bytes"], LIMIT);
         let decoded: PullReview = serde_json::from_value(json).unwrap();
         let restored = RestorePlan::from(decoded);
         restored.validate_review().unwrap();
@@ -135,7 +145,7 @@ mod tests {
 
     #[test]
     fn review_rejects_the_obsolete_executable_action_field() {
-        let review = PullReview::try_from(review_plan()).unwrap();
+        let review = PullReview::from_plan(review_plan(), LIMIT).unwrap();
         let mut json = serde_json::to_value(review).unwrap();
         json["conversation_actions"] = json!([]);
         let error = serde_json::from_value::<PullReview>(json).unwrap_err();
@@ -148,12 +158,12 @@ mod tests {
     fn review_conversion_preserves_validation_of_lifetime_and_unique_selection_ids() {
         let mut plan = review_plan();
         plan.expires_at = plan.created_at - 1;
-        assert!(PullReview::try_from(plan).is_err());
+        assert!(PullReview::from_plan(plan, LIMIT).is_err());
 
         let mut plan = review_plan();
         plan.conversation_review
             .push(plan.conversation_review[0].clone());
-        assert!(PullReview::try_from(plan)
+        assert!(PullReview::from_plan(plan, LIMIT)
             .unwrap_err()
             .contains("duplicate restore selection"));
     }

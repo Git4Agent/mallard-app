@@ -97,7 +97,8 @@ export function useManagedCloudSetup({ enabled, draftId, mode, port, api = proje
         if (!live()) return;
         patch({ account: login.account, serviceOrigin: login.service_origin, link: null });
         const adopted = await portRef.current.adoptPrepared(saved, live);
-        if (adopted && live()) patch({ phase: "review" });
+        // Successful adoption resets the editor session. Check only this run now.
+        if (adopted && generation.current === token && !cancelled.current) patch({ phase: "review" });
       } catch (reason) {
         if (generation.current === token) {
           patch({ error: cancelled.current ? "managed_cloud_setup_cancelled" : errorCode(reason), account: failedAccount(reason), link: null });
@@ -205,7 +206,7 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
       <>
         <span className="storage-setup-guide-copy">
           {mode === "create"
-            ? "Signs in with GitHub in a browser you choose and keeps a 90-day session to Mallard Cloud. Pushes stay private to you and the collaborators you invite; a snapshot becomes public only when you request a release on the website."
+            ? "Sign in with GitHub in your preferred browser for 90-day access. Pushes stay private to you and invited collaborators. Public snapshots require a release request on the website."
             : "Renews this storage’s session with the same GitHub account. Sign-in happens in a browser you choose."}
         </span>
         <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={() => flow.start()}>

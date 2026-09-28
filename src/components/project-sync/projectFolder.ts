@@ -106,13 +106,21 @@ export function settledProbe(input: FolderInput, state: FolderProbeState): Proje
     : null;
 }
 
+/** What a way on does, where it is more than new text for the field: set
+ *  this folder up with another agent profile, connect it as it is, or open
+ *  the project already there. The field's owner carries it out. */
+export type FolderRun = "another-profile" | "use-as-is" | "open-project";
+
+/** A way on: new text for the field, or something its owner runs. */
+export type FolderAction = { label: string; value: string } | { label: string; run: FolderRun };
+
 export interface FolderVerdict {
   tone: "mute" | "ok" | "warn" | "bad";
   message: string;
   /** Printed in the mono face after the message. */
   path?: string;
-  /** One quiet way on, as a link-styled button after the message. */
-  action?: { label: string; value: string } | { label: string; anotherProfile: true };
+  /** Quiet ways on, as link-styled buttons after the message. */
+  actions?: FolderAction[];
 }
 
 /**
@@ -153,7 +161,7 @@ export function folderVerdict(
         ? {
           tone: "bad",
           message: "This is a file.",
-          action: { label: `Use ${context.compact(probe.parent)}`, value: context.compact(probe.parent) },
+          actions: [{ label: `Use ${context.compact(probe.parent)}`, value: context.compact(probe.parent) }],
         }
         : { tone: "bad", message: "This is a file." };
     case "mallard_data":
@@ -176,7 +184,7 @@ export function folderVerdict(
           ? {
             tone: "ok",
             message: `Already added as “${name}”.`,
-            action: { label: "Set it up with another agent profile", anotherProfile: true },
+            actions: [{ label: "Set it up with another agent profile", run: "another-profile" }],
           }
           : { tone: "ok", message: `“${name}” uses this folder too, with its own agent profiles.` };
       }

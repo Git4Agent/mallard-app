@@ -983,6 +983,11 @@ pub trait SessionAdapter: Send + Sync {
         &self,
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String>;
+
+    /// Explicit best-effort deletion. This does not coordinate active writers.
+    fn delete_session(&self, _home: &Path, _session: &DiscoveredSession) -> Result<(), String> {
+        Err("This provider does not support local session deletion.".into())
+    }
 }
 
 #[cfg(test)]

@@ -405,6 +405,42 @@ This flow works with a new or existing Git project, or with a non-Git folder.
    or create an appropriate local folder, add it to Mallard, select the
    existing remote repository, and complete a reviewed Pull.
 
+### Test Flow 3: Get a project from a Mallard Cloud link
+
+1. Choose **Add project** › **From Mallard Cloud**. Select a connected
+   account, or add one and choose **Finish setup** to return here with it
+   selected. Setup started from **Storages** opens the new storage's page.
+2. Paste the repository's page address, such as `mallard-ai.com/owner/name`,
+   and choose **Look up**, or pick it from the list. A private repository you
+   have not joined takes its invitation code.
+3. Check **Folder**. Under **New folder** it is the repository's name,
+   beside your other projects, and **Browse…** picks the parent and keeps the
+   name. Already have the project here? Choose **Existing folder** (or **Use
+   it as it is** when the path holds files) and pick the folder itself. It is
+   connected as it is; a folder whose Git remote isn't the repository's asks
+   for one tick first.
+4. Choose **Clone and connect** (**Connect** for an existing folder). A
+   repository linked to GitHub is cloned with `gh`, then `git`; anything else,
+   or a clone that does not work, gets an empty folder, and the project then
+   shows the command that clones into it. Nothing is pulled: choose **Pull**
+   on the project when ready.
+
+### Test Flow 4: A Mallard Cloud repository removed, and a draft discarded
+
+1. Push a project to Mallard Cloud. On the website, open the repository's
+   **Settings** and remove it. In Mallard, refresh: the project reads **Being
+   deleted**, then **Repository gone**, every session keeps its own state,
+   and Push is open.
+2. Choose **Push**. The repository is created again at the same address, as
+   version 1, and the note ends. A second computer of the same account reads
+   **Created again**, pulls, and pushes.
+3. Release a version, change a session, add one, and push again. As the
+   Owner, open the Mallard Cloud chip in the path bar and choose
+   **Discard draft…**, then
+   **Discard**. The project reads **Draft discarded**: the changed session
+   is ahead, the added one is only on this computer, and the rest are in
+   sync with the public version. Pull, then Push, to start a new draft.
+
 ## How session-to-commit mapping works
 
 Mallard parses provider session archives locally to recover session metadata,
@@ -438,6 +474,20 @@ that branch.
   exact empty directory and is never recursive.
 - Absolute checkout paths, Codex-home paths, storage credentials, restore
   plans, receipts, backups, and local preferences stay on the machine.
+- A Mallard Cloud repository that was removed on the website, is being
+  deleted, or is out of the account's reach reads as empty: every session
+  shows its own state, Push and Pull stay open, and a Push creates the
+  repository again at the address it had. Nothing is unlinked, reset or
+  relinked, and a refresh saves nothing; a Push or a Pull saves the
+  repository it used on the link. Any other answer, such as a suspended
+  account, a rejected sign-in or a service that cannot be reached, never
+  reads as empty and keeps Push and Pull closed.
+- The Owner of a public Mallard Cloud repository can discard its draft from
+  the Mallard Cloud chip's panel (**Discard draft…**), after a confirmation: every push
+  after the public version is removed from Mallard Cloud, and the sessions
+  are compared with the public version again. Nothing on any computer is
+  deleted. A draft with no public version under it is discarded on the
+  website, by the Owner or an Admin.
 
 Settings > Sync has separate **Push Codex children** and **Push Claude children**
 switches. Both default to Off and control the next Push. Each cloud task carries

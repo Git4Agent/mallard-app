@@ -3,6 +3,7 @@
 //! target planning, and safe session actions.
 
 pub mod actions;
+mod deletion;
 pub mod codec;
 pub mod discovery;
 pub mod history;
@@ -436,6 +437,10 @@ impl SessionAdapter for ClaudeAdapter {
         context: &SessionActionContext<'_>,
     ) -> Vec<SessionActionDescriptor> {
         actions::available_actions(context)
+    }
+
+    fn delete_session(&self, home: &Path, session: &crate::providers::DiscoveredSession) -> Result<(), String> {
+        deletion::delete(home, session)
     }
 
     fn execute_action(

@@ -38,7 +38,7 @@ import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
 } from "./session-detail/sessionDetailModel";
-import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup, type PathBarMenuItem } from "../sync-review/SyncPathBar";
+import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
@@ -78,7 +78,8 @@ import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
 import { FeishuSetupLane, useFeishuSetup } from "./FeishuSetup";
 import { ManagedCloudSetupLane, useManagedCloudSetup } from "./ManagedCloudSetup";
-import { cloudStatusChip, cloudVersionUrl, releaseChip } from "./managedCloudLink";
+import { cloudRepositoryGone, cloudStatusNotice, cloudSyncBlocked, cloudVerbs, discardCloudDraft } from "./managedCloudLink";
+import ManagedCloudChip from "./ManagedCloudChip";
 import { openExternalUrl } from "./externalLink";
 import type { StorageSetupPort } from "./StorageSetupStep";
 import {
@@ -110,6 +111,12 @@ type InlineStorageReview = {
   continueTitle?: string | null;
   /** The verb the review's primary wears; the card button shows the same. */
   continueLabel?: string | null;
+  /** The review is still waiting on its rows; the bar button spins with the
+   *  review's own primary. */
+  continuePending?: boolean;
+  /** Not the review yet: its frame while it is prepared. `busy` then means
+   *  preparing, never publishing or applying. */
+  preparing?: boolean;
 };
 
 /**
@@ -170,7 +177,7 @@ interface Props {
   ) => void;
   onConfigureBinding: (projectId: string) => Promise<void> | void;
   onRenameProject: (projectId: string, alias: string | null) => Promise<RenameResult> | RenameResult;
-  onResetProjectMetadata: (projectId: string) => Promise<void> | void;
+  onDeleteProjectSessions: (projectId: string) => Promise<void> | void;
   onRefresh: () => void;
   onAddProject: () => void;
   onSelectProject: (projectId: string) => void;
@@ -519,7 +526,7 @@ export default function ProjectLinksWorkspace({
   onConnectSibling,
   onConfigureBinding,
   onRenameProject,
-  onResetProjectMetadata,
+  onDeleteProjectSessions,
   onRefresh,
   onAddProject,
   onSelectProject,
@@ -1292,10 +1299,20 @@ export default function ProjectLinksWorkspace({
     }
   }, [managedCloudKey, managedCloudProjectId, managedCloudStorageId, activityHeader?.projectId, activityHeader?.storageId, activityHeader?.managedCloudStatus, managedCloudRepositoryId]);
   const cloudStatus: ManagedCloudStatus | null = managedCloudKey && activityHeader?.projectId === managedCloudProjectId && activityHeader?.storageId === managedCloudStorageId && activityHeader.comparisonError
-    ? { repository_id: managedCloudRepositoryId!, state: activityHeader.managedCloudStatus?.state === "ready" ? "unavailable" : activityHeader.managedCloudStatus?.state ?? "unavailable", link: null, message: activityHeader.comparisonError }
+    /* A comparison that failed closes Push and Pull whatever the repository
+       answered: only a comparison that succeeded reads a gone one as empty. */
+    ? { repository_id: managedCloudRepositoryId!, state: !activityHeader.managedCloudStatus || activityHeader.managedCloudStatus.state === "ready" || cloudRepositoryGone(activityHeader.managedCloudStatus) ? "unavailable" : activityHeader.managedCloudStatus.state, link: null, message: activityHeader.comparisonError }
     : managedCloudKey && cloudObservation?.key === managedCloudKey && cloudObservation.status.repository_id === managedCloudRepositoryId ? cloudObservation.status : null;
   const currentManagedCloudLink = cloudStatus?.state === "ready" ? cloudStatus.link : null;
-  const cloudSyncBlocked = !!managedCloudKey && cloudStatus !== null && cloudStatus.state !== "ready";
+  /* "Checking…" only while this pair's read is in flight. A comparison may
+     come back without a status (the store had none to give), and then the
+     bar shows no chip rather than a check that never ends. */
+  const cloudChecking = !cloudStatus
+    && !!managedCloudKey
+    && activityHeader?.projectId === managedCloudProjectId
+    && activityHeader?.storageId === managedCloudStorageId
+    && !!activityHeader.refreshing;
+  const cloudBlocksSync = !!managedCloudKey && cloudSyncBlocked(cloudStatus);
   const cloudRefreshRef = useRef(activityHeader?.onRefresh);
   cloudRefreshRef.current = activityHeader?.projectId === managedCloudProjectId && activityHeader?.storageId === managedCloudStorageId ? activityHeader.onRefresh : undefined;
   useEffect(() => {
@@ -1305,68 +1322,66 @@ export default function ProjectLinksWorkspace({
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
   }, [managedCloudKey, runningAction]);
-  /* Opening the repository's page and asking for its release are verbs on
-     this project in this storage, so they live in the project crumb's menu.
-     The bar keeps only the release state: its action cluster never shrinks,
-     and at the 580px floor it has no room for a second group. */
-  const managedCloudMenuItems: PathBarMenuItem[] = [];
-  if (currentManagedCloudLink && managedCloudKey && managedCloudProjectId && managedCloudStorageId) {
+  /* The repository's verbs live in the Cloud chip's panel, beside the state
+     they act on (docs/PLAN_CLOUD_STATUS_CHIP.md). The panel decides which it
+     offers from the status (cloudVerbs); these are what the release and the
+     discard do. Both name the repository by the link, so they wait while
+     another repository is read in place of the link's. */
+  const requestCloudRelease = () => {
     const link = currentManagedCloudLink;
+    if (!link || !managedCloudKey || !managedCloudProjectId || !managedCloudStorageId || !cloudVerbs(cloudStatus).requestRelease) return;
     const linkKey = managedCloudKey;
     const projectId = managedCloudProjectId;
     const storageId = managedCloudStorageId;
-    managedCloudMenuItems.push({
-      id: "open-managed-cloud",
-      label: "View draft",
-      detail: `${link.owner_login}/${link.name}`,
-      detailIsPath: true,
-      icon: "external-link",
-      onSelect: () => void openExternalUrl(cloudVersionUrl(link, "private")),
+    void run(`release:${linkKey}`, async () => {
+      try {
+        projectSyncApi.invalidateProjectActivity(projectId, storageId);
+        const next = await projectSyncApi.requestManagedCloudRelease(projectId, storageId, link.repository_revision);
+        setCloudObservation({ key: linkKey, status: { repository_id: next.repository_id, state: "ready", link: next, publication: next.repository_revision === link.repository_revision ? cloudStatus?.publication : null, message: null } });
+        setCloudActionError(null);
+        cloudRefreshRef.current?.();
+      } catch (reason) {
+        setCloudActionError({ key: linkKey, message: reason instanceof Error ? reason.message : String(reason) });
+        cloudRefreshRef.current?.();
+      }
     });
-    if (link.visibility === "public") {
-      managedCloudMenuItems.push({
-        id: "view-published-cloud",
-        label: "View published version",
-        icon: "external-link",
-        onSelect: () => void openExternalUrl(cloudVersionUrl(link, "public")),
-      });
-    }
-    if (link.can_request_release) {
-      managedCloudMenuItems.push({
-        id: "request-managed-cloud-release",
-        label: "Request public release",
-        icon: "upload",
-        disabled: busy || !!runningAction,
-        onSelect: () => void run(`release:${linkKey}`, async () => {
-          try {
-            projectSyncApi.invalidateProjectActivity(projectId, storageId);
-            const next = await projectSyncApi.requestManagedCloudRelease(projectId, storageId, link.repository_revision);
-            setCloudObservation({ key: linkKey, status: { repository_id: next.repository_id, state: "ready", link: next, publication: next.repository_revision === link.repository_revision ? cloudStatus?.publication : null, message: null } });
-            setCloudActionError(null);
-            cloudRefreshRef.current?.();
-          } catch (reason) {
-            setCloudActionError({ key: linkKey, message: reason instanceof Error ? reason.message : String(reason) });
-            cloudRefreshRef.current?.();
-          }
-        }),
-      });
-    }
-  }
+  };
+  const discardCloudDraftNow = () => {
+    if (!managedCloudKey || !managedCloudProjectId || !managedCloudStorageId) return;
+    const linkKey = managedCloudKey;
+    const projectId = managedCloudProjectId;
+    const storageId = managedCloudStorageId;
+    void run(`discard:${linkKey}`, () => discardCloudDraft(cloudStatus, {
+      confirm,
+      discard: (expectedRepositoryRevision) => {
+        projectSyncApi.invalidateProjectActivity(projectId, storageId);
+        return projectSyncApi.discardManagedCloudDraft(projectId, storageId, expectedRepositoryRevision);
+      },
+      report: (refusal) => setCloudActionError(refusal === null ? null : { key: linkKey, message: refusal }),
+      refresh: () => cloudRefreshRef.current?.(),
+    }));
+  };
   const workspaceReviewOpen = !!workspaceActionPrefix
     && inlineStorageReview?.projectId === workspaceProject?.local_project_id
     && inlineStorageReview?.storageId === workspaceStorage?.storage_id;
   const workspaceReviewKind = workspaceReviewOpen ? inlineStorageReview?.kind ?? null : null;
   const workspacePushReviewOpen = workspaceReviewOpen && inlineStorageReview?.kind === "push";
   const workspacePullReviewOpen = workspaceReviewOpen && inlineStorageReview?.kind === "pull";
+  const workspacePreparingReview = workspaceReviewOpen && !!inlineStorageReview?.preparing;
   const workspacePushPreparing = runningAction === `push:${workspaceActionPrefix}`;
-  const workspacePushPublishing = workspacePushReviewOpen && busy;
+  const workspacePushPublishing = workspacePushReviewOpen && busy && !workspacePreparingReview;
   const workspacePullPreparing = runningAction === `pull:${workspaceActionPrefix}`;
-  const workspacePullApplying = workspacePullReviewOpen && busy;
+  const workspacePullApplying = workspacePullReviewOpen && busy && !workspacePreparingReview;
   const workspacePullProgress = workspacePullPreparing || workspacePullApplying;
   const workspacePushProgress = workspacePushPreparing || workspacePushPublishing;
-  const workspacePullReadout = workspacePullPreparing && fetchProgress?.phase === "plan"
-    ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
-    : null;
+  /* A review still waiting on its rows is progress too: the bar's button
+     spins with the review's own primary, under the same label. */
+  const workspacePullSpinning = workspacePullProgress
+    || (workspacePullReviewOpen && !!inlineStorageReview?.continuePending);
+  const workspacePushSpinning = workspacePushProgress
+    || (workspacePushReviewOpen && !!inlineStorageReview?.continuePending);
+  /* The prepare's own progress is the card's caption, in words; the bar
+     carries a count only for the transfer the user asked for. */
   const workspacePushReadout = workspacePushPublishing && fetchProgress?.phase === "push"
     ? `${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`
     : null;
@@ -2202,7 +2217,6 @@ export default function ProjectLinksWorkspace({
               title: workspaceProfileTitle,
               onSelect: () => void onConfigureBinding(workspaceProject.local_project_id),
             },
-            ...managedCloudMenuItems,
             {
               id: "rename",
               label: "Rename project…",
@@ -2214,13 +2228,13 @@ export default function ProjectLinksWorkspace({
               },
             },
             {
-              id: "reset-sync-metadata",
-              label: "Reset local sync state…",
+              id: "delete-project-sessions",
+              label: "Delete all local sessions…",
               icon: "trash" as const,
               danger: true,
               disabled: busy,
-              title: "Forget local sync bases, conversation mappings, and results; files and cloud data are kept",
-              onSelect: () => void onResetProjectMetadata(workspaceProject.local_project_id),
+              title: "Delete this project’s local sessions and subagents, and clear its session bindings and local sync state",
+              onSelect: () => void onDeleteProjectSessions(workspaceProject.local_project_id),
             },
           ],
         },
@@ -2411,28 +2425,24 @@ export default function ProjectLinksWorkspace({
           <b>{attention}</b>
         </span>
       )}
-      {currentManagedCloudLink && (() => {
-        const link = currentManagedCloudLink;
-        const chip = cloudStatusChip(link, cloudStatus?.publication);
-        /* Connected to a public repository the account does not belong to:
-           anyone signed in pushes to it, and the Owner still decides what is
-           released. The chip says so, so a contributor knows their standing
-           before the Owner's review. */
-        const standing = link.role === null && link.visibility === "public" && link.can_push
-          ? " Contributor: you are not a collaborator of this repository, but it is public, so anyone signed in can push to it. The Owner decides what is released."
-          : "";
-        return (
-          <span
-            className={`sync-path-attention sync-path-cloud-status${chip.severity === "plain" ? "" : ` ${chip.severity}`}`}
-            tabIndex={0}
-            data-tooltip={`Mallard Cloud: ${chip.detail}${standing}`}
-            aria-label={`Mallard Cloud: ${chip.label}. ${chip.detail}${standing}`}
-          >
-            <Icon name="cloud" size={13} />
-            <b>{releaseChip(link.release).label}</b>
-          </span>
-        );
-      })()}
+      {/* Every answer the service gives shows here, the ones the notice below
+          also carries included; while the first answer is on its way it
+          checks, inert. */}
+      {managedCloudKey && (cloudStatus || cloudChecking) && (
+        <ManagedCloudChip
+          status={cloudStatus}
+          storageName={workspaceStorage.name || "Mallard Cloud"}
+          busy={busy || !!runningAction}
+          refreshing={!!activityHeader?.refreshing}
+          onOpenUrl={(url) => void openExternalUrl(url)}
+          onRequestRelease={requestCloudRelease}
+          onDiscardDraft={discardCloudDraftNow}
+          onRetry={() => cloudRefreshRef.current?.()}
+          onStorageSettings={() => {
+            if (managedCloudStorageId) onOpenStorage(managedCloudStorageId);
+          }}
+        />
+      )}
       {viewRefresh && (
         <button
           type="button"
@@ -2458,7 +2468,7 @@ export default function ProjectLinksWorkspace({
         disabled={busy
           || !!runningAction
           || workspaceStorageUnavailable
-          || cloudSyncBlocked
+          || cloudBlocksSync
           || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_pull)
           || (workspaceBindingActive && !workspaceCanRestore)
           || storageActionLockedForReview(workspaceReviewKind, "pull")
@@ -2496,18 +2506,16 @@ export default function ProjectLinksWorkspace({
         aria-expanded={workspacePullReviewOpen}
       >
         <Icon
-          key={workspacePullProgress ? "pull-progress" : "pull-idle"}
-          name={workspacePullProgress ? "refresh" : "download"}
+          key={workspacePullSpinning ? "pull-progress" : "pull-idle"}
+          name={workspacePullSpinning ? "refresh" : "download"}
           size={14}
-          className={workspacePullProgress ? "icon-spin" : undefined}
+          className={workspacePullSpinning ? "icon-spin" : undefined}
         />
-        {workspacePullReadout
-          ? <span className="sync-btn-readout">{workspacePullReadout}</span>
-          : <span className="sync-path-sync-label">{
-            workspacePullReviewOpen && !workspacePullProgress && inlineStorageReview?.continueLabel
-              ? inlineStorageReview.continueLabel
-              : projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })
-          }</span>}
+        <span className="sync-path-sync-label">{
+          workspacePullReviewOpen && !workspacePullProgress && inlineStorageReview?.continueLabel
+            ? inlineStorageReview.continueLabel
+            : projectPullActionLabel({ preparing: workspacePullPreparing, applying: workspacePullApplying })
+        }</span>
         {showPullCount && <span className="sync-path-count" aria-hidden="true">{pullCount}</span>}
       </button>
       <button
@@ -2516,7 +2524,7 @@ export default function ProjectLinksWorkspace({
         disabled={busy
           || !!runningAction
           || workspaceStorageUnavailable
-          || cloudSyncBlocked
+          || cloudBlocksSync
           || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_push)
           || !workspaceCanSync
           || storageActionLockedForReview(workspaceReviewKind, "push")
@@ -2545,14 +2553,18 @@ export default function ProjectLinksWorkspace({
         aria-expanded={workspacePushReviewOpen}
       >
         <Icon
-          key={workspacePushProgress ? "push-progress" : "push-idle"}
-          name={workspacePushProgress ? "refresh" : "upload"}
+          key={workspacePushSpinning ? "push-progress" : "push-idle"}
+          name={workspacePushSpinning ? "refresh" : "upload"}
           size={14}
-          className={workspacePushProgress ? "icon-spin" : undefined}
+          className={workspacePushSpinning ? "icon-spin" : undefined}
         />
         {workspacePushReadout
           ? <span className="sync-btn-readout">{workspacePushReadout}</span>
-          : <span className="sync-path-sync-label">{projectPushActionLabel({ preparing: workspacePushPreparing, publishing: workspacePushPublishing })}</span>}
+          : <span className="sync-path-sync-label">{
+            workspacePushReviewOpen && !workspacePushProgress && inlineStorageReview?.continueLabel
+              ? inlineStorageReview.continueLabel
+              : projectPushActionLabel({ preparing: workspacePushPreparing, publishing: workspacePushPublishing })
+          }</span>}
         {showPushCount && <span className="sync-path-count" aria-hidden="true">{pushCount}</span>}
       </button>
     </div>
@@ -2565,12 +2577,22 @@ export default function ProjectLinksWorkspace({
   if (revealError) {
     workspaceNotices.push({ key: "reveal-failed", severity: "danger", message: revealError });
   }
-  if (managedCloudKey && cloudStatus && cloudStatus.state !== "ready") {
+  const cloudNotice = managedCloudKey ? cloudStatusNotice(cloudStatus) : null;
+  if (cloudNotice) {
     workspaceNotices.push({
       key: "managed-cloud-status", severity: "warning",
-      title: cloudStatus.state === "deleting" ? "Being deleted" : cloudStatus.state === "sign_in_required" ? "Sign-in required" : cloudStatus.state === "inaccessible" ? "Repository unavailable" : "Status unavailable",
-      message: cloudStatus.message ?? "Could not check Mallard Cloud.",
-      action: <button type="button" className="btn btn-ghost" disabled={activityHeader?.refreshing} onClick={() => cloudStatus.state === "sign_in_required" && managedCloudStorageId ? onOpenStorage(managedCloudStorageId) : cloudRefreshRef.current?.()}>{cloudStatus.state === "sign_in_required" ? "Storage settings" : "Retry"}</button>,
+      title: cloudNotice.title,
+      message: cloudNotice.message,
+      action: cloudNotice.action === null ? undefined : (
+        <button
+          type="button"
+          className="btn btn-ghost"
+          disabled={activityHeader?.refreshing}
+          onClick={() => cloudNotice.action === "storage_settings" && managedCloudStorageId ? onOpenStorage(managedCloudStorageId) : cloudRefreshRef.current?.()}
+        >
+          {cloudNotice.action === "storage_settings" ? "Storage settings" : "Retry"}
+        </button>
+      ),
     });
   }
   if (cloudActionError?.key === workspaceActionPrefix) {

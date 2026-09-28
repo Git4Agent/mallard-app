@@ -126,6 +126,7 @@ pub fn run() {
         .manage(project_sync::dropbox_setup::DropboxSetupControl::default())
         .manage(project_sync::feishu_setup::FeishuSetupControl::default())
         .manage(project_sync::managed_cloud_setup::ManagedCloudSetupControl::default())
+        .manage(project_sync::cloud_project::CloudProjectControl::default())
         .manage(app_update::AppUpdateState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -207,9 +208,13 @@ pub fn run() {
             project_sync::managed_cloud_setup::sign_in_managed_cloud_storage,
             project_sync::managed_cloud_setup::cancel_managed_cloud_setup,
             project_sync::managed_cloud_link::request_managed_cloud_release,
+            project_sync::managed_cloud_link::discard_managed_cloud_draft,
             project_sync::managed_cloud_link::list_managed_cloud_repositories,
             project_sync::managed_cloud_link::resolve_managed_cloud_repository,
             project_sync::managed_cloud_link::accept_managed_cloud_invitation,
+            project_sync::cloud_project::probe_cloud_project_folder,
+            project_sync::cloud_project::get_cloud_project_folder,
+            project_sync::cloud_project::cancel_cloud_project_folder,
 
             project_sync::commands::cancel_r2_storage_setup,
             project_sync::commands::discover_r2_storage,
@@ -228,8 +233,9 @@ pub fn run() {
             project_sync::commands::open_project_markdown_path,
             project_sync::commands::read_project_markdown_image,
             project_sync::commands::execute_project_session_action,
+            project_sync::commands::delete_local_project_session,
             project_sync::commands::remove_local_project,
-            project_sync::commands::reset_project_sync_metadata,
+            project_sync::commands::delete_local_project_sessions,
             project_sync::commands::clear_storage_data,
             project_sync::commands::rename_local_project,
             project_sync::commands::save_project_link,

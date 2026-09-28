@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
 import Notice from "../notice/Notice";
 import { menuOptions, moveMenuFocus } from "./menuKeyboard";
@@ -433,6 +433,107 @@ export function PathBarMenu({
  * path bar renders the zone under the shell's own titlebar instead. */
 export const PathBarBelow = createContext<ReactNode>(null);
 
+/* The bar's one open menu, shared with the popovers a caller puts among the
+ * actions: a crumb menu and a popover are never open together, and both close
+ * on the same outside click and the same Escape. */
+interface PathBarMenuControl {
+  open: string | null;
+  toggle: (key: string) => void;
+  close: (key: string, returnFocus: boolean) => void;
+  registerOpener: (key: string) => (node: HTMLButtonElement | null) => void;
+  registerPopover: (key: string, present: boolean) => void;
+}
+const PathBarMenus = createContext<PathBarMenuControl | null>(null);
+
+/**
+ * A button among the bar's actions that opens a panel under it: a status the
+ * bar carries, with the verbs on it. The panel is a non-modal dialog, not a
+ * menu, so it may hold more than menu items: a heading, facts, a row with a
+ * second button. Focus moves into it on open, Tab walks it, and leaving it
+ * closes it; Escape and a click outside the bar close it as they close a crumb
+ * menu, and Escape hands focus back to the button. The bar stays domain-free:
+ * the caller hands in the face, the names and the panel.
+ */
+export function PathBarPopover({
+  id,
+  label,
+  className,
+  face,
+  ariaLabel,
+  tooltip,
+  disabled,
+  children,
+}: {
+  id: string;
+  /** Names the panel. */
+  label: string;
+  className: string;
+  /** The button's content: a mark, and the word when there is room. */
+  face: ReactNode;
+  ariaLabel: string;
+  /** Shown on hover and focus while the panel is closed. */
+  tooltip?: string;
+  disabled?: boolean;
+  /** The panel; `close` lets a verb dismiss it. */
+  children: (close: (returnFocus: boolean) => void) => ReactNode;
+}) {
+  const bar = useContext(PathBarMenus);
+  const key = `popover:${id}`;
+  const panelId = `${useId().replace(/[^a-zA-Z0-9_-]/g, "-")}-panel`;
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const open = !disabled && bar?.open === key;
+  const register = bar?.registerPopover;
+
+  useEffect(() => {
+    if (!register) return;
+    register(key, true);
+    return () => register(key, false);
+  }, [register, key]);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      panelRef.current?.querySelector<HTMLElement>("button:not([disabled]), a[href]")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
+
+  const close = (returnFocus: boolean) => bar?.close(key, returnFocus);
+  return (
+    <span
+      ref={anchorRef}
+      className="sync-path-popover"
+      onBlur={(event) => {
+        // Only a move to a node outside closes it; a blur to nowhere is the
+        // panel hiding itself or a click on its own padding.
+        const next = event.relatedTarget;
+        if (open && next instanceof Node && !anchorRef.current?.contains(next)) close(false);
+      }}
+    >
+      <button
+        ref={bar?.registerOpener(key)}
+        type="button"
+        className={className}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
+        aria-label={ariaLabel}
+        data-tooltip={open ? undefined : tooltip}
+        disabled={disabled}
+        onClick={() => bar?.toggle(key)}
+      >
+        {face}
+      </button>
+      {open && (
+        <div ref={panelRef} id={panelId} className="sync-path-menu end sync-path-popover-panel" role="dialog" aria-label={label}>
+          {children(close)}
+        </div>
+      )}
+    </span>
+  );
+}
+
 export default function SyncPathBar({
   crumbs,
   overflow,
@@ -450,11 +551,15 @@ export default function SyncPathBar({
   // back instead of dropping it on <body>.
   const openerRefs = useRef(new Map<string, HTMLButtonElement | null>());
 
+  // The popovers among the actions that are mounted now (see PathBarPopover).
+  const popoverKeys = useRef(new Set<string>());
+
   // A crumb that stops carrying a menu — the section, once you drill past it —
   // must not leave its menu pinned open behind the new leaf.
   const openStillExists = openMenu === "overflow"
     ? hasItems(overflow)
-    : crumbs.some((crumb) => crumb.id === openMenu && hasItems(crumb.menu));
+    : (openMenu !== null && popoverKeys.current.has(openMenu))
+      || crumbs.some((crumb) => crumb.id === openMenu && hasItems(crumb.menu));
   useEffect(() => {
     if (openMenu && !openStillExists) setOpenMenu(null);
   }, [openMenu, openStillExists]);
@@ -530,8 +635,33 @@ export default function SyncPathBar({
   const overflowMenuId = `${baseId}-overflow`;
   const below = useContext(PathBarBelow);
 
+  /* Stable, so a popover's mount effect runs once rather than every render. */
+  const popoverControls = useRef({
+    toggle: (key: string) => setOpenMenu((current) => (current === key ? null : key)),
+    close: (key: string, returnFocus: boolean) => {
+      setOpenMenu((current) => (current === key ? null : current));
+      if (returnFocus) openerRefs.current.get(key)?.focus();
+    },
+    registerOpener: (key: string) => (node: HTMLButtonElement | null) => {
+      if (node) openerRefs.current.set(key, node);
+      else openerRefs.current.delete(key);
+    },
+    registerPopover: (key: string, present: boolean) => {
+      if (present) {
+        popoverKeys.current.add(key);
+        return;
+      }
+      popoverKeys.current.delete(key);
+      setOpenMenu((current) => (current === key ? null : current));
+    },
+  }).current;
+  const menuControl = useMemo<PathBarMenuControl>(
+    () => ({ open: openMenu, ...popoverControls }),
+    [openMenu, popoverControls],
+  );
+
   return (
-    <>
+    <PathBarMenus.Provider value={menuControl}>
     {/* The bar is the window's drag handle here; its children are buttons and
         do not carry the attribute, so they stay clickable. */}
     <header ref={barRef} className="sync-pathbar sync-titlebar" data-tauri-drag-region>
@@ -716,6 +846,6 @@ export default function SyncPathBar({
       </div>
     </header>
     {below}
-    </>
+    </PathBarMenus.Provider>
   );
 }

@@ -1200,6 +1200,66 @@ impl LocalStateRepository {
         Ok(result)
     }
 
+    /// Explicit local deletion: remove only this session's bindings and checkpoints.
+    /// Provider files are handled separately; either operation can fail independently.
+    pub fn forget_local_session(
+        &self,
+        project_id: &LocalProjectId,
+        profile_id: &mallard_domain::LocalProviderProfileId,
+        provider: &mallard_domain::ProviderKey,
+        thread_id: &mallard_domain::ThreadId,
+    ) -> Result<(), String> {
+        let _operation = self.acquire_host_operation()?;
+        let _guard = persistence_guard(&self.root)?;
+        let identity = self.load_or_create_host_identity_unlocked()?;
+        let mut config = self.load_config_unlocked()?;
+        let machine = self.load_bindings_unlocked(&config, &identity)?;
+        let mut bindings =
+            self.load_conversation_bindings_document_unlocked(&config, &machine, &identity)?;
+        // Owned child state lives inside the root binding and checkpoint.
+        // Native child IDs are not independent conversation identities.
+        let before = bindings.bindings.len();
+        bindings.bindings.retain(|binding| {
+            !(&binding.local_project_id == project_id
+                && &binding.provider_profile_id == profile_id
+                && &binding.thread_id == thread_id)
+        });
+        let scope = mallard_domain::SyncScopeKey::provider(provider.clone());
+        let mut changed = false;
+        for link in config
+            .links
+            .iter_mut()
+            .filter(|link| &link.local_project_id == project_id)
+        {
+            if let Some(checkpoints) = link.conversation_checkpoints.get_mut(&scope) {
+                let count = checkpoints.len();
+                checkpoints.retain(|id, _| id != thread_id);
+                changed |= count != checkpoints.len();
+            }
+        }
+        if changed {
+            config.revision = config.revision.saturating_add(1);
+        }
+        if before != bindings.bindings.len() {
+            bindings.revision = bindings.revision.saturating_add(1);
+        }
+        config.validate()?;
+        machine.validate(&config)?;
+        bindings.validate(&identity, &machine, &config, &tail_layout_codec_for)?;
+        if changed {
+            write_json_atomic(&self.root, &self.config_path(), &config, MAX_CONFIG_BYTES)?;
+        }
+        if before != bindings.bindings.len() {
+            write_json_atomic(
+                &self.root,
+                &self.conversation_bindings_path(),
+                &bindings,
+                MAX_CONVERSATION_BINDINGS_BYTES,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Forget every derived sync decision and local conversation binding for
     /// one configured project, including bindings with restored path origins.
     /// Retain project setup, immutable origin files, and every user-owned byte.
@@ -2873,7 +2933,7 @@ fn ensure_real_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_no_symlinks(root: &Path, destination: &Path) -> Result<Option<fs::Metadata>, String> {
+pub(crate) fn ensure_no_symlinks(root: &Path, destination: &Path) -> Result<Option<fs::Metadata>, String> {
     let relative = destination.strip_prefix(root).map_err(|_| {
         format!(
             "Mallard state path '{}' escapes '{}'",
@@ -5065,6 +5125,50 @@ mod tests {
         let owner = crate::session_path_origins::PathOriginsOwner::for_binding(&binding).unwrap();
         binding.path_origins_ref = Some(repo.store_path_origins(owner, &origins).unwrap());
         (binding, origins)
+    }
+
+    #[test]
+    fn forget_local_session_removes_owned_state_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let (mut selected, _) = bound_path_origin_fixture(&repo, &temp);
+        let mut child = selected.clone();
+        child.path_origins_ref = None;
+        child.thread_id = ThreadId::parse("child-thread").unwrap();
+        child.provider_thread_id = Some("child-native".into());
+        let mut parent = child.clone();
+        parent.thread_id = ThreadId::parse("parent-thread").unwrap();
+        parent.provider_thread_id = Some("parent-native".into());
+        selected.installed_end = Some(100);
+        selected.installed_subagents.insert(
+            mallard_domain::SubagentKey::parse("owned-child").unwrap(),
+            mallard_domain::InstalledSubagent {
+                provider_thread_id: "child-native".into(),
+                installed_end: 50,
+            },
+        );
+        repo.mutate_conversation_bindings(|bindings| {
+            bindings.bindings.extend([selected.clone(), parent.clone()]);
+            Ok(())
+        })
+        .unwrap();
+        for _ in 0..2 {
+            repo.forget_local_session(
+                &selected.local_project_id,
+                &selected.provider_profile_id,
+                &codex_key(),
+                &selected.thread_id,
+            )
+            .unwrap();
+            assert_eq!(
+                repo.load_conversation_bindings().unwrap().bindings,
+                vec![parent.clone()]
+            );
+        }
+        assert!(
+            repo.load_path_origins(&selected).is_ok(),
+            "immutable origin history remains"
+        );
     }
 
     #[test]

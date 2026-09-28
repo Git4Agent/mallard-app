@@ -118,7 +118,7 @@ impl StorageProviderAdapter for LocalFolderAdapter {
             key: provider_key(),
             config_version: LOCAL_CONFIG_VERSION,
             display_name: "Local folder".to_string(),
-            description: "A folder on this Mac or on a mounted drive.".to_string(),
+            description: "A local folder or mounted drive.".to_string(),
             default_name: "Local storage".to_string(),
             name_suggestion: Some(StorageNameSuggestion::last_path_component("directory")),
             display_rank: 30,

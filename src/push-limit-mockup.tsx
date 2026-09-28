@@ -286,7 +286,7 @@ function Figure({ load, short = false }: { load: Load; short?: boolean }) {
 function ShippedFigure({ load }: { load: Load }) {
   const over = load.over > 0;
   return (
-    <span className={`sync-push-budget-figure${over ? " over" : ""}`} role="meter" aria-valuemin={0} aria-valuemax={load.limit} aria-valuenow={Math.min(load.total, load.limit)} aria-valuetext={load.sentence}>
+    <span className={`sync-review-budget-figure${over ? " over" : ""}`} role="meter" aria-valuemin={0} aria-valuemax={load.limit} aria-valuenow={Math.min(load.total, load.limit)} aria-valuetext={load.sentence}>
       {over
         ? <><b>+{formatBytes(load.over)}</b></>
         : <><b>{formatBytes(load.total)}</b> / {formatBytes(load.limit)}</>}
@@ -400,8 +400,8 @@ function MockReview({ direction, files }: { direction: Direction; files: number 
         {/* F is shipped: this frame renders the app's own classes, so the
             specimen keeps measuring the real thing. */}
         {direction === "both" && (
-          <div className="sync-push-budget-glance" title={load.breakdown}>
-            <span className={`sync-push-budget-track${over ? " over" : ""}`} aria-hidden="true">
+          <div className="sync-review-budget-glance" title={load.breakdown}>
+            <span className={`sync-review-budget-track push${over ? " over" : ""}`} aria-hidden="true">
               <i style={{ width: load.pct(load.total) }} />
               {over && <b style={{ left: load.limitPct }} />}
             </span>
@@ -496,7 +496,7 @@ function MockReview({ direction, files }: { direction: Direction; files: number 
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
         {direction === "both" && over && (
-          <p className="sync-push-budget-sentence">{load.sentence}</p>
+          <p className="sync-review-budget-sentence">{load.sentence}</p>
         )}
         {direction === "before" && (
           <span className={`sync-push-budget mk-budget${over ? " over" : ""}`} role="status" title={load.breakdown}>
@@ -512,8 +512,8 @@ function MockReview({ direction, files }: { direction: Direction; files: number 
         </button>
 
         {direction === "both" && (
-          <div className={`sync-push-budget-gauge${over ? " over" : ""}`} role="status" title={load.breakdown}>
-            <span className="sync-push-budget-fill" style={{ width: `${Math.min(100, (load.total / load.limit) * 100)}%` }} aria-hidden="true" />
+          <div className={`sync-review-budget-gauge push${over ? " over" : ""}`} role="status" title={load.breakdown}>
+            <span className="sync-review-budget-fill" style={{ width: `${Math.min(100, (load.total / load.limit) * 100)}%` }} aria-hidden="true" />
             <ShippedFigure load={load} />
           </div>
         )}

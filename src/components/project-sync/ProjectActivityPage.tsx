@@ -1,3 +1,4 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   GitBranchSummary,
@@ -92,9 +93,12 @@ interface PageProps extends SessionSearchProps {
    * Fires with whether the review list is trustworthy: the timeline needs
    * `activity` and the storage rows need the comparison, projected from one
    * asynchronous backend read. A hosting review gates its primary action so
-   * nothing is applied sight unseen.
+   * nothing is applied sight unseen, and says why when a read failed.
    */
-  onReviewListReadyChange?: (ready: boolean) => void;
+  onReviewListStateChange?: (state: ReviewListState) => void;
+  /** What the hosting review already knows about the list it is waiting
+   *  for, so the placeholders land at the list's own height. */
+  reviewScaffold?: ReviewScaffold;
   /**
    * Hands the workspace path bar what it needs to speak for this page, and
    * null when there is nothing to say. Only the workspace passes it; the two
@@ -123,6 +127,7 @@ interface ContentProps extends SessionSearchProps {
   canShowLess: boolean;
   /** Dispatches one backend-declared row action. */
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
+  onDeleteSession?: (session: ProjectSessionSummary) => void;
   onOpenSessionDetail?: (
     request: OpenSessionDetailRequest,
     trigger: HTMLButtonElement,
@@ -140,7 +145,22 @@ interface ContentProps extends SessionSearchProps {
   onReviewPull?: () => void;
   onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
+  reviewScaffold?: ReviewScaffold;
 }
+
+/** A review list is loading until both of its reads have settled. */
+export type ReviewListState = "loading" | "ready" | "failed";
+
+/** The rows a review will land, as its plan or context counts them. */
+export interface ReviewScaffold {
+  count: number;
+  /** How many of them land under "Only in …". */
+  storageOnly: number;
+}
+
+/** A review's reason when its list did not load: the list itself carries
+ *  the error and its Try again, so the buttons only point at it. */
+export const REVIEW_LIST_FAILED_REASON = "The session list didn't load. Try again in the list.";
 
 interface BranchPickerProps {
   branches: GitBranchSummary[];
@@ -701,18 +721,33 @@ function SessionTimestamp({ session }: { session: ProjectSessionSummary }) {
 /** Readouts only — everything in here is hovered, nothing is clicked. The
  *  card renders the stamp separately so it can trail the row's buttons; the
  *  standalone renders keep it attached. */
+/** The size a review row prints beside its metrics: what a push of the
+ *  session captures, or what a pull of it installs. Drawn in a review only,
+ *  where the limit makes the number mean something. */
+export interface ReviewSizeReadout {
+  bytes: number;
+  label: "Push size" | "Pull size";
+}
+
+export function reviewSizeReadout(
+  mode: "push" | "pull" | undefined,
+  entry: ThreadSyncEntry | undefined,
+): ReviewSizeReadout | null {
+  if (mode === "push" && entry?.capture_bytes != null) return { bytes: entry.capture_bytes, label: "Push size" };
+  if (mode === "pull" && entry?.pull_bytes != null) return { bytes: entry.pull_bytes, label: "Pull size" };
+  return null;
+}
+
 export function SessionMetrics({
   session,
   id,
   showTimestamp = true,
-  captureBytes = null,
+  sizeReadout = null,
 }: {
   session: ProjectSessionSummary;
   id?: string;
   showTimestamp?: boolean;
-  /** What a push of this session weighs; drawn in Push review only, where
-   *  the budget makes the number mean something. */
-  captureBytes?: number | null;
+  sizeReadout?: ReviewSizeReadout | null;
 }) {
   const durationText = formatDuration(session.started_at, session.ended_at);
   const durationLabel = durationText
@@ -736,9 +771,9 @@ export function SessionMetrics({
         <SessionRowIcon name={session.is_active ? "activity" : "clock"} /><b>{durationText}</b>
       </span>
     )}
-    {captureBytes != null && (
-      <span className="sync-history-thread-metric" data-tooltip={`Push size · ${formatBytes(captureBytes)}`} aria-label={`Push size: ${formatBytes(captureBytes)}`} tabIndex={0}>
-        <Icon name="drive" size={12} /><b>{formatBytes(captureBytes)}</b>
+    {sizeReadout && (
+      <span className="sync-history-thread-metric" data-tooltip={`${sizeReadout.label} · ${formatBytes(sizeReadout.bytes)}`} aria-label={`${sizeReadout.label}: ${formatBytes(sizeReadout.bytes)}`} tabIndex={0}>
+        <Icon name="drive" size={12} /><b>{formatBytes(sizeReadout.bytes)}</b>
       </span>
     )}
     {showTimestamp && <SessionTimestamp session={session} />}
@@ -780,6 +815,7 @@ interface SessionCardProps {
   busy?: boolean;
   busyActionId?: string | null;
   onSessionAction: (session: ProjectSessionSummary, action: SessionActionDescriptor) => void;
+  onDeleteSession?: (session: ProjectSessionSummary) => void;
   onOpenSessionDetail?: (
     request: OpenSessionDetailRequest,
     trigger: HTMLButtonElement,
@@ -1228,7 +1264,7 @@ function ChildOmissionIcon() {
 
 function SessionCard({
   session, occurrenceKey, workingDirectory, busy = false, busyActionId = null,
-  onSessionAction, onOpenSessionDetail,
+  onSessionAction, onDeleteSession, onOpenSessionDetail,
   syncEntry, reviewResourceId, storageName, syncFallback, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: SessionCardProps) {
@@ -1402,10 +1438,25 @@ function SessionCard({
           <SessionMetrics
             session={session}
             showTimestamp={false}
-            captureBytes={selectionMode === "push" ? syncEntry?.capture_bytes ?? null : null}
+            sizeReadout={reviewSizeReadout(selectionMode, syncEntry)}
           />
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
+            {!selectionMode && session.source !== "remote_only" && session.access === "bound_ready"
+              && (session.provider === "codex" || session.provider === "claude")
+              && session.provider_session_id && session.transcript_path && onDeleteSession && (
+              <button
+                type="button"
+                className="btn btn-ghost sync-history-session-detail-action"
+                aria-label="Delete local session"
+                title="Delete local session and its subagents"
+                disabled={busy}
+                onClick={() => onDeleteSession(session)}
+              >
+                <Icon name={busyActionId === "delete" && busy ? "refresh" : "trash"} size={14}
+                  className={busyActionId === "delete" && busy ? "icon-spin" : undefined} />
+              </button>
+            )}
             <SessionDebugMenu
               resourceId={session.resource_id}
               logicalThreadId={session.logical_thread_id ?? null}
@@ -1459,6 +1510,7 @@ function SyncEntryCard({
   const title = compactThreadTitle(fullTitle);
   const identityLabel = `${title}, ${entry.provider_display_name} thread ${entry.thread_id}`;
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
+  const sizeReadout = reviewSizeReadout(selectionMode, entry);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
   const holdDetail = selectionMode ? syncHoldDetail(selectionMode, entry) : null;
   return (
@@ -1523,9 +1575,9 @@ function SyncEntryCard({
           takes all 36 characters whole. */}
       <span className="sync-history-stored-thread-meta">
         <span className="sync-history-stored-thread-id"><code>{entry.thread_id}</code></span>
-        {selectionMode === "push" && entry.capture_bytes != null && (
-          <span className="sync-history-thread-metric" data-tooltip={`Push size · ${formatBytes(entry.capture_bytes)}`} aria-label={`Push size: ${formatBytes(entry.capture_bytes)}`} tabIndex={0}>
-            <Icon name="drive" size={12} /><b>{formatBytes(entry.capture_bytes)}</b>
+        {sizeReadout && (
+          <span className="sync-history-thread-metric" data-tooltip={`${sizeReadout.label} · ${formatBytes(sizeReadout.bytes)}`} aria-label={`${sizeReadout.label}: ${formatBytes(sizeReadout.bytes)}`} tabIndex={0}>
+            <Icon name="drive" size={12} /><b>{formatBytes(sizeReadout.bytes)}</b>
           </span>
         )}
         {updatedAt != null && (
@@ -1602,15 +1654,27 @@ function providerNoticeSeverity(state: ProviderActivityState): NoticeSeverity {
 export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
-  onSessionAction, onOpenSessionDetail, comparison = null,
+  onSessionAction, onDeleteSession, onOpenSessionDetail, comparison = null,
   storageLoading = false, comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
   selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull,
   onChooseAgentProfile,
   continuityActionBusy = false,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
+  reviewScaffold,
 }: ContentProps) {
   const [localQuery, setLocalQuery] = useState("");
+  /* A review's list is keyed on settled reads, not on request flags: every
+     flag starts false, so a flag-keyed branch painted nothing on the first
+     commit, and the rows are filtered on the comparison, so the list was
+     empty between the two reads. Each caption names the read still out. */
+  const reviewLoadingLabel = !selectionMode
+    ? null
+    : activity === null && loadError === null
+      ? "Loading sessions"
+      : comparison === null && comparisonError === null
+        ? "Comparing with this computer"
+        : null;
   const comparisonStorageId = comparison?.storage_id ?? "";
   const dismissedClearedNotice = useDismissedStorageWarning(project.local_project_id, comparisonStorageId);
   const query = searchQuery ?? localQuery;
@@ -1773,7 +1837,7 @@ export function ProjectChatHistoryContent({
     return (
     <SessionCard key={key} session={session} occurrenceKey={key} workingDirectory={workingDirectory}
       busy={actionBusyResourceId === session.resource_id} busyActionId={actionBusyActionId}
-      onSessionAction={onSessionAction} onOpenSessionDetail={onOpenSessionDetail}
+      onSessionAction={onSessionAction} onDeleteSession={onDeleteSession} onOpenSessionDetail={onOpenSessionDetail}
       syncEntry={entry} reviewResourceId={reviewResourceId}
       storageName={comparison ? comparisonStorageName : activeStorageName} syncFallback={syncFallback}
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
@@ -1877,8 +1941,9 @@ export function ProjectChatHistoryContent({
     });
   }
   /* A whole-comparison failure belongs in the shared notice zone, separate
-     from provider-scoped failures. */
-  if (comparisonError && !comparisonErrorHandled) {
+     from provider-scoped failures. A review draws it in its list instead:
+     its rows are the comparison's, so there is no row below to fall back. */
+  if (comparisonError && !comparisonErrorHandled && !selectionMode) {
     notices.push({
       key: "comparison-failed",
       severity: "warning",
@@ -1928,7 +1993,10 @@ export function ProjectChatHistoryContent({
           className="sync-history-notices"
           {...noticeTiming}
         />
-        {hasBoundProvider && !(storageLoading && searchableIds.size === 0) && (
+        {/* A review's field lands with its rows: until then the caption
+            stands in its slot, and a list that failed has nothing to search. */}
+        {hasBoundProvider && !(storageLoading && searchableIds.size === 0)
+          && !(selectionMode && (activity === null || comparison === null)) && (
           <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
             label={selectionMode ? "Search sessions" : "Search loaded sessions"}
             matches={searchResults.resourceIds.size} total={searchableIds.size} hiddenSelected={hiddenSelected} />
@@ -1950,6 +2018,31 @@ export function ProjectChatHistoryContent({
                 Choose Agent profile
               </button>
             )}
+          </div>
+        ) : reviewLoadingLabel ? (
+          /* The review's own shape, ungated: its host already waited 150ms
+             before opening the review, and this is what the review is drawn
+             with from its first frame until both reads have settled. */
+          <LoadingScaffold
+            shape="sessions"
+            label={reviewLoadingLabel}
+            count={reviewScaffold?.count}
+            storageOnly={reviewScaffold?.storageOnly}
+          />
+        ) : selectionMode && activity && comparison === null ? (
+          /* A review whose comparison failed has no rows to show — they are
+             the comparison's — so the failure takes the list's place with its
+             own retry, never a blank and never an endless load. It announces:
+             it replaces the scaffold after the read settles. */
+          <div className="sync-history-state sync-history-profile-state" role="alert">
+            <Icon name="alert-triangle" size={18} />
+            <div>
+              <strong>{`Couldn't compare this computer with ${comparisonStorageName}.`}</strong>
+              <span>{comparisonError}</span>
+            </div>
+            <button type="button" className="btn" onClick={onRetryLoad} disabled={loading || comparisonLoading}>
+              <Icon name="refresh" size={13} /> Try again
+            </button>
           </div>
         ) : (loading && !activity) || (storageLoading && allSessions.length === 0) ? (
           /* Not a status message: the scaffold is what the view renders with
@@ -2257,7 +2350,8 @@ export default function ProjectActivityPage({
   onChooseAgentProfile,
   continuityActionBusy = false,
   comparisonOverride,
-  onReviewListReadyChange,
+  onReviewListStateChange,
+  reviewScaffold,
   onHeaderModelChange,
   onOpenSessionDetail,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
@@ -2278,6 +2372,7 @@ export default function ProjectActivityPage({
   const [loadingMore, setLoadingMore] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const actionInFlightRef = useRef(false);
   const [actionBusyResourceId, setActionBusyResourceId] = useState<string | null>(null);
   const [actionBusyActionId, setActionBusyActionId] = useState<string | null>(null);
   const requestRef = useRef(0);
@@ -2395,10 +2490,19 @@ export default function ProjectActivityPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.local_project_id, binding?.revision, activeStorageId, refreshEpoch, comparisonOverride, selectionMode]);
 
-  const reviewListReady = activity !== null && !loading && !storageLoading && comparison !== null && !comparisonLoading;
+  /* Failed only while a read that never landed has an error: a load-more that
+     fails over a loaded list leaves that list trustworthy. With no agent
+     profile connected nothing is ever read, and the list says so itself. */
+  const reviewListState: ReviewListState = !hasBoundProvider
+    || (activity === null && loadError !== null)
+    || (comparison === null && comparisonError !== null)
+    ? "failed"
+    : activity !== null && !loading && !storageLoading && comparison !== null && !comparisonLoading
+      ? "ready"
+      : "loading";
   useEffect(() => {
-    onReviewListReadyChange?.(reviewListReady);
-  }, [reviewListReady, onReviewListReadyChange]);
+    onReviewListStateChange?.(reviewListState);
+  }, [reviewListState, onReviewListStateChange]);
 
   // The path bar holds onto whatever model it was last handed, so a model that
   // is a new object every render would drive it into a re-render loop. These
@@ -2488,8 +2592,39 @@ export default function ProjectActivityPage({
   // they speak for.
   useEffect(() => () => { onHeaderModelChange?.(null); }, [onHeaderModelChange]);
 
+  const deleteSession = async (session: ProjectSessionSummary) => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
+    try {
+      const approved = await confirm(
+        `Permanently delete “${session.title || "Untitled session"}” and its subagents from this machine?\n\nThis removes the local session files and Mallard binding. Cloud copies are kept. This action cannot be undone.`,
+        { title: "Delete local session?", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
+      );
+      if (!approved) return;
+      setActionError(null);
+      setActionBusyResourceId(session.resource_id);
+      setActionBusyActionId("delete");
+      let failure: string | null = null;
+      try {
+        const result = await projectSyncApi.deleteLocalProjectSession(project.local_project_id, session.resource_id);
+        failure = [
+          result.provider_error && `Session files: ${result.provider_error}`,
+          result.metadata_error && `Mallard binding: ${result.metadata_error}`,
+        ].filter(Boolean).join(" ") || null;
+      } catch (reason) { failure = errorMessage(reason); }
+      await loadWorkspace(branch);
+      setActionError(failure);
+    } catch (reason) { setActionError(errorMessage(reason)); }
+    finally {
+      setActionBusyResourceId(null);
+      setActionBusyActionId(null);
+      actionInFlightRef.current = false;
+    }
+  };
+
   const runSessionAction = async (session: ProjectSessionSummary, action: SessionActionDescriptor) => {
-    if (!action.enabled) return;
+    if (!action.enabled || actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
     setActionError(null);
     setActionBusyResourceId(session.resource_id);
     setActionBusyActionId(action.action_id);
@@ -2499,7 +2634,8 @@ export default function ProjectActivityPage({
     finally {
       setActionBusyResourceId(null);
       setActionBusyActionId(null);
+      actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} />;
 }

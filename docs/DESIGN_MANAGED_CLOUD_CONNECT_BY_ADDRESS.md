@@ -99,7 +99,9 @@ or **Create and connect**. On the setup page the band's badge and
 read-only verb and caution went with the open-push contract of
 `DESIGN_MANAGED_CLOUD_OPEN_PUBLIC_PUSH.md`; an **Enter an invitation code**
 toggle under the address field, and the code field on a miss, join a
-private repository from the picker.)
+private repository from the picker. 2026-09-27: the address field takes the
+code too, and its verb turns from Look up to Join; see
+`PLAN_REPOSITORY_PICKER_TIDY.md`.)
 
 ### 2.1 Address grammar
 
@@ -130,7 +132,7 @@ mirrored in Rust); the website's own top-level paths (`invitations`,
 | --- | --- | --- | --- |
 | Summary with `role` in owner/admin/member | Type, Visibility, You: role, Git remote from `repository_fingerprint` | Connect and review Pull | the summary's `bundle_id` through the existing paths |
 | Summary with `role: null`, `writer: true` (a public repository, 2026-09-16) | Public · anyone signed in can push; Git remote from `repository_fingerprint`, which the summary now discloses | Connect and review Pull | same bundle id; the card later wears a `Contributor` chip |
-| `404` | empty state: nothing at that address that you can see; if it is private, enter its invitation code below (the field appears; `accept_managed_cloud_invitation` joins and selects) | Join | the joined repository's bundle id |
+| `404` | empty state: nothing at that address that you can see; if it is private, paste its invitation code in the same field (the verb turns to Join; `accept_managed_cloud_invitation` joins and selects) | Join | the joined repository's bundle id |
 | `repository_class: catalog` | error: that address is a skill, plugin intent, or pet, not a project | disabled | |
 | class is `git_project` but the folder has no remote, or the reverse | the existing acknowledgement | Connect and review Pull once acknowledged | |
 
@@ -238,8 +240,8 @@ row). The card says the remote is this checkout's; Connect and review
 Pull. No `HorrorGame-2`, no sibling notice.
 
 **Invited collaborator.** Enter the repository's invitation code on the
-website or in the desktop's picker (the field is a toggle away, and appears
-by itself when an address finds nothing); the repository is selected at
+website or in the desktop's picker (the address field takes the code too,
+and its verb turns to Join); the repository is selected at
 once and the row is in the listing from then on. Role shows as Member;
 Pull and Push both work.
 
@@ -326,7 +328,13 @@ Frontend:
   selects its repository; a row click fills the field; the found row
   offers `Open on website` and, when another row was picked since, `Use
   this`; an invitation-code field (`acceptManagedCloudInvitation`) joins a
-  private repository and selects it.
+  private repository and selects it. Since 2026-09-27
+  (`PLAN_REPOSITORY_PICKER_TIDY.md`) one field, "Address or invitation
+  code", takes both: Look up, or Join once the text has no `/` or `.` and is
+  20 characters without separators (`isInvitationCodeShaped`). A repository
+  that is already a row is selected there, with one line under the field
+  instead of the found card (`inListing`). "Your repositories" heads the
+  rows, and with none it is one quiet line rather than an empty list box.
 - `BundleConnectionDialog.tsx`: `ManagedCloudBody` for a `managed_cloud`
   storage (address, rows, New repository for `reason: "link"`, footer verb
   `Create and connect` / `Connect and review Pull`);

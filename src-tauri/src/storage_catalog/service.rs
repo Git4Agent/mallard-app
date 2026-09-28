@@ -5977,6 +5977,184 @@ mod tests {
             );
         }
 
+        /// An item's repository removed on the website while the app runs
+        /// (PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md, rule R9): the store
+        /// learned its id when it pushed the item. The item reads as not in
+        /// the storage, being deleted or gone, and its Push creates the
+        /// repository again at the same address and saves the item's
+        /// accepted head. Nothing is relinked and nothing restarts.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_item_whose_repository_was_removed_is_pushed_again_without_a_restart() {
+            let stub = StubManagedCloud::start().await;
+            let root = tempfile::tempdir().unwrap();
+            let machine = managed_machine(
+                root.path(),
+                &stub,
+                "octocat",
+                &[("review", b"---\nname: review\n---\nReview.\n")],
+            );
+            let (scope_id, storage_id) = blocking(&machine, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                link_scope(fixture, &scope, &fixture.storage.id, 3);
+                push_all(fixture, &scope, &fixture.storage.id);
+                (scope, fixture.storage.id.clone())
+            })
+            .await;
+            let active = |stub: &StubManagedCloud| {
+                stub.state
+                    .lock()
+                    .unwrap()
+                    .repositories
+                    .values()
+                    .find(|repository| repository.state == "active")
+                    .cloned()
+            };
+            let accepted = |machine: &Arc<LibraryFixture>| {
+                machine.catalog.load_scope_links().unwrap().links[0]
+                    .accepted_items
+                    .clone()
+            };
+            let mut previous = accepted(&machine);
+            assert_eq!(previous.len(), 1);
+
+            for finished in [false, true] {
+                let gone = active(&stub).unwrap();
+                {
+                    let mut state = stub.state.lock().unwrap();
+                    state.remove(&gone.id);
+                    if finished {
+                        state.finish_removal(&gone.id);
+                    }
+                }
+                // The page: the item is on this computer and not in the
+                // storage. The refresh saves nothing.
+                let refreshed = blocking(&machine, {
+                    let scope_id = scope_id.clone();
+                    let storage_id = storage_id.clone();
+                    move |fixture| page(fixture, &scope_id, Some(&storage_id)).unwrap()
+                })
+                .await;
+                assert_eq!(refreshed.rows.len(), 1);
+                assert_eq!(
+                    refreshed.rows[0].state,
+                    Some(CatalogLinkState::New),
+                    "{:?}",
+                    refreshed.rows[0]
+                );
+                assert_eq!(accepted(&machine), previous);
+
+                // The Push creates the repository again, under its name.
+                stub.clear_log();
+                blocking(&machine, {
+                    let scope_id = scope_id.clone();
+                    let storage_id = storage_id.clone();
+                    move |fixture| push_all(fixture, &scope_id, &storage_id)
+                })
+                .await;
+                let created = active(&stub).unwrap();
+                assert_ne!(created.id, gone.id);
+                assert_eq!(created.name, "review");
+                assert_eq!(created.catalog, gone.catalog);
+                assert_eq!(created.private_revision, 1);
+                assert!(stub
+                    .requests()
+                    .iter()
+                    .filter(|request| request.method == "PUT")
+                    .all(|request| request.path.contains(&created.id)));
+                let saved = accepted(&machine);
+                assert_eq!(saved.len(), 1);
+                assert_ne!(saved, previous, "the accepted head names the new history");
+                previous = saved;
+
+                let settled = blocking(&machine, {
+                    let scope_id = scope_id.clone();
+                    let storage_id = storage_id.clone();
+                    move |fixture| page(fixture, &scope_id, Some(&storage_id)).unwrap()
+                })
+                .await;
+                assert_eq!(settled.rows[0].state, Some(CatalogLinkState::InSync));
+            }
+        }
+
+        /// An item's draft discarded on the website: its repository stays,
+        /// empty. The item's accepted head names a removed push, so it reads
+        /// as absent and the item as not in the storage; its Push starts a
+        /// first version in the same repository.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_item_whose_draft_was_discarded_is_pushed_again_into_the_same_repository() {
+            let stub = StubManagedCloud::start().await;
+            let root = tempfile::tempdir().unwrap();
+            let machine = managed_machine(
+                root.path(),
+                &stub,
+                "octocat",
+                &[("review", b"---\nname: review\n---\nReview.\n")],
+            );
+            let (scope_id, storage_id) = blocking(&machine, |fixture| {
+                let scope = skill_scope(fixture).scope.scope_id;
+                link_scope(fixture, &scope, &fixture.storage.id, 3);
+                push_all(fixture, &scope, &fixture.storage.id);
+                (scope, fixture.storage.id.clone())
+            })
+            .await;
+            let repository_id = stub
+                .state
+                .lock()
+                .unwrap()
+                .repositories
+                .values()
+                .next()
+                .unwrap()
+                .id
+                .clone();
+            let accepted = machine.catalog.load_scope_links().unwrap().links[0]
+                .accepted_items
+                .clone();
+            assert_eq!(stub.state.lock().unwrap().discard(&repository_id), Ok(None));
+
+            let refreshed = blocking(&machine, {
+                let scope_id = scope_id.clone();
+                let storage_id = storage_id.clone();
+                move |fixture| page(fixture, &scope_id, Some(&storage_id)).unwrap()
+            })
+            .await;
+            assert_eq!(refreshed.rows[0].state, Some(CatalogLinkState::New));
+            assert_eq!(
+                machine.catalog.load_scope_links().unwrap().links[0].accepted_items,
+                accepted,
+                "a refresh saves nothing"
+            );
+
+            stub.clear_log();
+            blocking(&machine, {
+                let scope_id = scope_id.clone();
+                let storage_id = storage_id.clone();
+                move |fixture| push_all(fixture, &scope_id, &storage_id)
+            })
+            .await;
+            assert!(!stub
+                .request_lines()
+                .contains(&"POST /v1/repositories".to_string()));
+            {
+                let state = stub.state.lock().unwrap();
+                assert_eq!(state.repositories.len(), 1);
+                let repository = &state.repositories[&repository_id];
+                assert_eq!(repository.stream().1.names().len(), 1);
+                assert_eq!(repository.head().unwrap().manifest_revision, 1);
+            }
+            let settled = blocking(&machine, {
+                let scope_id = scope_id.clone();
+                let storage_id = storage_id.clone();
+                move |fixture| page(fixture, &scope_id, Some(&storage_id)).unwrap()
+            })
+            .await;
+            assert_eq!(settled.rows[0].state, Some(CatalogLinkState::InSync));
+            assert_ne!(
+                machine.catalog.load_scope_links().unwrap().links[0].accepted_items,
+                accepted
+            );
+        }
+
         /// The same Library flow against a running Worker (a local `wrangler
         /// dev` or staging), on an account whose token the environment
         /// supplies; ignored by default. It pushes two skills of a fresh

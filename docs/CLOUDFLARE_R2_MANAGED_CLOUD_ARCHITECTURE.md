@@ -452,10 +452,13 @@ and `pushed_by` (section 8) is the only record of them.
 | Capability | Contributor | Member | Admin | Owner |
 | --- | --- | --- | --- | --- |
 | Read the private snapshot and public history; Push; Pull; request a public release | Yes, while the repository is public | Yes | Yes | Yes |
-| Discard the private snapshot; list members; leave | No | Yes | Yes | Yes (not leave) |
+| List members; leave | No | Yes | Yes | Yes (not leave) |
 | Approve or reject a release | No | No | No | Yes |
 | Set, rotate, and revoke the invitation code; remove Members and Admins; promote or demote | No | No | Yes | Yes |
-| Rename; make private; remove the repository | No | No | Yes | Yes |
+| Rename; make private; discard the private snapshot; remove the repository | No | No | Yes | Yes |
+
+The desktop offers the discard to the Owner alone, and only over a public
+version; an Admin discards on the website (section 4.5).
 
 Creation makes the creator the sole Owner. The Owner or an Admin sets the
 repository's code on the website's Members tab and sends it by any channel;
@@ -505,16 +508,25 @@ check admission inside their transaction. Downloaded copies cannot be revoked.
 
 ### 4.5 Discard and removal
 
-**Discard private snapshot** clears the private slot in one transaction,
-ends the open upload, and invalidates the open request. It deletes nothing
-local and changes nothing public.
+**Discard private snapshot** is the Owner's and an Admin's, after a
+confirmation, and takes effect in its request
+(`PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md`, 2026-09-26). On a public
+repository it returns the private snapshot to the public version: every push
+after the one the public version was released from is removed, and that push
+and the ones before it stay with their claims. On a private repository, one
+made private after a release included, it removes every push and the
+repository stays, empty. It invalidates the open request, deletes nothing
+local, removes no object, view or manifest, and changes nothing public.
 
 **Repository removal** is immediate. An Owner or Admin confirms the display
 name and the current revision. The transaction sets `state = 'deleting'`,
 makes the repository private, revokes codes, invalidates requests, and ends
-the open upload. The cron Worker writes the external removal record, erases
-every object and manifest of the repository, and marks it `removed`. Nothing
-is deleted on any machine. IDs and keys are never reused.
+the open upload. From that request on the repository stops counting: it no
+longer stands for its bundle or its Library item, holds its name, or counts
+toward the account's limit, so the same project can be created again at the
+same address at once. The cron Worker writes the external removal record,
+erases every object and manifest of the repository's own prefix, and marks it
+`removed`. Nothing is deleted on any machine. IDs and keys are never reused.
 
 ### 4.6 Super Admin
 
@@ -546,22 +558,40 @@ The website never decodes provider transcripts.
 
 ### 4.8 Stars
 
-Any signed-in account can star a repository it can read: a public one with
-a public head, or one it collaborates on. Anonymous readers see the count
-and get a sign-in link. A star is a personal mark, not repository state: it
-never bumps `revision` or `updated_at`, so it cannot cause a revision
-conflict for a pusher or reorder the listing, and it writes no audit row.
+A star is a vote. Anyone who can read a repository can star it, signed in or
+not: every Star is +1 to `star_count`, up to 24 per voter per repository per
+UTC day (`LIMITS.starsPerDay`), with no cap across repositories. Past that the
+service answers `star_limit_reached` (429) until 00:00 UTC. `star_count` is
+stars given, not people, and it keeps every one: only repository removal
+takes stars away.
+
+A voter is an account or, signed out, a connection: the IP address (an IPv6
+address by its /64, which a client can move within at will) hashed with a
+random secret made for the UTC day. The scheduled job deletes the day's
+tallies and its secret once the day is over, and no address is ever stored.
+Signed out, a star needs the website's `X-Requested-With` and `Origin`, the
+rule a signed-in page's mutations follow, so another site cannot spend its
+visitors' stars, and only a public repository with a public head can be
+starred.
+
+Signed in, Star also puts the repository on the account's Starred list, and
+Starred (the toggle) takes it off without touching the count; starring again
+puts it back and counts again. The website's control is unchanged: a split
+pill, "Star | 12", which for a signed-out reader stays "Star" while the number
+climbs. A star is a personal mark, not repository state: it never bumps
+`revision` or `updated_at`, so it cannot cause a revision conflict for a
+pusher or reorder the listing, and it writes no audit row.
 
 Stars persist through visibility changes and membership changes. Read access
-applies when the Starred list is read: a star on a repository the account
-can no longer read stays in the table but is not listed until the repository
-is readable again, and the count keeps every row. GitHub erases stars when a
-repository goes private; Mallard keeps history, so a re-release restores the
-count. Only repository removal deletes star rows.
+applies when the Starred list is read: a repository the account can no longer
+read stays on the list but is not shown until it is readable again, and the
+count keeps every star. GitHub erases stars when a repository goes private;
+Mallard keeps history, so a re-release restores the count.
 
 Every listing row and repository summary carries `star_count` and, for the
-caller, `viewer_starred`. `GET /v1/me/starred` lists the caller's stars
-newest first; collaborators see their private head on their own repositories.
+caller, `viewer_starred` (whether it is on the caller's Starred list).
+`GET /v1/me/starred` lists that list, latest star first; collaborators see
+their private head on their own repositories.
 
 ## 5. Desktop design
 
@@ -778,23 +808,30 @@ src/components/project-sync/ManagedCloudSetup.tsx      hook + lane
 
 ### 5.7 Desktop screens
 
-Push and Pull are the existing screens. The storage card for a managed link
-adds:
+Push and Pull are the existing screens. The project path bar carries one
+Mallard Cloud chip beside Push and Pull (docs/PLAN_CLOUD_STATUS_CHIP.md). It
+shows whatever the status answered, read when the pair opens, on window
+focus, and after every Push or Pull ends. That covers the release and the
+draft (`Draft vN`, `Published vN`, `Private`, `In review`, `Rejected`,
+`Not pushed`), a repository gone or being deleted, a sign-in needed, a
+refused account, and a service that cannot be reached. The chip opens a
+panel with the repository's facts and verbs:
 
 - **Request public release**, calling
   `request_managed_cloud_release(local_project_id, storage_id,
-  expected_repository_revision)`, and a status chip (`Not pushed`, `Private`,
-  `Waiting for Owner`, `Waiting for Super Admin`, `Public`, `Rejected`,
-  `Snapshot changed`) from `get_managed_cloud_link(local_project_id,
-  storage_id)`, refreshed when the pair opens, on window focus, and after
-  every Push or Pull ends. Both live in the project path bar beside Push
-  and Pull; the request button shows only when the service would accept it.
-- **Open on website**, an external link to the repository's address
-  `{origin}/{owner_login}/{name}` (section 4.1) with no token.
+  expected_repository_revision)`, shown only when the service would accept
+  it; otherwise **View release request** once a request waits or was turned
+  down. Either one copies the Release tab's address (`?tab=release`).
+- **View draft** and **View published version**: external links to the
+  repository's address `{origin}/{owner_login}/{name}` (section 4.1) with
+  `?version=private` or `?version=public` and no token. Each copies its
+  address from a button at the row's end.
 
-Members, invitations, approvals, discard, removal, and Super Admin live on
-the website only. The desktop has no account UI in Settings; the account is
-the storage.
+Members, invitations, approvals, removal, and Super Admin live on the
+website only. Discard lives on the website, for the Owner and Admins, and in
+the desktop chip's panel, for the Owner over a public version
+(**Discard draft…**, confirmed in the system's dialog). The desktop has no
+account UI in Settings; the account is the storage.
 
 ### 5.8 Implementation notes (2026-09-14)
 
@@ -992,8 +1029,9 @@ CREATE TABLE repositories (
     (class = 'catalog'         AND bundle_id IS NULL     AND catalog_resource_id IS NOT NULL)
   )
 );
--- One name per Owner, compared case-insensitively; a removed repository frees its name.
-CREATE UNIQUE INDEX repositories_owner_name ON repositories(created_by, name COLLATE NOCASE) WHERE state <> 'removed';
+-- One name per Owner among active repositories, compared case-insensitively. A
+-- repository frees its name when its removal is confirmed.
+CREATE UNIQUE INDEX repositories_owner_name ON repositories(created_by, name COLLATE NOCASE) WHERE state = 'active';
 CREATE INDEX repositories_bundle ON repositories(bundle_id) WHERE bundle_id IS NOT NULL;
 
 CREATE TABLE repository_members (
@@ -1005,15 +1043,34 @@ CREATE TABLE repository_members (
 );
 CREATE UNIQUE INDEX repository_single_owner ON repository_members(repository_id) WHERE role = 'owner';
 
--- Migration 0002 (section 4.8). `star_count` is kept in step inside the batch
--- that inserts or deletes a row; the Starred listing applies read access.
+-- Migration 0002 (section 4.8). A star is a vote: every Star is +1 to
+-- `star_count`, 24 per voter per repository per UTC day. An account's stars on
+-- a repository are one row; `listed` puts it on the Starred list.
 CREATE TABLE repository_stars (
   repository_id TEXT NOT NULL REFERENCES repositories(id),
   user_id       TEXT NOT NULL REFERENCES users(id),
+  listed        INTEGER NOT NULL CHECK (listed IN (0, 1)),
+  day           INTEGER NOT NULL,                 -- the UTC day day_stars counts
+  day_stars     INTEGER NOT NULL CHECK (day_stars >= 0),
+  starred_at    INTEGER NOT NULL,                 -- latest Star; orders the Starred list
   created_at    INTEGER NOT NULL,
   PRIMARY KEY (repository_id, user_id)
 );
-CREATE INDEX repository_stars_user ON repository_stars(user_id, created_at, repository_id);
+CREATE INDEX repository_stars_listed ON repository_stars(user_id, starred_at, repository_id) WHERE listed = 1;
+-- Signed out, a connection (the IP hashed with the day's secret) is the voter;
+-- the scheduled job deletes earlier days' tallies and secrets.
+CREATE TABLE guest_stars (
+  repository_id TEXT NOT NULL REFERENCES repositories(id),
+  connection    TEXT NOT NULL,
+  day           INTEGER NOT NULL,
+  stars         INTEGER NOT NULL CHECK (stars >= 0),
+  PRIMARY KEY (repository_id, connection)
+);
+CREATE INDEX guest_stars_day ON guest_stars(day);
+CREATE TABLE star_secrets (
+  day    INTEGER PRIMARY KEY,
+  secret TEXT NOT NULL
+);
 
 CREATE TABLE objects (
   id            TEXT PRIMARY KEY,                  -- obj_<random>
@@ -1178,13 +1235,13 @@ R2 I/O or JSON parsing happens inside a batch. Copies between tables use
 
 | Operation | Guards | Writes |
 | --- | --- | --- |
-| Create repository | actor active; identity unused; repository count under limit; `name` = the requested name normalized, suffixed past the Owner's existing names (the unique index `repositories_owner_name` settles a race as `repository_name_taken`, retried once) | repositories, owner membership, audit |
+| Create repository | actor active; identity unused among the account's active repositories; active repository count under limit; `name` = the requested name normalized, suffixed past the names of the Owner's active repositories (the unique index `repositories_owner_name` settles a race as `repository_name_taken`, retried once) | repositories, owner membership, audit |
 | Create upload | writer (section 4.3: a member, or anyone on a public repository with a public head); repository active and revision matches; `private_revision` matches; fewer than 64 of the pusher's own uploads open; `commit_id` unused; quota admits `reserved_bytes` on top of every open upload's reservation | uploads, upload_objects (matched `object_id` for ready digests), audit |
 | Register object write | upload open and not expired; digest listed; not yet ready | objects (`writing`), upload_objects.object_id |
 | Mark object ready | object `writing`; size matches | objects (`ready`) |
 | Commit upload | upload open and not expired; every upload_object has a `ready` object; repository active, revision and `private_revision` unchanged; `expected_commit_id` equals the current private commit or both are null; actor still a writer | publications (private, `private_revision + 1`); publication_objects from upload_objects plus carried-forward views; previous private publication → `retired`; repositories head and `private_revision`; open release request → `invalidated`; `committed_bytes += bytes of objects entering a publication for the first time`; uploads → `committed`; idempotency; audit |
 | Abandon or expire upload | upload open | uploads → `abandoned` or `expired` |
-| Discard private snapshot | member; `private_revision` and commit match | private publication → `retired`; head cleared; `private_revision + 1`; open request → `invalidated`; audit (open uploads stay open and answer `head_changed` at commit) |
+| Discard private snapshot | Owner or Admin; repository active and revision matches; there is a draft to discard | removals (target `chain`, the kept publication and the first removed record), revision + 1, open request → `invalidated`, audit; then, in the same request, the removal: the rows of the removed records → `removed`, head at the kept publication or cleared |
 | Set or rotate the invitation code | Owner or Admin; revision matches | repositories `invite_code_*`, revision + 1, audit |
 | Revoke the invitation code | Owner or Admin; revision matches (a repository without a code answers ok too) | repositories `invite_code_*` cleared, revision + 1, audit |
 | Enter the invitation code | actor active; the code is the repository's current one; repository active; members under 50 or already a member | membership (Member; an existing collaborator is unchanged and the batch is skipped), revision + 1, open request → `invalidated`, audit |
@@ -1324,7 +1381,8 @@ Codes: `authentication_required`, `forbidden`, `not_found`,
 `object_integrity_failed`, `quota_exceeded`, `release_request_pending`,
 `release_request_invalid`, `owner_required`, `super_admin_required`,
 `invitation_invalid`, `idempotency_mismatch`, `repository_removed`,
-`storage_managed_account_exists`, `temporarily_unavailable`.
+`storage_managed_account_exists`, `star_limit_reached`,
+`temporarily_unavailable`.
 `manifest_invalid` carries the specific reason in `detail` (class mismatch,
 identity mismatch, unregistered coordinate, missing reference, bound
 exceeded). Errors never reveal private existence, content, or local paths.
@@ -1367,7 +1425,7 @@ discarded.
 | `GET` | `/v1/repositories/by-bundle/{bundle_id}/head` | The head the caller may read for that bundle, or `204` when unknown |
 | `GET` | `/v1/repositories/by-name/{owner}/{name}` | The repository at that address (section 4.1): the collaborator's summary, else the public face, else `404`; both segments compare case-insensitively |
 | `GET` | `/v1/users/{login}` | Profile: `{user: {user_id, github_login, avatar_url, created_at}, repositories}`, the repositories the account owns that the caller may read, rows as in the Starred listing |
-| `GET` | `/v1/me/starred?cursor=` | The caller's stars, newest first, 50 per page; rows carry `owner`, `name`, `visibility`, `starred_at`, and the readable `head` (section 4.8) |
+| `GET` | `/v1/me/starred?cursor=` | The caller's Starred list, latest star first, 50 per page; rows carry `owner`, `name`, `visibility`, `starred_at`, and the readable `head` (section 4.8) |
 | `GET` | `/v1/public/repositories?class=&provider=&kind=&cursor=` | Bounded public listing, 50 per page |
 | `GET` | `/v1/public/repositories/{id}` | Public summary: class, `owner`, `name`, public head, counts |
 | `GET` | `/v1/public/repositories/{id}/manifest` | Current public manifest |
@@ -1399,7 +1457,7 @@ row cannot be joined.
 | `POST` | `/v1/repositories` | Create; body below |
 | `GET`, `PATCH` | `/v1/repositories/{id}` | Summary with `owner`, `name`, both heads, revisions, role, usage, `star_count`, `member_count`, open request; rename `{name, expected_repository_revision}` (strict; the address moves, nothing redirects) |
 | `POST` | `/v1/repositories/{id}/visibility` | `{visibility: "private", expected_repository_revision}` |
-| `PUT`, `DELETE` | `/v1/repositories/{id}/star` | Star or unstar (section 4.8); idempotent, no Idempotency-Key; → `{repository_id, starred, star_count}` |
+| `POST`, `DELETE` | `/v1/repositories/{id}/star` | `POST` gives one star, signed in or not (24 per voter per repository per UTC day, then `star_limit_reached`); signed in, it also puts the repository on the Starred list, and `DELETE` takes it off without touching the count (section 4.8); no Idempotency-Key; → `{repository_id, starred, star_count}` |
 | `GET` | `/v1/repositories/{id}/members` | Collaborators and Super Admin; `invitation: {code?, set_by, set_by_login, set_at} \| null` says whether a code stands; `code` only for the Owner and Admins |
 | `PATCH`, `DELETE` | `/v1/repositories/{id}/members/{user_id}` | Change role; remove; a non-Owner deletes their own row to leave |
 | `PUT` | `/v1/repositories/{id}/invitation` | Owner or Admin; `{expected_repository_revision}` → `{code, set_by, set_by_login, set_at, repository_revision}`; creates or rotates the repository's one code |
@@ -1437,7 +1495,7 @@ section 4.1 says, so these become `Mallard-Desktop`, `Research-Notes`, `Rika`):
 | `PUT` | `/v1/repositories/{id}/uploads/{upload}/objects/{sha256}` | Step 2 |
 | `POST` | `/v1/repositories/{id}/uploads/{upload}/commit` | Step 3 |
 | `POST` | `/v1/repositories/{id}/uploads/{upload}/abandon` | End an open upload |
-| `POST` | `/v1/repositories/{id}/private-snapshot/discard` | `{expected_private_revision, expected_commit_id, confirm: true}` |
+| `POST` | `/v1/repositories/{id}/private-snapshot/discard` | `{confirm: true, expected_repository_revision}` → `{ok, repository_id, removal_id, state, kept_revision}` (`STORE_API.md` section 3) |
 
 Upload creation: `multipart/form-data`; part `manifest` carries the raw
 manifest bytes, part `request` carries this JSON:
@@ -1913,6 +1971,7 @@ first column are the draft's.
 | Desktop collaborator and invitation screens (draft 11.5) | Website only | The desktop adds one lane and two buttons |
 | (added 2026-09-14) Stars erased when a repository goes private, as GitHub does | Stars persist; read access applies when the Starred list is read | One predicate at query time instead of cascades on make-private, member removal, and leave; a re-release restores the count |
 | (added 2026-09-16) Membership gates every push; per-person single-use invitation codes | Anyone signed in pushes to a public repository (`Access.writer`, `G.writer`); a private repository has one standing code on its row (`repositories.invite_code_*`), set, rotated, or revoked by the Owner or an Admin | Public work needs no invitations, and the Owner still decides every release; one code per repository is what "invite at the repo level" asked for, and it drops a table, a quota, an expiry job, and a label |
+| (added 2026-09-26) Stars need an account, one per account, as on GitHub | A star is a vote: signed in or not, up to 24 per voter per repository per UTC day; a signed-out voter is a connection (the IP hashed with the day's secret); Starred takes a repository off the list and keeps the count | Visitors can back a repository without signing in; the website's control stays as it was, and with no Trending page the daily cap bounds what one voter can add |
 
 Kept from the draft: one private slot, retained public history, Owner plus
 Super Admin approval when admission is absent, one item per catalog repository, the

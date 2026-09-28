@@ -75,7 +75,7 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
             key: provider_key(),
             config_version: 1,
             display_name: "Mallard Cloud".into(),
-            description: "Mallard's own service: sign in with GitHub, push private snapshots, invite collaborators, and read them on the website.".into(),
+            description: "Private snapshots with team sharing and web access.".into(),
             default_name: "Mallard Cloud".into(),
             name_suggestion: Some(StorageNameSuggestion::whole_setting(
                 "account_login",

@@ -111,11 +111,17 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-### Session message and tool icons
+### Lucide outline icons
 
 The `message-square` and `wrench` paths, plus the dot and stem of `info`, are from
 [Lucide 0.468.0](https://github.com/lucide-icons/lucide/tree/0.468.0/icons).
 Original geometry is inlined in `SessionRowIcon.tsx`.
+
+The shared `trash`, `terminal`, `git-commit`, and `external-link` icons in
+`Icons.tsx` use Lucide 0.468.0 `trash-2`, `square-terminal`,
+`git-commit-horizontal`, and `external-link`. They use a 2-unit rounded stroke.
+The terminal prompt and frame radius are enlarged for small action buttons;
+the commit node is enlarged to match the approved soft outline design.
 
 ISC License
 

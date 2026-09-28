@@ -1,7 +1,7 @@
 import type { SVGProps } from "react";
 
 // Compact pixel geometry uses assets from HackerNoon and Pixelarticons.
-// Provider geometry remains vector artwork. See THIRD_PARTY_NOTICES.md.
+// Outline actions use Lucide geometry. See THIRD_PARTY_NOTICES.md.
 export type IconName =
   | "activity"
   | "alert-triangle"
@@ -16,6 +16,14 @@ export type IconName =
   | "claude-mark"
   | "clock"
   | "cloud"
+  | "cloud-dot"
+  | "cloud-check"
+  | "cloud-lock"
+  | "cloud-clock"
+  | "cloud-x"
+  | "cloud-alert"
+  | "cloud-user"
+  | "cloud-off"
   | "code"
   | "computer"
   | "copy"
@@ -70,6 +78,43 @@ export type IconName =
 // Joint mock 2: the HackerNoon star pair shares one outer silhouette.
 const STAR_OUTER = "m16,8v-2h-1v-2h-1v-2h-1v-1h-2v1h-1v2h-1v2h-1v2H1v2h1v1h1v1h1v1h1v1h1v5h-1v4h2v-1h2v-1h2v-1h2v1h2v1h2v1h2v-4h-1v-5h1v-1h1v-1h1v-1h1v-1h1v-2h-7Z";
 const STAR_OUTLINE = STAR_OUTER + "m4,3h-1v1h-1v1h-1v1h-1v5h1v1h-2v-1h-2v-1h-2v1h-2v1h-2v-1h1v-5h-1v-1h-1v-1h-1v-1h-1v-1h4v-1h1v-1h1v-2h1v-2h2v2h1v2h1v1h1v1h4v1Z";
+
+// The Mallard Cloud state marks, rasterized off the cloud's own one-unit
+// grid: the cloud less the badge's gap, and the badge.
+const CLOUD_STATE_MARKS: Partial<Record<IconName, { body: string; badge: string }>> = {
+  "cloud-dot": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h10v1H13ZM12 15h12v1H12ZM12 16h12v1H12ZM12 17h12v1H12ZM12 18h12v1H12ZM12 19h12v1H12ZM12 20h12v1H12ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-check": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h10v1H13ZM12 15h8v1H12ZM22 15h2v1H22ZM12 16h7v1H12ZM22 16h2v1H22ZM12 17h2v1H12ZM16 17h2v1H16ZM21 17h3v1H21ZM12 18h2v1H12ZM20 18h4v1H20ZM12 19h3v1H12ZM19 19h5v1H19ZM12 20h4v1H12ZM18 20h6v1H18ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-lock": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h3v1H13ZM20 14h3v1H20ZM12 15h3v1H12ZM17 15h2v1H17ZM21 15h3v1H21ZM12 16h3v1H12ZM17 16h2v1H17ZM21 16h3v1H21ZM12 17h2v1H12ZM22 17h2v1H22ZM12 18h2v1H12ZM22 18h2v1H22ZM12 19h2v1H12ZM22 19h2v1H22ZM12 20h2v1H12ZM22 20h2v1H22ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-clock": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h4v1H13ZM19 14h4v1H19ZM12 15h5v1H12ZM19 15h5v1H19ZM12 16h5v1H12ZM19 16h5v1H19ZM12 17h5v1H12ZM21 17h3v1H21ZM12 18h5v1H12ZM21 18h3v1H21ZM12 19h12v1H12ZM12 20h12v1H12ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-x": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h10v1H13ZM12 15h2v1H12ZM16 15h4v1H16ZM22 15h2v1H22ZM12 16h3v1H12ZM17 16h2v1H17ZM21 16h3v1H21ZM12 17h4v1H12ZM20 17h4v1H20ZM12 18h4v1H12ZM20 18h4v1H20ZM12 19h3v1H12ZM17 19h2v1H17ZM21 19h3v1H21ZM12 20h2v1H12ZM16 20h4v1H16ZM22 20h2v1H22ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-alert": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h4v1H13ZM19 14h4v1H19ZM12 15h5v1H12ZM19 15h5v1H19ZM12 16h5v1H12ZM19 16h5v1H19ZM12 17h5v1H12ZM19 17h5v1H19ZM12 18h12v1H12ZM12 19h5v1H12ZM19 19h5v1H19ZM12 20h5v1H12ZM19 20h5v1H19ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-user": {
+    body: "M8 5h5v1H8ZM7 6h2v1H7ZM12 6h2v1H12ZM6 7h2v1H6ZM13 7h1v1H13ZM15 7h3v1H15ZM5 8h2v1H5ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM1 12h2v1H1ZM1 13h1v1H1ZM1 14h1v1H1ZM1 15h1v1H1ZM1 16h2v1H1ZM2 17h2v1H2ZM3 18h3v1H3ZM5 19h6v1H5Z",
+    badge: "M15 12h6v1H15ZM13 13h10v1H13ZM13 14h4v1H13ZM19 14h4v1H19ZM12 15h4v1H12ZM20 15h4v1H20ZM12 16h4v1H12ZM20 16h4v1H20ZM12 17h5v1H12ZM19 17h5v1H19ZM12 18h12v1H12ZM12 19h3v1H12ZM21 19h3v1H21ZM12 20h2v1H12ZM22 20h2v1H22ZM13 21h10v1H13ZM13 22h10v1H13ZM15 23h6v1H15Z",
+  },
+  "cloud-off": {
+    body: "M9 5h4v1H9ZM12 6h2v1H12ZM13 7h1v1H13ZM15 7h3v1H15ZM13 8h3v1H13ZM17 8h2v1H17ZM5 9h1v1H5ZM18 9h2v1H18ZM5 10h1v1H5ZM19 10h1v1H19ZM2 11h4v1H2ZM19 11h3v1H19ZM1 12h2v1H1ZM21 12h2v1H21ZM1 13h1v1H1ZM22 13h1v1H22ZM1 14h1v1H1ZM22 14h1v1H22ZM1 15h1v1H1ZM22 15h1v1H22ZM1 16h2v1H1ZM21 16h2v1H21ZM2 17h2v1H2ZM21 17h1v1H21ZM3 18h3v1H3ZM5 19h11v1H5Z",
+    badge: "M2 2h2v1H2ZM2 3h3v1H2ZM3 4h3v1H3ZM4 5h3v1H4ZM5 6h3v1H5ZM6 7h3v1H6ZM7 8h3v1H7ZM8 9h3v1H8ZM9 10h3v1H9ZM10 11h3v1H10ZM11 12h3v1H11ZM12 13h3v1H12ZM13 14h3v1H13ZM14 15h3v1H14ZM15 16h3v1H15ZM16 17h3v1H16ZM17 18h3v1H17ZM18 19h3v1H18ZM19 20h3v1H19ZM20 21h2v1H20Z",
+  },
+};
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -176,6 +221,19 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
       )}
       {name === "cloud" && (
         <path className="icon-pixel-fill" fill="currentColor" stroke="none" d="M22 12v-1h-2V9h-1V8h-1V7h-3v1h-1V6h-1V5H8v1H7v1H6v1H5v3H2v1H1v5h1v1h1v1h2v1h14v-1h2v-1h1v-1h1v-5h-1Zm0 4h-1v1h-1v1h-2v1H6v-1H4v-1H3v-1H2v-3h1v-1h3V9h1V8h1V7h1V6h3v1h1v2h3V8h1v1h1v1h1v2h2v1h1v3Z" />
+      )}
+      {/* Mallard Cloud states: the cloud above with a badge bitten out of
+          its lower right corner (a one-unit gap), or a slash through it for
+          a repository that is gone. The badge is a solid disc with its glyph
+          knocked out, so it reads at 16px where an outline would close up;
+          the disc alone is a newer draft. 31-47 cells of ink, inside the
+          set's 15-48 band. The badge takes --icon-badge, so a caller can tint
+          it by tone while the cloud keeps the text colour. */}
+      {CLOUD_STATE_MARKS[name] && (
+        <>
+          <path className="icon-pixel-fill" fill="currentColor" stroke="none" d={CLOUD_STATE_MARKS[name]!.body} />
+          <path className="icon-pixel-fill icon-badge" fill="currentColor" stroke="none" d={CLOUD_STATE_MARKS[name]!.badge} />
+        </>
       )}
       {/* The two chevrons need a gap wide enough to survive 12px: at a 2-unit
           separation their arms nearly met and the pair read as a ring of dots
@@ -357,27 +415,22 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
           d="M4 4h6v2H4ZM4 18h16v2H4ZM20 8h2v10h-2ZM2 6h2v12H2ZM10 6h10v2H10Z"
         />
       )}
-      {/* Redrawn in-house on the even grid, so it carries no provenance class.
-          The sourced glyph stepped its diagonal one unit at a time; at the 12px
-          this renders at, a 24-unit grid is half a device pixel per unit, so the
-          shaft and the frame both dissolved. Every edge here lands on an even
-          coordinate: the box loses its top-right corner and the arrow leaves
-          through the gap. */}
       {name === "external-link" && (
-        <path className="icon-pixel-fill" fill="currentColor" stroke="none"
-          d="M2 6h8v2H2ZM2 6h2v16H2ZM2 20h18v2H2ZM18 12h2v10h-2ZM12 0h10v2H12ZM20 0h2v10h-2ZM18 2h2v2h-2ZM16 4h2v2h-2ZM14 6h2v2h-2ZM12 8h2v2h-2ZM10 10h2v2h-2Z" />
+        <g fill="none" stroke="currentColor" strokeWidth={2}
+          strokeLinecap="round" strokeLinejoin="round" shapeRendering="geometricPrecision">
+          <path d="M15 3h6v6" />
+          <path d="M10 14 21 3" />
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+        </g>
       )}
       {name === "git-branch" && (
         <path className="icon-git-branch-mark icon-pixel-fill" fill="currentColor" stroke="none" d="M20 2V1h-4v1h-1v4h1v1h1v4H7V7h1V6h1V2H8V1H4v1H3v4h1v1h1v10H4v1H3v4h1v1h4v-1h1v-4H8v-1H7v-4h12V7h1V6h1V2h-1ZM5 3h2v2H5Zm2 18H5v-2h2ZM19 5h-2V3h2Z" />
       )}
       {name === "git-commit" && (
-        <g className="icon-pixel-fill" fill="currentColor" stroke="none">
-          <path d="M1 11h6v2H1Z" />
-          <path d="M17 11h6v2h-6Z" />
-          <path d="M9 7h6v2H9Z" />
-          <path d="M9 15h6v2H9Z" />
-          <path d="M7 9h2v6H7Z" />
-          <path d="M15 9h2v6h-2Z" />
+        <g fill="none" stroke="currentColor" strokeWidth={2}
+          strokeLinecap="round" strokeLinejoin="round" shapeRendering="geometricPrecision">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M3 12h5m8 0h5" />
         </g>
       )}
       {name === "git-compare-arrows" && (
@@ -565,26 +618,21 @@ export default function Icon({ name, size = 14, ...props }: IconProps) {
         </g>
       )}
       {name === "trash" && (
-        <path
-          className="icon-pixel-fill icon-pixelarticons"
-          fill="currentColor"
-          stroke="none"
-          d="M18 22H6v-2h12ZM9 6h6V4h2v2h5v2h-2v12h-2V8H6v12H4V8H2V6h5V4h2ZM15 4H9V2h6Z"
-        />
+        <g fill="none" stroke="currentColor" strokeWidth={2}
+          strokeLinecap="round" strokeLinejoin="round" shapeRendering="geometricPrecision">
+          <path d="M3 6h18" />
+          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+          <path d="M10 11v6m4-6v6" />
+        </g>
       )}
-      {/* Drawn in-house, so no provenance class. The sourced glyph framed the
-          prompt in a 2-unit window and left it three 2x2 blocks in the corner;
-          at the 12-14px this icon actually renders, a 24-unit grid gives half a
-          device pixel per unit, so the prompt sank into a smudge and the icon
-          read as an empty box. Dropping the frame buys the whole grid, and the
-          chevron and cursor bar are what identify a terminal anyway. */}
+      {/* Enlarge the prompt inside Lucide's frame for the 12–14 px actions. */}
       {name === "terminal" && (
-        <path
-          className="icon-pixel-fill"
-          fill="currentColor"
-          stroke="none"
-          d="M4 6h2v2H4ZM6 8h2v2H6ZM8 10h2v2H8ZM10 12h2v2h-2ZM8 14h2v2H8ZM6 16h2v2H6ZM4 18h2v2H4ZM14 18h6v2h-6Z"
-        />
+        <g fill="none" stroke="currentColor" strokeWidth={2}
+          strokeLinecap="round" strokeLinejoin="round" shapeRendering="geometricPrecision">
+          <rect x="3" y="3" width="18" height="18" rx="3" />
+          <path d="m7 8 4 4-4 4m6 0h4" />
+        </g>
       )}
       {name === "upload" && (
         <path

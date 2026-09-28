@@ -320,6 +320,15 @@ export interface ProjectSyncMetadataResetResult {
   materializations_removed: number;
 }
 
+/** Best-effort deletion in the project's bound Codex and Claude profiles. */
+export interface ProjectSessionsDeleteResult {
+  sessions_deleted: number;
+  sessions_failed: number;
+  provider_errors: string[];
+  metadata_reset: ProjectSyncMetadataResetResult | null;
+  metadata_error: string | null;
+}
+
 /** Result of permanently clearing Mallard-managed objects from one storage. */
 export interface StorageDataClearResult {
   storage_id: string;
@@ -1224,10 +1233,20 @@ export interface ConversationReviewRow {
   action_id?: string | null;
   /** The stored thread's name; absent when the stored thread has none. */
   display_title?: string | null;
+  /** The storage-side bytes a pull of this row installs (transcript, sidecars,
+   *  child transcripts, index fragment); absent when the action writes no
+   *  payload. The review meter sums it with the file actions' source_size. */
+  source_size?: number | null;
+  /** The stored session's last-message time: the key the recommended
+   *  selection walks newest first. Absent when the presentation has none. */
+  stored_ended_at?: number | null;
 }
 
 /** Pull comparison DTO. Executable conversation actions stay in the backend. */
 export interface PullReview {
+  /** The most bytes one Pull Apply installs; the review meter refuses past
+   *  it and Apply rechecks the selection against the pinned manifest. */
+  apply_limit_bytes: number;
   schema_version: 1;
   plan_id: string;
   storage_id: string;
@@ -1627,6 +1646,10 @@ export interface ThreadSyncEntry {
   /** What a push of this row's local conversation weighs (transcript plus
    *  sidecars); absent for storage-only rows. The review meter sums it. */
   capture_bytes?: number | null;
+  /** What a pull of this row's stored conversation installs: every file the
+   *  manifest lists for it. Absent for local-only rows and for rows compared
+   *  without a storage. The Pull review prints it per row. */
+  pull_bytes?: number | null;
   push_decision: ThreadSyncDecision;
   pull_decision: ThreadSyncDecision;
 }
@@ -1795,11 +1818,23 @@ export interface ManagedCloudPublicationStatus {
   public_revision: number | null;
 }
 export interface ManagedCloudStatus {
+  /** The repository the link saved. While it is gone and another one of the
+   *  same project is read in its place, `link.repository_id` names that one. */
   repository_id: string;
-  state: "ready" | "deleting" | "inaccessible" | "sign_in_required" | "unavailable";
+  /** `deleting` and `gone`: the saved repository was removed, or this account
+   *  lost access to it. It reads as empty, and a Push creates it again. */
+  state: "ready" | "deleting" | "gone" | "inaccessible" | "sign_in_required" | "unavailable";
   link: ManagedCloudLink | null;
   publication?: ManagedCloudPublicationStatus | null;
   message: string | null;
+}
+/** What a discard of the draft answered. */
+export interface ManagedCloudDiscardedDraft {
+  repository_id: string;
+  removal_id: string;
+  state: "done" | "deleting";
+  /** The version the draft returned to; null when no push is kept. */
+  kept_revision: number | null;
 }
 export interface ManagedCloudLink {
   visibility: "private" | "public";
@@ -1846,11 +1881,57 @@ export interface ManagedCloudRepository {
   /** The remote's fingerprint when the service lets this account know it. */
   repository_fingerprint: string | null;
   git_remote: ManagedCloudGitRemote;
+  /** `https://github.com/{owner}/{name}` once the service has linked it:
+   *  the only source a new project is cloned from. */
+  github_url: string | null;
   revision: number;
   updated_at: number;
   resources: number;
   registration_only: boolean;
 }
+
+/** Where a project got from Mallard Cloud may put its folder. A folder that
+ *  holds files carries its own origin — the fingerprint setup's
+ *  acknowledgement rule compares, and the remote as host and path — for
+ *  connecting it as it is. */
+export type CloudProjectFolder =
+  | { kind: "refused"; message: string }
+  | { kind: "new" }
+  | { kind: "empty" }
+  | { kind: "checkout" }
+  | { kind: "occupied"; suggestion: string; local_fingerprint: string | null; git_remote: string | null }
+  | { kind: "project"; project_id: string };
+
+export interface CloudProjectFolderProbe {
+  folder: CloudProjectFolder;
+  /** Whether Git runs on this computer; gh clones through it too. */
+  can_clone: boolean;
+}
+
+export interface CloudProjectFolderRequest {
+  destination: string;
+  github_url: string | null;
+  repository_fingerprint: string | null;
+  operation_id: string;
+}
+
+export type CloneFailureReason = "no_git" | "refused" | "unreachable" | "failed";
+
+/** Why a GitHub repository was left as an empty folder, and the command
+ *  that clones into it later. */
+export interface CloneFailure {
+  reason: CloneFailureReason;
+  command: string;
+}
+
+export type CloudProjectFolderResult =
+  | { kind: "cloned"; canonical_path: string }
+  | { kind: "created"; canonical_path: string; failure: CloneFailure | null }
+  | { kind: "existing"; canonical_path: string };
+
+export type CloudProjectFolderProgress =
+  | { stage: "cloning"; percent: number | null }
+  | { stage: "creating" };
 
 /** What one pasted address resolves to on a Mallard Cloud storage, and
  *  what one entered invitation code joins. A public repository takes
@@ -1870,3 +1951,9 @@ export type ProjectActivityRefreshEvent =
   | { stage: "activity_error"; message: string; storage_pending: boolean }
   | { stage: "comparison"; comparison: ThreadSyncComparison }
   | { stage: "comparison_error"; message: string; managed_cloud_status?: ManagedCloudStatus | null };
+
+/** Best-effort local deletion; failures are independent. */
+export interface LocalSessionDeleteResult {
+  provider_error: string | null;
+  metadata_error: string | null;
+}

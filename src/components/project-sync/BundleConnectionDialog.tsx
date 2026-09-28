@@ -116,8 +116,8 @@ function ManagedCloudBody({
             {sibling
               ? `${storage.name} already has this repository under another address. Connecting adopts it, so pushes and pulls from every machine converge; the current empty registration is abandoned.`
               : missing
-                ? `${projectName} has a local-only identity. Paste a repository address, enter an invitation code, or select a repository below.`
-                : "Paste a repository address, enter an invitation code, or select a repository below. Connecting keeps the project folder in its current location."}
+                ? `${projectName} has a local-only identity. Paste a repository address or an invitation code, or choose one of your repositories.`
+                : "Paste a repository address or an invitation code, or choose one of your repositories. Connecting keeps the project folder in its current location."}
           </p>
         </div>
         <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} aria-label="Close repo chooser">
@@ -146,7 +146,7 @@ function ManagedCloudBody({
 
       <footer className="sync-modal-footer">
         {offerNew
-          ? <span>{selection ? footerNote : "Look up an address, join with a code, or select a row"}</span>
+          ? <span>{selection ? footerNote : "Paste an address or a code, or select a row"}</span>
           : (
             <button type="button" className="btn btn-ghost" onClick={onKeepCurrent} disabled={busy}>
               {sibling ? "Not now" : "Review separate Push"}

@@ -1441,16 +1441,40 @@ pub fn execute_project_session_action(
     action_id: &str,
     before_launch: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
-    let (provider, thread_id) = parse_conversation_resource_id(resource_id)?;
     let state = repository.load_project_activity_state_snapshot()?;
     let resolved =
         resolve_activity_project_from_state(&state.config, &state.bindings, local_project_id)?;
+    let (provider, _, session) = resolve_action_session(registry, &state, &resolved, resource_id)?;
+    let adapter = registry.require(&provider)?;
+    let home = &resolved.homes[&provider];
+    let mut request = SessionActionRequest {
+        action_id,
+        provider_home: &home.home,
+        project_root: &resolved.project_root,
+        provider_session_id: &session.session_id,
+        before_launch,
+    };
+    adapter.execute_action(&mut request).map(|_| ())
+}
+
+fn resolve_action_session(
+    registry: &AgentProviderRegistry,
+    state: &LocalProjectActivityStateSnapshot,
+    resolved: &ResolvedActivityProject,
+    resource_id: &str,
+) -> Result<(ProviderKey, ThreadId, crate::providers::DiscoveredSession), String> {
+    let (provider, thread_id) = parse_conversation_resource_id(resource_id)?;
     let session_for_thread = state
         .conversation_bindings
         .bindings
         .iter()
         .find(|binding| {
-            binding.local_project_id == resolved.project_id && binding.thread_id == thread_id
+            binding.local_project_id == resolved.project_id
+                && binding.thread_id == thread_id
+                && resolved
+                    .homes
+                    .get(&provider)
+                    .is_some_and(|home| home.profile_id == binding.provider_profile_id)
         })
         .and_then(|binding| binding.provider_thread_id.clone());
     let adapter = registry.require(&provider)?;
@@ -1488,14 +1512,135 @@ pub fn execute_project_session_action(
     }
     let session = matched_session
         .ok_or_else(|| "session does not belong to the selected project".to_string())?;
-    let mut request = SessionActionRequest {
-        action_id,
-        provider_home: &home.home,
-        project_root: &resolved.project_root,
-        provider_session_id: &session.session_id,
-        before_launch,
+    Ok((provider, thread_id, session))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocalSessionDeleteResult {
+    pub provider_error: Option<String>,
+    pub metadata_error: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSessionsDeleteResult {
+    pub sessions_deleted: u64,
+    pub sessions_failed: u64,
+    pub provider_errors: Vec<String>,
+    pub metadata_reset: Option<crate::persistence::ProjectSyncMetadataResetResult>,
+    pub metadata_error: Option<String>,
+}
+
+/// Delete discovered sessions in the project's bound profiles, then reset all
+/// project sync metadata. Each provider and the metadata reset are best effort.
+pub fn delete_local_project_sessions(
+    repository: &LocalStateRepository,
+    registry: &AgentProviderRegistry,
+    local_project_id: &LocalProjectId,
+    expected_project_revision: u64,
+    invalidate: &mut dyn FnMut(&Path),
+) -> Result<ProjectSessionsDeleteResult, String> {
+    let state = repository.load_project_state_snapshot()?;
+    let project = state
+        .config
+        .project(local_project_id)
+        .ok_or("Unknown local project.")?;
+    if project.revision != expected_project_revision {
+        return Err("The project changed. Refresh before deleting its sessions.".into());
+    }
+    let mut result = ProjectSessionsDeleteResult {
+        sessions_deleted: 0,
+        sessions_failed: 0,
+        provider_errors: Vec::new(),
+        metadata_reset: None,
+        metadata_error: None,
     };
-    adapter.execute_action(&mut request).map(|_| ())
+    match resolve_activity_project_from_state(&state.config, &state.bindings, local_project_id) {
+        Ok(resolved) => {
+            for (provider, error) in &resolved.unavailable {
+                if matches!(provider.as_str(), "codex" | "claude") {
+                    result.provider_errors.push(format!("{provider}: {error}"));
+                }
+            }
+            for (provider, home) in &resolved.homes {
+                if !matches!(provider.as_str(), "codex" | "claude") {
+                    continue;
+                }
+                let discovery = registry.require(provider).and_then(|adapter| {
+                    adapter
+                        .discover(&SessionDiscoveryContext {
+                            provider_home: &home.home,
+                            project_root: &resolved.project_root,
+                        })
+                        .map(|discovery| (adapter, discovery))
+                });
+                match discovery {
+                    Ok((adapter, discovery)) => {
+                        result.provider_errors.extend(discovery.warnings);
+                        for session in discovery.sessions {
+                            match adapter.delete_session(&home.home, &session) {
+                                Ok(()) => result.sessions_deleted += 1,
+                                Err(error) => {
+                                    result.sessions_failed += 1;
+                                    result.provider_errors.push(format!(
+                                        "{provider} session {}: {error}",
+                                        session.session_id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => result.provider_errors.push(format!("{provider}: {error}")),
+                }
+                invalidate(&home.home);
+            }
+        }
+        Err(error) => result.provider_errors.push(error),
+    }
+    // Do not return early on provider failures: stale and restored bindings
+    // for this project must also be removed when files are unavailable.
+    match repository.reset_project_sync_metadata(local_project_id, expected_project_revision) {
+        Ok(reset) => result.metadata_reset = Some(reset),
+        Err(error) => result.metadata_error = Some(error),
+    }
+    Ok(result)
+}
+
+/// One provider attempt followed by independent, targeted Mallard cleanup.
+pub fn delete_local_project_session(
+    repository: &LocalStateRepository,
+    registry: &AgentProviderRegistry,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+    invalidate: &mut dyn FnMut(&Path),
+) -> Result<LocalSessionDeleteResult, String> {
+    let state = repository.load_project_activity_state_snapshot()?;
+    let resolved =
+        resolve_activity_project_from_state(&state.config, &state.bindings, local_project_id)?;
+    let (provider, thread_id) = parse_conversation_resource_id(resource_id)?;
+    let adapter = registry.require(&provider)?;
+    let home = resolved
+        .homes
+        .get(&provider)
+        .ok_or("The provider profile is unavailable.")?;
+    let bound = state.conversation_bindings.bindings.iter().any(|binding| {
+        binding.local_project_id == *local_project_id
+            && binding.provider_profile_id == home.profile_id
+            && binding.thread_id == thread_id
+    });
+    let provider_error = match resolve_action_session(registry, &state, &resolved, resource_id) {
+        Ok((_, _, session)) => adapter.delete_session(&home.home, &session).err(),
+        // A missing or unreadable provider file must not prevent known binding cleanup.
+        Err(error) if bound => Some(error),
+        Err(error) => return Err(error),
+    };
+    let metadata_error = repository
+        .forget_local_session(local_project_id, &home.profile_id, &provider, &thread_id)
+        .err();
+    invalidate(&home.home);
+    Ok(LocalSessionDeleteResult {
+        provider_error,
+        metadata_error,
+    })
 }
 
 // ---------------------------------------------------------------------------

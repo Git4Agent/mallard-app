@@ -2,7 +2,8 @@ import { Channel, invoke } from "../../ipc";
 import type {
   DropboxSetupMode, DropboxSetupLogin, DropboxSetupProgress,
   FeishuSetupLogin, FeishuSetupMode, FeishuSetupProgress,
-  ManagedCloudLink, ManagedCloudRepository, ManagedCloudRepositoryResolution,
+  CloudProjectFolderProbe, CloudProjectFolderProgress, CloudProjectFolderRequest, CloudProjectFolderResult,
+  ManagedCloudDiscardedDraft, ManagedCloudLink, ManagedCloudRepository, ManagedCloudRepositoryResolution,
   ManagedCloudSetupLogin, ManagedCloudSetupMode, ManagedCloudSetupProgress,
   R2Account,
   R2Jurisdiction,
@@ -23,6 +24,7 @@ import type {
   CreateSetupDraftResult,
   HostIdentityStatus,
   LocalProjectRegistration,
+  LocalSessionDeleteResult,
   LocalStateSummary,
   LocalStateWipeResult,
   MaintenanceActionRequest,
@@ -38,9 +40,9 @@ import type {
   ProjectSessionDetail,
   ProjectSessionTimelinePage,
   ProjectSessionTimelineQuery,
+  ProjectSessionsDeleteResult,
   ProjectSetupDraft,
   ProjectStorageLink,
-  ProjectSyncMetadataResetResult,
   ProviderDescriptor,
   ProviderKey,
   ProviderProfile,
@@ -226,8 +228,8 @@ export const projectSyncApi = {
   removeProject: (localProjectId: string) =>
     invoke<boolean>("remove_local_project", { localProjectId }),
 
-  resetProjectSyncMetadata: (localProjectId: string, expectedProjectRevision: number) =>
-    invoke<ProjectSyncMetadataResetResult>("reset_project_sync_metadata", {
+  deleteLocalProjectSessions: (localProjectId: string, expectedProjectRevision: number) =>
+    invoke<ProjectSessionsDeleteResult>("delete_local_project_sessions", {
       localProjectId,
       expectedProjectRevision,
     }),
@@ -321,6 +323,11 @@ export const projectSyncApi = {
    *  pushed yet. */
   requestManagedCloudRelease: (localProjectId: string, storageId: string, expectedRepositoryRevision: number) =>
     invoke<ManagedCloudLink>("request_managed_cloud_release", { localProjectId, storageId, expectedRepositoryRevision }),
+  /** The Owner's discard of a draft over a public version: every push after
+   *  the public version is removed from Mallard Cloud. One request; nothing
+   *  on this computer is read, written or deleted. */
+  discardManagedCloudDraft: (localProjectId: string, storageId: string, expectedRepositoryRevision: number) =>
+    invoke<ManagedCloudDiscardedDraft>("discard_managed_cloud_draft", { localProjectId, storageId, expectedRepositoryRevision }),
   /** The project repositories the account belongs to on a Mallard Cloud
    *  storage, each compared with the local project's Git remote. */
   listManagedCloudRepositories: (storageId: string, localRepositoryFingerprint: string | null) =>
@@ -333,6 +340,17 @@ export const projectSyncApi = {
    *  a resolved address does. */
   acceptManagedCloudInvitation: (storageId: string, code: string, localRepositoryFingerprint: string | null) =>
     invoke<ManagedCloudRepositoryResolution>("accept_managed_cloud_invitation", { storageId, code, localRepositoryFingerprint }),
+  /** Where a project got from Mallard Cloud may put its folder. Reads only. */
+  probeCloudProjectFolder: (destination: string, repositoryFingerprint: string | null) =>
+    invoke<CloudProjectFolderProbe>("probe_cloud_project_folder", { destination, repositoryFingerprint }),
+  /** Makes that folder: a clone (gh, then git) when one works, else empty. */
+  getCloudProjectFolder: (request: CloudProjectFolderRequest, onProgress: (progress: CloudProjectFolderProgress) => void) => {
+    const channel = new Channel<CloudProjectFolderProgress>();
+    channel.onmessage = onProgress;
+    return invoke<CloudProjectFolderResult>("get_cloud_project_folder", { request, onProgress: channel });
+  },
+  cancelCloudProjectFolder: (operationId: string) =>
+    invoke<void>("cancel_cloud_project_folder", { operationId }),
 
   getHostIdentityStatus: () =>
     invoke<HostIdentityStatus>("get_host_identity_status"),
@@ -544,6 +562,8 @@ export const projectSyncApi = {
   readProjectMarkdownImage: (localProjectId: string, relativePath: string) =>
     invoke<ProjectMarkdownImage>("read_project_markdown_image", { localProjectId, relativePath }),
 
+  deleteLocalProjectSession: (localProjectId: string, resourceId: string) =>
+    invoke<LocalSessionDeleteResult>("delete_local_project_session", { localProjectId, resourceId }),
   executeProjectSessionAction: (localProjectId: string, resourceId: string, actionId: string) =>
     invoke<void>("execute_project_session_action", { localProjectId, resourceId, actionId }),
 };

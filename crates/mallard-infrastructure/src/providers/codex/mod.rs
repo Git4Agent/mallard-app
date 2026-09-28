@@ -3,6 +3,7 @@
 //! adapter is the sole registered gateway common code uses to reach them.
 
 pub mod actions;
+mod deletion;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
@@ -436,6 +437,10 @@ impl SessionAdapter for CodexAdapter {
         context: &SessionActionContext<'_>,
     ) -> Vec<SessionActionDescriptor> {
         actions::available_actions(context)
+    }
+
+    fn delete_session(&self, home: &Path, session: &crate::providers::DiscoveredSession) -> Result<(), String> {
+        deletion::delete(home, &session.session_id)
     }
 
     fn execute_action(

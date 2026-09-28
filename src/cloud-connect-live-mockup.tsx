@@ -53,6 +53,7 @@ const repo = (overrides: Partial<ManagedCloudRepository>): ManagedCloudRepositor
   can_push: true,
   repository_fingerprint: CHECKOUT,
   git_remote: "matches",
+  github_url: null,
   revision: 4,
   updated_at: now - 2 * 3600,
   resources: 3,

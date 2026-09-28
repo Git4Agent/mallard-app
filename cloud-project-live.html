@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>From Mallard Cloud — live harness</title>
+    <style>
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+      .harness { max-width: 1100px; margin: 0 auto; padding: 16px 20px 60px; display: grid; gap: 14px; font: 13px/1.45 system-ui, sans-serif; }
+      .harness-controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .harness-controls label { display: inline-flex; gap: 6px; align-items: center; }
+      .harness-frame { border: 1px dashed var(--border-strong); border-radius: 12px; overflow: hidden; }
+      .harness-frame .sync-main { height: auto !important; overflow: visible !important; }
+      .harness-log { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; min-height: 60px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/cloud-project-live.tsx"></script>
+  </body>
+</html>

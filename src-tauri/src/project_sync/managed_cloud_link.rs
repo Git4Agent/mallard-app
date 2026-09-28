@@ -1,13 +1,17 @@
 //! The website bridge for a project linked to a Mallard Cloud storage: the
 //! repository's page and where its release stands, read from the service
-//! on demand, the one action the desktop offers, a release request, and
-//! the reads that let a project be connected to a repository by its
-//! website address: the account's repositories, one address resolved, and
-//! one invitation code entered.
+//! on demand, the two actions the desktop offers, a release request and
+//! the Owner's discard of a draft over a public version, and the reads
+//! that let a project be connected to a repository by its website address:
+//! the account's repositories, one address resolved, and one invitation
+//! code entered.
 use super::service::repository;
 use mallard_domain::{sha256_hex, LocalProjectId, StorageId};
 use mallard_infrastructure::managed_cloud::address::{parse_repository_address, AddressError};
-use mallard_infrastructure::managed_cloud::client::{ManagedCloudClient, RepositorySummary};
+use mallard_infrastructure::managed_cloud::client::{
+    DiscardedDraft, ManagedCloudClient, RepositorySummary,
+};
+use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
 use serde::Serialize;
 
@@ -49,6 +53,9 @@ pub struct ManagedCloudRepository {
     /// collaborator, the digest of the disclosed GitHub address otherwise.
     pub repository_fingerprint: Option<String>,
     pub git_remote: GitRemoteMatch,
+    /// The repository's GitHub address, `https://github.com/{owner}/{name}`,
+    /// when the service has linked it: the only source a new project clones.
+    pub github_url: Option<String>,
     pub revision: u64,
     pub updated_at: u64,
     pub resources: u64,
@@ -130,6 +137,7 @@ fn describe_repository(
         can_push: summary.writer,
         repository_fingerprint: remote.unwrap_or_default(),
         git_remote,
+        github_url: summary.github_url.clone(),
         revision: tag.map(|tag| tag.revision).unwrap_or(0),
         updated_at: head
             .map(|head| head.updated_at)
@@ -292,11 +300,14 @@ struct Target {
     repository_id: String,
 }
 
+/// The repository a link's action names: the link's pin, exactly. `None`
+/// on a storage that is not Mallard Cloud.
 fn target(
+    repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<Option<Target>, String> {
-    let config = repository()?.load_config()?;
+    let config = repository.load_config()?;
     let Some(storage) = config
         .storages
         .iter()
@@ -332,7 +343,7 @@ pub async fn request_managed_cloud_release(
     storage_id: StorageId,
     expected_repository_revision: u64,
 ) -> Result<ManagedCloudLink, String> {
-    let Some(target) = target(&local_project_id, &storage_id)? else {
+    let Some(target) = target(&repository()?, &local_project_id, &storage_id)? else {
         return Err("This storage is not Mallard Cloud.".to_string());
     };
     target
@@ -341,6 +352,44 @@ pub async fn request_managed_cloud_release(
         .await?;
     let summary = target.client.get_repository(&target.repository_id).await?;
     Ok(target.client.link_from_summary(&summary))
+}
+
+/// One request to the service, which does the removing: every push after
+/// the public version goes from Mallard Cloud, and the draft is the public
+/// version again. Nothing on this computer is read, written or deleted; the
+/// link's records of the removed pushes are stale from here on and read as
+/// absent at the next comparison.
+pub(super) async fn discard_draft(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    expected_repository_revision: u64,
+) -> Result<DiscardedDraft, String> {
+    let Some(target) = target(repository, local_project_id, storage_id)? else {
+        return Err("This storage is not Mallard Cloud.".to_string());
+    };
+    Ok(target
+        .client
+        .discard_private_snapshot(&target.repository_id, expected_repository_revision)
+        .await?)
+}
+
+/// The Owner's discard of a draft over a public version, confirmed in the
+/// workspace. Names the repository by the link's pin and the repository
+/// revision the status showed.
+#[tauri::command]
+pub async fn discard_managed_cloud_draft(
+    local_project_id: LocalProjectId,
+    storage_id: StorageId,
+    expected_repository_revision: u64,
+) -> Result<DiscardedDraft, String> {
+    discard_draft(
+        &repository()?,
+        &local_project_id,
+        &storage_id,
+        expected_repository_revision,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -554,6 +603,8 @@ mod tests {
             repository.repository_fingerprint.as_deref(),
             Some(fingerprint.as_str())
         );
+        // The disclosed address is what a new project clones.
+        assert_eq!(repository.github_url.as_deref(), Some(github));
         assert_eq!(repository.updated_at, 700);
         // With another checkout the disclosed remote differs.
         let other = resolve_repository(

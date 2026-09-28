@@ -1,6 +1,8 @@
 # Push review opens with the newest sessions that fit
 
-- Status: proposal, not implemented
+- Status: implemented; the walk became the strict prefix of R1 on
+  2026-09-26 (`PLAN_PULL_APPLY_LIMIT.md`, D3) — the first landing skipped any
+  session that did not fit and kept going
 - Date: 2026-09-04
 - Scope: the Push review's default selection. Frontend only.
 

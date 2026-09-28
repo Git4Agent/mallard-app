@@ -394,6 +394,10 @@ function Specimen() {
                   onCancel={() => undefined}
                   onChoose={() => undefined}
                   onOpenProject={() => undefined}
+                  profiles={[]}
+                  storages={[]}
+                  onAddCloudAccount={() => undefined}
+                  onCloudProjectDone={() => undefined}
                 />
                   </section>
                 </main>

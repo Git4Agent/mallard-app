@@ -196,6 +196,23 @@ test("the path bar's trail is sized by the bar, never by the window", () => {
   assert.match(css, /\.sync-pathbar \.sync-history-branch-name,[\s\S]*?display: none;/);
 });
 
+// The bar does not clip and its action cluster runs the bar's full height, so
+// the right inset alone keeps a control's box out of the rounded corners. At
+// 10px, pressing Push, Pull or ⋯ in the live WebKit view repainted that box
+// with the bar's background and left both right corners squared off.
+test("nothing in the path bar reaches into its rounded corners", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const bar = css.match(/\n\.sync-titlebar \{[^}]*background: var\(--bg-2\);\n\}/)?.[0] ?? "";
+  assert.match(bar, /padding-right: var\(--retro-panel-radius\);/, "the right inset must clear the corner");
+  // The radius covers the 16px inner curve plus 2px. A control that hangs
+  // further past its box than that needs a wider inset.
+  assert.match(css, /--shadow-control: 2px 2px 0 /);
+  for (const selector of [".sync-path-sync", ".sync-path-more"]) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(css, new RegExp(`\\n${escaped}:active:not\\(:disabled\\) \\{[^}]*transform: translate\\(2px, 2px\\);`));
+  }
+});
+
 test("top-level navigation opens stable index pages", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
@@ -428,10 +445,11 @@ test("host-scoped workflows keep their originating epoch across async continuati
     assert.ok(awaited > capture, `epoch must be captured before ${awaitExpression}`);
   };
 
-  // Add project writes nothing: it opens setup at the Folder field. The draft
-  // is born when that step chooses a folder, inside its own epoch.
+  // Add project writes nothing: it opens setup at New project's doors (the
+  // Folder field, or From Mallard Cloud on an account). The draft is born
+  // when a step chooses a folder, inside its own epoch.
   const addProject = section(workspace, "beginAddProject", "chooseProjectFolder");
-  assert.match(addProject, /setSetupView\(\{ kind: "folder" \}\)/);
+  assert.match(addProject, /setSetupView\(\{ kind: "folder", \.\.\.open \}\)/);
   assert.doesNotMatch(addProject, /createSetupDraft|await open\(/);
   const chooseFolder = section(workspace, "chooseProjectFolder", "refreshCatalogScopes");
   capturesBefore(chooseFolder, "await projectSyncApi.createSetupDraft(");
@@ -544,7 +562,9 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   assert.doesNotMatch(sidebar, /onRefresh|Refresh projects/);
   assert.match(workspace, /Reload app data/);
   assert.match(workspace, /className="sync-titlebar-actions"/);
-  assert.match(workspace, /workspaceTitle === "Projects" \? null : \(\s*<button[\s\S]*?className="sync-theme-button"/);
+  // The Projects landing and New project reach the theme through the app
+  // menu's Dark theme item only.
+  assert.match(workspace, /workspaceTitle === "Projects" \|\| choosingProjectFolder \? null : \(\s*<button[\s\S]*?className="sync-theme-button"/);
   assert.match(workspace, /<PathBarMenu\s+id="sync-app-actions-menu"\s+groups=\{appActions\}/);
   // Its items sit at tabIndex -1, so opening must move focus in and closing
   // must hand it back — a no-op registerRef left the menu unreachable by key.
@@ -924,4 +944,26 @@ test("the connection flow has no separate Finish step or persisted schema change
   assert.match(dialog, /"Connect"/);
   assert.match(workspace, /await connectStorageBundle\(projectId, storageId, project\.bundle_id\)/, "same-bundle local storage links use the same connection flow");
   assert.equal(PROJECT_SYNC_SCHEMA, 1);
+});
+
+test("project session deletion requires warning approval and replaces metadata-only reset", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const start = workspace.indexOf("  async function deleteLocalProjectSessions(");
+  assert.ok(start >= 0);
+  const action = workspace.slice(start, workspace.indexOf("  // App commands", start));
+  const approval = action.indexOf("if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;");
+  const request = action.indexOf("await projectSyncApi.deleteLocalProjectSessions(");
+  assert.ok(action.indexOf("await confirm(") < approval && approval < request);
+  assert.match(action, /kind: "warning", okLabel: "Delete all", cancelLabel: "Cancel"/);
+  assert.match(action, /Project files and cloud copies are kept. This cannot be undone./);
+  assert.match(action, /result\.provider_errors/);
+  assert.match(action, /result\.metadata_error/);
+  assert.ok(action.indexOf("await refresh(workflowEpoch)") < action.indexOf("setError(`${outcome}"));
+  const menu = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(menu, /label: "Delete all local sessions…"/);
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  const commands = readFileSync("src-tauri/src/lib.rs", "utf8");
+  assert.match(api, /invoke<ProjectSessionsDeleteResult>\("delete_local_project_sessions"/);
+  assert.match(commands, /commands::delete_local_project_sessions,/);
+  assert.doesNotMatch(api + commands, /reset_project_sync_metadata/);
 });

@@ -25,6 +25,16 @@
       ],
       "port": 8787,
       "autoPort": false
+    },
+    {
+      "name": "managed-cloud-web",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "cd ../mallardInternal/cloudflare/managed-cloud && export PATH=\"$HOME/.nvm/versions/node/v22.22.0/bin:$PATH\" && npx vite --config web/vite.config.ts"
+      ],
+      "port": 5173,
+      "autoPort": false
     }
   ]
 }

@@ -73,7 +73,9 @@ import PushResourceWorkspace, {
   sanitizePushSelection,
 } from "./PushResourceWorkspace";
 import ProjectSetupWorkspace from "./ProjectSetupWorkspace";
-import NewProjectFolderStep from "./NewProjectFolderStep";
+import NewProjectFolderStep, { type NewProjectSource } from "./NewProjectFolderStep";
+import { cloneFailureText, type CloneFallback } from "./CloudProjectSource";
+import { writeClipboardText } from "../sync-review/clipboard";
 import ProjectSidebar from "./ProjectSidebar";
 import type {
   ActiveProjectSubview,
@@ -93,6 +95,13 @@ import {
   catalogScopeViews,
 } from "../storage-catalog/model";
 import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
+import type { ReviewListState } from "./ProjectActivityPage";
+import ReviewPreparing from "../sync-review/ReviewPreparing";
+import {
+  PREPARING_CANCELLED,
+  createReviewPreparing,
+  type PreparingHandle,
+} from "./reviewPreparing";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
 import { type SyncReviewStep } from "./reviewSteps";
 import { buildPullReviewItems, pullActionResourceIds } from "./pullReviewModel";
@@ -249,6 +258,18 @@ interface PendingPush {
   showProjectFiles: boolean;
 }
 
+/** A Push or Pull review still being prepared. The storage card shows it,
+ *  in the review's own frame, once it has taken longer than 150 ms. */
+interface PreparingReview {
+  kind: "push" | "pull";
+  projectId: string;
+  storageId: string;
+  /** Past the 150 ms gate: the card is on screen. */
+  shown: boolean;
+  /** A write has started (Pull's metadata accept): Cancel is withdrawn. */
+  writing: boolean;
+}
+
 function pushResources(pending: PendingPush): InventoryResource[] {
   const resources = inventoryResources(pending.inventory);
   const byId = new Map(resources.map((resource) => [resource.resource_id, resource]));
@@ -365,6 +386,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   /* Beside the selection, not inside the review panel: the path bar's Push
      publishes the same review, so its refusal has to see this too. */
   const [pushDeletionApproved, setPushDeletionApproved] = useState(false);
+  /* The same reason: both Push buttons wait until the review's rows land. */
+  const [pushListState, setPushListState] = useState<ReviewListState>("loading");
   const [projectContentLoading, setProjectContentLoading] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
   const [pushReviewStep, setPushReviewStep] = useState<SyncReviewStep>("history");
@@ -409,12 +432,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [setupDrafts, setSetupDrafts] = useState<SetupDraftSummary[]>([]);
   const [storageSetupDrafts, setStorageSetupDrafts] = useState<StorageSetupDraft[]>([]);
   /* Setup is two views: the folder, before any draft exists, then the
-     draft's page. Every way out clears both at once. */
+     draft's page. Every way out clears both at once. The folder view opens
+     on one of New project's doors, and From Mallard Cloud on an account. */
   const [setupView, setSetupView] = useState<
-    { kind: "folder" } | { kind: "draft"; draftId: string } | null
+    | { kind: "folder"; source?: NewProjectSource; storageId?: string | null }
+    | { kind: "draft"; draftId: string }
+    | null
   >(null);
   const setupDraftId = setupView?.kind === "draft" ? setupView.draftId : null;
   const choosingProjectFolder = setupView?.kind === "folder";
+  const setupFolderView = setupView?.kind === "folder" ? setupView : null;
+  // Only storage setup started from New project returns there after saving.
+  const cloudProjectSetupStorageRef = useRef<string | null>(null);
+  const cloudLandingRef = useRef<string | null>(null);
+  /* A GitHub repository that got an empty folder: said once, with the
+     command that clones into it. */
+  const [cloneFallback, setCloneFallback] = useState<CloneFallback | null>(null);
   const [editingBinding, setEditingBinding] = useState<ProjectBindingDraft | null>(null);
 
   const [restorePlan, setRestorePlan] = useState<PullReview | null>(null);
@@ -432,6 +465,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const pullApplyInFlight = useRef(false);
   const connectionInFlight = useRef(false);
   const restoreRequest = useRef(0);
+  const [preparingReview, setPreparingReview] = useState<PreparingReview | null>(null);
+  const [preparingTracker] = useState(() => createReviewPreparing({
+    shown: () => setPreparingReview((current) => (current ? { ...current, shown: true } : current)),
+    writing: () => setPreparingReview((current) => (current ? { ...current, writing: true } : current)),
+    finished: () => setPreparingReview(null),
+  }));
   const shellRequest = useRef(0);
   /* A project switch supersedes the load in flight. The workflow epoch alone
      cannot see it — it only moves when the host identity changes — so a slow
@@ -1456,6 +1495,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       repositories — shared by the sidebar, the Storages index, the Catalog,
       and the banners that deep-link a storage. */
   const openStorageWorkspace = async (storageId: string) => {
+    // Consume the return to New project when its Cloud setup has finished.
+    const landing = cloudLandingRef.current;
+    cloudLandingRef.current = null;
+    if (landing === storageId) {
+      await beginAddProject({ source: "cloud", storageId });
+      return;
+    }
     if (!(await saveStorageDraftBeforeNavigation())) return;
     closeProjectSubview();
     setSetupView(null);
@@ -1511,10 +1557,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   /** Add project opens the setup page at its Folder field. Nothing is
       written until a folder is chosen there. */
-  const beginAddProject = async () => {
+  const beginAddProject = async (open?: { source: NewProjectSource; storageId?: string | null }) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
-    setSetupView({ kind: "folder" });
+    setSetupView({ kind: "folder", ...open });
   };
 
   /** The folder step's commit: the draft is born here, or resumed. */
@@ -1778,12 +1824,28 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
+  /* Every ending of a prepare calls `finish` in the same update that puts
+     its result on screen, so no frame falls between the card and what
+     replaces it; see reviewPreparing.ts for the gate and the Cancel race. */
+  const beginPreparing = (kind: "push" | "pull", projectId: string, storageId: string): PreparingHandle => {
+    setPreparingReview({ kind, projectId, storageId, shown: false, writing: false });
+    /* Started from inside an open review — Compare again, Rescan, or the
+       Push review's Open Pull review — the slot is already filled: that
+       review unmounts now, so the card replaces it now, with no gate. */
+    return preparingTracker.begin({ immediate: pendingPush !== null || restorePlan !== null });
+  };
+
+  const cancelPreparing = () => {
+    preparingTracker.cancel();
+  };
+
   const openPushChooser = async (
     projectId: string,
     storageId: string,
     workflowEpoch = hostWorkflowEpoch.current,
   ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    const preparing = beginPreparing("push", projectId, storageId);
     setBusy(true);
     setError(null);
     setPushError(null);
@@ -1792,11 +1854,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setPushReviewStep("history");
       setPushProjectContentRemovals(new Set());
       setPushWarningAcknowledgements(new Set());
+      setPushListState("loading");
       setProjectContentLoading(false);
       setStorageNotice(null);
       // One backend call runs a single discovery pass and a single remote
       // snapshot for every review section.
-      const context = await projectSyncApi.preparePushReview(projectId, storageId);
+      const context = await preparing.race(projectSyncApi.preparePushReview(projectId, storageId));
+      if (context === PREPARING_CANCELLED) return;
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       const nextDetail = context.project;
       const nextInventory = context.inventory;
@@ -1913,6 +1977,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
       }
     } finally {
+      // Every ending above reaches here without another await, so the card
+      // closes in the same update that puts the review or the notice up.
+      preparing.finish();
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   };
@@ -2254,6 +2321,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     bundleId: string,
     targetBinding: ProjectBinding,
     displayName: string,
+    /** The Pull's card, when this plan is what the card is waiting for. */
+    preparing?: PreparingHandle,
   ) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const requestId = ++restoreRequest.current;
@@ -2274,11 +2343,22 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // is ready; optional dependency/readiness checks must never hide a valid
       // restore plan or its Apply button.
       const request = { storageId, bundleId, binding: targetBinding };
-      const review = await beginPullReview(projectSyncApi, request);
+      const planning = beginPullReview(projectSyncApi, request);
+      const review = preparing ? await preparing.race(planning) : await planning;
+      if (review === PREPARING_CANCELLED) {
+        // Nothing was read into the project, and the review this plan was
+        // for is gone. Closing it supersedes this request, so the finally
+        // below no longer owns the lock: release it here.
+        closePullReview();
+        setBusy(false);
+        return null;
+      }
       if (restoreRequest.current !== requestId) return null;
       // Matching content needs only pinned local metadata acceptance. File
       // changes, blocked rows and replaced history keep the explicit review.
       if (canAcceptPullMetadata(review.restorePlan)) {
+        // This writes: from here the card's Cancel is withdrawn.
+        preparing?.writing();
         await acceptPullMetadata(projectSyncApi, review.restorePlan);
         if (restoreRequest.current !== requestId) return null;
         setReviewSupportLoading(false);
@@ -2290,10 +2370,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         if (restoreRequest.current !== requestId) return null;
         setHistoryRefreshEpoch((epoch) => epoch + 1);
         notify(`Storage reviewed for ${displayName} — files unchanged.`);
+        preparing?.finish();
         return null;
       }
       setRestorePlan(review.restorePlan);
-      notify(`Pull review ready for ${displayName} — nothing applied yet.`);
+      // The review replaces the card in this same update.
+      preparing?.finish();
+      /* No "ready" receipt: the review on screen is the news, and it says so
+         itself, to a screen reader, once its rows land. An older receipt
+         would otherwise sit above it speaking for something else. */
+      setNotice(null);
 
       // Supporting context fills in asynchronously after the workspace is usable.
       // Its lifecycle is request-scoped so closing or replanning cannot apply
@@ -2419,13 +2505,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const beginProjectRestore = async (projectId: string, storageId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
+    const preparing = beginPreparing("pull", projectId, storageId);
     setBusy(true);
     setError(null);
     try {
       setPendingPush(null);
       setPushError(null);
       setStorageNotice(null);
-      const nextDetail = await projectSyncApi.getProject(projectId);
+      const nextDetail = await preparing.race(projectSyncApi.getProject(projectId));
+      if (nextDetail === PREPARING_CANCELLED) return;
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       if (!nextDetail) throw new Error("The selected local project no longer exists.");
       setActiveProjectId(projectId);
@@ -2453,6 +2541,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         nextDetail.project.bundle_id,
         nextDetail.binding,
         projectLabel(nextDetail.project),
+        preparing,
       );
       if (!failure) return;
       if (failure.startsWith("There is nothing to pull from")) {
@@ -2468,7 +2557,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           setPendingBundleConnection({ projectId, storageId, matches: [], reason: "missing" });
           return;
         }
-        const bundles = await projectSyncApi.listRemoteBundleSnapshots(storageId);
+        const bundles = await preparing.race(projectSyncApi.listRemoteBundleSnapshots(storageId));
+        if (bundles === PREPARING_CANCELLED) return;
         if (hostWorkflowEpoch.current !== workflowEpoch) return;
         if (bundles.length > 0) {
           bundles.sort((left, right) => {
@@ -2506,7 +2596,31 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         });
       }
     } finally {
+      // The review, the notice, the binding editor or the repository chooser
+      // was set just above, without another await: the card closes with it.
+      preparing.finish();
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
+    }
+  };
+
+  /* Compare again, from inside a Pull review: the same wait in the same card.
+     A plan that fails here has no review left to show its error in, so it
+     lands on the card as any Pull that could not start does. */
+  const replanPull = async (
+    storageId: string,
+    bundleId: string,
+    targetBinding: ProjectBinding,
+    displayName: string,
+  ) => {
+    const projectId = targetBinding.local_project_id;
+    const preparing = beginPreparing("pull", projectId, storageId);
+    try {
+      const failure = await planRestore(storageId, bundleId, targetBinding, displayName, preparing);
+      if (failure) {
+        setStorageNotice({ projectId, storageId, kind: "action_failed", action: "pull", message: failure });
+      }
+    } finally {
+      preparing.finish();
     }
   };
 
@@ -2630,7 +2744,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setReviewSupportLoading(false);
   };
 
-  async function resetProjectSyncMetadata(projectId: string): Promise<void> {
+  async function deleteLocalProjectSessions(projectId: string): Promise<void> {
     const workflowEpoch = hostWorkflowEpoch.current;
     const summary = projects.find((candidate) => candidate.local_project_id === projectId);
     if (!summary) {
@@ -2638,15 +2752,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       return;
     }
     const approved = await confirm(
-      `Reset local sync state for “${projectLabel(summary)}”?\n\nMallard will remove all local session bindings for this project, including restored-session path mappings. It will also forget reviewed sync bases and Pull results. Project files, provider sessions, project setup, recipes, storage configuration, and cloud data will not be deleted.`,
-      { title: "Reset local sync state" },
+      `Delete all local sessions for “${projectLabel(summary)}”?\n\nDeletes sessions and subagents from its bound Codex/Claude profiles. Clears all project session bindings and local sync state.\n\nProject files and cloud copies are kept. This cannot be undone.`,
+      { title: "Delete all local sessions?", kind: "warning", okLabel: "Delete all", cancelLabel: "Cancel" },
     );
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
     setBusy(true);
     setError(null);
     try {
-      const result = await projectSyncApi.resetProjectSyncMetadata(
+      const result = await projectSyncApi.deleteLocalProjectSessions(
         projectId,
         summary.revision,
       );
@@ -2662,11 +2776,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refresh(workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
 
-      const removed = result.scope_bases_removed
-        + result.conversation_checkpoints_removed
-        + result.conversation_bindings_removed
-        + result.materializations_removed;
-      notify(`Local sync state reset — ${removed} derived record${removed === 1 ? "" : "s"} removed; files and cloud data kept.`);
+      const outcome = `${result.sessions_deleted} local session${result.sessions_deleted === 1 ? "" : "s"} deleted; ${result.sessions_failed} failed.`;
+      const failures = [
+        ...result.provider_errors,
+        ...(result.metadata_error ? [`Local sync state: ${result.metadata_error}`] : []),
+      ];
+      if (failures.length > 0) {
+        setError(`${outcome} ${failures.join(" ")}`);
+      } else {
+        notify(`${outcome} All project session bindings and local sync state cleared.`);
+      }
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -2708,10 +2827,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // Window-level controls: the theme toggle and the app menu. They belong to
   // the window, not to any screen, so the titlebar carries them on the screens
   // that have one; path-bar screens reach the same scope through the
-  // overflow's Mallard group, and theme lives on the Settings page there.
+  // overflow's Mallard group. That menu holds Dark theme on every screen, so
+  // the Projects landing and New project leave the toggle out.
   const windowActions = (
     <div className="sync-titlebar-actions">
-      {workspaceTitle === "Projects" ? null : (
+      {workspaceTitle === "Projects" || choosingProjectFolder ? null : (
         <button
           type="button"
           className="sync-theme-button"
@@ -2969,9 +3089,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         throw new Error("The storage was verified and saved, but its configuration could not be refreshed.");
       }
       adoptConfigSnapshot(saved);
-      const storageName = saved.storages
-        .find((candidate) => candidate.storage_id === result.storage_id)?.name || "Storage";
+      const committed = saved.storages.find((candidate) => candidate.storage_id === result.storage_id);
+      const storageName = committed?.name || "Storage";
       notify(`${result.replaced ? "Updated" : "Connected"} ${storageName}.`);
+      if (cloudProjectSetupStorageRef.current === result.storage_id) {
+        cloudProjectSetupStorageRef.current = null;
+        if (!result.replaced && isManagedCloudStorage(committed)) cloudLandingRef.current = result.storage_id;
+      }
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       return hostWorkflowEpoch.current === workflowEpoch ? result : null;
     } catch (reason) {
@@ -3122,7 +3246,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   /** The chosen provider mints the draft; the backend binds it to that
       provider for good, and the form opens on it. */
-  const createStorageDraft = async (provider: StorageProviderKey, name?: string) => {
+  const createStorageDraft = async (provider: StorageProviderKey, name?: string, returnToNewProject = false) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     if (!(await saveStorageDraftBeforeNavigation())) return;
     setBusy(true);
@@ -3151,6 +3275,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!draft || hostWorkflowEpoch.current !== workflowEpoch) return;
     await refreshStorageSetupDrafts(undefined, workflowEpoch);
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    cloudProjectSetupStorageRef.current = returnToNewProject ? draft.storage_id : null;
     openStorageDraftForm(draft);
   };
 
@@ -3190,6 +3315,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
      than opening one. They were two rules once, and the bar's knew nothing
      about the capture budget or the deletion acknowledgement, so a review the
      footer refused could still be pushed from above it. */
+  /* Without a binding the review lists from the inventory it already holds,
+     which is on screen from the first render. */
+  const pendingPushListState: ReviewListState = pendingPush?.binding ? pushListState : "ready";
   const pendingPushDisabledReason = pendingPush
     ? pushReviewDisabledReason({
       selected: safePushSelection,
@@ -3199,6 +3327,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       projectContentRemovals: pushProjectContentRemovals,
       deletionApproved: pushDeletionApproved,
       projectContentLoading,
+      listState: pendingPushListState,
     })
     : null;
   const inlineStorageReview = pendingPush ? {
@@ -3212,6 +3341,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     /* Pull already said why its button was withheld; Push said nothing, so a
        refusal in the bar had no explanation anywhere near it. */
     continueTitle: pendingPushDisabledReason,
+    /* Until the rows land, both buttons wear the wait itself. */
+    continueLabel: pendingPushListState === "loading" ? "Loading sessions…" : null,
+    continuePending: pendingPushListState === "loading",
     onClose: () => {
       if (busy) return;
       setPendingPush(null);
@@ -3240,6 +3372,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         acknowledgedWarningDigests={pushWarningAcknowledgements}
         deletionApproved={pushDeletionApproved}
         onDeletionApprovedChange={setPushDeletionApproved}
+        listState={pendingPushListState}
+        onListStateChange={setPushListState}
         fetchProgress={fetchProgress}
         showProjectFiles={pendingPush.showProjectFiles}
         activeStep={pushReviewStep}
@@ -3289,6 +3423,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     continueDisabled: !pullReviewPrimary || pullReviewPrimary.disabledReason !== null,
     continueTitle: pullReviewPrimary?.disabledReason ?? null,
     continueLabel: pullReviewPrimary?.label ?? null,
+    continuePending: pullReviewPrimary?.pending ?? false,
     onClose: closePullReview,
     content: (
       <RestorePlanView
@@ -3304,7 +3439,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onDismissError={() => setRestoreError(null)}
         onApply={(selection) => void applyReview(selection)}
         onBack={closePullReview}
-        onRefreshPlan={() => void planRestore(
+        onRefreshPlan={() => void replanPull(
           restorePlan.storage_id,
           restoreBinding.bundle_id,
           restoreBinding,
@@ -3313,7 +3448,36 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         onPrimaryChange={setPullReviewPrimary}
       />
     ),
-  } : null;
+  } : preparingReview?.shown ? (() => {
+    /* The review's frame while it is prepared: the storage card opens where
+       the review will be and turns into it, or into the card's notice, in
+       place. Both buttons wear the wait; × is Cancel until a write starts. */
+    const verb = preparingReview.kind === "pull" ? "Pull" : "Push";
+    const storageName = config.storages.find((storage) => storage.storage_id === preparingReview.storageId)?.name
+      || "storage";
+    return {
+      kind: preparingReview.kind,
+      projectId: preparingReview.projectId,
+      storageId: preparingReview.storageId,
+      preparing: true,
+      continueDisabled: true,
+      continueTitle: `Preparing the ${verb} review`,
+      continueLabel: "Preparing…",
+      continuePending: true,
+      onClose: cancelPreparing,
+      content: (
+        <ReviewPreparing
+          verb={preparingReview.kind}
+          title={`${verb} review`}
+          caption={preparingReview.kind === "pull"
+            ? `Reading the latest version from ${storageName}`
+            : `Comparing this computer with ${storageName}`}
+          onCancel={cancelPreparing}
+          cancelDisabled={preparingReview.writing}
+        />
+      ),
+    };
+  })() : null;
 
   if (!hostIdentityStatus && hostIdentityError) {
     return (
@@ -3413,6 +3577,27 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       severity: notice.tone === "attention" ? "warning" : "success",
       message: notice.message,
       onDismiss: () => setNotice(null),
+    });
+  }
+  /* A project from Mallard Cloud whose GitHub repository could not be
+     cloned has an empty folder; this says why, once, with the command. */
+  if (cloneFallback) {
+    const { command } = cloneFallback.failure;
+    shellNotices.push({
+      key: "clone-fallback",
+      severity: "warning",
+      title: `${cloneFallback.projectName} wasn’t cloned.`,
+      message: (
+        <>
+          {cloneFailureText(cloneFallback.failure.reason)} The folder is empty; clone into it: <code>{command}</code>
+        </>
+      ),
+      action: (
+        <button type="button" className="btn" onClick={() => void writeClipboardText(command).catch(() => {})}>
+          Copy command
+        </button>
+      ),
+      onDismiss: () => setCloneFallback(null),
     });
   }
   /* Every rung of this zone is an event. `shellError` and a Push failure
@@ -3664,13 +3849,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             }}
             onConfigureBinding={configureProjectBinding}
             onRenameProject={(projectId, alias) => renameProject(projectId, alias)}
-            onResetProjectMetadata={(projectId) => resetProjectSyncMetadata(projectId)}
+            onDeleteProjectSessions={(projectId) => deleteLocalProjectSessions(projectId)}
             onRefresh={() => void refresh()}
             onAddProject={() => void beginAddProject()}
             onSelectProject={openProject}
             appActions={appActions}
             onAddStorage={openNewStorageConfiguration}
-            onCreateStorageDraft={createStorageDraft}
+            onCreateStorageDraft={(provider, name) => createStorageDraft(provider, name,
+              cloudProjectSetupStorageRef.current !== null && cloudProjectSetupStorageRef.current === activeStorageSettingsId)}
             onOpenStorage={openStorageWorkspace}
             onOpenStorageIndex={openStorageIndex}
             onClearStorage={(storageId) => void clearStorageData(storageId)}
@@ -3713,16 +3899,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               />
             ) : choosingProjectFolder ? (
               <NewProjectFolderStep
+                key={`${setupFolderView?.source ?? "folder"}:${setupFolderView?.storageId ?? ""}`}
                 workflowEpoch={hostWorkflowEpoch.current}
                 isWorkflowCurrent={(workflowEpoch) => (
                   hostWorkflowEpoch.current === workflowEpoch
                 )}
                 projects={projects}
                 providers={agentProviders}
+                profiles={profiles}
+                storages={config.storages}
                 busy={busy}
+                initialSource={setupFolderView?.source}
+                initialStorageId={setupFolderView?.storageId ?? null}
                 onCancel={() => setSetupView(null)}
                 onChoose={(projectRoot) => void chooseProjectFolder(projectRoot)}
                 onOpenProject={openProject}
+                onAddCloudAccount={() => void createStorageDraft("managed_cloud", undefined, true)}
+                onCloudProjectDone={(detail, fallback, workflowEpoch) => {
+                  setCloneFallback(fallback);
+                  void completeSetup(detail, workflowEpoch);
+                }}
               />
             ) : null}
           />

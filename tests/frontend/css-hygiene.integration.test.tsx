@@ -418,3 +418,53 @@ test("no glyph is painted in a hue that misses the non-text floor", () => {
     `a bare amber is painted as a glyph here — use --warning-text:\n${offenders.join("\n")}`,
   );
 });
+
+test("both review meter fills read on the track they run along", () => {
+  // The meter is a graphic that carries meaning — how much of the limit is
+  // spent — so each fill holds 3:1 (1.4.11) on the empty track under it, in
+  // both themes. --loader-track is translucent, so it is measured composited
+  // on the header paper the track sits on. Read through the two rules, so a
+  // token drift is measured as it drifted: the push fill measured 4.31 and
+  // 5.04, the pull fill 4.00 and 4.76, when the pull meter was added.
+  for (const theme of ["light", "dark"] as const) {
+    const tokens = tokensFor(theme);
+    const track = composite(resolve("--loader-track", tokens), resolve("--surface-card", tokens));
+    for (const selector of [".sync-review-budget-track > i", ".sync-review-budget-track.pull > i"]) {
+      const fill = ruleColour(selector, "background", tokens);
+      const measured = contrast(fill, track);
+      assert.ok(
+        measured >= 3,
+        `${selector} is ${fill} on ${theme}, ${measured.toFixed(2)}:1 against the track ${track} — needs 3`,
+      );
+    }
+  }
+});
+
+test("no container query styles its own container", () => {
+  // An element is never its own query container, so a rule for the
+  // container's own selector inside its `@container` block never applies. The
+  // path bar's 640px rung set `gap: 6px` on `.sync-pathbar` that way, and the
+  // 6px it counted on at the 580px floor was never given back.
+  const css = stripComments(appCss);
+  const offenders: string[] = [];
+  for (const declared of css.matchAll(/([^{}]+)\{[^{}]*?\bcontainer:\s*([a-z0-9-]+)\s*\//g)) {
+    const own = new Set(declared[1].split(",").map((selector) => selector.trim()));
+    const name = declared[2];
+    for (const query of css.matchAll(new RegExp(`@container\\s+${name}\\s*\\([^)]*\\)\\s*\\{`, "g"))) {
+      let depth = 1;
+      let end = query.index! + query[0].length;
+      while (depth > 0 && end < css.length) {
+        if (css[end] === "{") depth += 1;
+        else if (css[end] === "}") depth -= 1;
+        end += 1;
+      }
+      const body = css.slice(query.index! + query[0].length, end - 1);
+      for (const rule of body.matchAll(/([^{}]+)\{/g)) {
+        for (const selector of rule[1].split(",").map((part) => part.trim())) {
+          if (own.has(selector)) offenders.push(`@container ${name} styles ${selector}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], "a container cannot match its own query");
+});

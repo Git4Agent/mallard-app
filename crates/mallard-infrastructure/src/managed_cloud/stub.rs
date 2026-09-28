@@ -4,8 +4,9 @@
 //! writes, the per-class checks, the claim guard on a record, the index
 //! kept the way the Worker keeps it, the stream listing that carries the
 //! repository's status, by-bundle and by-library resolution, the coordinate
-//! answer, releases, discard as the ordered delete, and the desktop
-//! sign-in dance. State lives in memory; tests reach it directly.
+//! answer, releases, removal with its three repository states, discard as
+//! the service runs it, and the desktop sign-in dance. State lives in
+//! memory; tests reach it directly.
 use crate::storage_core::publication::record_name_of;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -86,6 +87,10 @@ pub struct CatalogItem {
 #[derive(Clone, Debug)]
 pub struct Repository {
     pub id: String,
+    /// `active`, `deleting` from the request that confirms its removal, and
+    /// `removed` once the worker has erased its prefix. Only an active
+    /// repository stands for its bundle or item, holds its name, or counts.
+    pub state: String,
     pub class: String,
     /// The address segment after the Owner's login, as the service stores it.
     pub name: String,
@@ -115,6 +120,28 @@ pub struct Repository {
     pub members: BTreeMap<String, (String, String)>,
     pub release_requests: Vec<Value>,
     pub invite_code: Option<InviteCode>,
+}
+
+fn keep_manifest_content(value: &Value, prefix: &str, keys: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(key) = fields.get("object_key").and_then(Value::as_str) {
+                keys.insert(format!("{prefix}/{key}"));
+            }
+            if let Some(sha) = fields.get("transcript_sha256").and_then(Value::as_str) {
+                keys.insert(format!("{prefix}/_views/1-{sha}.json"));
+            }
+            for child in fields.values() {
+                keep_manifest_content(child, prefix, keys);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                keep_manifest_content(child, prefix, keys);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl Repository {
@@ -187,6 +214,32 @@ impl Repository {
             .iter()
             .find(|publication| publication.commit_id == commit)
     }
+
+    fn active(&self) -> bool {
+        self.state == "active"
+    }
+
+    /// Public with a released head: anyone signed in reads and pushes.
+    fn open(&self) -> bool {
+        self.active() && self.visibility == "public" && self.public_commit_id.is_some()
+    }
+
+    /// How many pushes a discard keeps: on a public repository those up to
+    /// the push the public version was released from, on any other none.
+    /// `None` when there is no draft to discard.
+    fn discard_keeps(&self) -> Option<usize> {
+        let (names, mainline) = self.stream();
+        if !self.open() {
+            return (!names.is_empty()).then_some(0);
+        }
+        let released = &self.public_head()?.record_name;
+        let kept = mainline
+            .names()
+            .iter()
+            .position(|name| &name.file_name() == released)?
+            + 1;
+        (mainline.names().len() > kept).then_some(kept)
+    }
 }
 
 struct Attempt {
@@ -204,6 +257,16 @@ pub enum Fault {
     After,
 }
 
+/// How an injected failure answers a store listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListingFault {
+    /// `503 temporarily_unavailable`, the service's own.
+    Unavailable,
+    /// A `404` that is not the service's: no error envelope, as a proxy in
+    /// front of it would answer.
+    ForeignNotFound,
+}
+
 #[derive(Default)]
 pub struct StubState {
     pub users: BTreeMap<String, StubUser>,
@@ -218,8 +281,11 @@ pub struct StubState {
     pub fail_next_claim: Option<Fault>,
     /// The next record write fails: before or after the record lands.
     pub fail_next_record: Option<Fault>,
-    /// The next store listing answers 503.
-    pub fail_next_listing: bool,
+    /// The next store listing fails.
+    pub fail_next_listing: Option<ListingFault>,
+    /// Accounts the service has suspended: every request of theirs answers
+    /// `403 forbidden`.
+    pub suspended: BTreeSet<String>,
     /// The next record lands without its index batch: the index lags R2.
     pub skip_next_index: bool,
 }
@@ -238,6 +304,13 @@ impl StubState {
         self.users.insert(user.id.clone(), user.clone());
         self.tokens.insert(token.clone(), user.id.clone());
         (user, token)
+    }
+    /// One more session of an account: another computer signed in to it.
+    pub fn add_session(&mut self, user_id: &str) -> String {
+        self.next += 1;
+        let token = format!("tok_{user_id}_{:024x}", self.next);
+        self.tokens.insert(token.clone(), user_id.to_owned());
+        token
     }
     pub fn add_member(&mut self, repository_id: &str, user_id: &str, role: &str) {
         let login = self.users[user_id].login.clone();
@@ -284,38 +357,147 @@ impl StubState {
         repository.release_requests.clear();
         repository.revision += 1;
     }
-    /// The website's Discard, as the removal worker runs it: the claims go
-    /// until their listing is empty, then the records, and only then the
-    /// index. Objects, views and manifests stay.
-    pub fn discard(&mut self, repository_id: &str) {
+    /// Make a repository private, as its Owner would on the website. Its
+    /// released version stays on the row and plays no part from here on.
+    pub fn make_private(&mut self, repository_id: &str) {
         let repository = self
             .repositories
             .get_mut(repository_id)
             .expect("repository");
-        for prefix in [repository.claims_prefix(), repository.stream_prefix()] {
-            for key in repository.keys_under(&prefix) {
-                repository.objects.remove(&key);
-            }
-        }
-        for publication in &mut repository.publications {
-            if publication.state != "removed" {
-                publication.state = "removed".to_owned();
-            }
-        }
-        repository.private_head = None;
+        repository.visibility = "private".to_owned();
         repository.release_requests.clear();
         repository.revision += 1;
     }
+    /// Discard the draft, as the service runs it in the request. On a public
+    /// repository the draft returns to the public version: the claim of the
+    /// push it was released from goes, then every push after it and their
+    /// claims. On any other repository every claim and every push goes.
+    /// Content used only by removed pushes is deleted. The depth of the push that is
+    /// kept, or `None` when nothing is; `Err` when there is no draft.
+    pub fn discard(&mut self, repository_id: &str) -> Result<Option<u64>, &'static str> {
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        let kept = repository
+            .discard_keeps()
+            .ok_or("There is no draft to discard.")?;
+        let (_, mainline) = repository.stream();
+        let chain = &mainline.names()[..kept];
+        let kept_records = chain
+            .iter()
+            .map(RecordName::file_name)
+            .collect::<BTreeSet<_>>();
+        // The claims of the root and of every kept push but the last hold kept records.
+        let kept_claims = chain
+            .iter()
+            .map(|name| {
+                name.parent()
+                    .map_or_else(|| "root.json".to_owned(), |parent| format!("{parent}.json"))
+            })
+            .collect::<BTreeSet<_>>();
+        let file = |key: &str| key.rsplit('/').next().unwrap_or_default().to_owned();
+        for key in repository.keys_under(&repository.claims_prefix()) {
+            if !kept_claims.contains(&file(&key)) {
+                repository.objects.remove(&key);
+            }
+        }
+        for key in repository.keys_under(&repository.stream_prefix()) {
+            if !kept_records.contains(&file(&key)) {
+                repository.objects.remove(&key);
+            }
+        }
+        let head = chain.last().map(RecordName::file_name);
+        for publication in &mut repository.publications {
+            if publication.state == "removed" {
+                continue;
+            }
+            publication.state = if !kept_records.contains(&publication.record_name) {
+                "removed"
+            } else if Some(&publication.record_name) == head.as_ref() {
+                "available"
+            } else {
+                "retired"
+            }
+            .to_owned();
+        }
+        let content = repository.content_prefix();
+        let mut protected = BTreeSet::new();
+        for publication in &repository.publications {
+            if publication.state != "removed"
+                || Some(&publication.commit_id) == repository.public_commit_id.as_ref()
+            {
+                let key = format!("{content}/{}", publication.manifest_key);
+                let Some(object) = repository.objects.get(&key) else {
+                    continue;
+                };
+                let value: Value = serde_json::from_slice(&object.bytes).expect("stored manifest");
+                protected.insert(key);
+                keep_manifest_content(&value, &content, &mut protected);
+            }
+        }
+        for key in repository.keys_under(&content) {
+            if (key.contains("/_objects/")
+                || key.contains("/_views/")
+                || key.contains("/_manifests/"))
+                && !protected.contains(&key)
+            {
+                repository.objects.remove(&key);
+                repository.counted.remove(&key);
+            }
+        }
+        repository.committed_bytes = repository
+            .counted
+            .iter()
+            .filter_map(|key| repository.objects.get(key))
+            .map(|object| object.bytes.len() as u64)
+            .sum();
+        repository.private_head = head;
+        repository.release_requests.clear();
+        repository.revision += 1;
+        Ok(chain.last().map(RecordName::revision))
+    }
+    /// Confirm a repository's removal, as its Owner would on the website: it
+    /// is `deleting` and stops counting at once.
+    pub fn remove(&mut self, repository_id: &str) {
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        repository.state = "deleting".to_owned();
+        repository.visibility = "private".to_owned();
+        repository.invite_code = None;
+        repository.release_requests.clear();
+        repository.revision += 1;
+    }
+    /// The removal worker's run: the prefix is erased and the row is `removed`.
+    pub fn finish_removal(&mut self, repository_id: &str) {
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        repository.state = "removed".to_owned();
+        repository.objects.clear();
+        repository.counted.clear();
+        repository.committed_bytes = 0;
+        repository.private_head = None;
+        repository.public_commit_id = None;
+        for publication in &mut repository.publications {
+            publication.state = "removed".to_owned();
+        }
+    }
+    /// The active repository of a bundle: the one the service resolves.
     pub fn repository_for_bundle(&self, bundle_id: &str) -> Option<&Repository> {
         self.repositories
             .values()
-            .find(|r| r.bundle_id.as_deref() == Some(bundle_id))
+            .find(|r| r.active() && r.bundle_id.as_deref() == Some(bundle_id))
     }
     pub fn repository_for_library(&self, library_repository_id: &str) -> Option<&Repository> {
         self.repositories.values().find(|r| {
-            r.catalog
-                .as_ref()
-                .is_some_and(|item| item.library_repository_id == library_repository_id)
+            r.active()
+                && r.catalog
+                    .as_ref()
+                    .is_some_and(|item| item.library_repository_id == library_repository_id)
         })
     }
     /// Move the index's head pointer by hand: what the desktop must never
@@ -587,7 +769,7 @@ fn summary(state: &StubState, repository: &Repository, role: Option<&str>, write
         "github_url": repository.github_url,
         "catalog": repository.catalog.as_ref().map(catalog_value),
         "revision": repository.revision,
-        "state": "active",
+        "state": repository.state,
         "visibility": repository.visibility,
         "private_revision": repository.private_revision,
         "public_revision": repository.public_revision,
@@ -661,6 +843,11 @@ async fn handle(
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
+    let repository_revision = request
+        .headers()
+        .get("x-mallard-repository-revision")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     let body = match request.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => return Ok(error("invalid_request", "incomplete body").0),
@@ -721,6 +908,7 @@ async fn handle(
         idempotency.as_deref(),
         declared_sha.as_deref(),
         content_length,
+        repository_revision,
         body,
     );
     Ok(response)
@@ -1082,6 +1270,7 @@ fn route(
     idempotency: Option<&str>,
     declared_sha: Option<&str>,
     content_length: Option<usize>,
+    repository_revision: Option<u64>,
     body: Bytes,
 ) -> Reply {
     let parts = segments(path);
@@ -1142,6 +1331,9 @@ fn route(
     let Some(user_id) = bearer.and_then(|token| state.tokens.get(token).cloned()) else {
         return error("authentication_required", "Sign in to continue.");
     };
+    if state.suspended.contains(&user_id) {
+        return error("forbidden", "This account is suspended.");
+    }
     let user = state.users[&user_id].clone();
     if method == Method::GET && path == "/v1/me" {
         return json(
@@ -1154,7 +1346,7 @@ fn route(
         let rows = state
             .repositories
             .values()
-            .filter(|r| r.members.contains_key(&user_id))
+            .filter(|r| r.state != "removed" && r.members.contains_key(&user_id))
             .filter(|r| match class.as_deref() {
                 Some("project") => r.class != "catalog",
                 Some("catalog") => r.class == "catalog",
@@ -1182,7 +1374,7 @@ fn route(
         let rows = state
             .repositories
             .values()
-            .filter(|r| r.members.contains_key(&user_id))
+            .filter(|r| r.active() && r.members.contains_key(&user_id))
             .filter(|r| {
                 r.catalog.as_ref().is_some_and(|item| {
                     item.provider == provider
@@ -1256,11 +1448,9 @@ fn route(
             {
                 return error("invalid_request", "library_repository_id");
             }
-            if state
-                .repositories
-                .values()
-                .any(|r| r.catalog.as_ref() == Some(&item) && r.members.contains_key(&user_id))
-            {
+            if state.repositories.values().any(|r| {
+                r.active() && r.catalog.as_ref() == Some(&item) && r.members.contains_key(&user_id)
+            }) {
                 return error("storage_managed_account_exists", "already registered");
             }
             (None, None, Some(item))
@@ -1276,7 +1466,8 @@ fn route(
                 return error("invalid_request", "bundle_id");
             }
             if state.repositories.values().any(|r| {
-                r.bundle_id.as_deref() == Some(bundle_id.as_str())
+                r.active()
+                    && r.bundle_id.as_deref() == Some(bundle_id.as_str())
                     && r.members.contains_key(&user_id)
             }) {
                 return error("storage_managed_account_exists", "already registered");
@@ -1287,7 +1478,7 @@ fn route(
         let held: BTreeSet<String> = state
             .repositories
             .values()
-            .filter(|r| r.owner_id == user_id)
+            .filter(|r| r.active() && r.owner_id == user_id)
             .map(|r| r.name.to_ascii_lowercase())
             .collect();
         let id = state.id("repo");
@@ -1303,6 +1494,7 @@ fn route(
         );
         let repository = Repository {
             id: id.clone(),
+            state: "active".to_owned(),
             class,
             name: pick_available_name(&base, &held),
             owner_id: user_id.clone(),
@@ -1339,7 +1531,7 @@ fn route(
         let Some(id) = state
             .repositories
             .values()
-            .find(|r| r.invite_code.as_ref().is_some_and(|c| c.code == normalized))
+            .find(|r| r.active() && r.invite_code.as_ref().is_some_and(|c| c.code == normalized))
             .map(|r| r.id.clone())
         else {
             return error(
@@ -1381,12 +1573,8 @@ fn route(
         let Some(repository) = state
             .repositories
             .values()
-            .find(|r| matches(r) && r.members.contains_key(&user_id))
-            .or_else(|| {
-                state.repositories.values().find(|r| {
-                    matches(r) && r.visibility == "public" && r.public_commit_id.is_some()
-                })
-            })
+            .find(|r| r.active() && matches(r) && r.members.contains_key(&user_id))
+            .or_else(|| state.repositories.values().find(|r| matches(r) && r.open()))
         else {
             return no_content();
         };
@@ -1402,17 +1590,26 @@ fn route(
         else {
             return error("not_found", "no such owner");
         };
-        let Some(repository) = state
-            .repositories
-            .values()
-            .find(|r| r.owner_id == owner.id && r.name.eq_ignore_ascii_case(parts[4]))
-        else {
+        // The active repository of that name, else the newest one being removed.
+        let named = |wanted: &str| {
+            state.repositories.values().rfind(|r| {
+                r.state == wanted && r.owner_id == owner.id && r.name.eq_ignore_ascii_case(parts[4])
+            })
+        };
+        let Some(repository) = named("active").or_else(|| named("deleting")) else {
             return error("not_found", "no such repository");
         };
+        if !repository.active() {
+            return if repository.members.contains_key(&user_id) {
+                error("repository_removed", "This repository is being removed.")
+            } else {
+                error("not_found", "not visible")
+            };
+        }
         if let Some((_, role)) = repository.members.get(&user_id) {
             return json(StatusCode::OK, summary(state, repository, Some(role), true));
         }
-        if repository.visibility == "public" && repository.public_commit_id.is_some() {
+        if repository.open() {
             // Anyone signed in is a writer on an open repository (section 4.3).
             return json(StatusCode::OK, summary(state, repository, None, true));
         }
@@ -1428,12 +1625,20 @@ fn route(
             .get(&user_id)
             .map(|(_, role)| role.clone());
         let rest = &parts[3..];
+        // Section 6.6: a removed repository is missing to everyone; one being
+        // removed answers its collaborators `repository_removed` and is
+        // missing to everyone else.
+        if repository.state == "removed" || (!repository.active() && role.is_none()) {
+            return error("not_found", "not visible");
+        }
+        if !repository.active() {
+            return error("repository_removed", "This repository is being removed.");
+        }
         // Section 4.3: a collaborator, or anyone signed in on an open
         // repository (public with a released head), is a writer and reads and
         // pushes alike; everyone else sees nothing. The stub has no anonymous
         // callers and no Super Admin.
-        let released = repository.visibility == "public" && repository.public_commit_id.is_some();
-        if role.is_none() && !released {
+        if role.is_none() && !repository.open() {
             return error("not_found", "not visible");
         }
         let manages = matches!(role.as_deref(), Some("owner") | Some("admin"));
@@ -1459,6 +1664,18 @@ fn route(
                 return bytes_reply(object.bytes.clone(), &object.sha256, content_type);
             }
             if method == Method::PUT {
+                let Some(revision) = repository_revision else {
+                    return error(
+                        "invalid_request",
+                        "X-Mallard-Repository-Revision is required.",
+                    );
+                };
+                if revision != repository.revision {
+                    return error(
+                        "revision_conflict",
+                        "The repository changed; start a new Push.",
+                    );
+                }
                 return put_store(
                     state,
                     &repository_id,
@@ -1552,17 +1769,27 @@ fn route(
                 return json(StatusCode::CREATED, request);
             }
             (&Method::POST, ["private-snapshot", "discard"]) => {
-                let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                if value["confirm"] != true
-                    || value["expected_repository_revision"].as_u64() != Some(repository.revision)
-                {
-                    return error("revision_conflict", "stale version");
+                if !manages {
+                    return error("forbidden", "Only the Owner or an Admin can do this.");
                 }
-                state.discard(&repository_id);
+                let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if value["confirm"] != true {
+                    return error("invalid_request", "confirm must be true.");
+                }
+                if value["expected_repository_revision"].as_u64() != Some(repository.revision) {
+                    return error(
+                        "revision_conflict",
+                        "The repository changed since you read it. Reload and retry.",
+                    );
+                }
+                let kept_revision = match state.discard(&repository_id) {
+                    Ok(kept) => kept,
+                    Err(detail) => return error("invalid_request", detail),
+                };
                 let removal_id = state.id("rmv");
                 return json(
                     StatusCode::OK,
-                    json!({"ok": true, "repository_id": repository_id, "removal_id": removal_id}),
+                    json!({"ok": true, "repository_id": repository_id, "removal_id": removal_id, "state": "done", "kept_revision": kept_revision}),
                 );
             }
             _ => {}
@@ -1577,8 +1804,20 @@ fn list_store(
     role: Option<&str>,
     uri: &hyper::Uri,
 ) -> Reply {
-    if std::mem::take(&mut state.fail_next_listing) {
-        return error("temporarily_unavailable", "listing unavailable");
+    match state.fail_next_listing.take() {
+        Some(ListingFault::Unavailable) => {
+            return error("temporarily_unavailable", "listing unavailable")
+        }
+        Some(ListingFault::ForeignNotFound) => {
+            return Reply(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("content-type", "text/html")
+                    .body(Full::new(Bytes::from_static(b"<h1>Not Found</h1>")))
+                    .unwrap(),
+            )
+        }
+        None => {}
     }
     let Some(prefix) = query(uri, "prefix") else {
         return error("key_invalid", "prefix");

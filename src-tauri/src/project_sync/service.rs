@@ -4,8 +4,6 @@
 //! persistence. Every storage uses the same immutable bundle publication:
 //! a record written last, and a head selected from the stream's records.
 
-use mallard_domain::ConversationWireChildren;
-use mallard_infrastructure::app_settings::AppSettings;
 use chrono::{TimeZone, Utc};
 use mallard_application::storage_setup::{self as storage_setup, storage_local_root};
 pub use mallard_application::storage_setup::{
@@ -13,6 +11,7 @@ pub use mallard_application::storage_setup::{
     VerifyStorageResult,
 };
 use mallard_domain::portable::contracts;
+use mallard_domain::ConversationWireChildren;
 use mallard_domain::PortableContractResolver;
 use mallard_domain::{
     absent_bundle_head_pin, classify_remote_continuity, classify_scope_continuity,
@@ -50,13 +49,13 @@ use mallard_domain::{
     AcceptedSubagentState, SubagentContentState, SubagentKey, SubagentSelection, SubagentTailPins,
 };
 use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
+use mallard_infrastructure::app_settings::AppSettings;
 use mallard_infrastructure::bundle_engine::{
     absent_scope_pin, unreached_apply_result, BundleBytes, BundleEngine, BundleObservation,
     CapturedBundleFile, FetchProgress, ObjectCache, PublishBundleRequest, PublishExpectation,
     PublishedBundle, ScopePublishInput, NOT_PULLED, VERSION_INCOMPLETE,
 };
 use mallard_infrastructure::claude_history_tail;
-use mallard_infrastructure::storage_core::publication::unfinished_push_sentence;
 use mallard_infrastructure::codex_history_graph;
 use mallard_infrastructure::codex_history_graph::CodexSeededRoot;
 use mallard_infrastructure::codex_standalone_builder::{
@@ -77,16 +76,15 @@ use mallard_infrastructure::credential_redaction;
 use mallard_infrastructure::jsonl_tail_io;
 use mallard_infrastructure::owned_subagents;
 use mallard_infrastructure::payload::PayloadBytes;
-pub use mallard_infrastructure::persistence::ProjectSyncMetadataResetResult;
 use mallard_infrastructure::persistence::{
     ConfigMutation, ConfigTransactionError, LocalProjectActivityStateSnapshot,
     LocalStateRepository, LockedConversationPull, StorageSyncMetadataResetResult,
 };
 use mallard_infrastructure::portable_resources::PortableResourceRegistry;
-pub use mallard_infrastructure::project_activity::ProjectActivity;
 use mallard_infrastructure::project_activity::{
     self, ProviderAccessState, ResolvedActivityProject,
 };
+pub use mallard_infrastructure::project_activity::{ProjectActivity, ProjectSessionsDeleteResult};
 use mallard_infrastructure::provider_capture::{
     self, kind_primitive, CaptureRequest, Discovery, LocalSessionView, ResourceCandidate,
 };
@@ -107,6 +105,7 @@ pub use mallard_infrastructure::session_detail::{
 };
 use mallard_infrastructure::session_path_map::{validate_pathmap_root, SessionPathMapper};
 use mallard_infrastructure::session_path_origins::{PathOrigins, PathOriginsOwner};
+use mallard_infrastructure::storage_core::publication::unfinished_push_sentence;
 use mallard_infrastructure::storage_core::{
     clear_managed_storage_data, ConfiguredObjectStore, ManagedStorageClearResult, VerifiedBody,
 };
@@ -739,6 +738,11 @@ pub struct ThreadSyncEntry {
     /// sidecars); absent for storage-only rows. The review meter sums it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_bytes: Option<u64>,
+    /// What a pull of this row's stored conversation installs: every file
+    /// the manifest lists for it. Absent for local-only rows and for rows
+    /// compared without a storage. The Pull review prints it per row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_bytes: Option<u64>,
     pub push_decision: ConversationDecision,
     pub pull_decision: ConversationDecision,
 }
@@ -983,12 +987,18 @@ pub(crate) fn list_project_bindings_with_repository(
     Ok(repository.load_bindings()?.bindings)
 }
 
-pub(super) fn reset_project_sync_metadata_with_repository(
+pub(super) fn delete_local_project_sessions_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     expected_project_revision: u64,
-) -> Result<ProjectSyncMetadataResetResult, String> {
-    repository.reset_project_sync_metadata(local_project_id, expected_project_revision)
+) -> Result<ProjectSessionsDeleteResult, String> {
+    project_activity::delete_local_project_sessions(
+        repository,
+        provider_registry(),
+        local_project_id,
+        expected_project_revision,
+        &mut |home| super::session_watch_service::session_watch_service().force_rebaseline(home),
+    )
 }
 
 pub(super) fn get_setup_draft_with_repository(
@@ -1567,6 +1577,20 @@ pub(super) fn read_project_markdown_image_with_repository(
     session_detail::read_project_markdown_image(repository, local_project_id, relative_path)
 }
 
+pub(super) fn delete_local_project_session_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    resource_id: &str,
+) -> Result<project_activity::LocalSessionDeleteResult, String> {
+    project_activity::delete_local_project_session(
+        repository,
+        provider_registry(),
+        local_project_id,
+        resource_id,
+        &mut |home| super::session_watch_service::session_watch_service().force_rebaseline(home),
+    )
+}
+
 pub(super) fn execute_project_session_action_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
@@ -1837,6 +1861,64 @@ fn is_selectable_pull_conversation_action(action: &ConversationPlanAction) -> bo
             | ConversationPlanActionType::MaterializeCloud
             | ConversationPlanActionType::KeepBoth
             | ConversationPlanActionType::CreateLocal
+    )
+}
+
+/// Whether a Pull row's action installs storage bytes: the three that
+/// materialize a stored transcript. Metadata adoption and the report rows
+/// write no payload, so they weigh nothing in the review.
+fn pull_action_installs_bytes(action: ConversationReviewAction) -> bool {
+    matches!(
+        action,
+        ConversationReviewAction::MaterializeCloud
+            | ConversationReviewAction::KeepBoth
+            | ConversationReviewAction::CreateLocal
+    )
+}
+
+/// What an approved Pull selection installs, priced from the pinned
+/// manifest: the approved file actions' storage-side sizes plus every file
+/// the manifest lists for each conversation the selection materializes.
+/// Metadata adoptions write no payload and count nothing. The same sum the
+/// review meter shows, so the two agree on the version the review pinned.
+fn pull_bytes_of_selection<'a>(
+    manifest: &BundleManifest,
+    plan: &RestorePlan,
+    approved: &BTreeSet<ActionId>,
+    conversations: impl IntoIterator<Item = (ConversationPlanActionType, Option<&'a CloudThreadId>)>,
+) -> Result<u64, String> {
+    let mut total = plan
+        .actions
+        .iter()
+        .filter(|action| approved.contains(&action.action_id))
+        .filter_map(|action| action.source_size)
+        .fold(0_u64, u64::saturating_add);
+    for (action, cloud_thread_id) in conversations {
+        if !matches!(
+            action,
+            ConversationPlanActionType::MaterializeCloud
+                | ConversationPlanActionType::KeepBoth
+                | ConversationPlanActionType::CreateLocal
+        ) {
+            continue;
+        }
+        let cloud_thread_id =
+            cloud_thread_id.ok_or("conversation Pull action lacks its cloud id")?;
+        let (_, thread) = manifest
+            .find_conversation(cloud_thread_id)
+            .ok_or("conversation Pull action names a thread this version does not hold")?;
+        total = total.saturating_add(manifest.conversation_bytes(thread));
+    }
+    Ok(total)
+}
+
+/// The refusal past the Pull limit, worded as the review meter words it so
+/// the sentence is the same wherever it is read.
+fn pull_limit_sentence(total: u64, limit: u64) -> String {
+    format!(
+        "{} over the {} pull limit — exclude sessions or files to pull.",
+        provider_capture::format_bytes(total.saturating_sub(limit)),
+        provider_capture::format_bytes(limit)
     )
 }
 
@@ -5790,7 +5872,8 @@ fn provider_thread_review(
                 .filter_map(|(thread_id, depends_on)| {
                     let observation = cursor_observations.get(thread_id)?;
                     if !matches!(observation.evidence, TailSideEvidence::Present(_))
-                        || observation.subagents.is_none() {
+                        || observation.subagents.is_none()
+                    {
                         return None;
                     }
                     let local = local_threads.get(thread_id)?;
@@ -6349,9 +6432,11 @@ fn provider_thread_review(
                 .as_ref()
                 .is_some_and(|tree| tree.missing().is_empty());
         let push = if push.selectable && outgoing_child_failure {
-            let mut blocked =
-                mallard_domain::blocked_conversation_decision(ConversationBlocker::ObservationFailed);
-            blocked.blocked_reason = Some("Child conversations could not be verified for Push.".into());
+            let mut blocked = mallard_domain::blocked_conversation_decision(
+                ConversationBlocker::ObservationFailed,
+            );
+            blocked.blocked_reason =
+                Some("Child conversations could not be verified for Push.".into());
             blocked
         } else {
             push
@@ -6479,6 +6564,9 @@ fn provider_thread_review(
             storage_present: thread.is_some(),
             capture_bytes: local
                 .map(|local| local.capture_bytes + subagent_selection.estimated_bytes),
+            pull_bytes: thread.and_then(|thread| {
+                snapshot.map(|snapshot| snapshot.manifest.conversation_bytes(thread))
+            }),
             status_detail: capabilities
                 .operation_state
                 .eq(&ConversationOperationState::Pending)
@@ -6847,6 +6935,7 @@ fn provider_thread_review(
                 .expect("selectable Pull classification produces an action");
                 pull_actions.push(pull_action);
             }
+            let installs_bytes = pull_action_installs_bytes(pull.action);
             pull_review.push(ConversationReviewRow {
                 stored_without_credential_redaction: thread
                     .and_then(|row| row.wire_redaction.as_ref())
@@ -6866,6 +6955,14 @@ fn provider_thread_review(
                 // the raw id, and a Claude descriptor's name IS the session
                 // UUID, so reusing it would print an id as a title.
                 display_title: thread.and_then(|thread| thread.display_title.clone()),
+                source_size: installs_bytes
+                    .then(|| {
+                        thread.and_then(|thread| {
+                            snapshot.map(|snapshot| snapshot.manifest.conversation_bytes(thread))
+                        })
+                    })
+                    .flatten(),
+                stored_ended_at: thread.and_then(|thread| thread.last_message_at()),
             });
         }
     }
@@ -7209,8 +7306,7 @@ fn observe_linked_bundle(
                         link.local_project_id
                     )
                 })?;
-            let (_, own) =
-                repository.derive_origin_tokens(&link.bundle_id, &binding.replica_id)?;
+            let (_, own) = repository.derive_origin_tokens(&link.bundle_id, &binding.replica_id)?;
             Ok(if origin.origin_replica_token == own {
                 SavedBy::Push
             } else {
@@ -7539,6 +7635,7 @@ fn build_thread_sync_comparison(
                 .iter()
                 .find(|view| view.descriptor.resource_id == candidate.resource_id)
                 .map(|view| view.capture_bytes),
+            pull_bytes: None,
             push_decision: blocked.clone(),
             pull_decision: blocked,
         });
@@ -7605,6 +7702,7 @@ fn build_thread_sync_comparison(
                     compared_against_storage: true,
                     provider_thread_id: thread.source_thread_id.clone(),
                     capture_bytes: None,
+                    pull_bytes: Some(snapshot.manifest.conversation_bytes(thread)),
                     push_decision: view_only.clone(),
                     pull_decision: view_only.clone(),
                 });
@@ -8856,8 +8954,17 @@ fn build_conversation_publication(
                 },
             );
             child_origins.merge(&artifact.path_origins)?;
-            child_payloads.push((key.clone(), normalized, artifact.root_bytes.into_bytes(),
-                child.sources.get(&child.path).ok_or("child source stamp is missing")?.1.mtime_secs()));
+            child_payloads.push((
+                key.clone(),
+                normalized,
+                artifact.root_bytes.into_bytes(),
+                child
+                    .sources
+                    .get(&child.path)
+                    .ok_or("child source stamp is missing")?
+                    .1
+                    .mtime_secs(),
+            ));
             captured_sources.extend(child.sources.clone());
         }
         captured_tree = Some(tree);
@@ -8966,14 +9073,15 @@ fn build_conversation_publication(
             .source_thread_id
             .as_deref()
             .ok_or("conversation lacks a physical source ID")?;
-        let encoded = mallard_infrastructure::providers::claude::publication::encode_main_transcript(
-            &transcript.bytes,
-            source_id,
-            &mapper,
-            &source_origins,
-            redaction_run,
-        )
-        .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
+        let encoded =
+            mallard_infrastructure::providers::claude::publication::encode_main_transcript(
+                &transcript.bytes,
+                source_id,
+                &mapper,
+                &source_origins,
+                redaction_run,
+            )
+            .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
         let redacted = encoded.bytes;
         let wire_analysis = encoded.analysis;
         let child_links = encoded.child_links;
@@ -9380,8 +9488,12 @@ fn commit_conversation_publication(
     }
     for (sidecar_path, file) in sidecars {
         match file {
-            PublishedFile::Retained(entry) => { scope.retained_files.insert(sidecar_path, entry); }
-            PublishedFile::Captured(file) => { scope.captured_files.insert(sidecar_path, file); }
+            PublishedFile::Retained(entry) => {
+                scope.retained_files.insert(sidecar_path, entry);
+            }
+            PublishedFile::Captured(file) => {
+                scope.captured_files.insert(sidecar_path, file);
+            }
         }
     }
     scope.tombstones.retain(|_, tombstone| {
@@ -10617,6 +10729,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         manifest_sha256: manifest_sha256.clone(),
         manifest_size,
     };
+    let cloud_repository = cloud_repository_in_use(&engine, &bundle_id)?;
     repository.mutate_config(|config| {
         let current = config
             .projects
@@ -10632,6 +10745,12 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     .to_string(),
             );
         }
+        save_cloud_pin(config, storage_id, &bundle_id, cloud_repository.as_ref());
+        let current = config
+            .projects
+            .iter_mut()
+            .find(|current| current.local_project_id == *local_project_id)
+            .ok_or_else(|| "project was removed while publishing".to_string())?;
         {
             let current_link = config
                 .links
@@ -10639,9 +10758,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                 .find(|link| {
                     link.local_project_id == *local_project_id && link.storage_id == *storage_id
                 })
-                .ok_or_else(|| {
-                    "project storage link was removed while publishing".to_string()
-                })?;
+                .ok_or_else(|| "project storage link was removed while publishing".to_string())?;
             for scope in &writable_scopes {
                 let last_pull_at = current_link
                     .scope_bases
@@ -10880,12 +10997,21 @@ pub(super) fn plan_bundle_restore_with_progress(
                     .planned_action()
                     .map(|_| ActionId::parse(generated_named_id("selection")?))
                     .transpose()?;
+                let thread = entry
+                    .cloud_thread_id
+                    .as_ref()
+                    .and_then(|id| snapshot.manifest.find_conversation(id))
+                    .map(|(_, thread)| thread);
+                // The comparison priced the stored thread from this same
+                // manifest; the row carries that number only when its
+                // action installs the bytes.
+                let source_size = pull_action_installs_bytes(entry.pull_decision.action)
+                    .then_some(entry.pull_bytes)
+                    .flatten();
+                let stored_ended_at = thread.and_then(|thread| thread.last_message_at());
                 Ok(ConversationReviewRow {
-                    stored_without_credential_redaction: entry
-                        .cloud_thread_id
-                        .as_ref()
-                        .and_then(|id| snapshot.manifest.find_conversation(id))
-                        .and_then(|(_, thread)| thread.wire_redaction.as_ref())
+                    stored_without_credential_redaction: thread
+                        .and_then(|thread| thread.wire_redaction.as_ref())
                         .is_some_and(|stamp| {
                             stamp.codec == credential_redaction::REDACTION_OFF_CODEC_V1
                         }),
@@ -10899,6 +11025,8 @@ pub(super) fn plan_bundle_restore_with_progress(
                     action_id,
                     display_title: (entry.display_name != entry.thread_id)
                         .then_some(entry.display_name),
+                    source_size,
+                    stored_ended_at,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -12570,7 +12698,10 @@ fn validate_pull_approval(
                 .filter_map(|row| row.action_id.clone()),
         )
         .collect::<BTreeSet<_>>();
-    if let Some(unknown) = approved.iter().find(|action_id| !known.contains(*action_id)) {
+    if let Some(unknown) = approved
+        .iter()
+        .find(|action_id| !known.contains(*action_id))
+    {
         return Err(format!(
             "restore selection '{}' is not in the comparison",
             unknown
@@ -12806,6 +12937,26 @@ pub(super) fn apply_bundle_restore_with_progress(
             return Err(eligibility.reason);
         }
     }
+    // The whole selection, priced from the pinned manifest, before the first
+    // write. The review refused past this limit already; rechecking here is
+    // what makes the limit a contract rather than a courtesy of the meter.
+    let pull_bytes = pull_bytes_of_selection(
+        &snapshot.manifest,
+        &plan,
+        &approved,
+        approved_conversation_actions.iter().map(|selected| {
+            (
+                selected.action.action,
+                selected.action.cloud_thread_id.as_ref(),
+            )
+        }),
+    )?;
+    if pull_bytes > provider_capture::MAX_CAPTURE_BYTES {
+        return Err(pull_limit_sentence(
+            pull_bytes,
+            provider_capture::MAX_CAPTURE_BYTES,
+        ));
+    }
     let applied_at = now_secs();
     on_phase("prepare apply", phase_started.elapsed());
     let phase_started = Instant::now();
@@ -12863,8 +13014,7 @@ pub(super) fn apply_bundle_restore_with_progress(
     );
     #[cfg(test)]
     pull_test_support::run_after_download();
-    let (prepared_conversations, prepare_failures, session_views, mut stopped) = match downloaded
-    {
+    let (prepared_conversations, prepare_failures, session_views, mut stopped) = match downloaded {
         Ok((prepared, failures, views)) => (prepared, failures, views, None),
         Err(reason) => (Vec::new(), Vec::new(), session_views, Some(reason)),
     };
@@ -13260,7 +13410,14 @@ pub(super) fn apply_bundle_restore_with_progress(
         .iter()
         .any(|receipt| matches!(receipt.status, ActionStatus::Failed | ActionStatus::Blocked));
     if files_complete {
+        let cloud_repository = cloud_repository_in_use(&engine, &plan.bundle_id)?;
         repository.mutate_config(|config| {
+            save_cloud_pin(
+                config,
+                &plan.storage_id,
+                &plan.bundle_id,
+                cloud_repository.as_ref(),
+            );
             let project = config
                 .projects
                 .iter_mut()
@@ -13406,8 +13563,11 @@ pub(super) fn apply_bundle_restore_with_progress(
     // that a sync product replicates has not received it yet.
     let stopped = stopped.map(|reason| {
         if reason == VERSION_INCOMPLETE {
-            let (_, storage_name, _) =
-                project_storage_log_context(repository, &binding.local_project_id, &plan.storage_id);
+            let (_, storage_name, _) = project_storage_log_context(
+                repository,
+                &binding.local_project_id,
+                &plan.storage_id,
+            );
             format!("Part of this version is missing from {storage_name}. Compare again.")
         } else {
             reason
@@ -14206,7 +14366,13 @@ fn capture_request_for_resolved_binding_from_state(
     Ok(request)
 }
 
-fn repository_fingerprint(project_root: &Path) -> Option<String> {
+pub(super) fn repository_fingerprint(project_root: &Path) -> Option<String> {
+    origin_url(project_root).map(|url| repository_fingerprint_from_remote_url(&url))
+}
+
+/// The `origin` remote's URL as `.git/config` spells it, read without
+/// running Git; none when the folder has no readable config of its own.
+pub(super) fn origin_url(project_root: &Path) -> Option<String> {
     let config_path = project_root.join(".git/config");
     let metadata = fs::symlink_metadata(&config_path).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
@@ -14225,14 +14391,14 @@ fn repository_fingerprint(project_root: &Path) -> Option<String> {
                 continue;
             };
             if key.trim().eq_ignore_ascii_case("url") {
-                return Some(repository_fingerprint_from_remote_url(value.trim()));
+                return Some(value.trim().to_string());
             }
         }
     }
     None
 }
 
-fn repository_fingerprint_from_remote_url(value: &str) -> String {
+pub(super) fn repository_fingerprint_from_remote_url(value: &str) -> String {
     let sanitized = strip_url_userinfo(value.trim());
     let canonical_github = project_activity::normalize_github_repository_url(value);
     let canonical = canonical_github.as_deref().unwrap_or(&sanitized);
@@ -14509,6 +14675,42 @@ fn cloud_link_id(storage: &StorageConfig, bundle: &BundleId) -> Result<Option<St
         .managed_cloud()
         .map(|cloud| cloud.resolve_repository(bundle))
         .transpose()
+}
+
+/// The Mallard Cloud repository a Push or a Pull read and wrote: the link's
+/// pin, or what stands in for a pin that answered gone. `None` on any other
+/// storage. It costs no request: the operation has already resolved it.
+fn cloud_repository_in_use(
+    engine: &StorageEngine,
+    bundle: &BundleId,
+) -> Result<Option<String>, String> {
+    match engine.store().managed_cloud() {
+        Some(cloud) => cloud.repository_in_use(bundle),
+        None => Ok(None),
+    }
+}
+
+/// Save the repository an operation used as the pin of every link of that
+/// storage and bundle, in the transaction that saves the operation's bases.
+/// A Push onto a repository that was gone created another, and a Pull read
+/// the one another computer created: from here on the link names it. Only a
+/// Push and a Pull do this; a refresh saves nothing.
+fn save_cloud_pin(
+    config: &mut SyncConfig,
+    storage_id: &StorageId,
+    bundle: &BundleId,
+    repository: Option<&String>,
+) {
+    let Some(repository) = repository else {
+        return;
+    };
+    for link in config
+        .links
+        .iter_mut()
+        .filter(|link| link.storage_id == *storage_id && link.bundle_id == *bundle)
+    {
+        link.managed_cloud_repository_id = Some(repository.clone());
+    }
 }
 
 fn cloud_status_for(
@@ -15368,6 +15570,23 @@ pub(super) fn probe_project_folder_with_repository(
     let machine = repository.load_bindings()?;
     let index = ProjectFolderIndex::load(repository, &machine)?;
     Ok(index.folder(&canonical, project_activity::is_git_work_tree(&canonical)))
+}
+
+/// The same verdict without running Git: Git is read from a `.git` entry on
+/// the folder or above, as the recent-folder list reads it. For a probe that
+/// runs per keystroke where Git may not be installed — on macOS, running the
+/// `/usr/bin/git` stub offers to install the developer tools.
+pub(super) fn probe_project_folder_without_git(
+    repository: &LocalStateRepository,
+    project_root: &str,
+) -> Result<ProjectFolderProbe, String> {
+    let canonical = match resolve_project_folder(repository, project_root) {
+        Ok(canonical) => canonical,
+        Err(refusal) => return Ok(refusal.probe),
+    };
+    let machine = repository.load_bindings()?;
+    let index = ProjectFolderIndex::load(repository, &machine)?;
+    Ok(index.folder(&canonical, has_git_entry(&canonical)))
 }
 
 /// The folders the newest sessions of every registered profile ran in, each
@@ -16516,14 +16735,15 @@ fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
 mod tests {
     include!("owned_subagent_tests.rs");
     include!("claude_owned_subagent_tests.rs");
+    include!("project_session_delete_tests.rs");
     include!("optional_redaction_tests.rs");
     include!("child_sync_settings_tests.rs");
+    include!("managed_cloud_gone_tests.rs");
     use super::*;
     use mallard_infrastructure::providers::codex::provider_key as codex_key;
     use mallard_infrastructure::storage_providers::local::{
         local_storage_config, provider_key as local_provider_key,
     };
-
 
     use crate::storage_catalog::persistence::CatalogStateRepository;
     use crate::sync_tests::thread_variants::harness::{
@@ -20591,17 +20811,29 @@ mod tests {
         assert_eq!(restore.storage_id, selected_storage_id);
         assert_eq!(restore.revision, 4);
         assert_eq!(
-            get_restore_readiness_with_repository(&repo, &project.local_project_id, &selected_storage_id)
-                .unwrap()
-                .bundle_id,
+            get_restore_readiness_with_repository(
+                &repo,
+                &project.local_project_id,
+                &selected_storage_id
+            )
+            .unwrap()
+            .bundle_id,
             restore.bundle_id
         );
 
         advance_local_content();
         push_bundle_with_repository(&repo, &project.local_project_id, &selected_storage_id)
             .unwrap();
-        assert_eq!(get_restore_readiness_with_repository(&repo, &project.local_project_id, &selected_storage_id)
-            .unwrap().bundle_id, restore.bundle_id);
+        assert_eq!(
+            get_restore_readiness_with_repository(
+                &repo,
+                &project.local_project_id,
+                &selected_storage_id
+            )
+            .unwrap()
+            .bundle_id,
+            restore.bundle_id
+        );
     }
 
     #[test]
@@ -21092,7 +21324,10 @@ mod tests {
 
         let plan = world.pull_plan();
         let kept = FilesWorld::file_write(&plan, "draft.md").expect("draft.md keeps a local copy");
-        assert_eq!(kept.copy_logical_path.as_str(), "project/draft-local-copy.md");
+        assert_eq!(
+            kept.copy_logical_path.as_str(),
+            "project/draft-local-copy.md"
+        );
         assert_eq!(FilesWorld::file_write(&plan, "extra.md"), None);
         world.pull_everything(&plan);
         assert_eq!(world.read("draft.md"), b"second draft\n");
@@ -21242,7 +21477,10 @@ mod tests {
         assert!(files.warnings.is_empty(), "{:?}", files.warnings);
         let plan = world.pull_plan();
         let kept = FilesWorld::file_write(&plan, "draft.md").expect("draft.md keeps a local copy");
-        assert_eq!(kept.copy_logical_path.as_str(), "project/draft-local-copy.md");
+        assert_eq!(
+            kept.copy_logical_path.as_str(),
+            "project/draft-local-copy.md"
+        );
         world.pull_everything(&plan);
         assert_eq!(world.read("draft.md"), b"first draft\n");
         assert_eq!(world.read("draft-local-copy.md"), b"second draft\n");
@@ -22243,7 +22481,11 @@ mod tests {
                 .extend(reviewed_project_content_recipe(&files).entries);
             approval.project_content_review_token = files.review_token;
             ProjectSyncService::new(&self.repo)
-                .push_reviewed(&computer.project.local_project_id, &self.storage_id, approval)
+                .push_reviewed(
+                    &computer.project.local_project_id,
+                    &self.storage_id,
+                    approval,
+                )
                 .unwrap()
         }
 
@@ -22471,7 +22713,10 @@ mod tests {
         assert!(repository_bases(&link).all(|base| base.revision == 3));
 
         let error = ProjectSyncService::new(&world.repo)
-            .apply_bundle_restore(&older, TwoComputers::ticked_ids(&older).into_iter().collect())
+            .apply_bundle_restore(
+                &older,
+                TwoComputers::ticked_ids(&older).into_iter().collect(),
+            )
             .unwrap_err();
         assert_eq!(error, REVIEW_SUPERSEDED);
         assert_eq!(world.link(b), link);
@@ -22526,7 +22771,11 @@ mod tests {
         assert!(result.success, "{}", result.message);
         assert_eq!(result.stopped, None);
         assert_eq!(
-            result.applied_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            result
+                .applied_action_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
             TwoComputers::ticked_ids(&plan)
         );
         assert!(world.rollout_of(b, &cloud_id).exists());
@@ -22597,9 +22846,17 @@ mod tests {
             "{:?}",
             result.applied_action_ids
         );
-        assert!(result.failed_actions.is_empty(), "{:?}", result.failed_actions);
+        assert!(
+            result.failed_actions.is_empty(),
+            "{:?}",
+            result.failed_actions
+        );
         assert_eq!(
-            result.not_pulled_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            result
+                .not_pulled_action_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
             ticked
         );
         assert_eq!(result.reviewed_base_advanced, Some(false));
@@ -22623,8 +22880,12 @@ mod tests {
     ) {
         let world = TwoComputers::new("cleared-after-download-store");
         let (a, b) = (&world.a, &world.b);
-        std::fs::write(a.root.join("draft.md"), b"first draft
-").unwrap();
+        std::fs::write(
+            a.root.join("draft.md"),
+            b"first draft
+",
+        )
+        .unwrap();
         let session = "019f7500-0000-7000-8000-0000000000a8";
         write_codex_session(&a.codex, session, &a.root);
         assert_eq!(world.push_with_files(a).revision, Some(2));
@@ -22652,14 +22913,26 @@ mod tests {
             Some("Part of this version is missing from Project content store. Compare again.")
         );
         assert_eq!(
-            result.applied_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            result
+                .applied_action_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
             session_actions
         );
         assert_eq!(
-            result.not_pulled_action_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            result
+                .not_pulled_action_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
             file_actions
         );
-        assert!(result.failed_actions.is_empty(), "{:?}", result.failed_actions);
+        assert!(
+            result.failed_actions.is_empty(),
+            "{:?}",
+            result.failed_actions
+        );
         assert_eq!(result.reviewed_base_advanced, Some(false));
         assert!(world.rollout_of(b, &cloud_id).exists());
         assert!(!b.root.join("draft.md").exists());
@@ -22688,8 +22961,12 @@ mod tests {
     fn a_pull_stops_the_same_way_when_an_object_has_not_arrived_and_offers_the_rest_afterwards() {
         let world = TwoComputers::new("replicating-folder-store");
         let (a, b) = (&world.a, &world.b);
-        std::fs::write(a.root.join("draft.md"), b"first draft
-").unwrap();
+        std::fs::write(
+            a.root.join("draft.md"),
+            b"first draft
+",
+        )
+        .unwrap();
         let session = "019f7500-0000-7000-8000-0000000000a9";
         write_codex_session(&a.codex, session, &a.root);
         assert_eq!(world.push_with_files(a).revision, Some(2));
@@ -22736,8 +23013,12 @@ mod tests {
     fn a_pull_stops_with_the_storage_own_error_when_it_cannot_be_read() {
         let world = TwoComputers::new("unreadable-store");
         let (a, b) = (&world.a, &world.b);
-        std::fs::write(a.root.join("draft.md"), b"first draft
-").unwrap();
+        std::fs::write(
+            a.root.join("draft.md"),
+            b"first draft
+",
+        )
+        .unwrap();
         let session = "019f7500-0000-7000-8000-0000000000aa";
         write_codex_session(&a.codex, session, &a.root);
         assert_eq!(world.push_with_files(a).revision, Some(2));
@@ -22767,8 +23048,8 @@ mod tests {
     /// reset. With that row left unticked, the next Pull marks the areas as
     /// reviewed (rule 5).
     #[test]
-    fn a_stored_session_that_cannot_be_read_fails_alone_and_the_next_pull_marks_the_areas_reviewed(
-    ) {
+    fn a_stored_session_that_cannot_be_read_fails_alone_and_the_next_pull_marks_the_areas_reviewed()
+    {
         let world = TwoComputers::new("unreadable-session-store");
         let (a, b) = (&world.a, &world.b);
         write_codex_session(&a.codex, "019f7500-0000-7000-8000-0000000000ab", &a.root);
@@ -22796,7 +23077,12 @@ mod tests {
         let result = world.pull_everything(&plan);
         assert!(!result.success);
         assert_eq!(result.stopped, None);
-        assert_eq!(result.failed_actions.len(), 1, "{:?}", result.failed_actions);
+        assert_eq!(
+            result.failed_actions.len(),
+            1,
+            "{:?}",
+            result.failed_actions
+        );
         assert_eq!(
             result.failed_actions[0].message,
             mallard_infrastructure::pull_transcript::STORED_SESSION_UNREADABLE
@@ -22876,10 +23162,12 @@ mod tests {
                 .plan_bundle_restore(&world.storage_id, &world.bundle_id, &computer.binding)
                 .unwrap_err()
         };
-        assert_eq!(plan(a), "There is nothing to pull from Project content store.");
+        assert_eq!(
+            plan(a),
+            "There is nothing to pull from Project content store."
+        );
         assert!(plan(b).contains("does not exist"), "{}", plan(b));
     }
-
 
     /// Continue a Codex rollout by one user turn, as the provider would.
     fn append_codex_user_turn(path: &Path, id: &str, text: &str) {
@@ -23353,8 +23641,7 @@ mod tests {
         assert_eq!(saved_config(), before);
         let config = repo.load_config().unwrap();
         let link = project_link(&config, &project.local_project_id, &storage_id).unwrap();
-        assert!(repository_bases(link)
-            .all(|base| base.commit_id == second_first_name.commit_id()));
+        assert!(repository_bases(link).all(|base| base.commit_id == second_first_name.commit_id()));
         let checkpoints = link
             .conversation_checkpoints
             .values()
@@ -27623,7 +27910,11 @@ mod tests {
             format!("remember: DB_PASSWORD={SECRET_A_PASSWORD} for staging\n"),
         )
         .unwrap();
-        std::fs::write(memory_dir.join("workflow.md"), "Use the staging workflow.\n").unwrap();
+        std::fs::write(
+            memory_dir.join("workflow.md"),
+            "Use the staging workflow.\n",
+        )
+        .unwrap();
         // Reviewed push with the recommended recipe: conversations plus the
         // provider-state memory resource.
         let review =
@@ -27734,8 +28025,14 @@ mod tests {
             .find(|action| action.action == ConversationReviewAction::CreateLocal)
             .cloned()
             .expect("stored thread offers CreateLocal");
-        assert_eq!(restore.actions.iter().filter(|action| matches!(action.kind,
-            RestoreActionKind::MergeFile { .. })).count(), 2);
+        assert_eq!(
+            restore
+                .actions
+                .iter()
+                .filter(|action| matches!(action.kind, RestoreActionKind::MergeFile { .. }))
+                .count(),
+            2
+        );
         // B adopts the whole bundle — the conversation plus the generic
         // provider-state memory — so its own later push reviews clean.
         let applied = ProjectSyncService::new(&repo)
@@ -27750,7 +28047,10 @@ mod tests {
             )
             .unwrap();
         for action in &restore.actions {
-            assert!(applied.applied_action_ids.contains(&action.action_id), "{applied:?}");
+            assert!(
+                applied.applied_action_ids.contains(&action.action_id),
+                "{applied:?}"
+            );
         }
         assert!(
             applied.success,
@@ -30260,6 +30560,76 @@ mod tests {
         assert_eq!(conversation_action.display_title.as_deref(), Some(title));
         // Plans are pure intent: CreateLocal names no local identity.
         assert_eq!(conversation_action.thread_id, None);
+        // The review prices each stored session from the pinned manifest —
+        // the same number the comparison row carries — and keys the walk of
+        // its recommended selection on the stored session's last-message
+        // time, as the activity row shows it.
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let stored = engine.inspect(&bundle_id).unwrap();
+        let (_, stored_row) = stored.manifest.find_conversation(&cloud_thread_id).unwrap();
+        let stored_bytes = stored.manifest.conversation_bytes(stored_row);
+        assert!(stored_bytes > 0);
+        assert_eq!(conversation_action.source_size, Some(stored_bytes));
+        assert_eq!(stored_thread.pull_bytes, Some(stored_bytes));
+        assert_eq!(
+            conversation_action.stored_ended_at,
+            stored_row.last_message_at()
+        );
+        let activity = get_project_activity_with_repository(
+            &repo,
+            &target.local_project_id,
+            Some(&storage_id),
+            None,
+            None,
+            Some(3650),
+            true,
+        )
+        .unwrap();
+        let stored_session = activity
+            .sessions
+            .iter()
+            .find(|session| session.logical_thread_id.as_deref() == Some(cloud_thread_id.as_str()))
+            .unwrap();
+        assert_eq!(
+            conversation_action.stored_ended_at.unwrap_or(0),
+            stored_session.ended_at
+        );
+        // The review the frontend sees carries the Apply limit, and Apply
+        // prices the same selection from the same manifest: a materialization
+        // weighs its files, a metadata adoption nothing.
+        let review = mallard_domain::PullReview::from_plan(
+            restore.clone(),
+            provider_capture::MAX_CAPTURE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            review.apply_limit_bytes,
+            provider_capture::MAX_CAPTURE_BYTES
+        );
+        let priced = pull_bytes_of_selection(
+            &stored.manifest,
+            &restore,
+            &BTreeSet::new(),
+            [
+                (
+                    ConversationPlanActionType::CreateLocal,
+                    Some(&cloud_thread_id),
+                ),
+                (
+                    ConversationPlanActionType::AdoptCloudMetadata,
+                    Some(&cloud_thread_id),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(priced, stored_bytes);
+        assert_eq!(
+            pull_limit_sentence(
+                provider_capture::MAX_CAPTURE_BYTES + 87 * 1024 * 1024,
+                provider_capture::MAX_CAPTURE_BYTES
+            ),
+            "87 MB over the 512 MB pull limit — exclude sessions or files to pull."
+        );
         let before = readiness_for_binding(&repo, &storage_id, &bundle_id, &target_binding);
         assert_eq!(before.state, "needs_setup");
 

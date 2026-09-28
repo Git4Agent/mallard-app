@@ -719,6 +719,20 @@ and that file differ in detail, the file is right.
   shows one publication row per record with the head at the selected depth.
   The same two tests are the live gate for staging (section 13).
 
+## Superseded on 2026-09-26
+
+`PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md` replaced these passages of this
+plan. The text above is kept as it was written.
+
+| Where | As written | Now |
+| --- | --- | --- |
+| Decision 8 | Discard clears the chain; desktops read an empty stream and the next Push starts at revision 1 | On a public repository a discard removes the pushes after the released one, and desktops select the released push. On a private repository it clears the chain, as written. It keeps the content either way |
+| Section 5.8 | Discard queues a removal and answers at once | The removal runs in the request; the worker finishes what the request's budget left |
+| Section 6.5 | A website Discard reads as "Another computer cleared <storage>" | "Draft discarded" and "Draft discarded and pushed again", and "Created again" for a repository that was removed and created again |
+| Section 7 | The rows "Discard on the website" and "Repository removed, or access lost" | A discard returns the draft to the public version or empties a private repository; a repository that is removed, being deleted or out of reach reads as empty, and a Push creates it again |
+| Section 11 | Nothing on Mallard Cloud is deleted by a desktop verb | Discard is a verb of the website, for the Owner and Admins, and of the desktop, for the Owner over a public version, each with a confirmation. Removal is a website action. No other desktop verb deletes anything on Mallard Cloud |
+| Section 13 | Row 8 of the staging pass | The live pass of the newer plan, rows 9 to 15 |
+
 ## Source pointers
 
 | What | Where |

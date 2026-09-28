@@ -1,0 +1,735 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type {
+  CloneFailure,
+  CloneFailureReason,
+  CloudProjectFolder,
+  CloudProjectFolderProbe,
+  CloudProjectFolderProgress,
+  DraftProfileSelection,
+  LocalProjectSummary,
+  ManagedCloudRepository,
+  ProjectDetail,
+  ProviderDescriptor,
+  ProviderKey,
+  ProviderProfileSummary,
+  StorageSummary,
+} from "../../types";
+import Icon from "../Icons";
+import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
+import ProviderMark from "../sync-review/ProviderMark";
+import { errorMessage } from "../../storageError";
+import { projectSyncApi } from "./api";
+import { repositoryFingerprintsRequireAcknowledgement } from "./model";
+import ProjectFolderField from "./ProjectFolderField";
+import {
+  compactFolderPath,
+  readFolderInput,
+  type FolderInput,
+  type FolderRun,
+  type FolderVerdict,
+} from "./projectFolder";
+import { useHomePath } from "./ProjectSetupWorkspace";
+import RepositoryAddressPicker, {
+  isManagedCloudStorage,
+  useManagedCloudRepositories,
+  type RepositorySelection,
+} from "./RepositoryAddressPicker";
+
+/** A GitHub repository left as an empty folder: said once on the project. */
+export interface CloneFallback {
+  projectName: string;
+  failure: CloneFailure;
+}
+
+/** Why the folder is empty, in a few words. */
+export function cloneFailureText(reason: CloneFailureReason): string {
+  switch (reason) {
+    case "no_git": return "No gh or git here.";
+    case "refused": return "GitHub said no.";
+    case "unreachable": return "GitHub couldn’t be reached.";
+    case "failed": return "The clone failed.";
+  }
+}
+
+/** New folder: cloned or made here. Existing folder: one this computer
+ *  already has, connected as it is. */
+export type FolderMode = "new" | "existing";
+
+interface Props {
+  /** New project's two ways in, drawn at the top of the body. */
+  doors: ReactNode;
+  storages: StorageSummary[];
+  /** The account to start on, such as the one Finish setup just added. */
+  initialStorageId: string | null;
+  providers: ProviderDescriptor[];
+  profiles: ProviderProfileSummary[];
+  projects: LocalProjectSummary[];
+  busy: boolean;
+  workflowEpoch: number;
+  isWorkflowCurrent: (workflowEpoch: number) => boolean;
+  onCancel: () => void;
+  /** No Mallard Cloud account yet: set one up. */
+  onAddAccount: () => void;
+  /** The folder is already a project: go to it instead. */
+  onOpenProject: (projectId: string) => void;
+  onDone: (detail: ProjectDetail, fallback: CloneFallback | null, workflowEpoch: number) => void;
+}
+
+const PROBE_DELAY_MS = 320;
+
+type ProbeState =
+  | { status: "idle" }
+  | { status: "checking"; key: string }
+  | { status: "done"; key: string; probe: CloudProjectFolderProbe }
+  | { status: "error"; key: string; message: string };
+
+type Run =
+  | { phase: "idle" }
+  | { phase: "folder"; progress: CloudProjectFolderProgress | null }
+  | { phase: "connect" }
+  | { phase: "failed"; title: string; message: string };
+
+const probeKey = (path: string, fingerprint: string | null, round: number) => `${path}\n${fingerprint ?? ""}\n${round}`;
+
+/** The Folder field's verdict for the destination, read without writing. */
+function useCloudFolderProbe(
+  path: string | null,
+  fingerprint: string | null,
+  round: number,
+  isActive: () => boolean,
+): ProbeState {
+  const [state, setState] = useState<ProbeState>({ status: "idle" });
+  const requestRef = useRef(0);
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  useEffect(() => {
+    const requestId = ++requestRef.current;
+    if (!path) {
+      setState({ status: "idle" });
+      return;
+    }
+    const key = probeKey(path, fingerprint, round);
+    setState({ status: "checking", key });
+    const timer = window.setTimeout(() => {
+      void projectSyncApi.probeCloudProjectFolder(path, fingerprint).then(
+        (probe) => {
+          if (requestRef.current === requestId && isActiveRef.current()) setState({ status: "done", key, probe });
+        },
+        (reason) => {
+          if (requestRef.current === requestId && isActiveRef.current()) {
+            setState({ status: "error", key, message: errorMessage(reason) });
+          }
+        },
+      );
+    }, PROBE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [path, fingerprint, round]);
+  return state;
+}
+
+/** The folder most projects here sit in; the home folder otherwise. No
+ *  setting: a new project goes beside the ones already on this computer. */
+export function defaultProjectParent(projects: LocalProjectSummary[], home: string | null): string | null {
+  const counts = new Map<string, number>();
+  for (const project of projects) {
+    const root = project.canonical_project_root ?? project.project_root;
+    const parent = root ? root.replace(/[\\/][^\\/]+[\\/]?$/, "") : "";
+    if (parent && parent !== root) counts.set(parent, (counts.get(parent) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let most = 0;
+  for (const [parent, count] of counts) {
+    if (count > most) {
+      best = parent;
+      most = count;
+    }
+  }
+  return best ?? home;
+}
+
+export function joinFolder(parent: string, name: string): string {
+  const separator = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
+  return `${parent.replace(/[\\/]+$/, "")}${separator}${name}`;
+}
+
+/** What Browse picked, as the field's path: for a new folder the parent,
+ *  keeping the repository's name; for an existing one the folder itself. */
+export function browsedPath(mode: FolderMode, picked: string, name: string): string {
+  return mode === "existing" ? picked : joinFolder(picked, name);
+}
+
+/** Whether the click will try to clone: a GitHub repository, with Git here. */
+export function clonesFrom(repository: ManagedCloudRepository, canClone: boolean): string | null {
+  return repository.repository_class === "git_project" && repository.github_url && canClone
+    ? repository.github_url.replace(/^https:\/\//, "")
+    : null;
+}
+
+/** Whether an existing folder connects only once the person ticks setup's
+ *  acknowledgement: it holds files, and its remote isn't this repository's. */
+export function needsTick(
+  mode: FolderMode,
+  folder: CloudProjectFolder | null,
+  repository: ManagedCloudRepository,
+): boolean {
+  return mode === "existing" && folder?.kind === "occupied"
+    && repositoryFingerprintsRequireAcknowledgement(repository.repository_fingerprint, folder.local_fingerprint);
+}
+
+/** What the Folder line says: where the project lands, and how. */
+export function destinationVerdict(
+  input: FolderInput,
+  state: ProbeState,
+  key: string | null,
+  repository: ManagedCloudRepository,
+  compact: (path: string) => string,
+  mode: FolderMode,
+): FolderVerdict | null {
+  if (input.kind === "empty") return null;
+  if (input.kind === "search") return { tone: "bad", message: "Enter a full path." };
+  if (state.status === "error" && state.key === key) return { tone: "bad", message: state.message };
+  if (state.status !== "done" || state.key !== key) return null;
+  const { folder, can_clone: canClone } = state.probe;
+  const git = repository.repository_class === "git_project";
+  switch (folder.kind) {
+    case "refused":
+      return { tone: "bad", message: folder.message };
+    case "project":
+      return { tone: "bad", message: "Already a project here.", actions: [{ label: "Open it", run: "open-project" }] };
+    case "checkout":
+      return { tone: "ok", message: "Already its checkout. Nothing to clone." };
+  }
+  if (mode === "existing") {
+    switch (folder.kind) {
+      case "new":
+        return { tone: "bad", message: "No folder here." };
+      case "empty":
+        return { tone: "ok", message: "Empty. Nothing is cloned." };
+      case "occupied":
+        if (!needsTick(mode, folder, repository)) return { tone: "ok", message: "Used as it is." };
+        if (!folder.local_fingerprint) return { tone: "warn", message: "No Git remote to check." };
+        if (!git) return { tone: "warn", message: `A Git checkout; ${repository.name} has no Git.` };
+        return { tone: "warn", message: folder.git_remote ? `Git remote: ${folder.git_remote}.` : "Another Git remote." };
+    }
+  }
+  const source = clonesFrom(repository, canClone);
+  switch (folder.kind) {
+    case "occupied":
+      return {
+        tone: "warn",
+        message: "Holds files.",
+        actions: [
+          { label: "Use it as it is", run: "use-as-is" },
+          ...(folder.suggestion ? [{ label: `Use ${compact(folder.suggestion)}`, value: compact(folder.suggestion) }] : []),
+        ],
+      };
+    case "new":
+      if (source) return { tone: "ok", message: `New folder. Clones ${source}; empty if that fails.` };
+      if (git && repository.github_url) return { tone: "warn", message: "New, empty folder: no gh or git here." };
+      if (git) return { tone: "ok", message: "New, empty folder: not on GitHub." };
+      return { tone: "ok", message: "New, empty folder." };
+    case "empty":
+      if (source) return { tone: "ok", message: `Empty folder. Clones ${source} into it; stays empty if that fails.` };
+      if (git && repository.github_url) return { tone: "warn", message: "Empty folder, stays empty: no gh or git here." };
+      if (git) return { tone: "ok", message: "Empty folder, stays empty: not on GitHub." };
+      return { tone: "ok", message: "Empty folder." };
+  }
+}
+
+/** Setup's Git-remote acknowledgement, from what the folder holds when it
+ *  connects: an empty folder (made here or found) has nothing to verify, its
+ *  checkout matches, and one that holds files is acknowledged only by the
+ *  person's tick. */
+export function mismatchAcknowledged(holds: "empty" | "checkout" | "occupied", ticked: boolean): boolean {
+  return holds === "empty" || (holds === "occupied" && ticked);
+}
+
+export interface ConnectChoices {
+  storageId: string;
+  bundleId: string;
+  repository: ManagedCloudRepository;
+  profiles: Record<ProviderKey, DraftProfileSelection>;
+}
+
+/** Setup's finish on the folder: the draft (or the one already there), this
+ *  page's choices, and Finish. A failure keeps the folder. */
+export async function connectFolder(projectRoot: string, choices: ConnectChoices, acknowledged: boolean): Promise<ProjectDetail> {
+  const { draft } = await projectSyncApi.createSetupDraft(projectRoot);
+  const saved = await projectSyncApi.updateSetupDraft({
+    ...draft,
+    profiles: choices.profiles,
+    storage: { storage_id: choices.storageId },
+    repository: {
+      kind: "existing",
+      storage_id: choices.storageId,
+      bundle_id: choices.bundleId,
+      display_name: choices.repository.address,
+      repository_fingerprint: choices.repository.repository_fingerprint,
+      mismatch_acknowledged: acknowledged,
+    },
+  });
+  return projectSyncApi.finalizeProjectSetup(saved.draft_id, saved.revision);
+}
+
+/** Existing folder: asks about it again — the line may be stale — and
+ *  connects it as it is only while the answer is the one shown and the tick
+ *  still covers it; null when it changed. Nothing in the folder is touched,
+ *  and the path keeps the spelling it was typed in. */
+export async function connectExistingFolder(
+  path: string,
+  shown: CloudProjectFolder,
+  ticked: boolean,
+  choices: ConnectChoices,
+): Promise<ProjectDetail | null> {
+  const { folder } = await projectSyncApi.probeCloudProjectFolder(path, choices.repository.repository_fingerprint);
+  if (folder.kind !== shown.kind) return null;
+  if (folder.kind !== "empty" && folder.kind !== "checkout" && folder.kind !== "occupied") return null;
+  if (needsTick("existing", folder, choices.repository) && !ticked) return null;
+  return connectFolder(path, choices, mismatchAcknowledged(folder.kind, ticked));
+}
+
+/** Setup's rule for agents: each one the registry sets up by default, from
+ *  its only profile here; with two or more, the person picks. */
+function defaultAgents(providers: ProviderDescriptor[], profiles: ProviderProfileSummary[]) {
+  const enabled: Record<ProviderKey, boolean> = {};
+  const chosen: Record<ProviderKey, string> = {};
+  for (const descriptor of providers) {
+    const options = usableProfiles(profiles, descriptor.key);
+    enabled[descriptor.key] = descriptor.setup_default && options.length > 0;
+    chosen[descriptor.key] = options.length === 1 ? options[0].profile_id : "";
+  }
+  return { enabled, chosen };
+}
+
+function usableProfiles(profiles: ProviderProfileSummary[], provider: ProviderKey) {
+  return profiles.filter((profile) => profile.provider === provider && profile.available && profile.readable);
+}
+
+let operationSequence = 0;
+function newOperationId(): string {
+  operationSequence += 1;
+  return `cloud-project-${Date.now().toString(36)}-${operationSequence}`;
+}
+
+/**
+ * New project › From Mallard Cloud: a project whose repository is on
+ * Mallard Cloud. Setup's own bands in the order this needs them — the
+ * Mallard Cloud account first (Storage), the repository by its address
+ * (Repository), its folder (Project), the agent profiles (Agent) — and one
+ * verb that connects. The folder is a new one — a GitHub repository is
+ * cloned, with gh and then git; anything else, or a clone that does not
+ * work, gets an empty folder — or one this computer already has, connected
+ * as it is. Nothing is pulled: the project opens on Activity like any
+ * finished setup.
+ */
+export default function CloudProjectSource({
+  doors,
+  storages,
+  initialStorageId,
+  providers,
+  profiles,
+  projects,
+  busy,
+  workflowEpoch,
+  isWorkflowCurrent,
+  onCancel,
+  onAddAccount,
+  onOpenProject,
+  onDone,
+}: Props) {
+  const homePath = useHomePath();
+  const compact = (path: string) => compactFolderPath(path, homePath);
+  const accounts = storages.filter(isManagedCloudStorage);
+  const [storageId, setStorageId] = useState<string | null>(() => (
+    initialStorageId && accounts.some((storage) => storage.storage_id === initialStorageId)
+      ? initialStorageId
+      : accounts.length === 1 ? accounts[0].storage_id : null
+  ));
+  const storage = accounts.find((candidate) => candidate.storage_id === storageId) ?? null;
+  const mountedRef = useRef(true);
+  const isActive = () => mountedRef.current && isWorkflowCurrent(workflowEpoch);
+  const listing = useManagedCloudRepositories(storage?.storage_id ?? null, null, isActive);
+  const [selection, setSelection] = useState<RepositorySelection | null>(null);
+  const [repository, setRepository] = useState<ManagedCloudRepository | null>(null);
+  const [mode, setMode] = useState<FolderMode>("new");
+  const [folderText, setFolderText] = useState("");
+  const suggestedFolder = useRef("");
+  // The tick belongs to one folder for one repository.
+  const [tickedFor, setTickedFor] = useState<string | null>(null);
+  const [agents, setAgents] = useState(() => defaultAgents(providers, profiles));
+  const [run, setRun] = useState<Run>({ phase: "idle" });
+  const [probeRound, setProbeRound] = useState(0);
+  const operationRef = useRef<string | null>(null);
+  // Cancel pressed during this run: its refusal is not a failure to show.
+  const cancelledRef = useRef(false);
+
+  // The only account is chosen as soon as it exists.
+  useEffect(() => {
+    if (!storageId && accounts.length === 1) setStorageId(accounts[0].storage_id);
+  }, [accounts.length]);
+
+  /* Leaving mid-clone stops the clone; git removes what it wrote. */
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (operationRef.current) void projectSyncApi.cancelCloudProjectFolder(operationRef.current).catch(() => {});
+    };
+  }, []);
+
+  const input = readFolderInput(folderText, homePath);
+  const destination = input.kind === "path" ? input.path : null;
+  const fingerprint = repository?.repository_fingerprint ?? null;
+  const probeState = useCloudFolderProbe(repository ? destination : null, fingerprint, probeRound, isActive);
+  const key = destination ? probeKey(destination, fingerprint, probeRound) : null;
+  const probe = probeState.status === "done" && probeState.key === key ? probeState.probe : null;
+  const verdict = repository ? destinationVerdict(input, probeState, key, repository, compact, mode) : null;
+
+  const running = run.phase === "folder" || run.phase === "connect";
+  const working = busy || running;
+  const existing = mode === "existing";
+  const folderKind = probe?.folder.kind ?? null;
+  const source = repository && probe ? clonesFrom(repository, probe.can_clone) : null;
+  const willClone = !existing && !!source && (folderKind === "new" || folderKind === "empty");
+  const tick = !!repository && needsTick(mode, probe?.folder ?? null, repository);
+  const tickFor = destination && repository ? `${destination}\n${repository.repository_id}` : null;
+  const ticked = tickFor !== null && tickedFor === tickFor;
+
+  const enabledProviders = providers.filter((descriptor) => agents.enabled[descriptor.key]);
+  const incomplete = enabledProviders.filter((descriptor) => !agents.chosen[descriptor.key]);
+  const agentMessage = enabledProviders.length === 0
+    ? "Turn on at least one agent to continue."
+    : incomplete.length > 0 ? `Choose a profile for ${incomplete.map((descriptor) => descriptor.display_name).join(", ")}.` : null;
+
+  // Named for what the click will do, once the folder's verdict says it.
+  const verb = existing || !repository || !probe || folderKind === "checkout" || (folderKind === "empty" && !willClone)
+    ? "Connect"
+    : willClone ? "Clone and connect" : "Create folder and connect";
+  const connectable = existing
+    ? folderKind === "empty" || folderKind === "checkout" || (folderKind === "occupied" && (!tick || ticked))
+    : folderKind === "new" || folderKind === "empty" || folderKind === "checkout";
+  const ready = !!storage && !!repository?.bundle_id && !!destination && connectable && agentMessage === null;
+
+  const chooseStorage = (next: string) => {
+    if (next === storageId) return;
+    // Repositories belong to one account: a new account starts over.
+    setStorageId(next);
+    setSelection(null);
+    setRepository(null);
+  };
+
+  const chooseRepository = (next: RepositorySelection | null, chosen: ManagedCloudRepository | null) => {
+    setSelection(next);
+    const picked = next?.kind === "existing" ? chosen : null;
+    setRepository(picked);
+    if (!picked) return;
+    // The folder follows the repository until it is edited.
+    const parent = defaultProjectParent(projects, homePath);
+    const suggestion = parent ? compact(joinFolder(parent, picked.name)) : "";
+    if (!folderText || folderText === suggestedFolder.current) setFolderText(suggestion);
+    suggestedFolder.current = suggestion;
+  };
+
+  const runFolderAction = (action: FolderRun) => {
+    if (action === "use-as-is") setMode("existing");
+    else if (action === "open-project" && probe?.folder.kind === "project") onOpenProject(probe.folder.project_id);
+  };
+
+  const start = async () => {
+    if (!ready || working || !storage || !repository?.bundle_id || !destination || !probe) return;
+    const chosenProfiles: Record<ProviderKey, DraftProfileSelection> = {};
+    for (const descriptor of enabledProviders) {
+      chosenProfiles[descriptor.key] = { kind: "existing", profile_id: agents.chosen[descriptor.key] };
+    }
+    const choices: ConnectChoices = {
+      storageId: storage.storage_id,
+      bundleId: repository.bundle_id,
+      repository,
+      profiles: chosenProfiles,
+    };
+
+    if (existing) {
+      setRun({ phase: "connect" });
+      try {
+        const detail = await connectExistingFolder(destination, probe.folder, ticked, choices);
+        if (!isActive()) return;
+        if (!detail) {
+          setRun({ phase: "failed", title: "The folder changed.", message: "Check it, then connect again." });
+          setProbeRound((round) => round + 1);
+          return;
+        }
+        setRun({ phase: "idle" });
+        onDone(detail, null, workflowEpoch);
+      } catch (reason) {
+        if (!isActive()) return;
+        setRun({ phase: "failed", title: "Not connected.", message: errorMessage(reason) });
+        setProbeRound((round) => round + 1);
+      }
+      return;
+    }
+
+    const operationId = newOperationId();
+    operationRef.current = operationId;
+    cancelledRef.current = false;
+    setRun({ phase: "folder", progress: null });
+    let folder;
+    try {
+      folder = await projectSyncApi.getCloudProjectFolder({
+        destination,
+        github_url: repository.repository_class === "git_project" ? repository.github_url : null,
+        repository_fingerprint: repository.repository_fingerprint,
+        operation_id: operationId,
+      }, (progress) => {
+        if (isActive() && operationRef.current === operationId) setRun({ phase: "folder", progress });
+      });
+    } catch (reason) {
+      operationRef.current = null;
+      if (!isActive()) return;
+      setRun(cancelledRef.current
+        ? { phase: "idle" }
+        : { phase: "failed", title: "Folder not made.", message: errorMessage(reason) });
+      setProbeRound((round) => round + 1);
+      return;
+    }
+    operationRef.current = null;
+    if (!isActive()) return;
+    setRun({ phase: "connect" });
+    try {
+      // `created` is an empty folder, made here or found; the rest is a checkout.
+      const holds = folder.kind === "created" ? "empty" : "checkout";
+      const detail = await connectFolder(folder.canonical_path, choices, mismatchAcknowledged(holds, false));
+      if (!isActive()) return;
+      const fallback = folder.kind === "created" && folder.failure
+        ? { projectName: detail.project.local_alias || detail.project.display_name, failure: folder.failure }
+        : null;
+      setRun({ phase: "idle" });
+      onDone(detail, fallback, workflowEpoch);
+    } catch (reason) {
+      if (!isActive()) return;
+      setRun({ phase: "failed", title: "Not connected.", message: errorMessage(reason) });
+      setProbeRound((round) => round + 1);
+    }
+  };
+
+  const cancel = () => {
+    if (run.phase === "folder" && operationRef.current) {
+      cancelledRef.current = true;
+      void projectSyncApi.cancelCloudProjectFolder(operationRef.current).catch(() => {});
+      return;
+    }
+    onCancel();
+  };
+
+  const status = run.phase === "folder"
+    ? run.progress?.stage === "creating"
+      ? willClone ? "Clone failed · making an empty folder…" : "Making the folder…"
+      : `Cloning ${source ?? repository?.address ?? ""}${run.progress?.stage === "cloning" && run.progress.percent !== null ? ` · ${run.progress.percent}%` : "…"}`
+    : run.phase === "connect" && repository ? `Connecting to ${repository.address}…` : null;
+  const primaryLabel = run.phase === "folder"
+    ? run.progress?.stage === "creating" || !willClone ? "Creating…" : "Cloning…"
+    : run.phase === "connect" ? "Connecting…" : run.phase === "failed" ? "Try again" : verb;
+
+  /* What kind of folder the field names; Browse follows it. */
+  const folderSwitch = (
+    <div className="setup-pill-row" role="radiogroup" aria-label="Folder">
+      {(["new", "existing"] as const).map((option) => {
+        const active = mode === option;
+        return (
+          <button
+            key={option}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            className={`setup-pill${active ? " active" : ""}`}
+            disabled={working}
+            onClick={() => setMode(option)}
+          >
+            <Icon name={option === "new" ? "plus" : "folder"} size={12} />
+            <span className="setup-pill-label">{option === "new" ? "New folder" : "Existing folder"}</span>
+            <span className="setup-pill-check" aria-hidden="true">{active && <Icon name="check" size={12} />}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <>
+      <div className="sync-modal-body">
+        {doors}
+
+        <section className="sync-setup-section">
+          <div className="sync-card-heading"><div><strong>Storage</strong></div></div>
+          {accounts.length === 0 ? (
+            <div className="r2-step-list">
+              <div className="storage-found-empty" role="status">
+                <Icon name="storage-mallard" size={24} />
+                <strong>No Mallard Cloud account yet.</strong>
+                <span className="storage-found-empty-verbs">
+                  <button type="button" className="btn btn-primary" onClick={onAddAccount} disabled={working}>
+                    <Icon name="link" size={13} /> Set up Mallard Cloud
+                  </button>
+                </span>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="setup-pill-row" role="radiogroup" aria-label="Storage">
+                {accounts.map((account) => {
+                  const active = account.storage_id === storageId;
+                  const name = account.name || "(unnamed)";
+                  return (
+                    <button
+                      key={account.storage_id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      aria-label={`${name} · ${account.provider_label}`}
+                      title={`${name} · ${account.provider_label}`}
+                      className={`setup-pill${active ? " active" : ""}`}
+                      disabled={working || !account.available}
+                      onClick={() => chooseStorage(account.storage_id)}
+                    >
+                      <Icon name="storage-mallard" size={12} />
+                      <span className="setup-pill-label">{name}{account.available ? "" : " (unavailable)"}</span>
+                      <span className="setup-pill-check" aria-hidden="true">{active && <Icon name="check" size={12} />}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {!storage && <small className="sync-setup-hint">Choose an account first.</small>}
+            </>
+          )}
+        </section>
+
+        {storage && (
+          <section className="sync-setup-section repo-connect cloud-project-repository">
+            <div className="sync-card-heading"><div><strong>Repository</strong></div></div>
+            <RepositoryAddressPicker
+              storage={storage}
+              projectName=""
+              localFingerprint={null}
+              listing={listing}
+              selection={selection}
+              rows="match-option"
+              offerNew={false}
+              mode="clone"
+              disabled={working}
+              onSelect={chooseRepository}
+            />
+          </section>
+        )}
+
+        {storage && repository && (
+          <section className="sync-setup-section">
+            <div className="sync-card-heading"><div><strong>Project</strong></div></div>
+            <div className="sync-field-grid sync-setup-project-fields">
+              <label>
+                <span>Name</span>
+                <input value={repository.name} readOnly disabled />
+              </label>
+              <ProjectFolderField
+                value={folderText}
+                verdict={verdict}
+                disabled={working}
+                heading={folderSwitch}
+                placeholder="~/code/my-app"
+                onChange={setFolderText}
+                onEnter={() => void start()}
+                onBrowsed={(picked) => setFolderText(compact(browsedPath(mode, picked, repository.name)))}
+                onRun={runFolderAction}
+              />
+            </div>
+            {/* Outside the field grid, whose label and input rules would
+                restyle the box's own label and checkbox. */}
+            {tick && (
+              <Acknowledgement
+                checked={ticked}
+                disabled={working}
+                onChange={(checked) => setTickedFor(checked ? tickFor : null)}
+              >
+                Can’t verify this is {repository.name}. Connect it anyway.
+              </Acknowledgement>
+            )}
+          </section>
+        )}
+
+        {storage && repository && (
+          <section className="sync-setup-section">
+            <div className="sync-card-heading"><div><strong>Agent</strong></div></div>
+            <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+              {providers.map((descriptor) => {
+                const options = usableProfiles(profiles, descriptor.key);
+                const on = !!agents.enabled[descriptor.key];
+                const value = agents.chosen[descriptor.key] ?? "";
+                return (
+                  <div key={descriptor.key} className={`sync-provider-card${on ? " enabled" : ""}`}>
+                    <label className="sync-provider-toggle setup-marked-toggle">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        disabled={working || options.length === 0 || (on && enabledProviders.length === 1)}
+                        aria-label={`Use ${descriptor.display_name} in this project`}
+                        onChange={() => setAgents((current) => ({
+                          ...current,
+                          enabled: { ...current.enabled, [descriptor.key]: !on },
+                        }))}
+                      />
+                      <ProviderMark provider={descriptor.key} displayName={descriptor.display_name} size={12} />
+                      <strong>{descriptor.display_name}</strong>
+                      <span>{descriptor.profile_label}</span>
+                    </label>
+                    {on ? (
+                      <div className="sync-agent-profile-list">
+                        <div className={`sync-agent-profile-row${value ? "" : " has-error"}`}>
+                          <span className="sync-select-shell">
+                            <select
+                              value={value}
+                              disabled={working}
+                              aria-label={`${descriptor.display_name} profile`}
+                              aria-invalid={!value || undefined}
+                              onChange={(event) => {
+                                const next = event.target.value;
+                                setAgents((current) => ({ ...current, chosen: { ...current.chosen, [descriptor.key]: next } }));
+                              }}
+                            >
+                              <option value="">Choose profile</option>
+                              {options.map((option) => (
+                                <option key={option.profile_id} value={option.profile_id}>{option.display_name}</option>
+                              ))}
+                            </select>
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <small>Not used by this project on this machine.</small>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {agentMessage && <FieldMessage>{agentMessage}</FieldMessage>}
+          </section>
+        )}
+
+        {run.phase === "failed" && (
+          <Notice severity="danger" timing="blocking" title={run.title} className="sync-setup-system-error">
+            {run.message}
+          </Notice>
+        )}
+      </div>
+
+      <footer className="sync-modal-footer sync-setup-footer">
+        {status && <span className="sync-setup-save-state" aria-live="polite">{status}</span>}
+        <div>
+          <button type="button" className="btn btn-ghost" onClick={cancel} disabled={run.phase === "connect"}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-primary" disabled={!ready || working} onClick={() => void start()}>
+            {primaryLabel}
+          </button>
+        </div>
+      </footer>
+    </>
+  );
+}

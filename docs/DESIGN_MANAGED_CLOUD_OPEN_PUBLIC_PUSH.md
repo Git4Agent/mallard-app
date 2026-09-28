@@ -197,7 +197,9 @@ Frontend:
   you can see. If it is private, enter its invitation code." with Join;
   a resolved code selects the repository. A small "Enter an invitation
   code" toggle under the address field opens the same field without a
-  failed lookup first.
+  failed lookup first. (2026-09-27: the address field itself takes the
+  code, with Join as its verb once the text is a code; see
+  `PLAN_REPOSITORY_PICKER_TIDY.md`.)
 - `BundleConnectionDialog.tsx`: the footer verb for `public` becomes
   Connect and review Pull; `Connect read-only` goes.
 - `ProjectLinksWorkspace.tsx`: the `Read-only` chip becomes `Contributor`

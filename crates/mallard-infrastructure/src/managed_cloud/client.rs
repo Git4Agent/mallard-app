@@ -17,7 +17,7 @@ use reqwest::{header::HeaderValue, Client, Method, RequestBuilder, Response, Sta
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 const JSON_LIMIT: u64 = 16 * 1024 * 1024;
@@ -26,7 +26,7 @@ const ERROR_BODY_LIMIT: u64 = 64 * 1024;
 /// The service's fixed error codes (`STORE_API.md` section 7 and the
 /// architecture's section 7.1). Nothing outside this list is retained from
 /// an error body.
-pub const SERVICE_ERROR_CODES: [&str; 25] = [
+pub const SERVICE_ERROR_CODES: [&str; 26] = [
     "authentication_required",
     "forbidden",
     "not_found",
@@ -34,6 +34,7 @@ pub const SERVICE_ERROR_CODES: [&str; 25] = [
     "invalid_request",
     "manifest_invalid",
     "revision_conflict",
+    "repository_discarding",
     "already_present",
     "claim_taken",
     "claim_mismatch",
@@ -92,7 +93,8 @@ pub enum ErrorKind {
 }
 
 /// One classified failure. `detail` is the service's own bounded sentence
-/// for validation refusals, so a push can say what the validator disliked.
+/// for a refusal, so a push can say what the validator disliked and a
+/// refused action who may take it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -101,6 +103,53 @@ pub struct Error {
     pub code: Option<&'static str>,
     pub request_id: Option<String>,
     pub detail: Option<String>,
+    diagnostics: ErrorDiagnostics,
+}
+
+/// Only local transfer facts, validated request IDs, and fixed failure tags
+/// may enter the activity log. Never retain URLs, headers, or response bodies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ErrorDiagnostics {
+    cf_ray: Option<String>,
+    transport: Option<&'static str>,
+    service_reason: Option<&'static str>,
+    upload: Option<UploadDiagnostics>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UploadDiagnostics {
+    kind: &'static str,
+    bytes: usize,
+    sha256: Option<String>,
+    elapsed: Duration,
+}
+
+fn upload_kind(key: &str) -> &'static str {
+    key.split('/')
+        .find_map(|part| match part {
+            "_objects" => Some("object"),
+            "_views" => Some("view"),
+            "_manifests" => Some("manifest"),
+            "_claims" => Some("claim"),
+            "_commits" => Some("record"),
+            "_tag.json" => Some("tag"),
+            _ => None,
+        })
+        .unwrap_or("unknown")
+}
+
+/// The deployed service uses these fixed sentences for its three 503 paths.
+/// Map exact matches to local tags; arbitrary service text is not diagnostic data.
+fn unavailable_reason(code: Option<&str>, detail: &str) -> Option<&'static str> {
+    if code != Some("temporarily_unavailable") {
+        return None;
+    }
+    match detail {
+        "The bytes could not be stored; retry." => Some("r2_write_failed"),
+        "The object is being cleaned up; push again shortly." => Some("object_cleanup_in_progress"),
+        "The request could not be completed." => Some("service_request_failed"),
+        _ => None,
+    }
 }
 
 impl Error {
@@ -112,6 +161,7 @@ impl Error {
             code: None,
             request_id: None,
             detail: None,
+            diagnostics: ErrorDiagnostics::default(),
         }
     }
     fn of(kind: ErrorKind, route: &'static str) -> Self {
@@ -122,7 +172,15 @@ impl Error {
             code: None,
             request_id: None,
             detail: None,
+            diagnostics: ErrorDiagnostics::default(),
         }
+    }
+    /// Whether the service said the repository is gone: deleted, being
+    /// deleted, or out of this account's reach, which it answers alike. A
+    /// `404` without the service's own code is not that answer.
+    pub fn repository_gone(&self) -> bool {
+        self.kind == ErrorKind::NotFound
+            && matches!(self.code, Some("not_found" | "repository_removed"))
     }
     pub fn evidence(&self) -> ConnectionEvidence {
         ConnectionEvidence {
@@ -137,12 +195,13 @@ impl Error {
     pub fn message(&self) -> String {
         let fixed = match self.kind {
             ErrorKind::Auth => "Mallard Cloud rejected the saved sign-in. Reconnect Mallard Cloud in storage settings.",
-            ErrorKind::Permission => "Mallard Cloud refused this request. You are not a collaborator of this repository, or the account is suspended.",
+            ErrorKind::Permission => "Mallard Cloud refused this request.",
             ErrorKind::NotFound => "Mallard Cloud has no such repository, or you no longer have access to it.",
             ErrorKind::Absent => "Mallard Cloud has no such object.",
             ErrorKind::AlreadyPresent => "Mallard Cloud already holds this object.",
             ErrorKind::ClaimTaken => "Another computer claimed this version on Mallard Cloud.",
             ErrorKind::ClaimMismatch => "Mallard Cloud refused the record: the claim of its parent does not hold it.",
+            ErrorKind::Conflict if self.code == Some("repository_discarding") => "Mallard Cloud is discarding this repository. Wait for deletion to finish.",
             ErrorKind::Conflict => "Mallard Cloud refused a stale request. Refresh and try again.",
             ErrorKind::AccountExists => "This account already has a Mallard Cloud repository for this project.",
             ErrorKind::Quota => "The Mallard Cloud repository is out of quota.",
@@ -165,6 +224,26 @@ impl Error {
         }
         if let Some(id) = &self.request_id {
             facts.push(format!("request {id}"));
+        }
+        if let Some(upload) = &self.diagnostics.upload {
+            facts.push(format!(
+                "method=PUT, object_kind={}, bytes={}, elapsed_ms={}",
+                upload.kind,
+                upload.bytes,
+                upload.elapsed.as_millis()
+            ));
+            if let Some(sha256) = &upload.sha256 {
+                facts.push(format!("sha256={sha256}"));
+            }
+        }
+        if let Some(transport) = self.diagnostics.transport {
+            facts.push(format!("transport={transport}"));
+        }
+        if let Some(reason) = self.diagnostics.service_reason {
+            facts.push(format!("service_reason={reason}"));
+        }
+        if let Some(ray) = &self.diagnostics.cf_ray {
+            facts.push(format!("cf_ray={ray}"));
         }
         match &self.detail {
             Some(detail) => format!("{fixed} {detail} ({})", facts.join(", ")),
@@ -383,6 +462,20 @@ pub struct ReleaseRequest {
     pub state: String,
 }
 
+/// What a discard of the draft answered (`STORE_API.md` section 3).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DiscardedDraft {
+    pub repository_id: String,
+    pub removal_id: String,
+    /// `done`, or `deleting` while the service finishes the removal; every
+    /// listing selects the kept push either way.
+    pub state: String,
+    /// The depth of the push the draft returned to: the one the public
+    /// version was released from. `None` when no push is kept.
+    #[serde(default)]
+    pub kept_revision: Option<u64>,
+}
+
 /// What a streamed object answered with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Downloaded {
@@ -557,7 +650,7 @@ impl ManagedCloudClient {
     ) -> Result<Response> {
         let response = match request.send().await {
             Ok(response) => response,
-            Err(_) => {
+            Err(failure) => {
                 self.inner.health.record(ConnectionHealth::failed(
                     ConnectionState::Unreachable,
                     "managed_cloud_unreachable",
@@ -569,14 +662,26 @@ impl ManagedCloudClient {
                         request_id: None,
                     }),
                 ));
-                return Err(Error::of(
+                let mut error = Error::of(
                     if read {
                         ErrorKind::Unreachable
                     } else {
                         ErrorKind::Unknown
                     },
                     route,
-                ));
+                );
+                error.diagnostics.transport = Some(if failure.is_timeout() {
+                    "timeout"
+                } else if failure.is_connect() {
+                    "connect"
+                } else if failure.is_body() {
+                    "body"
+                } else if failure.is_request() {
+                    "request"
+                } else {
+                    "transport"
+                });
+                return Err(error);
             }
         };
         if response.headers().len() > 128 {
@@ -593,6 +698,9 @@ impl ManagedCloudClient {
                 .get("x-request-id")
                 .map(HeaderValue::as_bytes),
         );
+        let cf_ray = ConnectionEvidence::request_id(
+            response.headers().get("cf-ray").map(HeaderValue::as_bytes),
+        );
         let bytes = bounded(response, ERROR_BODY_LIMIT)
             .await
             .unwrap_or_default();
@@ -601,6 +709,12 @@ impl ManagedCloudClient {
             SERVICE_ERROR_CODES
                 .into_iter()
                 .find(|known| *known == body.error)
+        });
+        let service_reason = body.as_ref().and_then(|body| {
+            status
+                .is_server_error()
+                .then(|| unavailable_reason(code, &body.detail))
+                .flatten()
         });
         let detail = body
             .filter(|body| !body.detail.is_empty() && body.detail.len() <= 512)
@@ -646,9 +760,15 @@ impl ManagedCloudClient {
                     | ErrorKind::Integrity
                     | ErrorKind::Conflict
                     | ErrorKind::ClaimMismatch
+                    | ErrorKind::Permission
             )
             .then_some(detail)
             .flatten(),
+            diagnostics: ErrorDiagnostics {
+                cf_ray,
+                service_reason,
+                ..ErrorDiagnostics::default()
+            },
         };
         match kind {
             ErrorKind::Auth => {
@@ -871,6 +991,7 @@ impl ManagedCloudClient {
         key: &str,
         bytes: Bytes,
         sha256: &str,
+        repository_revision: u64,
     ) -> Result<PutOutcome> {
         let route = "v1/repositories/{id}/store/{key}";
         let content_type = if key.ends_with(".json") {
@@ -878,6 +999,7 @@ impl ManagedCloudClient {
         } else {
             "application/octet-stream"
         };
+        let size = bytes.len();
         let request = self
             .request(
                 Method::PUT,
@@ -886,13 +1008,25 @@ impl ManagedCloudClient {
             )?
             .header("Content-Length", bytes.len())
             .header("X-Mallard-Sha256", sha256)
+            .header("X-Mallard-Repository-Revision", repository_revision)
             .header("Content-Type", content_type)
             .body(bytes);
+        let started = Instant::now();
         match self.send(route, false, request).await {
             Ok(_) => Ok(PutOutcome::Written),
             Err(error) if error.kind == ErrorKind::AlreadyPresent => Ok(PutOutcome::AlreadyPresent),
             Err(error) if error.kind == ErrorKind::ClaimTaken => Ok(PutOutcome::ClaimTaken),
-            Err(error) => Err(error),
+            Err(mut error) => {
+                error.diagnostics.upload = Some(UploadDiagnostics {
+                    kind: upload_kind(key),
+                    bytes: size,
+                    sha256: mallard_domain::validate_sha256("upload", sha256)
+                        .is_ok()
+                        .then(|| sha256.to_owned()),
+                    elapsed: started.elapsed(),
+                });
+                Err(error)
+            }
         }
     }
 
@@ -1005,6 +1139,31 @@ impl ManagedCloudClient {
             .json(
                 &serde_json::json!({"expected_repository_revision": expected_repository_revision}),
             );
+        self.json(route, false, request).await
+    }
+
+    /// Discard the draft, naming the repository revision the status showed:
+    /// on a public repository every push after the public version is removed
+    /// from Mallard Cloud. One request, not a read, never sent again. A
+    /// refusal carries the service's sentence: `forbidden` for anyone but
+    /// the Owner and Admins, `revision_conflict` for a stale revision,
+    /// `invalid_request` when there is no draft to discard.
+    pub async fn discard_private_snapshot(
+        &self,
+        repository_id: &str,
+        expected_repository_revision: u64,
+    ) -> Result<DiscardedDraft> {
+        let route = "v1/repositories/{id}/private-snapshot/discard";
+        let request = self
+            .request(
+                Method::POST,
+                route,
+                &format!("/v1/repositories/{repository_id}/private-snapshot/discard"),
+            )?
+            .json(&serde_json::json!({
+                "confirm": true,
+                "expected_repository_revision": expected_repository_revision,
+            }));
         self.json(route, false, request).await
     }
 
@@ -1138,7 +1297,14 @@ pub struct ManagedCloudLink {
 #[serde(rename_all = "snake_case")]
 pub enum ManagedCloudStatusState {
     Ready,
+    /// The pinned repository is being deleted. It reads as empty, and a Push
+    /// creates it again.
     Deleting,
+    /// The pinned repository was deleted, or this account lost access to it:
+    /// the service answers both alike. It reads as empty, and a Push creates
+    /// it again on this account.
+    Gone,
+    /// The service refused the account. Push and Pull stay closed.
     Inaccessible,
     SignInRequired,
     Unavailable,
@@ -1204,22 +1370,26 @@ impl ManagedCloudStatus {
         }
     }
 
+    /// The status of a repository that did not answer its listing. Only
+    /// `not_found` and `repository_removed` say the repository is gone;
+    /// every other answer keeps what it is.
     pub fn failed(repository_id: &str, error: &Error) -> Self {
-        let state = if error.code == Some("repository_removed") {
-            ManagedCloudStatusState::Deleting
-        } else {
-            match error.kind {
-                ErrorKind::Auth => ManagedCloudStatusState::SignInRequired,
-                ErrorKind::NotFound | ErrorKind::Permission => {
-                    ManagedCloudStatusState::Inaccessible
-                }
-                _ => ManagedCloudStatusState::Unavailable,
+        let state = match error.kind {
+            _ if error.repository_gone() && error.code == Some("repository_removed") => {
+                ManagedCloudStatusState::Deleting
             }
+            _ if error.repository_gone() => ManagedCloudStatusState::Gone,
+            ErrorKind::Auth => ManagedCloudStatusState::SignInRequired,
+            ErrorKind::Permission => ManagedCloudStatusState::Inaccessible,
+            _ => ManagedCloudStatusState::Unavailable,
         };
         let message = match state {
-            ManagedCloudStatusState::Deleting => "This repository is being deleted.".to_string(),
+            ManagedCloudStatusState::Deleting => "Push creates it again.".to_string(),
+            ManagedCloudStatusState::Gone => {
+                "Deleted, or this account lost access. Push creates it again.".to_string()
+            }
             ManagedCloudStatusState::Inaccessible => {
-                "Repository unavailable. It was deleted or you no longer have access.".to_string()
+                "Mallard Cloud refused this account. It may be suspended.".to_string()
             }
             _ => error.message(),
         };
@@ -1236,7 +1406,223 @@ impl ManagedCloudStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity_log::{
+        ActivityLogContext, ActivityLogEntry, ActivityLogQuery, ActivityLogStore, ActivityLogType,
+    };
+    use http_body_util::{BodyExt, Full};
+    use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+    use hyper_util::rt::TokioIo;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn upload_response(
+        status: u16,
+        body: serde_json::Value,
+        request_id: &'static str,
+        cf_ray: &'static str,
+    ) -> (
+        ManagedCloudClient,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let requests = count.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let count = count.clone();
+                let body = Bytes::from(serde_json::to_vec(&body).unwrap());
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: hyper::Request<Incoming>| {
+                        let count = count.clone();
+                        let body = body.clone();
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            let _ = request.into_body().collect().await;
+                            Ok::<_, std::convert::Infallible>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("x-request-id", request_id)
+                                    .header("cf-ray", cf_ray)
+                                    .body(Full::new(body))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        let client = ManagedCloudClient::new(
+            &endpoint,
+            Some(SecretValue::parse("private-fixture-bearer-token").unwrap()),
+        )
+        .unwrap();
+        (client, requests, server)
+    }
+
+    #[tokio::test]
+    async fn failed_upload_diagnostics_reach_the_activity_log_without_retry() {
+        let (client, requests, server) = upload_response(
+            503,
+            json!({"error": "temporarily_unavailable", "detail": "The bytes could not be stored; retry."}),
+            "req-upload-failed",
+            "1234567890abcdef-SJC",
+        ).await;
+        let bytes = Bytes::from_static(b"private conversation fixture");
+        let sha256 = mallard_domain::sha256_hex(&bytes);
+        let key = format!(".mallard/v1/repositories/private-bundle/_objects/{sha256}");
+        let error = client
+            .put_object("private-repository", &key, bytes.clone(), &sha256, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(error.status, Some(503));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
+
+        // The production Push command persists this same error conversion.
+        let failure: String = error.into();
+        let entry = ActivityLogEntry::new(
+            ActivityLogType::Push,
+            "error",
+            "push.failed",
+            &format!("Push failed: {failure}"),
+            Some("push-fixture".into()),
+            ActivityLogContext::default(),
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = ActivityLogStore::from_home_dir(temp.path()).unwrap();
+        store.append(&entry).unwrap();
+        let page = store.query(&ActivityLogQuery::default()).unwrap();
+        let message = &page.entries[0].message;
+        for fact in [
+            "HTTP 503",
+            "temporarily_unavailable",
+            "request req-upload-failed",
+            "method=PUT",
+            "object_kind=object",
+            "elapsed_ms=",
+            "service_reason=r2_write_failed",
+            "cf_ray=1234567890abcdef-SJC",
+        ] {
+            assert!(message.contains(fact), "missing {fact}");
+        }
+        assert!(message.contains(&format!("bytes={}", bytes.len())));
+        assert!(message.contains(&format!("sha256={sha256}")));
+        for private in [
+            "private-fixture-bearer-token",
+            "private conversation",
+            "private-repository",
+            "private-bundle",
+            "http://",
+            "The bytes could not be stored",
+        ] {
+            assert!(!message.contains(private), "retained {private}");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_diagnostics_drop_unknown_service_text_and_invalid_identifiers() {
+        let (client, requests, server) = upload_response(
+            503,
+            json!({"error": "temporarily_unavailable", "detail": "Bearer remote-secret /Users/private/file?token=private-token"}),
+            "request/private-token",
+            "ray/private-token",
+        ).await;
+        let error = client
+            .put_object(
+                "private-repository",
+                "_objects/private-key",
+                Bytes::from_static(b"private-body"),
+                "private-digest",
+                1,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert!(error.request_id.is_none());
+        assert!(error.detail.is_none());
+        assert!(error.diagnostics.cf_ray.is_none());
+        assert!(error.diagnostics.service_reason.is_none());
+        assert!(!error.message().contains("private"));
+        assert!(!error.message().contains("remote-secret"));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn duplicate_upload_still_succeeds_without_retry() {
+        let (client, requests, server) = upload_response(
+            409,
+            json!({"error": "already_present", "detail": "The key already holds these bytes."}),
+            "req-duplicate",
+            "1234567890abcdef-SJC",
+        )
+        .await;
+        let bytes = Bytes::from_static(b"fixture");
+        let sha256 = mallard_domain::sha256_hex(&bytes);
+        assert_eq!(
+            client
+                .put_object("repo", "_objects/fixture", bytes, &sha256, 1)
+                .await
+                .unwrap(),
+            PutOutcome::AlreadyPresent
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn upload_transport_failure_keeps_the_unknown_write_outcome() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = ManagedCloudClient::new(&endpoint, None).unwrap();
+        let bytes = Bytes::from_static(b"fixture");
+        let sha256 = mallard_domain::sha256_hex(&bytes);
+        let error = client
+            .put_object("repo", "_objects/fixture", bytes, &sha256, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Unknown);
+        assert!(error.status.is_none());
+        assert!(error.message().contains("transport=connect"));
+        assert!(error.message().contains("object_kind=object"));
+        assert!(!error.message().contains(&endpoint));
+    }
+
+    #[test]
+    fn unavailable_diagnostics_distinguish_service_paths_without_retaining_text() {
+        assert_eq!(
+            unavailable_reason(
+                Some("temporarily_unavailable"),
+                "The object is being cleaned up; push again shortly."
+            ),
+            Some("object_cleanup_in_progress")
+        );
+        assert_eq!(
+            unavailable_reason(
+                Some("temporarily_unavailable"),
+                "The request could not be completed."
+            ),
+            Some("service_request_failed")
+        );
+        assert_eq!(
+            unavailable_reason(Some("unknown"), "The bytes could not be stored; retry."),
+            None
+        );
+        assert_eq!(
+            unavailable_reason(
+                Some("temporarily_unavailable"),
+                "The bytes could not be stored; retry. private data"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn origins_are_bare_http_origins() {
@@ -1263,6 +1649,7 @@ mod tests {
             code: Some("claim_mismatch"),
             request_id: Some("req-1".into()),
             detail: None,
+            diagnostics: ErrorDiagnostics::default(),
         };
         assert_eq!(
             error.message(),

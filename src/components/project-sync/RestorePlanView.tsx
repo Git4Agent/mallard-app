@@ -6,7 +6,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import ProjectActivityPage from "./ProjectActivityPage";
+import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
   type ProjectFileCommitImpactCounts,
@@ -23,14 +23,18 @@ import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
 import {
   buildPullReviewItems,
   buildPullReviewSelection,
+  fitPullRecommendation,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
+  pullBudgetTotal,
   recommendedPullSelection,
   requiredPullProjectDirectoryIds,
   requiresApproval,
   restoreActionIds,
   type PullReviewItem,
 } from "./pullReviewModel";
+import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../sync-review/ReviewBudgetMeter";
+import { formatBytes } from "../../format";
 
 interface Props {
   projectName: string;
@@ -61,8 +65,11 @@ interface Props {
 export interface PullReviewPrimary {
   /** Why the apply must not run right now; null when it may. */
   disabledReason: string | null;
-  /** The verb the button wears: "Pull N", or "Mark as reviewed" at zero. */
+  /** The verb the button wears: "Pull N", or "Mark as reviewed" at zero,
+   *  and "Loading sessions…" until the rows land. */
   label: string;
+  /** The rows have not landed yet; the button shows the wait. */
+  pending: boolean;
   /** Applies the review's current selection — the footer's own onClick. */
   apply: () => void;
 }
@@ -180,7 +187,11 @@ function ItemList({
               </span>
               <span className="sync-pull-item-copy">
                 <strong>{item.title}</strong>
-                <span>{itemKindLabel(item)}{item.provider ? ` · ${providerLabel(item.provider)}` : ""}</span>
+                <span>
+                  {itemKindLabel(item)}
+                  {item.provider ? ` · ${providerLabel(item.provider)}` : ""}
+                  {item.pullBytes != null ? ` · ${formatBytes(item.pullBytes)}` : ""}
+                </span>
               </span>
               {itemOperationChip(item) && (
                 <span className="sync-history-branch-state history-only" title={item.detail}>
@@ -257,6 +268,14 @@ export default function RestorePlanView({
   }, [items]);
 
   const selection = useMemo(() => buildPullReviewSelection(items, selected), [items, selected]);
+  // What the selection would install against the limit the review carries.
+  // Nothing is reserved: a Pull carries nothing it does not show as a row.
+  const budget = useMemo(
+    () => pullBudgetTotal(items, selected, plan.apply_limit_bytes),
+    [items, plan.apply_limit_bytes, selected],
+  );
+  const budgetBreakdown = `Sessions ${formatBytes(budget.sessions)} · Setup & tools ${formatBytes(budget.other)} · Project files ${formatBytes(budget.projectFiles)}`;
+  const overLimitSentence = budget.total > budget.limit ? reviewBudgetSentence(budget, "pull") : null;
   const approvalItems = items.filter((item) => (
     item.category !== "project_content" && requiresApproval(item) && !selected.has(item.resourceId)
   ));
@@ -269,18 +288,44 @@ export default function RestorePlanView({
   // its own async fetches; until it reports ready, the primary must not apply
   // a selection the user has not seen. The ItemList fallback is synchronous.
   const activityHistoryInUse = conversationItems.length > 0 && Boolean(project);
-  const [reviewListReady, setReviewListReady] = useState(false);
-  const primaryDisabledReason = !busy && activityHistoryInUse && !reviewListReady
-    ? "Loading storage changes…"
-    : null;
+  const [listState, setListState] = useState<ReviewListState>("loading");
+  const listPending = activityHistoryInUse && listState === "loading";
+  const listFailed = activityHistoryInUse && listState === "failed";
+  // What the placeholders draw while the list loads: the plan already knows
+  // how many sessions will land, and which of them exist only in storage.
+  const reviewScaffold = useMemo(() => ({
+    count: conversationItems.length,
+    storageOnly: conversationItems.filter((item) => (
+      item.conversationReviewRows.some((row) => row.action === "create_local")
+    )).length,
+  }), [conversationItems]);
+  // Loading first: while the list is not on screen every judgement below it
+  // is provisional. Then a list that failed, then the limit, with the
+  // meter's own sentence as the reason — the same rules the path bar's Pull
+  // reads through the primary.
+  const primaryDisabledReason = !busy && listPending
+    ? "Loading sessions…"
+    : !busy && listFailed
+      ? REVIEW_LIST_FAILED_REASON
+      : overLimitSentence;
   // An empty apply still runs — it marks the storage as reviewed and
   // unblocks Push — so the verb must say so instead of promising a Pull
   // that restores nothing. With rows ticked the button carries their count.
+  // Until the rows land the verb is the wait itself, on both buttons.
   const selectedPendingCount = items.filter((item) => (
     selected.has(item.resourceId) && restoreActionIds(item).length > 0
   )).length;
-  const primaryLabel = selectedPendingCount > 0 ? `Pull ${selectedPendingCount}` : "Mark as reviewed";
+  const primaryLabel = listPending
+    ? "Loading sessions…"
+    : selectedPendingCount > 0 ? `Pull ${selectedPendingCount}` : "Mark as reviewed";
   const primaryBusyLabel = selectedPendingCount > 0 ? "Pulling…" : "Marking as reviewed…";
+  /* The green "ready" message is gone from the shell, so the review says it
+     itself, once, when its rows land. Set after mount so a review that is
+     ready from its first render still changes the region and is heard. */
+  const [readyAnnounced, setReadyAnnounced] = useState(false);
+  useEffect(() => {
+    if (!listPending && !listFailed) setReadyAnnounced(true);
+  }, [listPending, listFailed]);
 
   // The storage-card Pull button is the same control as the footer primary,
   // so it must run the same apply under the same gating — including the
@@ -295,9 +340,10 @@ export default function RestorePlanView({
     onPrimaryChange?.({
       disabledReason: primaryDisabledReason,
       label: primaryLabel,
+      pending: listPending,
       apply: () => onApplyRef.current(selectionRef.current),
     });
-  }, [primaryDisabledReason, primaryLabel, onPrimaryChange]);
+  }, [primaryDisabledReason, primaryLabel, listPending, onPrimaryChange]);
   useEffect(() => () => onPrimaryChange?.(null), [onPrimaryChange]);
 
   const requiredProjectDirectories = requiredPullProjectDirectoryIds(items, selected);
@@ -314,7 +360,6 @@ export default function RestorePlanView({
     else next.add(resourceId);
     return includeRequiredPullProjectDirectories(items, next);
   });
-  const recommendedIds = new Set(items.filter(recommendedPullSelection).map((item) => item.resourceId));
   // The history step hosts every non-file item: sessions in the list, agent
   // setup & tools in the details row at the bottom of the same panel.
   const stepItems = activeStep === "project_files"
@@ -328,6 +373,12 @@ export default function RestorePlanView({
   const searchStepItems = searchActive
     ? conversationItems.filter((item) => matchingIds.has(item.resourceId))
     : stepItems;
+  // The sessions step's ✓ is the newest safe sessions that fit this pull,
+  // charging whatever the files step has ticked; the files step's ✓ stays
+  // every safe addition, and the meter refuses if they do not fit.
+  const recommendedIds = activeStep === "history"
+    ? fitPullRecommendation(items, searchStepItems, selected, plan.apply_limit_bytes)
+    : new Set(items.filter(recommendedPullSelection).map((item) => item.resourceId));
   const pendingSearchItems = searchStepItems.filter((item) => restoreActionIds(item).length > 0);
   const pendingStepItems = stepItems.filter((item) => (
     restoreActionIds(item).length > 0
@@ -431,14 +482,23 @@ export default function RestorePlanView({
             <h2 id="sync-pull-review-title">Pull review</h2>
             <span className="sync-pull-review-meta">Version {plan.revision}</span>
           </div>
+          <span className="sync-visually-hidden" role="status">
+            {readyAnnounced ? "Pull review ready — nothing applied yet." : ""}
+          </span>
         </div>
-        {/* The recommend button's own count is a property of the plan, not of
-            the selection, so it never moves when a row is ticked. */}
+        {/* The meters and the count measure rows; until the rows land they
+            would measure nothing anyone can see. The recommend button's own
+            count is a property of the plan, not of the selection, so it never
+            moves when a row is ticked. */}
+        {!listPending && <ReviewBudgetGlance budget={budget} verb="pull" breakdown={budgetBreakdown} />}
         <SyncReviewSelectionBar
           count={selectedIn(pendingStepItems)}
           total={pendingStepItems.length}
           busy={busy}
-          recommendedTitle={`Restore the recommended safe selection${searchActive ? " for matching sessions" : ""} (${pendingRecommendedCount})`}
+          listPending={listPending}
+          recommendedTitle={activeStep === "history"
+            ? `Select the newest ${searchActive ? "matching " : ""}sessions that fit this pull (${pendingRecommendedCount})`
+            : `Restore the recommended safe selection (${pendingRecommendedCount})`}
           recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching sessions" : ""} (${pendingRecommendedCount})`}
           recommendedDisabled={pendingSearchItems.length === 0 || stepMatchesRecommended}
           onRecommended={useRecommended}
@@ -506,7 +566,8 @@ export default function RestorePlanView({
                     return next;
                   })}
                   continuityActionBusy={busy}
-                  onReviewListReadyChange={setReviewListReady}
+                  onReviewListStateChange={setListState}
+                  reviewScaffold={reviewScaffold}
                 />
               ) : conversationItems.length > 0 ? (
                 <ItemList
@@ -525,10 +586,11 @@ export default function RestorePlanView({
                 <details className="sync-sync-review-other">
                   <summary>
                     <span><Icon name="settings" size={15} /><strong>Agent setup &amp; tools</strong></span>
-                    <span>{selectedIn(otherItems)} selected<Icon name="chevron-right" size={13} /></span>
+                    {/* The count waits on the readiness checks, in the line
+                        that is on screen, not inside a closed fold. */}
+                    <span>{supportLoading ? "Checking…" : `${selectedIn(otherItems)} selected`}<Icon name="chevron-right" size={13} /></span>
                   </summary>
                   <ItemList items={otherItems} selected={selected} phase={phase} disabled={busy} onToggle={toggle} />
-                  {supportLoading && <div className="sync-pull-support-loading"><Icon name="refresh" className="icon-spin" size={14} /> Checking readiness…</div>}
                 </details>
               )}
             </>
@@ -564,6 +626,13 @@ export default function RestorePlanView({
       </div>
 
       <footer className="sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer">
+        {overLimitSentence && (
+          /* The refusal takes a row of its own above the button cluster, where
+             the gauge that caused it and the button it stops both sit. It does
+             not announce: the gauge beside it is the status region, and its
+             own text already changed to the overshoot. */
+          <p className="sync-review-budget-sentence">{overLimitSentence}</p>
+        )}
         <ProjectFileCommitImpact
           counts={projectFileImpact}
           deletionTarget="local"
@@ -594,6 +663,7 @@ export default function RestorePlanView({
             {activeStep === "history" && <Icon name="chevron-right" size={14} />}
           </button>
         )}
+        {!listPending && <ReviewBudgetGauge budget={budget} verb="pull" breakdown={budgetBreakdown} />}
         <button
           type="button"
           className="btn btn-primary sync-pull-apply-button"
@@ -601,7 +671,7 @@ export default function RestorePlanView({
           title={primaryDisabledReason ?? undefined}
           onClick={() => onApply(selection)}
         >
-          {busy
+          {busy || listPending
             ? <Icon name="refresh" size={16} className="icon-spin" />
             : <ThreadStatusIcon status="cloud-outstanding" size={16} />}
           {busy ? primaryBusyLabel : primaryLabel}

@@ -747,6 +747,8 @@ test("pull selection rows wear the operation chips in the files grammar", () => 
       compared_against_storage: true,
       subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
       provider_thread_id: CODEX_SESSION_ID,
+      capture_bytes: 96 * 1024 * 1024,
+      pull_bytes: 118 * 1024 * 1024,
       push_decision: reviewDecision("require_pull"),
       pull_decision: reviewDecision("keep_both", true),
     }],
@@ -764,6 +766,10 @@ test("pull selection rows wear the operation chips in the files grammar", () => 
     />,
   );
   assert.match(html, />Update session · keeps local copy</);
+  // A pull-mode row prints what a pull of it installs, never what a push
+  // would capture.
+  assert.match(html, /aria-label="Pull size: 118 MB"/);
+  assert.doesNotMatch(html, /Push size/);
 });
 
 test("Pull review includes missing-child recovery and excludes unrelated unavailable sessions", () => {
@@ -1451,6 +1457,78 @@ test("a storage another computer cleared shows one standing note with no unlink 
   assert.match(render(displaced("push"), "push"), /Another computer pushed to Local storage 1 first/);
   assert.doesNotMatch(render(displaced("push"), "pull"), /Another computer pushed/);
   assert.doesNotMatch(displacedPush, /Another computer cleared|Push again\./);
+
+  // Mallard Cloud names what moved its history. A repository that is gone
+  // or being deleted speaks through the workspace's own note, and every
+  // session reads its own state: none reads as not compared.
+  type CloudStatus = NonNullable<ThreadSyncComparison["managed_cloud_status"]>;
+  const cloudLink: NonNullable<CloudStatus["link"]> = {
+    repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
+    website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
+    repository_revision: 7, can_request_release: false, role: "owner", release: { kind: "public" },
+  };
+  const cloud = (overrides: Partial<CloudStatus> = {}): CloudStatus => ({
+    repository_id: "repo_one", state: "ready", message: null,
+    link: cloudLink,
+    publication: { state: "matches_published", private_revision: 2, public_revision: 2 },
+    ...overrides,
+  });
+  const localOnly = {
+    provider: "codex" as const, provider_display_name: "Codex", access: "bound_ready" as const,
+    thread_id: CODEX_SESSION_ID, conversation_resource_id: codexResourceId,
+    resource_id: codexResourceId, display_name: "Comparison alias",
+    state: "local_only" as const, local_present: true, storage_present: false,
+    compared_against_storage: true,
+    subagent_selection: { wire_children: "on" as const, keys: [], omitted: false, estimated_bytes: 0 },
+    push_decision: { action: "create_cloud" as const, selectable: true },
+    pull_decision: { action: "report_local_only" as const, selectable: false },
+  };
+  for (const state of ["gone", "deleting"] as const) {
+    const html = render({
+      ...cleared,
+      storage_name: "Mallard Cloud",
+      entries: [localOnly],
+      managed_cloud_status: { repository_id: "repo_one", state, link: null, message: "Push creates it again." },
+    });
+    assert.doesNotMatch(html, /Another computer cleared|Draft discarded|Created again/, state);
+    assert.doesNotMatch(html, /Not compared|Comparison with Mallard Cloud failed|unknown status/, state);
+    assert.match(html, /Not in Mallard Cloud|Only on this|Local only|Push to/i, state);
+  }
+  const onCloud = (comparison: ThreadSyncComparison, status = cloud()) => render({ ...comparison, storage_name: "Mallard Cloud", managed_cloud_status: status });
+  // The draft was discarded: the repository holds its public version.
+  const discarded = onCloud(recreated);
+  assert.match(discarded, /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds public version 2\. Pull, then push again\./);
+  assert.match(onCloud(elsewhere), /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds public version 2\.(?! Pull)/);
+  // Discarded, and another computer pushed a new draft since.
+  const pushedSince = cloud({ publication: { state: "unpublished_draft", private_revision: 3, public_revision: 2 } });
+  assert.match(onCloud(recreated, pushedSince), /notice-lead">Draft discarded and pushed again<\/strong> — Pull, then push again\./);
+  assert.match(onCloud(elsewhere, pushedSince), /notice-lead">Draft discarded and pushed again<\/strong>/);
+  assert.doesNotMatch(onCloud(elsewhere, pushedSince), /Pull, then push again/);
+  // A private repository, discarded on the website, holds nothing.
+  const emptied = cloud({
+    link: { ...cloudLink, visibility: "private", release: { kind: "not_pushed" } },
+    publication: { state: "no_draft", private_revision: null, public_revision: null },
+  });
+  assert.match(onCloud(cleared, emptied), /notice-lead">Draft discarded<\/strong> — Push creates a new draft\./);
+  // The link's repository is gone and another computer created it again.
+  const createdAgain = cloud({ link: { ...cloudLink, repository_id: "repo_two" } });
+  assert.match(onCloud(recreated, createdAgain), /notice-lead">Created again<\/strong> — rika\/portal was deleted and created again\. Pull, then push again\./);
+  assert.match(onCloud(elsewhere, createdAgain), /notice-lead">Created again<\/strong> — rika\/portal was deleted and created again\.(?! Pull)/);
+  assert.match(
+    onCloud(emptyComparison({ remote_continuity: { state: "unreviewed", remote_revision: 1 }, scopes: [writable("provider:codex", { state: "unreviewed", remote_revision: 1 })] }), createdAgain),
+    /notice-lead">Created again<\/strong> — rika\/portal was deleted and created again\. Pull, then push again\./,
+  );
+  // A displaced push reads on Mallard Cloud as on any storage, and a history
+  // this computer is on has nothing to say.
+  assert.match(onCloud(displaced("push")), /Another computer pushed to Mallard Cloud first/);
+  assert.doesNotMatch(onCloud(emptyComparison()), /Draft discarded|Created again|Another computer/);
+  for (const html of [discarded, onCloud(recreated, pushedSince), onCloud(cleared, emptied), onCloud(recreated, createdAgain)]) {
+    assert.doesNotMatch(html, /Another computer cleared/);
+    assert.match(html, /class="notice warning[^"]*" role="region"/);
+    assert.doesNotMatch(html, /Unlink storage|Reset local sync|unlink/i);
+    // The Pull review is an ordinary Pull: no note.
+  }
+  assert.doesNotMatch(render({ ...recreated, managed_cloud_status: cloud() }, "pull"), /Draft discarded/);
 
   // No state asks for an unlink or a reset, and the note has no action.
   for (const html of [openHtml, render(recreated), displacedPush]) {
@@ -3542,6 +3620,37 @@ test("cloud loading is announced without a status panel and does not report a fi
   assert.match(failed, /Storage unavailable/);
 });
 
+test("a review list is loading until both reads settle, never blank, and a failed comparison has its own retry", () => {
+  const review = { ...contentDefaults, selectionMode: "pull" as const, reviewScaffold: { count: 4, storageOnly: 1 } };
+  // First commit: every flag is still false and nothing has landed. The old
+  // flag-keyed branch painted null here.
+  const first = renderToStaticMarkup(<ProjectChatHistoryContent {...review} activity={null} />);
+  assert.match(first, /class="loading-scaffold sessions" role="region" aria-label="Loading sessions"/);
+  assert.equal(first.match(/class="loading-scaffold-row"/g)?.length, 4);
+  assert.match(first, /<section class="sync-history-storage-only">/);
+  assert.doesNotMatch(first, /Search sessions/);
+
+  // Sessions landed, comparison still out: the screenshot's blank list.
+  const comparing = renderToStaticMarkup(<ProjectChatHistoryContent {...review} activity={activity} />);
+  assert.match(comparing, /Comparing with this computer…/);
+  assert.doesNotMatch(comparing, /Search sessions|No session changes|sync-history-thread-card/);
+
+  // The comparison failed: the list's own box with Try again, and no note
+  // promising rows "below" that a review cannot draw.
+  const failed = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...review} activity={activity} comparisonError="Storage unavailable" />,
+  );
+  assert.match(failed, /role="alert"[\s\S]*Couldn&#x27;t compare this computer with selected storage\.[\s\S]*Storage unavailable[\s\S]*Try again/);
+  assert.doesNotMatch(failed, /loading-scaffold|Every row below falls back/);
+
+  // Browse mode keeps its own scaffold and its note.
+  const browse = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} comparisonError="Storage unavailable" />,
+  );
+  assert.doesNotMatch(browse, /loading-scaffold sessions/);
+  assert.match(browse, /Every row below falls back to an unknown status/);
+});
+
 test("old and recent cloud sessions share full rows in Pull review", () => {
   const sessions = [1, 60, 120].map((days) => ({
     ...codexSession,
@@ -3587,4 +3696,31 @@ test("both activity request paths explicitly select review scope", () => {
   assert.match(page, /refreshProjectActivity\(\{[\s\S]*?review: selectionMode != null,/);
   assert.match(api, /invoke<void>\("refresh_project_activity", \{[^}]*review,/);
   assert.doesNotMatch(page, /reviewWindowDays/);
+});
+
+
+test("local session deletion is before info, works for both providers, and is hidden in reviews", () => {
+  for (const provider of ["codex", "claude"]) {
+    const props = { ...contentDefaults, activity: { ...activity, sessions: [{ ...codexSession, provider }] },
+      onDeleteSession: () => undefined };
+    const html = renderToStaticMarkup(<ProjectChatHistoryContent {...props} />);
+    assert.match(html, /aria-label="Delete local session"/);
+    assert.ok(html.indexOf('aria-label="Delete local session"') < html.indexOf('title="Session info"'));
+    const busy = renderToStaticMarkup(<ProjectChatHistoryContent {...props}
+      actionBusyResourceId={codexResourceId} actionBusyActionId="delete" />);
+    assert.match(busy, /aria-label="Delete local session"[^>]*disabled=""/);
+    assert.match(busy, /icon-spin/);
+    for (const selectionMode of ["push", "pull"] as const) {
+      assert.doesNotMatch(renderToStaticMarkup(<ProjectChatHistoryContent {...props}
+        selectionMode={selectionMode} />), /aria-label="Delete local session"/);
+    }
+    for (const session of [
+      { ...codexSession, source: "remote_only" as const },
+      { ...codexSession, access: "bound_unavailable" as const },
+      { ...codexSession, transcript_path: null },
+    ]) {
+      assert.doesNotMatch(renderToStaticMarkup(<ProjectChatHistoryContent {...props}
+        activity={{ ...activity, sessions: [session] }} />), /aria-label="Delete local session"/);
+    }
+  }
 });

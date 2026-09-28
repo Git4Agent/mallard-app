@@ -25,8 +25,10 @@ use mallard_domain::{
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
 pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-/// The most bytes one capture may retain. Push Compare reports this limit and
-/// byte estimates; Push Apply enforces it on the selected resources.
+/// The most bytes one Apply moves, in either direction. Push Compare reports
+/// it with byte estimates and Push Apply enforces it on the captured
+/// selection; Pull Compare reports it with each row's stored size and Pull
+/// Apply enforces it on the bytes the selection installs.
 pub const MAX_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_METADATA_LINES: usize = 128;

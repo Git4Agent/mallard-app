@@ -11,7 +11,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import ProjectActivityPage from "./ProjectActivityPage";
+import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
   projectFileDeletionCount,
@@ -26,6 +26,7 @@ import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSte
 import { STORAGE_BLOCKING_STATES } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
+import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
 
 export interface PushReviewBlocker {
@@ -58,6 +59,10 @@ interface Props {
    *  so its refusal has to see the acknowledgement too. */
   deletionApproved?: boolean;
   onDeletionApprovedChange?: (approved: boolean) => void;
+  /** Owned above the panel for the same reason: the path bar's Push waits
+   *  for the session list exactly as the footer's does. */
+  listState?: ReviewListState;
+  onListStateChange?: (state: ReviewListState) => void;
   /** Live upload progress while the push publishes; renders in the footer button. */
   fetchProgress?: BundleFetchProgress | null;
   showProjectFiles?: boolean;
@@ -282,11 +287,21 @@ export function recommendedPushSelection(
   // Reserve the same fixed content that the review meter counts.
   for (const entry of conversations) recommended.delete(entry.resource_id);
   const fixedBudget = pushBudgetTotal(recommended, threadComparison, projectContentInventory);
-  let remainingBytes = fixedBudget ? fixedBudget.limit - fixedBudget.total : Infinity;
+  const room = fixedBudget ? fixedBudget.limit - fixedBudget.total : Infinity;
+  let remainingBytes = room;
   for (const entry of conversations) {
     if (!selectableIds.has(entry.resource_id)) continue;
     const bytes = entry.capture_bytes ?? 0;
-    if (bytes > remainingBytes) continue;
+    if (bytes > remainingBytes) {
+      // A strict time prefix, not a first fit: the walk ends at the first
+      // session that does not fit, so the ticked rows are one block at the
+      // top of the list with nothing older slipped in under them. The one
+      // exception is a session that could not fit an empty push — skipped,
+      // or the default would stall at zero behind a row the meter refuses
+      // anyway.
+      if (bytes > room) continue;
+      break;
+    }
     recommended.add(entry.resource_id);
     remainingBytes -= bytes;
   }
@@ -388,6 +403,7 @@ export function pushReviewDisabledReason({
   projectContentRemovals = new Set<string>(),
   deletionApproved,
   projectContentLoading = false,
+  listState = "ready",
 }: {
   /** Sanitized: `sanitizePushSelection`, which is what the push carries. */
   selected: ReadonlySet<string>;
@@ -397,12 +413,17 @@ export function pushReviewDisabledReason({
   projectContentRemovals?: ReadonlySet<string>;
   deletionApproved: boolean;
   projectContentLoading?: boolean;
+  /** The session list's state: a Push waits until its rows are on screen,
+   *  so nothing ticked by default travels unseen. */
+  listState?: ReviewListState;
 }): string | null {
-  /* First: while the scan is running every judgement below it is provisional,
-     including the size of the push. */
+  /* First: until the rows are on screen, or while the scan is running,
+     every judgement below is provisional, including the size of the push. */
+  if (listState === "loading") return "Loading sessions…";
+  if (listState === "failed") return REVIEW_LIST_FAILED_REASON;
   if (projectContentLoading) return "Project files are still being scanned";
   const budget = pushBudgetTotal(selected, threadComparison, projectContentInventory);
-  if (budget && budget.total > budget.limit) return pushBudgetSentence(budget);
+  if (budget && budget.total > budget.limit) return reviewBudgetSentence(budget, "push");
   const blockers = pushReviewBlockers(
     selected,
     threadComparison,
@@ -428,107 +449,11 @@ export function pushReviewDisabledReason({
 
 type PushBudget = NonNullable<ReturnType<typeof pushBudgetTotal>>;
 
-/** What the meter says in one line: the size while it fits, the overshoot and
- *  the way out past the limit. The over sentence is also the Push button's
- *  title, so the refusal and its reason are worded once. */
-function pushBudgetSentence(total: PushBudget): string {
-  return total.total > total.limit
-    ? `${formatBytes(total.total - total.limit)} over the ${formatBytes(total.limit)} push limit — exclude sessions or files to push.`
-    : `This push · ${formatBytes(total.total)} of ${formatBytes(total.limit)}`;
-}
-
+/** The meter's title on both instances: the sources the total is made of.
+ *  The meter itself is the shared review primitive; only this wording is
+ *  Push's, because only Push carries requirements. */
 function pushBudgetBreakdown(total: PushBudget): string {
   return `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
-}
-
-/** `424 MB / 512 MB` while it fits, the overshoot alone once it does not —
- *  `short` drops the trailing "over 512 MB" where the sentence beside it has
- *  already named the limit. Carries the meter semantics for both instances. */
-function PushBudgetFigure({ total, short = false, label }: {
-  total: PushBudget;
-  short?: boolean;
-  label?: string;
-}) {
-  const over = total.total - total.limit;
-  return (
-    <span
-      className={`sync-push-budget-figure${over > 0 ? " over" : ""}`}
-      role="meter"
-      aria-label={label}
-      aria-valuemin={0}
-      aria-valuemax={total.limit}
-      aria-valuenow={Math.min(total.total, total.limit)}
-      aria-valuetext={pushBudgetSentence(total)}
-    >
-      {over > 0
-        ? <><b>+{formatBytes(over)}</b>{short ? "" : ` over ${formatBytes(total.limit)}`}</>
-        : <><b>{formatBytes(total.total)}</b> / {formatBytes(total.limit)}</>}
-    </span>
-  );
-}
-
-/** The bar under the header's figure. Scaled to max(total, limit): while the
- *  push fits, the track's right end IS the limit; past it the limit becomes a
- *  tick the fill visibly runs beyond, so the overshoot reads as a distance and
- *  not only as a number.
- *
- *  One fill, not a segment per source. Sessions, requirements and project
- *  files were drawn in three tones first, and the palette cannot carry them at
- *  6px: --text-3 against --thread-status-local measures 1.05:1 on cream, so
- *  the requirements segment simply disappeared into the sessions one. The
- *  breakdown stays where it has always been — the title on both instances.
- *  Decoration: the figure beside it is the meter. */
-function PushBudgetTrack({ total }: { total: PushBudget }) {
-  const scale = Math.max(total.total, total.limit);
-  const over = total.total > total.limit;
-  return (
-    <span className={`sync-push-budget-track${over ? " over" : ""}`} aria-hidden="true">
-      <i style={{ width: `${(total.total / scale) * 100}%` }} />
-      {over && <b style={{ left: `${(total.limit / scale) * 100}%` }} />}
-    </span>
-  );
-}
-
-/** The header's glance: the same measurement as the footer gauge, in the one
- *  other zone of the review that does not scroll away, so what this push
- *  carries is on screen at the top of a long list as well as at the button.
- *  It is not a live region — the footer's is, and two would read every tick
- *  out twice. */
-function PushBudgetGlance({ total }: { total: PushBudget }) {
-  return (
-    <div className="sync-push-budget-glance" title={pushBudgetBreakdown(total)}>
-      <PushBudgetTrack total={total} />
-      <PushBudgetFigure total={total} short label="Push size" />
-    </div>
-  );
-}
-
-/** The footer gauge: a pill the height of the button that fills left to right
- *  behind its own figure, set flush against Push so the quantity and the act
- *  that spends it read as one object. Live with the selection, which is why it
- *  sits beside the button and not in the banner zone above the list. */
-function PushBudgetGauge({ total }: { total: PushBudget }) {
-  const over = total.total > total.limit;
-  return (
-    <div
-      className={`sync-push-budget-gauge${over ? " over" : ""}`}
-      role="status"
-      title={pushBudgetBreakdown(total)}
-    >
-      {/* Past the limit there is nothing left to fill, and painting the danger
-          ink as a wash under its own figure took that figure to 3.4:1 on the
-          light theme. The plate and the ring carry the state instead; how far
-          over it went is the header track's job. */}
-      {!over && (
-        <span
-          className="sync-push-budget-fill"
-          style={{ width: `${(total.total / total.limit) * 100}%` }}
-          aria-hidden="true"
-        />
-      )}
-      <PushBudgetFigure total={total} short />
-    </div>
-  );
 }
 
 export default function PushResourceWorkspace({
@@ -551,6 +476,8 @@ export default function PushResourceWorkspace({
   acknowledgedWarningDigests = new Set(),
   deletionApproved = false,
   onDeletionApprovedChange,
+  listState = "ready",
+  onListStateChange,
   fetchProgress = null,
   showProjectFiles = false,
   activeStep: controlledActiveStep,
@@ -752,7 +679,7 @@ export default function PushResourceWorkspace({
   // ceiling can refuse Apply.
   const budgetTotal = pushBudgetTotal(effectiveSelected, threadComparison, projectContentInventory);
   const overLimitSentence = budgetTotal && budgetTotal.total > budgetTotal.limit
-    ? pushBudgetSentence(budgetTotal)
+    ? reviewBudgetSentence(budgetTotal, "push")
     : null;
   /* Not recomputed here: the path bar's Push publishes this same review, and
      the two conditions diverged for as long as each owned its own. */
@@ -764,7 +691,22 @@ export default function PushResourceWorkspace({
     projectContentRemovals,
     deletionApproved,
     projectContentLoading,
+    listState,
   });
+  /* The meters and the count measure rows; until the rows land they would
+     measure a default selection nobody has seen. */
+  const listPending = listState === "loading";
+  /* The review says it is ready once, when its rows land — after mount, so a
+     review ready from its first render still changes the region. */
+  const [readyAnnounced, setReadyAnnounced] = useState(false);
+  useEffect(() => {
+    if (listState === "ready") setReadyAnnounced(true);
+  }, [listState]);
+  // The placeholders take the count of sessions the list will land.
+  const reviewScaffold = useMemo(
+    () => ({ count: visibleConversations.length, storageOnly: 0 }),
+    [visibleConversations.length],
+  );
 
   const commitSelection = (next: Set<string>) => {
     const safeNext = includeRequiredProjectContentDirectories(
@@ -855,12 +797,18 @@ export default function PushResourceWorkspace({
         <div className="sync-sync-review-title">
           <h2 id="sync-push-resource-title">Push review</h2>
           <span className="sync-settings-flag">Credential redaction: {credentialRedactionEnabled ? "On" : "Off"}</span>
+          <span className="sync-visually-hidden" role="status">
+            {readyAnnounced ? "Push review ready." : ""}
+          </span>
         </div>
-        {budgetTotal && <PushBudgetGlance total={budgetTotal} />}
+        {budgetTotal && !listPending && (
+          <ReviewBudgetGlance budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
+        )}
         <SyncReviewSelectionBar
           count={countSelected(currentGroup, effectiveSelected)}
           total={currentGroup.length}
           busy={busy}
+          listPending={listPending}
           recommendedTitle={`Use the recommended ${searchActive ? "matching session" : activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
           recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching sessions" : ""} (${recommendedCount})`}
           recommendedDisabled={currentDefaults.length === 0 || currentMatchesDefaults}
@@ -927,6 +875,8 @@ export default function PushResourceWorkspace({
                   onReviewPull={onPull}
                   continuityActionBusy={busy}
                   comparisonOverride={threadComparison}
+                  onReviewListStateChange={onListStateChange}
+                  reviewScaffold={reviewScaffold}
                 />
               ) : (
                 <>
@@ -1003,7 +953,7 @@ export default function PushResourceWorkspace({
              the gauge that caused it and the button it stops both sit. It does
              not announce: the gauge beside it is the status region, and its
              own text already changed to the overshoot. */
-          <p className="sync-push-budget-sentence">{overLimitSentence}</p>
+          <p className="sync-review-budget-sentence">{overLimitSentence}</p>
         )}
         <ProjectFileCommitImpact
           counts={projectFileImpact}
@@ -1048,7 +998,9 @@ export default function PushResourceWorkspace({
             {activeStep === "history" && <Icon name="chevron-right" size={14} />}
           </button>
         )}
-        {budgetTotal && <PushBudgetGauge total={budgetTotal} />}
+        {budgetTotal && !listPending && (
+          <ReviewBudgetGauge budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
+        )}
         <button
           type="button"
           className="btn btn-primary sync-pull-apply-button"
@@ -1056,14 +1008,14 @@ export default function PushResourceWorkspace({
           disabled={busy || pushDisabledReason !== null}
           title={pushDisabledReason ?? undefined}
         >
-          {busy
+          {busy || listPending
             ? <Icon name="refresh" size={16} className="icon-spin" />
             : <ThreadStatusIcon status="local-outstanding" size={16} />}
           {busy
             ? (fetchProgress && fetchProgress.phase === "push"
               ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
               : "Pushing…")
-            : "Push"}
+            : listPending ? "Loading sessions…" : "Push"}
         </button>
       </footer>
     </section>

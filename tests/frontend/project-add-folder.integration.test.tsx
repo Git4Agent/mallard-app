@@ -86,7 +86,7 @@ test("the verdict line says what setup would make of the folder", () => {
   assert.deepEqual(verdict({ kind: "not_a_directory", parent: path }), {
     tone: "bad",
     message: "This is a file.",
-    action: { label: "Use ~/code/app", value: "~/code/app" },
+    actions: [{ label: "Use ~/code/app", value: "~/code/app" }],
   });
   assert.match(verdict({ kind: "mallard_data", contains: true })!.message, /holds Mallard’s own data/);
   assert.match(verdict({ kind: "mallard_data", contains: false })!.message, /Mallard’s own data folder/);
@@ -96,7 +96,7 @@ test("the verdict line says what setup would make of the folder", () => {
   assert.deepEqual(verdict(folder({ existing_project_ids: ["project-blog"] })), {
     tone: "ok",
     message: "Already added as “blog”.",
-    action: { label: "Set it up with another agent profile", anotherProfile: true },
+    actions: [{ label: "Set it up with another agent profile", run: "another-profile" }],
   });
   // A stale answer for an earlier path is never shown as this path's.
   assert.equal(folderVerdict(input, settled(`${HOME}/code`, folder()), context)!.message, "Checking");
@@ -154,13 +154,21 @@ test("New project opens at the Folder field and writes nothing until a folder is
       isWorkflowCurrent={() => true}
       projects={[blog]}
       providers={providers}
+      profiles={[]}
+      storages={[]}
       busy={false}
       onCancel={() => {}}
       onChoose={() => {}}
       onOpenProject={() => {}}
+      onAddCloudAccount={() => {}}
+      onCloudProjectDone={() => {}}
     />,
   );
   assert.match(html, /<h1 id="sync-new-project-title">New project<\/h1>/);
+  // Two doors; the folder one is open unless From Mallard Cloud was asked for.
+  assert.match(html, /role="radiogroup" aria-label="Where the project comes from"/);
+  assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?<strong>On this computer<\/strong>/);
+  assert.match(html, /aria-checked="false"[^>]*>[\s\S]*?<strong>From Mallard Cloud<\/strong>/);
   // One band named Folder; the field's own label stays for screen readers.
   assert.match(html, /<div class="sync-card-heading"><div><strong>Folder<\/strong><\/div><\/div>/);
   assert.doesNotMatch(html, /<strong>Project<\/strong>/);

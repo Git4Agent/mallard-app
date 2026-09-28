@@ -1,0 +1,148 @@
+/* App.css locks html, body and #root for the app shell; #root scrolls. */
+html, body { height: 100%; overflow: hidden !important; }
+body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+#root { height: 100%; overflow-y: auto !important; }
+
+/* ——— specimen chrome (not app CSS) ——————————————————————— */
+.spec { max-width: 1240px; margin: 0 auto; padding: 16px 20px 120px; display: grid; gap: 18px; font: 13px/1.45 system-ui, sans-serif; }
+.spec-title { font: 700 20px/1.2 system-ui; }
+.spec-sub { margin-top: -10px; color: var(--text-2); max-width: 1000px; }
+.spec-controls { position: sticky; top: 0; z-index: 60; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+.spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.spec-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+.spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+.spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+.spec-select { padding: 3px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-0); color: var(--text-0); font: 600 12px/1.2 system-ui; }
+.spec-h2 { margin: 14px 0 0; font: 700 16px/1.3 system-ui; }
+.spec-lede { margin: -12px 0 0; color: var(--text-2); max-width: 900px; }
+.spec-panel { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); overflow-x: auto; }
+.spec-row { display: grid; gap: 26px; align-items: start; }
+.spec-row.two { grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); }
+.spec-frame-wrap { min-width: 0; }
+.spec-col-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 4px; font: 700 14px/1.3 system-ui; }
+.spec-col-title em { padding: 1px 8px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font: 600 11px/1.5 system-ui; font-style: normal; }
+.spec-measure { margin-left: auto; color: var(--text-3); font: 500 11px/1.4 ui-monospace, monospace; }
+.spec-col-note { margin: 0 0 8px; color: var(--text-2); font-size: 12px; max-width: 900px; }
+.spec-issues { margin: 0; padding-left: 18px; }
+.spec-frame { position: relative; max-width: 100%; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--bg-0); }
+.spec-frame > .sync-pathbar { border-radius: 11px 11px 0 0; }
+.spec-frame .sync-main { height: auto !important; min-height: 0 !important; overflow: visible !important; padding: 12px 18px 16px; }
+.spec-hint { margin: 0; color: var(--text-3); font-size: 12px; }
+.spec-anchor { position: relative; display: inline-flex; }
+.spec-menu-room { height: 330px; }
+.spec-pop-room { height: 300px; }
+
+.spec-states { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+.spec-states th, .spec-states td { padding: 6px 12px 6px 0; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--border); }
+.spec-states th { color: var(--text-2); font-weight: 600; }
+.spec-states td small { display: block; color: var(--text-2); }
+.spec-states tr { cursor: pointer; }
+.spec-states tr[aria-selected="true"] td { background: var(--accent-soft); }
+.spec-states .sync-path-cloud-status { box-shadow: none; }
+.spec-today-chip .sync-path-attention[data-tooltip]::after { display: none; }
+
+.spec-marks { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.spec-mark { display: grid; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); color: var(--text-0); }
+.spec-mark-sizes { display: flex; align-items: flex-end; gap: 12px; }
+.spec-mark-raster { display: flex; gap: 8px; color: var(--text-0); }
+.spec-raster { image-rendering: pixelated; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-0); color: var(--text-0); }
+.spec-mark b { font: 700 12px/1.2 ui-monospace, monospace; }
+.spec-mark small { color: var(--text-2); font-size: 11.5px; }
+.spec-mark small.spec-bad { color: var(--danger-text); font-weight: 700; }
+.spec-swap { display: inline-flex; }
+
+.spec-patterns h4 { margin: 10px 0 2px; font: 700 13px/1.3 system-ui; }
+.spec-patterns h4:first-child { margin-top: 0; }
+.spec-patterns p { margin: 0 0 4px; color: var(--text-1); max-width: 980px; }
+.spec-patterns a { color: var(--info-text); }
+
+/* ——— proposed app CSS ———————————————————————————————————— */
+/* The Cloud chip becomes the button that opens the Cloud popover. Same
+   26px box. A (mark) stays at the mark-only width at every size; B and C
+   show the word above 960px and fold to A's mark below it, chevron too,
+   so the 580px floor keeps its slack. */
+button.sync-path-cloud-status { background: transparent; font: inherit; cursor: pointer; }
+button.sync-path-cloud-status:hover { background: var(--bg-hover); }
+.spec-cloud-button.mark { padding-inline: 4px; }
+/* The chip's downward tooltip carries the word on hover; it steps aside
+   while the popover is open. */
+.spec-cloud-button[data-tooltip] { cursor: pointer; }
+.spec-cloud-button[aria-expanded="true"]::after { display: none; }
+.spec-cloud-button > svg, .spec-cloud-button > .spec-swap { flex: 0 0 auto; }
+.spec-cloud-button > .sync-path-chevron { margin-left: -2px; }
+@container sync-pathbar (max-width: 960px) {
+  .spec-cloud-button.word { padding-inline: 4px; }
+  .spec-cloud-button.word > b, .spec-cloud-button.word > .sync-path-chevron { display: none; }
+}
+
+/* The popover: the menu's panel, a status block beside the role=menu
+   list (as the menu's Note sits beside it), then the verbs as rows. */
+.spec-cloud-pop { width: 300px; max-width: 300px; }
+.spec-pop-head { display: flex; align-items: center; gap: 10px; padding: 6px 8px 4px; color: var(--text-0); }
+.spec-pop-head .sync-path-menu-copy > span { font-family: var(--font-display); font-size: var(--type-md); font-weight: var(--weight-bold); }
+.spec-pop-head .sync-path-menu-copy > small { font-family: var(--font-mono); }
+.spec-pop-head.warning .sync-path-menu-copy > span { color: var(--warning-text); }
+.spec-pop-head.danger .sync-path-menu-copy > span { color: var(--danger-text); }
+.spec-pop-line { margin: 2px 8px 8px; color: var(--text-2); font-size: var(--type-xs); line-height: 1.35; }
+.spec-pop-body { padding-bottom: 4px; }
+.spec-pop-action { margin: 0 8px 4px; }
+.spec-pop-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin: 0 8px 6px; }
+.spec-pop-facts > div { display: grid; gap: 1px; }
+.spec-pop-facts dt { color: var(--text-3); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-semibold); letter-spacing: .1em; text-transform: uppercase; }
+.spec-pop-facts dd { margin: 0; color: var(--text-0); font-family: var(--font-mono); font-size: var(--type-xs); font-weight: var(--weight-semibold); }
+.spec-pop-primary { margin: 0 8px 4px; width: calc(100% - 16px); justify-content: center; }
+
+/* C: three stops on a line. */
+.spec-track { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); margin: 6px 4px 8px; padding: 0; list-style: none; }
+.spec-track::before { content: ""; position: absolute; top: 9px; left: 16%; right: 16%; height: 2px; background: var(--border-strong); }
+.spec-track > li { position: relative; display: grid; justify-items: center; gap: 2px; text-align: center; }
+.spec-track-dot { display: grid; place-items: center; width: 20px; height: 20px; border: var(--box-border); border-radius: 999px; background: var(--surface-popover); color: var(--accent-contrast); }
+.spec-track > li.done .spec-track-dot { background: var(--text-0); }
+.spec-track > li.current .spec-track-dot { background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-glow); }
+.spec-track > li.fail .spec-track-dot { border-color: var(--danger-text); background: var(--danger-text); }
+.spec-track > li b { font-family: var(--font-display); font-size: var(--type-xs); color: var(--text-0); }
+.spec-track > li small { font-family: var(--font-mono); font-size: var(--type-2xs); color: var(--text-2); }
+.spec-track > li.current small { color: var(--text-0); font-weight: var(--weight-semibold); }
+.spec-track > li.fail small { color: var(--danger-text); font-weight: var(--weight-semibold); }
+/* Copying the links. */
+.spec-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.spec-link-row { display: flex; align-items: center; gap: 2px; }
+.spec-link-row > .sync-path-menu-item { flex: 1 1 auto; min-width: 0; }
+.spec-copy { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 30px; height: 30px; padding: 0 8px; border: 2px solid transparent; border-radius: var(--r-pill); background: transparent; color: var(--text-2); font: inherit; cursor: pointer; }
+.spec-copy:hover { background: var(--surface-row-hover); color: var(--text-0); }
+.spec-copy:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.spec-copy.copied { color: var(--success-text); }
+.spec-copy small { font-size: var(--type-2xs); font-weight: var(--weight-semibold); }
+.spec-copy-row { color: var(--text-2); }
+.spec-copy-error { margin-top: 6px; color: var(--danger-text); }
+.spec-copy-row.copied, .spec-copy-row.copied > svg { color: var(--success-text); }
+.spec-cloud-pop.links { width: 340px; max-width: 340px; }
+.spec-link-fields { margin-top: 4px; }
+.spec-link-fields .sync-history-debug-copy { grid-template-columns: 50px minmax(0, 1fr) 44px; }
+.spec-primary-row { display: flex; align-items: center; gap: 4px; margin: 0 8px 4px; }
+.spec-primary-row > .spec-pop-primary { flex: 1 1 auto; width: auto; margin: 0; }
+.spec-pop-alone { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 22px; align-items: start; }
+.spec-pop-alone .sync-path-menu { position: static; max-height: none; }
+[hidden] { display: none !important; }
+
+/* ——— the picks page ————————————————————————————————————————— */
+.spec-fold { display: grid; gap: 10px; }
+.spec-fold-row { display: grid; gap: 4px; }
+.spec-fold-row .spec-measure { margin-left: 0; }
+.spec-tip-on[data-tooltip]::after { visibility: visible; }
+.spec-state-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; align-items: start; }
+.spec-state-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-0); }
+.spec-state-card.proposed { border-style: dashed; }
+.spec-state-card-head { display: flex; gap: 10px; align-items: baseline; }
+.spec-state-card-head b { display: block; font: 700 13px/1.3 system-ui; }
+.spec-state-card-head em { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--warning-soft); color: var(--warning-text); font: 600 10.5px/1.5 system-ui; font-style: normal; }
+.spec-state-card-head small { display: block; color: var(--text-3); font: 500 11px/1.4 ui-monospace, monospace; }
+.spec-rank { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font: 700 11px/1 system-ui; }
+.spec-state-chips { display: flex; align-items: center; gap: 8px; }
+.spec-state-chips small { color: var(--text-3); font-size: 11px; }
+.spec-state-chips .sync-path-cloud-status { box-shadow: var(--shadow-control); }
+.spec-pop-alone.one { grid-template-columns: 1fr; }
+.spec-pop-alone.one .spec-cloud-pop { width: 100%; max-width: 340px; }
+.spec-pop-standing { margin-top: -2px; color: var(--text-3); }
+.spec-checking { opacity: .7; cursor: default; }
+.spec-checking > b { color: var(--text-2); }

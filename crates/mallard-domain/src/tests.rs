@@ -997,6 +997,68 @@ fn mixed_provider_manifest_validates_with_unknown_scopes_preserved() {
     decoded.validate().unwrap();
 }
 
+#[test]
+fn a_pull_of_a_thread_weighs_every_file_the_manifest_lists_for_it() {
+    let codex = sealed_provider_scope("codex", "0123456789abcdef0123456789abcdef");
+    let mut scope = codex.scope;
+    // Beside the sealed scope's 10-byte transcript, a sidecar the thread
+    // lists: the sum is what a pull installs, not the transcript alone.
+    let sidecar = LogicalPath::parse(format!(
+        "state/conversations/codex/{}/sidecars/todo/todo.json",
+        codex.thread_id
+    ))
+    .unwrap();
+    let thread = scope.conversations.get_mut(&codex.thread_id).unwrap();
+    thread.files.push(ConversationFileRef {
+        logical_path: sidecar.clone(),
+        role: ConversationFileRole::Sidecar {
+            sidecar_kind: "todo".to_string(),
+        },
+    });
+    // And a reference the manifest does not resolve: validation rejects such
+    // a manifest, and the read-only sum counts nothing for it rather than
+    // failing.
+    thread.files.push(ConversationFileRef {
+        logical_path: LogicalPath::parse(format!(
+            "state/conversations/codex/{}/sidecars/todo/missing.json",
+            codex.thread_id
+        ))
+        .unwrap(),
+        role: ConversationFileRole::Sidecar {
+            sidecar_kind: "todo".to_string(),
+        },
+    });
+    scope.files.insert(
+        sidecar,
+        BundleFileEntry {
+            resource_id: thread.resource_id.clone(),
+            sha256: "d".repeat(64),
+            size: 5,
+            source_mtime: 1,
+            object_key: "_objects/".to_string() + &"d".repeat(64),
+            mode: Some(0o600),
+        },
+    );
+    let manifest = scoped_manifest(BTreeMap::from([
+        (SyncScopeKey::Project, sealed_project_scope()),
+        (SyncScopeKey::Provider(provider("codex")), scope),
+    ]));
+    let (_, thread) = manifest.find_conversation(&codex.thread_id).unwrap();
+    assert_eq!(manifest.conversation_bytes(thread), 15);
+
+    // The stored session's last-message time reads as the activity row
+    // reads it: the end, else the start, never before the start.
+    assert_eq!(thread.last_message_at(), Some(2));
+    let mut unended = thread.clone();
+    unended.presentation.ended_at = None;
+    assert_eq!(unended.last_message_at(), Some(1));
+    unended.presentation.started_at = None;
+    assert_eq!(unended.last_message_at(), None);
+    let mut reversed = thread.clone();
+    reversed.presentation.ended_at = Some(0);
+    assert_eq!(reversed.last_message_at(), Some(1));
+}
+
 /// The out-of-band path-map stamp is claimed exactly where no in-band
 /// declaration exists: a claude row without one is unreadable by design,
 /// and an in-band provider carrying one is a writer bug.
@@ -3275,6 +3337,8 @@ fn plan_actions_validate_relation_action_and_pins() {
         blocked_reason: None,
         action_id: None,
         display_title: None,
+        source_size: None,
+        stored_ended_at: None,
     };
     informational.validate().unwrap();
     // A title is optional, but "untitled" is one state on the wire: absent.
@@ -3620,6 +3684,8 @@ fn documents_fail_closed_on_missing_identity_keys() {
         blocked_reason: None,
         action_id: None,
         display_title: None,
+        source_size: None,
+        stored_ended_at: None,
     };
     let mut value = serde_json::to_value(&row).unwrap();
     value.as_object_mut().unwrap().remove("cloud_thread_id");
