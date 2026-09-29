@@ -445,13 +445,24 @@ This flow works with a new or existing Git project, or with a non-Git folder.
 
 Mallard parses provider session archives locally to recover session metadata,
 activity windows, recorded branch provenance, and recorded commit references.
+A session's interval runs from its first user prompt to its last agent reply.
 For a Git project, every selected local branch shows the same project-session
-set for the loaded time range. Mallard independently places those sessions on
-the selected branch's first-parent history when the evidence is strong enough:
-a commit can occur during the session or be the nearest follow-up commit
-within 24 hours. A provider-recorded branch never controls visibility, Push,
-or Pull. Sessions without a suitable commit remain visible as not mapped to
-that branch.
+set for the loaded time range, and each session is placed on exactly one
+commit of that branch's first-parent history: the closest commit at or after
+the session's **last user input**, read from the provider's JSONL transcript.
+A session with no commit after its last input is listed under
+**Uncommitted**. The session's timestamp tooltip shows the time of that last
+input.
+
+Placement uses time only. A provider-recorded branch or commit never controls
+visibility, Push, or Pull.
+
+The mapping is rebuilt from `git log` whenever Activity loads: when the app
+opens, on **Reload app data**, on the refresh button, and when the open
+project's `HEAD`, branch refs, or `packed-refs` change outside Mallard, for
+example after a checkout or a commit in a terminal. Reloads follow the
+checked-out branch unless another branch was picked in the branch menu. See
+[docs/DESIGN_GIT_SESSION_MAPPING.md](docs/DESIGN_GIT_SESSION_MAPPING.md).
 
 ## Push, Pull, and project-file safety
 

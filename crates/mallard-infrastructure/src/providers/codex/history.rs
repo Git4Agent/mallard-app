@@ -339,9 +339,15 @@ struct RolloutParser {
     summary: Option<String>,
     user_round_count: u64,
     agent_message_count: u64,
+    first_user_at: Option<u64>,
+    last_user_at: Option<u64>,
+    last_agent_at: Option<u64>,
     event_summary: Option<String>,
     event_user_round_count: u64,
     event_agent_message_count: u64,
+    event_first_user_at: Option<u64>,
+    event_last_user_at: Option<u64>,
+    event_last_agent_at: Option<u64>,
     tool_call_count: u64,
     total_input_tokens: Option<u64>,
     total_output_tokens: Option<u64>,
@@ -363,9 +369,15 @@ impl RolloutParser {
             summary: None,
             user_round_count: 0,
             agent_message_count: 0,
+            first_user_at: None,
+            last_user_at: None,
+            last_agent_at: None,
             event_summary: None,
             event_user_round_count: 0,
             event_agent_message_count: 0,
+            event_first_user_at: None,
+            event_last_user_at: None,
+            event_last_agent_at: None,
             tool_call_count: 0,
             total_input_tokens: None,
             total_output_tokens: None,
@@ -385,10 +397,10 @@ impl RolloutParser {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if let Some(timestamp) = value_alias(value, &["timestamp", "created_at", "updated_at"])
+        let timestamp = value_alias(value, &["timestamp", "created_at", "updated_at"])
             .or_else(|| value_alias(payload, &["timestamp", "created_at", "updated_at"]))
-            .and_then(parse_timestamp_value)
-        {
+            .and_then(parse_timestamp_value);
+        if let Some(timestamp) = timestamp {
             self.first_timestamp.get_or_insert(timestamp);
             self.last_timestamp = Some(timestamp);
         }
@@ -434,6 +446,8 @@ impl RolloutParser {
                             .filter(|text| is_meaningful_user_text(text))
                         {
                             self.user_round_count = self.user_round_count.saturating_add(1);
+                            self.first_user_at = self.first_user_at.or(timestamp);
+                            self.last_user_at = self.last_user_at.max(timestamp);
                             if self.summary.is_none() {
                                 self.summary = Some(truncate_chars(&text, MAX_SUMMARY_CHARS));
                             }
@@ -447,6 +461,7 @@ impl RolloutParser {
                         // final AgentMessage. Match the timeline projection:
                         // only explicit commentary is not a response.
                         self.agent_message_count = self.agent_message_count.saturating_add(1);
+                        self.last_agent_at = timestamp.or(self.last_agent_at);
                     }
                     _ => {}
                 }
@@ -455,6 +470,8 @@ impl RolloutParser {
         if payload_type == "user_message" {
             if let Some(text) = genuine_user_event(payload) {
                 self.event_user_round_count = self.event_user_round_count.saturating_add(1);
+                self.event_first_user_at = self.event_first_user_at.or(timestamp);
+                self.event_last_user_at = self.event_last_user_at.max(timestamp);
                 if self.event_summary.is_none() {
                     self.event_summary = Some(truncate_chars(&text, MAX_SUMMARY_CHARS));
                 }
@@ -467,6 +484,7 @@ impl RolloutParser {
             // coordination. Commentary event messages are visible steps, not
             // final replies.
             self.event_agent_message_count = self.event_agent_message_count.saturating_add(1);
+            self.event_last_agent_at = timestamp.or(self.event_last_agent_at);
         }
         if matches!(payload_type, "function_call" | "custom_tool_call") {
             self.tool_call_count = self.tool_call_count.saturating_add(1);
@@ -498,27 +516,40 @@ impl RolloutParser {
             .ok_or_else(|| "rollout has no cwd metadata".to_string())?;
         // Codex Desktop can emit both views or only the event view. Select
         // one source per role so event-only sessions work without counting
-        // dual-emitted messages twice.
+        // dual-emitted messages twice. The interval follows the same source:
+        // the first counted prompt to the last counted reply, falling back to
+        // the record bounds when the rollout has neither. The last counted
+        // prompt is the latest one, which places the session on a commit.
         let summary = self.summary.or(self.event_summary);
-        let user_round_count = if self.user_round_count > 0 {
-            self.user_round_count
+        let (user_round_count, first_user_at, last_prompt_at) = if self.user_round_count > 0 {
+            (self.user_round_count, self.first_user_at, self.last_user_at)
         } else {
-            self.event_user_round_count
+            (
+                self.event_user_round_count,
+                self.event_first_user_at,
+                self.event_last_user_at,
+            )
         };
-        let agent_message_count = if self.agent_message_count > 0 {
-            self.agent_message_count
+        let (agent_message_count, last_agent_at) = if self.agent_message_count > 0 {
+            (self.agent_message_count, self.last_agent_at)
         } else {
-            self.event_agent_message_count
+            (self.event_agent_message_count, self.event_last_agent_at)
         };
+        let started_at = first_user_at
+            .or(self.first_timestamp)
+            .or(self.metadata_timestamp);
+        let ended_at = last_agent_at
+            .or(self.last_timestamp)
+            .or(self.first_timestamp)
+            .or(self.metadata_timestamp)
+            .map(|ended_at| ended_at.max(started_at.unwrap_or(0)));
         Ok(SessionFileSummary {
             session_id: thread_id,
             title: summary.clone(),
             summary,
-            started_at: self.first_timestamp.or(self.metadata_timestamp),
-            ended_at: self
-                .last_timestamp
-                .or(self.first_timestamp)
-                .or(self.metadata_timestamp),
+            started_at,
+            ended_at,
+            last_prompt_at,
             branch: self.branch,
             recorded_sha: self.recorded_sha,
             user_rounds: user_round_count,
@@ -3612,6 +3643,98 @@ mod tests {
             Some("Debug the empty message count")
         );
         assert!(from_file.metrics_complete);
+    }
+
+    #[test]
+    fn bounds_and_last_prompt_come_from_counted_messages() {
+        // A rollout opens before its first prompt and keeps writing after its
+        // last reply: token counts, a prompt the agent never answered, and the
+        // model-input copy of injected context, which is never a prompt.
+        let project_root = tempfile::tempdir().unwrap();
+        let at = |time: &str| parse_timestamp_value(&json!(time)).unwrap();
+        let rollout = |records: Vec<Value>| {
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>()
+                .into_bytes()
+        };
+        let event = |time: &str, payload: Value| json!({"timestamp": time, "type": "event_msg", "payload": payload});
+        let meta = json!({
+            "timestamp": "2026-09-27T20:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "session-1", "cwd": project_root.path()}
+        });
+        let tokens =
+            json!({"type": "token_count", "info": {"total_token_usage": {"total_tokens": 1}}});
+
+        let events = summarize_rollout_bytes(&rollout(vec![
+            meta.clone(),
+            event(
+                "2026-09-27T20:00:30Z",
+                json!({"type": "user_message", "message": "Write the fable"}),
+            ),
+            event(
+                "2026-09-27T20:01:00Z",
+                json!({"type": "agent_message", "phase": "commentary", "message": "Drafting."}),
+            ),
+            event(
+                "2026-09-27T20:02:00Z",
+                json!({"type": "agent_message", "phase": "final_answer", "message": "Done."}),
+            ),
+            event("2026-09-27T20:02:01Z", tokens.clone()),
+            event(
+                "2026-09-27T20:05:00Z",
+                json!({"type": "user_message", "message": "Unanswered"}),
+            ),
+            json!({
+                "timestamp": "2026-09-27T20:06:00Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "<environment_context>injected</environment_context>"}
+                ]}
+            }),
+        ]))
+        .unwrap();
+        assert_eq!(events.started_at, Some(at("2026-09-27T20:00:30Z")));
+        assert_eq!(events.ended_at, Some(at("2026-09-27T20:02:00Z")));
+        assert_eq!(events.last_prompt_at, Some(at("2026-09-27T20:05:00Z")));
+
+        let item = |time: &str, item: Value| {
+            event(
+                time,
+                json!({"type": "item_completed", "turn_id": "turn-1", "item": item}),
+            )
+        };
+        let canonical = summarize_rollout_bytes(&rollout(vec![
+            meta.clone(),
+            item("2026-09-27T20:00:10Z", json!({"type": "UserMessage", "id": "u", "content": [{"type": "text", "text": "Write it"}]})),
+            item("2026-09-27T20:00:20Z", json!({"type": "AgentMessage", "id": "a", "content": [{"type": "text", "text": "Done."}]})),
+            event("2026-09-27T20:00:30Z", tokens.clone()),
+            // The event view is not counted beside canonical items.
+            event(
+                "2026-09-27T20:00:40Z",
+                json!({"type": "user_message", "message": "Obsolete duplicate"}),
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(canonical.started_at, Some(at("2026-09-27T20:00:10Z")));
+        assert_eq!(canonical.ended_at, Some(at("2026-09-27T20:00:20Z")));
+        assert_eq!(canonical.last_prompt_at, Some(at("2026-09-27T20:00:10Z")));
+
+        // No reply yet: the record bounds stand in for the missing side.
+        let unanswered = summarize_rollout_bytes(&rollout(vec![
+            meta,
+            event(
+                "2026-09-27T20:00:30Z",
+                json!({"type": "user_message", "message": "Still thinking"}),
+            ),
+            event("2026-09-27T20:00:40Z", tokens),
+        ]))
+        .unwrap();
+        assert_eq!(unanswered.started_at, Some(at("2026-09-27T20:00:30Z")));
+        assert_eq!(unanswered.ended_at, Some(at("2026-09-27T20:00:40Z")));
+        assert_eq!(unanswered.last_prompt_at, Some(at("2026-09-27T20:00:30Z")));
     }
 
     #[test]

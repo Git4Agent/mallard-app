@@ -163,6 +163,9 @@ pub fn run() {
             let watcher = project_sync::config_watcher::ConfigWatcher::start(app.handle().clone())
                 .map_err(std::io::Error::other)?;
             app.manage(std::sync::Mutex::new(watcher));
+            app.manage(std::sync::Mutex::new(
+                project_sync::git_watcher::ProjectGitWatcher::default(),
+            ));
             project_sync::config_watcher::start_connection_forwarder(app.handle().clone());
             project_sync::config_watcher::start_ignored_name_forwarder(app.handle().clone());
             // The Feishu sign-ins this computer keeps live beside the
@@ -227,6 +230,8 @@ pub fn run() {
             project_sync::commands::list_agent_providers,
             project_sync::commands::get_project_activity,
             project_sync::commands::refresh_project_activity,
+            project_sync::git_watcher::watch_project_git,
+            project_sync::git_watcher::unwatch_project_git,
             project_sync::commands::get_project_session_detail,
             project_sync::commands::get_project_session_timeline_page,
             project_sync::commands::get_project_session_event_detail,

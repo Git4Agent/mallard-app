@@ -264,6 +264,8 @@ pub struct SessionFileSummary {
     pub summary: Option<String>,
     pub started_at: Option<u64>,
     pub ended_at: Option<u64>,
+    /// The last human input: the time that places the session on a commit.
+    pub last_prompt_at: Option<u64>,
     pub branch: Option<String>,
     pub recorded_sha: Option<String>,
     pub user_rounds: u64,

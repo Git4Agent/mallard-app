@@ -853,6 +853,7 @@ fn session_presentation(
     domain::SessionPresentation {
         started_at: file_summary.started_at,
         ended_at: file_summary.ended_at,
+        last_prompt_at: file_summary.last_prompt_at,
         branch,
         recorded_sha,
         metrics: domain::SessionMetrics {
