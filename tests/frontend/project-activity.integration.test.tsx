@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   activityHeaderCounts,
   BranchPicker,
+  branchPin,
   ProjectChatHistoryContent,
   pullOperationChip,
   SessionMetrics,
@@ -209,10 +210,37 @@ test("switching the Git rail does not clear Push or Pull selection", () => {
     /const changeBranch = useCallback\(\(nextBranch: string\) => \{([\s\S]*?)\n  \}, \[\]\);/,
   )?.[1] ?? "";
 
-  assert.match(changeBranch, /setBranch\(nextBranch\)/);
+  assert.match(changeBranch, /setBranch\(branchPin\(nextBranch, /);
   assert.match(changeBranch, /setPages\(\[\]\)/);
   assert.match(changeBranch, /load\(null, nextBranch\)/);
   assert.doesNotMatch(changeBranch, /onDropSelection|setComparison|loadComparison/);
+});
+
+test("picking the checked-out branch pins nothing, so reloads follow the next checkout", () => {
+  const branches = [{ name: "main", is_current: true }, { name: "feature", is_current: false }];
+  assert.equal(branchPin("main", branches), null);
+  assert.equal(branchPin("feature", branches), "feature");
+  // A branch the page has not listed yet is still an explicit pin.
+  assert.equal(branchPin("unlisted", branches), "unlisted");
+});
+
+test("reloads re-resolve the checked-out branch unless one is pinned; paging keeps the shown branch", () => {
+  const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  // A load never overwrites the pin with the branch the backend resolved.
+  assert.doesNotMatch(source, /setBranch\((next|event\.activity)\.git/);
+  const refresh = source.match(/const refreshActivity = useCallback\(\(\) => \{([\s\S]*?)\n  \}/)?.[1] ?? "";
+  assert.match(refresh, /loadWorkspace\(latest\.current\.branch\)/);
+  // A ref change outside Mallard reloads with the pin, bypassing any read
+  // that began before the change.
+  assert.match(source, /onProjectGitChanged\([\s\S]*?load\(null, latest\.current\.branch, true\)/);
+  assert.match(source, /holdProjectGitWatch\(localProjectId\)/);
+  assert.match(source, /onLoadMore=\{\(\) => void load\([^}]*activity\?\.git\?\.selected_branch \?\? branch\)\}/);
+
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  assert.match(api, /invoke<void>\("watch_project_git", \{ localProjectId \}\)/);
+  assert.match(api, /invoke<void>\("unwatch_project_git", \{ localProjectId \}\)/);
+  assert.match(api, /listen<ProjectGitChangedEvent>\("project-git-changed"/);
+  assert.match(api, /if \(fresh\) return invoke<ProjectActivity>\("get_project_activity", request\)/);
 });
 
 test("path bar counts tally the whole comparison, split by the button that clears them", () => {
@@ -1618,6 +1646,26 @@ test("a session that crosses midnight still resolves to an unambiguous end", () 
   assert.match(html, /sync-history-thread-duration[^>]*aria-label="Ran for 10m"/);
   // The full ending date is still spelled out for assistive tech and the tooltip.
   assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+2026[^"]*"/);
+});
+
+test("the stamp names the last input's time between the start and the end", () => {
+  const startedAt = Math.floor(new Date(2026, 8, 27, 21, 52).getTime() / 1_000);
+  const lastPromptAt = Math.floor(new Date(2026, 8, 27, 22, 3).getTime() / 1_000);
+  const endedAt = Math.floor(new Date(2026, 8, 27, 22, 6).getTime() / 1_000);
+  const session = { ...codexSession, started_at: startedAt, ended_at: endedAt, last_prompt_at: lastPromptAt };
+  const tooltip = (html: string) => html.match(/sync-history-thread-time-end[^>]*data-tooltip="([^"]*)"/)?.[1] ?? "";
+
+  const html = renderToStaticMarkup(<SessionMetrics session={session} />);
+  const lines = tooltip(html).split("\n");
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /^Started Sep 27, 2026 at /);
+  assert.match(lines[1], /^Last input Sep 27, 2026 at /);
+  assert.match(lines[2], /^Ended Sep 27, 2026 at /);
+  assert.match(html, /aria-label="Started [^"]+\. Last input [^"]+\. Ended [^"]+"/);
+
+  // No recorded input: the stamp keeps its two ends only.
+  const bare = renderToStaticMarkup(<SessionMetrics session={{ ...session, last_prompt_at: null }} />);
+  assert.equal(tooltip(bare).split("\n").length, 2);
 });
 
 test("session actions stay compact and trail the readouts", () => {

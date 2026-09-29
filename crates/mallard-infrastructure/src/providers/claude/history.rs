@@ -205,6 +205,9 @@ struct SummaryAccumulator {
     summary: SessionFileSummary,
     identity: ClaudeSessionIdentityTracker,
     first_user_text: Option<String>,
+    first_prompt_at: Option<u64>,
+    last_input_at: Option<u64>,
+    last_reply_at: Option<u64>,
     summary_title: Option<String>,
     ai_title: Option<String>,
     custom_title: Option<String>,
@@ -236,7 +239,8 @@ impl SummaryAccumulator {
             self.summary.metrics_complete = false;
             return;
         };
-        if let Some(timestamp) = object.get("timestamp").and_then(parse_timestamp_value) {
+        let timestamp = object.get("timestamp").and_then(parse_timestamp_value);
+        if let Some(timestamp) = timestamp {
             if self
                 .summary
                 .started_at
@@ -283,9 +287,16 @@ impl SummaryAccumulator {
                             true
                         }
                     };
-                    if is_new_turn && self.first_user_text.is_none() {
-                        self.first_user_text = Some(truncate_chars(&text, TITLE_CHARS));
+                    if is_new_turn {
+                        self.first_prompt_at =
+                            self.first_prompt_at.into_iter().chain(timestamp).min();
+                        if self.first_user_text.is_none() {
+                            self.first_user_text = Some(truncate_chars(&text, TITLE_CHARS));
+                        }
+                        self.last_input_at = self.last_input_at.max(timestamp);
                     }
+                } else if is_slash_command(&value) {
+                    self.last_input_at = self.last_input_at.max(timestamp);
                 }
             }
             Some("assistant") if !is_meta_record(object) => {
@@ -299,6 +310,7 @@ impl SummaryAccumulator {
                     && assistant_record_is_visible(&value)
                     && record_text(&value).is_some_and(|text| !text.trim().is_empty())
                 {
+                    self.last_reply_at = self.last_reply_at.max(timestamp);
                     match value
                         .get("message")
                         .and_then(|message| message.get("id"))
@@ -374,6 +386,9 @@ impl SummaryAccumulator {
             mut summary,
             identity,
             first_user_text,
+            first_prompt_at,
+            last_input_at,
+            last_reply_at,
             summary_title,
             ai_title,
             custom_title,
@@ -402,6 +417,13 @@ impl SummaryAccumulator {
             .0
             .ok_or_else(|| "Claude session file has no leaf session ID".to_string())?;
         summary.user_rounds = (user_turn_ids.len() as u64).saturating_add(unidentified_user_turns);
+        // The interval runs from the first human prompt to the last agent
+        // reply; the record bounds stand in for a side the transcript lacks.
+        summary.started_at = first_prompt_at.or(summary.started_at);
+        summary.ended_at = last_reply_at
+            .or(summary.ended_at)
+            .map(|ended_at| ended_at.max(summary.started_at.unwrap_or(0)));
+        summary.last_prompt_at = last_input_at;
         summary.agent_messages =
             (agent_message_ids.len() as u64).saturating_add(unidentified_agent_messages);
         summary.summary = first_user_text.clone();
@@ -999,12 +1021,20 @@ fn has_tool_result(value: &Value) -> bool {
     })
 }
 
-fn meaningful_human_prompt(value: &Value) -> Option<String> {
+/// Text a person typed into the session — a prompt or a slash command —
+/// judged by the record's structure alone. Tool results, subagent traffic,
+/// meta and synthetic records, and the compaction summary Claude writes as a
+/// user message are never a person's input.
+fn human_input_text(value: &Value) -> Option<String> {
     let object = value.as_object()?;
     if is_meta_record(object)
         || object
             .get("isSynthetic")
             .or_else(|| object.get("is_synthetic"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || object
+            .get("isCompactSummary")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         || object
@@ -1030,22 +1060,38 @@ fn meaningful_human_prompt(value: &Value) -> Option<String> {
         }
     }
     let text = record_text(value)?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn meaningful_human_prompt(value: &Value) -> Option<String> {
+    let text = human_input_text(value)?;
     let trimmed = text.trim_start();
-    if trimmed.is_empty()
-        || [
-            "<system-reminder>",
-            "<local-command-caveat>",
-            "<command-name>",
-            "<command-message>",
-            "<local-command-stdout>",
-            "<ide_opened_file>",
-        ]
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
+    if [
+        "<system-reminder>",
+        "<local-command-caveat>",
+        "<command-name>",
+        "<command-message>",
+        "<local-command-stdout>",
+        "<ide_opened_file>",
+        // Pressing Esc records this marker as a user message.
+        "[Request interrupted by user",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
     {
         return None;
     }
     Some(text)
+}
+
+/// A slash command the person typed. Claude records one as a user message of
+/// `<command-…>` tags. It is the person's input, so it can be a session's last
+/// input, but it is not a prompt in the counts.
+fn is_slash_command(value: &Value) -> bool {
+    human_input_text(value).is_some_and(|text| {
+        let trimmed = text.trim_start();
+        trimmed.starts_with("<command-name>") || trimmed.starts_with("<command-message>")
+    })
 }
 
 fn assistant_record_is_visible(value: &Value) -> bool {
@@ -2340,6 +2386,46 @@ mod tests {
         let detail = read_event_detail(&transcript, &index, &tool_entry.event_id).unwrap();
         assert!(detail.arguments.as_deref().unwrap().contains("src/lib.rs"));
         assert_eq!(detail.result.as_deref(), Some("source contents"));
+    }
+
+    #[test]
+    fn bounds_and_last_input_come_from_counted_messages() {
+        // A transcript can open before its first prompt and keep writing after
+        // its last reply: system records, a prompt never answered, a typed
+        // slash command, an interruption marker, and a compaction summary.
+        let at = |time: &str| parse_timestamp_value(&json!(time)).unwrap();
+        let system = |time: &str| json!({"type":"system","sessionId":"session-1","timestamp":time,"content":"note"});
+        let user = |uuid: &str, time: &str, text: &str| json!({"type":"user","uuid":uuid,"sessionId":"session-1","timestamp":time,"message":{"role":"user","content":[{"type":"text","text":text}]}});
+
+        let summary = summarize_bytes(&jsonl_bytes(vec![
+            system("2026-09-27T20:00:00Z"),
+            user("u-1", "2026-09-27T20:00:30Z", "Write the fable"),
+            json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","timestamp":"2026-09-27T20:01:00Z","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"Drafting."},{"type":"tool_use","id":"tool-1","name":"Write","input":{}}]}}),
+            json!({"type":"user","uuid":"r-1","sessionId":"session-1","timestamp":"2026-09-27T20:01:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}),
+            json!({"type":"assistant","uuid":"a-2","sessionId":"session-1","timestamp":"2026-09-27T20:02:00Z","message":{"id":"msg-2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}}),
+            system("2026-09-27T20:02:01Z"),
+            user("u-2", "2026-09-27T20:05:00Z", "Unanswered"),
+            json!({"type":"user","uuid":"c-1","sessionId":"session-1","timestamp":"2026-09-27T20:06:00Z","message":{"role":"user","content":"<command-message>commit</command-message>\n<command-name>/commit</command-name>\n<command-args>-m fix</command-args>"}}),
+            user("i-1", "2026-09-27T20:07:00Z", "[Request interrupted by user]"),
+            json!({"type":"user","uuid":"k-1","isCompactSummary":true,"sessionId":"session-1","timestamp":"2026-09-27T20:08:00Z","message":{"role":"user","content":"This session is being continued from a previous conversation."}}),
+        ]))
+        .unwrap();
+        assert_eq!(summary.started_at, Some(at("2026-09-27T20:00:30Z")));
+        assert_eq!(summary.ended_at, Some(at("2026-09-27T20:02:00Z")));
+        // The slash command is the last input; it is not a counted prompt, and
+        // neither the marker nor the summary is either.
+        assert_eq!(summary.last_prompt_at, Some(at("2026-09-27T20:06:00Z")));
+        assert_eq!(summary.user_rounds, 2);
+
+        // No reply yet: the record bounds stand in for the missing side.
+        let unanswered = summarize_bytes(&jsonl_bytes(vec![
+            user("u-1", "2026-09-27T20:00:30Z", "Still thinking"),
+            system("2026-09-27T20:00:40Z"),
+        ]))
+        .unwrap();
+        assert_eq!(unanswered.started_at, Some(at("2026-09-27T20:00:30Z")));
+        assert_eq!(unanswered.ended_at, Some(at("2026-09-27T20:00:40Z")));
+        assert_eq!(unanswered.last_prompt_at, Some(at("2026-09-27T20:00:30Z")));
     }
 
     #[test]

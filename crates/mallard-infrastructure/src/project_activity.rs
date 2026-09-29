@@ -95,6 +95,10 @@ pub struct ProjectSessionSummary {
     pub summary: Option<String>,
     pub started_at: u64,
     pub ended_at: u64,
+    /// The last human input, which places the session on one commit. A
+    /// storage-only row carries the time recorded at Push.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_at: Option<u64>,
     /// Machine-local provider transcript selected by discovery. This is
     /// returned only for a locally present session and never enters a
     /// portable manifest.
@@ -1051,6 +1055,7 @@ fn merge_activity_sessions_with_state(
                 summary: record.summary.summary.clone(),
                 started_at,
                 ended_at,
+                last_prompt_at: record.summary.last_prompt_at,
                 transcript_path: Some(record.physical_path.to_string_lossy().into_owned()),
                 working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
                 sync_blocked_reason: None,
@@ -1138,6 +1143,7 @@ fn merge_activity_sessions_with_state(
                 summary: None,
                 started_at,
                 ended_at,
+                last_prompt_at: record.presentation.last_prompt_at,
                 transcript_path: None,
                 working_directory: None,
                 sync_blocked_reason: None,
@@ -1423,6 +1429,56 @@ pub fn list_project_repository_kinds(
 pub fn is_git_work_tree(root: &Path) -> bool {
     git_output(root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|output| {
         output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true"
+    })
+}
+
+/// The Git metadata a checkout or a commit rewrites: the worktree's own git
+/// dir, which holds `HEAD`, and the common dir every worktree shares, which
+/// holds `refs/heads` and `packed-refs`. Both are canonical. In an ordinary
+/// clone they are the same directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectGitDirs {
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+/// The Git dirs of a registered project's active checkout, or `None` when the
+/// project has no active binding or is not a Git work tree.
+pub fn project_git_dirs(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+) -> Result<Option<ProjectGitDirs>, String> {
+    let state = repository.load_project_state_snapshot()?;
+    let root = state
+        .bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            &binding.local_project_id == local_project_id && binding.state == BindingState::Active
+        })
+        .and_then(|binding| fs::canonicalize(&binding.project_root).ok());
+    Ok(root.and_then(|root| git_dirs(&root)))
+}
+
+pub fn git_dirs(root: &Path) -> Option<ProjectGitDirs> {
+    let output = git_output(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+    )
+    .ok()
+    .filter(|output| output.status.success())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let git_dir = fs::canonicalize(lines.next()?).ok()?;
+    let common_dir = fs::canonicalize(lines.next()?).ok()?;
+    Some(ProjectGitDirs {
+        git_dir,
+        common_dir,
     })
 }
 
@@ -1775,42 +1831,34 @@ fn load_first_parent_commits(
     Ok(commits)
 }
 
-/// Map every project session onto the selected first-parent rail from its
-/// activity interval and recorded SHA. Provider-recorded branches are
-/// provenance only and never control visibility.
+/// Map every project session onto exactly one commit of the selected
+/// first-parent rail: the closest commit at or after its last human input, or
+/// after its end when the transcript recorded no input. A session with no such
+/// commit is reported unmapped: it is still uncommitted on this branch.
+/// Provider-recorded branches and SHAs are provenance only and never control
+/// placement.
 fn map_sessions_to_commits(
     sessions: &[ProjectSessionSummary],
     commits: &mut [GitCommitSummary],
 ) -> MappingResult {
     let mut mapped_sessions = BTreeSet::new();
     let mut unmapped = Vec::new();
-    let rail_index = commits
-        .iter()
-        .enumerate()
-        .map(|(index, commit)| (commit.sha.clone(), index))
-        .collect::<BTreeMap<_, _>>();
     for session in sessions {
-        let successor = match session
-            .recorded_sha
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .and_then(|sha| rail_index.get(&sha).copied())
-        {
-            Some(recorded_index) => (0..recorded_index)
-                .rev()
-                .find(|&index| commits[index].committed_at >= session.ended_at),
-            None => commits
-                .iter()
-                .enumerate()
-                .filter(|(_, commit)| commit.committed_at >= session.ended_at)
-                .min_by_key(|(_, commit)| commit.committed_at)
-                .map(|(index, _)| index),
-        };
-        let Some(index) = successor else {
+        let placed_at = session.last_prompt_at.unwrap_or(session.ended_at);
+        // Oldest first, so two commits in the same second resolve to the
+        // earlier one.
+        let closest = commits
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, commit)| commit.committed_at >= placed_at)
+            .min_by_key(|(_, commit)| commit.committed_at)
+            .map(|(index, _)| index);
+        let Some(index) = closest else {
             let reason = if commits.is_empty() {
                 "The selected branch has no first-parent commits"
             } else {
-                "No first-parent commit on this branch follows the session's last activity"
+                "No first-parent commit on this branch follows the session's last prompt"
             };
             unmapped.push(UnmappedSessionReference {
                 resource_id: session.resource_id.clone(),
@@ -1845,7 +1893,7 @@ fn map_sessions_to_commits(
     debug_assert_eq!(
         mapped_sessions.len().saturating_add(unmapped.len()),
         sessions.len(),
-        "every project session must be mapped or explicitly unmapped",
+        "every project session must be mapped or explicitly unmapped, once",
     );
     MappingResult {
         unmapped,
@@ -2024,6 +2072,7 @@ mod activity_only_tests {
             summary: None,
             started_at,
             ended_at,
+            last_prompt_at: None,
             transcript_path: None,
             working_directory: None,
             sync_blocked_reason: None,
@@ -2076,7 +2125,7 @@ mod activity_only_tests {
             mapping.unmapped,
             vec![UnmappedSessionReference {
                 resource_id: "claude:conversation:claude-late".to_string(),
-                reason: "No first-parent commit on this branch follows the session's last activity"
+                reason: "No first-parent commit on this branch follows the session's last prompt"
                     .to_string(),
             }]
         );
@@ -2095,25 +2144,129 @@ mod activity_only_tests {
         assert_eq!(represented.len(), sessions.len());
     }
 
+    fn prompted(mut session: ProjectSessionSummary, last_prompt_at: u64) -> ProjectSessionSummary {
+        session.last_prompt_at = Some(last_prompt_at);
+        session
+    }
+
+    fn listed(commit: &GitCommitSummary) -> Vec<&str> {
+        commit
+            .session_refs
+            .iter()
+            .map(|reference| reference.resource_id.as_str())
+            .collect()
+    }
+
     #[test]
-    fn a_sha_from_another_branch_falls_back_to_time_mapping() {
+    fn a_session_maps_to_the_closest_commit_after_its_last_prompt_and_nowhere_else() {
+        let at = |hours: u64, minutes: u64| hours * 3_600 + minutes * 60;
+        let mut commits = vec![commit_at(at(21, 58), &[]), commit_at(at(20, 43), &[])];
+        let sessions = vec![
+            // Asked to commit at 20:42; the agent committed at 20:43 and
+            // replied after it. The reply does not push it to the next commit.
+            prompted(
+                session_at("codex", "publish", at(20, 42), at(20, 44), None),
+                at(20, 42),
+            ),
+            // Began before the first commit, last prompted after it.
+            prompted(
+                session_at("codex", "fable", at(20, 34), at(21, 47), None),
+                at(21, 40),
+            ),
+            // Last prompted after every commit: uncommitted, and under no
+            // commit it merely began before.
+            prompted(
+                session_at("claude", "label", at(20, 30), at(22, 6), None),
+                at(22, 1),
+            ),
+        ];
+
+        let mapping = map_sessions_to_commits(&sessions, &mut commits);
+
+        assert_eq!(listed(&commits[0]), vec!["codex:conversation:fable"]);
+        assert_eq!(listed(&commits[1]), vec!["codex:conversation:publish"]);
+        assert_eq!(
+            mapping
+                .unmapped
+                .iter()
+                .map(|reference| reference.resource_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude:conversation:label"]
+        );
+        assert_eq!(mapping.unique_session_count, 2);
+    }
+
+    #[test]
+    fn a_commit_in_the_second_of_the_last_prompt_takes_the_session() {
         let mut commits = vec![
             commit_at(300, &[]),
             commit_at(200, &[]),
             commit_at(100, &[]),
         ];
-        let session = session_at("codex", "other-branch", 120, 150, Some("f".repeat(40)));
 
-        let mapping = map_sessions_to_commits(&[session], &mut commits);
-
-        assert_eq!(mapping.unique_session_count, 1);
-        assert!(mapping.unmapped.is_empty());
-        assert_eq!(
-            commits[1].session_refs,
-            vec![CommitSessionReference {
-                resource_id: "codex:conversation:other-branch".to_string(),
-            }]
+        map_sessions_to_commits(
+            &[prompted(session_at("codex", "exact", 50, 250, None), 200)],
+            &mut commits,
         );
+
+        assert!(commits[0].session_refs.is_empty());
+        assert_eq!(listed(&commits[1]), vec!["codex:conversation:exact"]);
+        assert!(commits[2].session_refs.is_empty());
+    }
+
+    #[test]
+    fn two_commits_in_one_second_resolve_to_the_older() {
+        let mut newer = commit_at(200, &[]);
+        newer.sha = "b".repeat(40);
+        let mut commits = vec![newer, commit_at(200, &[]), commit_at(100, &[])];
+
+        map_sessions_to_commits(
+            &[prompted(session_at("codex", "tie", 120, 150, None), 150)],
+            &mut commits,
+        );
+
+        assert!(commits[0].session_refs.is_empty());
+        assert_eq!(listed(&commits[1]), vec!["codex:conversation:tie"]);
+    }
+
+    #[test]
+    fn a_session_without_a_recorded_prompt_is_placed_by_its_end() {
+        let mut commits = vec![
+            commit_at(300, &[]),
+            commit_at(200, &[]),
+            commit_at(100, &[]),
+        ];
+
+        map_sessions_to_commits(
+            &[session_at("codex", "silent", 50, 150, None)],
+            &mut commits,
+        );
+
+        assert_eq!(listed(&commits[1]), vec!["codex:conversation:silent"]);
+        assert!(commits[0].session_refs.is_empty());
+        assert!(commits[2].session_refs.is_empty());
+    }
+
+    #[test]
+    fn a_recorded_sha_is_provenance_and_never_moves_a_session() {
+        let mut commits = vec![
+            commit_at(300, &[]),
+            commit_at(200, &[]),
+            commit_at(100, &[]),
+        ];
+        let recorded = commits[0].sha.clone();
+
+        let mapping = map_sessions_to_commits(
+            &[prompted(
+                session_at("codex", "recorded", 120, 150, Some(recorded)),
+                130,
+            )],
+            &mut commits,
+        );
+
+        assert!(mapping.unmapped.is_empty());
+        assert!(commits[0].session_refs.is_empty());
+        assert_eq!(listed(&commits[1]), vec!["codex:conversation:recorded"]);
     }
 
     #[test]
@@ -2349,6 +2502,7 @@ mod activity_only_tests {
                 summary: None,
                 started_at: Some(1),
                 ended_at: Some(2),
+                last_prompt_at: Some(1),
                 branch: None,
                 recorded_sha: None,
                 user_rounds: 1,

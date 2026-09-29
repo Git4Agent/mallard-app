@@ -7,6 +7,7 @@ pub mod cloud_project;
 pub mod codex_maintenance;
 pub mod commands;
 pub mod config_watcher;
+pub mod git_watcher;
 pub mod maintenance;
 pub mod r2_setup;
 pub mod dropbox_setup;

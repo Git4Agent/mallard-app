@@ -707,12 +707,17 @@ export function unresolvedSyncPresentation({
 /* One absolute stamp, pushed to the far edge so it forms a column down the
    list. It anchors on the last activity because that is the more useful end of
    the interval; the start is that minus the duration sitting beside the other
-   readouts. Both ends are spelled out in full in the label. */
+   readouts. Both ends, and the last input between them — the time that places
+   the session on its commit — are spelled out in full in the label. */
 function SessionTimestamp({ session }: { session: ProjectSessionSummary }) {
   const startedLabel = `Started ${formatFullDateTime(session.started_at)}`;
   const endedLabel = `${session.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(session.ended_at)}${session.is_active ? ", active" : ""}`;
+  const lastInputLabel = session.last_prompt_at == null
+    ? null
+    : `Last input ${formatFullDateTime(session.last_prompt_at)}`;
+  const lines = [startedLabel, ...(lastInputLabel ? [lastInputLabel] : []), endedLabel];
   return (
-    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={`${startedLabel}\n${endedLabel}`} aria-label={`${startedLabel}. ${endedLabel}`} tabIndex={0}>
+    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={lines.join("\n")} aria-label={lines.join(". ")} tabIndex={0}>
       <time dateTime={new Date(session.ended_at * 1_000).toISOString()}>{formatFullDateTime(session.ended_at)}</time>
     </span>
   );
@@ -2306,6 +2311,12 @@ export function ProjectChatHistoryContent({
   return <div className={`sync-history-page sync-history-embedded${compactSelectionReview ? " sync-history-selection-review" : ""}`}>{content}</div>;
 }
 
+/** The branch a pick pins. Picking the checked-out branch pins nothing, so a
+ *  refresh or a ref change keeps following whatever is checked out next. */
+export function branchPin(name: string, branches: GitBranchSummary[]): string | null {
+  return branches.some((branch) => branch.name === name && branch.is_current) ? null : name;
+}
+
 function mergePages(previous: ProjectActivity | null, next: ProjectActivity): ProjectActivity {
   if (!previous || previous.git?.selected_branch !== next.git?.selected_branch) return next;
   /* The merged page covers both windows, and everything between them: the
@@ -2367,6 +2378,8 @@ export default function ProjectActivityPage({
   const [storageLoading, setStorageLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [managedCloudStatus, setManagedCloudStatus] = useState<ManagedCloudStatus | null>(null);
+  /* The branch the viewer pinned in the picker. Null follows the checked-out
+     branch, so every reload re-resolves HEAD and re-reads its history. */
   const [branch, setBranch] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -2379,7 +2392,7 @@ export default function ProjectActivityPage({
   const comparisonRequestRef = useRef(0);
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
 
-  const load = async (beforeTime?: number | null, requestedBranch = branch) => {
+  const load = async (beforeTime?: number | null, requestedBranch = branch, fresh = false) => {
     if (!hasBoundProvider) return false;
     const requestId = ++requestRef.current;
     if (beforeTime) setLoadingMore(true); else setLoading(true);
@@ -2394,10 +2407,10 @@ export default function ProjectActivityPage({
         beforeTime,
         30,
         selectionMode != null,
+        fresh,
       );
       if (requestId !== requestRef.current) return false;
       setPages((current) => beforeTime ? [...current, next] : [next]);
-      setBranch(next.git?.selected_branch ?? null);
     } catch (reason) {
       // Page-level failures and row-action failures are different facts;
       // keeping them in one state made them indistinguishable on screen.
@@ -2444,7 +2457,6 @@ export default function ProjectActivityPage({
           if (event.stage === "activity") {
             receivedActivity = true;
             setPages([event.activity]);
-            setBranch(event.activity.git?.selected_branch ?? null);
             setLoadError(null);
           } else {
             setLoadError(event.message);
@@ -2507,9 +2519,29 @@ export default function ProjectActivityPage({
   // The path bar holds onto whatever model it was last handed, so a model that
   // is a new object every render would drive it into a re-render loop. These
   // two handlers are the only mutable part of it; a latest-ref keeps their
-  // identity fixed while they still see this render's `load` and `branch`.
-  const latest = useRef({ load, loadWorkspace, branch });
-  latest.current = { load, loadWorkspace, branch };
+  // identity fixed while they still see this render's `load`, `branch`, and
+  // `branches`.
+  const branches = activity?.git?.branches;
+  const latest = useRef({ load, loadWorkspace, branch, branches });
+  latest.current = { load, loadWorkspace, branch, branches };
+
+  /* A checkout or commit made outside Mallard moves the Git refs; reload so
+     the mapping is rebuilt from the branch's current history. The watch is
+     held only while this page shows a Git project. */
+  const hasGit = activity?.git != null;
+  useEffect(() => {
+    if (!hasGit) return;
+    const localProjectId = project.local_project_id;
+    const release = projectSyncApi.holdProjectGitWatch(localProjectId);
+    const unlisten = projectSyncApi.onProjectGitChanged((event) => {
+      if (event.local_project_id !== localProjectId) return;
+      void latest.current.load(null, latest.current.branch, true);
+    }).catch(() => null);
+    return () => {
+      release();
+      void unlisten.then((stop) => stop?.());
+    };
+  }, [project.local_project_id, hasGit]);
 
   /* Show less pops the newest page off the stack. Every id a review can tick
      is either a session's own or its comparison entry's, so the set a row
@@ -2542,7 +2574,7 @@ export default function ProjectActivityPage({
   const changeBranch = useCallback((nextBranch: string) => {
     // The review parent owns selection. A branch changes only this page's Git
     // projection, so it must not clear selection or rebuild comparison.
-    setBranch(nextBranch);
+    setBranch(branchPin(nextBranch, latest.current.branches ?? []));
     setPages([]);
     void latest.current.load(null, nextBranch);
   }, []);
@@ -2637,5 +2669,5 @@ export default function ProjectActivityPage({
       actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} />;
 }

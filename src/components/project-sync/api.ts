@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { Channel, invoke } from "../../ipc";
 import type {
   DropboxSetupMode, DropboxSetupLogin, DropboxSetupProgress,
@@ -34,6 +35,7 @@ import type {
   ProjectBinding,
   ProjectDetail,
   ProjectFolderProbe,
+  ProjectGitChangedEvent,
   ProjectContentInventory,
   ProjectOperationResult,
   ProjectMarkdownImage,
@@ -90,6 +92,11 @@ export function createSingleFlight() {
 }
 
 const projectSyncSingleFlight = createSingleFlight();
+
+/* The backend watches one project's Git refs. A Push or Pull review can show
+   the same project's Activity beside the workspace page, so each page holds
+   the watch and only the last release stops it. */
+const projectGitWatchHolds = new Map<string, number>();
 
 export interface ActivityRefreshRequest {
   localProjectId: string;
@@ -497,6 +504,7 @@ export const projectSyncApi = {
     beforeTime?: number | null,
     windowDays = 30,
     review = false,
+    fresh = false,
   ) => {
     const request = {
       localProjectId,
@@ -506,6 +514,8 @@ export const projectSyncApi = {
       windowDays,
       review,
     };
+    // A reload for a ref change must not join a read that began before it.
+    if (fresh) return invoke<ProjectActivity>("get_project_activity", request);
     return projectSyncSingleFlight(
       JSON.stringify(["get_project_activity", request]),
       () => invoke<ProjectActivity>("get_project_activity", request),
@@ -513,6 +523,29 @@ export const projectSyncApi = {
   },
 
   refreshProjectActivity,
+
+  /** Hold the Git watch on a project while a page shows its Activity; the
+   *  returned function releases the hold. */
+  holdProjectGitWatch: (localProjectId: string) => {
+    const holds = projectGitWatchHolds.get(localProjectId) ?? 0;
+    projectGitWatchHolds.set(localProjectId, holds + 1);
+    if (holds === 0) void invoke<void>("watch_project_git", { localProjectId }).catch(() => undefined);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (projectGitWatchHolds.get(localProjectId) ?? 1) - 1;
+      if (remaining > 0) {
+        projectGitWatchHolds.set(localProjectId, remaining);
+        return;
+      }
+      projectGitWatchHolds.delete(localProjectId);
+      void invoke<void>("unwatch_project_git", { localProjectId }).catch(() => undefined);
+    };
+  },
+
+  onProjectGitChanged: (handler: (event: ProjectGitChangedEvent) => void) =>
+    listen<ProjectGitChangedEvent>("project-git-changed", (event) => handler(event.payload)),
 
   getProjectSessionDetail: (localProjectId: string, resourceId: string) => {
     const request = { localProjectId, resourceId };

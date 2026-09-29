@@ -843,6 +843,7 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
         presentation: SessionPresentation {
             started_at: Some(1),
             ended_at: Some(2),
+            last_prompt_at: Some(1),
             branch: Some("main".to_string()),
             recorded_sha: None,
             metrics: SessionMetrics {

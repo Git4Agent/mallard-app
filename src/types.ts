@@ -1009,6 +1009,12 @@ export interface StorageConnectionChangedEvent {
   storage_id: string;
 }
 
+/** A checkout or commit moved the watched project's Git refs; Activity
+ *  reloads to rebuild its session-to-commit mapping. Names the project only. */
+export interface ProjectGitChangedEvent {
+  local_project_id: string;
+}
+
 export type ResourceSyncState =
   | "synced"
   | "local_only"
@@ -1356,6 +1362,8 @@ export interface ProjectSessionSummary {
   summary?: string | null;
   started_at: number;
   ended_at: number;
+  /** The last human input, which places the session on its one commit. */
+  last_prompt_at?: number | null;
   /** Machine-local provider transcript; absent for storage-only sessions. */
   transcript_path?: string | null;
   working_directory?: string | null;

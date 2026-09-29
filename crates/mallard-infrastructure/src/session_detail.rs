@@ -1422,11 +1422,13 @@ fn checkpoint_event(
     }
 }
 
+/// The session's one commit, placed the way Activity places it: the closest
+/// first-parent commit at or after the last human input (or the end when no
+/// input was recorded), the older of two in the same second.
 fn checkpoint_support(
     project_root: &Path,
     branch: Option<&str>,
-    recorded_sha: Option<&str>,
-    ended_at: Option<u64>,
+    placed_at: Option<u64>,
 ) -> SessionDetailResult<CheckpointSupport> {
     let inside = git_output(project_root, &["rev-parse", "--is-inside-work-tree"])
         .ok()
@@ -1497,28 +1499,12 @@ fn checkpoint_support(
     if !output.status.success() {
         return Ok(CheckpointSupport::Supported(None));
     }
-    let commits = parse_git_commits(&output, &selected);
-    let ended_at = ended_at.unwrap_or(0);
-    let checkpoint = if let Some(recorded_sha) = recorded_sha
-        .filter(|sha| valid_full_sha(sha))
-        .map(str::to_ascii_lowercase)
-    {
-        commits
-            .iter()
-            .position(|commit| commit.sha == recorded_sha)
-            .and_then(|recorded_index| {
-                (0..recorded_index)
-                    .rev()
-                    .find(|index| commits[*index].committed_at >= ended_at)
-            })
-            .map(|index| commits[index].clone())
-    } else {
-        commits
-            .iter()
-            .filter(|commit| commit.committed_at >= ended_at)
-            .min_by_key(|commit| commit.committed_at)
-            .cloned()
-    };
+    let placed_at = placed_at.unwrap_or(0);
+    let checkpoint = parse_git_commits(&output, &selected)
+        .into_iter()
+        .rev()
+        .filter(|commit| commit.committed_at >= placed_at)
+        .min_by_key(|commit| commit.committed_at);
     Ok(CheckpointSupport::Supported(checkpoint))
 }
 
@@ -1893,8 +1879,7 @@ pub fn get_project_session_detail(
         checkpoint_support(
             &session.project_root,
             summary.branch.as_deref(),
-            summary.recorded_sha.as_deref(),
-            summary.ended_at,
+            summary.last_prompt_at.or(summary.ended_at),
         )?
     };
     let mut event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
@@ -2133,8 +2118,7 @@ pub fn get_project_session_timeline_page(
         if let CheckpointSupport::Supported(Some(checkpoint)) = checkpoint_support(
             &session.project_root,
             summary.branch.as_deref(),
-            summary.recorded_sha.as_deref(),
-            summary.ended_at,
+            summary.last_prompt_at.or(summary.ended_at),
         )? {
             if slice.events.len() < limit {
                 slice.events.push(checkpoint_event(&index, checkpoint));
@@ -2376,6 +2360,7 @@ mod tests {
             summary: None,
             started_at: None,
             ended_at: None,
+            last_prompt_at: None,
             branch: None,
             recorded_sha: None,
             user_rounds: 0,

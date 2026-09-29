@@ -436,7 +436,7 @@ fn canonical_paths(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
 /// and dependency keys. Existing paths canonicalize directly. Removal events
 /// may name a path that has already disappeared, so canonicalize its nearest
 /// existing ancestor and append the missing suffix without following it.
-fn canonical_event_path(path: &Path) -> PathBuf {
+pub(crate) fn canonical_event_path(path: &Path) -> PathBuf {
     let mut current = path;
     let mut missing = Vec::new();
     loop {
