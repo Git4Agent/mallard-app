@@ -22,13 +22,11 @@ use super::traits::{
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
 };
-use crate::provider_capture::{
-    scan_session_metadata_with, Discovery, ParsedSessionMetadata, MAX_FILE_BYTES,
-};
+use crate::provider_capture::{scan_session_metadata_with, ParsedSessionMetadata, MAX_FILE_BYTES};
 use mallard_domain::ProviderKey;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -112,22 +110,6 @@ impl SessionAdapter for CodexAdapter {
             }),
             maintenance_actions: self.maintenance_actions(),
         }
-    }
-
-    fn watch_roots(&self) -> &'static [&'static str] {
-        &["sessions", "archived_sessions"]
-    }
-
-    fn session_title_index(&self) -> Option<&'static str> {
-        Some("session_index.jsonl")
-    }
-
-    fn refresh_session_titles(
-        &self,
-        discovery: &mut crate::provider_capture::Discovery,
-        canonical_home: &Path,
-    ) -> Result<(), String> {
-        refresh_codex_session_titles(discovery, canonical_home)
     }
 
     fn reconstructs_rollout_graph(&self) -> bool {
@@ -283,7 +265,9 @@ impl SessionAdapter for CodexAdapter {
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
-        scan_session_metadata_with(path, parse_codex_session_metadata)
+        crate::session_scan_memo::scan_once("codex", path, |path| {
+            scan_session_metadata_with(path, parse_codex_session_metadata)
+        })
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
@@ -422,6 +406,14 @@ impl SessionAdapter for CodexAdapter {
         history::describe_agent_call(entry, context)
     }
 
+    fn agent_calls_without_transcript(
+        &self,
+        index: &SessionTimelineIndex,
+        binding: &mallard_domain::LocalConversationBinding,
+    ) -> BTreeSet<String> {
+        crate::codex_subagents::agent_calls_without_transcript(index, binding)
+    }
+
     fn read_event_detail(
         &self,
         path: &Path,
@@ -544,7 +536,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = scan_session_metadata_with(&path, parse_codex_session_metadata).unwrap_err();
+        let error = scan_session_metadata_with(&path, parse_codex_session_metadata)
+            .unwrap_err()
+            .into_message();
         assert!(error.contains("authoritative session metadata"));
     }
 
@@ -570,24 +564,6 @@ mod tests {
         assert_eq!(metadata.session_id, "current-session");
         assert_eq!(metadata.authorized_home, temp.path());
     }
-}
-
-/// Re-run only the session-index title enrichment over a cached discovery:
-/// a replaced `session_index.jsonl` invalidates display titles, never tail
-/// evidence or membership.
-fn refresh_codex_session_titles(
-    discovery: &mut Discovery,
-    canonical_home: &Path,
-) -> Result<(), String> {
-    let index = canonical_home.join("session_index.jsonl");
-    discovery.refresh_conversation_titles(&provider_key(), |ids| {
-        if ids.is_empty() || !index.is_file() {
-            return Ok(BTreeMap::new());
-        }
-        Ok(parse_session_index_titles(
-            &filter_codex_session_index_by_ids(&index, ids)?,
-        ))
-    })
 }
 
 pub(crate) fn filter_codex_session_index_by_ids(

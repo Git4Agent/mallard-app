@@ -14,6 +14,12 @@ pub type SourceSnapshots = BTreeMap<
 pub const PUSH_CHANGED: &str =
     "This task changed during Push. Push it again to include the latest work.";
 
+/// The task was edited after it was last pushed or pulled: an earlier
+/// message is no longer what it was. Pushing again cannot succeed; the next
+/// comparison reads the task in full and shows how it stands.
+pub const PUSH_EDITED: &str =
+    "Earlier messages in this task changed on this computer. Refresh to compare it again.";
+
 /// Prove the cloud prefix using already parsed local and wire chains.
 pub fn adopt_chain_prefix(
     local: &[mallard_domain::CanonicalConversationMessage],
@@ -51,8 +57,25 @@ pub enum ChildReferences {
 }
 
 impl ChildReferences {
+    /// The provider IDs of the children the main refers to whose
+    /// transcripts are not among the installed ones.
+    pub fn absent(
+        &self,
+        installed: &BTreeMap<SubagentKey, mallard_domain::InstalledSubagent>,
+    ) -> BTreeSet<String> {
+        match self {
+            // A Codex rollout is never rewritten: its cutoff tells them apart.
+            Self::Codex(_) => BTreeSet::new(),
+            Self::Claude(links) => links
+                .iter()
+                .filter(|(_, key)| !installed.contains_key(key))
+                .map(|(id, _)| id.clone())
+                .collect(),
+        }
+    }
+
     pub fn prepare(
-        self,
+        &self,
         children: &BTreeMap<SubagentKey, (Vec<u8>, SubagentContentState)>,
         identities: &BTreeMap<String, String>,
         source_parent: &str,
@@ -63,7 +86,7 @@ impl ChildReferences {
     ) -> Result<Vec<InstalledChildPayload>, String> {
         match self {
             Self::Codex(references) => crate::codex_subagents::prepare_child_payloads(
-                references,
+                references.clone(),
                 children,
                 identities,
                 root,
@@ -72,7 +95,7 @@ impl ChildReferences {
             ),
             Self::Claude(references) => {
                 crate::providers::claude::subagents::prepare_child_payloads(
-                    &references,
+                    references,
                     children,
                     source_parent,
                     destination_parent,
@@ -213,5 +236,135 @@ impl InstalledChildPayload {
                     bytes,
                 )
             }
+    }
+}
+
+/// What the tests of the agent cards of a pulled session are made of.
+#[cfg(test)]
+pub(crate) mod agent_card_fixtures {
+    use crate::providers::traits::{
+        SessionAgentIndexEntry, SessionCount, SessionCountQuality, SessionEventCounts,
+        SessionSourceSpan, SessionTimelineEventKind, SessionTimelineIndex,
+        SessionTimelineIndexEntry, SessionTimelineSource, SessionToolCallStatus,
+        SessionToolCategory, SessionToolIndexEntry,
+    };
+    use mallard_domain::{InstalledSubagent, LocalConversationBinding, SubagentKey};
+
+    /// An agent call of the turn `turn-1`: its event ID, the child that it
+    /// names, and its place.
+    pub(crate) fn agent_call(
+        event_id: &str,
+        agent: Option<&str>,
+        offset: u64,
+    ) -> SessionTimelineIndexEntry {
+        SessionTimelineIndexEntry {
+            event_id: event_id.to_string(),
+            ordinal: 0,
+            timestamp: None,
+            kind: SessionTimelineEventKind::AgentCall,
+            quality: SessionCountQuality::Exact,
+            turn_id: Some("turn-1".to_string()),
+            turn_tool_summary: None,
+            parent_event_id: None,
+            source: SessionSourceSpan { offset, length: 4 },
+            tool: Some(SessionToolIndexEntry {
+                provider_call_id: event_id.to_string(),
+                native_name: "agent".to_string(),
+                category: SessionToolCategory::Other,
+                status: SessionToolCallStatus::Completed,
+                affected_paths: Vec::new(),
+                result_source: None,
+            }),
+            agent: Some(SessionAgentIndexEntry {
+                provider_agent_id: agent.map(ToOwned::to_owned),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// An index of agent calls over sources of the given lengths.
+    pub(crate) fn index_of_agent_calls(
+        sources: &[u64],
+        calls: &[(&str, Option<&str>, u64)],
+    ) -> SessionTimelineIndex {
+        let none = || SessionCount::exact(0);
+        SessionTimelineIndex {
+            sources: sources
+                .iter()
+                .enumerate()
+                .map(|(position, length)| SessionTimelineSource {
+                    relative_path: format!("sessions/rollout-{position}.jsonl"),
+                    length: *length,
+                })
+                .collect(),
+            parser_version: 1,
+            events: calls
+                .iter()
+                .enumerate()
+                .map(
+                    |(ordinal, (event_id, agent, offset))| SessionTimelineIndexEntry {
+                        ordinal: ordinal as u64,
+                        ..agent_call(event_id, *agent, *offset)
+                    },
+                )
+                .collect(),
+            counts: SessionEventCounts {
+                prompts: none(),
+                responses: none(),
+                intermediate_steps: none(),
+                checkpoints: none(),
+                tool_calls: none(),
+                file_edits: none(),
+                shell_calls: none(),
+                reads: none(),
+                other_tools: none(),
+                agent_calls: SessionCount::exact(calls.len() as u64),
+            },
+            warnings: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    /// The binding of a session: what a Pull installed of it, or nothing
+    /// for a session that was made on this computer. `installed` pairs a
+    /// child key with the provider ID of the child.
+    pub(crate) fn binding_of_a_pulled_session(
+        installed_end: Option<u64>,
+        installed: &[(&str, &str)],
+        absent: &[&str],
+    ) -> LocalConversationBinding {
+        LocalConversationBinding {
+            installed_end,
+            installed_absent_subagents: absent.iter().map(ToString::to_string).collect(),
+            pulled_children_excluded: false,
+            installed_subagents: installed
+                .iter()
+                .map(|(creation, id)| {
+                    (
+                        SubagentKey::child(None, creation).unwrap(),
+                        InstalledSubagent {
+                            provider_thread_id: id.to_string(),
+                            installed_end: 1,
+                        },
+                    )
+                })
+                .collect(),
+            path_origins_ref: None,
+            host_id: mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+            replica_id: mallard_domain::ReplicaId::parse("replica-a").unwrap(),
+            local_project_id: mallard_domain::LocalProjectId::parse("project-a").unwrap(),
+            provider_profile_id: mallard_domain::LocalProviderProfileId::parse("profile-a")
+                .unwrap(),
+            thread_id: mallard_domain::ThreadId::parse("thread-1").unwrap(),
+            cloud_thread_id: None,
+            forked_from: None,
+            preserved: None,
+            root_tail_layout: None,
+            provider_thread_id: Some("parent".into()),
+            materialization_state: mallard_domain::ConversationMaterializationState::Resumable,
+            revision: 0,
+            created_at: 1,
+            updated_at: 1,
+        }
     }
 }

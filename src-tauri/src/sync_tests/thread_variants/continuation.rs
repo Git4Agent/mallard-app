@@ -500,6 +500,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -520,6 +521,7 @@ fn current_schema_comparison_exposes_distinct_typed_threads_without_guessing_by_
             });
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -791,6 +793,7 @@ fn install_active_branch(
         .mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -1029,6 +1032,7 @@ fn materialize_thread(
         }
         None => bindings_after.bindings.push(LocalConversationBinding {
             installed_end: Some(rewritten.len() as u64),
+            installed_absent_subagents: Default::default(),
             pulled_children_excluded: false,
             installed_subagents: Default::default(),
             path_origins_ref: None,

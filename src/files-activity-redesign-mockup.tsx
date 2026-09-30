@@ -381,8 +381,8 @@ function PushPane() {
         <SyncReviewSelectionBar
           count={picked}
           total={selectable.length}
+          recommendedCount={selectable.length}
           recommendedTitle="Use the recommended project file selection"
-          recommendedAriaLabel="Use recommended selection"
           recommendedDisabled={false}
           onRecommended={state.useRecommended}
           clearDisabled={picked === 0}
@@ -425,8 +425,8 @@ function PullPane() {
         <SyncReviewSelectionBar
           count={picked}
           total={PULL_ENTRIES.length}
+          recommendedCount={PULL_ENTRIES.length}
           recommendedTitle="Use the recommended selection"
-          recommendedAriaLabel="Use recommended selection"
           recommendedDisabled={false}
           onRecommended={state.useRecommended}
           clearDisabled={picked === 0}

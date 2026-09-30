@@ -2,7 +2,10 @@
 
 The implemented codec preserves conversation text on return to the original
 project binding. Provider IDs and record layout can change. Credential
-redaction remains an explicit exception. Redacted text stays redacted.
+redaction remains an explicit exception. Redacted text stays redacted. A
+record that was rewritten after Pull in a way Mallard does not know is a
+second exception, described under
+[Rewritten transcripts](#rewritten-transcripts).
 
 This is a clean cutover. Local state, manifests, plans, and receipts keep
 **schema 1**. The codec name stays `mallard.pathmap.v1`. Clear the old test
@@ -60,11 +63,17 @@ record ordinal. Each entry has:
 - A `derived` bit for rebuildable native display/layout records.
 - Inverse path edits: a [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901.html),
   a key/value flag, a UTF-8 byte range, and a closed wire atom.
+- Optionally `rewritten`: the same three of the record in the form that its
+  provider is known to rewrite it to. Pull writes it for a Claude record
+  that holds thinking beside other content. See
+  [Rewritten transcripts](#rewritten-transcripts).
 
 The file stores no transcript copy. Pointer keys can contain local text, so
 origins remain private local state. They never enter a portable manifest.
 Zero-edit records still have coverage. Missing, corrupt, stale, swapped,
-truncated, or misaligned referenced data fails the affected thread.
+truncated, or misaligned referenced data fails the affected thread, with the
+two cases of [Rewritten transcripts](#rewritten-transcripts) as the only
+exception for stale data.
 
 Push checks retained record hashes and replays their edits. It scans only
 new records. Native forks use physical parent coordinates; metadata updates
@@ -98,10 +107,78 @@ checks, occupied destinations, shared indexes, and real JSON key collisions
 remain checked. Pull still performs one live source update check. Origin
 checks use captured or prepared records, not a second live transcript read.
 
+## Rewritten transcripts
+
+A transcript can be rewritten after its origins were saved. The Claude
+desktop app does so when it imports a session: it removes thinking, and with
+it whole records, and changes no message. Keep both preserves an edited
+session as a copy of its own, with the origins that were saved before the
+edit.
+
+Push first reads the saved origins by position, as described above. A
+changed or missing saved record refuses that encoding. Push encodes once
+more in two cases only:
+
+- **The first Push of a copy that Keep both preserved.** The reviewed action
+  creates a cloud thread, the binding has `preserved` and no cloud mapping,
+  and the checkpoint has no accepted version. The copy is published under a
+  new cloud identity, so no stored version is contradicted. For Codex this
+  covers the leaf segment of the root.
+- **A mapped Claude session whose accepted messages are proven.** The
+  messages up to the accepted end give the accepted local value, and the new
+  wire form gives the accepted wire value at the same end. When the
+  redaction setting was changed since the stored version, the wire proof is
+  made on one more encoding, under the redaction of the stored version.
+
+The second encoding finds saved origins by record digest. It takes the
+records in file order and gives each the first saved origin of its digest
+that lies after the last one given. That origin passes its hash check and is
+replayed like any retained one. A record that finds none is scanned as a new
+record. The saved length is not checked; the proofs stand in for it.
+
+An import rewrites a record that holds thinking beside other content: it
+takes the thinking out and leaves the rest. Pull saves the origins of such a
+record in both forms. The entry of the record has a second entry,
+`rewritten`, with the hash of the record without its thinking and the edits
+that lie outside the thinking, at the places the content then has. The
+lookup by digest knows both hashes, and the two forms are one place in the
+order of the file. The rewritten record therefore finds the edits that were
+saved for it, and its text is stored as it was accepted. The lookup by
+position gives the entry of the record itself, as before. A record that was
+written on this computer has no second entry and needs none: a new scan of
+it gives what its saved edits give.
+
+A mapped Codex session, a segment of a Codex ancestor, every child
+transcript, and a session whose proofs fail stay refused. A missing,
+corrupt, or foreign origin file fails as before. No transcript is downloaded
+for any of this.
+
+**Accepted loss.** The wire proof covers what the wire fingerprint of a
+message hashes, for the messages of the conversation up to the accepted end.
+A rewritten record outside them has no proof, and a kept copy has none at
+all. A record that the import rewrote finds its second entry and loses
+nothing. The loss is left for a record that finds no saved entry of its
+hash: one that was rewritten in another way, or one that was pulled before
+the second entry existed. When such a record arrived by Pull and names the
+destination's project directory in text that was plain where it was
+written, the new scan stores a reference, and the text names another
+directory on return. A path in a spelling that the destination renders like
+another one can return in the plain spelling. This is the *blind rescanning*
+counterexample of the formal checks below. The owner accepted it for these
+records on 2026-09-29, on the expectation that a session keeps its project
+directory. The models are unchanged.
+
 ## Cost sample
 
 CPU work is linear in transcript bytes plus edits. Origin loading and saving
 adds local metadata I/O. No cloud request is added to normal Push or Pull.
+A Push of a rewritten transcript encodes that one session twice, and three
+times when the redaction setting was changed. Pull hashes a Claude record
+that holds thinking beside other content once more, for its second entry.
+In a release sample of 11.5 MB and 8,275 records, where one record in ten
+was such a record, the origin file grew from 2,055,033 to 2,333,732 bytes,
+which is 337 bytes for each of them. The time of the Pull did not change
+beyond the noise of the measurement.
 Each raw-path tag adds three or four wire bytes. URI tags can be shorter than
 the old URI form. Source-only Codex wire records remove redundant payloads.
 
@@ -180,7 +257,9 @@ The commit model permits partial writes. It does not assert rollback.
 Rust tests check the concrete scanner, all eight spellings, literal marker
 syntax, Unicode and control text, exact returned message text, nested keys,
 zero-edit history, appends, native forks, metadata folding, hook projection,
-origin corruption and ownership, metadata reset, and host rotation. Existing
+origin corruption and ownership, metadata reset, host rotation, the lookup
+by digest with both cases of a rewritten transcript, and the second entry of
+a record that holds thinking. Existing
 service and live tests cover thread isolation, Keep both, in-place updates,
 approvals, shared indexes, destination collisions, and credential redaction.
 

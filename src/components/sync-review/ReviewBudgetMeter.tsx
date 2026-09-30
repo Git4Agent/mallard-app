@@ -62,11 +62,11 @@ function ReviewBudgetFigure({ budget, verb, short = false, label }: {
  *  the requirements segment simply disappeared into the sessions one. The
  *  breakdown stays where it has always been — the title on both instances.
  *  Decoration: the figure beside it is the meter. */
-function ReviewBudgetTrack({ budget, verb }: { budget: ReviewBudget; verb: ReviewBudgetVerb }) {
+function ReviewBudgetTrack({ budget }: { budget: ReviewBudget }) {
   const scale = Math.max(budget.total, budget.limit);
   const over = budget.total > budget.limit;
   return (
-    <span className={`sync-review-budget-track ${verb}${over ? " over" : ""}`} aria-hidden="true">
+    <span className={`sync-review-budget-track${over ? " over" : ""}`} aria-hidden="true">
       <i style={{ width: `${(budget.total / scale) * 100}%` }} />
       {over && <b style={{ left: `${(budget.limit / scale) * 100}%` }} />}
     </span>
@@ -86,7 +86,10 @@ export function ReviewBudgetGlance({ budget, verb, breakdown }: {
 }) {
   return (
     <div className="sync-review-budget-glance" title={breakdown}>
-      <ReviewBudgetTrack budget={budget} verb={verb} />
+      {/* Pull only. The Push header also carries the redaction flag and the
+          Select pill, and at the default window it has no room for the bar;
+          the track is decoration and the footer gauge fills the same way. */}
+      {verb === "pull" && <ReviewBudgetTrack budget={budget} />}
       <ReviewBudgetFigure budget={budget} verb={verb} short label={sizeLabel(verb)} />
     </div>
   );

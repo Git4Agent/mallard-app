@@ -64,7 +64,6 @@ struct Counters {
     bytes_hashed: AtomicU64,
     full_graph_resolves: AtomicU64,
     selected_captures: AtomicU64,
-    inventory_reuse_hits: AtomicU64,
     observation_reuse_hits: AtomicU64,
 }
 
@@ -80,7 +79,6 @@ pub struct MetricsSnapshot {
     pub bytes_hashed: u64,
     pub full_graph_resolves: u64,
     pub selected_captures: u64,
-    pub inventory_reuse_hits: u64,
     pub observation_reuse_hits: u64,
 }
 
@@ -97,7 +95,6 @@ impl MetricsSnapshot {
             bytes_hashed: self.bytes_hashed - earlier.bytes_hashed,
             full_graph_resolves: self.full_graph_resolves - earlier.full_graph_resolves,
             selected_captures: self.selected_captures - earlier.selected_captures,
-            inventory_reuse_hits: self.inventory_reuse_hits - earlier.inventory_reuse_hits,
             observation_reuse_hits: self.observation_reuse_hits - earlier.observation_reuse_hits,
         }
     }
@@ -115,7 +112,6 @@ impl Counters {
             bytes_hashed: self.bytes_hashed.load(Ordering::Relaxed),
             full_graph_resolves: self.full_graph_resolves.load(Ordering::Relaxed),
             selected_captures: self.selected_captures.load(Ordering::Relaxed),
-            inventory_reuse_hits: self.inventory_reuse_hits.load(Ordering::Relaxed),
             observation_reuse_hits: self.observation_reuse_hits.load(Ordering::Relaxed),
         }
     }
@@ -252,12 +248,6 @@ pub fn record_selected_capture(path: &Path) {
     });
 }
 
-pub fn record_inventory_reuse_hit(root: &Path) {
-    record(root, |c| {
-        c.inventory_reuse_hits.fetch_add(1, Ordering::Relaxed);
-    });
-}
-
 pub fn record_observation_reuse_hit(root: &Path) {
     record(root, |c| {
         c.observation_reuse_hits.fetch_add(1, Ordering::Relaxed);
@@ -274,7 +264,7 @@ pub fn log_operation_delta(label: &str, before: &MetricsSnapshot) {
     eprintln!(
         "sync-metrics {label}: dirs={} head_reads={} transcript_bytes={} probe_bytes={} \
          append_bytes={} records={} hashed_bytes={} full_resolves={} captures={} \
-         inventory_hits={} observation_hits={}",
+         observation_hits={}",
         delta.directories_visited,
         delta.files_head_read,
         delta.transcript_bytes_read,
@@ -284,7 +274,6 @@ pub fn log_operation_delta(label: &str, before: &MetricsSnapshot) {
         delta.bytes_hashed,
         delta.full_graph_resolves,
         delta.selected_captures,
-        delta.inventory_reuse_hits,
         delta.observation_reuse_hits,
     );
 }

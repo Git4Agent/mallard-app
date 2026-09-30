@@ -9,7 +9,7 @@ use crate::credential_redaction::{RedactedWireBytes, RedactionRun};
 use crate::payload::PayloadBytes;
 use crate::providers::SessionAnalysis;
 use crate::session_path_map::SessionPathMapper;
-use crate::session_path_origins::PathOrigins;
+use crate::session_path_origins::{EncodeRefusal, OriginLookup, PathOrigins};
 use serde_json::Value;
 
 pub struct EncodedMainTranscript {
@@ -27,23 +27,22 @@ pub fn encode_main_transcript(
     source_id: &str,
     mapper: &SessionPathMapper,
     origins: &PathOrigins,
+    lookup: OriginLookup,
     redaction: &mut RedactionRun<'_>,
-) -> Result<EncodedMainTranscript, String> {
+) -> Result<EncodedMainTranscript, EncodeRefusal> {
     let text = std::str::from_utf8(bytes).map_err(|_| "Claude transcript is not valid UTF-8")?;
     let mut output = String::with_capacity(text.len());
     let mut encoded_length = 0_u64;
     let mut path_origins = PathOrigins::default();
     let mut child_links = ChildLinks::new();
+    let mut saved = origins.saved(source_id, lookup);
     let mut source_ordinal = 0;
-    let mut source_offset = 0_u64;
     let mut watermark = ClaudeWatermark::default();
     let mut failure = None;
     let mut records = text
         .split_inclusive('\n')
         .enumerate()
         .filter_map(|(index, raw)| {
-            let offset = source_offset;
-            source_offset += raw.len() as u64;
             let line = raw.strip_suffix('\n').unwrap_or(raw);
             if line.trim().is_empty() {
                 output.push_str(raw);
@@ -57,13 +56,13 @@ pub fn encode_main_transcript(
                 }
                 return Some(serde_json::from_str::<Value>(line));
             }
-            let result = (|| -> Result<Value, String> {
+            let result = (|| -> Result<Value, EncodeRefusal> {
                 let record = serde_json::from_str(line)
                     .map_err(|_| "Claude source transcript record is not JSON")?;
-                record_link(&mut child_links, &record, offset, source_id)?;
+                record_link(&mut child_links, &record, source_id)?;
                 let encoded = mapper
-                    .encode_record_with_origins(&record, origins.record(source_id, source_ordinal))
-                    .map_err(|error| format!("Claude record {}: {error}", index + 1))?;
+                    .encode_record_with_origins(&record, saved.origin_of(&record)?)
+                    .map_err(|refusal| refusal.at(format_args!("Claude record {}", index + 1)))?;
                 source_ordinal += 1;
                 path_origins.push(source_id, encoded.origins);
                 let serialized = serde_json::to_string(&encoded.wire)
@@ -98,12 +97,14 @@ pub fn encode_main_transcript(
     if let Some(error) = failure {
         return Err(error);
     }
-    origins.verify_source_length(source_id, source_ordinal, false)?;
+    if lookup == OriginLookup::ByPosition {
+        origins.verify_source_length(source_id, source_ordinal, false)?;
+    }
     if encoded_length > conversation_file_limit_bytes() {
         return Err("path-encoded Claude transcript exceeds its size limit".into());
     }
     if let CodecLineage::Unknown { reason } = &analysis.lineage {
-        return Err(format!("Claude wire failed re-analysis: {reason:?}"));
+        return Err(format!("Claude wire failed re-analysis: {reason:?}").into());
     }
     Ok(EncodedMainTranscript {
         bytes: RedactedWireBytes::from_verified_payload(PayloadBytes::from(output.into_bytes())),
@@ -149,6 +150,7 @@ mod tests {
                 "parent",
                 &mapper,
                 &PathOrigins::default(),
+                OriginLookup::ByPosition,
                 &mut run,
             )
             .unwrap();
@@ -227,6 +229,7 @@ mod tests {
                     "parent",
                     &mapper,
                     &PathOrigins::default(),
+                    OriginLookup::ByPosition,
                     &mut shared().begin_run().with_enabled(enabled),
                 )
                 .unwrap();
@@ -265,21 +268,212 @@ mod tests {
             "parent",
             &mapper,
             &PathOrigins::default(),
+            OriginLookup::ByPosition,
             &mut shared().begin_run(),
         )
         .err()
         .unwrap();
-        assert_eq!(error, "Claude source transcript record is not JSON");
+        assert_eq!(
+            error,
+            EncodeRefusal::from("Claude source transcript record is not JSON")
+        );
         for source in ["", " \n\r\n", "null\n", "{\n"] {
             assert!(encode_main_transcript(
                 source.as_bytes(),
                 "parent",
                 &mapper,
                 &PathOrigins::default(),
+                OriginLookup::ByPosition,
                 &mut shared().begin_run(),
             )
             .is_err());
         }
+    }
+
+    /// A session as Pull installs it under `/fixture/destination`, with
+    /// the origins Pull saves: `u1` refers to the project, `a1` and `u2`
+    /// name the destination's directory in text that was plain where it
+    /// was written.
+    fn pulled_session() -> (SessionPathMapper, Vec<Value>, Vec<Value>, PathOrigins) {
+        let mapper = SessionPathMapper::new("/fixture/destination", None, None).unwrap();
+        let row = |kind: &str, uuid: &str, parent: Option<&str>, content: Value| {
+            json!({"type":kind,"uuid":uuid,"parentUuid":parent,"sessionId":"parent",
+                "cwd":"/__mallard_root__/b;","message":{"role":kind,"content":content}})
+        };
+        let thinking = json!({"type":"thinking","thinking":"hidden","signature":"s"});
+        let wire = vec![
+            row("user", "u1", None, json!("read /__mallard_root__/b;/file")),
+            row("assistant", "t1", Some("u1"), json!([thinking])),
+            row(
+                "assistant",
+                "a1",
+                Some("t1"),
+                json!([thinking, {"type":"text","text":"see /fixture/destination/notes"}]),
+            ),
+            row(
+                "user",
+                "u2",
+                Some("a1"),
+                json!("notes are in /fixture/destination/notes"),
+            ),
+        ];
+        let mut origins = PathOrigins::default();
+        let local = wire
+            .iter()
+            .map(|record| {
+                let mut decoded = mapper.decode_record_with_origins(record).unwrap();
+                decoded.origins.rewritten =
+                    crate::providers::claude::codec::origins_without_thinking(
+                        &decoded.local,
+                        &decoded.origins.fields,
+                    )
+                    .unwrap();
+                origins.push("parent", decoded.origins);
+                decoded.local
+            })
+            .collect();
+        (mapper, wire, local, origins)
+    }
+
+    fn encode(
+        mapper: &SessionPathMapper,
+        records: &[Value],
+        origins: &PathOrigins,
+        lookup: OriginLookup,
+    ) -> Result<(Vec<Value>, PathOrigins), EncodeRefusal> {
+        let source = records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        let encoded = encode_main_transcript(
+            source.as_bytes(),
+            "parent",
+            mapper,
+            origins,
+            lookup,
+            &mut shared().begin_run(),
+        )?;
+        let wire = crate::conversation_codec::parsed_records(encoded.bytes.as_bytes())
+            .map(Result::unwrap)
+            .collect();
+        Ok((wire, encoded.path_origins))
+    }
+
+    #[test]
+    fn a_rewritten_transcript_is_refused_by_position_and_encoded_by_digest() {
+        let (mapper, wire, local, saved) = pulled_session();
+        let unchanged = encode(&mapper, &local, &saved, OriginLookup::ByPosition).unwrap();
+        assert_eq!(unchanged, (wire.clone(), saved.clone()));
+        assert_eq!(
+            encode(&mapper, &local, &saved, OriginLookup::ByDigest).unwrap(),
+            unchanged
+        );
+
+        // The desktop import: the row of thinking is removed, the row of
+        // thinking and text keeps its text. A new message follows.
+        let mut imported: Vec<Value> = local
+            .iter()
+            .filter_map(|record| crate::providers::claude::project_claude_record(record.clone()))
+            .collect();
+        assert_eq!(imported.len(), 3);
+        imported.push(
+            json!({"type":"user","uuid":"u3","parentUuid":"u2","sessionId":"parent",
+            "cwd":"/fixture/destination","message":{"role":"user",
+            "content":"and /fixture/destination/more"}}),
+        );
+        let refusal = encode(&mapper, &imported, &saved, OriginLookup::ByPosition).unwrap_err();
+        assert!(refusal.saved_record_changed);
+        assert_eq!(
+            refusal.message,
+            "Claude record 2: retained transcript record changed; path origins no longer match"
+        );
+
+        let (encoded, origins) =
+            encode(&mapper, &imported, &saved, OriginLookup::ByDigest).unwrap();
+        let (saved, origins) = (&saved.sources["parent"], &origins.sources["parent"]);
+        // Records that kept their content have the origins that were saved
+        // of them, wherever they are now: the plain text stays plain.
+        assert_eq!(encoded[0], wire[0]);
+        assert_eq!(encoded[2], wire[3]);
+        assert_eq!((&origins[0], &origins[2]), (&saved[0], &saved[3]));
+        // The record that the import rewrote has the origins that were
+        // saved of it without its thinking: its plain text stays plain. A
+        // new scan would store a reference.
+        assert_eq!(
+            Some(&encoded[1]),
+            crate::providers::claude::project_claude_record(wire[2].clone()).as_ref()
+        );
+        assert_eq!(Some(&origins[1]), saved[2].rewritten.as_deref());
+        assert_ne!(
+            origins[1],
+            mapper.encode_record(&imported[1]).unwrap().origins
+        );
+        // The new record is scanned.
+        assert_eq!(
+            encoded[3]["message"]["content"],
+            "and /__mallard_root__/b;/more"
+        );
+        // What is saved of this encoding is read by position next time.
+        let origins = PathOrigins {
+            sources: [("parent".to_string(), origins.clone())].into(),
+        };
+        assert_eq!(
+            encode(&mapper, &imported, &origins, OriginLookup::ByPosition).unwrap(),
+            (encoded, origins)
+        );
+    }
+
+    #[test]
+    fn a_missing_record_is_told_apart_from_a_transcript_that_cannot_be_read() {
+        let (mapper, _, local, saved) = pulled_session();
+        let missing = encode(&mapper, &local[..3], &saved, OriginLookup::ByPosition).unwrap_err();
+        assert!(missing.saved_record_changed);
+        assert_eq!(
+            missing.message,
+            "retained transcript was truncated; path origins no longer match"
+        );
+        encode(&mapper, &local[..3], &saved, OriginLookup::ByDigest).unwrap();
+
+        for lookup in [OriginLookup::ByPosition, OriginLookup::ByDigest] {
+            let source = format!("{}\n{{malformed\n", local[0]);
+            let refusal = encode_main_transcript(
+                source.as_bytes(),
+                "parent",
+                &mapper,
+                &saved,
+                lookup,
+                &mut shared().begin_run(),
+            )
+            .err()
+            .unwrap();
+            assert!(!refusal.saved_record_changed, "{lookup:?}");
+        }
+    }
+
+    /// What an ordinary Push costs: one pass, and one hash of each record,
+    /// of a retained one to check it and of a new one to save it.
+    #[test]
+    fn an_appended_transcript_is_encoded_in_one_pass_with_one_hash_a_record() {
+        let (mapper, _, mut local, saved) = pulled_session();
+        local.push(
+            json!({"type":"user","uuid":"u3","parentUuid":"u2","sessionId":"parent",
+            "cwd":"/fixture/destination","message":{"role":"user","content":"more"}}),
+        );
+        let (passes, hashes) = (
+            crate::sync_metrics::analysis_work(),
+            crate::session_path_origins::record_hash_attempts(),
+        );
+        encode(&mapper, &local, &saved, OriginLookup::ByPosition).unwrap();
+        assert_eq!(
+            crate::sync_metrics::analysis_work()
+                .delta_since(passes)
+                .passes,
+            1
+        );
+        assert_eq!(
+            crate::session_path_origins::record_hash_attempts() - hashes,
+            local.len() as u64
+        );
     }
 
     #[test]
@@ -299,6 +493,7 @@ mod tests {
                 "parent",
                 &mapper,
                 &PathOrigins::default(),
+                OriginLookup::ByPosition,
                 &mut run,
             )
             .unwrap();
@@ -314,6 +509,7 @@ mod tests {
             "parent",
             &mapper,
             &PathOrigins::default(),
+            OriginLookup::ByPosition,
             &mut run,
         )
         .is_err());

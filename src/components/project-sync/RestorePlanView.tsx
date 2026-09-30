@@ -499,7 +499,7 @@ export default function RestorePlanView({
           recommendedTitle={activeStep === "history"
             ? `Select the newest ${searchActive ? "matching " : ""}sessions that fit this pull (${pendingRecommendedCount})`
             : `Restore the recommended safe selection (${pendingRecommendedCount})`}
-          recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching sessions" : ""} (${pendingRecommendedCount})`}
+          recommendedCount={pendingRecommendedCount}
           recommendedDisabled={pendingSearchItems.length === 0 || stepMatchesRecommended}
           onRecommended={useRecommended}
           searchActive={searchActive}

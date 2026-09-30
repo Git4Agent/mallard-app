@@ -15,6 +15,7 @@ import {
   unresolvedSyncPresentation,
 } from "../../src/components/project-sync/ProjectActivityPage";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
+import Icon from "../../src/components/Icons";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
 import { createActivityRefresh, createSingleFlight } from "../../src/components/project-sync/api";
 import { dismissStorageWarning, clearStorageWarningDismissal } from "../../src/preferences";
@@ -454,145 +455,154 @@ test("session indicators use the quiet desktop sync vocabulary", () => {
   assert.match(css, /\.sync-thread-sync-indicator\.unavailable \{ color: var\(--thread-status-unavailable\); \}/);
 });
 
-test("thread status badges use the outlined Default 24px pixel family", () => {
-  const badge = "M9 1h6v1h3v1h1v1h1v1h1v1h1v3h1v6h-1v3h-1v1h-1v1h-1v1h-1v1h-3v1h-6v-1h-3v-1h-1v-1h-1v-1h-1v-1h-1v-3h-1v-6h1v-3h1v-1h1v-1h1v-1h1v-1h3ZM11 2v1h-3v1h-2v1h-1v1h-1v2h-1v3h-1v2h1v3h1v2h1v1h1v1h2v1h3v1h2v-1h3v-1h2v-1h1v-1h1v-2h1v-3h1v-2h-1v-3h-1v-2h-1v-1h-1v-1h-2v-1h-3v-1Z";
-  // The disc the filled variant paints: the ring's outer boundary alone, which
-  // is everything before its second subpath.
-  const disc = badge.slice(0, badge.indexOf("ZM") + 1);
-  // Colours resolve per theme now. One hex could not serve both papers, and
-  // three of the old seven failed outright on cream — amber `pending` measured
-  // 2.22:1, on a 1px hairline.
+test("shared icons use the rounded Tabler vector family", () => {
+  const settings = renderToStaticMarkup(<Icon name="settings" size={19} />);
+  assert.match(settings, /data-icon="settings"/);
+  assert.match(settings, /tabler-icon-adjustments-horizontal/);
+  assert.match(settings, /stroke-width="2"/);
+  assert.match(settings, /stroke-linecap="round"/);
+  assert.match(settings, /shape-rendering="geometricPrecision"/);
+  assert.doesNotMatch(settings, /crispEdges|icon-pixel/);
+
+  const provider = renderToStaticMarkup(<Icon name="storage-r2" size={20} />);
+  assert.match(provider, /data-storage-provider="r2"/);
+  assert.match(provider, /\/storage-provider-icons\/r2\.svg/);
+});
+
+test("Catalog resource icons use standalone outlines while Skill stays unchanged", () => {
+  const petV1 = renderToStaticMarkup(<Icon name="catalog-pet-v1" size={18} />);
+  assert.match(petV1, /data-icon="catalog-pet-v1"/);
+  assert.match(petV1, /data-icon-source="fluent-animal-paw-print"/);
+  assert.match(petV1, /stroke-width="2"/);
+  assert.doesNotMatch(petV1, /catalog-orbit|tabler-icon-circle|stroke-dasharray/);
+
+  const petV2 = renderToStaticMarkup(<Icon name="catalog-pet-v2" size={18} />);
+  assert.match(petV2, /data-icon="catalog-pet-v2"/);
+  assert.match(petV2, /data-icon-source="lucide-cat"/);
+  assert.match(petV2, /stroke-width="1.75"/);
+  assert.doesNotMatch(petV2, /catalog-orbit|tabler-icon-circle|stroke-dasharray/);
+
+  const plugin = renderToStaticMarkup(<Icon name="catalog-plugin" size={18} />);
+  assert.match(plugin, /data-icon="catalog-plugin"/);
+  assert.match(plugin, /tabler-icon-plug/);
+  assert.doesNotMatch(plugin, /catalog-orbit|tabler-icon-circle|stroke-dasharray/);
+
+  const skill = renderToStaticMarkup(<Icon name="lightbulb" size={18} />);
+  assert.match(skill, /data-icon="lightbulb"/);
+  assert.match(skill, /tabler-icon-bulb/);
+  assert.doesNotMatch(skill, /catalog-orbit/);
+});
+
+test("thread status badges use the colored rounded vector family", () => {
   const expected: Record<
     ThreadStatusIconName,
-    { light: string; dark: string; glyph: string; filled?: true }
+    { iconClass: string; token: string; light: string; dark: string; composite?: true; filled?: true }
   > = {
-    // Cream forces the green to full saturation instead of lightness; dark
-    // keeps the hue and lifts it a step so it clears the active row.
     synced: {
+      iconClass: "tabler-icon-circle-check",
+      token: "synced",
       light: "#006b32",
       dark: "#4dbf7e",
-      glyph: "M16 9h2v2h-1v1h-1v2h-1v1h-1v1h-1v1h-2v-1h-1v-1h-1v-1h-1v-2h2v1h1v1h2v-1h1v-2h1v-1h1Z",
     },
     "cloud-outstanding": {
+      iconClass: "tabler-icon-cloud-download",
+      token: "cloud",
+      light: "#885e06",
+      dark: "#f2c369",
+      composite: true,
+    },
+    "local-outstanding": {
+      iconClass: "tabler-icon-upload",
+      token: "local",
       light: "#256c90",
       dark: "#8ccff3",
-      glyph: "M9 7h5v1h-5ZM9 8v2h-1v-2ZM14 8h1v2h-1ZM8 10v1h-2v-1ZM15 10h2v1h-2ZM6 11v3h-1v-3ZM17 11h1v5h-12v-2h1v1h10Z",
-    },
-    // VS Code's shipped gitDecoration.modified (light unaltered, dark lifted a
-    // step for the active row): amber is what a file list means by "local work
-    // not sent anywhere yet".
-    "local-outstanding": {
-      light: "#895503",
-      dark: "#e6c896",
-      glyph: "M11 8h3v1h1v1h1v1h1v2h-2v-1h-1v-1h-1v7h-2v-6h-1v1h-2v-2h1v-1h1v-1h1Z",
+      composite: true,
     },
     divergent: {
+      iconClass: "tabler-icon-git-merge",
+      token: "divergent",
       light: "#6d529d",
       dark: "#cbb4f3",
-      glyph: "M6 6h4v4h-4ZM14 6h4v4h-4ZM7 10h2v1h-2ZM15 10h2v1h-2ZM7 11h3v1h-3ZM14 11h3v1h-3ZM8 12h8v1h-8ZM9 13h6v1h-6ZM11 14h2v2h-2ZM10 16h4v3h-4Z",
-      filled: true,
+      composite: true,
     },
     pending: {
+      iconClass: "tabler-icon-clock",
+      token: "pending",
       light: "#725f48",
       dark: "#c8b998",
-      glyph: "M11 7h2v5h4v2h-6Z",
     },
     conflict: {
+      iconClass: "tabler-icon-exclamation-circle-filled",
+      token: "conflict",
       light: "#b53420",
       dark: "#f4917f",
-      glyph: "M11 6h3v9h-3ZM11 16h3v3h-3Z",
       filled: true,
     },
     unavailable: {
-      light: "#725f48",
-      dark: "#c8b998",
-      glyph: "M7 11h10v3h-10Z",
+      iconClass: "tabler-icon-circle-minus",
+      token: "unavailable",
+      light: "#5f6978",
+      dark: "#b7c0cc",
     },
-    // The three neutrals say "no verdict yet", so they take --text-3 rather
-    // than a signal hue: a colour here would claim an answer the comparison has
-    // not given, and on an unlinked project one of these is on every row.
     untracked: {
-      light: "var(--text-3)",
-      dark: "var(--text-3)",
-      glyph: "M8 8h8v8H8ZM10 14h4v-4h-4Z",
+      iconClass: "tabler-icon-square-rounded",
+      token: "untracked",
+      light: "#6b7280",
+      dark: "#aaa69d",
+      composite: true,
     },
     checking: {
-      light: "var(--text-3)",
-      dark: "var(--text-3)",
-      glyph: "M6 11h3v3H6Z",
+      iconClass: "tabler-icon-dots",
+      token: "checking",
+      light: "#00758a",
+      dark: "#62d0e8",
+      composite: true,
     },
     unknown: {
-      light: "var(--text-3)",
-      dark: "var(--text-3)",
-      glyph: "M9 6h6v2H9ZM13 8h2v3h-2ZM11 11h4v2h-4ZM11 13h2v2h-2ZM11 16h2v2h-2Z",
+      iconClass: "tabler-icon-help-circle",
+      token: "unknown",
+      light: "#6d529d",
+      dark: "#d4b7ff",
     },
   };
   const statuses = Object.keys(expected) as ThreadStatusIconName[];
 
   for (const status of statuses) {
+    const spec = expected[status];
     const html = renderToStaticMarkup(<ThreadStatusIcon status={status} />);
     assert.match(html, new RegExp(`data-thread-status="${status}"`));
-    assert.match(html, /thread-status-icon-badge/);
-    assert.ok(html.includes(expected[status].glyph), `${status} glyph geometry`);
-    assert.match(html, /width="24"/);
-    assert.match(html, /height="24"/);
-    assert.match(html, /shape-rendering="crispEdges"/);
-    // No gradient, filter or stroke anywhere: the mark is flat fill on the
-    // pixel grid, and a stroke would land on half-pixels at 18px.
-    assert.doesNotMatch(html, /(?:linearGradient|filter|drop-shadow|stroke=)/);
-    assert.doesNotMatch(html, /--thread-status-glyph/);
-
-    if (expected[status].filled) {
-      // Solid disc with the glyph punched out by fill-rule, so the two states a
-      // button cannot resolve are found pre-attentively — and found in
-      // greyscale, where hue tells the reader nothing (WCAG 1.4.1). No mask,
-      // so no generated id has to survive server rendering.
-      assert.ok(html.includes(disc), `${status} must paint the solid disc`);
-      assert.match(html, /fill-rule="evenodd"/);
-      assert.doesNotMatch(html, /<mask|url\(#/);
-      // The knockout inverts stroke and gap, so overlapping subpaths would be
-      // crossed an even number of times and fill back in.
-      const rects = [...expected[status].glyph.matchAll(/M(\d+) (\d+)h(\d+)v(\d+)h-\d+Z/g)]
-        .map(([, x, y, w, h]) => [+x, +y, +w, +h] as const);
-      assert.equal(rects.length, expected[status].glyph.split("Z").length - 1,
-        `${status} glyph must be whole rectangles, or overlap cannot be checked`);
-      for (let i = 0; i < rects.length; i += 1) {
-        for (let j = i + 1; j < rects.length; j += 1) {
-          const [ax, ay, aw, ah] = rects[i];
-          const [bx, by, bw, bh] = rects[j];
-          const overlaps = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
-          assert.ok(!overlaps, `${status} rects ${i} and ${j} overlap; evenodd would refill the gap`);
-        }
-      }
+    assert.match(html, /aria-hidden="true"/);
+    assert.match(html, /style="width:24px;height:24px"/);
+    assert.ok(html.includes(spec.iconClass), `${status} must use ${spec.iconClass}`);
+    if (spec.filled) {
+      assert.match(html, /fill="currentColor" stroke="none"/);
     } else {
-      assert.ok(html.includes(badge), `${status} must use the shared ring badge`);
-      assert.match(html, /thread-status-icon-badge" fill="currentColor"/);
-      assert.doesNotMatch(html, /fill-rule/);
+      assert.match(html, /stroke-width="2"/);
+    }
+    assert.doesNotMatch(html, /crispEdges|icon-pixel/);
+    if (spec.composite) {
+      assert.match(html, /thread-status-icon-badge/);
+      assert.match(html, /thread-status-icon-glyph/);
+    } else {
+      assert.match(html, /thread-status-icon-primary/);
+      assert.doesNotMatch(html, /thread-status-icon-badge/);
     }
   }
 
-  // Three dots, animated in turn: one glyph pulsing as a whole reads as an
-  // alarm, a cycle reads as work in progress.
   const checkingHtml = renderToStaticMarkup(<ThreadStatusIcon status="checking" />);
-  assert.match(checkingHtml, /class="thread-status-icon-dots"/);
-  assert.equal((checkingHtml.match(/<path fill="currentColor"/g) ?? []).length, 3);
+  assert.match(checkingHtml, /thread-status-icon-dots/);
 
   const css = readFileSync("src/App.css", "utf8");
-  for (const status of statuses) {
-    assert.match(css, new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\]`));
+  for (const [status, spec] of Object.entries(expected)) {
+    assert.match(
+      css,
+      new RegExp(`\\.thread-status-icon\\[data-thread-status="${status}"\\] \\{ color: var\\(--status-icon-${spec.token}\\); \\}`),
+    );
+    assert.ok(css.includes(spec.light), `light value ${spec.light} missing from the palette`);
+    assert.ok(css.includes(spec.dark), `dark value ${spec.dark} missing from the palette`);
   }
-  // Both halves of every pair must stay in the shared palette; one value
-  // cannot serve both papers.
-  const palette = css;
-  for (const { light, dark } of Object.values(expected)) {
-    assert.ok(palette.includes(light), `light value ${light} missing from the palette`);
-    assert.ok(palette.includes(dark), `dark value ${dark} missing from the palette`);
-  }
-  // None of the seven may be declared outside a theme block again.
-  const invariant = palette.slice(0, palette.indexOf('data-theme="dark"'));
-  assert.doesNotMatch(invariant, /--thread-status-(synced|local):/);
-  assert.match(css, /\.thread-status-icon-dots > path \{[^}]*animation: thread-status-dot/s);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots > path \{ animation: none;/s);
+  assert.match(css, /\.thread-status-icon-dots \{[^}]*animation: thread-status-pulse/s);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots \{ animation: none;/s);
 });
 
 test("a row with no comparison entry names why, instead of drawing nothing", () => {
@@ -2218,8 +2228,8 @@ test("selected storage adds directional indicators and remote-only session rows"
   assert.doesNotMatch(html, /sync-thread-sync-summary/);
   assert.match(html, /aria-label="Newer on this computer\. Push to update Local storage 1\."/);
   assert.match(html, /aria-label="Only in Local storage 1\. Pull to download it here\."/);
-  assert.match(html, /sync-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><svg[^>]+>/);
-  assert.match(html, /sync-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><svg[^>]+>/);
+  assert.match(html, /sync-thread-sync-indicator local[^>]+aria-label="Newer on this computer\.[^"]+"[^>]*><span[^>]+data-thread-status="local-outstanding"/);
+  assert.match(html, /sync-thread-sync-indicator storage[^>]+aria-label="Only in Local storage 1\.[^"]+"[^>]*><span[^>]+data-thread-status="cloud-outstanding"/);
   assert.doesNotMatch(html, /sync-thread-sync-glyph/);
   assert.match(html, /Improve cloud thread titles/);
   // The remote-only row says where it lives through its badge, not a location
@@ -2711,7 +2721,7 @@ test("completed projects use their main row for history and only mark Git reposi
   assert.doesNotMatch(html, /\.png"/);
   assert.doesNotMatch(html, /aria-label="View history for Mallard local"/);
   assert.equal(html.match(/sync-project-git-icon/g)?.length, 1);
-  assert.equal(html.match(/icon-git-folder-mark/g)?.length, 1);
+  assert.equal(html.match(/tabler-icon-folder-code/g)?.length, 1);
   assert.equal(html.match(/sync-project-folder-icon/g)?.length, 1);
   assert.match(html, /aria-label="Mallard local, Git repository"/);
   assert.doesNotMatch(html, /sync-repository-kind|>git<\/span>/);
@@ -2953,7 +2963,7 @@ test("the Catalog rail starts empty and lists one row per added scope", () => {
   const tiles = [...emptyPane.matchAll(/class="sidebar-door" title="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(tiles, ["Add Skills", "Add Pets v1"]);
   assert.match(emptyPane, /aria-label="Add Skills"[^]*?data-icon="lightbulb"[^]*?data-icon="plus"/);
-  assert.match(emptyPane, /aria-label="Add Pets v1"[^]*?data-icon="paw"/);
+  assert.match(emptyPane, /aria-label="Add Pets v1"[^]*?data-icon="catalog-pet-v1"/);
   assert.doesNotMatch(emptyPane, /Add your first|sync-sidebar-empty|<span>Skills<\/span>|<span>Plugins<\/span>|<span>Pets<\/span>/);
   // Before the registry answers, the one tile is the chooser itself.
   assert.match(catalogPane(render([], null)), /class="sidebar-door" title="Add resource"[^]*?data-icon="catalog"/);
@@ -2969,8 +2979,8 @@ test("the Catalog rail starts empty and lists one row per added scope", () => {
   const pane = catalogPane(html);
   // Each row wears the glyph its capability's presentation hint names.
   assert.match(pane, /data-icon="lightbulb"[^]*?Skills · Codex home/);
-  assert.match(pane, /data-icon="paw"[^]*?Pets v1 · Codex home/);
-  assert.match(pane, /data-icon="cat"[^]*?Pets v2 · Codex home/);
+  assert.match(pane, /data-icon="catalog-pet-v1"[^]*?Pets v1 · Codex home/);
+  assert.match(pane, /data-icon="catalog-pet-v2"[^]*?Pets v2 · Codex home/);
   assert.match(pane, /<span>Skills · Codex home<\/span>/);
   assert.match(pane, /<span>Skills · conf2<\/span>/);
   assert.match(pane, /<span>Pets v1 · Codex home<\/span>/);
@@ -3215,7 +3225,7 @@ test("a fetch in flight moves the node and nothing else", () => {
   const busy = renderToStaticMarkup(
     <ProjectChatHistoryContent {...contentDefaults} activity={activity} loadingMore />,
   );
-  assert.match(busy, /class="sync-history-rail-foot-node"[^>]*>.*?data-icon="refresh"[^>]*class="icon-spin"/s);
+  assert.match(busy, /class="sync-history-rail-foot-node"[^>]*>.*?class="[^"]*icon-spin[^"]*"[^>]*data-icon="refresh"/s);
   assert.match(busy, /<strong>Loading…<\/strong>/);
   assert.match(busy, /disabled=""/);
   // Same stamp, in the same slot, either way.

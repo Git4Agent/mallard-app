@@ -68,7 +68,7 @@ fn claude_owned_subagents_round_trip_update_and_missing_recovery() {
     let home = temp.path().join("source-claude");
     bind_and_link_claude_replica(&repo, &source, &storage, &root, &home);
     let parent = "11111111-1111-4111-8111-111111111111";
-    let (_, children) = write_claude_owned_fixture(&home, &root, parent, 2);
+    let (source_main, children) = write_claude_owned_fixture(&home, &root, parent, 2);
     let service = ProjectSyncService::new(&repo);
     let push = |project: &LocalProjectRegistration| {
         let review = service
@@ -190,17 +190,30 @@ fn claude_owned_subagents_round_trip_update_and_missing_recovery() {
     let quiet = metrics.snapshot().delta_since(&before);
     assert_eq!(quiet.transcript_bytes_read, 0);
     assert_eq!(quiet.append_bytes_read, 0);
-    let main_metrics =
-        mallard_infrastructure::sync_metrics::register_root(&std::fs::canonicalize(main).unwrap());
-    let before_cold = main_metrics.snapshot();
-    super::super::session_watch_service::session_watch_service().force_rebaseline(&target_home);
-    assert_eq!(compare().entries[0].state, ThreadSyncState::Synced);
-    let cold = main_metrics.snapshot().delta_since(&before_cold);
-    assert!(cold.transcript_bytes_read > 0);
-    assert_eq!(
-        cold.full_graph_resolves, 0,
-        "cold membership uses the existing main cursor"
-    );
+    // Pull fixes its checkpoint before the file exists, so the installed
+    // transcript has no saved file state: a cold comparison reads it in
+    // full. Push accepted the source under the state of its file: a cold
+    // comparison reads that one for membership alone and takes its
+    // evidence from the cursor.
+    for (path, project, full_reads) in [(main, &target, 1), (&source_main, &source, 0)] {
+        let metrics = mallard_infrastructure::sync_metrics::register_root(
+            &std::fs::canonicalize(path).unwrap(),
+        );
+        let before_cold = metrics.snapshot();
+        super::super::observation_cache::observation_cache()
+            .reset_and_purge_disk(repo.root())
+            .unwrap();
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage,
+        )
+        .unwrap();
+        assert_eq!(comparison.entries[0].state, ThreadSyncState::Synced);
+        let cold = metrics.snapshot().delta_since(&before_cold);
+        assert!(cold.transcript_bytes_read > 0);
+        assert_eq!(cold.full_graph_resolves, full_reads, "{}", path.display());
+    }
     let sibling = claude_subagents::child_path(main, dest, "agent1").unwrap();
     let sibling_metrics = mallard_infrastructure::sync_metrics::register_root(&sibling);
     let before = sibling_metrics.snapshot();
@@ -280,6 +293,7 @@ fn native_claude_owned_transport_bridge() {
         .to_string_lossy()
         .starts_with("mallard-claude-owned-native-"));
     let repo = LocalStateRepository::from_home_dir(root.join("mallard-state")).unwrap();
+    save_child_push(&repo, "claude", true);
     let storage = StorageId::parse("native-claude-owned").unwrap();
     add_local_storage(&repo, &storage, &root.join("store"));
     let source = register(&repo);
@@ -296,6 +310,12 @@ fn native_claude_owned_transport_bridge() {
         .unwrap();
     let entries = &review.thread_comparison.as_ref().unwrap().entries;
     assert_eq!(entries.len(), 2, "{entries:?}");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.subagent_selection.wire_children == ConversationWireChildren::On),
+        "{entries:?}"
+    );
     assert!(
         entries
             .iter()
@@ -419,8 +439,9 @@ fn benchmark_claude_owned_subagents() {
         for cold in [true, false] {
             for _ in 0..15 {
                 if cold {
-                    super::super::session_watch_service::session_watch_service()
-                        .force_rebaseline(&home);
+                    super::super::observation_cache::observation_cache()
+                        .reset_and_purge_disk(repo.root())
+                        .unwrap();
                 }
                 let start = Instant::now();
                 let comparison = get_project_thread_sync_comparison_with_repository(

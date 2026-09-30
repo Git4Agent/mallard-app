@@ -3,7 +3,8 @@
 //! Push verifies physical source origins, maps new records, and redacts
 //! credentials. The wire form keeps source records with tagged path
 //! references and one authoritative metadata head. Redundant display
-//! records are checked and omitted.
+//! records are checked and omitted. The leaf of a copy that Keep both
+//! preserved can be read by record digest instead of by position.
 //!
 //! Pull decodes references and captures their inverse edits. It then builds
 //! native display records from the decoded sources. Generated display and
@@ -31,7 +32,7 @@ use crate::payload::PayloadBytes;
 use crate::session_path_map::{
     path_map_marker, validate_path_map_marker, SessionPathMapper, PATH_MAP_FIELD,
 };
-use crate::session_path_origins::{PathOrigins, RecordPathOrigins};
+use crate::session_path_origins::{EncodeRefusal, OriginLookup, PathOrigins, RecordPathOrigins};
 use crate::verified_transcript::VerifiedTranscript;
 use mallard_domain::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness, hex_lower,
@@ -161,6 +162,7 @@ fn encode_codex_root_with_reader(
         layout,
         redactor,
         origins,
+        OriginLookup::ByPosition,
         &std::collections::BTreeMap::new(),
         read_segment,
     )?;
@@ -195,7 +197,7 @@ pub fn decode_standalone_codex_root(
     layout: Option<&mallard_domain::RootTailLayout>,
 ) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
     let mut redaction = credential_redaction::shared().begin_run();
-    reconstruct_codex_root(
+    Ok(reconstruct_codex_root(
         resolved,
         BuildMode::Decode {
             root_provider_thread_id,
@@ -205,12 +207,15 @@ pub fn decode_standalone_codex_root(
         layout,
         &mut redaction,
         &PathOrigins::default(),
+        OriginLookup::ByPosition,
         &std::collections::BTreeMap::new(),
         &|segment| read_bounded(&segment.path).map(Cow::Owned),
-    )
+    )?)
 }
 
 /// Encode one member of the selected tree from its captured sources.
+/// `leaf_lookup` is where the saved origins of the leaf segment are looked
+/// for; the segments of its ancestors are always read by position.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_codex_tree_member(
     resolved: &ResolvedCodexRoot,
@@ -220,8 +225,10 @@ pub fn encode_codex_tree_member(
     layout: Option<&mallard_domain::RootTailLayout>,
     redactor: &mut credential_redaction::RedactionRun<'_>,
     origins: &PathOrigins,
+    leaf_lookup: OriginLookup,
     identities: &std::collections::BTreeMap<String, String>,
-) -> Result<StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>, String> {
+) -> Result<StandaloneConversationArtifact<credential_redaction::RedactedWireBytes>, EncodeRefusal>
+{
     let artifact = reconstruct_codex_root(
         resolved,
         BuildMode::Encode {
@@ -231,6 +238,7 @@ pub fn encode_codex_tree_member(
         layout,
         redactor,
         origins,
+        leaf_lookup,
         identities,
         &|segment| {
             sources
@@ -269,7 +277,7 @@ pub fn decode_codex_tree_member(
     identities: &std::collections::BTreeMap<String, String>,
     redaction: &mut credential_redaction::RedactionRun<'_>,
 ) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
-    reconstruct_codex_root(
+    Ok(reconstruct_codex_root(
         resolved,
         BuildMode::Decode {
             root_provider_thread_id: destination,
@@ -279,22 +287,25 @@ pub fn decode_codex_tree_member(
         Some(layout),
         redaction,
         &PathOrigins::default(),
+        OriginLookup::ByPosition,
         identities,
         &|_| Ok(Cow::Borrowed(bytes)),
-    )
+    )?)
 }
 
 type SegmentReader<'a> = dyn Fn(&ResolvedSegment) -> Result<Cow<'a, [u8]>, String> + 'a;
 
+#[allow(clippy::too_many_arguments)]
 fn reconstruct_codex_root(
     resolved: &ResolvedCodexRoot,
     mode: BuildMode<'_>,
     layout: Option<&mallard_domain::RootTailLayout>,
     redactor: &mut credential_redaction::RedactionRun<'_>,
     previous_origins: &PathOrigins,
+    leaf_lookup: OriginLookup,
     identities: &std::collections::BTreeMap<String, String>,
     read_segment: &SegmentReader<'_>,
-) -> Result<StandaloneConversationArtifact<PayloadBytes>, String> {
+) -> Result<StandaloneConversationArtifact<PayloadBytes>, EncodeRefusal> {
     let home = crate::session_path_map::home_dir_text();
     let (mut output_root_id, mapper, encode_mode) = match mode {
         BuildMode::Encode {
@@ -331,6 +342,7 @@ fn reconstruct_codex_root(
         encode_mode,
         redactor,
         previous_origins,
+        leaf_lookup,
         &mut path_origins,
     )?;
     if encode_mode {
@@ -475,7 +487,7 @@ fn reconstruct_codex_root(
             .insert(0, head_origins);
     }
     if output.len() as u64 > conversation_file_limit_bytes() {
-        return Err("standalone Codex output exceeds the bounded transcript limit".to_string());
+        return Err("standalone Codex output exceeds the bounded transcript limit".into());
     }
     let output_verification_started = Instant::now();
     if !encode_mode {
@@ -494,10 +506,10 @@ fn reconstruct_codex_root(
     // with exactly the resolved chain's message identities under the output
     // identity, and the output-form tail is refolded from that analysis.
     if analysis.source_thread_id.as_deref() != Some(output_root_id.as_str()) {
-        return Err("standalone output lost its root identity".to_string());
+        return Err("standalone output lost its root identity".into());
     }
     if analysis.is_internal_subagent != resolved.leaf_meta.is_internal_subagent {
-        return Err("standalone output changed its subagent role".to_string());
+        return Err("standalone output changed its subagent role".into());
     }
     let output = PayloadBytes::from(output);
     let verification = VerifiedTranscript::from_codex_analysis(output.clone(), &analysis)?;
@@ -511,10 +523,7 @@ fn reconstruct_codex_root(
             semantic_digest,
         } => (chain, lineage_digest, semantic_digest),
         CodecLineage::Unknown { reason } => {
-            return Err(format!(
-                "standalone output failed re-analysis: {:?}",
-                reason
-            ));
+            return Err(format!("standalone output failed re-analysis: {:?}", reason).into());
         }
     };
     if chain.len() != resolved.chain.len()
@@ -526,7 +535,7 @@ fn reconstruct_codex_root(
                     || output_message.parent_message_id != source_message.parent_message_id
             })
     {
-        return Err("standalone output changed the canonical chain identities".to_string());
+        return Err("standalone output changed the canonical chain identities".into());
     }
     let (partition_kind, start_record_count) =
         crate::codex_history_graph::effective_tail_partition(layout, resolved)?;
@@ -612,6 +621,7 @@ struct SourceRecord<'a> {
 }
 
 /// Parse each source once, folding the leaf metadata and collecting its body.
+#[allow(clippy::too_many_arguments)]
 fn read_source_records<'a>(
     resolved: &'a ResolvedCodexRoot,
     read_segment: &SegmentReader<'_>,
@@ -619,18 +629,27 @@ fn read_source_records<'a>(
     encode_mode: bool,
     redactor: &mut credential_redaction::RedactionRun<'_>,
     previous: &PathOrigins,
+    leaf_lookup: OriginLookup,
     origins: &mut PathOrigins,
-) -> Result<(Value, Vec<SourceRecord<'a>>), String> {
+) -> Result<(Value, Vec<SourceRecord<'a>>), EncodeRefusal> {
     let mut effective: Option<Value> = None;
     let mut records = Vec::new();
     let mut activity_events = std::collections::BTreeMap::new();
     for (index, segment) in resolved.segments.iter().enumerate() {
+        let leaf = index + 1 == resolved.segments.len();
+        let lookup = if leaf {
+            leaf_lookup
+        } else {
+            OriginLookup::ByPosition
+        };
+        let mut saved = previous.saved(&segment.rollout_id, lookup);
         let bytes = read_segment(segment)?;
         if (bytes.len() as u64) < segment.consumed_byte_len {
             return Err(format!(
                 "Codex segment '{}' shrank below its resolved cutoff",
                 segment.provider_thread_id
-            ));
+            )
+            .into());
         }
         let mut record_number = 0;
         for raw in bytes[..segment.consumed_byte_len as usize].split(|byte| *byte == b'\n') {
@@ -655,7 +674,7 @@ fn read_source_records<'a>(
                     )?;
                 }
             }
-            let prior = previous.record(&segment.rollout_id, record_number - 1);
+            let prior = saved.origin_of(&value)?;
             if encode_mode {
                 if let Some(prior) = prior.filter(|origin| origin.derived) {
                     prior.verify_record(&value)?;
@@ -667,7 +686,7 @@ fn read_source_records<'a>(
                 .as_u64()
                 .unwrap_or((record_number - 1) as u64);
             let mut local = value.clone();
-            let mut value = (|| -> Result<Value, String> {
+            let mut value = (|| -> Result<Value, EncodeRefusal> {
                 if encode_mode {
                     let encoded = mapper.encode_record_with_origins(&value, prior)?;
                     origins.push(&segment.rollout_id, encoded.origins);
@@ -682,11 +701,11 @@ fn read_source_records<'a>(
                     Ok(value)
                 }
             })()
-            .map_err(|error| {
-                format!(
-                    "Codex segment '{}' record {}: {error}",
+            .map_err(|refusal| {
+                refusal.at(format_args!(
+                    "Codex segment '{}' record {}",
                     segment.provider_thread_id, record_number
-                )
+                ))
             })?;
             if structural_record_type(&value) != Some("session_meta") {
                 if let Some(record) = value.as_object_mut() {
@@ -705,7 +724,7 @@ fn read_source_records<'a>(
                 });
                 continue;
             }
-            if index + 1 != resolved.segments.len() {
+            if !leaf {
                 continue;
             }
             let payload = value
@@ -720,12 +739,8 @@ fn read_source_records<'a>(
                 None => effective = Some(value),
             }
         }
-        if encode_mode {
-            previous.verify_source_length(
-                &segment.provider_thread_id,
-                record_number,
-                index + 1 != resolved.segments.len(),
-            )?;
+        if encode_mode && lookup == OriginLookup::ByPosition {
+            previous.verify_source_length(&segment.provider_thread_id, record_number, !leaf)?;
         }
     }
     Ok((
@@ -2273,6 +2288,127 @@ mod tests {
             .find(|record| record["payload"]["id"] == "hook")
             .unwrap();
         assert_eq!(message["payload"]["content"][0]["text"], original);
+    }
+
+    /// By digest, the mark of a display record that Pull generated is used
+    /// for the record it was saved of and for no other. A display record
+    /// that was changed is classified from its content, like a record that
+    /// was never covered.
+    #[test]
+    fn a_changed_display_record_is_classified_from_its_content_by_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = BTreeMap::new();
+        let leaf = write(
+            &directory,
+            &mut files,
+            "source",
+            &[
+                json!({"type":"session_meta", "payload":{"id":"source", "cwd":SOURCE_ROOT,
+                "history_mode":"paginated"}})
+                .to_string(),
+                json!({"type":"response_item", "timestamp":"2026-09-04T10:00:00Z", "payload":{
+                "id":"hook", "type":"message", "role":"user", "content":[{"type":"input_text",
+                "text":"<hook_prompt hook_run_id=\"run-1\">read /tmp/project/file</hook_prompt>"}]}})
+                .to_string(),
+            ],
+        );
+        let resolved = resolve_codex_root(&leaf, &|_| Ok(None)).unwrap();
+        let wire = encode_standalone_codex_root(
+            &resolved,
+            SOURCE_ROOT,
+            None,
+            None,
+            &mut credential_redaction::shared().begin_run(),
+            &PathOrigins::default(),
+        )
+        .unwrap();
+        let wire_path = directory.path().join("wire.jsonl");
+        std::fs::write(&wire_path, &wire.root_bytes).unwrap();
+        let resolved = resolve_codex_root(&wire_path, &|_| Ok(None)).unwrap();
+        let pulled =
+            decode_standalone_codex_root(&resolved, "destination", "/b/project", None, None)
+                .unwrap();
+        let saved = &pulled.path_origins.sources["destination"];
+        assert_eq!(
+            saved
+                .iter()
+                .map(|origin| origin.derived)
+                .collect::<Vec<_>>(),
+            [false, true, false, true, true]
+        );
+        let encode = |records: &[Value], lookup| {
+            let path = directory.path().join("local.jsonl");
+            std::fs::write(
+                &path,
+                records
+                    .iter()
+                    .map(|record| format!("{record}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            reconstruct_codex_root(
+                &resolve_codex_root(&path, &|_| Ok(None)).unwrap(),
+                BuildMode::Encode {
+                    root: "/b/project",
+                    canonical_root: None,
+                },
+                None,
+                &mut credential_redaction::shared().begin_run(),
+                &pulled.path_origins,
+                lookup,
+                &BTreeMap::new(),
+                &|segment| read_bounded(&segment.path).map(Cow::Owned),
+            )
+        };
+        let records = output_records(&pulled.root_bytes);
+        let unchanged = encode(&records, OriginLookup::ByPosition).unwrap();
+        let by_digest = encode(&records, OriginLookup::ByDigest).unwrap();
+        assert_eq!(by_digest.root_bytes, unchanged.root_bytes);
+        assert_eq!(by_digest.path_origins, unchanged.path_origins);
+        assert_eq!(output_records(&unchanged.root_bytes).len(), 2);
+
+        // Changed in what it says: no longer the record Pull generated, so
+        // it is a record of the session and is published.
+        let mut said = records.clone();
+        said[1]["payload"]["extra"] = json!(true);
+        assert!(
+            encode(&said, OriginLookup::ByPosition)
+                .unwrap_err()
+                .saved_record_changed
+        );
+        let published = encode(&said, OriginLookup::ByDigest).unwrap();
+        let output = output_records(&published.root_bytes);
+        assert_eq!(output.len(), 3);
+        assert_eq!(output[1]["payload"]["extra"], true);
+        assert_eq!(
+            output[2]["payload"],
+            output_records(&unchanged.root_bytes)[1]["payload"]
+        );
+        assert_eq!(
+            published.path_origins.sources["destination"]
+                .iter()
+                .map(|origin| origin.derived)
+                .collect::<Vec<_>>(),
+            [false, false, false, true, true]
+        );
+
+        // Changed in the thread it names alone: still the record Pull
+        // would generate, so it is left out as before, under its new digest.
+        let mut named = records.clone();
+        named[3]["payload"]["thread_id"] = json!("elsewhere");
+        assert!(
+            encode(&named, OriginLookup::ByPosition)
+                .unwrap_err()
+                .saved_record_changed
+        );
+        let omitted = encode(&named, OriginLookup::ByDigest).unwrap();
+        assert_eq!(omitted.root_bytes, unchanged.root_bytes);
+        let origins = &omitted.path_origins.sources["destination"];
+        assert_eq!(origins[..3], saved[..3]);
+        assert_eq!(origins[4], saved[4]);
+        assert!(origins[3].derived);
+        assert_ne!(origins[3].local_sha256, saved[3].local_sha256);
+        origins[3].verify_record(&named[3]).unwrap();
     }
 
     #[test]

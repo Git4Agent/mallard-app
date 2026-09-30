@@ -412,7 +412,7 @@ function MockReview({ direction, files }: { direction: Direction; files: number 
           count={selectedRows.length}
           total={admittedRows.length}
           recommendedTitle={`Use the recommended session selection (${admittedRows.length})`}
-          recommendedAriaLabel={`Use recommended selection (${admittedRows.length})`}
+          recommendedCount={admittedRows.length}
           recommendedDisabled={dropped.size === 0}
           onRecommended={() => setDropped(new Set())}
           clearDisabled={selectedRows.length === 0}

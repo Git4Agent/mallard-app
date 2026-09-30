@@ -1,9 +1,12 @@
 //! Lossless project-path references. Literal marker text is escaped once.
 //! Spelling tags survive transport; local origin records protect later Push.
+//! One loss is accepted: a record that was rewritten after its origin was
+//! saved, into a form of which no origin was saved, is scanned as a new
+//! record (`OriginLookup::ByDigest`).
 
 use crate::path_text_boundary::{boundary_valid, left_boundary_valid, valid_json_text};
 use crate::session_path_origins::{
-    pointer_child, replay_path_fields, PathField, PathSpan, RecordPathOrigins,
+    pointer_child, replay_path_fields, EncodeRefusal, PathField, PathSpan, RecordPathOrigins,
 };
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use serde_json::{Map, Value};
@@ -487,14 +490,14 @@ impl SessionPathMapper {
     }
 
     pub fn encode_record(&self, record: &Value) -> Result<EncodedRecord, String> {
-        self.encode_record_with_origins(record, None)
+        Ok(self.encode_record_with_origins(record, None)?)
     }
 
     pub fn encode_record_with_origins(
         &self,
         record: &Value,
         previous: Option<&RecordPathOrigins>,
-    ) -> Result<EncodedRecord, String> {
+    ) -> Result<EncodedRecord, EncodeRefusal> {
         let (wire, origins) = if let Some(previous) = previous {
             (previous.replay(record)?, previous.clone())
         } else {
@@ -635,7 +638,8 @@ mod tests {
                     .err()
                     .expect("changed record must fail")
             });
-            assert!(error.contains("retained transcript record changed"));
+            assert!(error.saved_record_changed);
+            assert!(error.message.contains("retained transcript record changed"));
         }
         let mut damaged_hash = stored.clone();
         damaged_hash.local_sha256 = "0".repeat(64);
@@ -653,7 +657,8 @@ mod tests {
                 .err()
                 .expect("edits that change source text must fail")
         });
-        assert!(error.contains("exact source restoration"));
+        assert!(!error.saved_record_changed);
+        assert!(error.message.contains("exact source restoration"));
     }
 
     #[test]
@@ -833,6 +838,7 @@ mod tests {
             .encode_record_with_origins(&token, Some(&stored))
             .err()
             .unwrap()
+            .message
             .contains("exact source restoration"));
     }
 

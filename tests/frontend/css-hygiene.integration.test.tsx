@@ -419,24 +419,23 @@ test("no glyph is painted in a hue that misses the non-text floor", () => {
   );
 });
 
-test("both review meter fills read on the track they run along", () => {
+test("the review meter fill reads on the track it runs along", () => {
   // The meter is a graphic that carries meaning — how much of the limit is
-  // spent — so each fill holds 3:1 (1.4.11) on the empty track under it, in
+  // spent — so its fill holds 3:1 (1.4.11) on the empty track under it, in
   // both themes. --loader-track is translucent, so it is measured composited
-  // on the header paper the track sits on. Read through the two rules, so a
-  // token drift is measured as it drifted: the push fill measured 4.31 and
-  // 5.04, the pull fill 4.00 and 4.76, when the pull meter was added.
+  // on the header paper the track sits on. Read through the rule, so a token
+  // drift is measured as it drifted: the pull fill measured 4.00 and 4.76.
+  // Only the Pull header draws a track.
   for (const theme of ["light", "dark"] as const) {
     const tokens = tokensFor(theme);
     const track = composite(resolve("--loader-track", tokens), resolve("--surface-card", tokens));
-    for (const selector of [".sync-review-budget-track > i", ".sync-review-budget-track.pull > i"]) {
-      const fill = ruleColour(selector, "background", tokens);
-      const measured = contrast(fill, track);
-      assert.ok(
-        measured >= 3,
-        `${selector} is ${fill} on ${theme}, ${measured.toFixed(2)}:1 against the track ${track} — needs 3`,
-      );
-    }
+    const selector = ".sync-review-budget-track > i";
+    const fill = ruleColour(selector, "background", tokens);
+    const measured = contrast(fill, track);
+    assert.ok(
+      measured >= 3,
+      `${selector} is ${fill} on ${theme}, ${measured.toFixed(2)}:1 against the track ${track} — needs 3`,
+    );
   }
 });
 

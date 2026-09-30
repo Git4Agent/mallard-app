@@ -339,7 +339,7 @@ fn history_request(snapshot_id: String, cursor: Option<String>) -> ProjectSessio
     }
 }
 
-fn assert_detail_history(
+pub(super) fn assert_detail_history(
     service: &ProjectSyncService<'_>,
     project: &LocalProjectId,
     resource: &ResourceId,

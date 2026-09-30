@@ -12,8 +12,8 @@ pub mod publication;
 pub mod subagents;
 
 use super::traits::{
-    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand,
-    ProviderCliLauncher, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
+    ProviderDescriptor, ScanFailure, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
     SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
     SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionHomeSighting,
@@ -47,53 +47,61 @@ enum WindowScan {
     Undecided,
 }
 
-fn scan_claude_session_metadata(path: &Path) -> Result<SessionFileMetadata, String> {
+fn scan_claude_session_metadata(path: &Path) -> Result<SessionFileMetadata, ScanFailure> {
     scan_claude_session_metadata_with_window(path, SCAN_TAIL_WINDOW_BYTES)
 }
 
 fn scan_claude_session_metadata_with_window(
     path: &Path,
     window_bytes: u64,
-) -> Result<SessionFileMetadata, String> {
+) -> Result<SessionFileMetadata, ScanFailure> {
+    let rejected = |message: &str| ScanFailure::Rejected(message.to_string());
     crate::sync_metrics::record_file_head_read(path);
-    let file = crate::jsonl_tail_io::open_no_follow(path)?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("inspect Claude session '{}': {}", path.display(), error))?;
+    let file = crate::jsonl_tail_io::open_no_follow(path).map_err(ScanFailure::Unreadable)?;
+    let metadata = file.metadata().map_err(|error| {
+        ScanFailure::Unreadable(format!(
+            "inspect Claude session '{}': {}",
+            path.display(),
+            error
+        ))
+    })?;
     if !metadata.is_file() {
-        return Err("Claude session transcript is not a regular file".to_string());
+        return Err(rejected("Claude session transcript is not a regular file"));
     }
     if metadata.len() > conversation_file_limit_bytes() {
-        return Err(format!(
+        return Err(ScanFailure::Rejected(format!(
             "Claude session exceeds {} bytes",
             conversation_file_limit_bytes()
-        ));
+        )));
     }
 
     let identity = if metadata.len() > window_bytes {
         drop(file);
         match scan_tail_window(path, window_bytes)? {
             WindowScan::Decided(identity) => identity,
-            WindowScan::Undecided => {
-                scan_full_stream(crate::jsonl_tail_io::open_no_follow(path)?, path)?
-            }
+            WindowScan::Undecided => scan_full_stream(
+                crate::jsonl_tail_io::open_no_follow(path).map_err(ScanFailure::Unreadable)?,
+                path,
+            )?,
         }
     } else {
         scan_full_stream(file, path)?
     };
 
     let (session_id, authorized_home) = identity.leaf_identity();
-    let session_id = session_id
-        .ok_or_else(|| "authoritative Claude leaf session ID was not found".to_string())?;
-    let authorized_home = authorized_home
-        .ok_or_else(|| "authorized Claude session home was not found".to_string())?;
+    let session_id =
+        session_id.ok_or_else(|| rejected("authoritative Claude leaf session ID was not found"))?;
+    let authorized_home =
+        authorized_home.ok_or_else(|| rejected("authorized Claude session home was not found"))?;
     let file_session_id = path
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_suffix(".jsonl"))
-        .ok_or_else(|| "Claude session filename is invalid".to_string())?;
+        .ok_or_else(|| rejected("Claude session filename is invalid"))?;
     if file_session_id != session_id {
-        return Err("Claude session filename does not match its leaf session ID".to_string());
+        return Err(rejected(
+            "Claude session filename does not match its leaf session ID",
+        ));
     }
     validated_session_metadata(session_id, authorized_home, false)
 }
@@ -105,8 +113,11 @@ fn scan_claude_session_metadata_with_window(
 /// so the tracker's leaf identity over the window equals the whole-file
 /// result. Anything else is undecidable from the tail (the leaf segment may
 /// begin before the window) and falls back to the full stream.
-fn scan_tail_window(path: &Path, window_bytes: u64) -> Result<WindowScan, String> {
-    let window = crate::jsonl_tail_io::read_suffix_window(path, window_bytes)?;
+fn scan_tail_window(path: &Path, window_bytes: u64) -> Result<WindowScan, ScanFailure> {
+    // Every failure of the bounded read is a failure to read, a file that
+    // kept changing included: the next scan tries again.
+    let window = crate::jsonl_tail_io::read_suffix_window(path, window_bytes)
+        .map_err(ScanFailure::Unreadable)?;
     let bytes = window.bytes.as_slice();
     // Only complete records participate: drop through the first newline when
     // the window starts mid-file (a boundary-aligned start harmlessly treats
@@ -175,25 +186,25 @@ fn scan_tail_window(path: &Path, window_bytes: u64) -> Result<WindowScan, String
 fn scan_full_stream(
     file: std::fs::File,
     path: &Path,
-) -> Result<codec::ClaudeSessionIdentityTracker, String> {
+) -> Result<codec::ClaudeSessionIdentityTracker, ScanFailure> {
     let mut reader = BufReader::new(file);
     let mut identity = codec::ClaudeSessionIdentityTracker::default();
     let mut bytes_read = 0_u64;
     let mut record_count = 0_usize;
     loop {
         let mut line = Vec::new();
-        let read = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|error| format!("read Claude session metadata: {}", error))?;
+        let read = reader.read_until(b'\n', &mut line).map_err(|error| {
+            ScanFailure::Unreadable(format!("read Claude session metadata: {}", error))
+        })?;
         if read == 0 {
             break;
         }
         bytes_read = bytes_read.saturating_add(read as u64);
         if bytes_read > conversation_file_limit_bytes() {
-            return Err(format!(
+            return Err(ScanFailure::Rejected(format!(
                 "Claude session exceeds {} bytes",
                 conversation_file_limit_bytes()
-            ));
+            )));
         }
         // The provider is allowed to be appending. A non-newline-terminated
         // tail is not a durable record yet and cannot change leaf identity.
@@ -205,10 +216,10 @@ fn scan_full_stream(
         }
         record_count = record_count.saturating_add(1);
         if record_count > codec::MAX_CLAUDE_RECORDS {
-            return Err(format!(
+            return Err(ScanFailure::Rejected(format!(
                 "Claude session exceeds {} metadata records",
                 codec::MAX_CLAUDE_RECORDS
-            ));
+            )));
         }
         if let Ok(record) = serde_json::from_slice::<codec::ClaudeScanRecord>(&line) {
             if let Some(parts) = record.into_identity_parts() {
@@ -271,8 +282,11 @@ impl SessionAdapter for ClaudeAdapter {
         }
     }
 
-    fn watch_roots(&self) -> &'static [&'static str] {
-        &["projects", "file-history", "todos"]
+    /// A Claude session is updated in place. Pull tells a child that
+    /// Claude wrote here from one that an earlier Pull brought, and leaves
+    /// the first where it is.
+    fn update_keeps_local_only_children(&self) -> bool {
+        true
     }
 
     fn tail_layout_codec(&self) -> Option<&'static str> {
@@ -316,7 +330,7 @@ impl SessionAdapter for ClaudeAdapter {
     }
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
-        scan_claude_session_metadata(path)
+        crate::session_scan_memo::scan_once("claude", path, scan_claude_session_metadata)
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {
@@ -422,6 +436,14 @@ impl SessionAdapter for ClaudeAdapter {
         history::describe_agent_call(path, entry, context)
     }
 
+    fn agent_calls_without_transcript(
+        &self,
+        index: &SessionTimelineIndex,
+        binding: &mallard_domain::LocalConversationBinding,
+    ) -> std::collections::BTreeSet<String> {
+        subagents::agent_calls_without_transcript(index, binding)
+    }
+
     fn read_event_detail(
         &self,
         path: &Path,
@@ -494,7 +516,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = scan_claude_session_metadata(&path).unwrap_err();
+        let error = scan_claude_session_metadata(&path)
+            .unwrap_err()
+            .into_message();
         assert!(error.contains("authoritative Claude leaf"));
     }
 
@@ -669,7 +693,7 @@ mod tests {
             if file_session_id != session_id {
                 return Err("filename mismatch".to_string());
             }
-            validated_session_metadata(session_id, cwd, false)
+            validated_session_metadata(session_id, cwd, false).map_err(ScanFailure::into_message)
         }
 
         let Some(home) = std::env::var_os("HOME") else {
@@ -714,7 +738,7 @@ mod tests {
         let mut both_err = 0_usize;
         let mut both_ok = 0_usize;
         for (path, oracle) in files.iter().zip(&oracle_results) {
-            let new = scan_claude_session_metadata(path);
+            let new = scan_claude_session_metadata(path).map_err(ScanFailure::into_message);
             match (oracle, &new) {
                 (Ok(old), Ok(new)) => {
                     if old.session_id == new.session_id
@@ -843,7 +867,9 @@ mod tests {
 
         // The same bytes through the stream path still enforce the record
         // cap: the window acceptance is deliberate, not a lost bound.
-        let error = scan_claude_session_metadata_with_window(&path, u64::MAX).unwrap_err();
+        let error = scan_claude_session_metadata_with_window(&path, u64::MAX)
+            .unwrap_err()
+            .into_message();
         assert!(error.contains("metadata records"), "{error}");
     }
 
@@ -1009,6 +1035,7 @@ mod tests {
         fs::copy(&path, &mismatched).unwrap();
         assert!(scan_claude_session_metadata(&mismatched)
             .unwrap_err()
+            .into_message()
             .contains("filename does not match"));
     }
 }

@@ -1944,6 +1944,7 @@ fn push_action(
             tail: ConversationTailPins {
                 subagents: Default::default(),
                 subagents_omitted: false,
+                local_only_subagents_kept: false,
                 missing_local_subagents: Default::default(),
                 accepted: None,
                 accepted_local: None,
@@ -2606,6 +2607,17 @@ fn ready_mapping(consumed: u64) -> PhysicalMappingState {
             end_byte_offset: consumed,
             range_sha256: "c".repeat(64),
         },
+        source_state: Some(SourceFileState {
+            size: consumed + 100,
+            modified_secs: 1_790_000_000,
+            modified_nanos: 5,
+            identity: Some(SourceFileIdentity {
+                device: 16_777_234,
+                inode: 42,
+                changed_secs: 1_790_000_000,
+                changed_nanos: 5,
+            }),
+        }),
     }
 }
 
@@ -2784,6 +2796,58 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
     }
     assert!(empty_probe.validate().is_err());
 
+    // The saved file state covers the cursor and carries real times. A
+    // cursor saved without one is valid, and is written without the field.
+    let mut short_file = checkpoint.clone();
+    if let PhysicalMappingState::Ready {
+        source_state: Some(state),
+        ..
+    } = &mut short_file.physical
+    {
+        state.size = 1_999;
+    }
+    assert!(short_file
+        .validate()
+        .unwrap_err()
+        .contains("shorter than its cursor"));
+    for corrupt in [
+        (|state: &mut SourceFileState| state.modified_nanos = 1_000_000_000)
+            as fn(&mut SourceFileState),
+        |state| state.identity.as_mut().unwrap().changed_nanos = -1,
+        |state| state.identity.as_mut().unwrap().changed_nanos = 1_000_000_000,
+    ] {
+        let mut bad_time = checkpoint.clone();
+        if let PhysicalMappingState::Ready {
+            source_state: Some(state),
+            ..
+        } = &mut bad_time.physical
+        {
+            corrupt(state);
+        }
+        assert!(bad_time.validate().unwrap_err().contains("invalid time"));
+    }
+    let saved = serde_json::to_value(&checkpoint).unwrap();
+    assert_eq!(saved["physical"]["source_state"]["identity"]["inode"], 42);
+    assert_eq!(
+        serde_json::from_value::<ConversationCheckpoint>(saved.clone()).unwrap(),
+        checkpoint
+    );
+    let mut unstamped = checkpoint.clone();
+    if let PhysicalMappingState::Ready { source_state, .. } = &mut unstamped.physical {
+        *source_state = None;
+    }
+    unstamped.validate().unwrap();
+    let mut without_field = saved;
+    without_field["physical"]
+        .as_object_mut()
+        .unwrap()
+        .remove("source_state");
+    assert_eq!(serde_json::to_value(&unstamped).unwrap(), without_field);
+    assert_eq!(
+        serde_json::from_value::<ConversationCheckpoint>(without_field).unwrap(),
+        unstamped
+    );
+
     // Native paginated ordinals are global across the resolved lineage, so
     // a small append-bearing segment can have a next ordinal greater than
     // its local byte cursor.
@@ -2839,6 +2903,7 @@ fn conversation_checkpoints_validate_layout_witness_and_mapping() {
 fn conversation_bindings_carry_validated_layouts() {
     let binding = LocalConversationBinding {
         installed_end: None,
+        installed_absent_subagents: Default::default(),
         pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
@@ -2863,32 +2928,43 @@ fn conversation_bindings_carry_validated_layouts() {
     };
     binding.validate().unwrap();
 
-    let mut encoded = serde_json::to_value(&binding).unwrap();
-    encoded
-        .as_object_mut()
+    // A child that a Pull brought a reference of, and no transcript.
+    assert!(serde_json::to_value(&binding)
         .unwrap()
-        .remove("pulled_children_excluded");
-    let without_exclusion: LocalConversationBinding = serde_json::from_value(encoded).unwrap();
-    assert!(!without_exclusion.pulled_children_excluded);
-    without_exclusion.validate().unwrap();
-    let mut excluded = binding.clone();
-    excluded.pulled_children_excluded = true;
+        .get("installed_absent_subagents")
+        .is_none());
+    let mut absent = binding.clone();
+    absent.installed_absent_subagents.insert("agent-1".into());
     assert!(
-        excluded.validate().is_err(),
-        "native threads cannot carry Pull exclusions"
+        absent.validate().is_err(),
+        "a native thread has no installed references"
     );
-    excluded.installed_end = Some(128);
-    excluded.validate().unwrap();
-    excluded.installed_subagents.insert(
+    absent.installed_end = Some(128);
+    absent.validate().unwrap();
+    let encoded = serde_json::to_value(&absent).unwrap();
+    assert_eq!(
+        encoded["installed_absent_subagents"],
+        serde_json::json!(["agent-1"])
+    );
+    assert_eq!(
+        serde_json::from_value::<LocalConversationBinding>(encoded).unwrap(),
+        absent
+    );
+    for invalid in ["", "line\nbreak", &"x".repeat(129)] {
+        let mut named = absent.clone();
+        named.installed_absent_subagents.insert(invalid.into());
+        assert!(named.validate().is_err(), "{invalid:?}");
+    }
+    absent.installed_subagents.insert(
         SubagentKey::child(None, "start").unwrap(),
         InstalledSubagent {
-            provider_thread_id: "child-1".into(),
+            provider_thread_id: "agent-1".into(),
             installed_end: 64,
         },
     );
     assert!(
-        excluded.validate().is_err(),
-        "excluded children cannot be installed"
+        absent.validate().is_err(),
+        "an installed child is not an absent one"
     );
 
     let mut moved_whole = binding.clone();
@@ -2993,6 +3069,7 @@ fn preserved_provenance_validates_on_every_carrier() {
     // provenance, so only the ordinal rule applies.
     let binding = LocalConversationBinding {
         installed_end: None,
+        installed_absent_subagents: Default::default(),
         pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
@@ -3492,6 +3569,7 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
     // An unknown binding key fails closed without explicit enumeration.
     let binding = LocalConversationBinding {
         installed_end: None,
+        installed_absent_subagents: Default::default(),
         pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
@@ -3525,6 +3603,21 @@ fn reshaped_documents_reject_unknown_and_retired_keys() {
         .unwrap()
         .insert("preserved_local".to_string(), serde_json::json!(false));
     assert!(serde_json::from_value::<LocalConversationBinding>(value).is_err());
+
+    // Versions 0.1.3 to 0.1.5 wrote one flag for the agent cards of the
+    // whole session. Their rows are read, and the key is not written again.
+    let mut value = serde_json::to_value(&binding).unwrap();
+    assert!(value.get("pulled_children_excluded").is_none());
+    value.as_object_mut().unwrap().insert(
+        "pulled_children_excluded".to_string(),
+        serde_json::json!(true),
+    );
+    let earlier: LocalConversationBinding = serde_json::from_value(value).unwrap();
+    assert!(earlier.pulled_children_excluded);
+    assert!(serde_json::to_value(&earlier)
+        .unwrap()
+        .get("pulled_children_excluded")
+        .is_none());
 
     // A link without the checkpoint map fails closed.
     let project = sample_project();
@@ -3601,6 +3694,7 @@ fn documents_fail_closed_on_missing_identity_keys() {
     // these keys mandatory. The fixtures omit the required identity keys.
     let binding = LocalConversationBinding {
         installed_end: None,
+        installed_absent_subagents: Default::default(),
         pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
@@ -3698,6 +3792,7 @@ fn bindings_reject_duplicate_cloud_claims_per_scope() {
     let host = HostId::parse("00112233445566778899aabbccddeeff").unwrap();
     let row = |thread: &str, replica: &str, cloud: Option<&str>| LocalConversationBinding {
         installed_end: None,
+        installed_absent_subagents: Default::default(),
         pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,
@@ -3858,6 +3953,72 @@ fn missing_child_recovery_requires_exact_missing_evidence() {
     )
     .decision(ConversationPlanDirection::Pull);
     assert_eq!(decision.action, ConversationReviewAction::Blocked);
+}
+
+// The main transcripts agree. One child is on this computer alone, and one
+// is in the storage alone.
+#[test]
+fn a_child_of_this_computer_alone_is_kept_by_an_update_or_by_keep_both() {
+    let mut update = push_action("merge-children", "claude", "profile-claude", "1");
+    let main = update.pins.tail.local.clone().unwrap();
+    update.action = ConversationPlanActionType::MaterializeCloud;
+    update.cloud_thread_id = Some(CloudThreadId::parse("cloudthread-merge").unwrap());
+    update.pins.tail.accepted = Some(main.clone());
+    update.pins.tail.accepted_local = Some(main.clone());
+    update.pins.tail.cloud = Some(main);
+    update.pins.tail.raw_range = None;
+    update.pins.tail.lineage_digest = Some("1".repeat(64));
+    update.pins.tail.semantic_digest = Some("2".repeat(64));
+    let content = SubagentContentState {
+        message_count: 1,
+        sha256: "3".repeat(64),
+    };
+    for (key, here) in [("made-here", true), ("stored", false)] {
+        update.pins.tail.subagents.insert(
+            SubagentKey::parse(key).unwrap(),
+            SubagentTailPins {
+                accepted: None,
+                local: here.then(|| content.clone()),
+                cloud: (!here).then(|| content.clone()),
+            },
+        );
+    }
+    let mut keep_both = update.clone();
+    keep_both.action = ConversationPlanActionType::KeepBoth;
+
+    // An update that would leave the child behind is no plan.
+    assert_eq!(
+        update.pins.tail.classification(),
+        Ok(TailClassification::Divergent)
+    );
+    assert!(update
+        .validate()
+        .unwrap_err()
+        .contains("disagrees with its tail evidence"));
+    keep_both.validate().unwrap();
+
+    // An update that keeps the child is the plan, and keeping both is none.
+    for action in [&mut update, &mut keep_both] {
+        action.pins.tail.local_only_subagents_kept = true;
+    }
+    assert_eq!(
+        update.pins.tail.classification(),
+        Ok(TailClassification::CloudOutstanding)
+    );
+    update.validate().unwrap();
+    assert!(keep_both
+        .validate()
+        .unwrap_err()
+        .contains("disagrees with its tail evidence"));
+
+    // A plan says what the update keeps.
+    let mut unsaid = serde_json::to_value(&update).unwrap();
+    unsaid["pins"]["tail"]
+        .as_object_mut()
+        .unwrap()
+        .remove("local_only_subagents_kept")
+        .unwrap();
+    assert!(serde_json::from_value::<ConversationPlanAction>(unsaid).is_err());
 }
 
 #[test]

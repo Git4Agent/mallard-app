@@ -378,7 +378,7 @@ function MockReview({ direction, projectFilesBytes }: {
           count={selectedCount}
           total={admittedRows.length}
           recommendedTitle={`Use the recommended session selection (${admittedRows.length})`}
-          recommendedAriaLabel={`Use recommended selection (${admittedRows.length})`}
+          recommendedCount={admittedRows.length}
           recommendedDisabled={deselected.size === 0}
           onRecommended={() => setDeselected(new Set())}
           clearDisabled={selectedCount === 0}

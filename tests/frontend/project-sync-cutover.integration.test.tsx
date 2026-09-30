@@ -3,21 +3,69 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import Icon from "../../src/components/Icons";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
+import SyncPathBar from "../../src/components/sync-review/SyncPathBar";
 import {
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
 } from "../../src/components/project-sync/model";
 import { expandHomePath } from "../../src/profilePath";
-import { PROJECT_SYNC_SCHEMA } from "../../src/types";
+import { PROJECT_SYNC_SCHEMA, type ProjectSetupDraft } from "../../src/types";
 import {
+  defaultSetupRepository,
   profilePathHint,
   type ProfilePathProbeState,
 } from "../../src/components/project-sync/ProjectSetupWorkspace";
 
+test("setup defaults to one Git match and preserves an explicit repository choice", () => {
+  const draft: ProjectSetupDraft = {
+    schema: 1, draft_id: "draft", local_project_id: "project", new_bundle_id: "new-bundle",
+    project_root: "/tmp/project", canonical_project_root: "/tmp/project", display_name: "project",
+    repository_fingerprint: "git-fingerprint", profiles: {}, storage: { storage_id: "storage" },
+    repository: { kind: "new" }, revision: 1, created_at: 1, updated_at: 1,
+  };
+  const match = {
+    storage_id: "storage", bundle_id: "matched-bundle", display_name: "Matching repository",
+    repository_fingerprint: "git-fingerprint",
+  };
+  const other = { ...match, bundle_id: "other-bundle", repository_fingerprint: "other-git" };
+  const selected = defaultSetupRepository(draft, [other, match], false);
+  assert.deepEqual(selected, { ...match, kind: "existing", mismatch_acknowledged: false });
+  assert.equal(defaultSetupRepository(draft, [match], true), draft.repository, "keep an explicit New selection");
+  const resumed = { ...draft, repository: selected };
+  assert.equal(defaultSetupRepository(resumed, [other], false), selected, "keep a saved existing selection");
+  assert.equal(defaultSetupRepository(draft, [], false), draft.repository);
+  assert.equal(defaultSetupRepository(draft, [other], false), draft.repository);
+  assert.equal(defaultSetupRepository(draft, [match, { ...match, bundle_id: "second-match" }], false), draft.repository);
+  assert.equal(defaultSetupRepository(draft, [{ ...match, storage_id: "previous-storage" }], false), draft.repository);
+  const nonGit = { ...draft, repository_fingerprint: null };
+  assert.equal(defaultSetupRepository(nonGit, [{ ...match, repository_fingerprint: null }], false), draft.repository);
+});
+
 test("App mounts ProjectSync", () => {
   const app = readFileSync("src/App.tsx", "utf8");
   assert.match(app, /<ProjectSync/);
+});
+
+test("the generic storage icon uses the soft-outline database", () => {
+  for (const size of [14, 18, 24]) {
+    const markup = renderToStaticMarkup(<Icon name="storage" size={size} className="storage-test" />);
+    assert.match(markup, /data-icon="storage"/);
+    assert.match(markup, /class="[^"]*storage-test[^"]*"/);
+    assert.match(markup, new RegExp(`width="${size}"`));
+    assert.match(markup, new RegExp(`height="${size}"`));
+    assert.match(markup, /viewBox="0 0 24 24"/);
+    assert.match(markup, /stroke="currentColor"/);
+    assert.match(markup, /stroke-width="2"/);
+    assert.match(markup, /stroke-linecap="round"/);
+    assert.match(markup, /stroke-linejoin="round"/);
+    assert.match(markup, /shape-rendering="geometricPrecision"/);
+    assert.match(markup, /aria-hidden="true"/);
+    assert.match(markup, /focusable="false"/);
+    assert.match(markup, /tabler-icon-database/);
+    assert.doesNotMatch(markup, /tabler-icon-server|data-storage-provider/);
+  }
 });
 
 test("the current frontend contract is schema 1", () => {
@@ -211,6 +259,48 @@ test("nothing in the path bar reaches into its rounded corners", () => {
     const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     assert.match(css, new RegExp(`\\n${escaped}:active:not\\(:disabled\\) \\{[^}]*transform: translate\\(2px, 2px\\);`));
   }
+});
+
+// Bare at 14px, the provider artwork sank into the honey current row. The bar
+// now draws it as the rail does: on the provider's pale tile in the ink box.
+test("the path bar stands storage marks on the rail's tile", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const tile = css.match(
+    /\n:is\(\.sync-path-crumb, \.sync-path-menu-current, \.sync-path-menu-item\) > svg\[data-storage-provider\] \{[^}]*\}/,
+  )?.[0] ?? "";
+  assert.match(tile, /border: var\(--box-border\);/);
+  assert.match(tile, /background: var\(--storage-icon-tile\);/);
+  // Scoped to the bar: the settings plate and the landing cards pad their own
+  // artwork, and an unscoped rule would tile them twice.
+  assert.doesNotMatch(css, /\nsvg\[data-storage-provider\] \{/);
+  // Menu rows keep their height and the icon-only crumb stays inside its
+  // item's floor.
+  assert.match(
+    css,
+    /\n:is\(\.sync-path-menu-current, \.sync-path-menu-item\) > svg\[data-storage-provider\] \{[^}]*margin-block: -2px;/,
+  );
+  assert.match(css, /\n\.sync-path-crumb:has\(> svg\[data-storage-provider\]\) \{\s*padding-left: 3px;/);
+
+  // The selectors reach the mark only as a direct child of the crumb, the
+  // current row and a switch target, which is where the bar renders it.
+  const markup = renderToStaticMarkup(
+    <SyncPathBar
+      crumbs={[{
+        id: "storage",
+        label: "Mallard Cloud",
+        icon: "storage-mallard",
+        tone: "root",
+        menuHeader: { label: "Mallard Cloud", icon: "storage-mallard" },
+        menu: [{
+          label: "Switch to",
+          items: [{ id: "local", label: "my-storage", icon: "storage-local", onSelect: () => {} }],
+        }],
+      }, { id: "project", label: "mallard-app", icon: "git-folder" }]}
+    />,
+  );
+  assert.match(markup, /class="sync-path-crumb root"[^>]*><svg[^>]*data-storage-provider="mallard"/);
+  assert.match(markup, /class="sync-path-menu-current"[^>]*><svg[^>]*data-storage-provider="mallard"/);
+  assert.match(markup, /class="sync-path-menu-item target"[^>]*><svg[^>]*data-storage-provider="local"/);
 });
 
 test("top-level navigation opens stable index pages", () => {

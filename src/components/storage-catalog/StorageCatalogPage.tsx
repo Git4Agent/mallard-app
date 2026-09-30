@@ -23,6 +23,7 @@ import {
   actionLabel,
   catalogNoun,
   catalogPresentation,
+  catalogPullRecommendation,
   catalogScopeIcon,
   catalogScopeLabel,
   filterCatalogPullReviewItems,
@@ -535,7 +536,7 @@ function ResourceCard({
         >
           {preview
             ? <img src={preview} alt={`${row.display_name} preview`} />
-            : <Icon name="paw" size={16} />}
+            : <Icon name="catalog-pet-v1" size={16} />}
         </span>
       )}
       <div className="sync-history-thread-topline">
@@ -1561,8 +1562,8 @@ export default function StorageCatalogPage({
                 count={pushSelected.size}
                 total={selectableRows.length}
                 busy={busy}
+                recommendedCount={visibleRows.length}
                 recommendedTitle={`Use the recommended selection${searchActive ? " for matching names" : ""} (${visibleRows.length})`}
-                recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching names" : ""} (${visibleRows.length})`}
                 recommendedDisabled={matchingSelected === visibleRows.length}
                 onRecommended={() => setPushSelected((current) => replaceSearchSelection(current, matchingIds, new Set(matchingIds)))}
                 searchActive={searchActive}
@@ -1675,22 +1676,39 @@ export default function StorageCatalogPage({
               </div>
             </div>
             <footer className="sync-inline-action-footer sync-sync-review-footer">
-              {/* No live region: this reads off the plan's warnings and the
-                  current selection, and it is on screen beside the button it
-                  explains — the button's own disabled state is what a reader
-                  arrives at. */}
-              {pushReviewUnacknowledged && <span><small>Acknowledge the warnings above before pushing.</small></span>}
-              {/* The count rides the verb — the number at the point of
-                  commitment, the way a Git client's commit button carries it. */}
-              <button
-                type="button"
-                className="btn btn-primary sync-pull-apply-button"
-                disabled={pushReviewApplyDisabled}
-                onClick={() => void runPush()}
-              >
-                <ThreadStatusIcon status="local-outstanding" size={16} />
-                Push {pushSelected.size}
-              </button>
+              {selectableRows.length === 0 ? (
+                /* Nothing can push, so the commit's slot holds the way out —
+                   the project Push review's rule. It names the page it lands
+                   on, the one headed by this scope's label. */
+                <button
+                  type="button"
+                  className="btn sync-review-exit"
+                  disabled={busy}
+                  title={`Close Push review — back to ${scope.label}`}
+                  onClick={() => setMode({ kind: "list" })}
+                >
+                  <span>{`Back to ${scope.label}`}</span>
+                </button>
+              ) : (
+                <>
+                  {/* No live region: this reads off the plan's warnings and the
+                      current selection, and it is on screen beside the button it
+                      explains — the button's own disabled state is what a reader
+                      arrives at. */}
+                  {pushReviewUnacknowledged && <span><small>Acknowledge the warnings above before pushing.</small></span>}
+                  {/* The count rides the verb — the number at the point of
+                      commitment, the way a Git client's commit button carries it. */}
+                  <button
+                    type="button"
+                    className="btn btn-primary sync-pull-apply-button"
+                    disabled={pushReviewApplyDisabled}
+                    onClick={() => void runPush()}
+                  >
+                    <ThreadStatusIcon status="local-outstanding" size={16} />
+                    Push {pushSelected.size}
+                  </button>
+                </>
+              )}
             </footer>
           </section>
         </main>
@@ -1705,6 +1723,7 @@ export default function StorageCatalogPage({
     const visibleItems = reviewItems.filter((item) => nameMatchesSearch(rowForItem(item.item).display_name, searchQuery));
     const matchingIds = visibleItems.map((item) => item.item.resource_id);
     const matchingSelected = matchingIds.filter((id) => pullSelected.has(id)).length;
+    const recommendation = catalogPullRecommendation(visibleItems, pullSelected, pullChoice);
     const chosenLabel = (item: (typeof reviewItems)[number]) => {
       const actionId = pullChoice[item.item.resource_id];
       const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
@@ -1728,17 +1747,16 @@ export default function StorageCatalogPage({
                 count={pullReviewSelectedCount}
                 total={reviewItems.length}
                 busy={busy}
-                recommendedTitle={`Use the recommended local actions${searchActive ? " for matching names" : ""} (${visibleItems.length})`}
-                recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching names" : ""} (${visibleItems.length})`}
-                recommendedDisabled={busy || visibleItems.length === 0}
+                recommendedCount={recommendation.items.length}
+                recommendedTitle={`Use the recommended local actions${searchActive ? " for matching names" : ""} (${recommendation.items.length})`}
+                recommendedDisabled={recommendation.matches}
                 onRecommended={() => {
-                  const defaults = visibleItems.filter((item) => item.item.default_action_id);
                   setPullSelected((current) => replaceSearchSelection(current, matchingIds,
-                    new Set(defaults.map((item) => item.item.resource_id))));
+                    new Set(recommendation.items.map((item) => item.item.resource_id))));
                   setPullChoice((current) => {
                     const next = { ...current };
                     matchingIds.forEach((id) => { delete next[id]; });
-                    defaults.forEach((item) => { next[item.item.resource_id] = item.item.default_action_id!; });
+                    recommendation.items.forEach((item) => { next[item.item.resource_id] = item.item.default_action_id!; });
                     return next;
                   });
                   setPullAcks((current) => replaceSearchSelection(current, matchingIds));
@@ -1864,21 +1882,37 @@ export default function StorageCatalogPage({
               </div>
             </div>
             <footer className="sync-inline-action-footer sync-sync-review-footer">
-              {/* It announces: choosing Overwrite from a row's menu is what
-                  makes this appear, and it appears at the same moment the Pull
-                  button goes disabled. A polite region does not announce what
-                  is already present, so the case where the plan opens blocked
-                  costs nothing. */}
-              {blocked && <span role="status"><small>Acknowledge the overwrite above before pulling.</small></span>}
-              <button
-                type="button"
-                className="btn btn-primary sync-pull-apply-button"
-                disabled={pullReviewApplyDisabled}
-                onClick={() => void runPull()}
-              >
-                <ThreadStatusIcon status="cloud-outstanding" size={16} />
-                Pull {pullReviewSelectedCount}
-              </button>
+              {reviewItems.length === 0 ? (
+                /* Nothing to pull: the commit's slot holds the way out, as on
+                   Push. */
+                <button
+                  type="button"
+                  className="btn sync-review-exit"
+                  disabled={busy}
+                  title={`Close Pull review — back to ${scope.label}`}
+                  onClick={() => setMode({ kind: "list" })}
+                >
+                  <span>{`Back to ${scope.label}`}</span>
+                </button>
+              ) : (
+                <>
+                  {/* It announces: choosing Overwrite from a row's menu is what
+                      makes this appear, and it appears at the same moment the Pull
+                      button goes disabled. A polite region does not announce what
+                      is already present, so the case where the plan opens blocked
+                      costs nothing. */}
+                  {blocked && <span role="status"><small>Acknowledge the overwrite above before pulling.</small></span>}
+                  <button
+                    type="button"
+                    className="btn btn-primary sync-pull-apply-button"
+                    disabled={pullReviewApplyDisabled}
+                    onClick={() => void runPull()}
+                  >
+                    <ThreadStatusIcon status="cloud-outstanding" size={16} />
+                    Pull {pullReviewSelectedCount}
+                  </button>
+                </>
+              )}
             </footer>
           </section>
         </main>

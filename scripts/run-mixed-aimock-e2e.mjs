@@ -11,6 +11,7 @@ import { Checkpoints } from "./mixed-aimock/checkpoint.mjs";
 import { exclusionControls } from "./mixed-aimock/controls.mjs";
 import { incrementalCheckpoints } from "./mixed-aimock/incremental.mjs";
 import { graphFaults } from "./mixed-aimock/faults.mjs";
+import { sessionReconciliation } from "./mixed-aimock/reconciliation.mjs";
 import { Ledger } from "./mixed-aimock/roundtrip.mjs";
 import { buildWorker, harnessIdentity } from "./mixed-aimock/build.mjs";
 import { confirmRegression } from "./compare-mixed-aimock-benchmark.mjs";
@@ -147,6 +148,10 @@ try {
   for (const value of Object.values(active)) await value.close();
   stage = "graph_faults";
   report.faults = await graphFaults({ binary, root, replicas, checkpoints, native, fault: corpus.fault, workers: opts.workers });
+  stage = "session_reconciliation";
+  console.log("Check immediate session reconciliation, open writers, and process restarts.");
+  report.reconciliation = await sessionReconciliation({ binary, root, replicas, checkpoints, native, nodes, workers: opts.workers });
+  assert.equal(report.reconciliation.status, "passed", "session_reconciliation_failed");
   report.status = "passed";
   if (opts.benchmark) {
     stage = "benchmark_preparation";

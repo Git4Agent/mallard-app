@@ -33,6 +33,14 @@ export function summary(report) {
   if (report.sessions) lines.push(`Source: ${report.sessions.codex} Codex and ${report.sessions.claude} Claude sessions.`, "",
     `Source turns: ${report.source_turns ?? "incomplete"}. Final conversations: ${report.final_sessions?.total ?? "incomplete"}.`, "");
   if (report.graph) lines.push(`Codex graph: ${report.graph.edges} edges. Maximum depth: ${report.graph.max_depth}.`, "");
+  if (report.reconciliation) {
+    lines.push(`Session reconciliation: ${report.reconciliation.status}.`, "",
+      "| Provider | Case | Result | Code |", "| --- | --- | --- | --- |");
+    for (const result of report.reconciliation.cases) {
+      lines.push(`| ${result.provider} | ${result.case} | ${result.status} | ${result.code ?? ""} |`);
+    }
+    lines.push("");
+  }
   if (report.failure) lines.push(`Failed step: ${report.failure.stage}. Code: ${report.failure.code}.`, "");
   if (report.failure?.transcript) {
     const state = report.failure.transcript;

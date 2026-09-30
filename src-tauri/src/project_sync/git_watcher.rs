@@ -9,12 +9,11 @@
 //! the project only; no path leaves the backend.
 
 use super::service::repository;
-use super::session_watch_service::canonical_event_path;
 use mallard_domain::LocalProjectId;
 use mallard_infrastructure::project_activity::{project_git_dirs, ProjectGitDirs};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Mutex;
 use std::thread;
@@ -144,6 +143,30 @@ fn is_ref_event(event: &Event, dirs: &ProjectGitDirs) -> bool {
         .any(|path| is_ref_path(&canonical_event_path(path), dirs))
 }
 
+/// Normalize watcher paths to the same spelling as the Git directories.
+/// A removal event may name a missing path, so canonicalize its nearest
+/// existing ancestor and append the missing suffix without following it.
+fn canonical_event_path(path: &Path) -> PathBuf {
+    let mut current = path;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut canonical) = std::fs::canonicalize(current) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+        let Some(name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        current = parent;
+    }
+}
+
 /// `HEAD` moves on a checkout, a branch tip on a commit, and `packed-refs` on
 /// a pack or a fetch. Git writes each through a `.lock` sibling it renames
 /// into place, so the lock itself is never the signal.
@@ -205,7 +228,6 @@ pub async fn unwatch_project_git(
 mod tests {
     use super::*;
     use mallard_infrastructure::project_activity::git_dirs;
-    use std::path::PathBuf;
     use std::process::Command;
     use std::time::Instant;
 

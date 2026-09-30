@@ -3674,6 +3674,7 @@ mod tests {
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -3818,6 +3819,7 @@ mod tests {
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -4001,6 +4003,7 @@ mod tests {
         repo.mutate_conversation_bindings(|bindings| {
             bindings.bindings.push(LocalConversationBinding {
                 installed_end: Some(128),
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: BTreeMap::from([(
                     child_key,
@@ -4204,6 +4207,7 @@ mod tests {
             repo.mutate_conversation_bindings(|conversations| {
                 conversations.bindings.push(LocalConversationBinding {
                     installed_end: None,
+                    installed_absent_subagents: Default::default(),
                     pulled_children_excluded: false,
                     installed_subagents: Default::default(),
                     path_origins_ref: None,
@@ -4313,6 +4317,7 @@ mod tests {
         repo.mutate_conversation_bindings(|conversations| {
             conversations.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -5093,6 +5098,7 @@ mod tests {
         let replica_id = install_bound_project(repo, temp, &identity);
         let mut binding = LocalConversationBinding {
             installed_end: None,
+            installed_absent_subagents: Default::default(),
             pulled_children_excluded: false,
             installed_subagents: Default::default(),
             host_id: identity.host_id,
@@ -5169,6 +5175,30 @@ mod tests {
             repo.load_path_origins(&selected).is_ok(),
             "immutable origin history remains"
         );
+    }
+
+    // A Codex rollout is only appended to, so its cutoff tells the children
+    // apart that came with a Pull. Only a Claude binding names them.
+    #[test]
+    fn only_a_claude_binding_names_absent_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let (mut binding, _) = bound_path_origin_fixture(&repo, &temp);
+        binding.installed_end = Some(100);
+        binding.installed_absent_subagents.insert("agent-1".into());
+        binding.validate().unwrap();
+        let error = repo
+            .mutate_conversation_bindings(|bindings| {
+                bindings.bindings.push(binding.clone());
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(error, "provider does not record absent child references");
+        assert!(repo
+            .load_conversation_bindings()
+            .unwrap()
+            .bindings
+            .is_empty());
     }
 
     #[test]

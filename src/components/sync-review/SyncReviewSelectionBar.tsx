@@ -11,8 +11,8 @@ export default function SyncReviewSelectionBar({
   count,
   total,
   busy = false,
+  recommendedCount,
   recommendedTitle,
-  recommendedAriaLabel,
   recommendedDisabled,
   onRecommended,
   clearDisabled,
@@ -27,8 +27,11 @@ export default function SyncReviewSelectionBar({
   /** The rows have not landed: a count and the controls that change a
    *  selection would speak for rows nobody can see, so only close stays. */
   listPending?: boolean;
+  /** How many rows the recommend action would tick: what it does, not how
+   *  many are ticked now. */
+  recommendedCount: number;
+  /** The sentence behind the count, worded by the feature that knows it. */
   recommendedTitle: string;
-  recommendedAriaLabel: string;
   recommendedDisabled: boolean;
   onRecommended: () => void;
   clearDisabled: boolean;
@@ -43,10 +46,6 @@ export default function SyncReviewSelectionBar({
     <div className="sync-push-resource-actions">
       {!listPending && (
         <>
-          {/* The recommend button's own count is a property of the resource set,
-              not of the selection, so it never moves when a row is ticked. Shown
-              as a bare number beside a tick it read as "N selected"; the live
-              count below is the one that answers that question. */}
           <span
             className="sync-sync-review-selected"
             style={{ "--review-count-digits": String(total).length } as CSSProperties}
@@ -56,15 +55,26 @@ export default function SyncReviewSelectionBar({
           >
             <b>{count}</b>/{total}
           </span>
+          {/* A labelled pill, not a bare tick: drawn as a ghost glyph beside the
+              count it read as a status mark, and a Pull review opens with nothing
+              ticked, where missing it means marking the version reviewed. Its
+              count is what it would tick — a property of the resource set, so it
+              never moves when a row is ticked; the live count before it answers
+              "how many are selected". The words and the count name the button;
+              the title is the sentence behind them. Nothing to recommend is
+              nothing to select: Clear is the control for emptying a step. */}
           <button
             type="button"
-            className="btn btn-ghost sync-sync-review-icon-action"
+            className="btn sync-sync-review-select"
             onClick={onRecommended}
-            disabled={busy || recommendedDisabled}
+            disabled={busy || recommendedDisabled || recommendedCount === 0}
             title={recommendedTitle}
-            aria-label={recommendedAriaLabel}
           >
-            <Icon name="check-circle" size={15} />
+            <Icon name="check-circle" size={14} />
+            {/* The space keeps the accessible name "Select 3", not "Select3";
+                a flex item's trailing space draws nothing. */}
+            {"Select "}
+            <span className="sync-path-count">{recommendedCount}</span>
           </button>
           <button
             type="button"

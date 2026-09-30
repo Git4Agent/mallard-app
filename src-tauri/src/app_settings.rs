@@ -1,12 +1,12 @@
 //! Tauri-facing tuning-settings commands. The document, validation, and the
 //! installed process-wide snapshot live in
 //! `mallard_infrastructure::app_settings`; this module adds the command
-//! surface and the cache consequences the infrastructure crate cannot see:
-//! observation and inventory caches bake limits into their contents, and a
-//! tuning change fires no filesystem event, so it drops them explicitly.
-//! Redaction-only changes preserve caches. Saves share the host operation lock.
+//! surface and the cache consequence the infrastructure crate cannot see:
+//! retained observations bake limits into their contents, and a tuning
+//! change touches no session file, so it drops them explicitly.
+//! Redaction-only changes preserve them. Saves share the host operation lock.
 
-use crate::project_sync::session_watch_service::session_watch_service;
+use crate::project_sync::observation_cache::observation_cache;
 use mallard_infrastructure::app_settings::{
     install_app_settings, load_app_settings, save_app_settings, AppSettings,
 };
@@ -47,7 +47,7 @@ pub async fn update_app_settings(settings: AppSettings) -> Result<AppSettings, S
     run_settings_io(move || {
         let repository = LocalStateRepository::from_user_home()?;
         update_app_settings_core(&repository, &settings, || {
-            session_watch_service().reset_all_caches_and_purge_disk(repository.root())
+            observation_cache().reset_and_purge_disk(repository.root())
         })
     })
     .await

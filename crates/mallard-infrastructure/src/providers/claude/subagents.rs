@@ -13,25 +13,15 @@ use serde_json::Value;
 use super::codec::{analyze_claude_records_in_context, ClaudeRecordContext};
 use crate::claude_history_tail::{self, ClaudeTailRefresh};
 use crate::conversation_codec::{CodecLineage, CodecUnknownReason};
-use crate::jsonl_tail_io::{self, SourceStamp};
+use crate::jsonl_tail_io::{self, SourceStamp, SourceStamps};
 use crate::providers::SessionAnalysis;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChildLink {
-    pub key: SubagentKey,
-    pub offset: u64,
-}
-
-pub type ChildLinks = BTreeMap<String, ChildLink>;
+/// The key of each child the main refers to, under the child's agent ID.
+pub type ChildLinks = BTreeMap<String, SubagentKey>;
 
 /// Called from the required parent parse. Copied references are filtered here,
 /// before any filesystem lookup. Resumes retain the first result's key.
-pub fn record_link(
-    links: &mut ChildLinks,
-    record: &Value,
-    offset: u64,
-    parent: &str,
-) -> Result<(), String> {
+pub fn record_link(links: &mut ChildLinks, record: &Value, parent: &str) -> Result<(), String> {
     if record.get("sessionId").and_then(Value::as_str) != Some(parent)
         || record.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || record.get("type").and_then(Value::as_str) != Some("user")
@@ -64,7 +54,7 @@ pub fn record_link(
     let key = SubagentKey::child(None, creation)?;
     if links
         .iter()
-        .any(|(other, link)| other != id && link.key == key)
+        .any(|(other, known)| other != id && *known == key)
     {
         return Err("Claude child key names multiple agent IDs".into());
     }
@@ -72,7 +62,7 @@ pub fn record_link(
         if links.len() + 1 >= mallard_domain::MAX_CONVERSATION_FILES {
             return Err("Claude child count limit".into());
         }
-        links.insert(id.to_string(), ChildLink { key, offset });
+        links.insert(id.to_string(), key);
     }
     Ok(())
 }
@@ -130,30 +120,15 @@ pub fn child_exists(path: &Path, root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Check the installed parent cutoff against the bytes already read.
-pub fn validate_installed_cutoff(
-    bytes: &[u8],
-    binding: Option<&LocalConversationBinding>,
-) -> Result<(), String> {
-    if let Some(end) = binding.and_then(|row| row.installed_end) {
-        if end == 0 || end > bytes.len() as u64 || bytes[end as usize - 1] != b'\n' {
-            return Err("invalid Claude installed discovery cutoff".into());
-        }
-    }
-    Ok(())
-}
-
 /// Cold membership scan when the existing main cursor can supply tail evidence.
 pub fn collect_main_links(bytes: &[u8], parent: &str) -> Result<ChildLinks, String> {
     let mut links = ChildLinks::new();
-    let mut offset = 0;
     for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
         if !raw.iter().all(u8::is_ascii_whitespace) {
             let value = serde_json::from_slice::<Value>(raw)
                 .map_err(|_| "Claude child discovery found malformed JSON")?;
-            record_link(&mut links, &value, offset, parent)?;
+            record_link(&mut links, &value, parent)?;
         }
-        offset += raw.len() as u64;
     }
     Ok(links)
 }
@@ -170,7 +145,6 @@ pub fn analyze_main(
     let mut offset = 0;
     let mut watermark = claude_history_tail::ClaudeWatermark::default();
     let records = bytes.split_inclusive(|b| *b == b'\n').filter_map(|raw| {
-        let start = offset;
         offset += raw.len() as u64;
         if raw.iter().all(u8::is_ascii_whitespace) {
             let _ = watermark.feed(None, offset, ClaudeRecordContext::Main);
@@ -181,7 +155,7 @@ pub fn analyze_main(
             if let Err(error) = watermark.feed(Some(value), offset, ClaudeRecordContext::Main) {
                 failure = Some(error);
             }
-            if let Err(error) = record_link(links, value, start, parent) {
+            if let Err(error) = record_link(links, value, parent) {
                 failure = Some(error);
             }
         }
@@ -207,7 +181,7 @@ pub fn refresh_main(
         mapping,
         window,
         ClaudeRecordContext::Main,
-        &mut |record, offset| record_link(links, record, offset, &mapping.provider_thread_id),
+        &mut |record| record_link(links, record, &mapping.provider_thread_id),
     )
 }
 
@@ -266,7 +240,9 @@ pub struct TreeObservation {
     pub children: BTreeMap<SubagentKey, ChildObservation>,
     pub missing: BTreeSet<SubagentKey>,
     pub omitted: bool,
-    pub dependencies: Vec<PathBuf>,
+    /// Every child file this tree consulted, under the stamp it was read
+    /// at. A missing child has no stamp and leaves the set unpinned.
+    pub dependencies: SourceStamps,
 }
 
 impl TreeObservation {
@@ -290,12 +266,6 @@ fn candidates(
 ) -> Result<BTreeMap<SubagentKey, String>, String> {
     let mut candidates = BTreeMap::new();
     if let Some(binding) = binding {
-        if binding
-            .installed_end
-            .is_some_and(|end| end > main.mapping.consumed_byte_offset)
-        {
-            return Err("Claude installed cutoff exceeds complete history".into());
-        }
         for (key, child) in &binding.installed_subagents {
             if key.owner().is_some() {
                 return Err("Claude supports direct children only".into());
@@ -303,17 +273,15 @@ fn candidates(
             candidates.insert(key.clone(), child.provider_thread_id.clone());
         }
     }
-    for (id, link) in &main.links {
-        if binding
-            .and_then(|binding| binding.installed_end)
-            .is_some_and(|end| link.offset < end)
+    for (id, key) in &main.links {
+        // A child that came with Pull is known by its ID: installed, or
+        // referred to without its transcript.
+        if binding.is_some_and(|binding| binding.installed_absent_subagents.contains(id))
+            || candidates.values().any(|known| known == id)
         {
             continue;
         }
-        if candidates.values().any(|known| known == id) {
-            continue;
-        }
-        if candidates.insert(link.key.clone(), id.clone()).is_some() {
+        if candidates.insert(key.clone(), id.clone()).is_some() {
             return Err("Claude installed key changed identity".into());
         }
     }
@@ -321,6 +289,27 @@ fn candidates(
         return Err("Claude child count limit".into());
     }
     Ok(candidates)
+}
+
+/// The agent calls whose children came with a Pull without their
+/// transcripts. A call names its child in its result, and the binding names
+/// the children that came without a transcript.
+pub fn agent_calls_without_transcript(
+    index: &crate::providers::SessionTimelineIndex,
+    binding: &LocalConversationBinding,
+) -> BTreeSet<String> {
+    index
+        .events
+        .iter()
+        .filter(|entry| {
+            entry
+                .agent
+                .as_ref()
+                .and_then(|agent| agent.provider_agent_id.as_ref())
+                .is_some_and(|id| binding.installed_absent_subagents.contains(id))
+        })
+        .map(|entry| entry.event_id.clone())
+        .collect()
 }
 
 pub fn observe_tree(
@@ -332,7 +321,7 @@ pub fn observe_tree(
     let path = PathBuf::from(&main.mapping.root_path);
     let parent = main.mapping.provider_thread_id.clone();
     let mut tree = TreeObservation {
-        dependencies: vec![path.clone()],
+        dependencies: SourceStamps::default(),
         main,
         children: BTreeMap::new(),
         missing: BTreeSet::new(),
@@ -341,8 +330,8 @@ pub fn observe_tree(
     let mut total = tree.main.mapping.source_file_size;
     for (key, id) in members {
         let child_path = child_path(&path, &parent, &id)?;
-        tree.dependencies.push(child_path.clone());
         if !child_exists(&child_path, path.parent().unwrap())? {
+            tree.dependencies.record_unstamped();
             tree.missing.insert(key);
             continue;
         }
@@ -358,9 +347,11 @@ pub fn observe_tree(
             .filter(|child| Some(&child.stamp) == stamp.as_ref())
             .cloned();
         if child.is_none() {
+            // The saved cursor serves only the same file, grown; any other
+            // change reads the child in full.
             if let Some((previous, stamp)) = previous
                 .zip(stamp.as_ref())
-                .filter(|(child, stamp)| child.stamp.same_file(stamp))
+                .filter(|(child, stamp)| stamp.continues(&child.stamp.file_state()))
             {
                 if let Ok(window) = jsonl_tail_io::read_tail_window(&child_path, &previous.mapping)
                 {
@@ -378,7 +369,7 @@ pub fn observe_tree(
                         &previous.mapping,
                         &window,
                         context,
-                        &mut |_, _| Ok(()),
+                        &mut |_| Ok(()),
                     )? {
                         ClaudeTailRefresh::Extended {
                             observed_tail,
@@ -434,6 +425,7 @@ pub fn observe_tree(
                 let analysis =
                     analyze_claude_records_in_context(&bytes[..complete], records, context);
                 if unsupported(&analysis) {
+                    tree.dependencies.record(&child_path, &stamp);
                     tree.omitted = true;
                     tree.children.clear();
                     tree.missing.clear();
@@ -461,6 +453,7 @@ pub fn observe_tree(
         if total > crate::provider_capture::MAX_CAPTURE_BYTES {
             return Err("Claude parent exceeds capture limit".into());
         }
+        tree.dependencies.record(&child_path, &child.stamp);
         tree.children.insert(key, child);
     }
     Ok(tree)
@@ -562,7 +555,7 @@ pub fn capture_children(
                             Err(error) => failure = Some(error.to_string()),
                         }
                     }
-                    Err(error) => failure = Some(error),
+                    Err(error) => failure = Some(error.message),
                 }
                 ordinal += 1;
             }
@@ -652,7 +645,7 @@ pub fn prepare_child_payloads(
         }
         let agent = links
             .iter()
-            .find(|(_, link)| &link.key == key)
+            .find(|(_, known)| *known == key)
             .map(|(agent, _)| agent)
             .ok_or("listed Claude child has no parent tool-result link")?;
         if jsonl_tail_io::safe_record_end(bytes) != bytes.len() as u64 {
@@ -782,16 +775,15 @@ mod tests {
             "message":{"content":[{"type":"tool_result","tool_use_id":key}]}})
         };
         let mut links = ChildLinks::new();
-        record_link(&mut links, &result("ancestor", "old"), 0, "parent").unwrap();
+        record_link(&mut links, &result("ancestor", "old"), "parent").unwrap();
         assert!(links.is_empty());
-        record_link(&mut links, &result("parent", "first"), 42, "parent").unwrap();
-        record_link(&mut links, &result("parent", "resumed"), 99, "parent").unwrap();
+        record_link(&mut links, &result("parent", "first"), "parent").unwrap();
+        record_link(&mut links, &result("parent", "resumed"), "parent").unwrap();
         assert_eq!(links.len(), 1);
-        assert_eq!(links["agent"].key.as_str(), "first");
-        assert_eq!(links["agent"].offset, 42);
+        assert_eq!(links["agent"].as_str(), "first");
         let mut conflict = result("parent", "first");
         conflict["toolUseResult"]["agentId"] = json!("different");
-        assert!(record_link(&mut links, &conflict, 101, "parent").is_err());
+        assert!(record_link(&mut links, &conflict, "parent").is_err());
     }
     #[test]
     fn nested_reference_is_unsupported_and_unsafe_path_is_not_missing() {
@@ -812,6 +804,84 @@ mod tests {
             assert!(child_exists(&path, temp.path()).is_err());
         }
         assert!(child_path(&main, "parent", "../escape").is_err());
+    }
+    // A child that came with a Pull is known by its ID, wherever its
+    // reference is in the file. The file here is shorter than the one Pull
+    // wrote, as it is after a desktop import.
+    #[test]
+    fn a_child_that_came_with_a_pull_is_known_by_its_id() {
+        let result = |uuid: &str, previous: &str, agent: &str| {
+            json!({"type":"user","uuid":uuid,"parentUuid":previous,"sessionId":"parent",
+            "cwd":"/fixture/project","isSidechain":false,"toolUseResult":{"agentId":agent},
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":format!("call-{agent}"),"content":"done"}
+            ]}})
+        };
+        let mut first = record("u1", None);
+        first["isSidechain"] = json!(false);
+        first.as_object_mut().unwrap().remove("agentId");
+        let raw = bytes(&[
+            first,
+            result("r1", "u1", "installed"),
+            result("r2", "r1", "absent"),
+            result("r3", "r2", "made-here"),
+        ]);
+        let mut links = ChildLinks::new();
+        let (analysis, watermark) = analyze_main(&raw, "parent", &mut links).unwrap();
+        let mapping = claude_history_tail::seed_claude_root_with_watermark(
+            Path::new("parent.jsonl"),
+            &raw,
+            &analysis,
+            watermark,
+        )
+        .unwrap()
+        .unwrap()
+        .mapping;
+        let main = MainObservation { mapping, links };
+        let child = |agent: &str| {
+            (
+                SubagentKey::child(None, &format!("call-{agent}")).unwrap(),
+                agent.to_string(),
+            )
+        };
+        assert_eq!(
+            candidates(&main, None).unwrap(),
+            BTreeMap::from([child("absent"), child("installed"), child("made-here")])
+        );
+
+        let binding = LocalConversationBinding {
+            installed_end: Some(raw.len() as u64 * 2),
+            installed_absent_subagents: BTreeSet::from(["absent".to_string()]),
+            pulled_children_excluded: false,
+            installed_subagents: BTreeMap::from([(
+                child("installed").0,
+                mallard_domain::InstalledSubagent {
+                    provider_thread_id: "installed".into(),
+                    installed_end: 1,
+                },
+            )]),
+            path_origins_ref: None,
+            host_id: mallard_domain::HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
+            replica_id: mallard_domain::ReplicaId::parse("replica-a").unwrap(),
+            local_project_id: mallard_domain::LocalProjectId::parse("project-a").unwrap(),
+            provider_profile_id: mallard_domain::LocalProviderProfileId::parse("profile-a")
+                .unwrap(),
+            thread_id: mallard_domain::ThreadId::parse("thread-1").unwrap(),
+            cloud_thread_id: None,
+            forked_from: None,
+            preserved: None,
+            root_tail_layout: None,
+            provider_thread_id: Some("parent".into()),
+            materialization_state: mallard_domain::ConversationMaterializationState::Resumable,
+            revision: 0,
+            created_at: 1,
+            updated_at: 1,
+        };
+        binding.validate().unwrap();
+        assert_eq!(
+            candidates(&main, Some(&binding)).unwrap(),
+            BTreeMap::from([child("installed"), child("made-here")])
+        );
     }
     #[test]
     fn fused_main_cursor_retains_pending_thinking_boundary() {
@@ -875,7 +945,7 @@ mod tests {
             &seed.mapping,
             &window,
             context,
-            &mut |_, _| Ok(()),
+            &mut |_| Ok(()),
         )
         .unwrap();
         let ClaudeTailRefresh::Extended { observed_tail, .. } = result else {
@@ -894,9 +964,37 @@ mod tests {
             &seed.mapping,
             &window,
             context,
-            &mut |_, _| Ok(()),
+            &mut |_| Ok(()),
         )
         .unwrap();
         assert!(matches!(result, ClaudeTailRefresh::NeedsFullResolve { .. }));
+    }
+
+    #[test]
+    fn a_call_is_left_out_by_the_id_of_the_child_it_names() {
+        use crate::owned_subagents::agent_card_fixtures::{
+            binding_of_a_pulled_session, index_of_agent_calls,
+        };
+        // The places say nothing: the desktop app may rewrite the file.
+        let index = index_of_agent_calls(
+            &[],
+            &[
+                ("call-installed", Some("installed"), 10),
+                ("call-absent", Some("absent"), 900),
+                ("call-resumed", Some("absent"), 20),
+                ("call-made-here", Some("made-here"), 30),
+                ("call-unanswered", None, 40),
+            ],
+        );
+        let binding =
+            binding_of_a_pulled_session(Some(100), &[("call-installed", "installed")], &["absent"]);
+        binding.validate().unwrap();
+        assert_eq!(
+            agent_calls_without_transcript(&index, &binding),
+            BTreeSet::from(["call-absent".to_string(), "call-resumed".to_string()])
+        );
+        // A session that was made on this computer names no such child.
+        let native = binding_of_a_pulled_session(None, &[], &[]);
+        assert!(agent_calls_without_transcript(&index, &native).is_empty());
     }
 }

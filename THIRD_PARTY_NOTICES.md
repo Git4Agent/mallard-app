@@ -18,9 +18,38 @@ The source URLs, revisions, asset hashes, and full licenses are included in
 of their owners. The Mallard duck-and-cloud PNG was generated for the selected
 Mallard storage icon design.
 
-## Pixel Icon Library
+## Shared UI icons
 
-Mallard's pixel-style UI glyphs are adapted from the
+Mallard's shared UI glyphs and colored thread-status badges use
+[@tabler/icons-react v3.48.0](https://github.com/tabler/tabler-icons/tree/v3.48.0).
+The icons render with `currentColor` and the library's 24-unit rounded-stroke
+geometry. Storage-provider artwork and the Claude provider mark remain separate.
+
+MIT License
+
+Copyright (c) 2020-2026 Paweł Kuna
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Pixel Icon Library design mockups
+
+Archived Mallard design mockups contain pixel-style UI glyphs adapted from the
 [Pixel Icon Library by HackerNoon](https://github.com/hackernoon/pixel-icon-library).
 The original icon files are licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
@@ -28,9 +57,9 @@ The original icon files are licensed under
 Copyright © 2023 HackerNoon. The glyphs were inlined, recolored through
 `currentColor`, and selectively simplified for Mallard's 14–22 px UI sizes.
 
-## Pixelarticons
+## Pixelarticons design mockups
 
-Selected navigation glyphs are adapted from
+Archived Mallard design mockups contain selected navigation glyphs adapted from
 [Pixelarticons by Gerrit Halfmann](https://github.com/halfmage/pixelarticons).
 The original icon files are licensed under the MIT License.
 
@@ -55,14 +84,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## ChatGPT mark
-
-Mallard uses a monochrome, crisp-edge rendering of the
-[ChatGPT knot mark](https://commons.wikimedia.org/wiki/File:ChatGPT-Logo.svg)
-to identify actions that open a ChatGPT conversation. Wikimedia Commons
-describes the underlying geometric mark as public domain while noting that it
-remains a trademark of OpenAI.
-
 ## Departure Mono
 
 Mallard bundles Departure Mono by Helena Zhang, from
@@ -70,10 +91,10 @@ Mallard bundles Departure Mono by Helena Zhang, from
 Open Font License 1.1. The complete license text is included at
 `public/fonts/DepartureMono-OFL.txt`.
 
-## Compact pixel icon update
+## Compact pixel icon design mockups
 
-The shared desktop and website set follows Joint mock 2. Updated search, file,
-clock, copy, lock, link, unlink, chevrons, and close paths come from Pixelarticons
+The archived Joint mock 2 set includes updated search, file,
+clock, copy, lock, link, unlink, chevrons, and close paths from Pixelarticons
 revision `8275e0af7c16aa40c54ea2b90b7af83b1fe4eb4c`. The tool mark uses the wrench
 half of `tools.svg`, centered and rotated. The Git folder retains the previous
 desktop folder and prompt geometry. The star is from HackerNoon
@@ -117,11 +138,9 @@ The `message-square` and `wrench` paths, plus the dot and stem of `info`, are fr
 [Lucide 0.468.0](https://github.com/lucide-icons/lucide/tree/0.468.0/icons).
 Original geometry is inlined in `SessionRowIcon.tsx`.
 
-The shared `trash`, `terminal`, `git-commit`, and `external-link` icons in
-`Icons.tsx` use Lucide 0.468.0 `trash-2`, `square-terminal`,
-`git-commit-horizontal`, and `external-link`. They use a 2-unit rounded stroke.
-The terminal prompt and frame radius are enlarged for small action buttons;
-the commit node is enlarged to match the approved soft outline design.
+The Catalog Pet v2 head uses the `cat` contour from the same Lucide version.
+`CatalogPetIcon.tsx` omits the nose and keeps the source head geometry. The round
+eye marks use the `cat` eye paths from Tabler 3.48.0, with a vertical offset.
 
 ISC License
 
@@ -138,3 +157,32 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+## Catalog paw icon
+
+Catalog Pet v1 uses `animal_paw_print_24_filled` from
+[Fluent System Icons](https://github.com/microsoft/fluentui-system-icons/blob/a563cf9166f4f91aa617557ed272612b7f0a2f72/assets/Animal%20Paw%20Print/SVG/ic_fluent_animal_paw_print_24_filled.svg).
+The source contours are inlined in `CatalogPetIcon.tsx`. The four toe pads remain
+solid. The central pad uses a 2-unit outline instead of a solid fill.
+
+MIT License
+
+Copyright (c) 2020 Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -112,6 +112,7 @@ pub fn retained_root_is_byte_identical(
     let PhysicalMappingState::Ready {
         root_mapping,
         raw_range_pin,
+        ..
     } = &checkpoint.physical
     else {
         return Ok(false);
@@ -786,6 +787,8 @@ mod tests {
                     end_byte_offset: bytes.len() as u64,
                     range_sha256: sha256_hex(bytes),
                 },
+                // The witness reads every byte and consults no file state.
+                source_state: None,
             },
             prefix_witness: None,
             binding_revision: 0,
@@ -989,6 +992,7 @@ mod tests {
                 None,
                 &mut crate::credential_redaction::shared().begin_run(),
                 &crate::session_path_origins::PathOrigins::default(),
+                crate::session_path_origins::OriginLookup::ByPosition,
                 &BTreeMap::from([("thread".into(), "mallard-main".into())]),
             )
             .unwrap()
@@ -1002,6 +1006,7 @@ mod tests {
             None,
             &mut crate::credential_redaction::shared().begin_run(),
             &before.path_origins,
+            crate::session_path_origins::OriginLookup::ByPosition,
             &BTreeMap::from([("thread".into(), "mallard-main".into())]),
         )
         .unwrap();
@@ -1221,17 +1226,20 @@ mod tests {
     /// whole-file cursor path, for equivalence tests.
     fn tail_window_from(mapping: &RootPhysicalMapping, full: &[u8]) -> TailWindow {
         let window_offset = mapping.consumed_byte_offset - mapping.probe_window_len;
+        let stamp = crate::jsonl_tail_io::SourceStamp::for_tests(full.len() as u64);
         if (full.len() as u64) < mapping.consumed_byte_offset {
             return TailWindow {
                 file_len: full.len() as u64,
                 window_offset,
                 bytes: Vec::new(),
+                stamp,
             };
         }
         TailWindow {
             file_len: full.len() as u64,
             window_offset,
             bytes: full[window_offset as usize..].to_vec(),
+            stamp,
         }
     }
 

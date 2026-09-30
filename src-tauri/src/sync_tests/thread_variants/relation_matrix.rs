@@ -234,6 +234,26 @@ fn a_pair_without_an_acceptance_keeps_both_instead_of_blocking() {
     validate_conversation_action_pins(&action, &current).unwrap();
 }
 
+/// A plan says what its Pull keeps of the children that only this computer
+/// has. When the provider keeps something else at Apply, the plan is stale.
+#[test]
+fn a_plan_is_stale_when_the_pull_keeps_other_children_than_reviewed() {
+    let (action, mut current) = reviewed_action(
+        ConversationPlanActionType::MaterializeCloud,
+        TailClassification::CloudOutstanding,
+    );
+    validate_conversation_action_pins(&action, &current).unwrap();
+    current.pins.tail.local_only_subagents_kept = !action.pins.tail.local_only_subagents_kept;
+    assert_eq!(
+        validate_conversation_action_pins(&action, &current),
+        Err(
+            mallard_infrastructure::conversation_sync::ConversationStalePin::Tail(
+                mallard_infrastructure::conversation_sync::ConversationTailPin::Subagents,
+            )
+        )
+    );
+}
+
 #[test]
 fn malformed_evidence_is_a_typed_blocker_not_a_classifier_state() {
     let tail = whole_tail(&[("m-a", "one")]);
@@ -344,6 +364,7 @@ context: ConversationContextPins {
         tail: ConversationTailPins {
             subagents: Default::default(),
             subagents_omitted: false,
+            local_only_subagents_kept: false,
             missing_local_subagents: Default::default(),
             accepted: accepted.clone(),
             accepted_local: accepted,

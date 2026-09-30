@@ -23,7 +23,7 @@ import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
-import { STORAGE_BLOCKING_STATES } from "./model";
+import { STORAGE_BLOCKING_STATES, projectLabel } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../sync-review/ReviewBudgetMeter";
@@ -696,6 +696,17 @@ export default function PushResourceWorkspace({
   /* The meters and the count measure rows; until the rows land they would
      measure a default selection nobody has seen. */
   const listPending = listState === "loading";
+  /* Nothing to push, so the footer's one button leaves instead. Not while a
+     file scan runs: its files may still land, and the footer is the loading
+     one until they do. An unscanned files step does not hold it back — the
+     scan only starts when that step is opened, so a review waiting on it
+     would never offer the way out. */
+  const emptyReview = listState === "ready"
+    && !projectContentLoading
+    && visibleResources.length === 0
+    && projectContentRemovals.size === 0;
+  // The page the review closes onto, as the path bar names it.
+  const exitTarget = project?.is_git_repository ? "Git history" : project ? projectLabel(project) : "project";
   /* The review says it is ready once, when its rows land — after mount, so a
      review ready from its first render still changes the region. */
   const [readyAnnounced, setReadyAnnounced] = useState(false);
@@ -801,7 +812,9 @@ export default function PushResourceWorkspace({
             {readyAnnounced ? "Push review ready." : ""}
           </span>
         </div>
-        {budgetTotal && !listPending && (
+        {/* An empty review draws no meter: it would measure only the
+            reserved requirements of a push that cannot happen. */}
+        {budgetTotal && !listPending && !emptyReview && (
           <ReviewBudgetGlance budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
         )}
         <SyncReviewSelectionBar
@@ -810,7 +823,7 @@ export default function PushResourceWorkspace({
           busy={busy}
           listPending={listPending}
           recommendedTitle={`Use the recommended ${searchActive ? "matching session" : activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
-          recommendedAriaLabel={`Use recommended selection${searchActive ? " for matching sessions" : ""} (${recommendedCount})`}
+          recommendedCount={recommendedCount}
           recommendedDisabled={currentDefaults.length === 0 || currentMatchesDefaults}
           onRecommended={useRecommendedForStep}
           searchActive={searchActive}
@@ -982,41 +995,61 @@ export default function PushResourceWorkspace({
              and the button under the reader's focus has gone dead. */
           <span role="status"><small>A running push finishes or fails whole — it can’t be cancelled midway.</small></span>
         )}
-        {showProjectFiles && (
-          /* The step navigator, not a gate: Push stays live on both steps.
-             It reads forward on the sessions step and back on the files one,
-             so the footer is always "keep reviewing, or publish now". */
+        {emptyReview ? (
+          /* Nothing to commit, so the commit's slot holds the way out — the
+             way Settings' Done leaves a page with nothing to save. A box, not
+             the gold (nothing is committed) and not a ghost (the ghost is the
+             step navigator, which has nothing to walk between here: both
+             tabs read 0 and the strip above already switches). The path
+             bar's Push stays, disabled, as the review's verb. */
           <button
             type="button"
-            className="btn btn-ghost"
+            className="btn sync-review-exit"
             disabled={busy}
-            title={activeStep === "history" ? "Review project files next" : "Back to session selection"}
-            onClick={() => selectStep(activeStep === "history" ? "project_files" : "history")}
+            title={`Close Push review — back to ${exitTarget}`}
+            onClick={onClose}
           >
-            {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
-            {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
-            {activeStep === "history" && <Icon name="chevron-right" size={14} />}
+            <span>{`Back to ${exitTarget}`}</span>
           </button>
+        ) : (
+          <>
+            {showProjectFiles && (
+              /* The step navigator, not a gate: Push stays live on both steps.
+                 It reads forward on the sessions step and back on the files one,
+                 so the footer is always "keep reviewing, or publish now". */
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                title={activeStep === "history" ? "Review project files next" : "Back to session selection"}
+                onClick={() => selectStep(activeStep === "history" ? "project_files" : "history")}
+              >
+                {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
+                {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
+                {activeStep === "history" && <Icon name="chevron-right" size={14} />}
+              </button>
+            )}
+            {budgetTotal && !listPending && (
+              <ReviewBudgetGauge budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
+            )}
+            <button
+              type="button"
+              className="btn btn-primary sync-pull-apply-button"
+              onClick={onPush}
+              disabled={busy || pushDisabledReason !== null}
+              title={pushDisabledReason ?? undefined}
+            >
+              {busy || listPending
+                ? <Icon name="refresh" size={16} className="icon-spin" />
+                : <ThreadStatusIcon status="local-outstanding" size={16} />}
+              {busy
+                ? (fetchProgress && fetchProgress.phase === "push"
+                  ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
+                  : "Pushing…")
+                : listPending ? "Loading sessions…" : "Push"}
+            </button>
+          </>
         )}
-        {budgetTotal && !listPending && (
-          <ReviewBudgetGauge budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
-        )}
-        <button
-          type="button"
-          className="btn btn-primary sync-pull-apply-button"
-          onClick={onPush}
-          disabled={busy || pushDisabledReason !== null}
-          title={pushDisabledReason ?? undefined}
-        >
-          {busy || listPending
-            ? <Icon name="refresh" size={16} className="icon-spin" />
-            : <ThreadStatusIcon status="local-outstanding" size={16} />}
-          {busy
-            ? (fetchProgress && fetchProgress.phase === "push"
-              ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
-              : "Pushing…")
-            : listPending ? "Loading sessions…" : "Push"}
-        </button>
       </footer>
     </section>
   );

@@ -397,7 +397,7 @@ pub fn refresh_claude_tail(
         mapping,
         tail,
         ClaudeRecordContext::Main,
-        &mut |_, _| Ok(()),
+        &mut |_| Ok(()),
     )
 }
 
@@ -407,7 +407,7 @@ pub(crate) fn refresh_claude_tail_with_records(
     mapping: &RootPhysicalMapping,
     tail: &TailWindow,
     context: ClaudeRecordContext<'_>,
-    on_record: &mut dyn FnMut(&Value, u64) -> Result<(), String>,
+    on_record: &mut dyn FnMut(&Value) -> Result<(), String>,
 ) -> Result<ClaudeTailRefresh, String> {
     if tail.window_offset != mapping.consumed_byte_offset - mapping.probe_window_len {
         return Err("Claude tail window does not start at the mapping's probe window".to_string());
@@ -481,7 +481,7 @@ pub(crate) fn refresh_claude_tail_with_records(
             });
         };
         appended_records += 1;
-        on_record(&value, mapping.consumed_byte_offset + piece_offset as u64)?;
+        on_record(&value)?;
         let outcome = feeder.feed_in_context(&value, context);
         match outcome {
             ClaudeFeedOutcome::Pending => {
@@ -660,17 +660,20 @@ mod tests {
     /// path, for equivalence tests.
     fn tail_window_from(mapping: &RootPhysicalMapping, full: &[u8]) -> TailWindow {
         let window_offset = mapping.consumed_byte_offset - mapping.probe_window_len;
+        let stamp = crate::jsonl_tail_io::SourceStamp::for_tests(full.len() as u64);
         if (full.len() as u64) < mapping.consumed_byte_offset {
             return TailWindow {
                 file_len: full.len() as u64,
                 window_offset,
                 bytes: Vec::new(),
+                stamp,
             };
         }
         TailWindow {
             file_len: full.len() as u64,
             window_offset,
             bytes: full[window_offset as usize..].to_vec(),
+            stamp,
         }
     }
 

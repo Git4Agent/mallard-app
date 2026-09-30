@@ -287,6 +287,7 @@ fn local_bindings_reject_duplicate_provider_thread_ownership_profile_wide() {
     );
     let binding = |thread: &str| LocalConversationBinding {
         installed_end: None,
+        installed_absent_subagents: Default::default(),
         pulled_children_excluded: false,
         installed_subagents: Default::default(),
         path_origins_ref: None,

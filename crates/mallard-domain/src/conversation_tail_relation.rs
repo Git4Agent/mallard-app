@@ -48,25 +48,41 @@ pub fn compare_subagent_tail(
 }
 
 /// Fold already-classified rollouts without comparing their content again.
+///
+/// What this computer changed stands against what the storage changed, and
+/// the session is `Divergent`. A child that only this computer has is such a
+/// change, unless `local_only_children_kept`: the Pull that installs the
+/// stored version then updates the session where it is and leaves that child
+/// in its place. The session is behind the storage, and ahead of it after
+/// the Pull. A main transcript or a child that was continued here is
+/// replaced by the Pull, so it stands against the storage all the same.
 pub fn fold_conversation_relations(
     main: TailClassification,
     children: impl IntoIterator<Item = TailClassification>,
+    local_only_children_kept: bool,
 ) -> TailClassification {
     use TailClassification::*;
     let mut local = false;
+    let mut local_only_child = false;
     let mut cloud = false;
     let mut divergent = false;
     let mut advanced = false;
-    for relation in std::iter::once(main).chain(children) {
+    let children = children.into_iter().map(|relation| (relation, true));
+    for (relation, is_child) in std::iter::once((main, false)).chain(children) {
         match relation {
             Unknown => return Unknown,
             Divergent => divergent = true,
+            MissingCloud if is_child => local_only_child = true,
             LocalOutstanding | MissingCloud => local = true,
             CloudOutstanding | MissingLocal => cloud = true,
             Sync(SyncCurrency::Advanced) => advanced = true,
             Sync(SyncCurrency::Current) | MissingBoth => {}
         }
     }
+    // The Pull keeps a child in its place only beside a main transcript
+    // that is on both sides.
+    let kept = local_only_children_kept && matches!(main, Sync(_) | CloudOutstanding);
+    local |= local_only_child && !(cloud && kept);
     if divergent || (local && cloud) {
         Divergent
     } else if matches!(main, MissingCloud | MissingLocal | MissingBoth) {
@@ -354,32 +370,90 @@ mod owned_child_tests {
     fn fold_counts_new_children_and_mixed_sides_without_hiding_invalid_evidence() {
         use TailClassification::*;
         let synced = Sync(SyncCurrency::Current);
-        assert_eq!(
-            fold_conversation_relations(synced, [MissingCloud]),
-            LocalOutstanding
-        );
-        assert_eq!(
-            fold_conversation_relations(synced, [MissingLocal]),
-            CloudOutstanding
-        );
-        assert_eq!(
-            fold_conversation_relations(synced, [LocalOutstanding, CloudOutstanding]),
-            Divergent
-        );
-        assert_eq!(
-            fold_conversation_relations(LocalOutstanding, [CloudOutstanding]),
-            Divergent
-        );
-        assert_eq!(fold_conversation_relations(synced, [Divergent]), Divergent);
-        assert_eq!(fold_conversation_relations(Divergent, [Unknown]), Unknown);
-        assert_eq!(
-            fold_conversation_relations(MissingCloud, [MissingCloud]),
-            MissingCloud
-        );
-        assert_eq!(
-            fold_conversation_relations(MissingLocal, [MissingLocal]),
-            MissingLocal
-        );
-        assert_eq!(fold_conversation_relations(synced, [synced]), synced);
+        // No session here has a child of this computer alone beside a
+        // change in the storage, so what a Pull keeps decides nothing.
+        for kept in [false, true] {
+            let fold = |main, children: &[TailClassification]| {
+                fold_conversation_relations(main, children.iter().copied(), kept)
+            };
+            assert_eq!(fold(synced, &[MissingCloud]), LocalOutstanding);
+            assert_eq!(fold(synced, &[MissingLocal]), CloudOutstanding);
+            assert_eq!(
+                fold(synced, &[LocalOutstanding, CloudOutstanding]),
+                Divergent
+            );
+            assert_eq!(fold(LocalOutstanding, &[CloudOutstanding]), Divergent);
+            assert_eq!(fold(synced, &[Divergent]), Divergent);
+            assert_eq!(fold(Divergent, &[Unknown]), Unknown);
+            assert_eq!(fold(MissingCloud, &[MissingCloud]), MissingCloud);
+            assert_eq!(fold(MissingLocal, &[MissingLocal]), MissingLocal);
+            assert_eq!(fold(synced, &[synced]), synced);
+        }
+    }
+
+    #[test]
+    fn a_child_of_this_computer_alone_stands_against_the_storage_unless_a_pull_keeps_it() {
+        use TailClassification::*;
+        let synced = Sync(SyncCurrency::Current);
+        let advanced = Sync(SyncCurrency::Advanced);
+        let fold = |main, children: &[TailClassification], kept| {
+            fold_conversation_relations(main, children.iter().copied(), kept)
+        };
+        // The storage has a child more, a longer child, or a longer main
+        // transcript. This computer has a child that is not stored.
+        for (main, children) in [
+            (synced, vec![MissingCloud, MissingLocal]),
+            (synced, vec![MissingLocal, MissingCloud, MissingCloud]),
+            (synced, vec![MissingCloud, CloudOutstanding]),
+            (advanced, vec![MissingCloud, MissingLocal]),
+            (CloudOutstanding, vec![MissingCloud]),
+            (CloudOutstanding, vec![synced, MissingCloud, MissingLocal]),
+        ] {
+            assert_eq!(
+                fold(main, &children, false),
+                Divergent,
+                "{main:?} {children:?}"
+            );
+            assert_eq!(
+                fold(main, &children, true),
+                CloudOutstanding,
+                "{main:?} {children:?}"
+            );
+        }
+        for kept in [false, true] {
+            // After that Pull the child is what the session is ahead by.
+            assert_eq!(
+                fold(synced, &[synced, MissingCloud], kept),
+                LocalOutstanding
+            );
+            // The Pull replaces a main transcript and a child that were
+            // continued here, and it keeps no child beside a main
+            // transcript that is on one side only.
+            for (main, children) in [
+                (LocalOutstanding, vec![MissingLocal]),
+                (LocalOutstanding, vec![MissingCloud, MissingLocal]),
+                (synced, vec![LocalOutstanding, MissingLocal]),
+                (
+                    synced,
+                    vec![LocalOutstanding, MissingCloud, CloudOutstanding],
+                ),
+                (CloudOutstanding, vec![LocalOutstanding, MissingCloud]),
+                (synced, vec![Divergent, MissingCloud, MissingLocal]),
+                (Divergent, vec![MissingCloud, MissingLocal]),
+                (MissingCloud, vec![MissingCloud, MissingLocal]),
+                (MissingLocal, vec![MissingCloud, MissingLocal]),
+                (MissingBoth, vec![MissingCloud, MissingLocal]),
+            ] {
+                assert_eq!(
+                    fold(main, &children, kept),
+                    Divergent,
+                    "{main:?} {children:?} {kept}"
+                );
+            }
+            assert_eq!(
+                fold(CloudOutstanding, &[MissingCloud, Unknown], kept),
+                Unknown
+            );
+        }
     }
 }

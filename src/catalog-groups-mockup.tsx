@@ -166,7 +166,7 @@ function CatalogCard({ row }: { row: Row }) {
     <article className={`sync-history-thread-card catalog-card${row.pet ? " catalog-card-pet" : ""}`}>
       {row.pet && (
         <span className="catalog-pet-preview" aria-hidden="true">
-          <Icon name="paw" size={16} />
+          <Icon name="catalog-pet-v1" size={16} />
         </span>
       )}
       <div className="sync-history-thread-topline">
@@ -431,7 +431,7 @@ function Harness() {
             glance that most of this list is not here.
           </>}
         >
-          <Today rows={PETS} kind="Pets v2" mark="paw" />
+          <Today rows={PETS} kind="Pets v2" mark="catalog-pet-v2" />
         </Panel>
 
         <Panel
@@ -443,7 +443,7 @@ function Harness() {
             and no heading grows furniture it does not have today.
           </>}
         >
-          <Partitioned rows={PETS} kind="Pets v2" mark="paw" />
+          <Partitioned rows={PETS} kind="Pets v2" mark="catalog-pet-v2" />
         </Panel>
 
         <Panel
@@ -456,7 +456,7 @@ function Harness() {
             rule was written when there was one heading and the number would have read as a row.
           </>}
         >
-          <Partitioned rows={PETS} kind="Pets v2" mark="paw" count />
+          <Partitioned rows={PETS} kind="Pets v2" mark="catalog-pet-v2" count />
           <div className="mockup-substage">
             <p>Skills, same treatment — the partition is not a pet feature:</p>
             <Partitioned rows={SKILLS} kind="Skills" mark="lightbulb" count />
@@ -475,7 +475,7 @@ function Harness() {
           <Partitioned rows={SKILLS} kind="Skills" mark="lightbulb" count />
           <div className="mockup-substage">
             <p>Plugins — no Fork control on the row, everything else unchanged:</p>
-            <Partitioned rows={PLUGINS} kind="Plugins" mark="puzzle" count />
+            <Partitioned rows={PLUGINS} kind="Plugins" mark="catalog-plugin" count />
           </div>
         </Panel>
 
@@ -504,7 +504,7 @@ function Harness() {
             it is the page’s subject. Click the chevron to see the folded state.
           </>}
         >
-          <Partitioned rows={MANY_PETS} kind="Pets v2" mark="paw" count foldable />
+          <Partitioned rows={MANY_PETS} kind="Pets v2" mark="catalog-pet-v2" count foldable />
         </Panel>
       </div>
     </div>

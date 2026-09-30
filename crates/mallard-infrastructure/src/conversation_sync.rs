@@ -211,6 +211,7 @@ pub fn validate_conversation_action_pins(
     if current_tail.subagents != planned_tail.subagents
         || current_tail.missing_local_subagents != planned_tail.missing_local_subagents
         || current_tail.subagents_omitted != planned_tail.subagents_omitted
+        || current_tail.local_only_subagents_kept != planned_tail.local_only_subagents_kept
     {
         return Err(ConversationStalePin::Tail(Tail::Subagents));
     }

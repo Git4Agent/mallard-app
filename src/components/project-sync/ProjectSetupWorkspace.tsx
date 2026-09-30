@@ -63,6 +63,29 @@ type SaveState = "idle" | "saving" | "saved" | "error";
 
 const AUTOSAVE_DELAY_MS = 700;
 
+/** Select only one verified Git match from the chosen storage. */
+export function defaultSetupRepository(
+  draft: ProjectSetupDraft,
+  bundles: BundleSnapshotSummary[],
+  manuallySelected: boolean,
+): ProjectSetupDraft["repository"] {
+  if (manuallySelected || draft.repository.kind === "existing" || !draft.storage) return draft.repository;
+  const matches = bundles.filter((bundle) => (
+    bundle.storage_id === draft.storage?.storage_id
+    && repositoryFingerprintMatches(bundle.repository_fingerprint, draft.repository_fingerprint)
+  ));
+  if (matches.length !== 1) return draft.repository;
+  const match = matches[0];
+  return {
+    kind: "existing",
+    storage_id: match.storage_id,
+    bundle_id: match.bundle_id,
+    display_name: match.display_name,
+    repository_fingerprint: match.repository_fingerprint,
+    mismatch_acknowledged: false,
+  };
+}
+
 /** Adopt the name derived for a changed folder without losing newer edits. */
 export function mergeSavedSetupDraft(
   current: ProjectSetupDraft,
@@ -265,6 +288,7 @@ export default function ProjectSetupWorkspace({
   const [remoteBundles, setRemoteBundles] = useState<BundleSnapshotSummary[]>([]);
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
+  const repositoryManuallySelected = useRef(false);
   // Providers the user has switched on for this draft. Only entries with a
   // chosen profile are persisted on the draft itself; an enabled provider
   // without a selection blocks finalization locally.
@@ -403,13 +427,18 @@ export default function ProjectSetupWorkspace({
   const repositoryFingerprint = inspection?.draft.repository_fingerprint
     ?? draft?.repository_fingerprint
     ?? null;
-  // No silent pick: a Git match is a badge on its row, the choice is a
-  // click, and the draft's own default (New repository) stands until then.
   const managedListing = useManagedCloudRepositories(
     managedStorage ? chosenStorageId : null,
     repositoryFingerprint,
     workflowIsActive,
   );
+
+  useEffect(() => {
+    if (!draft || managedStorage || bundlesLoading || bundlesError || busy || finalizing) return;
+    const repository = defaultSetupRepository(draft, remoteBundles, repositoryManuallySelected.current);
+    if (repository === draft.repository) return;
+    edit((current) => ({ ...current, repository }));
+  }, [draft, managedStorage, bundlesLoading, bundlesError, remoteBundles, busy, finalizing]);
 
   const probeTargets = useMemo<ProfileProbeTarget[]>(() => (
     providers.flatMap((descriptor) => {
@@ -610,11 +639,14 @@ export default function ProjectSetupWorkspace({
 
   // Repository choices are storage-specific, so changing the storage drops the
   // repository decision rather than carrying a stale one across.
-  const chooseStorage = (storageId: string | null) => edit((current) => ({
-    ...current,
-    repository: { kind: "new" },
-    storage: storageId ? { storage_id: storageId } : null,
-  }));
+  const chooseStorage = (storageId: string | null) => {
+    repositoryManuallySelected.current = false;
+    edit((current) => ({
+      ...current,
+      repository: { kind: "new" },
+      storage: storageId ? { storage_id: storageId } : null,
+    }));
+  };
 
   const profileRow = (descriptor: ProviderDescriptor) => {
     const provider = descriptor.key;
@@ -982,7 +1014,10 @@ export default function ProjectSetupWorkspace({
                   role="radio"
                   aria-checked={!usesExistingRepo}
                   className={`sync-bundle-match-option separate${!usesExistingRepo ? " active" : ""}`}
-                  onClick={() => edit((current) => ({ ...current, repository: { kind: "new" } }))}
+                  onClick={() => {
+                    repositoryManuallySelected.current = true;
+                    edit((current) => ({ ...current, repository: { kind: "new" } }));
+                  }}
                   disabled={working}
                 >
                   <span className="sync-bundle-radio"><span /></span>

@@ -330,6 +330,9 @@ mod tests {
         let bucket = home.join("projects/-work-app");
         std::fs::create_dir_all(bucket.join("newest/subagents")).unwrap();
         let app = temp.path().join("work/app");
+        // The clock is read once. Every file time and the expected time
+        // come from this reading, however long the test takes.
+        let now = SystemTime::now();
         let write = |name: &str, lines: &[serde_json::Value], age_secs: u64| {
             let path = bucket.join(name);
             let body: String = lines.iter().map(|line| format!("{line}\n")).collect();
@@ -338,7 +341,7 @@ mod tests {
                 .write(true)
                 .open(&path)
                 .unwrap()
-                .set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+                .set_modified(now - Duration::from_secs(age_secs))
                 .unwrap();
         };
         write(
@@ -381,11 +384,11 @@ mod tests {
         let homes = recent_session_homes(&home).unwrap();
         assert_eq!(homes.len(), 1, "{homes:?}");
         assert_eq!(homes[0].home, app);
-        let newest = (SystemTime::now() - Duration::from_secs(60))
+        let newest = (now - Duration::from_secs(60))
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert!(homes[0].last_active.abs_diff(newest) <= 2);
+        assert_eq!(homes[0].last_active, newest);
     }
 
     #[test]

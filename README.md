@@ -516,16 +516,55 @@ child blocks Push. If that accepted child exists in storage and all other
 evidence is valid, Pull offers Keep both to restore the cloud copy and retain
 the local files.
 
-Child changes use the same comparison rules as main changes. Review fixes
-child membership; Apply captures the latest bytes. A source change after
-capture fails that task with a request to Push again. Completed writes remain
-after an Apply error; there is no rollback of the task tree.
+A Claude task is updated in place, so Pull can meet child files on this
+computer: those an earlier Pull installed, and those Claude wrote here. Pull
+replaces such a file only when the cloud lists that child, and only in the
+state the review saw. Any other file in the place of a listed child stops
+that task. A child that Claude wrote here stays a child of the task when the
+cloud version does not list it. A copy from an earlier Pull does not.
+
+Child changes use the same comparison rules as main changes, and a change on
+this computer beside a change in the cloud reads as diverged. One case is
+different. A child that only this computer has stands against nothing in the
+cloud when the task is updated in place, which is so for Claude: the task
+reads as behind the cloud, Pull installs what the cloud holds and leaves that
+child where it is, and the next Push stores it. So the children that two
+computers made of one task come together in one task. A main conversation or
+a child that was continued on this computer would be replaced by that Pull:
+beside a change in the cloud it reads as diverged, and Pull offers Keep both.
+A Codex update is written under a new identity and would leave the child
+behind, so for Codex every such case reads as diverged.
+
+The session page shows a card for each call of a child agent. It leaves out
+the card of a child that came with a Pull without its transcript. A child
+that was made on this computer has its card, also in a task that was pulled
+without its children.
+
+Review fixes child membership; Apply captures the latest bytes. A source
+change after capture fails that task with a request to Push again. Completed
+writes remain after an Apply error; there is no rollback of the task tree.
 
 This is a schema-1 clean cutover with required new fields. Use fresh Mallard
 state and empty test storage. See the [owned-child design](docs/PLAN_CODEX_OWNED_SUBAGENT_SYNC.md)
 and [verification results](docs/CODEX_OWNED_SUBAGENT_SYNC_VERIFICATION.md). Claude scope and validation are in
 the [Claude design](docs/PLAN_CLAUDE_OWNED_SUBAGENT_SYNC.md) and
 [Claude verification](docs/CLAUDE_OWNED_SUBAGENT_SYNC_VERIFICATION.md).
+
+Refresh reads a session from the place Mallard saved in its file, and only
+what was added after it. The saved place is used only on the same file, and
+only while that file is untouched or has grown. A session file that was
+rewritten, replaced, or shortened is read in full and judged by its content:
+an edited session shows as diverged, and Pull offers Keep both. A pulled
+session, and a session whose file was copied, is read in full each time it
+changes until it is next pushed.
+
+Refresh cannot see an edit that arrives together with new turns, because it
+reads only the new turns. Push reads the whole session. It stops that task
+once, says that earlier messages changed, and switches the saved place off.
+The next Refresh reads the session in full and shows it as diverged. An edit
+is a change to an earlier message. A rewind is not an edit, and neither is
+the rewrite the Claude desktop app makes when it imports a session. Child
+session files are read from their own saved place, under the first rule.
 
 ## Architecture
 
@@ -962,11 +1001,24 @@ npm install
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e
 ```
 
-Before the scenario starts, a native watcher preflight appends to a temporary
-file and requires a change event within five seconds. If events are unavailable,
-the test stops with a prerequisite error. On macOS, run it from a normal terminal
-outside the outer sandbox. Watch registration alone does not prove event delivery.
-The preflight starts no Claude model turns or mock server.
+Select the repeated Desktop-import scenario with:
+
+```sh
+MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e -- --scenario desktop-import
+```
+
+This separate scenario has 16 main conversation rounds, four simulated imports,
+and three further rounds for visible-edit refusal and Keep both. The mock emits
+thinking and redacted-thinking blocks through the real CLI. A test helper removes
+those blocks, deletes empty assistant rows, leaves parent links unchanged, and
+replaces the transcript atomically. Round 6 also constructs explicit mixed and
+consecutive thinking-only rows before Push. Each import must leave the session
+Synced; the next turn must become Local ahead and Push back to Synced. The test
+checks exact request history, the Read exchange, immutable stored objects, and
+both replicas after Pull. It reports time and byte counts without timing limits.
+It simulates the file rewrite; it does not launch or validate Claude Desktop.
+The import after Pull is a required assertion, including the installed-cutoff
+boundary. No padding or metadata reset hides that failure.
 
 The current native-format gate requires exactly Claude Code `2.1.266`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model

@@ -17,6 +17,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::conversation_codec::CodecLineage;
 use crate::payload::PayloadBytes;
 use crate::portable_resources::PortableResourceRegistry;
+use crate::providers::traits::ScanFailure;
 use mallard_domain::portable::contracts;
 use mallard_domain::{
     self as domain, hex_lower, sha256_hex, ApplyPolicyCoordinate, ResourceKindCoordinate,
@@ -288,68 +289,6 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    /// Combine independently cached provider-profile discoveries into the
-    /// same opaque witness produced by one multi-provider walk.
-    pub fn combine(discoveries: Vec<Self>) -> Result<Self, String> {
-        let mut combined = Self::default();
-        for discovery in discoveries {
-            for (resource_id, resource) in discovery.resources {
-                if combined
-                    .resources
-                    .insert(resource_id.clone(), resource)
-                    .is_some()
-                {
-                    return Err(format!(
-                        "provider discoveries produced duplicate resource '{}'",
-                        resource_id
-                    ));
-                }
-            }
-            for (logical_path, directory) in discovery.directories {
-                if combined
-                    .directories
-                    .insert(logical_path.clone(), directory)
-                    .is_some()
-                {
-                    return Err(format!(
-                        "provider discoveries produced duplicate directory '{}'",
-                        logical_path
-                    ));
-                }
-            }
-            combined.warnings.extend(discovery.warnings);
-            combined.ignored_count = combined
-                .ignored_count
-                .saturating_add(discovery.ignored_count);
-            combined.blocked_count = combined
-                .blocked_count
-                .saturating_add(discovery.blocked_count);
-            combined
-                .project_content_diagnostics
-                .warnings
-                .extend(discovery.project_content_diagnostics.warnings);
-            combined.project_content_diagnostics.ignored_count = combined
-                .project_content_diagnostics
-                .ignored_count
-                .saturating_add(discovery.project_content_diagnostics.ignored_count);
-            combined.project_content_diagnostics.blocked_count = combined
-                .project_content_diagnostics
-                .blocked_count
-                .saturating_add(discovery.project_content_diagnostics.blocked_count);
-            for (provider, session_ids) in discovery.excluded_subagent_session_ids {
-                combined
-                    .excluded_subagent_session_ids
-                    .entry(provider)
-                    .or_default()
-                    .extend(session_ids);
-            }
-            combined
-                .excluded_subagent_resource_ids
-                .extend(discovery.excluded_subagent_resource_ids);
-        }
-        Ok(combined)
-    }
-
     /// Descriptor-only view for inventory-style callers. The Discovery keeps
     /// its physical paths for a later capture.
     /// What a capture of one discovered resource weighs: every file it owns,
@@ -982,39 +921,6 @@ pub struct LocalSessionView {
     pub capture_bytes: u64,
 }
 
-impl Discovery {
-    /// Re-run title enrichment for one provider's conversations over a
-    /// cached discovery: `titles_for` maps the discovered provider session
-    /// ids to display titles. Membership and tail evidence never change.
-    pub fn refresh_conversation_titles(
-        &mut self,
-        provider: &domain::ProviderKey,
-        titles_for: impl FnOnce(&BTreeSet<String>) -> Result<BTreeMap<String, String>, String>,
-    ) -> Result<(), String> {
-        let ids = self
-            .resources
-            .values()
-            .filter_map(|resource| resource.conversation.as_ref())
-            .filter(|conversation| conversation.provider == *provider)
-            .map(|conversation| conversation.provider_session_id.clone())
-            .collect::<BTreeSet<_>>();
-        let titles = titles_for(&ids)?;
-        for resource in self.resources.values_mut() {
-            let Some(conversation) = &resource.conversation else {
-                continue;
-            };
-            if conversation.provider != *provider {
-                continue;
-            }
-            resource.descriptor.display_name = titles
-                .get(&conversation.provider_session_id)
-                .cloned()
-                .unwrap_or_else(|| conversation.provider_session_id.clone());
-        }
-        Ok(())
-    }
-}
-
 /// Project the discovery's conversation candidates into metadata-only
 /// session views. A source that fails its fresh no-follow stat becomes a
 /// blocked view, matching the row discovery would have blocked.
@@ -1054,6 +960,18 @@ pub fn local_session_views(discovery: &Discovery) -> Vec<LocalSessionView> {
         });
     }
     views
+}
+
+/// One full provider walk and the session views it lists. Every call
+/// walks: what it reuses is each transcript's metadata scan, while that
+/// file's stamp is unchanged.
+pub fn discover_sessions(
+    registry: &crate::providers::AgentProviderRegistry,
+    request: &CaptureRequest,
+) -> Result<(Discovery, Vec<LocalSessionView>), String> {
+    let discovery = discover_full(registry, request)?;
+    let views = local_session_views(&discovery);
+    Ok((discovery, views))
 }
 
 /// The one full provider walk behind every inventory and capture view.
@@ -1752,16 +1670,16 @@ pub(crate) struct ParsedSessionMetadata {
 pub(crate) fn scan_session_metadata_with(
     path: &Path,
     parse_record: fn(&[u8]) -> Option<ParsedSessionMetadata>,
-) -> Result<crate::providers::SessionFileMetadata, String> {
+) -> Result<crate::providers::SessionFileMetadata, ScanFailure> {
     crate::sync_metrics::record_file_head_read(path);
-    let file = fs::File::open(path).map_err(|e| format!("open: {}", e))?;
+    let file = fs::File::open(path).map_err(|e| ScanFailure::Unreadable(format!("open: {}", e)))?;
     let mut reader = BufReader::new(file);
     let mut total = 0_usize;
     for _ in 0..MAX_METADATA_LINES {
         let mut line = Vec::new();
         let read = reader
             .read_until(b'\n', &mut line)
-            .map_err(|e| format!("read metadata: {}", e))?;
+            .map_err(|e| ScanFailure::Unreadable(format!("read metadata: {}", e)))?;
         if read == 0 {
             break;
         }
@@ -1780,14 +1698,16 @@ pub(crate) fn scan_session_metadata_with(
             );
         }
     }
-    Err("authoritative session metadata was not found in bounded file head".to_string())
+    Err(ScanFailure::Rejected(
+        "authoritative session metadata was not found in bounded file head".to_string(),
+    ))
 }
 
 pub(crate) fn validated_session_metadata(
     id: String,
     authorized_home: String,
     is_internal_subagent: bool,
-) -> Result<crate::providers::SessionFileMetadata, String> {
+) -> Result<crate::providers::SessionFileMetadata, ScanFailure> {
     if id.is_empty()
         || id.len() > 512
         || id.chars().any(char::is_control)
@@ -1795,11 +1715,15 @@ pub(crate) fn validated_session_metadata(
         || authorized_home.len() > 4096
         || authorized_home.chars().any(char::is_control)
     {
-        return Err("invalid session ID or authorized home".to_string());
+        return Err(ScanFailure::Rejected(
+            "invalid session ID or authorized home".to_string(),
+        ));
     }
     let authorized_home = PathBuf::from(authorized_home);
     if !authorized_home.is_absolute() {
-        return Err("session authorized home is not absolute".to_string());
+        return Err(ScanFailure::Rejected(
+            "session authorized home is not absolute".to_string(),
+        ));
     }
     Ok(crate::providers::SessionFileMetadata {
         session_id: id,
@@ -3018,6 +2942,188 @@ mod tests {
         write(&reverted, transcript(&other).as_bytes());
         let discovery = discover_full(registry(), &request).unwrap();
         assert!(local_session_views(&discovery).is_empty());
+    }
+
+    fn codex_rollout(path: &Path, id: &str, cwd: &Path) {
+        write(
+            path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":{}}}}}\n",
+                serde_json::to_string(cwd.to_str().unwrap()).unwrap()
+            )
+            .as_bytes(),
+        );
+    }
+
+    fn session_ids(views: &[LocalSessionView]) -> Vec<&str> {
+        views
+            .iter()
+            .map(|view| view.provider_thread_id.as_str())
+            .collect()
+    }
+
+    /// No event takes part in discovery: every call lists what is on disk
+    /// now, and opens only the files whose stamp moved since it last
+    /// scanned them.
+    #[test]
+    fn every_discovery_lists_the_disk_and_opens_only_changed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let other = temp.path().join("other");
+        let codex = temp.path().join("codex");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let day = codex.join("sessions/2026/09/28");
+        let first = day.join("rollout-first.jsonl");
+        let second = day.join("rollout-second.jsonl");
+        let third = day.join("rollout-third.jsonl");
+        codex_rollout(&first, "thread-first", &project);
+        codex_rollout(&second, "thread-second", &project);
+        codex_rollout(&day.join("rollout-foreign.jsonl"), "thread-foreign", &other);
+        let request = CaptureRequest {
+            project_root: project.clone(),
+            provider_homes: BTreeMap::from([(codex_key(), codex.clone())]),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let metrics = crate::sync_metrics::register_root(&fs::canonicalize(&codex).unwrap());
+        let discover = || {
+            let before = metrics.snapshot();
+            let (_, views) = discover_sessions(registry(), &request).unwrap();
+            let opened = metrics.snapshot().delta_since(&before).files_head_read;
+            (views, opened)
+        };
+
+        let (views, opened) = discover();
+        assert_eq!(session_ids(&views), ["thread-first", "thread-second"]);
+        assert_eq!(opened, 3, "a first discovery scans every transcript");
+        let (views, opened) = discover();
+        assert_eq!(session_ids(&views), ["thread-first", "thread-second"]);
+        assert_eq!(opened, 0, "an unchanged file is not opened");
+
+        // The provider appends and keeps the file open.
+        let mut writer = fs::OpenOptions::new().append(true).open(&first).unwrap();
+        writer.write_all(b"{\"type\":\"event_msg\"}\n").unwrap();
+        writer.flush().unwrap();
+        let (views, opened) = discover();
+        assert_eq!(opened, 1, "only the changed file is scanned again");
+        assert_eq!(
+            views[0].source_size,
+            fs::metadata(&first).unwrap().len(),
+            "the row shows the size while the writer still holds the file"
+        );
+        drop(writer);
+        assert_eq!(discover().1, 0, "closing the file writes nothing");
+
+        // Created.
+        codex_rollout(&third, "thread-third", &project);
+        let (views, opened) = discover();
+        assert_eq!(
+            session_ids(&views),
+            ["thread-first", "thread-second", "thread-third"]
+        );
+        assert_eq!(opened, 1);
+
+        // Archived: the same file under the other session tree.
+        let archived = codex.join("archived_sessions/rollout-second.jsonl");
+        fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        fs::rename(&second, &archived).unwrap();
+        let (views, opened) = discover();
+        assert_eq!(
+            session_ids(&views),
+            ["thread-first", "thread-second", "thread-third"]
+        );
+        assert_eq!(views[1].source_path, fs::canonicalize(&archived).unwrap());
+        assert_eq!(opened, 1, "a moved file is scanned at its new path");
+
+        // Replaced at the same path by a session another folder owns.
+        let replacement = temp.path().join("replacement.jsonl");
+        codex_rollout(&replacement, "thread-replacement", &other);
+        fs::rename(&replacement, &third).unwrap();
+        let (views, opened) = discover();
+        assert_eq!(session_ids(&views), ["thread-first", "thread-second"]);
+        assert_eq!(opened, 1);
+
+        // Deleted.
+        fs::remove_file(&first).unwrap();
+        let (views, opened) = discover();
+        assert_eq!(session_ids(&views), ["thread-second"]);
+        assert_eq!(opened, 0);
+    }
+
+    /// A Claude transcript is owned through its leaf segment, which an
+    /// append can move. A file that held only copied history is rejected,
+    /// and that verdict lasts exactly as long as the bytes do.
+    #[test]
+    fn a_claude_append_that_moves_the_leaf_home_is_seen_by_the_next_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let original_cwd = temp.path().join("original");
+        let claude = temp.path().join("claude");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&original_cwd).unwrap();
+        let transcript = claude.join("projects/source/session-b.jsonl");
+        write(
+            &transcript,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "uuid": "user-original",
+                    "parentUuid": null,
+                    "sessionId": "session-a",
+                    "cwd": original_cwd,
+                    "message": {"role": "user", "content": "original"}
+                })
+            )
+            .as_bytes(),
+        );
+        let request = CaptureRequest {
+            project_root: project.clone(),
+            provider_homes: BTreeMap::from([(claude_key(), claude.clone())]),
+            include_project_content: false,
+            excluded_content_roots: Vec::new(),
+        };
+        let metrics = crate::sync_metrics::register_root(&fs::canonicalize(&claude).unwrap());
+        let discover = || {
+            let before = metrics.snapshot();
+            let (_, views) = discover_sessions(registry(), &request).unwrap();
+            let opened = metrics.snapshot().delta_since(&before).files_head_read;
+            (views, opened)
+        };
+
+        let (views, opened) = discover();
+        assert!(views.is_empty(), "copied history names another session");
+        assert_eq!(opened, 1);
+        let (views, opened) = discover();
+        assert!(views.is_empty());
+        assert_eq!(opened, 0, "a rejection is remembered like an answer");
+
+        // The resumed turn arrives through a handle that stays open.
+        let mut writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(
+            writer,
+            "{}",
+            serde_json::json!({
+                "type": "assistant",
+                "uuid": "assistant-resumed",
+                "parentUuid": "user-original",
+                "sessionId": "session-b",
+                "cwd": project,
+                "message": {"role": "assistant", "content": [{
+                    "type": "text", "text": "resumed"
+                }]}
+            })
+        )
+        .unwrap();
+        writer.flush().unwrap();
+        let (views, opened) = discover();
+        assert_eq!(session_ids(&views), ["session-b"]);
+        assert_eq!(opened, 1);
+        drop(writer);
     }
 
     #[test]

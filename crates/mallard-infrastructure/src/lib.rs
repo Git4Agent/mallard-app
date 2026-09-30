@@ -40,6 +40,7 @@ pub mod r2_setup;
 pub mod session_detail;
 pub mod session_path_map;
 pub mod session_path_origins;
+mod session_scan_memo;
 pub mod storage_core;
 mod storage_names;
 pub mod storage_providers;

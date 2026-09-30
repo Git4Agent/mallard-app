@@ -32,12 +32,12 @@ export interface CatalogGlyph {
  * has never heard of, wears the Catalog glyph and opens no artwork. */
 const CATALOG_GLYPHS: Record<string, CatalogGlyph> = {
   skill: { icon: "lightbulb", artwork: false },
-  plugin: { icon: "puzzle", artwork: false },
-  pet: { icon: "paw", artwork: true },
+  plugin: { icon: "catalog-plugin", artwork: false },
+  pet: { icon: "catalog-pet-v1", artwork: true },
   /* The second pet format is its own row beside the first, so it wears its
      own mark — a face beside the print — rather than a second paw the eye
      cannot tell from the first. */
-  "pet-v2": { icon: "cat", artwork: true },
+  "pet-v2": { icon: "catalog-pet-v2", artwork: true },
 };
 const UNKNOWN_GLYPH: CatalogGlyph = { icon: "catalog", artwork: false };
 
@@ -244,6 +244,24 @@ export function filterCatalogPullReviewItems(
     const row = rowsByResource.get(item.item.resource_id);
     return row != null && rowPullable(row);
   });
+}
+
+/** A Library Pull's recommended selection: every item's default action, and
+ * nothing for an item that has none. `matches` says the selection and the
+ * chosen actions already read that way, so recommending again changes nothing. */
+export function catalogPullRecommendation(
+  items: readonly CatalogScopePullItem[],
+  selected: ReadonlySet<string>,
+  choice: Readonly<Record<string, string>>,
+): { items: CatalogScopePullItem[]; matches: boolean } {
+  return {
+    items: items.filter((item) => item.item.default_action_id),
+    matches: items.every((item) => {
+      const id = item.item.resource_id;
+      const action = item.item.default_action_id;
+      return action ? selected.has(id) && choice[id] === action : !selected.has(id);
+    }),
+  };
 }
 
 /** The exact time a row last moved, and which side moved it. Local time wins

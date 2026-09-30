@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
   pushBudgetTotal,
@@ -332,6 +333,64 @@ function renderWorkspace(selected: Set<string>, inventory: ProjectContentInvento
   );
 }
 
+test("an empty Push review offers a way back without enabling publication", () => {
+  const synced = entry("synced", {
+    state: "synced",
+    storage_present: true,
+    push_decision: { action: "no_changes", selectable: false },
+  });
+  const render = (overrides: Partial<ComponentProps<typeof PushResourceWorkspace>> = {}) => (
+    renderToStaticMarkup(
+      <PushResourceWorkspace
+        credentialRedactionEnabled={true}
+        project={{ ...project, is_git_repository: true }}
+        resources={[conversationResource(synced)]}
+        selected={new Set()}
+        projectDefaults={new Set()}
+        threadComparison={comparison({ entries: [synced] })}
+        busy={false}
+        onToggle={() => undefined}
+        onClose={() => undefined}
+        onPush={() => undefined}
+        {...overrides}
+      />,
+    )
+  );
+  const footer = (html: string) => html.match(/<footer\b[\s\S]*?<\/footer>/)?.[0] ?? "";
+  const exitButton = (html: string) => (footer(html).match(/<button\b[^>]*>[\s\S]*?<\/button>/g) ?? [])
+    .find((button) => button.includes("sync-review-exit"));
+  const ready = render();
+  const exit = exitButton(ready);
+  assert.ok(exit, "sessions with no delta still have a visible exit");
+  // The exit takes the commit's slot: a box button, the footer's only one.
+  assert.match(exit, /class="btn sync-review-exit"/);
+  assert.match(exit, /title="Close Push review — back to Git history"/);
+  assert.match(exit, /<span>Back to Git history<\/span>/);
+  assert.doesNotMatch(exit, /disabled=""|btn-ghost|btn-primary/);
+  assert.equal(footer(ready).match(/<button\b/g)?.length, 1, "the exit is the empty footer's only button");
+  assert.doesNotMatch(ready, /sync-pull-apply-button/, "no dead Push in an empty review");
+  assert.doesNotMatch(ready, /sync-review-budget-(glance|gauge)/, "no meter for a push that cannot happen");
+  assert.match(exitButton(render({ busy: true })) ?? "", /disabled=""/);
+  for (const listState of ["loading", "failed"] as const) {
+    assert.equal(exitButton(render({ listState })), undefined, "unsettled reads are not empty reviews");
+  }
+  const changed = render({
+    resources: [conversationResource(fits)],
+    threadComparison: comparison({ entries: [fits] }),
+  });
+  assert.equal(exitButton(changed), undefined, "an unticked change is not an empty review");
+  assert.match(changed, /class="btn btn-primary sync-pull-apply-button"[^>]*disabled=""/);
+  // A non-Git review closes onto the project, named as its crumb names it.
+  const nonGit = { ...project, is_git_repository: false };
+  const filesStep = render({ project: nonGit, showProjectFiles: true, activeStep: "project_files" });
+  assert.match(exitButton(filesStep) ?? "", /<span>Back to Mallard local<\/span>/);
+  assert.doesNotMatch(footer(filesStep), /btn-ghost/, "no step navigator between two empty tabs");
+  // A running file scan may still land files: the footer stays the loading one.
+  const scanning = render({ project: nonGit, showProjectFiles: true, projectContentLoading: true });
+  assert.equal(exitButton(scanning), undefined);
+  assert.match(scanning, /sync-pull-apply-button/);
+});
+
 test("manual selection can use an older session", () => {
   const html = renderWorkspace(new Set([waits.resource_id]));
   assert.doesNotMatch(html, /Too much to push at once|push again after this one|>Later</i);
@@ -351,21 +410,19 @@ test("the meter is drawn in both pinned zones and sums sessions, requirements, a
   assert.match(within, /role="meter"[^>]*aria-valuemax="536870912"[^>]*aria-valuenow="103809024"/);
   assert.match(within, /aria-valuetext="This push · 99 MB of 512 MB"/);
   assert.match(within, /<b>99 MB<\/b> \/ 512 MB/);
-  // While it fits, the track's right end IS the limit — no tick, no refusal.
-  assert.doesNotMatch(within, /class="sync-review-budget-track push over"/);
+  // The header shares its row with the redaction flag and the Select pill:
+  // the glance is its figure alone, and the footer gauge does the filling.
+  assert.doesNotMatch(within, /sync-review-budget-track/);
   assert.doesNotMatch(within, /sync-review-budget-sentence/);
   const pushWithin = within.slice(within.lastIndexOf("<button", within.indexOf("sync-pull-apply-button")));
   assert.doesNotMatch(pushWithin.slice(0, pushWithin.indexOf(">")), /disabled=""/);
 
   // A 500 MB project file carries the total past the limit: both figures turn
-  // to the overshoot, the track grows a tick the fill runs past, the refusal
-  // takes its own row, and Push refuses with the same sentence as its title.
+  // to the overshoot, the gauge turns over, the refusal takes its own row, and
+  // Push refuses with the same sentence as its title.
   const over = renderWorkspace(new Set([fits.resource_id, projectFile.resource_id]), projectFiles);
   assert.match(over, /class="sync-review-budget-gauge push over"/);
-  assert.match(over, /class="sync-review-budget-track push over"/);
-  // The tick sits where the limit fell on a track scaled to the total, so the
-  // fill visibly runs past it: 512 of 599 MB is 85.4% along.
-  assert.match(over, /class="sync-review-budget-track push over"[^>]*>.*?<b style="left:85\.4/);
+  assert.doesNotMatch(over, /sync-review-budget-track/);
   assert.equal(over.match(/class="sync-review-budget-figure over"/g)?.length, 2);
   assert.match(over, /<b>\+87 MB<\/b>/);
   assert.equal(

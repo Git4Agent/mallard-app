@@ -718,3 +718,48 @@ test("duplicate valid scenario returns 409 and makes both semantic and raw audit
   assert.equal(audit.raw_journal_reconciled, true);
   assert.equal(audit.raw_audit_ok, false);
 });
+
+test("thinking responses are bounded and preserve the closed text and Read contracts", () => {
+  const thinking = { reasoning: "synthetic reasoning", redacted_thinking: ["b3BhcXVl"] };
+  const rows = readScenarios();
+  for (const row of rows) row.response.thinking = thinking;
+  const parsed = parse(documentFor(rows));
+  for (const row of parsed.scenarios) {
+    const response = fixedFixtureResponse(parsed, row);
+    assert.equal(response.reasoning, thinking.reasoning);
+    assert.deepEqual(response.redactedThinking, thinking.redacted_thinking);
+  }
+  for (const invalid of [null, {}, { ...thinking, extra: true },
+    { ...thinking, reasoning: "x".repeat(16 * 1024 + 1) },
+    { ...thinking, redacted_thinking: Array(5).fill("opaque") },
+    { ...thinking, redacted_thinking: [42] }]) {
+    assert.throws(() => parse(documentFor([textScenario({ response: {
+      kind: "text", content: "TEST_ASSISTANT_OK", thinking: invalid,
+    } })])), /thinking/u);
+  }
+});
+
+test("Claude stream carries thinking and redacted thinking before visible text", async (t) => {
+  const subject = await startHarness(t, documentFor([textScenario({ response: {
+    kind: "text", content: "TEST_ASSISTANT_OK",
+    thinking: { reasoning: "synthetic reasoning", redacted_thinking: ["b3BhcXVl"] },
+  } })]));
+  const response = await postAnthropic(subject.baseUrl,
+    anthropicBody([{ role: "user", content: "TEST_USER_CURRENT" }]));
+  assert.equal(response.status, 200);
+  const stream = await response.text();
+  const events = stream.split("\n").filter((line) => line.startsWith("data: {"))
+    .map((line) => JSON.parse(line.slice(6)));
+  const starts = events.filter((event) => event.type === "content_block_start");
+  assert.deepEqual(starts.map((event) => event.content_block.type),
+    ["redacted_thinking", "thinking", "text"]);
+  assert.equal(starts[0].content_block.data, "b3BhcXVl");
+  assert.equal(events.filter((event) => event.delta?.type === "thinking_delta")
+    .map((event) => event.delta.thinking).join(""), "synthetic reasoning");
+  assert.ok(events.some((event) => event.delta?.type === "signature_delta"));
+  assert.equal(events.filter((event) => event.delta?.type === "text_delta")
+    .map((event) => event.delta.text).join(""), "TEST_ASSISTANT_OK");
+  const audit = await stopHarness(subject);
+  assert.equal(audit.all_scenarios_consumed_once, true);
+  assert.equal(audit.raw_audit_ok, true);
+});

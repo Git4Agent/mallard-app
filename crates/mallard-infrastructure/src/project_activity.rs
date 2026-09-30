@@ -1593,7 +1593,6 @@ pub fn delete_local_project_sessions(
     registry: &AgentProviderRegistry,
     local_project_id: &LocalProjectId,
     expected_project_revision: u64,
-    invalidate: &mut dyn FnMut(&Path),
 ) -> Result<ProjectSessionsDeleteResult, String> {
     let state = repository.load_project_state_snapshot()?;
     let project = state
@@ -1647,7 +1646,6 @@ pub fn delete_local_project_sessions(
                     }
                     Err(error) => result.provider_errors.push(format!("{provider}: {error}")),
                 }
-                invalidate(&home.home);
             }
         }
         Err(error) => result.provider_errors.push(error),
@@ -1667,7 +1665,6 @@ pub fn delete_local_project_session(
     registry: &AgentProviderRegistry,
     local_project_id: &LocalProjectId,
     resource_id: &str,
-    invalidate: &mut dyn FnMut(&Path),
 ) -> Result<LocalSessionDeleteResult, String> {
     let state = repository.load_project_activity_state_snapshot()?;
     let resolved =
@@ -1692,7 +1689,6 @@ pub fn delete_local_project_session(
     let metadata_error = repository
         .forget_local_session(local_project_id, &home.profile_id, &provider, &thread_id)
         .err();
-    invalidate(&home.home);
     Ok(LocalSessionDeleteResult {
         provider_error,
         metadata_error,
@@ -2608,6 +2604,7 @@ mod activity_only_tests {
     ) -> LocalConversationBinding {
         LocalConversationBinding {
             installed_end: None,
+            installed_absent_subagents: Default::default(),
             pulled_children_excluded: false,
             installed_subagents: Default::default(),
             path_origins_ref: None,
@@ -3266,6 +3263,7 @@ mod activity_only_tests {
             .mutate_conversation_bindings(|bindings| {
                 bindings.bindings.push(LocalConversationBinding {
                     installed_end: None,
+                    installed_absent_subagents: Default::default(),
                     pulled_children_excluded: false,
                     installed_subagents: Default::default(),
                     path_origins_ref: None,

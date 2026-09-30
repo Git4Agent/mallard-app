@@ -14,6 +14,7 @@ import {
   catalogProviderList,
   catalogScopeLabel,
   catalogScopeViews,
+  catalogPullRecommendation,
   catalogStorageRepositoryViews,
   filterCatalogPullReviewItems,
   rowStatus,
@@ -278,15 +279,15 @@ test("every presentation hint wears its own mark rather than borrowing one", () 
     ["skill", "plugin", "pet", "pet-v2"].map((icon) => [icon, catalogPresentation(hint(icon))]),
     [
       ["skill", { icon: "lightbulb", artwork: false }],
-      ["plugin", { icon: "puzzle", artwork: false }],
+      ["plugin", { icon: "catalog-plugin", artwork: false }],
       // The two pet formats are two rows, so they wear two marks; both hints
       // open the artwork column.
-      ["pet", { icon: "paw", artwork: true }],
-      ["pet-v2", { icon: "cat", artwork: true }],
+      ["pet", { icon: "catalog-pet-v1", artwork: true }],
+      ["pet-v2", { icon: "catalog-pet-v2", artwork: true }],
     ],
   );
-  assert.equal(catalogPresentation(CODEX_PETS_V1).icon, "paw");
-  assert.equal(catalogPresentation(CODEX_PETS_V2).icon, "cat");
+  assert.equal(catalogPresentation(CODEX_PETS_V1).icon, "catalog-pet-v1");
+  assert.equal(catalogPresentation(CODEX_PETS_V2).icon, "catalog-pet-v2");
   // A hint this build has never heard of — a capability added later — draws
   // the Catalog glyph and opens no artwork; so does a row with no capability.
   assert.deepEqual(catalogPresentation(hint("note")), { icon: "catalog", artwork: false });
@@ -301,7 +302,7 @@ test("every presentation hint wears its own mark rather than borrowing one", () 
   // The card's tile is the glyph when a row has no preview yet, so the column
   // never collapses and never repeats the provider mark beside it.
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
-  assert.match(page, /catalog-pet-preview[\s\S]*?<Icon name="paw" size=\{16\} \/>/);
+  assert.match(page, /catalog-pet-preview[\s\S]*?<Icon name="catalog-pet-v1" size=\{16\} \/>/);
   assert.doesNotMatch(page, /<Icon name="openai"/);
 });
 
@@ -383,6 +384,46 @@ test("Catalog Pull review keeps only cloud-outstanding and divergent rows", () =
   );
 });
 
+test("Library Pull's Select counts and restores only default actions", () => {
+  // The header's Select used to count every visible item while ticking only
+  // those with a default action, and stayed live once they were ticked.
+  const pullItem = (id: string, defaultAction: string | null): CatalogScopePullItem => ({
+    item: {
+      resource_id: id,
+      provider: CODEX_SKILLS.provider,
+      resource_kind: CODEX_SKILLS.resource_kind,
+      format: CODEX_SKILLS.format,
+      format_version: CODEX_SKILLS.format_version,
+      provider_label: CODEX_SKILLS.provider_label,
+      kind_label: CODEX_SKILLS.presentation.kind_label,
+      format_label: CODEX_SKILLS.presentation.format_label,
+      display_name: id,
+      relation: "storage_changed",
+      disposition: { kind: "executable" },
+      actions: [],
+      default_action_id: defaultAction,
+    },
+    conflicting_claims: [],
+  });
+  const items = [pullItem("update", "update-action"), pullItem("install", "install-action"), pullItem("choose", null)];
+  const defaults = new Set(["update", "install"]);
+  const choices = { update: "update-action", install: "install-action" };
+
+  const opened = catalogPullRecommendation(items, defaults, choices);
+  assert.deepEqual(opened.items.map((item) => item.item.resource_id), ["update", "install"]);
+  assert.equal(opened.matches, true, "the defaults the review opens with are already the recommendation");
+
+  // Unticking a default, ticking the item without one, or choosing another
+  // action for a ticked default each leaves something for Select to restore.
+  assert.equal(catalogPullRecommendation(items, new Set(["update"]), choices).matches, false);
+  assert.equal(catalogPullRecommendation(items, new Set([...defaults, "choose"]), choices).matches, false);
+  assert.equal(catalogPullRecommendation(items, defaults, { ...choices, update: "overwrite-action" }).matches, false);
+  // A choice left behind on an unticked item is not a selection.
+  assert.equal(catalogPullRecommendation(items, defaults, { ...choices, choose: "overwrite-action" }).matches, true);
+  // With no defaults there is nothing to select.
+  assert.deepEqual(catalogPullRecommendation([pullItem("choose", null)], new Set(), {}).items, []);
+});
+
 const STORAGES = [
   { id: "storage-a", name: "Vault", provider: "local", provider_label: "Local folder", icon: "drive", detail: "~/Vault", detailIsPath: true },
 ];
@@ -410,8 +451,8 @@ test("the Catalog index is a stable root with empty and populated states", () =>
   const doors = [...empty.matchAll(/class="landing-picker-door" aria-label="([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(doors, ["Add Skills", "Add Plugins", "Add Pets v1", "Add Pets v2"]);
   assert.match(empty, /aria-label="Add Skills"[\s\S]*?data-icon="lightbulb"[\s\S]*?<strong>Skills<\/strong>[\s\S]*?data-icon="plus"[\s\S]*?sync-provider-mark codex[\s\S]*?sync-provider-mark claude/);
-  assert.match(empty, /aria-label="Add Plugins"[\s\S]*?data-icon="puzzle"/);
-  assert.match(empty, /aria-label="Add Pets v1"[\s\S]*?data-icon="paw"/);
+  assert.match(empty, /aria-label="Add Plugins"[\s\S]*?data-icon="catalog-plugin"/);
+  assert.match(empty, /aria-label="Add Pets v1"[\s\S]*?data-icon="catalog-pet-v1"/);
   assert.match(empty, /landing-picker-caption"[\s\S]*?data-icon="cloud"[\s\S]*?Shared through your storages/);
   assert.doesNotMatch(empty, /landing-picker-card"/);
 
@@ -553,7 +594,7 @@ test("the Add chooser lists the backend's capabilities in its order and records 
   // still on screen as the choice it made.
   assert.deepEqual(
     catalogDoors(CAPABILITIES).map((door) => [door.label, door.icon]),
-    [["Skills", "lightbulb"], ["Plugins", "puzzle"], ["Pets v1", "paw"], ["Pets v2", "cat"]],
+    [["Skills", "lightbulb"], ["Plugins", "catalog-plugin"], ["Pets v1", "catalog-pet-v1"], ["Pets v2", "catalog-pet-v2"]],
   );
 
   // The workspace draws exactly these choices, and Add records the one
@@ -736,6 +777,27 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   // The count rides the verb at the point of commitment.
   assert.match(page, /Push \{pushSelected\.size\}/);
   assert.match(page, /Pull \{pullReviewSelectedCount\}/);
+});
+
+test("an empty Catalog review's footer holds only the way back to the page it closes onto", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // The exit takes the commit's slot: the footer's only button, a box rather
+  // than the gold or a ghost, named for the page headed by the scope's label.
+  for (const [empty, verb] of [["selectableRows", "Push"], ["reviewItems", "Pull"]] as const) {
+    const footer = page.match(new RegExp(
+      `<footer className="sync-inline-action-footer sync-sync-review-footer">\\s*\\{${empty}\\.length === 0 \\? \\([\\s\\S]*?</footer>`,
+    ))?.[0];
+    assert.ok(footer, `${verb} footer branches on an empty review`);
+    const [exitBranch, commitBranch] = footer.split(") : (");
+    assert.match(exitBranch, /className="btn sync-review-exit"/);
+    assert.match(exitBranch, new RegExp(`title=\\{\`Close ${verb} review — back to \\$\\{scope\\.label\\}\`\\}`));
+    assert.match(exitBranch, /<span>\{`Back to \$\{scope\.label\}`\}<\/span>/);
+    assert.match(exitBranch, /onClick=\{\(\) => setMode\(\{ kind: "list" \}\)\}/);
+    assert.doesNotMatch(exitBranch, /btn-primary|btn-ghost|chevron-left/);
+    assert.match(commitBranch, new RegExp(`${verb} \\{`));
+  }
+  // "Library" is not a name the app shows; the sidebar and index say Catalog.
+  assert.doesNotMatch(page, /Back to Library/);
 });
 
 test("rows of a capability with artwork wear the preview tile, and stored-only previews arrive lazily", () => {

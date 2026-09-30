@@ -445,16 +445,67 @@ impl RawRangePin {
     }
 }
 
+/// What the filesystem reported for a transcript at the read its cursor was
+/// saved from: size and modification time, and on platforms that report them
+/// the file identity and change time.  Machine-local plain data, never
+/// serialized to cloud.  The infrastructure stamps files and owns the
+/// comparison.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFileState {
+    pub size: u64,
+    /// Whole seconds since the Unix epoch, negative before it; the
+    /// nanoseconds always count forward from that second.
+    pub modified_secs: i64,
+    pub modified_nanos: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<SourceFileIdentity>,
+}
+
+/// Which file a path named, and when its content or metadata last changed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub changed_secs: i64,
+    pub changed_nanos: i64,
+}
+
+impl SourceFileState {
+    pub fn validate(&self) -> Result<(), String> {
+        let nanos_per_second = 1_000_000_000;
+        if self.modified_nanos >= nanos_per_second
+            || self.identity.as_ref().is_some_and(|identity| {
+                !(0..i64::from(nanos_per_second)).contains(&identity.changed_nanos)
+            })
+        {
+            return Err("conversation mapping source state has an invalid time".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// Physical validity of the checkpoint's mapping.  `Detached` is the single
 /// physical-invalidation state, set when another operation replaces the bound
 /// alias: it preserves accepted cloud evidence, drops the mapping, and does
 /// not pre-classify the eventual relation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
+// Nearly every checkpoint is `Ready`; boxing its mapping would change every
+// consumer to save space in the rare detached one.
+#[allow(clippy::large_enum_variant)]
 pub enum PhysicalMappingState {
     Ready {
         root_mapping: RootPhysicalMapping,
         raw_range_pin: RawRangePin,
+        /// The state of the file the cursor was saved from.  The cursor is
+        /// used only on that same file, untouched or grown since; anything
+        /// else is read in full.  A cursor saved without a state is never
+        /// used: a Pull install writes its checkpoint before the file
+        /// exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_state: Option<SourceFileState>,
     },
     Detached {
         expected_provider_thread_id: String,
@@ -468,6 +519,7 @@ impl PhysicalMappingState {
             Self::Ready {
                 root_mapping,
                 raw_range_pin,
+                source_state,
             } => {
                 root_mapping.validate()?;
                 raw_range_pin.validate()?;
@@ -475,6 +527,15 @@ impl PhysicalMappingState {
                     return Err(
                         "conversation raw range pin disagrees with its mapping cursor".to_string(),
                     );
+                }
+                if let Some(state) = source_state {
+                    state.validate()?;
+                    if state.size < root_mapping.consumed_byte_offset {
+                        return Err(
+                            "conversation mapping source state is shorter than its cursor"
+                                .to_string(),
+                        );
+                    }
                 }
                 Ok(())
             }

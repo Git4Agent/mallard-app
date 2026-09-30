@@ -137,11 +137,11 @@ on demand.
 | `host_identity.json` | Installation identity | Schema/revision, private 128-bit `host_id`, optional local display name, timestamps | No |
 | `sync_config.json` | User configuration and project/storage catalog | Storage definitions, S3 credentials, local projects, storage links, recipes, project-content preferences, per-storage reviewed bases, per-link conversation checkpoints (accepted portable tail + witness, observed tail, physical mapping cursor, prefix witness) | No |
 | `machine_projects.json` | Machine path and provider-profile catalog | Exact and canonical checkout paths, exact and canonical provider-home paths, host/replica IDs, project/profile bindings, binding revisions and state | No |
-| `conversation_bindings.json` | Local-to-portable conversation identity map | Required nullable `path_origins_ref` (SHA-256 and byte length), Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint, keep-both `preserved` provenance (`preserved_from` origin + per-origin ordinal) | No |
-| `path_origins/<sha256>.json` | Immutable local inverse path edits | Schema 1, codec, physical owner, source IDs, strict record hashes, derived-record flags, JSON pointers, UTF-8 byte ranges, and wire atoms; no transcript copy; 128 MiB bound | No |
+| `conversation_bindings.json` | Local-to-portable conversation identity map | Required nullable `path_origins_ref` (SHA-256 and byte length), Mallard thread ID, provider thread ID, project/replica/profile scope, materialization state, immutable root tail layout (codec, partition kind, fixed start), `forked_from` provenance hint, keep-both `preserved` provenance (`preserved_from` origin + per-origin ordinal), what a Pull installed (`installed_end`, `installed_subagents`, `installed_absent_subagents`) | No |
+| `path_origins/<sha256>.json` | Immutable local inverse path edits | Schema 1, codec, physical owner, source IDs, strict record hashes, derived-record flags, JSON pointers, UTF-8 byte ranges, and wire atoms; for a Claude record that holds thinking beside other content, the same of the record without its thinking (`rewritten`); no transcript copy; 128 MiB bound | No |
 | `materializations.json` | Durable Pull history | Plan and bundle coordinates, status, action receipts, absolute targets, backup paths, conversation receipts, errors | No |
 | `activity_cache.json` | Local session-history acceleration for every bound provider | File size/mtime keys, provider key, parsed ownership, cwd, Git/session metrics, and identities; cached title, summary, and chat text are deliberately omitted | No |
-| `observation_cache.json` | Local comparison acceleration | Bounded, schema-1 tail observations keyed by project, storage, provider home, and checkpoint generation; reset removes the in-memory and on-disk entries | No |
+| `observation_cache.json` | Local comparison acceleration | Bounded, schema-1 tail observations keyed by provider home, project, storage, and thread; a record answers for one checkpoint generation and binding revision; reset removes the in-memory and on-disk entries | No |
 | `catalog_resource_profiles.json` | Machine-local Codex/Claude Library profiles | Provider key, display name, configured `CODEX_HOME`/`CLAUDE_CONFIG_DIR` path, revisions | No |
 | `catalog_scopes.json` | User-added Catalog menu rows | One row per (profile × resource kind); membership is the kind inventory, never stored | No |
 | `catalog_scope_links.json` | Scope-storage links | One link per (scope × storage): the derived kind-repository ID, the accepted head continuity pin, and per-resource accepted content bases | No |
@@ -231,7 +231,52 @@ One provider thread ID may have only one owner for a given host/profile.
 - `preserved` as the keep-both provenance hint (`preserved_from` origin in
   the cloud id space + per-origin ordinal), published with the thread on
   Push and restored from the cloud record on other machines' pulls —
-  display-only, like `forked_from`.
+  display-only, like `forked_from`; and
+- what a Pull installed. `installed_end` is the byte length of the
+  installed transcript, and `null` for a session made on this computer.
+  `installed_subagents` maps each installed child key to its provider ID
+  and byte length. `installed_absent_subagents` lists the provider IDs of
+  the children that the installed Claude transcript refers to and that are
+  no children here: Pull did not install them, and the provider did not
+  write them on this computer. It is written only when it has entries.
+
+Child discovery tells the children that came with a Pull from those made
+on this computer. For Codex it reads the rollout after `installed_end`,
+because a rollout is only appended to. For Claude it knows them by ID, from
+`installed_subagents` and `installed_absent_subagents`, because the Claude
+desktop app rewrites a transcript when it imports it. A saved place in a
+Claude file serves only as a cursor, and a cursor that no longer fits the
+file is dropped for a full read.
+
+The session page tells them apart in the same way, for each agent card.
+It leaves out the card of a call whose child came with a Pull without its
+transcript: for Claude a call that names a child of
+`installed_absent_subagents`, for Codex a call before `installed_end` that
+names no child of `installed_subagents`. A call that names no child has its
+card. The binding carries no flag for the cards of the whole session. A
+row that holds the key `pulled_children_excluded` of versions 0.1.3 to 0.1.5
+is read; the key is ignored and not written again.
+
+A Claude session is updated in place, so a Pull can meet children that the
+provider wrote on this computer. A reference is such a child when no Pull
+brought it, which the binding says as it was before the Pull, and its
+transcript is here. It stays a child: it is left out of
+`installed_absent_subagents`. When the stored version holds the child, Pull
+replaces its file under the state that the review pinned. A file alone
+decides nothing, because a copy that an earlier Pull installed stays on
+disk after a Pull of a version without children.
+
+Because that update keeps them, a child that only this computer has stands
+against nothing in the storage. The comparison folds the relations of the
+main transcript and of each child into one. With a change in the storage
+and a main transcript that this computer did not continue, such a child
+leaves the session behind the storage: Pull updates it, and afterwards the
+session is ahead by that child. A main transcript or a child that was
+continued here would be replaced, so beside a change in the storage the
+session is diverged. A Codex update is written under a new identity, which
+would leave the child with the rollout it belongs to, so for Codex such a
+child beside a change in the storage is diverged as well. A reviewed plan
+pins which of the two holds, as `local_only_subagents_kept`.
 
 Acceptance state does not live on the binding. Each `ProjectStorageLink` in
 `sync_config.json` holds per-provider-scope conversation checkpoints keyed by
@@ -809,7 +854,16 @@ Unknown tags and malformed wire escapes fail validation.
 Pull records exact inverse edits in local origin files. Push reuses them for
 retained history, including records with zero edits. It scans new records.
 This preserves literal destination paths and original path spellings through
-later pushes. Codex portable transcripts keep source records; Pull rebuilds
+later pushes. A transcript that was rewritten after its origins were saved
+is encoded once more, with the saved origins found by record digest, in two
+cases: the first Push of a copy that Keep both preserved, and a mapped
+Claude session whose accepted messages are proven in the local and the wire
+form. A record that finds no saved origin is then scanned as a new record.
+The Claude desktop app takes the thinking out of a record when it imports a
+session. For a record that holds thinking beside other content, Pull saves
+the origins of both forms, so the rewritten record finds the edits saved
+for it.
+Codex portable transcripts keep source records; Pull rebuilds
 redundant native display records after path decoding. Derived local records
 are hash-checked and omitted on the next Push.
 
@@ -821,7 +875,8 @@ before the accepted checkpoint advances. Project metadata reset removes all
 session bindings for that project, including these path-origin references.
 It keeps the immutable origin files and provider sessions. Host rotation
 stages files with the new owner for retained bindings. A failed Apply is
-not rolled back. Missing or stale origins fail the affected thread.
+not rolled back. Missing origins fail the affected thread. Stale origins
+fail it outside the two cases above.
 
 See [codec rules and verification](../formal/pathmap-origins-v1/README.md).
 This is a clean replacement under schema 1 with no migration or old reader.

@@ -24,8 +24,8 @@ use crate::providers::{
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory, AGENT_RESOURCE_SEGMENT,
 };
 use mallard_domain::{
-    hex_lower, now_secs, parse_conversation_resource_id, sha256_hex, LocalProjectId,
-    NoticeSeverity, ProviderKey,
+    hex_lower, now_secs, parse_conversation_resource_id, sha256_hex, LocalConversationBinding,
+    LocalProjectId, NoticeSeverity, ProviderKey,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -228,7 +228,9 @@ struct ResolvedLocalSession {
     file_size: u64,
     modified_nanos: u64,
     is_active: bool,
-    pulled_children_excluded: bool,
+    /// The binding of a root session. It says what a Pull installed, and
+    /// so which agent calls name a child without a transcript.
+    binding: Option<LocalConversationBinding>,
     /// Set on a child transcript: whose child, and which one. The parent it
     /// was reached through is resolved alongside it.
     child: Option<SessionChildIdentity>,
@@ -329,7 +331,7 @@ fn resolve_session(
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
             is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
-            pulled_children_excluded: false,
+            binding: None,
             child: Some(child),
         };
         parent = Some(std::mem::replace(&mut session, next));
@@ -376,8 +378,29 @@ fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String 
     )
 }
 
-/// Limits and Pull exclusions join the snapshot identity, so changes invalidate
-/// open cursors through the existing `SnapshotChanged` refresh path.
+/// What the binding says a Pull installed of the children. It decides
+/// which agent cards the page shows.
+fn installed_children(binding: Option<&LocalConversationBinding>) -> String {
+    let Some(binding) = binding.filter(|binding| binding.installed_end.is_some()) else {
+        return String::new();
+    };
+    let ids = |ids: &mut dyn Iterator<Item = &str>| ids.collect::<Vec<_>>().join("\u{1f}");
+    format!(
+        "{}\u{1e}{}\u{1e}{}",
+        binding.installed_end.unwrap_or(0),
+        ids(&mut binding
+            .installed_subagents
+            .values()
+            .map(|child| child.provider_thread_id.as_str())),
+        ids(&mut binding
+            .installed_absent_subagents
+            .iter()
+            .map(String::as_str)),
+    )
+}
+
+/// Limits and what a Pull installed join the snapshot identity, so changes
+/// invalidate open cursors through the existing `SnapshotChanged` refresh path.
 fn snapshot_id_with_limits(
     session: &ResolvedLocalSession,
     timeline_version: u32,
@@ -394,7 +417,7 @@ fn snapshot_id_with_limits(
             timeline_version,
             preview_budget_bytes,
             conversation_limit_bytes,
-            session.pulled_children_excluded,
+            installed_children(session.binding.as_ref()),
             session.transcript_path.display()
         )
         .as_bytes(),
@@ -1108,8 +1131,7 @@ fn resolve_local_session(
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
             is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
-            pulled_children_excluded: local_binding
-                .is_some_and(|binding| binding.pulled_children_excluded),
+            binding: local_binding.cloned(),
             child: None,
         });
     }
@@ -1278,7 +1300,64 @@ fn refresh_file_state(session: &mut ResolvedLocalSession) -> SessionDetailResult
     Ok(())
 }
 
+/// Take agent calls out of an index. A call may hold the tool summary of
+/// its turn; the summary goes to the entry that would have held it.
+fn leave_out_agent_calls(index: &mut SessionTimelineIndex, calls: &BTreeSet<String>) {
+    let before = index.events.len();
+    let mut summaries = Vec::new();
+    index.events.retain_mut(|entry| {
+        let left_out =
+            entry.kind == SessionTimelineEventKind::AgentCall && calls.contains(&entry.event_id);
+        if left_out {
+            summaries.extend(entry.turn_tool_summary.take());
+        }
+        !left_out
+    });
+    for summary in summaries {
+        let of_turn = |entry: &crate::providers::SessionTimelineIndexEntry| {
+            entry.turn_id.as_deref() == Some(summary.turn_id.as_str())
+        };
+        let position = index
+            .events
+            .iter()
+            .position(|entry| of_turn(entry) && entry.kind != SessionTimelineEventKind::ToolCall)
+            .or_else(|| index.events.iter().position(of_turn));
+        if let Some(position) = position {
+            index.events[position].turn_tool_summary = Some(summary);
+        }
+    }
+    let left_out = (before - index.events.len()) as u64;
+    if let Some(shown) = index.counts.agent_calls.value.as_mut() {
+        *shown = shown.saturating_sub(left_out);
+    }
+}
+
+/// The index as the page shows it: without the agent calls whose children
+/// came with a Pull without their transcripts. The saved index holds every
+/// call, because a later Pull may bring the transcripts.
 fn load_or_build_index(
+    repository: &LocalStateRepository,
+    registry: &AgentProviderRegistry,
+    session: &mut ResolvedLocalSession,
+) -> SessionDetailResult<(
+    SessionTimelineIndex,
+    SessionFileSummary,
+    String,
+    Vec<SessionDetailWarning>,
+)> {
+    let (mut index, summary, snapshot_id, warnings) =
+        load_or_build_whole_index(repository, registry, session)?;
+    if let Some(binding) = &session.binding {
+        let calls = registry
+            .require(&session.provider)
+            .map(|adapter| adapter.agent_calls_without_transcript(&index, binding))
+            .unwrap_or_default();
+        leave_out_agent_calls(&mut index, &calls);
+    }
+    Ok((index, summary, snapshot_id, warnings))
+}
+
+fn load_or_build_whole_index(
     repository: &LocalStateRepository,
     registry: &AgentProviderRegistry,
     session: &mut ResolvedLocalSession,
@@ -1882,10 +1961,7 @@ pub fn get_project_session_detail(
             summary.last_prompt_at.or(summary.ended_at),
         )?
     };
-    let mut event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
-    if session.pulled_children_excluded {
-        event_counts.agent_calls = SessionCount::exact(0);
-    }
+    let event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
     let tokens = match summary.total_tokens {
         Some(value) => SessionCount {
             value: Some(value),
@@ -2077,14 +2153,10 @@ pub fn get_project_session_timeline_page(
             "No registered provider can read this session.",
         )
     })?;
-    let mut included_event_kinds = request.included_event_kinds.clone();
-    if session.pulled_children_excluded {
-        included_event_kinds.remove(&SessionTimelineEventKind::AgentCall);
-    }
     let query = SessionTimelineQuery {
         start_index: Some(start_index),
         limit,
-        included_event_kinds,
+        included_event_kinds: request.included_event_kinds.clone(),
         included_tool_categories: request.included_tool_categories.clone(),
         turn_id: request.turn_id.clone(),
     };
@@ -2348,7 +2420,7 @@ mod tests {
             file_size: 0,
             modified_nanos: 0,
             is_active: false,
-            pulled_children_excluded: false,
+            binding: None,
             child: None,
         }
     }
@@ -2375,11 +2447,73 @@ mod tests {
     }
 
     #[test]
-    fn pull_child_exclusion_changes_the_viewer_snapshot() {
+    fn what_a_pull_installed_of_the_children_changes_the_viewer_snapshot() {
+        use crate::owned_subagents::agent_card_fixtures::binding_of_a_pulled_session;
         let mut session = sanitization_session();
-        let before = snapshot_id(&session, 1);
-        session.pulled_children_excluded = true;
-        assert_ne!(snapshot_id(&session, 1), before);
+        let unbound = snapshot_id(&session, 1);
+        let mut binding = binding_of_a_pulled_session(None, &[], &[]);
+        session.binding = Some(binding.clone());
+        assert_eq!(snapshot_id(&session, 1), unbound, "a native session");
+
+        let mut seen = BTreeSet::from([unbound]);
+        binding.installed_end = Some(64);
+        session.binding = Some(binding.clone());
+        assert!(seen.insert(snapshot_id(&session, 1)), "a pulled session");
+        binding.installed_absent_subagents.insert("agent-1".into());
+        session.binding = Some(binding.clone());
+        assert!(
+            seen.insert(snapshot_id(&session, 1)),
+            "a child without a transcript"
+        );
+        binding.installed_absent_subagents.clear();
+        binding.installed_subagents.insert(
+            mallard_domain::SubagentKey::child(None, "call-1").unwrap(),
+            mallard_domain::InstalledSubagent {
+                provider_thread_id: "agent-1".into(),
+                installed_end: 8,
+            },
+        );
+        session.binding = Some(binding);
+        assert!(seen.insert(snapshot_id(&session, 1)), "an installed child");
+    }
+
+    #[test]
+    fn an_agent_call_that_is_left_out_hands_on_the_tool_summary_of_its_turn() {
+        use crate::owned_subagents::agent_card_fixtures::agent_call;
+        // The turn opens with the agent call, so the call holds the summary.
+        let mut index = index_with_path("file");
+        index.events[0].ordinal = 1;
+        let summary = index.events[0].turn_tool_summary.take();
+        let mut call = agent_call("agent-1", None, 0);
+        call.turn_tool_summary = summary.clone();
+        index.events.insert(0, call);
+        index.events.push(SessionTimelineIndexEntry {
+            ordinal: 2,
+            ..agent_call("agent-2", None, 0)
+        });
+        index.counts.agent_calls = SessionCount::exact(2);
+        validate_index(&index, 4).unwrap();
+
+        leave_out_agent_calls(&mut index, &BTreeSet::from(["agent-1".to_string()]));
+        validate_index(&index, 4).unwrap();
+        assert_eq!(
+            index
+                .events
+                .iter()
+                .map(|entry| entry.event_id.as_str())
+                .collect::<Vec<_>>(),
+            ["event-1", "agent-2"]
+        );
+        assert_eq!(index.counts.agent_calls, SessionCount::exact(1));
+        // No entry of the turn is left but a tool call and an agent call:
+        // the agent call holds the summary, as it would in a new index.
+        assert_eq!(index.events[1].turn_tool_summary, summary);
+        assert_eq!(index.counts.tool_calls, SessionCount::exact(1));
+
+        // An ID that names no agent call leaves the index as it is.
+        let before = index.clone();
+        leave_out_agent_calls(&mut index, &BTreeSet::from(["event-1".to_string()]));
+        assert_eq!(index, before);
     }
 
     fn cache_entry_fixture() -> TimelineCacheEntry {

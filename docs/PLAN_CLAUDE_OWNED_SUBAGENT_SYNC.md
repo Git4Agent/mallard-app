@@ -144,6 +144,12 @@ from imported history. A stale cutoff or invalid installation map is an error.
 The shared child `installed_end` field remains an installed-file byte cutoff;
 Claude does not use it for descendant discovery.
 
+> Reversed on 2026-09-29 for the main transcript. The Claude desktop app
+> rewrites a transcript when it imports it, so a byte offset does not stay
+> valid. A child that came with a Pull is now known by its ID: from the
+> binding map, or from `installed_absent_subagents` when it came without
+> its transcript. See `PLAN_PUSH_AFTER_DESKTOP_IMPORT.md`, section 13.
+
 ~~~text
 P creates C
 |
@@ -261,6 +267,16 @@ That module is the sole authority for presence, outstanding work, divergence,
 and parent result folding. Add no provider parameter or second truth table.
 Main-only scope excludes every child from this comparison.
 
+> Changed on 2026-09-29. The fold takes one fact beside the relations:
+> whether the Pull that updates the session leaves the children that only
+> this computer has in their place. It is so for Claude, which is updated
+> in place. Such a child beside a change in the storage then leaves the
+> session behind the storage, where it was diverged before, and the
+> children that two computers made of one session come together. The
+> module is still the one authority, and it names no provider: the adapter
+> says the fact, and a reviewed plan pins it. See
+> `PLAN_PUSH_AFTER_DESKTOP_IMPORT.md`, section 15.
+
 **Recover a missing accepted local child with a reviewed Keep both Pull.**
 
 This shared change applies to Claude and Codex. The previous planner blocked
@@ -347,6 +363,12 @@ session UUID. For Create local and Keep both, use the existing fresh parent
 session-ID allocation. Preserve each child's native `agentId` and tool-result
 key. For an update of an existing binding, retain that binding's parent
 ID and known child mappings. Reject occupied unrelated targets.
+
+> Made precise on 2026-09-29. A known child of an update in place is one
+> that a Pull installed, or one that the local main transcript refers to
+> and whose file the provider wrote on this computer. The review pins its
+> file, and Apply replaces it under that state. Every other occupied
+> target is rejected. See `PLAN_PUSH_AFTER_DESKTOP_IMPORT.md`, section 14.
 
 A fresh parent must have both an unused main transcript path and an unused
 child-directory namespace. An orphan directory is an occupied target even

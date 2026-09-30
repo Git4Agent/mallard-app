@@ -771,8 +771,8 @@ function Review({ verb, spec }: { verb: Verb; spec: ReviewSpec }) {
           <SyncReviewSelectionBar
             count={pull ? 0 : pending}
             total={pending}
+            recommendedCount={pull ? PULL_ROWS.length : PUSH_ROWS.length}
             recommendedTitle="Use recommended selection"
-            recommendedAriaLabel="Use recommended selection"
             recommendedDisabled={!pull}
             onRecommended={() => undefined}
             clearDisabled={pull}

@@ -12,6 +12,8 @@
 
 #[path = "support/codex_output.rs"]
 mod codex_output;
+#[path = "support/session_reconciliation.rs"]
+mod session_reconciliation;
 mod support;
 
 use bytes::Bytes;
@@ -3932,25 +3934,17 @@ fn assert_divergent_push_gate(
     cloud_thread_id: &CloudThreadId,
     replica: &str,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let comparison = redacted(
-            service.compare_threads(project_id, storage_id),
-            "cannot refresh the divergent thread comparison",
-        );
-        if comparison.entries.iter().any(|entry| {
+    let comparison = redacted(
+        service.compare_threads(project_id, storage_id),
+        "cannot refresh the divergent thread comparison",
+    );
+    assert!(
+        comparison.entries.iter().any(|entry| {
             entry.cloud_thread_id.as_ref() == Some(cloud_thread_id)
                 && entry.state == ThreadSyncState::Diverged
-        }) {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "{replica} did not observe the divergent Codex update before the watcher deadline"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        }),
+        "{replica}: the first comparison must detect the completed native update"
+    );
 
     let review = redacted(
         service.prepare_push_review(project_id, storage_id),
@@ -5545,6 +5539,12 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         ),
         2,
     );
+    let resume_source = rollout_path(&myconf2, &provider_thread2);
+    let resume_prefix = read_bounded_file(
+        &resume_source,
+        MAX_CONVERSATION_FILE_BYTES,
+        "native resume prefix",
+    );
     let resumed2 = run_codex(
         &mut codex_turn_count,
         &provider,
@@ -5557,6 +5557,38 @@ fn live_codex_mallard_setup_push_pull_divergence() {
         "MALLARD_REMOTE_BRANCH",
     );
     assert_eq!(resumed2, provider_thread2);
+    session_reconciliation::with_replayed_native_append(
+        root.path(),
+        &resume_source,
+        &resume_prefix,
+        || {
+            let baseline = service2
+                .compare_threads(&project_id2, &storage_id)
+                .expect("compare native prefix before replay");
+            assert!(baseline
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.provider_thread_id.as_deref() == Some(&provider_thread2)
+                        && entry.state == ThreadSyncState::Synced
+                ));
+        },
+        || {
+            let appended = service2
+                .compare_threads(&project_id2, &storage_id)
+                .expect("compare native append while writer is open");
+            assert!(
+                appended
+                    .entries
+                    .iter()
+                    .any(
+                        |entry| entry.provider_thread_id.as_deref() == Some(&provider_thread2)
+                            && entry.state == ThreadSyncState::LocalAhead
+                    ),
+                "the first comparison must detect the open-writer append"
+            );
+        },
+    );
     let second_push = push(&service2, &project_id2, &storage_id);
     assert_eq!(second_push.revision, Some(3));
     assert_portable_rollout_paths(

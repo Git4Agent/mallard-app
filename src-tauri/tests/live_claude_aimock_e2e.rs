@@ -14,8 +14,11 @@
 //! gated so neither can contact an account or inspect a real Claude profile
 //! by default.
 
-#[path = "support/native_watcher.rs"]
-mod native_watcher;
+#[path = "support/session_reconciliation.rs"]
+mod session_reconciliation;
+
+#[path = "support/claude_desktop_import.rs"]
+mod claude_desktop_import;
 
 use mallard_domain::{
     ActionId, BundleId, CloudThreadId, ConversationMaterializationState, ConversationReviewAction,
@@ -77,8 +80,6 @@ const EXPECTED_MODEL_TURN_PROCESSES: usize = EXPECTED_SOURCE_PROCESSES + EXPECTE
 /// live CLI append.
 const EXPECTED_CURSOR_APPEND_PROCESSES: usize = EXPECTED_MODEL_TURN_PROCESSES + 1;
 const EXPECTED_AIMOCK_REQUESTS: usize = 13;
-const EXPECTED_AIMOCK_RAW_REQUESTS: usize =
-    EXPECTED_AIMOCK_REQUESTS + EXPECTED_CURSOR_APPEND_PROCESSES;
 
 // Claude 2.1.266 does not await the initial transcript record in --bare mode.
 // Both local and paid tests use the awaited path with explicit isolation.
@@ -642,8 +643,23 @@ struct AimockScenario {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum AimockResponse {
-    Text { content: String },
-    ReadTool { call_id: String, file_path: String },
+    Text {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking: Option<AimockThinking>,
+    },
+    ReadTool {
+        call_id: String,
+        file_path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thinking: Option<AimockThinking>,
+    },
+}
+
+#[derive(Serialize)]
+struct AimockThinking {
+    reasoning: String,
+    redacted_thinking: Vec<String>,
 }
 
 fn text_scenario(
@@ -661,6 +677,7 @@ fn text_scenario(
         expected_tool_result_marker: None,
         response: AimockResponse::Text {
             content: response.into(),
+            thinking: None,
         },
     }
 }
@@ -677,6 +694,7 @@ fn aimock_scenario_document(read_marker_path: &Path) -> AimockScenarioDocument {
             response: AimockResponse::ReadTool {
                 call_id: READ_TOOL_CALL_ID.to_string(),
                 file_path: read_marker_path.to_string_lossy().into_owned(),
+                thinking: None,
             },
         },
         AimockScenario {
@@ -688,6 +706,7 @@ fn aimock_scenario_document(read_marker_path: &Path) -> AimockScenarioDocument {
             expected_tool_result_marker: Some(READ_FILE_MARKER.to_string()),
             response: AimockResponse::Text {
                 content: "MALLARD_CLAUDE_BASE".to_string(),
+                thinking: None,
             },
         },
         text_scenario(
@@ -849,6 +868,8 @@ struct AimockProcess {
     stdout_reader: Option<std::thread::JoinHandle<Result<Vec<u8>, ()>>>,
     stderr_reader: Option<std::thread::JoinHandle<Result<Vec<u8>, ()>>>,
     audit_path: PathBuf,
+    expected_ids: BTreeSet<String>,
+    expected_probes: usize,
 }
 
 impl AimockProcess {
@@ -974,6 +995,12 @@ impl AimockProcess {
                 stdout_reader: Some(stdout_reader),
                 stderr_reader: Some(stderr_reader),
                 audit_path,
+                expected_ids: scenario
+                    .scenarios
+                    .iter()
+                    .map(|row| row.id.clone())
+                    .collect(),
+                expected_probes: scenario.expected_probe_request_count,
             },
             LocalAimockProvider::new(readiness.port),
         ))
@@ -1025,7 +1052,7 @@ impl AimockProcess {
         }
         let audit = read_bounded(&self.audit_path, MAX_CONTROL_BYTES, "Claude aimock audit");
         assert_excludes(&audit, sensitive, "Claude aimock audit");
-        validate_aimock_audit(&audit)
+        validate_aimock_audit(&audit, &self.expected_ids, self.expected_probes)
     }
 }
 
@@ -1045,13 +1072,19 @@ impl Drop for AimockProcess {
     }
 }
 
-fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
+fn validate_aimock_audit(
+    bytes: &[u8],
+    expected_ids: &BTreeSet<String>,
+    expected_probes: usize,
+) -> Result<(), &'static str> {
+    let expected_requests = expected_ids.len();
+    let expected_raw = expected_requests + expected_probes;
     let audit: AimockAudit =
         serde_json::from_slice(bytes).map_err(|_| "Claude aimock audit is malformed")?;
-    if audit.raw_request_count != EXPECTED_AIMOCK_RAW_REQUESTS
-        || audit.raw_expected_request_count != EXPECTED_AIMOCK_RAW_REQUESTS
-        || audit.raw_model_request_count != EXPECTED_AIMOCK_REQUESTS
-        || audit.raw_probe_request_count != EXPECTED_CURSOR_APPEND_PROCESSES
+    if audit.raw_request_count != expected_raw
+        || audit.raw_expected_request_count != expected_raw
+        || audit.raw_model_request_count != expected_requests
+        || audit.raw_probe_request_count != expected_probes
         || audit.raw_unexpected_request_count != 0
         || audit.raw_wrong_method_count != 0
         || audit.raw_wrong_path_count != 0
@@ -1078,15 +1111,15 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
     let aggregate_checks = [
         (audit.version == 1, "Claude aimock audit version failed"),
         (
-            audit.expected_request_count == EXPECTED_AIMOCK_REQUESTS,
+            audit.expected_request_count == expected_requests,
             "Claude aimock expected request count failed",
         ),
         (
-            audit.expected_probe_request_count == EXPECTED_CURSOR_APPEND_PROCESSES,
+            audit.expected_probe_request_count == expected_probes,
             "Claude aimock expected probe request count failed",
         ),
         (
-            audit.request_count == EXPECTED_AIMOCK_REQUESTS,
+            audit.request_count == expected_requests,
             "Claude aimock journal request count failed",
         ),
         (
@@ -1160,19 +1193,19 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
             "Claude aimock fixed placeholder audit failed",
         ),
         (
-            audit.raw_request_count == EXPECTED_AIMOCK_RAW_REQUESTS,
+            audit.raw_request_count == expected_raw,
             "Claude aimock raw request count failed",
         ),
         (
-            audit.raw_expected_request_count == EXPECTED_AIMOCK_RAW_REQUESTS,
+            audit.raw_expected_request_count == expected_raw,
             "Claude aimock raw expected request count failed",
         ),
         (
-            audit.raw_model_request_count == EXPECTED_AIMOCK_REQUESTS,
+            audit.raw_model_request_count == expected_requests,
             "Claude aimock raw model request count failed",
         ),
         (
-            audit.raw_probe_request_count == EXPECTED_CURSOR_APPEND_PROCESSES,
+            audit.raw_probe_request_count == expected_probes,
             "Claude aimock raw probe request count failed",
         ),
         (
@@ -1219,23 +1252,9 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
     if let Some((_, message)) = aggregate_checks.into_iter().find(|(passed, _)| !passed) {
         return Err(message);
     }
-    if audit.scenarios.len() != EXPECTED_AIMOCK_REQUESTS {
+    if audit.scenarios.len() != expected_requests {
         return Err("Claude aimock audit has the wrong scenario count");
     }
-    let expected_ids = [
-        "source_r1_read".to_string(),
-        "source_r1_final".to_string(),
-        "source_r2".to_string(),
-        "source_r3".to_string(),
-        "source_r4".to_string(),
-        "source_r5".to_string(),
-        "cursor_append".to_string(),
-    ]
-    .into_iter()
-    .chain(
-        (0..2).flat_map(|replica| (0..3).map(move |history| format!("verify_{replica}_{history}"))),
-    )
-    .collect::<BTreeSet<_>>();
     let mut ids = BTreeSet::new();
     for scenario in &audit.scenarios {
         if scenario.id.is_empty()
@@ -1266,7 +1285,7 @@ fn validate_aimock_audit(bytes: &[u8]) -> Result<(), &'static str> {
             return Err("Claude aimock per-scenario audit failed");
         }
     }
-    if ids != expected_ids {
+    if &ids != expected_ids {
         return Err("Claude aimock audit scenario IDs changed");
     }
     Ok(())
@@ -3935,9 +3954,6 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         return;
     }
 
-    native_watcher::require_native_watcher_events()
-        .expect("Claude AIMock E2E watcher preflight failed");
-
     let root = tempfile::tempdir().expect("create isolated Claude live-test root");
     let process_home = root.path().join("process-home");
     let claude_home_a = root.path().join("claude-a");
@@ -4917,8 +4933,8 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     );
 
     // Cursor parity: a warm comparison reads zero Claude transcript bytes,
-    // a real resumed CLI turn extends the checkpoint cursor through the
-    // probe window plus the appended bytes only, and the extended
+    // a changed transcript gets one metadata scan, then extends its cursor
+    // through the probe window and appended bytes, and the extended
     // observation agrees with a from-scratch analysis of the final bytes.
     let canonical_home_a =
         std::fs::canonicalize(&claude_home_a).expect("canonicalize replica-A Claude home");
@@ -5001,37 +5017,49 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         &base_transcript[..],
         "the resumed turn must append, never rewrite"
     );
-    // A comparison serves its watcher-clean observation until the watcher
-    // reports the append, and that delivery is asynchronous: poll for the
-    // comparison that consumes it. Every earlier comparison serves the cache
-    // with no reads; the consuming one reads only the appended bytes.
+    // Replay the native suffix through an open writer. The next comparison
+    // must detect it without waiting for close or a filesystem event.
     let appended_bytes = (extended_transcript.len() - base_transcript.len()) as u64;
-    let deadline = Instant::now() + TRANSCRIPT_SETTLE_TIMEOUT;
-    let extended = loop {
-        let before_extension = metrics.snapshot();
-        let extended = redacted(
-            service_a.compare_threads(&project_id_a, &storage_id),
-            "cannot compare after the appended Claude turn",
-        );
-        let delta = metrics.snapshot().delta_since(&before_extension);
-        assert_eq!(
-            delta.transcript_bytes_read, 0,
-            "the appended turn rides the cursor, never a whole-file read"
-        );
-        assert_eq!(delta.full_graph_resolves, 0);
-        if delta.append_bytes_read >= appended_bytes {
-            break extended;
-        }
-        assert_eq!(
-            delta.append_bytes_read, 0,
-            "a comparison ahead of the watcher serves its cache untouched"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "the watcher did not report the appended Claude turn before its bounded deadline"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    };
+    let (extended, delta) = session_reconciliation::with_replayed_native_append(
+        root.path(),
+        &transcript_path(&claude_home_a, &project_a, &primary_provider_id_a),
+        &base_transcript,
+        || {
+            let baseline = service_a
+                .compare_threads(&project_id_a, &storage_id)
+                .expect("compare native Claude prefix before replay");
+            assert!(baseline
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.cloud_thread_id.as_ref() == Some(&cloud_primary)
+                        && entry.state == ThreadSyncState::Synced
+                ));
+        },
+        || {
+            let before_extension = metrics.snapshot();
+            let extended = redacted(
+                service_a.compare_threads(&project_id_a, &storage_id),
+                "cannot compare after the appended Claude turn",
+            );
+            let delta = metrics.snapshot().delta_since(&before_extension);
+            (extended, delta)
+        },
+    );
+    assert_eq!(
+        delta.files_head_read, 1,
+        "only the changed transcript needs a fresh metadata scan"
+    );
+    assert_eq!(
+        delta.transcript_bytes_read,
+        extended_transcript.len() as u64,
+        "the metadata scan reads the changed transcript once"
+    );
+    assert_eq!(delta.full_graph_resolves, 0);
+    assert!(
+        delta.append_bytes_read >= appended_bytes,
+        "the first comparison after the append reads it"
+    );
     let primary_row = extended
         .entries
         .iter()
@@ -5485,6 +5513,35 @@ fn live_claude_tuzi_setup_push_pull_divergence() {
         4,
     );
     let destination_r2_bytes = transcript_bytes(&claude_home_b, &project_b, &provider_primary_b);
+    session_reconciliation::with_replayed_native_append(
+        root.path(),
+        &transcript_path(&claude_home_b, &project_b, &provider_primary_b),
+        &destination_r1_bytes,
+        || {
+            let baseline = service_b
+                .compare_threads(&project_id_b, &storage_id)
+                .expect("compare paid fixture prefix before replay");
+            assert!(baseline
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.cloud_thread_id.as_ref() == Some(&cloud_primary)
+                        && entry.state == ThreadSyncState::Synced
+                ));
+        },
+        || {
+            let appended = service_b
+                .compare_threads(&project_id_b, &storage_id)
+                .expect("compare paid fixture append while writer is open");
+            assert!(appended
+                .entries
+                .iter()
+                .any(
+                    |entry| entry.cloud_thread_id.as_ref() == Some(&cloud_primary)
+                        && entry.state == ThreadSyncState::LocalAhead
+                ));
+        },
+    );
     let r2_resource = mallard_domain::conversation_resource_id(&claude_key(), &logical_primary_b)
         .expect("derive paid content-revision-3 Claude resource ID");
     session_detail_text_history(

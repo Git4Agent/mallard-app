@@ -264,6 +264,17 @@ async function verifyClaudeVersion(environment) {
   }
 }
 
+const args = process.argv.slice(2);
+const scenario = args.length === 0 ? "sync"
+  : args.length === 2 && args[0] === "--scenario" ? args[1] : null;
+const tests = {
+  sync: "live_claude_aimock_setup_push_pull_divergence",
+  "desktop-import": "claude_desktop_import::live_claude_aimock_repeated_desktop_import",
+};
+if (!Object.hasOwn(tests, scenario)) {
+  fail("Usage: --scenario sync|desktop-import");
+}
+
 if (process.env.MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E !== "1") {
   fail(
     "Live Claude aimock integration testing is disabled. Set MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 to acknowledge the heavyweight credentialless local Claude Code integration test.",
@@ -313,7 +324,7 @@ const result = spawnSync(
     "src-tauri/Cargo.toml",
     "--test",
     "live_claude_aimock_e2e",
-    "live_claude_aimock_setup_push_pull_divergence",
+    tests[scenario],
     "--",
     "--ignored",
     "--exact",

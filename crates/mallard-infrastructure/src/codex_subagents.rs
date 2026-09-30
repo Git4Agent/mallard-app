@@ -73,7 +73,8 @@ pub struct TreeObservation {
     pub children: BTreeMap<SubagentKey, ChildObservation>,
     pub missing: BTreeSet<SubagentKey>,
     pub omitted: bool,
-    pub header_dependencies: Vec<PathBuf>,
+    /// Files read for their header alone, under the stamp each was read at.
+    pub header_dependencies: crate::jsonl_tail_io::SourceStamps,
 }
 
 impl TreeObservation {
@@ -89,61 +90,21 @@ impl TreeObservation {
                 .sum(),
         }
     }
-    pub fn dependencies(&self) -> Vec<PathBuf> {
-        std::iter::once(PathBuf::from(&self.main.mapping.root_path))
-            .chain(
-                self.children
-                    .values()
-                    .map(|child| PathBuf::from(&child.discovery.mapping.root_path)),
-            )
-            .chain(self.header_dependencies.iter().cloned())
-            .collect()
-    }
-}
-
-fn cursor_creations(previous: &DiscoveryObservation) -> Result<DiscoveryObservation, String> {
-    let path = Path::new(&previous.mapping.root_path);
-    let stamp = crate::jsonl_tail_io::SourceStamp::read(path)?;
-    if previous.stamp == stamp {
-        return Ok(previous.clone());
-    }
-    if !previous.stamp.same_file(&stamp) {
-        return Err("Codex discovery source was replaced".into());
-    }
-    let window = crate::jsonl_tail_io::read_tail_window(path, &previous.mapping)?;
-    let probe = previous.mapping.probe_window_len as usize;
-    if window.file_len < previous.mapping.consumed_byte_offset
-        || window.bytes.len() < probe
-        || mallard_domain::sha256_hex(&window.bytes[..probe])
-            != previous.mapping.probe_window_sha256
-    {
-        return Err("Codex discovery source was truncated or rewritten".into());
-    }
-    let mut next = previous.clone();
-    let appended = &window.bytes[probe..];
-    let complete = safe_record_end(appended) as usize;
-    let mut offset = previous.mapping.consumed_byte_offset;
-    for raw in appended[..complete].split(|byte| *byte == b'\n') {
-        if !raw.iter().all(u8::is_ascii_whitespace) {
-            let record =
-                serde_json::from_slice(raw).map_err(|_| "invalid appended Codex record")?;
-            record_creation(&mut next.creations, &record, offset)?;
+    /// Every file this tree was read from, under its read-time stamp.
+    pub fn dependencies(&self) -> crate::jsonl_tail_io::SourceStamps {
+        let mut stamps = crate::jsonl_tail_io::SourceStamps::of(
+            Path::new(&self.main.mapping.root_path),
+            &self.main.stamp,
+        );
+        for child in self.children.values() {
+            stamps.record(
+                Path::new(&child.discovery.mapping.root_path),
+                &child.discovery.stamp,
+            );
         }
-        offset += raw.len() as u64 + 1;
+        stamps.extend(&self.header_dependencies);
+        stamps
     }
-    next.mapping.consumed_byte_offset += complete as u64;
-    next.mapping.source_file_size = window.file_len;
-    next.mapping.probe_window_len = next
-        .mapping
-        .consumed_byte_offset
-        .min(crate::jsonl_tail_io::PROBE_WINDOW_BYTES);
-    let end = (next.mapping.consumed_byte_offset - window.window_offset) as usize;
-    next.mapping.probe_window_sha256 = mallard_domain::sha256_hex(
-        &window.bytes[end - next.mapping.probe_window_len as usize..end],
-    );
-    stamp.verify(path)?;
-    next.stamp = stamp;
-    Ok(next)
 }
 
 fn filtered_creations(
@@ -162,6 +123,45 @@ fn filtered_creations(
         .filter(|(_, (_, offset, _))| *offset >= cutoff.unwrap_or(0))
         .map(|(id, (creation, _, _))| (id.clone(), creation.clone()))
         .collect())
+}
+
+/// The agent calls whose children came with a Pull without their
+/// transcripts. A rollout is only appended to: a call before the installed
+/// end came with the Pull, and its child is here when the Pull installed it.
+pub fn agent_calls_without_transcript(
+    index: &crate::providers::SessionTimelineIndex,
+    binding: &mallard_domain::LocalConversationBinding,
+) -> BTreeSet<String> {
+    let Some(cutoff) = binding.installed_end else {
+        return BTreeSet::new();
+    };
+    // The index counts its places from the first retained source. The
+    // cutoff is a place in the current rollout, which is the last one.
+    let current = index.sources.split_last().map_or(0, |(_, earlier)| {
+        earlier.iter().map(|source| source.length).sum::<u64>()
+    });
+    index
+        .events
+        .iter()
+        .filter(|entry| {
+            entry
+                .agent
+                .as_ref()
+                .and_then(|agent| agent.provider_agent_id.as_ref())
+                .is_some_and(|id| {
+                    entry
+                        .source
+                        .offset
+                        .checked_sub(current)
+                        .is_some_and(|place| place < cutoff)
+                        && !binding
+                            .installed_subagents
+                            .values()
+                            .any(|child| &child.provider_thread_id == id)
+                })
+        })
+        .map(|entry| entry.event_id.clone())
+        .collect()
 }
 
 fn verify_cutoff(path: &Path, cutoff: u64) -> Result<(), String> {
@@ -239,7 +239,7 @@ pub fn observe_tree(
         children: BTreeMap::new(),
         missing: BTreeSet::new(),
         omitted: false,
-        header_dependencies: Vec::new(),
+        header_dependencies: Default::default(),
     };
     let mut pending = vec![(
         None,
@@ -270,7 +270,8 @@ pub fn observe_tree(
             if std::fs::symlink_metadata(&path)
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
-                tree.header_dependencies.push(path);
+                // Listed, then gone: there is no file state to pin.
+                tree.header_dependencies.record_unstamped();
                 tree.missing.insert(key.clone());
                 pending.push((Some(key), id, BTreeMap::new()));
                 continue;
@@ -285,7 +286,7 @@ pub fn observe_tree(
                 if required || previous.is_some() {
                     return Err("child ownership conflicts with the selected tree".into());
                 }
-                tree.header_dependencies.push(path);
+                tree.header_dependencies.record(&path, &stamp);
                 continue;
             }
             if identities.len() >= mallard_domain::MAX_CONVERSATION_FILES
@@ -294,7 +295,7 @@ pub fn observe_tree(
                 return Err("Codex child ownership cycle or count limit".into());
             }
             if !metadata.has_supported_header() {
-                tree.header_dependencies.push(path);
+                tree.header_dependencies.record(&path, &stamp);
                 tree.omitted = true;
                 tree.children.clear();
                 tree.missing.clear();
@@ -303,9 +304,12 @@ pub fn observe_tree(
             let child = if let Some(child) = cached {
                 child.clone()
             } else {
+                // The saved cursor serves only the same file, grown; any
+                // other change reads the child in full.
                 let extended = previous
                     .filter(|child| {
-                        child.metadata == metadata && child.discovery.stamp.same_file(&stamp)
+                        child.metadata == metadata
+                            && stamp.continues(&child.discovery.stamp.file_state())
                     })
                     .map(|child| -> Result<Option<ChildObservation>, String> {
                         let window = crate::jsonl_tail_io::read_tail_window(
@@ -372,7 +376,7 @@ pub fn observe_tree(
                                 &|id| lookup.find_rollout(id),
                             )?;
                         if !resolved_boundary(&metadata, &resolved) {
-                            tree.header_dependencies.push(path);
+                            tree.header_dependencies.record(&path, &stamp);
                             tree.omitted = true;
                             tree.children.clear();
                             tree.missing.clear();
@@ -413,10 +417,6 @@ pub fn observe_tree(
         }
     }
     Ok(tree)
-}
-
-pub fn refresh_discovery(previous: &DiscoveryObservation) -> Result<DiscoveryObservation, String> {
-    cursor_creations(previous)
 }
 
 /// Only native structural identity fields are mapped. Conversation text and
@@ -1269,6 +1269,7 @@ mod tests {
                 Some(&whole_child_layout()),
                 &mut redactor,
                 &origins,
+                crate::session_path_origins::OriginLookup::ByPosition,
                 &ids,
             )
             .unwrap();
@@ -1297,6 +1298,7 @@ mod tests {
             None,
             &mut redactor,
             &origins,
+            crate::session_path_origins::OriginLookup::ByPosition,
             &ids,
         )
         .unwrap();
@@ -1685,5 +1687,49 @@ mod tests {
         let original = message.clone();
         rewrite_references(&mut message, &ids);
         assert_eq!(message, original);
+    }
+
+    #[test]
+    fn a_call_before_the_installed_end_is_left_out_unless_its_child_was_installed() {
+        use crate::owned_subagents::agent_card_fixtures::{
+            binding_of_a_pulled_session, index_of_agent_calls,
+        };
+        // An earlier rollout of 100 bytes, then the current one. The Pull
+        // installed 200 bytes of the current one.
+        let index = index_of_agent_calls(
+            &[100, 500],
+            &[
+                ("in-the-earlier-rollout", Some("earlier"), 50),
+                ("came-without", Some("gone"), 110),
+                ("came-with", Some("installed"), 120),
+                ("unanswered", None, 130),
+                ("last-before-the-end", Some("gone-too"), 299),
+                ("first-after-the-end", Some("here"), 300),
+                ("made-here", Some("here-too"), 400),
+            ],
+        );
+        let binding =
+            binding_of_a_pulled_session(Some(200), &[("start-installed", "installed")], &[]);
+        binding.validate().unwrap();
+        assert_eq!(
+            agent_calls_without_transcript(&index, &binding),
+            BTreeSet::from([
+                "came-without".to_string(),
+                "last-before-the-end".to_string()
+            ])
+        );
+        // One rollout: the places of the index are the places of the file.
+        let mut alone = index.clone();
+        alone.sources.remove(0);
+        assert_eq!(
+            agent_calls_without_transcript(&alone, &binding),
+            BTreeSet::from([
+                "in-the-earlier-rollout".to_string(),
+                "came-without".to_string()
+            ])
+        );
+        // A session that was made on this computer has no installed end.
+        let native = binding_of_a_pulled_session(None, &[], &[]);
+        assert!(agent_calls_without_transcript(&index, &native).is_empty());
     }
 }

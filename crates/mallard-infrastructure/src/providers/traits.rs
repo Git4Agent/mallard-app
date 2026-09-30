@@ -169,6 +169,24 @@ pub struct SessionFileMetadata {
     pub is_internal_subagent: bool,
 }
 
+/// Why a metadata scan named no session. The two are kept apart because
+/// only a verdict on the bytes holds for as long as the bytes do.
+#[derive(Debug)]
+pub(crate) enum ScanFailure {
+    /// The file could not be read: nothing was learned about its bytes.
+    Unreadable(String),
+    /// The bytes were read and do not name a session the provider accepts.
+    Rejected(String),
+}
+
+impl ScanFailure {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Unreadable(message) | Self::Rejected(message) => message,
+        }
+    }
+}
+
 /// A folder a profile's recent sessions ran in. A hint for adding a project,
 /// read from a bounded number of files — never ownership evidence, which
 /// stays with [`SessionAdapter::discover`].
@@ -754,29 +772,17 @@ pub trait SessionAdapter: Send + Sync {
     fn descriptor(&self) -> ProviderDescriptor;
     fn codec_key(&self) -> &str;
     fn codec_version(&self) -> u32;
-    /// Provider-home subdirectories the session watcher observes for this
-    /// provider. Empty means the provider home is not watched.
-    fn watch_roots(&self) -> &'static [&'static str] {
-        &[]
-    }
-    /// A provider-home file whose rewrite invalidates display titles only
-    /// (never tail evidence or membership).
-    fn session_title_index(&self) -> Option<&'static str> {
-        None
-    }
-    /// Re-run only the display-title enrichment over a cached discovery.
-    fn refresh_session_titles(
-        &self,
-        _discovery: &mut crate::provider_capture::Discovery,
-        _canonical_home: &Path,
-    ) -> Result<(), String> {
-        Ok(())
-    }
     /// Whether this provider's conversations are physical rollout graphs
     /// that Mallard reconstructs as standalone artifacts (alias-owner lookup,
     /// relocated cloud materialization under freshly minted ids, and the
     /// graph seeding primitives). Wire-tail providers materialize in place.
     fn reconstructs_rollout_graph(&self) -> bool {
+        false
+    }
+    /// Whether a Pull that updates a session leaves the children that only
+    /// this computer has in their place, as children of the session. Such
+    /// a child then stands against nothing that the storage holds.
+    fn update_keeps_local_only_children(&self) -> bool {
         false
     }
     /// Mint one provider thread id for a new local copy. `taken` reports
@@ -970,6 +976,16 @@ pub trait SessionAdapter: Send + Sync {
         _context: &SessionTimelineContext<'_>,
     ) -> Result<SessionAgentPreview, String> {
         Err("provider has no agent calls".to_string())
+    }
+    /// The agent calls of `index` whose children came with a Pull without
+    /// their transcripts, by event ID. `binding` says what the Pull
+    /// installed. The session page shows no card of them.
+    fn agent_calls_without_transcript(
+        &self,
+        _index: &SessionTimelineIndex,
+        _binding: &mallard_domain::LocalConversationBinding,
+    ) -> BTreeSet<String> {
+        BTreeSet::new()
     }
     /// Read one bounded expanded event body on demand.
     fn read_event_detail(

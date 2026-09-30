@@ -65,9 +65,12 @@ test("an acknowledgement is the one message that never closes", () => {
 });
 
 test("each rung has its own glyph: an error is the octagon, never the warning triangle", () => {
-  const glyph = (severity: "danger" | "warning" | "info" | "success") => (
-    renderToStaticMarkup(<Notice severity={severity} timing="inline">Text.</Notice>).match(/data-icon="([^"]+)"[^>]*class="notice-mark"/)?.[1]
-  );
+  const glyph = (severity: "danger" | "warning" | "info" | "success") => {
+    const icon = renderToStaticMarkup(
+      <Notice severity={severity} timing="inline">Text.</Notice>,
+    ).match(/<svg[^>]*class="[^"]*notice-mark[^"]*"[^>]*>/)?.[0];
+    return icon?.match(/data-icon="([^"]+)"/)?.[1];
+  };
   assert.equal(glyph("danger"), "octagon-x");
   assert.equal(glyph("warning"), "alert-triangle");
   assert.equal(glyph("info"), "info");

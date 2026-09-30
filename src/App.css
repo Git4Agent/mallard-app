@@ -399,6 +399,28 @@ summary:focus-visible {
 .icon-git-branch-mark,
 .icon-git-folder-mark { color: var(--blue); }
 
+/* Warm Solid Accent: keep the shared outline calm, then color only the small
+   part that carries the action or state. Status badges have their own palette. */
+svg[data-icon="settings"] path:nth-child(3n + 1),
+svg[data-icon="range"] path:nth-child(3n + 1),
+svg[data-icon="trash"] path:is(:nth-child(2), :nth-child(3)),
+svg[data-icon="external-link"] path:not(:first-child),
+svg[data-icon="git-commit"] path:first-child,
+svg[data-icon="alert-triangle"] path:is(:first-child, :last-child),
+svg[data-icon="check-circle"] path:last-child,
+svg[data-icon="clock"] path:last-child,
+svg[data-icon="info"] path:not(:first-child),
+svg[data-icon="octagon-x"] path:first-child,
+svg[data-icon="cloud-dot"] path:last-child,
+svg[data-icon="cloud-check"] path:last-child,
+svg[data-icon="cloud-lock"] path:not(:first-child),
+svg[data-icon="cloud-clock"] path:not(:first-child),
+svg[data-icon="cloud-x"] path:not(:first-child),
+svg[data-icon="cloud-alert"] path:not(:first-child),
+svg[data-icon="lightbulb"] path:last-child {
+  stroke: var(--warning-text);
+}
+
 /* ── File Preview — document-style header ────────── */
 
 /* ── Files workspace ─────────────────────────────── */
@@ -2130,6 +2152,23 @@ summary:focus-visible {
   justify-content: center;
   gap: 5px;
 }
+/* The recommend control: the path bar's hollow pill (2px ink, cast shadow),
+   one step smaller than the 32px row, never the gold — the path bar and the
+   footer already carry the primary. Its count is the path bar's own chip, so
+   "Select 3" reads the way "Pull 3" does. */
+.sync-push-resource-actions .sync-sync-review-select {
+  height: 28px;
+  min-height: 28px;
+  margin: 0 6px 0 4px;
+  padding: 0 7px 0 8px;
+  color: var(--text-0);
+}
+.sync-push-resource-actions .sync-sync-review-select:disabled { box-shadow: none; }
+.sync-sync-review-select .sync-path-count {
+  height: 17px;
+  min-width: 17px;
+  margin: 0 -1px 0 0;
+}
 .sync-push-resource-actions .sync-inline-action-close {
   margin-left: 7px;
 }
@@ -2148,9 +2187,6 @@ summary:focus-visible {
    in, so the header does not shift when the cluster fills in. */
 .sync-push-resource-actions .sync-inline-action-close:only-child::before {
   content: none;
-}
-.sync-sync-review-icon-action > span {
-  color: var(--text-2);
 }
 .sync-push-resource-content { padding-top: 8px; }
 .sync-inline-action-scroll > .sync-resource-groups { gap: 4px; }
@@ -6331,18 +6367,37 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .thread-status-icon {
+  position: relative;
   display: block;
   flex: 0 0 auto;
-  color: var(--thread-status-unavailable);
+  color: var(--status-icon-unavailable);
+  line-height: 0;
 }
 
-.thread-status-icon[data-thread-status="synced"] { color: var(--thread-status-synced); }
-.thread-status-icon[data-thread-status="cloud-outstanding"] { color: var(--thread-status-cloud); }
-.thread-status-icon[data-thread-status="local-outstanding"] { color: var(--thread-status-local); }
-.thread-status-icon[data-thread-status="divergent"] { color: var(--thread-status-divergent); }
-.thread-status-icon[data-thread-status="pending"] { color: var(--thread-status-pending); }
-.thread-status-icon[data-thread-status="conflict"] { color: var(--thread-status-conflict); }
-.thread-status-icon[data-thread-status="unavailable"] { color: var(--thread-status-unavailable); }
+.thread-status-icon > svg {
+  position: absolute;
+  display: block;
+}
+
+.thread-status-icon-primary,
+.thread-status-icon-badge { inset: 0; }
+
+.thread-status-icon-glyph {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.thread-status-icon[data-thread-status="synced"] { color: var(--status-icon-synced); }
+.thread-status-icon[data-thread-status="cloud-outstanding"] { color: var(--status-icon-cloud); }
+.thread-status-icon[data-thread-status="local-outstanding"] { color: var(--status-icon-local); }
+.thread-status-icon[data-thread-status="divergent"] { color: var(--status-icon-divergent); }
+.thread-status-icon[data-thread-status="pending"] { color: var(--status-icon-pending); }
+.thread-status-icon[data-thread-status="conflict"] { color: var(--status-icon-conflict); }
+.thread-status-icon[data-thread-status="unavailable"] { color: var(--status-icon-unavailable); }
+.thread-status-icon[data-thread-status="untracked"] { color: var(--status-icon-untracked); }
+.thread-status-icon[data-thread-status="checking"] { color: var(--status-icon-checking); }
+.thread-status-icon[data-thread-status="unknown"] { color: var(--status-icon-unknown); }
 
 .sync-thread-sync-indicator.synced { color: var(--thread-status-synced); }
 .sync-thread-sync-indicator.local { color: var(--thread-status-local); }
@@ -6395,34 +6450,23 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   outline-offset: 2px;
 }
 
-/* The three neutral badges say "no verdict yet", so they take the muted text
-   colour rather than a signal hue — a colour here would claim an answer the
-   comparison has not given, and on an unlinked project one of these is on every
-   single row. Measured against --surface-row: 3.31:1 light, 3.75:1 dark, both
-   clear of the 3:1 WCAG 2.2 bar for non-text graphics. */
-.thread-status-icon[data-thread-status="untracked"],
-.thread-status-icon[data-thread-status="checking"],
-.thread-status-icon[data-thread-status="unknown"] { color: var(--text-3); }
-
 .sync-thread-sync-indicator.untracked,
 .sync-thread-sync-indicator.checking,
 .sync-thread-sync-indicator.unknown { color: var(--text-3); }
 
-/* Three dots blinking in turn. Separately animated because one glyph pulsing
-   as a whole reads as an alarm; a cycle reads as work in progress. */
-.thread-status-icon-dots > path {
-  animation: thread-status-dot 1.05s steps(1) infinite;
+/* A restrained pulse makes comparison activity visible without changing the
+   status icon's geometry or relying on hue alone. */
+.thread-status-icon-dots {
+  animation: thread-status-pulse 1.2s ease-in-out infinite;
 }
-.thread-status-icon-dots > path:nth-child(2) { animation-delay: 0.35s; }
-.thread-status-icon-dots > path:nth-child(3) { animation-delay: 0.7s; }
 
-@keyframes thread-status-dot {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0.28; }
+@keyframes thread-status-pulse {
+  0%, 100% { opacity: 0.32; }
+  50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thread-status-icon-dots > path { animation: none; opacity: 1; }
+  .thread-status-icon-dots { animation: none; opacity: 1; }
 }
 
 /* The provider's own mark, on the button that opens that provider. Monochrome:
@@ -6916,17 +6960,31 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   color: var(--text-0);
 }
 
+/* When the header runs out of room the title gives way, clipped at its own
+   edge rather than painted under the meter and the selection controls, which
+   never shrink. Clip, not hidden, so the display face's ascenders keep
+   overflowing the line box upward. */
 .sync-sync-review-title {
   min-width: 0;
   display: flex;
   align-items: baseline;
   gap: 8px;
+  overflow-x: clip;
   white-space: nowrap;
 }
 
 .sync-sync-review-title h2 {
   flex: 0 0 auto;
   margin-right: 0;
+}
+
+/* Push's redaction flag is the part that gives way first: it shortens inside
+   its own pill rather than being cut through its border by the clip. */
+.sync-sync-review-title > .sync-settings-flag {
+  min-width: 0;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sync-sync-review-header p {
@@ -7059,6 +7117,21 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   gap: 6px;
 }
 
+/* An empty review's one button is the way out, in the apply button's
+   footprint so the footer keeps its shape. A long page name ellipsizes; the
+   title carries the whole sentence. */
+.sync-sync-review-footer > .btn.sync-review-exit {
+  min-width: 180px;
+  max-width: 100%;
+  padding: 0 15px;
+}
+
+.sync-review-exit > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sync-inline-pull-review .sync-sync-review-footer {
   min-height: 48px;
   padding: 5px 20px;
@@ -7081,8 +7154,9 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   border-right: 1px solid var(--border);
 }
 
-/* Scaled to max(total, limit): while the push fits, the track's right end IS
-   the limit; past it the limit is the tick and the fill runs beyond it. */
+/* Scaled to max(total, limit): while the pull fits, the track's right end IS
+   the limit; past it the limit is the tick and the fill runs beyond it. Only
+   the Pull header draws it; the Push header has no room for it. */
 .sync-review-budget-track {
   position: relative;
   display: flex;
@@ -7100,22 +7174,16 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   overflow: hidden;
 }
 
-/* One fill in the local-outstanding ink, because the bar measures what leaves
-   this computer. A tone per source — sessions, requirements, project files —
-   was drawn first and does not survive measurement: --text-3 sits 1.05:1 from
-   --thread-status-local on cream, so two of the three segments were the same
-   colour. The breakdown stays in the title, where it already was. */
+/* One fill in the cloud-outstanding ink, because the bar measures what
+   arrives. A tone per source — sessions, requirements, project files — was
+   drawn first and does not survive measurement: --text-3 sat 1.05:1 from the
+   local ink on cream, so two of the three segments were the same colour. The
+   breakdown stays in the title, where it already was. --thread-status-cloud
+   on --loader-track holds 4.00:1 on cream and 4.76 on dark. Declared before
+   the over hatch, which must win. */
 .sync-review-budget-track > i {
   display: block;
   height: 100%;
-  background: var(--thread-status-local);
-}
-
-/* The pull fill, in the cloud-outstanding ink. Measured like the local one:
-   --thread-status-cloud on --loader-track holds 4.00:1 on cream and 4.76 on
-   dark, and --text-1 on its 34% gauge wash 6.24 and 4.65. Declared before the
-   over hatch, which shares its specificity and must win. */
-.sync-review-budget-track.pull > i {
   background: var(--thread-status-cloud);
 }
 
@@ -7187,6 +7255,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   background: color-mix(in srgb, var(--thread-status-local) 34%, transparent);
 }
 
+/* --text-1 on the 34% cloud wash measures 6.24:1 on cream and 4.65 on dark. */
 .sync-review-budget-gauge.pull .sync-review-budget-fill {
   background: color-mix(in srgb, var(--thread-status-cloud) 34%, transparent);
 }
@@ -7527,6 +7596,16 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 /* Narrow panels collapse review rows to one column. The banner is already one
    column. */
 @container sync-review-layout (max-width: 620px) {
+  /* The header glance steps aside. At the 800px window the review is 414px
+     wide, and the glance, the selection controls and close left the title
+     nothing — the meter painted across it and pushed close out of the card.
+     The widest Pull header (120/347, Select 128, 499 MB / 512 MB) keeps its
+     title whole down to 598px, so this rung holds it with room to spare. The
+     footer gauge, pinned beside the primary, carries the same figure. */
+  .sync-review-budget-glance {
+    display: none;
+  }
+
   /* The trailing count has nothing left to line up against. */
   .sync-sync-review-other > summary {
     min-height: 44px;
@@ -9511,6 +9590,18 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      step for the same reason. */
   --thread-status-synced: #4dbf7e;
   --thread-status-local: #e6c896;
+  /* The status-icon family uses colour and shape together. These brighter
+     dark-paper tones stay distinct at the 18px row size. */
+  --status-icon-synced: #4dbf7e;
+  --status-icon-cloud: #f2c369;
+  --status-icon-local: #8ccff3;
+  --status-icon-divergent: #cbb4f3;
+  --status-icon-pending: #c8b998;
+  --status-icon-conflict: #f4917f;
+  --status-icon-unavailable: #b7c0cc;
+  --status-icon-untracked: #aaa69d;
+  --status-icon-checking: #62d0e8;
+  --status-icon-unknown: #d4b7ff;
   --focus-ring: #e9b949;
   /* On espresso paper the ink line is the light edge and the cast shadow the
      dark one. The line is the tan control edge (5.9:1 on the paper) rather
@@ -9637,6 +9728,18 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      gitDecoration.modified light value below, unaltered. */
   --thread-status-synced: #006b32;
   --thread-status-local: #895503;
+  /* Cream-paper counterparts. Each clears the non-text contrast floor on
+     active rows; shape still carries the state when hue is unavailable. */
+  --status-icon-synced: #006b32;
+  --status-icon-cloud: #885e06;
+  --status-icon-local: #256c90;
+  --status-icon-divergent: #6d529d;
+  --status-icon-pending: #725f48;
+  --status-icon-conflict: #b53420;
+  --status-icon-unavailable: #5f6978;
+  --status-icon-untracked: #6b7280;
+  --status-icon-checking: #00758a;
+  --status-icon-unknown: #6d529d;
   --focus-ring: #805b15;
   /* Cream paper is printed in espresso: the ink line and the cast shadow
      are both the text ink, a hard cut rather than a translucent wash. */
@@ -9791,7 +9894,6 @@ body {
 
 /* Counts, not labels: tabular figures so the header does not reflow as the
    selection changes. */
-.sync-sync-review-icon-action > span,
 .sync-sync-review-selected {
   font-family: var(--font-mono);
   font-size: var(--type-2xs);
@@ -10332,12 +10434,12 @@ summary {
   color: var(--tile-yellow-ink);
 }
 
-:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child[data-icon="puzzle"] {
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child[data-icon="catalog-plugin"] {
   background: var(--tile-purple);
   color: var(--tile-purple-ink);
 }
 
-:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child:is([data-icon="paw"], [data-icon="cat"]) {
+:is(.landing-picker-card-title, .sidebar-profile-main) > svg:first-child:is([data-icon="catalog-pet-v1"], [data-icon="catalog-pet-v2"]) {
   background: var(--tile-red);
   color: var(--tile-red-ink);
 }
@@ -10366,6 +10468,39 @@ svg[data-storage-provider="r2"] { --storage-icon-tile: #ffe7d5; }
   padding: 6px;
   border-radius: 8px;
   background: var(--storage-icon-tile);
+}
+
+/* The path bar draws a storage the way the rail does: the artwork on its pale
+   tile inside the ink box. Bare at 14px it sank into the honey current row
+   and the cream popover. 24px in the switcher, the rail's outer size; 22px
+   on the crumb, whose pill is 28px. */
+:is(.sync-path-crumb, .sync-path-menu-current, .sync-path-menu-item) > svg[data-storage-provider] {
+  box-sizing: content-box;
+  padding: 2px;
+  border: var(--box-border);
+  background: var(--storage-icon-tile);
+}
+
+/* The tile reaches 2px into the row's padding on each side, so a one-line
+   switch target keeps its 34px and a two-line row keeps its height. */
+:is(.sync-path-menu-current, .sync-path-menu-item) > svg[data-storage-provider] {
+  width: 16px;
+  height: 16px;
+  margin-block: -2px;
+  border-radius: 7px;
+}
+
+.sync-path-crumb > svg[data-storage-provider] {
+  width: 14px;
+  height: 14px;
+  border-radius: 6px;
+}
+
+/* The crumb tucks its tile against its leading edge, an avatar in a chip.
+   That also holds the icon-only storage crumb at 51px, inside the storage
+   item's 3.5rem floor, so the narrow bar's trail gives up nothing for it. */
+.sync-path-crumb:has(> svg[data-storage-provider]) {
+  padding-left: 3px;
 }
 
 .sidebar-profile-actions button {
@@ -12023,7 +12158,7 @@ span.sync-update-pill {
 .sync-inline-action-close:active:not(:disabled),
 .log-panel-actions .btn:active:not(:disabled),
 .sync-modal-header .btn:active:not(:disabled),
-.sync-inline-action-header .btn:active:not(:disabled) {
+.sync-inline-action-header .btn:not(.sync-sync-review-select):active:not(:disabled) {
   transform: none;
 }
 

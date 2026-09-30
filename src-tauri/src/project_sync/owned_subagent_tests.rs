@@ -66,6 +66,7 @@ fn native_owned_subagents_transport_bridge() {
         .to_string_lossy()
         .starts_with("mallard-owned-native-"));
     let repo = LocalStateRepository::from_home_dir(root.join("mallard-state")).unwrap();
+    save_child_push(&repo, "codex", true);
     let storage = StorageId::parse("native-owned-store").unwrap();
     add_local_storage(&repo, &storage, &root.join("store"));
     let source = register(&repo);
@@ -83,6 +84,11 @@ fn native_owned_subagents_transport_bridge() {
         .unwrap();
     let entries = &review.thread_comparison.as_ref().unwrap().entries;
     assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(
+        entries[0].subagent_selection.wire_children,
+        ConversationWireChildren::On,
+        "{entries:?}"
+    );
     assert_eq!(
         entries[0].subagent_selection.omitted, shared_omission,
         "{entries:?}"
@@ -780,8 +786,9 @@ fn benchmark_owned_subagent_sync() {
             let mut times = Vec::new();
             for _ in 0..15 {
                 if cold {
-                    super::super::session_watch_service::session_watch_service()
-                        .force_rebaseline(&home);
+                    super::super::observation_cache::observation_cache()
+                        .reset_and_purge_disk(repo.root())
+                        .unwrap();
                 }
                 let start = Instant::now();
                 let comparison = get_project_thread_sync_comparison_with_repository(

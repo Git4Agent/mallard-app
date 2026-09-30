@@ -1859,9 +1859,14 @@ mod tests {
             None,
             true,
         );
-        let mut store = server.store();
-        store.request_timeout = Duration::from_millis(40);
-        let store_for_stall = store.clone();
+        let store = server.store();
+        // `request_timeout` bounds the request as well as each wait for the
+        // body. Only the stall check shortens it, and to a bound that a
+        // loaded machine keeps: at a load average over 100 a request took
+        // up to 22 ms alone and up to 86 ms in a bulk read, where staging
+        // writes and syncs its files on the two workers of this runtime.
+        let mut store_for_stall = store.clone();
+        store_for_stall.request_timeout = Duration::from_secs(2);
         let error = blocking(move || {
             store_for_stall.stage_verified(
                 &stalled,

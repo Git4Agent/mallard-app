@@ -11,7 +11,7 @@
 
 use crate::activity_log::ActivityLogScope;
 use crate::project_sync::config_watcher::ConfigWatcher;
-use crate::project_sync::session_watch_service::session_watch_service;
+use crate::project_sync::observation_cache::observation_cache;
 use crate::storage_catalog::persistence::CatalogStateRepository;
 use mallard_infrastructure::activity_log::ActivityLogType;
 use mallard_infrastructure::persistence::{
@@ -82,14 +82,14 @@ pub async fn reset_local_state(app: tauri::AppHandle) -> Result<LocalStateWipeRe
         // pending Library reviews were dropped inside the reset itself, so
         // three things hold pre-wipe state: the installed tuning snapshot
         // (settings.json is gone, so live values return to defaults), the
-        // session watch service (caches keyed by registrations that no longer
+        // observation cache (records keyed by registrations that no longer
         // exist), and the config watcher (its directory watch died with the
         // deleted root). Re-arm all of them before the promise resolves and
         // the frontend reloads.
         mallard_infrastructure::app_settings::install_app_settings(
             &mallard_infrastructure::app_settings::AppSettings::default(),
         );
-        session_watch_service().reset_all_caches();
+        observation_cache().reset();
         // Starting a fresh watcher recreates the (empty) root — accepted; the
         // boot log entry recreates it on a real fresh launch too.
         match ConfigWatcher::start(app.clone()) {

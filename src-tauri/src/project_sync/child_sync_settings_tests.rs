@@ -105,7 +105,7 @@ fn fresh_settings_push_without_redaction_or_subagents() {
 }
 
 #[test]
-fn pulled_children_excluded_hides_agent_cards_until_children_are_pulled() {
+fn children_pulled_without_transcripts_have_no_agent_cards_until_they_are_pulled() {
     for provider in ["codex", "claude"] {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -218,18 +218,6 @@ fn pulled_children_excluded_hides_agent_cards_until_children_are_pulled() {
             save_child_push(&repo, provider, enabled);
             push_child_settings(&service, &source, &storage);
             restore_child_settings(&service, &repo, &target, &storage);
-            // Missing optional fields must keep native agent cards visible.
-            let binding_path = repo.conversation_bindings_path();
-            let mut saved: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&binding_path).unwrap()).unwrap();
-            for row in saved["bindings"].as_array_mut().unwrap() {
-                if row["local_project_id"].as_str() == Some(source.local_project_id.as_str()) {
-                    row.as_object_mut()
-                        .unwrap()
-                        .remove("pulled_children_excluded");
-                }
-            }
-            std::fs::write(&binding_path, serde_json::to_vec(&saved).unwrap()).unwrap();
             // Reopen local state: viewing must not depend on the Pull process
             // or on reading storage. Inspect both native and imported copies.
             let reopened =
@@ -247,13 +235,23 @@ fn pulled_children_excluded_hides_agent_cards_until_children_are_pulled() {
                             project.display_name
                         )
                     });
-                let excluded = project.local_project_id == target.local_project_id && !enabled;
+                let pulled = project.local_project_id == target.local_project_id;
+                let excluded = pulled && !enabled;
                 assert_eq!(
-                    binding.pulled_children_excluded,
-                    excluded,
-                    "provider={provider} enabled={enabled} project={} installed_children={}",
-                    project.display_name,
-                    binding.installed_subagents.len()
+                    binding.installed_subagents.len(),
+                    if pulled && enabled { 3 } else { 0 },
+                    "provider={provider} enabled={enabled} project={}",
+                    project.display_name
+                );
+                assert_eq!(
+                    binding.installed_absent_subagents.len(),
+                    if excluded && provider == "claude" {
+                        3
+                    } else {
+                        0
+                    },
+                    "provider={provider} enabled={enabled} project={}",
+                    project.display_name
                 );
                 let resource = conversation_resource_id(
                     &ProviderKey::parse(provider).unwrap(),

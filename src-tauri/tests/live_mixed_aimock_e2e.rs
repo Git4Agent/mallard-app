@@ -70,13 +70,33 @@ fn open_context(root: &Path, args: &Value) -> Result<Context, String> {
     }
     let machine = private_directory(root, &root.join(name).join("machine"))?;
     let project_root = private_directory(root, Path::new(field(args, "project")?))?;
-    let codex = private_directory(root, &root.join(name).join("codex"))?;
-    let claude = private_directory(root, &root.join(name).join("claude"))?;
-    let storage_root = private_directory(root, &root.join("storage"))?;
+    let source = args
+        .get("source_replica")
+        .and_then(Value::as_str)
+        .unwrap_or(name);
+    if !["a", "b", "c"].contains(&source) {
+        return Err("fixture source replica".into());
+    }
+    let codex = private_directory(root, &root.join(source).join("codex"))?;
+    let claude = private_directory(root, &root.join(source).join("claude"))?;
+    let storage_directory = if args.get("separate_storage").and_then(Value::as_bool) == Some(true) {
+        "reconciliation-storage"
+    } else {
+        "storage"
+    };
+    let storage_root = private_directory(root, &root.join(storage_directory))?;
     let repository = LocalStateRepository::from_home_dir(&machine)?;
-    let storage_id = StorageId::parse("storage-mixed-aimock")?;
+    let storage_id = StorageId::parse(
+        args.get("storage_id")
+            .and_then(Value::as_str)
+            .unwrap_or("storage-mixed-aimock"),
+    )?;
     let mut config = repository.load_config()?;
-    if config.storages.is_empty() {
+    if !config
+        .storages
+        .iter()
+        .any(|storage| storage.id == storage_id)
+    {
         config.storages.push(
             mallard_infrastructure::storage_providers::local::local_storage_config(
                 storage_id.clone(),
@@ -86,9 +106,13 @@ fn open_context(root: &Path, args: &Value) -> Result<Context, String> {
         );
         repository.save_config(config)?;
     }
-    let mut settings = mallard_infrastructure::app_settings::AppSettings::default();
+    let mut settings = mallard_infrastructure::app_settings::load_app_settings(&repository)?;
     // The fixture expects redacted bodies and checks storage for credential leaks.
     settings.credential_redaction_enabled = true;
+    if let Some(include_children) = args.get("include_children").and_then(Value::as_bool) {
+        settings.push_codex_children = include_children;
+        settings.push_claude_children = include_children;
+    }
     if let Some(workers) = args.get("workers").and_then(Value::as_u64) {
         settings.comparison_workers = workers as u32;
     }
@@ -162,7 +186,7 @@ fn metrics(value: sync_metrics::MetricsSnapshot) -> Value {
         "transcript_bytes_read":value.transcript_bytes_read,"probe_bytes_read":value.probe_bytes_read,
         "append_bytes_read":value.append_bytes_read,"records_parsed":value.records_parsed,
         "bytes_hashed":value.bytes_hashed,"full_graph_resolves":value.full_graph_resolves,
-        "selected_captures":value.selected_captures,"inventory_reuse_hits":value.inventory_reuse_hits,
+        "selected_captures":value.selected_captures,
         "observation_reuse_hits":value.observation_reuse_hits})
 }
 
@@ -387,10 +411,14 @@ fn mixed_aimock_worker() {
         }
         assert!(length <= 1024 * 1024, "worker request size");
         let request: Request = serde_json::from_slice(&bytes).expect("worker request format");
-        let before = context
-            .as_ref()
-            .map(|c| c.metrics.iter().map(|m| m.snapshot()).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let before = if request.operation == "open" {
+            Vec::new()
+        } else {
+            context
+                .as_ref()
+                .map(|c| c.metrics.iter().map(|m| m.snapshot()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
         let before_usage = usage();
         let started = Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

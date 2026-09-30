@@ -184,6 +184,61 @@ pub fn project_claude_record(mut value: Value) -> Option<Value> {
     }
 }
 
+/// The origins of a record as the desktop import leaves it: the digest of
+/// the record without its thinking, and the saved edits that lie outside
+/// its thinking, at the places the content has then. `None` for a record
+/// that the import leaves as it is, and for one that it removes.
+pub(crate) fn origins_without_thinking(
+    record: &Value,
+    fields: &[crate::session_path_origins::PathField],
+) -> Result<Option<Box<crate::session_path_origins::RecordPathOrigins>>, String> {
+    const CONTENT: &str = "/message/content/";
+    let content = (record.get("type").and_then(Value::as_str) == Some("assistant"))
+        .then(|| record.pointer("/message/content").and_then(Value::as_array))
+        .flatten()
+        .filter(|content| {
+            content.iter().any(is_thinking_block) && !content.iter().all(is_thinking_block)
+        });
+    let Some(content) = content else {
+        return Ok(None);
+    };
+    // The place of each block that stays.
+    let mut kept = 0;
+    let places = content
+        .iter()
+        .map(|block| {
+            (!is_thinking_block(block)).then(|| {
+                kept += 1;
+                kept - 1
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut moved = Vec::with_capacity(fields.len());
+    for field in fields {
+        let Some(inside) = field.pointer.strip_prefix(CONTENT) else {
+            moved.push(field.clone());
+            continue;
+        };
+        let (block, rest) = inside.split_at(inside.find('/').unwrap_or(inside.len()));
+        let place = block
+            .parse::<usize>()
+            .ok()
+            .and_then(|block| places.get(block))
+            .ok_or("path origin names no content block")?;
+        if let Some(place) = place {
+            moved.push(crate::session_path_origins::PathField {
+                pointer: format!("{CONTENT}{place}{rest}"),
+                ..field.clone()
+            });
+        }
+    }
+    let imported = project_claude_record(record.clone())
+        .ok_or("a record with other content survives the import")?;
+    Ok(Some(Box::new(
+        crate::session_path_origins::RecordPathOrigins::capture(&imported, moved)?,
+    )))
+}
+
 struct ChainRecord {
     message_id: MessageId,
     parent: Option<MessageId>,
@@ -1697,6 +1752,108 @@ mod tests {
             lineage_digests(&analysis),
             lineage_digests(&analyze_claude_transcript(&plain))
         );
+    }
+
+    /// A record that holds thinking beside other content is rewritten by
+    /// the import. The origins saved for that form give, from the rewritten
+    /// record, the stored record without its thinking: a reference stays a
+    /// reference and plain text stays plain, wherever the record was
+    /// written.
+    #[test]
+    fn a_record_without_its_thinking_is_encoded_from_the_origins_saved_for_it() {
+        use crate::session_path_map::SessionPathMapper;
+        let written = json!({
+            "type": "assistant", "uuid": "a1", "parentUuid": "u1",
+            "sessionId": "s", "cwd": "/fixture/source",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "plain /fixture/destination/a, reference /fixture/source/a"},
+                {"type": "thinking", "thinking": "plan for /fixture/source/hidden", "signature": "s"},
+                {"type": "tool_use", "id": "t", "name": "Read", "input": {
+                    "file_path": "/fixture/source/b",
+                    "/fixture/source/key": "/fixture/destination/plain"
+                }},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "last /fixture/source/c"}
+            ]}
+        });
+        let source = SessionPathMapper::new("/fixture/source", None, None).unwrap();
+        let destination = SessionPathMapper::new("/fixture/destination", None, None).unwrap();
+        let stored = source.encode_record_with_origins(&written, None).unwrap();
+        let pulled = destination
+            .decode_record_with_origins(&stored.wire)
+            .unwrap();
+        let stored_without_thinking = project_claude_record(stored.wire.clone());
+
+        for (mapper, record, origins) in [
+            (&source, &written, &stored.origins),
+            (&destination, &pulled.local, &pulled.origins),
+        ] {
+            let saved = origins_without_thinking(record, &origins.fields)
+                .unwrap()
+                .expect("the record holds thinking beside other content");
+            assert!(saved.rewritten.is_none() && !saved.derived);
+            assert_eq!(
+                saved
+                    .fields
+                    .iter()
+                    .map(|field| field.pointer.as_str())
+                    .collect::<Vec<_>>(),
+                origins
+                    .fields
+                    .iter()
+                    .filter(|field| !field.pointer.starts_with("/message/content/1/"))
+                    .map(|field| field
+                        .pointer
+                        .replace("/content/2/", "/content/1/")
+                        .replace("/content/4/", "/content/2/"))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(saved.fields.len() + 1, origins.fields.len());
+            let imported = project_claude_record(record.clone()).unwrap();
+            assert_eq!(
+                Some(
+                    mapper
+                        .encode_record_with_origins(&imported, Some(&saved))
+                        .unwrap()
+                        .wire
+                ),
+                stored_without_thinking
+            );
+            // The origins are of that form alone.
+            assert!(mapper
+                .encode_record_with_origins(record, Some(&saved))
+                .is_err_and(|refusal| refusal.saved_record_changed));
+        }
+        // Without them the record that was pulled is scanned as a new one,
+        // and its plain text becomes a reference.
+        let imported = project_claude_record(pulled.local.clone()).unwrap();
+        assert_ne!(
+            Some(
+                destination
+                    .encode_record_with_origins(&imported, None)
+                    .unwrap()
+                    .wire
+            ),
+            stored_without_thinking
+        );
+
+        // The import leaves these as they are, or removes them.
+        let mut thinking_only = written.clone();
+        thinking_only["message"]["content"] =
+            json!([{"type": "thinking", "thinking": "plan", "signature": "s"}]);
+        let mut without_thinking = written.clone();
+        without_thinking["message"]["content"] = json!([{"type": "text", "text": "answer"}]);
+        let mut of_the_user = written.clone();
+        of_the_user["type"] = json!("user");
+        let mut text_content = written.clone();
+        text_content["message"]["content"] = json!("answer");
+        for record in [thinking_only, without_thinking, of_the_user, text_content] {
+            assert!(origins_without_thinking(&record, &[]).unwrap().is_none());
+        }
+        // A saved edit that names no block of the content is refused.
+        let mut astray = stored.origins.fields.clone();
+        astray[0].pointer = "/message/content/9/text".into();
+        assert!(origins_without_thinking(&written, &astray).is_err());
     }
 
     #[test]

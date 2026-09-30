@@ -59,9 +59,9 @@ interface Kind {
    glyphs for, in the backend's order. */
 const KINDS: Kind[] = [
   { key: "skill/dir@1", label: "Skills", icon: "lightbulb", providers: ["codex", "claude"] },
-  { key: "plugin/dir@1", label: "Plugins", icon: "puzzle", providers: ["claude"] },
-  { key: "pet/json@1", label: "Pets", icon: "paw", providers: ["codex", "claude"] },
-  { key: "pet/json@2", label: "Pets v2", icon: "cat", providers: ["codex"] },
+  { key: "plugin/dir@1", label: "Plugins", icon: "catalog-plugin", providers: ["claude"] },
+  { key: "pet/json@1", label: "Pets", icon: "catalog-pet-v1", providers: ["codex", "claude"] },
+  { key: "pet/json@2", label: "Pets v2", icon: "catalog-pet-v2", providers: ["codex"] },
 ];
 
 const PROFILES = [

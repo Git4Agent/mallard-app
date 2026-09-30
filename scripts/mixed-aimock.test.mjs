@@ -5,9 +5,29 @@ import { options } from "./mixed-aimock/options.mjs";
 import * as codex from "./live-codex-aimock-server.mjs";
 import * as claude from "./live-claude-aimock-server.mjs";
 import { environment, inspectClaudeTranscript, CLAUDE_ISOLATION_ARGUMENTS } from "./mixed-aimock/process.mjs";
+import { appendedRecords, nextRolloutName, rewrittenBytes } from "./mixed-aimock/reconciliation.mjs";
 
 const source = "/fixture/source/project";
 const destination = "/fixture/destination/project";
+
+test("reconciliation mutations retain native record order and change canonical message bytes", () => {
+  const codex = Buffer.from('{"ordinal":0,"type":"session_meta","payload":{"id":"fixture"}}\n{"ordinal":1,"type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"MIXED_USER"}]}}\n');
+  const appended = JSON.parse(appendedRecords("codex", codex, "fixture", source).toString().trim());
+  assert.equal(appended.ordinal, 2);
+  assert.equal(appended.payload.type, "message");
+  assert.equal(appended.payload.role, "user");
+  const rewritten = rewrittenBytes(codex);
+  assert.equal(rewritten.length, codex.length);
+  assert.match(rewritten.toString(), /FIXED_USER/u);
+  const claude = Buffer.from('{"type":"assistant","uuid":"answer","sessionId":"fixture","message":{"role":"assistant","content":"MIXED_ANSWER"}}\n');
+  const continued = JSON.parse(appendedRecords("claude", claude, "fixture", source).toString().trim());
+  assert.equal(continued.parentUuid, "answer");
+  assert.equal(continued.sessionId, "fixture");
+  assert.equal(continued.message.role, "user");
+  assert.notEqual(continued.uuid, "answer");
+  const replacement = nextRolloutName("rollout-2030-12-31T23-59-59-thread.jsonl", "thread");
+  assert.match(replacement, /^rollout-2031-01-01T00-00-00-thread_/u);
+});
 
 test("xlarge preserves the original counts, tiers, depth, and selected dependency closure", () => {
   const corpus = fixture("xlarge");

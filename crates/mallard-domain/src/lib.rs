@@ -1833,18 +1833,29 @@ pub struct LocalConversationBinding {
     pub root_tail_layout: Option<RootTailLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thread_id: Option<String>,
-    /// Local output byte cutoff from Pull. Native sources use explicit null.
+    /// The byte length of the transcript Pull installed. Native sources use
+    /// explicit null. A Codex rollout is only appended to, so Codex finds
+    /// new children after this place. Claude never reads it as a place in
+    /// the file: see `installed_absent_subagents`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub installed_end: Option<u64>,
-    /// The installed Pull version excluded child transcripts. Native threads
-    /// and bindings without this field keep agent cards visible.
-    #[serde(default)]
-    pub pulled_children_excluded: bool,
     pub installed_subagents: BTreeMap<SubagentKey, InstalledSubagent>,
+    /// Provider IDs of the children that the installed Claude transcript
+    /// refers to and Pull did not install. A reference is known by the
+    /// child it names, never by its place in the file, because the Claude
+    /// desktop app may rewrite the file.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub installed_absent_subagents: BTreeSet<String>,
     pub materialization_state: ConversationMaterializationState,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Versions 0.1.3 to 0.1.5 wrote this flag for the agent cards of the
+    /// whole session. Their files are still read: the key is accepted,
+    /// never used, and never written again. The page knows each child by
+    /// `installed_subagents` and `installed_absent_subagents`.
+    #[serde(default, skip_serializing)]
+    pub pulled_children_excluded: bool,
 }
 
 impl LocalConversationBinding {
@@ -1855,10 +1866,22 @@ impl LocalConversationBinding {
             .is_some_and(|end| end == 0 || end > MAX_CONVERSATION_FILE_BYTES)
             || (self.installed_end.is_none() && !self.installed_subagents.is_empty())
             || (self.installed_end.is_some() && self.provider_thread_id.is_none())
-            || (self.pulled_children_excluded
-                && (self.installed_end.is_none() || !self.installed_subagents.is_empty()))
         {
             return Err("conversation binding has invalid installation cutoffs".to_string());
+        }
+        if self.installed_absent_subagents.len() >= MAX_CONVERSATION_FILES
+            || (self.installed_end.is_none() && !self.installed_absent_subagents.is_empty())
+            || self.installed_absent_subagents.iter().any(|id| {
+                id.is_empty()
+                    || id.len() > 128
+                    || id.chars().any(char::is_control)
+                    || self
+                        .installed_subagents
+                        .values()
+                        .any(|child| &child.provider_thread_id == id)
+            })
+        {
+            return Err("conversation binding has invalid absent child references".to_string());
         }
         let mut child_ids = BTreeSet::new();
         for child in self.installed_subagents.values() {
@@ -2064,6 +2087,9 @@ impl ConversationBindings {
                 && (binding.installed_end.is_some() || !binding.installed_subagents.is_empty())
             {
                 return Err("provider does not support child installation metadata".into());
+            }
+            if provider.as_str() != "claude" && !binding.installed_absent_subagents.is_empty() {
+                return Err("provider does not record absent child references".into());
             }
             if let Some(parent_id) = &binding.provider_thread_id {
                 if !native_owners.insert((
@@ -3360,6 +3386,9 @@ pub struct ConversationTailPins {
     pub missing_local_subagents: BTreeSet<SubagentKey>,
     /// Temporary source scope for Compare and Push; never cloud metadata.
     pub subagents_omitted: bool,
+    /// A Pull that updates this session leaves the children that only this
+    /// computer has in their place, as children of the session.
+    pub local_only_subagents_kept: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<PortableConversationTail>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3410,7 +3439,11 @@ impl ConversationTailPins {
                     TailClassification::Unknown
                 }
             });
-        let relation = fold_conversation_relations(compare_conversation_tail(&evidence), children);
+        let relation = fold_conversation_relations(
+            compare_conversation_tail(&evidence),
+            children,
+            self.local_only_subagents_kept,
+        );
         match invalid {
             Some(blocker) => Err(format!(
                 "conversation child evidence is invalid: {blocker:?}"
@@ -5837,8 +5870,9 @@ pub use conversation_tail::{
     compute_portable_conversation_tail_with_codec, conversation_prefix_witness,
     AcceptedConversationVersion, ConversationCheckpoint, ConversationPrefixWitness,
     PhysicalMappingState, PortableConversationTail, RawRangePin, RootPhysicalMapping,
-    RootTailLayout, TailAccumulator, TailPartitionKind, CLAUDE_PORTABLE_TAIL_CODEC_V1,
-    CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1, PORTABLE_TAIL_CODEC_V1, PORTABLE_TAIL_CODEC_WIRE_V1,
+    RootTailLayout, SourceFileIdentity, SourceFileState, TailAccumulator, TailPartitionKind,
+    CLAUDE_PORTABLE_TAIL_CODEC_V1, CLAUDE_PORTABLE_TAIL_CODEC_WIRE_V1, PORTABLE_TAIL_CODEC_V1,
+    PORTABLE_TAIL_CODEC_WIRE_V1,
 };
 pub use conversation_tail_relation::{
     compare_conversation_tail, compare_subagent_tail, fold_conversation_relations, SyncCurrency,

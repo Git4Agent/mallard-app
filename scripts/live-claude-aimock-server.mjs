@@ -185,19 +185,34 @@ function validateReadPath(value) {
   }
 }
 
+function validateThinking(value, label) {
+  assertExactKeys(value, ["reasoning", "redacted_thinking"], label);
+  if (!isBoundedString(value.reasoning, 16 * 1024) ||
+      !Array.isArray(value.redacted_thinking) ||
+      value.redacted_thinking.length > 4 ||
+      value.redacted_thinking.some((item) => !isBoundedString(item, 1024))) {
+    throw new Error(`${label}_content`);
+  }
+  return value;
+}
+
 function validateResponse(value, label) {
   if (!isRecord(value) || typeof value.kind !== "string") {
     throw new Error(`${label}_shape`);
   }
+  const thinkingKeys = Object.hasOwn(value, "thinking") ? ["thinking"] : [];
+  const thinking = thinkingKeys.length
+    ? { thinking: validateThinking(value.thinking, `${label}_thinking`) }
+    : {};
   if (value.kind === "text") {
-    assertExactKeys(value, ["content", "kind"], label);
+    assertExactKeys(value, ["content", "kind", ...thinkingKeys], label);
     if (!isAssistantContent(value.content)) {
       throw new Error(`${label}_content`);
     }
-    return { kind: "text", content: value.content };
+    return { kind: "text", content: value.content, ...thinking };
   }
   if (value.kind === "read_tool") {
-    assertExactKeys(value, ["call_id", "file_path", "kind"], label);
+    assertExactKeys(value, ["call_id", "file_path", "kind", ...thinkingKeys], label);
     if (
       typeof value.call_id !== "string" ||
       !CALL_ID_PATTERN.test(value.call_id)
@@ -209,6 +224,7 @@ function validateResponse(value, label) {
       kind: "read_tool",
       call_id: value.call_id,
       file_path: value.file_path,
+      ...thinking,
     };
   }
   throw new Error(`${label}_kind`);
@@ -723,6 +739,10 @@ function fixedFixtureResponse(document, scenario) {
     id: `msg_${scenario.id}`,
     model: document.model,
     usage: { input_tokens: 1, output_tokens: 1 },
+    ...(scenario.response.thinking ? {
+      reasoning: scenario.response.thinking.reasoning,
+      redactedThinking: scenario.response.thinking.redacted_thinking,
+    } : {}),
   };
   if (scenario.response.kind === "text") {
     return { content: scenario.response.content, ...overrides };

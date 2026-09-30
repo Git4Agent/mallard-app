@@ -214,7 +214,7 @@ function Card({ name, says, note, paths, ink, blobs }: Omit<Candidate, "key"> & 
             <span className="mk-sibs">
               <Mark paths={paths} /> beside its siblings
               <Icon name="lightbulb" size={14} />
-              <Icon name="paw" size={14} />
+              <Icon name="catalog-pet-v1" size={14} />
             </span>
             · and the set: <Icon name="tool" size={14} /><Icon name="catalog" size={14} />
             <Icon name="file" size={14} /><Icon name="folder" size={14} /><Icon name="token" size={14} />
@@ -236,7 +236,7 @@ function Mockup() {
       <h1 className="mk-title">Plugin marks</h1>
       <p className="mk-lede">
         The mark never appears alone — Skills and Pets sit in the same lists — so being distinct from
-        <Icon name="lightbulb" size={13} /> and <Icon name="paw" size={13} /> comes before anything else.
+        <Icon name="lightbulb" size={13} /> and <Icon name="catalog-pet-v1" size={13} /> comes before anything else.
         Each candidate is hollow, on the 24-unit grid, and measured against the set's band of 15–48 ink
         (mean 32). Judge them at 14px in the row; the plate is for shape only.
       </p>

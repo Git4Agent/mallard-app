@@ -228,7 +228,7 @@ test("Reset Mallard wipes ~/.mallard behind a warning confirm and restarts", () 
   // would recreate ~/.mallard/logs the reset just deleted).
   assert.match(reset, /acquire_state_guard\(\)/);
   assert.match(reset, /wipe_local_state\(\)/);
-  assert.match(reset, /session_watch_service\(\)\.reset_all_caches\(\);/);
+  assert.match(reset, /observation_cache\(\)\.reset\(\);/);
   assert.match(reset, /ConfigWatcher::start\(app\.clone\(\)\)/);
   assert.doesNotMatch(reset, /request_restart|restart_app/);
   assert.doesNotMatch(reset, /local_state_reset_(completed|succeeded)/);
@@ -254,13 +254,14 @@ test("Performance settings persist through the backend tuning document", () => {
 
   // Rust side: one schema-1 document whose every field carries a serde
   // default (a partial file parses), hard-reject validation, and an update
-  // that persists, installs, then drops the caches that baked the old
-  // limits in — the watcher hears no filesystem event for a settings change.
+  // that persists, installs, then drops the observations that baked the old
+  // limits in — a settings change touches no session file, so their stamps
+  // would all still hold.
   assert.match(document, /pub const APP_SETTINGS_SCHEMA: u32 = 1;/);
   assert.match(document, /#\[serde\(default = "default_conversation_file_limit_bytes"\)\]/);
   assert.match(document, /#\[serde\(default = "default_timeline_preview_limit_bytes"\)\]/);
   assert.match(commands, /save_app_settings\(repository, settings\)\?;\s*install_app_settings\(settings\);/);
-  assert.match(commands, /reset_all_caches_and_purge_disk\(repository\.root\(\)\)/);
+  assert.match(commands, /observation_cache\(\)\.reset_and_purge_disk\(repository\.root\(\)\)/);
   assert.match(lib, /app_settings::get_app_settings,\s*app_settings::update_app_settings,/);
 
   // Startup makes the stored values live before the first command; the

@@ -477,10 +477,10 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   assert.match(html, />Push review</);
   assert.match(html, /sync-sync-review-title/);
   assert.doesNotMatch(html, /Choose what to include/);
-  assert.match(html, /aria-label="Use recommended selection \(1\)"/);
+  assert.match(html, /class="btn sync-sync-review-select"[^>]*>.*?Select <span class="sync-path-count">1<\/span>/);
   assert.match(html, /aria-label="Clear current selection"/);
   assert.match(html, /aria-label="Close push review"/);
-  const recommendedAction = html.indexOf('aria-label="Use recommended selection (1)"');
+  const recommendedAction = html.indexOf('class="btn sync-sync-review-select"');
   const clearAction = html.indexOf('aria-label="Clear current selection"');
   const closeAction = html.indexOf('aria-label="Close push review"');
   assert.ok(recommendedAction < clearAction && clearAction < closeAction);
@@ -586,7 +586,9 @@ test("a failed comparison names the error and offers no reset", () => {
 });
 
 test("two steps render two plain tabs — never a Review tab", () => {
-  const resource = memoryResource("review");
+  // A tool, not a conversation: without a comparison no conversation is
+  // listed, and a review with nothing listed trades Push for its exit.
+  const resource: InventoryResource = { ...memoryResource("review"), category: "tools" };
   const html = renderToStaticMarkup(
     <PushResourceWorkspace
       credentialRedactionEnabled={true}

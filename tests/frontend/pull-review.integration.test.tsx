@@ -29,7 +29,7 @@ import {
   pullBudgetTotal,
   recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
-import { reviewBudgetSentence } from "../../src/components/sync-review/ReviewBudgetMeter";
+import { ReviewBudgetGlance, reviewBudgetSentence } from "../../src/components/sync-review/ReviewBudgetMeter";
 import {
   applyPullReview,
   beginPullReview,
@@ -231,7 +231,7 @@ test("keep-both is one reviewed action with no second resolution payload", () =>
   const html = renderReview(plan);
   assert.match(html, /Not selected/);
   assert.match(html, /Select Conversation/);
-  assert.match(html, /Use recommended selection \(1\)/);
+  assert.match(html, /class="btn sync-sync-review-select"[^>]*>.*?Select <span class="sync-path-count">1<\/span>/);
   assert.doesNotMatch(html, /radiogroup|Fork and overwrite|Discard the local branch/);
 });
 
@@ -272,7 +272,7 @@ test("a mixed Pull starts empty and selecting one project file restores only tha
   const html = renderReview(plan);
   assert.match(html, /aria-label="Sessions, 0 selected"/);
   assert.match(html, /aria-label="Project files, 0 selected"/);
-  assert.match(html, /aria-label="Use recommended selection \(1\)"/);
+  assert.match(html, /class="btn sync-sync-review-select"[^>]*>.*?Select <span class="sync-path-count">1<\/span>/);
 
   const selection = buildPullReviewSelection(
     items,
@@ -942,13 +942,13 @@ test("the Pull review meters what it would install in both pinned zones, and eac
   // pull direction; only the footer's announces.
   assert.equal(html.match(/class="sync-review-budget-figure"/g)?.length, 2);
   assert.match(html, /class="sync-review-budget-glance" title="Sessions 0 B · Setup &amp; tools 0 B · Project files 0 B"/);
-  assert.match(html, /class="sync-review-budget-track pull"/);
+  assert.match(html, /class="sync-review-budget-track"/);
   assert.match(html, /class="sync-review-budget-gauge pull"[^>]*role="status"/);
   assert.equal(html.match(/class="sync-review-budget[^"]*"[^>]*role="status"/g)?.length, 1);
   assert.match(html, /role="meter"[^>]*aria-label="Pull size"[^>]*aria-valuemax="536870912"[^>]*aria-valuenow="0"/);
   assert.match(html, /aria-valuetext="This pull · 0 B of 512 MB"/);
   // Nothing is ticked at open, so nothing refuses and the meter is empty.
-  assert.doesNotMatch(html, /sync-review-budget-sentence|class="sync-review-budget-track pull over"/);
+  assert.doesNotMatch(html, /sync-review-budget-sentence|class="sync-review-budget-track over"/);
   // The list row prints what a pull of it installs.
   assert.match(html, /Conversation · Codex · 96 MB/);
 });
@@ -1063,13 +1063,29 @@ test("the sessions step's recommended selection is the newest sessions that fit,
     [...fitPullRecommendation(withHuge, withHuge, new Set(), LIMIT)],
     ["codex:conversation:cloudthread-newest"],
   );
-  // The review's ✓ reads the fitted set: two sessions are safe, one fits.
+  // The review's Select reads the fitted set: two sessions are safe, one
+  // fits. The words and the count name the button; the title says why.
   const html = renderReview({
     ...plan,
     actions: [],
     conversation_review: [storedSession("older", 300 * MB, 200), storedSession("newest", 300 * MB, 300)],
   });
-  assert.match(html, /title="Select the newest sessions that fit this pull \(1\)"[^>]*aria-label="Use recommended selection \(1\)"/);
+  assert.match(html, /class="btn sync-sync-review-select" title="Select the newest sessions that fit this pull \(1\)">.*?Select <span class="sync-path-count">1<\/span><\/button>/);
+  assert.doesNotMatch(html, /Use recommended selection/);
+});
+
+test("only the Pull header draws a track, and past the limit it marks where the limit fell", () => {
+  const over = { total: 599 * MB, limit: LIMIT };
+  const pull = renderToStaticMarkup(<ReviewBudgetGlance budget={over} verb="pull" breakdown="" />);
+  // Scaled to the total, so the fill visibly runs past the tick: 512 of 599
+  // MB is 85.4% along.
+  assert.match(pull, /class="sync-review-budget-track over"[^>]*>.*?<b style="left:85\.4/);
+  assert.match(pull, /class="sync-review-budget-figure over"/);
+  // The Push header has no room for the bar; its figure carries the same
+  // overshoot and the footer gauge still fills.
+  const push = renderToStaticMarkup(<ReviewBudgetGlance budget={over} verb="push" breakdown="" />);
+  assert.doesNotMatch(push, /sync-review-budget-track/);
+  assert.match(push, /class="sync-review-budget-figure over"[^>]*>.*?<b>\+87 MB<\/b>/);
 });
 
 test("a review with sessions paints its list in bone on the first render and holds what measures rows", () => {

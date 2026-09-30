@@ -88,6 +88,7 @@ pub use mallard_infrastructure::project_activity::{ProjectActivity, ProjectSessi
 use mallard_infrastructure::provider_capture::{
     self, kind_primitive, CaptureRequest, Discovery, LocalSessionView, ResourceCandidate,
 };
+use mallard_infrastructure::providers::claude::publication::EncodedMainTranscript;
 use mallard_infrastructure::providers::claude::subagents as claude_subagents;
 use mallard_infrastructure::providers::codex::first_codex_user_summary;
 use mallard_infrastructure::providers::AgentProviderRegistry;
@@ -104,7 +105,9 @@ pub use mallard_infrastructure::session_detail::{
     ProjectSessionTimelineRequest, SessionDetailError, SessionDetailErrorCode,
 };
 use mallard_infrastructure::session_path_map::{validate_pathmap_root, SessionPathMapper};
-use mallard_infrastructure::session_path_origins::{PathOrigins, PathOriginsOwner};
+use mallard_infrastructure::session_path_origins::{
+    EncodeRefusal, OriginLookup, PathOrigins, PathOriginsOwner,
+};
 use mallard_infrastructure::storage_core::publication::unfinished_push_sentence;
 use mallard_infrastructure::storage_core::{
     clear_managed_storage_data, ConfiguredObjectStore, ManagedStorageClearResult, VerifiedBody,
@@ -997,7 +1000,6 @@ pub(super) fn delete_local_project_sessions_with_repository(
         provider_registry(),
         local_project_id,
         expected_project_revision,
-        &mut |home| super::session_watch_service::session_watch_service().force_rebaseline(home),
     )
 }
 
@@ -1587,7 +1589,6 @@ pub(super) fn delete_local_project_session_with_repository(
         provider_registry(),
         local_project_id,
         resource_id,
-        &mut |home| super::session_watch_service::session_watch_service().force_rebaseline(home),
     )
 }
 
@@ -1674,8 +1675,7 @@ fn load_project_session_views(
             "Mallard could not revalidate this session's local ownership.",
         )
     })?;
-    let (_, views) = super::session_watch_service::session_watch_service()
-        .discovery_for(provider_registry(), local_project_id, &capture_request)
+    let (_, views) = provider_capture::discover_sessions(provider_registry(), &capture_request)
         .map_err(|_| {
             session_detail_error(
                 SessionDetailErrorCode::ProviderError,
@@ -3603,7 +3603,6 @@ pub(crate) struct LocalThreadReview {
     pub(crate) provider_thread_id: String,
     pub(crate) source_path: PathBuf,
     pub(crate) source_mtime: u64,
-    pub(crate) source_size: u64,
     /// Transcript plus sidecars, what a push capture of this thread weighs.
     pub(crate) capture_bytes: u64,
     pub(crate) captured: Option<CapturedThread>,
@@ -3881,13 +3880,20 @@ fn synthesized_whole_thread_tail(
     }
 }
 
+/// A cursor an observation derived and the stamp of the file it was read
+/// from: what a checkpoint saves as its physical mapping.
+struct SeededCursor {
+    root: CodexSeededRoot,
+    source: jsonl_tail_io::SourceStamp,
+}
+
 /// A worker's complete observation outcome.
 pub(crate) struct ProviderLocalObservation {
     observation: LocalTailObservation,
-    seeded: Option<CodexSeededRoot>,
-    /// Physical files the derivation read; empty when the outcome must not
-    /// be retained by the watch service.
-    depends_on: Vec<PathBuf>,
+    seeded: Option<SeededCursor>,
+    /// Physical files the derivation read, each under its read-time stamp;
+    /// empty when the outcome must not be retained.
+    depends_on: jsonl_tail_io::SourceStamps,
 }
 
 /// A parallel observation worker's slot value.
@@ -3906,8 +3912,8 @@ fn take_observation_outcome(
 }
 
 /// One reviewed thread's derived local state. Serializable because the
-/// watch service persists observations to disk between processes; the
-/// value is a pure function of the session bytes it was derived from.
+/// observation cache persists it between processes; the value is a pure
+/// function of the session bytes it was derived from.
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct LocalTailObservation {
     /// Read-time evidence for same-process Push reuse. Disk observations do
@@ -3926,6 +3932,10 @@ pub(crate) struct LocalTailObservation {
     /// the full-resolve path; it never comes from a cursor ride or any
     /// non-verifying branch.
     verified_acceptance: Option<VerifiedAdoption>,
+    /// The session no longer continues the version that was accepted: see
+    /// `edited_since_acceptance`. The comparison reads the accepted pins
+    /// of such a session as absent, and no cursor is saved from the read.
+    edited_since_acceptance: bool,
 }
 
 /// A full derivation and the exact files it read. This stays in memory;
@@ -4137,6 +4147,68 @@ fn adopt_codex_artifact(
     })
 }
 
+/// The complete records of one transcript and the names their saved digests
+/// are kept under.
+struct AcceptedRecords<'a> {
+    records_of: &'a str,
+    length_of: &'a str,
+    complete: &'a [u8],
+}
+
+/// Whether the messages up to the accepted end still give the accepted
+/// value. The messages and the accepted version are of one form, local or
+/// wire.
+fn accepted_prefix_matches(
+    accepted: &PortableConversationTail,
+    chain: &[mallard_domain::CanonicalConversationMessage],
+) -> bool {
+    mallard_domain::compute_conversation_tail_state(
+        accepted.partition_kind,
+        accepted.start_record_count,
+        accepted.accepted_end_record_count,
+        chain,
+    )
+    .is_ok_and(|state| state == accepted.accepted_tail_state)
+}
+
+/// Whether a session that was read in full was edited after it was
+/// accepted. Three things make an edit, asked in the order of their cost:
+///
+/// - the session has more messages than its accepted version, the one
+///   comparison that takes the accepted messages on trust;
+/// - the messages up to the accepted end no longer give the accepted
+///   value; and
+/// - a record whose digest was saved at the last Push or Pull changed or
+///   is missing, which is what the first encoding of a Push refuses.
+///
+/// A rewind changes the messages and no record. A Claude desktop import
+/// changes records and no message. Neither is an edit. A session without
+/// saved digests, or whose digests cannot be read, is not marked either:
+/// the Push reports that itself.
+fn edited_since_acceptance(
+    repository: &LocalStateRepository,
+    accepted: Option<&PortableConversationTail>,
+    binding: Option<&LocalConversationBinding>,
+    chain: &[mallard_domain::CanonicalConversationMessage],
+    records: AcceptedRecords<'_>,
+) -> bool {
+    let Some(accepted) = accepted else {
+        return false;
+    };
+    chain.len() as u64 > accepted.accepted_end_record_count
+        && !accepted_prefix_matches(accepted, chain)
+        && binding
+            .filter(|row| row.path_origins_ref.is_some())
+            .and_then(|row| repository.load_path_origins(row).ok())
+            .is_some_and(|origins| {
+                !origins.accepted_records_hold(
+                    records.records_of,
+                    records.length_of,
+                    records.complete,
+                )
+            })
+}
+
 /// Derive local Codex evidence: ride the checkpoint cursor when it is valid,
 /// fall back to a full re-resolve, and seed first-contact state. Returns the
 /// observation plus the refreshed checkpoint value to persist.
@@ -4174,9 +4246,10 @@ fn observe_codex_local(
                 evidence: TailSideEvidence::ConfirmedAbsent,
                 raw_range_pin: None,
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             },
             seeded: None,
-            depends_on: Vec::new(),
+            depends_on: Default::default(),
         });
     };
     let source = local.source_path.clone();
@@ -4186,17 +4259,23 @@ fn observe_codex_local(
         .unwrap_or_default();
     let lookup = codex_rollout_lookup(provider_home);
 
-    // A valid Ready checkpoint under a matching layout rides the cursor;
-    // an adoption probe needs the canonical chain and takes the full
-    // resolve below instead.
+    // A valid Ready checkpoint under a matching layout rides the cursor on
+    // the file it was saved from, untouched or grown since. Any other file
+    // state, and a cursor saved without one, takes the full resolve below:
+    // the content decides, never the stamp. An adoption probe needs the
+    // canonical chain and takes the full resolve as well.
     if let (Some(checkpoint), Some(layout), None) = (checkpoint, layout, adoption_probe) {
         if let PhysicalMappingState::Ready {
             root_mapping,
             raw_range_pin,
+            source_state: Some(saved),
         } = &checkpoint.physical
         {
+            // The stat keeps a changed file from being read twice; the
+            // window's own stamp, below, is the one that decides.
             if layout.matches(&checkpoint.observed_tail)
                 && root_mapping.root_path == source.to_string_lossy()
+                && jsonl_tail_io::SourceStamp::stat(&source).is_ok_and(|now| now.continues(saved))
             {
                 let tail = match jsonl_tail_io::read_tail_window(&source, root_mapping) {
                     Ok(tail) => tail,
@@ -4209,21 +4288,27 @@ fn observe_codex_local(
                                 evidence: TailSideEvidence::Invalid,
                                 raw_range_pin: None,
                                 verified_acceptance: None,
+                                edited_since_acceptance: false,
                             },
                             seeded: None,
-                            depends_on: Vec::new(),
+                            depends_on: Default::default(),
                         })
                     }
                 };
-                match codex_history_graph::refresh_codex_tail_with_records(
-                    layout,
-                    &checkpoint.observed_tail,
-                    root_mapping,
-                    &tail,
-                    &mut |record, offset| {
-                        codex_subagents::record_creation(&mut creations, record, offset)
-                    },
-                )? {
+                let refresh = if tail.stamp.continues(saved) {
+                    codex_history_graph::refresh_codex_tail_with_records(
+                        layout,
+                        &checkpoint.observed_tail,
+                        root_mapping,
+                        &tail,
+                        &mut |record, offset| {
+                            codex_subagents::record_creation(&mut creations, record, offset)
+                        },
+                    )?
+                } else {
+                    codex_history_graph::CodexTailRefresh::NeedsFullResolve
+                };
+                match refresh {
                     codex_history_graph::CodexTailRefresh::Unchanged => {
                         return Ok(ProviderLocalObservation {
                             observation: LocalTailObservation {
@@ -4232,7 +4317,7 @@ fn observe_codex_local(
                                 discovery: if previous_discovery.is_some() {
                                     Some(codex_subagents::DiscoveryObservation {
                                         mapping: root_mapping.clone(),
-                                        stamp: jsonl_tail_io::SourceStamp::read(&source)?,
+                                        stamp: tail.stamp.clone(),
                                         creations: creations.clone(),
                                     })
                                 } else {
@@ -4243,9 +4328,10 @@ fn observe_codex_local(
                                 ),
                                 raw_range_pin: Some(raw_range_pin.clone()),
                                 verified_acceptance: None,
+                                edited_since_acceptance: false,
                             },
                             seeded: None,
-                            depends_on: vec![source.clone()],
+                            depends_on: jsonl_tail_io::SourceStamps::of(&source, &tail.stamp),
                         });
                     }
                     codex_history_graph::CodexTailRefresh::Extended {
@@ -4261,12 +4347,13 @@ fn observe_codex_local(
                         // range read whose overlap with the window must match
                         // byte-for-byte, else the file raced and the
                         // observation fails closed.
+                        let mut depends_on = jsonl_tail_io::SourceStamps::of(&source, &tail.stamp);
                         let range_bytes = if range_start >= tail.window_offset {
                             tail.bytes[(range_start - tail.window_offset) as usize
                                 ..(mapping.consumed_byte_offset - tail.window_offset) as usize]
                                 .to_vec()
                         } else {
-                            let range = match jsonl_tail_io::read_range(
+                            let (range, range_stamp) = match jsonl_tail_io::read_range(
                                 &source,
                                 range_start,
                                 mapping.consumed_byte_offset,
@@ -4280,9 +4367,7 @@ fn observe_codex_local(
                                             discovery: if previous_discovery.is_some() {
                                                 Some(codex_subagents::DiscoveryObservation {
                                                     mapping: mapping.clone(),
-                                                    stamp: jsonl_tail_io::SourceStamp::read(
-                                                        &source,
-                                                    )?,
+                                                    stamp: tail.stamp.clone(),
                                                     creations: creations.clone(),
                                                 })
                                             } else {
@@ -4291,12 +4376,17 @@ fn observe_codex_local(
                                             evidence: TailSideEvidence::Invalid,
                                             raw_range_pin: None,
                                             verified_acceptance: None,
+                                            edited_since_acceptance: false,
                                         },
                                         seeded: None,
-                                        depends_on: Vec::new(),
+                                        depends_on: Default::default(),
                                     })
                                 }
                             };
+                            // A second read of the same file: under another
+                            // stamp the outcome serves this review and is
+                            // not retained.
+                            depends_on.record(&source, &range_stamp);
                             let overlap_from = (tail.window_offset - range_start) as usize;
                             let trusted = &tail.bytes
                                 [..(mapping.consumed_byte_offset - tail.window_offset) as usize];
@@ -4308,7 +4398,7 @@ fn observe_codex_local(
                                         discovery: if previous_discovery.is_some() {
                                             Some(codex_subagents::DiscoveryObservation {
                                                 mapping: mapping.clone(),
-                                                stamp: jsonl_tail_io::SourceStamp::read(&source)?,
+                                                stamp: tail.stamp.clone(),
                                                 creations: creations.clone(),
                                             })
                                         } else {
@@ -4317,9 +4407,10 @@ fn observe_codex_local(
                                         evidence: TailSideEvidence::Invalid,
                                         raw_range_pin: None,
                                         verified_acceptance: None,
+                                        edited_since_acceptance: false,
                                     },
                                     seeded: None,
-                                    depends_on: Vec::new(),
+                                    depends_on: Default::default(),
                                 });
                             }
                             range
@@ -4340,7 +4431,7 @@ fn observe_codex_local(
                                 discovery: if previous_discovery.is_some() {
                                     Some(codex_subagents::DiscoveryObservation {
                                         mapping: mapping.clone(),
-                                        stamp: jsonl_tail_io::SourceStamp::read(&source)?,
+                                        stamp: tail.stamp.clone(),
                                         creations: creations.clone(),
                                     })
                                 } else {
@@ -4349,16 +4440,20 @@ fn observe_codex_local(
                                 evidence: TailSideEvidence::Present(observed_tail.clone()),
                                 raw_range_pin: Some(pin.clone()),
                                 verified_acceptance: None,
+                                edited_since_acceptance: false,
                             },
-                            seeded: Some(CodexSeededRoot {
-                                layout: layout.clone(),
-                                observed_tail,
-                                prefix_witness: checkpoint.prefix_witness.clone(),
-                                mapping,
-                                lineage_digest: String::new(),
-                                semantic_digest: String::new(),
+                            seeded: Some(SeededCursor {
+                                root: CodexSeededRoot {
+                                    layout: layout.clone(),
+                                    observed_tail,
+                                    prefix_witness: checkpoint.prefix_witness.clone(),
+                                    mapping,
+                                    lineage_digest: String::new(),
+                                    semantic_digest: String::new(),
+                                },
+                                source: tail.stamp.clone(),
                             }),
-                            depends_on: vec![source.clone()],
+                            depends_on,
                         });
                     }
                     codex_history_graph::CodexTailRefresh::NeedsFullResolve => {}
@@ -4371,9 +4466,10 @@ fn observe_codex_local(
                                 evidence: TailSideEvidence::Invalid,
                                 raw_range_pin: None,
                                 verified_acceptance: None,
+                                edited_since_acceptance: false,
                             },
                             seeded: None,
-                            depends_on: Vec::new(),
+                            depends_on: Default::default(),
                         });
                     }
                 }
@@ -4406,9 +4502,10 @@ fn observe_codex_local(
                     evidence: TailSideEvidence::Invalid,
                     raw_range_pin: None,
                     verified_acceptance: None,
+                    edited_since_acceptance: false,
                 },
                 seeded: None,
-                depends_on: Vec::new(),
+                depends_on: Default::default(),
             })
         }
     };
@@ -4426,9 +4523,10 @@ fn observe_codex_local(
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             },
             seeded: None,
-            depends_on: Vec::new(),
+            depends_on: Default::default(),
         });
     };
     // First-contact adoption (§6.4): encode the local thread under its own
@@ -4478,9 +4576,10 @@ fn observe_codex_local(
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             },
             seeded: None,
-            depends_on: Vec::new(),
+            depends_on: Default::default(),
         });
     }
     let accepted_start = checkpoint
@@ -4502,9 +4601,26 @@ fn observe_codex_local(
             .as_slice(),
         ),
     };
+    let leaf = resolved
+        .segments
+        .last()
+        .ok_or("resolved Codex root has no segments")?;
+    let edited = edited_since_acceptance(
+        repository,
+        checkpoint.and_then(|checkpoint| checkpoint.accepted_local_tail.as_ref()),
+        local.binding.as_ref(),
+        &resolved.chain,
+        AcceptedRecords {
+            records_of: &leaf.rollout_id,
+            length_of: &leaf.provider_thread_id,
+            complete: &leaf_bytes[..leaf.consumed_byte_len as usize],
+        },
+    );
     let outcome = ProviderLocalObservation {
         observation: LocalTailObservation {
-            push_reuse: Some(PushObservationEvidence {
+            // An edited session is never published and saves no cursor: the
+            // next comparison reads it in full again.
+            push_reuse: (!edited).then(|| PushObservationEvidence {
                 seeded: seeded.clone(),
                 layout: layout.cloned(),
                 sources: sources
@@ -4522,12 +4638,15 @@ fn observe_codex_local(
             evidence: TailSideEvidence::Present(seeded.observed_tail.clone()),
             raw_range_pin: Some(pin),
             verified_acceptance,
+            edited_since_acceptance: edited,
         },
-        seeded: Some(seeded),
-        depends_on: resolved
-            .segments
+        seeded: (!edited).then(|| SeededCursor {
+            root: seeded,
+            source: leaf_stamp.clone(),
+        }),
+        depends_on: sources
             .iter()
-            .map(|segment| segment.path.clone())
+            .map(|(path, (_, stamp))| (path, stamp))
             .collect(),
     };
     if let Some(roots) = reviewed_roots {
@@ -4629,9 +4748,10 @@ fn observe_claude_local(
             evidence: TailSideEvidence::Invalid,
             raw_range_pin: None,
             verified_acceptance: None,
+            edited_since_acceptance: false,
         },
         seeded: None,
-        depends_on: Vec::new(),
+        depends_on: Default::default(),
     };
     let Some(local) = local else {
         return Ok(ProviderLocalObservation {
@@ -4642,9 +4762,10 @@ fn observe_claude_local(
                 evidence: TailSideEvidence::ConfirmedAbsent,
                 raw_range_pin: None,
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             },
             seeded: None,
-            depends_on: Vec::new(),
+            depends_on: Default::default(),
         });
     };
     let source = local.source_path.clone();
@@ -4665,7 +4786,7 @@ fn observe_claude_local(
         let mapping = outcome
             .seeded
             .as_ref()
-            .map(|seeded| &seeded.mapping)
+            .map(|seeded| &seeded.root.mapping)
             .or_else(|| {
                 checkpoint.and_then(|checkpoint| match &checkpoint.physical {
                     PhysicalMappingState::Ready { root_mapping, .. } => Some(root_mapping),
@@ -4682,28 +4803,30 @@ fn observe_claude_local(
             // Keep the proven parent; None remains unproven child evidence.
             return Ok(outcome);
         };
-        outcome.depends_on.extend(tree.dependencies.iter().cloned());
-        outcome.depends_on.sort();
-        outcome.depends_on.dedup();
+        outcome.depends_on.extend(&tree.dependencies);
         outcome.observation.subagents = Some(owned_subagents::TreeObservation::Claude(tree));
         Ok(outcome)
     };
 
     let mut cold_bytes = None;
-    // A valid Ready checkpoint under a matching layout rides the cursor; an
-    // adoption probe needs the canonical chain and takes the full path.
+    // A valid Ready checkpoint under a matching layout rides the cursor on
+    // the file it was saved from, untouched or grown since. Any other file
+    // state, and a cursor saved without one, takes the full path: the
+    // content decides, never the stamp. An adoption probe needs the
+    // canonical chain and takes the full path as well.
     if let (Some(checkpoint), Some(layout), None) = (checkpoint, layout, adoption_probe) {
         if let PhysicalMappingState::Ready {
             root_mapping,
             raw_range_pin,
+            source_state: Some(saved),
         } = &checkpoint.physical
         {
             if layout.matches(&checkpoint.observed_tail)
                 && root_mapping.root_path == source.to_string_lossy()
+                && stamp.continues(saved)
             {
                 if previous.is_none() {
                     let bytes = jsonl_tail_io::read_bounded(&source)?;
-                    claude_subagents::validate_installed_cutoff(&bytes, local.binding.as_ref())?;
                     let complete = jsonl_tail_io::safe_record_end(&bytes) as usize;
                     links = claude_subagents::collect_main_links(
                         &bytes[..complete],
@@ -4738,9 +4861,10 @@ fn observe_claude_local(
                                         ),
                                         raw_range_pin: Some(raw_range_pin.clone()),
                                         verified_acceptance: None,
+                                        edited_since_acceptance: false,
                                     },
                                     seeded: None,
-                                    depends_on: vec![source.clone()],
+                                    depends_on: jsonl_tail_io::SourceStamps::of(&source, &stamp),
                                 },
                                 links,
                             );
@@ -4768,7 +4892,7 @@ fn observe_claude_local(
                                     range_start,
                                     mapping.consumed_byte_offset,
                                 ) {
-                                    Ok(range) => {
+                                    Ok((range, _)) => {
                                         let overlap_from =
                                             (tail.window_offset - range_start) as usize;
                                         let trusted = &tail.bytes[..(mapping.consumed_byte_offset
@@ -4802,16 +4926,22 @@ fn observe_claude_local(
                                             ),
                                             raw_range_pin: Some(pin),
                                             verified_acceptance: None,
+                                            edited_since_acceptance: false,
                                         },
-                                        seeded: Some(CodexSeededRoot {
-                                            layout: layout.clone(),
-                                            observed_tail,
-                                            prefix_witness: None,
-                                            mapping,
-                                            lineage_digest: String::new(),
-                                            semantic_digest: String::new(),
+                                        seeded: Some(SeededCursor {
+                                            root: CodexSeededRoot {
+                                                layout: layout.clone(),
+                                                observed_tail,
+                                                prefix_witness: None,
+                                                mapping,
+                                                lineage_digest: String::new(),
+                                                semantic_digest: String::new(),
+                                            },
+                                            source: stamp.clone(),
                                         }),
-                                        depends_on: vec![source.clone()],
+                                        depends_on: jsonl_tail_io::SourceStamps::of(
+                                            &source, &stamp,
+                                        ),
                                     },
                                     links,
                                 );
@@ -4839,7 +4969,6 @@ fn observe_claude_local(
     if consumed == 0 {
         return Ok(invalid());
     }
-    claude_subagents::validate_installed_cutoff(&bytes, local.binding.as_ref())?;
     let (analysis, watermark) =
         claude_subagents::analyze_main(&bytes[..consumed], &local.provider_thread_id, &mut links)?;
     let CodecLineage::Complete { chain, .. } = &analysis.lineage else {
@@ -4943,7 +5072,18 @@ fn observe_claude_local(
             .as_slice(),
         ),
     };
-    finish(
+    let edited = edited_since_acceptance(
+        repository,
+        checkpoint.and_then(|checkpoint| checkpoint.accepted_local_tail.as_ref()),
+        local.binding.as_ref(),
+        chain,
+        AcceptedRecords {
+            records_of: &local.provider_thread_id,
+            length_of: &local.provider_thread_id,
+            complete: &bytes[..consumed],
+        },
+    );
+    let mut outcome = finish(
         ProviderLocalObservation {
             observation: LocalTailObservation {
                 push_reuse: Some(PushObservationEvidence {
@@ -4964,19 +5104,31 @@ fn observe_claude_local(
                 evidence: TailSideEvidence::Present(seeded.observed_tail.clone()),
                 raw_range_pin: Some(pin),
                 verified_acceptance,
+                edited_since_acceptance: edited,
             },
-            seeded: Some(CodexSeededRoot {
-                layout: seeded.layout,
-                observed_tail: seeded.observed_tail,
-                prefix_witness: None,
-                mapping: seeded.mapping,
-                lineage_digest: seeded.lineage_digest,
-                semantic_digest: seeded.semantic_digest,
+            seeded: Some(SeededCursor {
+                root: CodexSeededRoot {
+                    layout: seeded.layout,
+                    observed_tail: seeded.observed_tail,
+                    prefix_witness: None,
+                    mapping: seeded.mapping,
+                    lineage_digest: seeded.lineage_digest,
+                    semantic_digest: seeded.semantic_digest,
+                },
+                source: stamp.clone(),
             }),
-            depends_on: vec![source.clone()],
+            depends_on: jsonl_tail_io::SourceStamps::of(&source, &stamp),
         },
         links,
-    )
+    )?;
+    if edited {
+        // The child tree above is read from this mapping. An edited session
+        // is never published and saves no cursor: the next comparison reads
+        // it in full again.
+        outcome.seeded = None;
+        outcome.observation.push_reuse = None;
+    }
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5012,6 +5164,7 @@ fn provider_thread_review(
         )
     })?;
     let reconstructs_graph = adapter.reconstructs_rollout_graph();
+    let local_only_children_kept = adapter.update_keeps_local_only_children();
     let supports_cursor = adapter.supports_tail_cursor();
     let (pinned_scope_revision, pinned_scope_sha256) = provider_scope_pin(snapshot, provider);
     let domain_resources = provider_capture::domain_resources(captured)?;
@@ -5184,7 +5337,6 @@ fn provider_thread_review(
                     provider_thread_id,
                     source_path: view.source_path.clone(),
                     source_mtime: view.source_mtime,
-                    source_size: view.source_size,
                     capture_bytes: view.capture_bytes,
                     captured: captured_thread,
                 },
@@ -5210,13 +5362,18 @@ fn provider_thread_review(
                 continue;
             }
             let source = local.source_path.clone();
+            let Ok((leaf_bytes, source_stamp)) = jsonl_tail_io::read_snapshot(&source) else {
+                continue;
+            };
             let (seeded, raw_range_pin) = if reconstructs_graph {
                 let lookup = codex_rollout_lookup(provider_home);
-                let Ok(resolved_root) = codex_history_graph::resolve_codex_root(&source, &lookup)
-                else {
-                    continue;
-                };
-                let Ok(leaf_bytes) = jsonl_tail_io::read_bounded(&source) else {
+                let leaf_bytes: mallard_infrastructure::payload::PayloadBytes = leaf_bytes.into();
+                let Ok((resolved_root, _)) = codex_history_graph::resolve_captured_codex_root(
+                    &source,
+                    leaf_bytes.clone(),
+                    source_stamp.clone(),
+                    &lookup,
+                ) else {
                     continue;
                 };
                 let Ok(seeded) =
@@ -5236,9 +5393,7 @@ fn provider_thread_review(
             } else {
                 // Claude: one file is the whole root; analyze the complete
                 // records and seed from that analysis.
-                let Ok(bytes) = jsonl_tail_io::read_bounded(&source) else {
-                    continue;
-                };
+                let bytes = leaf_bytes;
                 let consumed = jsonl_tail_io::safe_record_end(&bytes) as usize;
                 if consumed == 0 {
                     continue;
@@ -5296,6 +5451,7 @@ fn provider_thread_review(
                         physical: PhysicalMappingState::Ready {
                             root_mapping: seeded.mapping.clone(),
                             raw_range_pin,
+                            source_state: Some(source_stamp.file_state()),
                         },
                         prefix_witness: seeded.prefix_witness.clone(),
                         binding_revision,
@@ -5514,8 +5670,8 @@ fn provider_thread_review(
     // error: its row is blocked with that message below, and neither the
     // other threads nor the provider as a whole are affected.
     let mut cursor_observations: BTreeMap<ThreadId, LocalTailObservation> = BTreeMap::new();
-    let mut cursor_refreshed: BTreeMap<ThreadId, CodexSeededRoot> = BTreeMap::new();
-    let mut cursor_deps: BTreeMap<ThreadId, Vec<PathBuf>> = BTreeMap::new();
+    let mut cursor_refreshed: BTreeMap<ThreadId, SeededCursor> = BTreeMap::new();
+    let mut cursor_deps: BTreeMap<ThreadId, jsonl_tail_io::SourceStamps> = BTreeMap::new();
     let mut observation_failures: BTreeMap<ThreadId, String> = BTreeMap::new();
     if supports_cursor {
         let observation_tasks: Vec<_> = local_unit_ids
@@ -5558,19 +5714,20 @@ fn provider_thread_review(
                 ))
             })
             .collect();
-        // Compare uses watcher-clean observations. Push additionally requires
-        // read-time stamps that match capture and every live dependency.
-        // Pull and cache misses use the bounded observation worker pool.
+        // Compare reuses an observation while every file it was read from
+        // still carries its read-time stamp. Push additionally requires
+        // that evidence to match the selected capture. Pull and cache
+        // misses use the bounded observation worker pool.
         let previous_trees = storage_id
             .map(|storage_id| {
-                super::session_watch_service::session_watch_service().subagent_cursors(
+                super::observation_cache::observation_cache().subagent_cursors(
                     provider_home,
                     repository.root(),
                     &binding.local_project_id,
                     storage_id,
                     &observation_tasks
                         .iter()
-                        .map(|(id, _, _, _, _, revision)| ((**id).clone(), *revision))
+                        .map(|(id, ..)| (**id).clone())
                         .collect::<Vec<_>>(),
                 )
             })
@@ -5581,7 +5738,7 @@ fn provider_thread_review(
                     .iter()
                     .filter(|(_, local, _, _, probe, _)| local.is_some() && probe.is_none())
                     .map(|(thread_id, _, checkpoint, _, _, binding_revision)| {
-                        super::session_watch_service::ObservationQuery {
+                        super::observation_cache::ObservationQuery {
                             thread_id: (**thread_id).clone(),
                             checkpoint_generation: checkpoint
                                 .map(|checkpoint| checkpoint.generation),
@@ -5589,8 +5746,7 @@ fn provider_thread_review(
                         }
                     })
                     .collect();
-                super::session_watch_service::session_watch_service().take_reusable_observations(
-                    provider,
+                super::observation_cache::observation_cache().take_reusable_observations(
                     provider_home,
                     repository.root(),
                     &binding.local_project_id,
@@ -5608,8 +5764,8 @@ fn provider_thread_review(
                             }
                             let local = (*local)?;
                             let transcript = &local.captured.as_ref()?.transcript;
-                            Some(super::session_watch_service::PushObservationQuery {
-                                observation: super::session_watch_service::ObservationQuery {
+                            Some(super::observation_cache::PushObservationQuery {
+                                observation: super::observation_cache::ObservationQuery {
                                     thread_id: (**thread_id).clone(),
                                     checkpoint_generation: checkpoint
                                         .map(|checkpoint| checkpoint.generation),
@@ -5623,8 +5779,9 @@ fn provider_thread_review(
                         },
                     )
                     .collect::<Vec<_>>();
-                super::session_watch_service::session_watch_service().take_push_observations(
+                super::observation_cache::observation_cache().take_push_observations(
                     provider_home,
+                    repository.root(),
                     &binding.local_project_id,
                     storage_id,
                     &queries,
@@ -5635,8 +5792,19 @@ fn provider_thread_review(
         if purpose == ReviewPurpose::PushPlan {
             for (thread_id, observation) in &cached {
                 if let Some(proof) = &observation.push_reuse {
-                    cursor_refreshed.insert(thread_id.clone(), proof.seeded.clone());
-                    cursor_deps.insert(thread_id.clone(), proof.sources.keys().cloned().collect());
+                    if let Some(source) = proof
+                        .sources
+                        .get(Path::new(&proof.seeded.mapping.root_path))
+                    {
+                        cursor_refreshed.insert(
+                            thread_id.clone(),
+                            SeededCursor {
+                                root: proof.seeded.clone(),
+                                source: source.clone(),
+                            },
+                        );
+                    }
+                    cursor_deps.insert(thread_id.clone(), proof.sources.iter().collect());
                 }
             }
         }
@@ -5692,21 +5860,20 @@ fn provider_thread_review(
                                 if let Some(local) = local {
                                     if matches!(outcome.observation.evidence, TailSideEvidence::Present(_)) {
                                         let previous = previous_trees.get(*task_id).and_then(|tree| tree.codex()).filter(|tree| tree.main.mapping.provider_thread_id == local.provider_thread_id);
+                                        // A cursor ride carries its discovery whenever a
+                                        // previous one exists; without one the main is
+                                        // read in full.
                                         let discovery = match outcome.observation.discovery.take() {
                                             Some(discovery) => discovery,
-                                            None => match previous {
-                                                Some(previous) => codex_subagents::refresh_discovery(&previous.main)?,
-                                                None => {
-                                                    let (bytes, stamp) = jsonl_tail_io::read_snapshot(&local.source_path)?;
-                                                    let (resolved, _) = codex_history_graph::resolve_captured_codex_root(&local.source_path, bytes.clone().into(), stamp.clone(), &|id| child_lookup.find_rollout(id))?;
-                                                    let seeded = codex_history_graph::seed_codex_root(&resolved, &bytes, *layout)?;
-                                                    codex_subagents::DiscoveryObservation { mapping: seeded.mapping, stamp, creations: resolved.leaf_creations }
-                                                }
-                                            },
+                                            None => {
+                                                let (bytes, stamp) = jsonl_tail_io::read_snapshot(&local.source_path)?;
+                                                let (resolved, _) = codex_history_graph::resolve_captured_codex_root(&local.source_path, bytes.clone().into(), stamp.clone(), &|id| child_lookup.find_rollout(id))?;
+                                                let seeded = codex_history_graph::seed_codex_root(&resolved, &bytes, *layout)?;
+                                                codex_subagents::DiscoveryObservation { mapping: seeded.mapping, stamp, creations: resolved.leaf_creations }
+                                            }
                                         };
                                         let Ok(tree) = codex_subagents::observe_tree(discovery, local.binding.as_ref(), &child_lookup, previous) else { return Ok(outcome); };
-                                        outcome.depends_on.extend(tree.dependencies());
-                                        outcome.depends_on.sort(); outcome.depends_on.dedup();
+                                        outcome.depends_on.extend(&tree.dependencies());
                                         outcome.observation.subagents = Some(owned_subagents::TreeObservation::Codex(tree));
                                     }
                                 }
@@ -5731,7 +5898,7 @@ fn provider_thread_review(
                     if let Some(seeded) = seeded {
                         cursor_refreshed.insert((*thread_id).clone(), seeded);
                     }
-                    if !depends_on.is_empty() {
+                    if depends_on.is_pinned() {
                         cursor_deps.insert((*thread_id).clone(), depends_on);
                     }
                     cursor_observations.insert((*thread_id).clone(), observation);
@@ -5786,12 +5953,13 @@ fn provider_thread_review(
                     accepted: stored.and_then(|checkpoint| checkpoint.accepted.clone()),
                     accepted_local_tail: stored
                         .and_then(|checkpoint| checkpoint.accepted_local_tail.clone()),
-                    observed_tail: seeded.observed_tail.clone(),
+                    observed_tail: seeded.root.observed_tail.clone(),
                     physical: PhysicalMappingState::Ready {
-                        root_mapping: seeded.mapping.clone(),
+                        root_mapping: seeded.root.mapping.clone(),
                         raw_range_pin: pin,
+                        source_state: Some(seeded.source.file_state()),
                     },
-                    prefix_witness: seeded.prefix_witness.clone(),
+                    prefix_witness: seeded.root.prefix_witness.clone(),
                     binding_revision: local_binding.revision,
                 };
                 if stored.is_some_and(|checkpoint| {
@@ -5861,10 +6029,10 @@ fn provider_thread_review(
     }
 
     // Retain freshly derived observations for the next operation, keyed by
-    // the post-maintenance checkpoint generation and validated against the
-    // watcher's dirty paths. Adoption-probe threads are never retained: a
-    // thread without accepted evidence re-proves its refold every review
-    // while a cloud tail exists for it.
+    // the post-maintenance checkpoint generation and pinned to the stamps
+    // their files were read under. Adoption-probe threads are never
+    // retained: a thread without accepted evidence re-proves its refold
+    // every review while a cloud tail exists for it.
     if let Some(storage_id) = storage_id {
         if supports_cursor && !cursor_deps.is_empty() {
             let stored: Vec<_> = cursor_deps
@@ -5900,20 +6068,17 @@ fn provider_thread_review(
                         Some(generation) => Some(*generation),
                         None => checkpoint.map(|checkpoint| checkpoint.generation),
                     };
-                    Some(super::session_watch_service::StoredObservation {
+                    Some(super::observation_cache::StoredObservation {
                         thread_id: thread_id.clone(),
-                        source_path: local.source_path.clone(),
                         depends_on: depends_on.clone(),
                         checkpoint_generation,
                         binding_revision: local_binding.map(|binding| binding.revision),
                         observation: observation.clone(),
-                        source_mtime_secs: local.source_mtime,
-                        source_size: local.source_size,
                     })
                 })
                 .collect();
             if !stored.is_empty() {
-                super::session_watch_service::session_watch_service().store_observations(
+                super::observation_cache::observation_cache().store_observations(
                     provider_home,
                     repository.root(),
                     &binding.local_project_id,
@@ -5990,6 +6155,7 @@ fn provider_thread_review(
                 evidence: TailSideEvidence::Invalid,
                 raw_range_pin: None,
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             }
         } else if unit_local_id.is_none() {
             // Cloud-only unit: there is no local side to observe.
@@ -6000,6 +6166,7 @@ fn provider_thread_review(
                 evidence: TailSideEvidence::ConfirmedAbsent,
                 raw_range_pin: None,
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             }
         } else if supports_cursor {
             match unit_local_id
@@ -6016,6 +6183,7 @@ fn provider_thread_review(
                     evidence: TailSideEvidence::Invalid,
                     raw_range_pin: None,
                     verified_acceptance: None,
+                    edited_since_acceptance: false,
                 },
                 None => return Err("local observation missing for reviewed thread".to_string()),
             }
@@ -6058,6 +6226,7 @@ fn provider_thread_review(
                     range_sha256: captured.transcript.bytes.sha256().to_string(),
                 }),
                 verified_acceptance: None,
+                edited_since_acceptance: false,
             }
         };
         // A proven adoption re-establishes both acceptance pins for this
@@ -6260,6 +6429,7 @@ fn provider_thread_review(
                                 thread.and_then(|row| row.wire_redaction.as_ref()),
                             )?,
                             &origins,
+                            OriginLookup::ByPosition,
                             &identities,
                         )?;
                     if let Some(adoption) =
@@ -6292,6 +6462,7 @@ fn provider_thread_review(
                                 thread.and_then(|row| row.wire_redaction.as_ref()),
                             )?,
                             &origins,
+                            OriginLookup::ByPosition,
                             &identities,
                         )?;
                     if let Some(adoption) = adopt_codex_artifact(
@@ -6310,6 +6481,13 @@ fn provider_thread_review(
             }
             Ok(())
         })();
+        // An edited session no longer continues the version that was
+        // accepted. The pins stay saved and are read as absent here, which
+        // leaves two copies that nothing relates.
+        if local_observation.edited_since_acceptance {
+            accepted_evidence = TailSideEvidence::ConfirmedAbsent;
+            accepted_local_evidence = TailSideEvidence::ConfirmedAbsent;
+        }
         let relation_result: Result<TailClassification, TailEvidenceBlocker> =
             if descriptor.is_none() && (local.is_some() || thread.is_some()) {
                 Err(TailEvidenceBlocker::InvalidSide)
@@ -6331,6 +6509,7 @@ fn provider_thread_review(
                     Ok(mallard_domain::fold_conversation_relations(
                         compare_conversation_tail(&evidence),
                         children,
+                        local_only_children_kept,
                     ))
                 })
             };
@@ -6377,6 +6556,7 @@ fn provider_thread_review(
                     subagents: child_pins.clone(),
                     missing_local_subagents: missing_local_subagents.clone(),
                     subagents_omitted: comparison_omitted,
+                    local_only_subagents_kept: local_only_children_kept,
                     accepted: present_tail(&accepted_evidence),
                     accepted_local: present_tail(&accepted_local_evidence),
                     local: present_tail(&local_observation.evidence),
@@ -6613,7 +6793,7 @@ fn provider_thread_review(
             continue;
         }
         // Executable actions freeze the local target from captured bytes,
-        // or from the watcher-clean pin a previous capture froze. A local
+        // or from the pin a previous capture froze. A local
         // row reviewed without either can only produce non-selectable
         // actions; its Absent pin makes any out-of-contract apply attempt
         // fail the stale-pin check instead of running.
@@ -6704,6 +6884,7 @@ fn provider_thread_review(
                     tail: ConversationTailPins {
                         subagents: child_pins.clone(),
                         subagents_omitted: comparison_omitted,
+                        local_only_subagents_kept: local_only_children_kept,
                         missing_local_subagents: missing_local_subagents.clone(),
                         accepted: accepted_tail_pin.clone(),
                         accepted_local: accepted_local_tail_pin.clone(),
@@ -6796,18 +6977,34 @@ fn provider_thread_review(
                         }
                         if provider.as_str() == "claude" {
                             if let (Some(row), Some(cloud)) = (local_binding, thread) {
+                                // A child is known here by the Pull that
+                                // installed it, or by the reference of the
+                                // local transcript when the provider wrote
+                                // it on this computer.
+                                let observed = local_observation
+                                    .subagents
+                                    .as_ref()
+                                    .and_then(|tree| tree.claude());
                                 for file in &cloud.files {
                                     if let ConversationFileRole::SubagentTranscript {
                                         child_key,
                                         ..
                                     } = &file.role
                                     {
-                                        if let Some(child) = row.installed_subagents.get(child_key)
+                                        if let Some(agent) = row
+                                            .installed_subagents
+                                            .get(child_key)
+                                            .map(|child| &child.provider_thread_id)
+                                            .or_else(|| {
+                                                observed
+                                                    .and_then(|tree| tree.children.get(child_key))
+                                                    .map(|child| &child.agent_id)
+                                            })
                                         {
                                             let target = claude_subagents::child_path(
                                                 &local.source_path,
                                                 &local.provider_thread_id,
-                                                &child.provider_thread_id,
+                                                agent,
                                             )?;
                                             expected_provider_state.push(
                                                 ProviderStateExpectation {
@@ -6910,6 +7107,7 @@ fn provider_thread_review(
                         tail: ConversationTailPins {
                             subagents: child_pins.clone(),
                             subagents_omitted: comparison_omitted,
+                            local_only_subagents_kept: local_only_children_kept,
                             missing_local_subagents: missing_local_subagents.clone(),
                             accepted: accepted_tail_pin,
                             accepted_local: accepted_local_tail_pin,
@@ -7098,8 +7296,8 @@ fn conversation_sidecar_refs(
 
 #[cfg(test)]
 impl LocalTailObservation {
-    /// Bare observation for the watch service's own suite.
-    pub(crate) fn for_watch_service_tests(evidence: TailSideEvidence) -> Self {
+    /// Bare observation for the observation cache's own suite.
+    pub(crate) fn for_observation_cache_tests(evidence: TailSideEvidence) -> Self {
         Self {
             push_reuse: None,
             subagents: None,
@@ -7107,6 +7305,7 @@ impl LocalTailObservation {
             evidence,
             raw_range_pin: None,
             verified_acceptance: None,
+            edited_since_acceptance: false,
         }
     }
 }
@@ -7244,25 +7443,8 @@ fn load_project_local_read_from_state(
         &state.bindings,
         &resolved,
     )?;
-    discover_project_local_read(
-        local_project_id,
-        activity_project,
-        resolved,
-        capture_request,
-    )
-}
-
-fn discover_project_local_read(
-    local_project_id: &LocalProjectId,
-    activity_project: ResolvedActivityProject,
-    resolved: ResolvedBinding,
-    capture_request: CaptureRequest,
-) -> Result<ProjectLocalRead, String> {
-    let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
-        provider_registry(),
-        local_project_id,
-        &capture_request,
-    )?;
+    let (discovery, views) =
+        provider_capture::discover_sessions(provider_registry(), &capture_request)?;
     Ok(ProjectLocalRead {
         activity_project,
         resolved,
@@ -8090,11 +8272,8 @@ pub(super) fn prepare_push_review_with_progress(
         machine,
         &resolved,
     )?;
-    let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
-        provider_registry(),
-        local_project_id,
-        &capture_request,
-    )?;
+    let (discovery, views) =
+        provider_capture::discover_sessions(provider_registry(), &capture_request)?;
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
 
@@ -8695,6 +8874,226 @@ struct ConversationPublication {
 struct PushThreadFailure {
     resource_id: ResourceId,
     message: String,
+    /// The session whose saved cursor must no longer be used: it was edited
+    /// after it was accepted.
+    edited_since_acceptance: Option<(ProviderKey, ThreadId)>,
+}
+
+/// Why one conversation was not built.
+struct PublicationRefusal {
+    message: String,
+    edited_since_acceptance: bool,
+}
+
+impl From<String> for PublicationRefusal {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            edited_since_acceptance: false,
+        }
+    }
+}
+
+impl From<&str> for PublicationRefusal {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+/// What a refused conversation is checked against: the transcript the Push
+/// captured, its messages, and the version that was accepted. A refusal
+/// alone does not say why the session no longer matches its review. An edit
+/// does: pushing again cannot succeed, and the comparison that offered the
+/// Push read through a cursor that never saw the edit.
+struct AcceptanceWitness<'a> {
+    accepted: &'a PortableConversationTail,
+    binding: &'a LocalConversationBinding,
+    chain: Vec<mallard_domain::CanonicalConversationMessage>,
+    transcript: mallard_infrastructure::payload::PayloadBytes,
+    records_of: String,
+    length_of: String,
+    complete: usize,
+}
+
+impl<'a> AcceptanceWitness<'a> {
+    fn of(
+        context: ConversationPublicationContext<'a>,
+        action: &ConversationPlanAction,
+        (conversation, transcript, _): &CapturedPublicationSource,
+        prepared: Option<&Result<PreparedCodexPublication, String>>,
+    ) -> Option<Self> {
+        let thread_id = action.thread_id.as_ref()?;
+        let accepted = context
+            .reviewed_config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == context.project.local_project_id
+                    && &link.storage_id == context.storage_id
+            })?
+            .conversation_checkpoints
+            .get(&SyncScopeKey::Provider(action.provider.clone()))?
+            .get(thread_id)?
+            .accepted_local_tail
+            .as_ref()?;
+        let binding = context.document.bindings.iter().find(|candidate| {
+            candidate.host_id == context.binding.host_id
+                && candidate.replica_id == context.binding.replica_id
+                && candidate.local_project_id == context.binding.local_project_id
+                && candidate.provider_profile_id == action.pins.context.provider_profile_id
+                && &candidate.thread_id == thread_id
+        })?;
+        let (chain, records_of, length_of, complete) = match prepared {
+            Some(prepared) => {
+                let root = &prepared.as_ref().ok()?.root;
+                let leaf = root.segments.last()?;
+                (
+                    root.chain.clone(),
+                    leaf.rollout_id.clone(),
+                    leaf.provider_thread_id.clone(),
+                    leaf.consumed_byte_len,
+                )
+            }
+            None => {
+                let source = conversation.source_thread_id.clone()?;
+                (
+                    conversation.lineage.chain()?.to_vec(),
+                    source.clone(),
+                    source,
+                    jsonl_tail_io::safe_record_end(&transcript.bytes),
+                )
+            }
+        };
+        Some(Self {
+            accepted,
+            binding,
+            chain,
+            transcript: transcript.bytes.clone(),
+            records_of,
+            length_of,
+            complete: usize::try_from(complete)
+                .ok()
+                .filter(|complete| *complete <= transcript.bytes.len())?,
+        })
+    }
+
+    fn edited(&self, repository: &LocalStateRepository) -> bool {
+        edited_since_acceptance(
+            repository,
+            Some(self.accepted),
+            Some(self.binding),
+            &self.chain,
+            AcceptedRecords {
+                records_of: &self.records_of,
+                length_of: &self.length_of,
+                complete: &self.transcript[..self.complete],
+            },
+        )
+    }
+}
+
+/// Whether this Push is the first one of a copy that Keep both preserved.
+/// The copy is published under a new cloud identity, so no accepted version
+/// exists that a record of it could contradict. Its saved origins are those
+/// of the session it was kept from, and the edit that made it a copy is in
+/// its records.
+fn first_push_of_a_kept_copy(
+    action: &ConversationPlanAction,
+    binding: Option<&LocalConversationBinding>,
+    checkpoint: Option<&ConversationCheckpoint>,
+) -> bool {
+    action.action == ConversationPlanActionType::CreateCloud
+        && binding.is_some_and(|row| row.preserved.is_some() && row.cloud_thread_id.is_none())
+        && checkpoint.is_none_or(|checkpoint| checkpoint.accepted.is_none())
+}
+
+/// Encode once more, by digest, a Claude transcript in which a saved record
+/// changed or is missing, or keep the refusal the first encoding gave.
+///
+/// A kept copy needs no proof. A mapped session needs two: its messages up
+/// to the accepted end give the accepted value in the local form, and the
+/// new wire form gives the accepted wire value at the same end. A Claude
+/// desktop import passes both, because it changes records and no message.
+/// A record that is no longer part of the conversation is in neither
+/// proof: it is published as a new scan reads it.
+fn encode_rewritten_claude_transcript(
+    refusal: EncodeRefusal,
+    encode: impl Fn(
+        OriginLookup,
+        &mut credential_redaction::RedactionRun<'_>,
+    ) -> Result<EncodedMainTranscript, EncodeRefusal>,
+    redaction: &mut credential_redaction::RedactionRun<'_>,
+    kept_copy: bool,
+    checkpoint: Option<&ConversationCheckpoint>,
+    chain: Option<&[mallard_domain::CanonicalConversationMessage]>,
+    stored_redaction: Option<&mallard_domain::ConversationWireRedaction>,
+) -> Result<EncodedMainTranscript, EncodeRefusal> {
+    if kept_copy {
+        return encode(OriginLookup::ByDigest, redaction);
+    }
+    let (Some(accepted), Some(accepted_local), Some(chain)) = (
+        checkpoint.and_then(|checkpoint| checkpoint.accepted.as_ref()),
+        checkpoint.and_then(|checkpoint| checkpoint.accepted_local_tail.as_ref()),
+        chain,
+    ) else {
+        return Err(refusal);
+    };
+    if !accepted_prefix_matches(accepted_local, chain) {
+        return Err(refusal);
+    }
+    let encoded = encode(OriginLookup::ByDigest, redaction)?;
+    // The accepted wire value is of the redaction it was published under.
+    let under_stored_redaction = if stored_redaction == Some(&redaction.stamp()) {
+        None
+    } else {
+        Some(encode(
+            OriginLookup::ByDigest,
+            &mut credential_redaction::shared().run_from_stamp(stored_redaction)?,
+        )?)
+    };
+    let proven = under_stored_redaction
+        .as_ref()
+        .unwrap_or(&encoded)
+        .analysis
+        .lineage
+        .chain()
+        .is_some_and(|wire_chain| accepted_prefix_matches(&accepted.portable_tail, wire_chain));
+    if proven {
+        Ok(encoded)
+    } else {
+        Err(refusal)
+    }
+}
+
+/// Build one conversation, and say of a refused one whether it was edited
+/// after it was accepted.
+fn build_conversation_publication_or_refusal(
+    context: ConversationPublicationContext<'_>,
+    action: &ConversationPlanAction,
+    previous_thread: Option<ConversationThread>,
+    captured: CapturedPublicationSource,
+    prepared_codex: Option<Result<PreparedCodexPublication, String>>,
+    redaction_run: &mut credential_redaction::RedactionRun<'_>,
+) -> Result<ConversationPublication, PublicationRefusal> {
+    let witness = AcceptanceWitness::of(context, action, &captured, prepared_codex.as_ref());
+    build_conversation_publication(
+        context,
+        action,
+        previous_thread,
+        captured,
+        prepared_codex,
+        redaction_run,
+    )
+    .map_err(|message| {
+        if witness.is_some_and(|witness| witness.edited(context.repository)) {
+            PublicationRefusal {
+                message: owned_subagents::PUSH_EDITED.to_string(),
+                edited_since_acceptance: true,
+            }
+        } else {
+            message.into()
+        }
+    })
 }
 
 /// Build one reviewed conversation action's publication: resolve its cloud
@@ -8943,6 +9342,7 @@ fn build_conversation_publication(
                     Some(&codex_subagents::whole_child_layout()),
                     redaction_run,
                     &installed_origins,
+                    OriginLookup::ByPosition,
                     &identities,
                 )?;
             let normalized = SubagentContentState::from_tail(&artifact.portable_tail)?;
@@ -9000,17 +9400,29 @@ fn build_conversation_publication(
                 ));
             }
         }
-        let artifact = mallard_infrastructure::codex_standalone_builder::encode_codex_tree_member(
-            &resolved_root,
-            &sources,
-            &binding.project_root,
-            (binding.canonical_project_root != binding.project_root)
-                .then_some(binding.canonical_project_root.as_str()),
-            stored_layout,
-            redaction_run,
-            &source_origins,
-            &identities,
-        )?;
+        let encode = |lookup, redaction: &mut credential_redaction::RedactionRun<'_>| {
+            mallard_infrastructure::codex_standalone_builder::encode_codex_tree_member(
+                &resolved_root,
+                &sources,
+                &binding.project_root,
+                (binding.canonical_project_root != binding.project_root)
+                    .then_some(binding.canonical_project_root.as_str()),
+                stored_layout,
+                redaction,
+                &source_origins,
+                lookup,
+                &identities,
+            )
+        };
+        let artifact = match encode(OriginLookup::ByPosition, redaction_run) {
+            Err(refusal)
+                if refusal.saved_record_changed
+                    && first_push_of_a_kept_copy(action, local_binding, stored_checkpoint) =>
+            {
+                encode(OriginLookup::ByDigest, redaction_run)
+            }
+            artifact => artifact,
+        }?;
         captured_sources.extend(sources);
         (Some(artifact), seeded, None)
     } else if supports_cursor {
@@ -9062,7 +9474,6 @@ fn build_conversation_publication(
             source.clone(),
             (transcript.bytes.clone(), source_stamp.clone()),
         );
-        claude_subagents::validate_installed_cutoff(&transcript.bytes, local_binding)?;
         let mapper = SessionPathMapper::new(
             &binding.project_root,
             (binding.canonical_project_root != binding.project_root)
@@ -9073,15 +9484,31 @@ fn build_conversation_publication(
             .source_thread_id
             .as_deref()
             .ok_or("conversation lacks a physical source ID")?;
-        let encoded =
+        let encode = |lookup, redaction: &mut credential_redaction::RedactionRun<'_>| {
             mallard_infrastructure::providers::claude::publication::encode_main_transcript(
                 &transcript.bytes,
                 source_id,
                 &mapper,
                 &source_origins,
-                redaction_run,
+                lookup,
+                redaction,
             )
-            .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
+        };
+        let encoded = match encode(OriginLookup::ByPosition, redaction_run) {
+            Err(refusal) if refusal.saved_record_changed => encode_rewritten_claude_transcript(
+                refusal,
+                encode,
+                redaction_run,
+                first_push_of_a_kept_copy(action, local_binding, stored_checkpoint),
+                stored_checkpoint,
+                conversation.lineage.chain(),
+                previous_thread
+                    .as_ref()
+                    .and_then(|thread| thread.wire_redaction.as_ref()),
+            ),
+            encoded => encoded,
+        }
+        .map_err(|error| format!("conversation '{}': {error}", result_thread_id))?;
         let redacted = encoded.bytes;
         let wire_analysis = encoded.analysis;
         let child_links = encoded.child_links;
@@ -9358,6 +9785,10 @@ fn build_conversation_publication(
                 end_byte_offset: seeded.mapping.consumed_byte_offset,
                 range_sha256: hex_digest(Sha256::digest([]).as_slice()),
             },
+            source_state: transcript
+                .source_stamp
+                .as_ref()
+                .map(jsonl_tail_io::SourceStamp::file_state),
         },
         prefix_witness: seeded.prefix_witness.clone(),
         binding_revision: action.pins.context.binding_revision.unwrap_or(0),
@@ -9839,7 +10270,7 @@ fn build_publish_request(
                 .unwrap_or(0)
         },
         |(action, previous, source, prepared)| {
-            build_conversation_publication(
+            Ok(build_conversation_publication_or_refusal(
                 context,
                 action,
                 previous,
@@ -9848,14 +10279,17 @@ fn build_publish_request(
                 &mut credential_redaction::shared()
                     .begin_run()
                     .with_enabled(action.pins.credential_redaction_enabled),
-            )
+            ))
         },
         |index, outcome| {
             if batch_error.is_some() {
                 return;
             }
             let action = &actions[index];
-            let outcome = outcome.and_then(|publication| {
+            let outcome = outcome
+                .map_err(PublicationRefusal::from)
+                .and_then(|built| built);
+            let outcome = outcome.and_then(|publication| -> Result<(), PublicationRefusal> {
                 if !resolved_cloud_ids.insert(publication.cloud_thread_id.clone()) {
                     batch_error = Some(format!(
                         "conversation Push batch resolves cloud thread '{}' twice; nothing was published",
@@ -9877,13 +10311,18 @@ fn build_publish_request(
                 operations.push(operation);
                 Ok(())
             });
-            if let Err(message) = outcome {
+            if let Err(refusal) = outcome {
                 indexed_failures.push((
                     index,
                     PushThreadFailure {
                         resource_id: conversation_action_row_key(action)
                             .expect("the resource was checked before preparation"),
-                        message,
+                        message: refusal.message,
+                        edited_since_acceptance: action
+                            .thread_id
+                            .clone()
+                            .filter(|_| refusal.edited_since_acceptance)
+                            .map(|thread_id| (action.provider.clone(), thread_id)),
                     },
                 ));
             }
@@ -9938,6 +10377,7 @@ fn build_publish_request(
             }
             None => running_bindings.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: Some(path_origins_ref),
@@ -10209,6 +10649,57 @@ fn push_bundle_reviewed_with_repository(
     )
 }
 
+/// The comparison that offered an edited session read it through its
+/// cursor, which never saw the edit. Forget the file state that cursor was
+/// saved from: a cursor without one is not used, so the next comparison
+/// reads the session in full and finds the edit itself. Everything that
+/// was accepted stays saved.
+fn stop_using_cursors_of_edited_sessions(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    failures: &[PushThreadFailure],
+) -> Result<(), String> {
+    let edited = failures
+        .iter()
+        .filter_map(|failure| failure.edited_since_acceptance.as_ref())
+        .collect::<Vec<_>>();
+    if edited.is_empty() {
+        return Ok(());
+    }
+    repository
+        .transact_config(|config| {
+            let Some(link) = config.links.iter_mut().find(|link| {
+                &link.local_project_id == local_project_id && &link.storage_id == storage_id
+            }) else {
+                return Ok::<_, String>(ConfigMutation::Unchanged(()));
+            };
+            let mut stopped = false;
+            for (provider, thread_id) in &edited {
+                let Some(checkpoint) = link
+                    .conversation_checkpoints
+                    .get_mut(&SyncScopeKey::Provider(provider.clone()))
+                    .and_then(|threads| threads.get_mut(thread_id))
+                else {
+                    continue;
+                };
+                if let PhysicalMappingState::Ready { source_state, .. } = &mut checkpoint.physical {
+                    if source_state.take().is_some() {
+                        checkpoint.generation = checkpoint.generation.saturating_add(1);
+                        stopped = true;
+                    }
+                }
+            }
+            Ok(if stopped {
+                ConfigMutation::Changed(())
+            } else {
+                ConfigMutation::Unchanged(())
+            })
+        })
+        .map_err(config_transaction_error)?;
+    Ok(())
+}
+
 /// Result-row state for a selected conversation the Push could not publish.
 const PUSH_RESULT_FAILED: &str = "failed";
 /// Result-row state for a selected conversation a Pull has to resolve first.
@@ -10345,10 +10836,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
         })?;
     on_phase("load config and binding", phase_started.elapsed());
     let phase_started = Instant::now();
-    // One provider walk feeds byte capture and the apply-time review. The
-    // profile watcher serves it from cache while it proves the home clean;
-    // a Push with a review token needs project content, which the cache
-    // never serves, so the review-token freshness check still walks fresh.
+    // One provider walk feeds byte capture and the apply-time review. A
+    // Push with a review token also walks the project content.
     let wants_project_content = project_content_review.review_token.is_some();
     let eligibility = project_file_sync_eligibility(&binding);
     if wants_project_content && eligibility.state != ProjectFileSyncEligibilityState::Eligible {
@@ -10362,11 +10851,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
         &resolved,
     )?;
     capture_request.include_project_content = wants_project_content;
-    let (discovery, views) = super::session_watch_service::session_watch_service().discovery_for(
-        provider_registry(),
-        local_project_id,
-        &capture_request,
-    )?;
+    let (discovery, views) =
+        provider_capture::discover_sessions(provider_registry(), &capture_request)?;
     let discovered = discovery.project_inventory();
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
@@ -10662,6 +11148,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         .map(|entry| PushThreadFailure {
             resource_id: entry.resource_id.clone(),
             message: owned_subagents::PUSH_CHANGED.into(),
+            edited_since_acceptance: None,
         })
         .collect::<Vec<_>>();
     selected_actions.retain(|action| {
@@ -10690,6 +11177,12 @@ pub(super) fn push_bundle_reviewed_with_progress(
         credential_redaction_enabled,
     )
     .map_err(|error| unfinished_push_sentence(&storage.name, error))?;
+    stop_using_cursors_of_edited_sessions(
+        repository,
+        local_project_id,
+        storage_id,
+        &publish_outcome.failures,
+    )?;
     publish_outcome.failures.extend(stale_children);
     let thread_results = conversation_push_results(
         &selected_conversations,
@@ -10956,12 +11449,8 @@ pub(super) fn plan_bundle_restore_with_progress(
             &state.bindings,
             &resolved,
         )?;
-        let (_discovery, views) = super::session_watch_service::session_watch_service()
-            .discovery_for(
-                provider_registry(),
-                &binding.local_project_id,
-                &capture_request,
-            )?;
+        let (_discovery, views) =
+            provider_capture::discover_sessions(provider_registry(), &capture_request)?;
         let review = thread_review(
             repository,
             Some(&snapshot),
@@ -11105,12 +11594,8 @@ fn build_restore_plan_for_apply(
         &state.bindings,
         resolved,
     )?;
-    let (discovery, session_views) = super::session_watch_service::session_watch_service()
-        .discovery_for(
-            provider_registry(),
-            &binding.local_project_id,
-            &capture_request,
-        )?;
+    let (discovery, session_views) =
+        provider_capture::discover_sessions(provider_registry(), &capture_request)?;
     let local_selection = discovery
         .project_inventory()
         .resources
@@ -11168,7 +11653,6 @@ fn build_restore_plan_for_apply(
 #[derive(Clone)]
 struct PreparedPullConversation {
     action: ConversationPlanAction,
-    pulled_children_excluded: bool,
     cloud_transcript: VerifiedBody,
     cloud_file_sha256: String,
     cloud_forked_from: Option<CloudThreadId>,
@@ -11461,6 +11945,7 @@ fn prepare_pull_conversation_actions(
                 tail: ConversationTailPins {
                     subagents: action.pins.tail.subagents.clone(),
                     subagents_omitted: action.pins.tail.subagents_omitted,
+                    local_only_subagents_kept: action.pins.tail.local_only_subagents_kept,
                     missing_local_subagents: action.pins.tail.missing_local_subagents.clone(),
                     accepted: action.pins.tail.accepted.clone(),
                     accepted_local: action.pins.tail.accepted_local.clone(),
@@ -11537,7 +12022,6 @@ fn prepare_pull_conversation_actions(
         let local_display_name = local_view.map(|view| view.descriptor.display_name.clone());
         Ok(PreparedPullConversation {
             action: action.clone(),
-            pulled_children_excluded: thread.wire_children == ConversationWireChildren::Off,
             cloud_transcript,
             cloud_file_sha256,
             cloud_forked_from: thread.forked_from.clone(),
@@ -11796,7 +12280,7 @@ fn apply_prepared_pull_conversation(
             if action.provider.as_str() == "claude" {
                 let mut links = claude_subagents::ChildLinks::new();
                 claude_subagents::analyze_main(&bytes, parent, &mut links)?;
-                source_ids.extend(links.into_iter().map(|(id, link)| (link.key, id)));
+                source_ids.extend(links.into_iter().map(|(id, key)| (key, id)));
             } else {
                 source_ids.extend(
                     codex_subagents::creation_references(&bytes, row.installed_end)?
@@ -11961,6 +12445,7 @@ fn apply_prepared_pull_conversation(
     };
 
     let PreparedPullTranscript {
+        child_references,
         transcript: verified_transcript,
         path_origins,
         layout: imported_layout,
@@ -12110,23 +12595,34 @@ fn apply_prepared_pull_conversation(
             .then(|| live_binding)
             .flatten()
             .and_then(|row| row.installed_subagents.get(child.key()));
-        let expected = if let Some(known) = known_child {
-            if known.provider_thread_id != child.provider_thread_id() {
-                return Err("installed child identity changed".into());
+        if known_child.is_some_and(|known| known.provider_thread_id != child.provider_thread_id()) {
+            return Err("installed child identity changed".into());
+        }
+        // An update in place replaces a child under the state it was
+        // reviewed in: one that a Pull installed, or one that the provider
+        // wrote here and the local transcript refers to. Any other target
+        // must be free.
+        let reviewed = materialize_in_place
+            .then(|| {
+                action
+                    .pins
+                    .target
+                    .provider_state
+                    .iter()
+                    .find(|pin| Path::new(&pin.target_path) == target_path)
+            })
+            .flatten();
+        let expected = match reviewed {
+            Some(pin) => pin.expectation.clone(),
+            None if known_child.is_some() => {
+                return Err("existing child target was not reviewed".into())
             }
-            action
-                .pins
-                .target
-                .provider_state
-                .iter()
-                .find(|pin| Path::new(&pin.target_path) == target_path)
-                .map(|pin| pin.expectation.clone())
-                .ok_or("existing child target was not reviewed")?
-        } else {
-            if bounded_file_expectation(&target_path)? != TargetExpectation::Absent {
-                return Err("child destination is occupied".into());
+            None => {
+                if bounded_file_expectation(&target_path)? != TargetExpectation::Absent {
+                    return Err("child destination is occupied".into());
+                }
+                TargetExpectation::Absent
             }
-            TargetExpectation::Absent
         };
         installed_subagents.insert(
             child.key().clone(),
@@ -12146,6 +12642,29 @@ fn apply_prepared_pull_conversation(
             bytes: child.bytes().clone(),
         });
         accepted_subagents.insert(child.key().clone(), child.accepted().clone());
+    }
+    let mut installed_absent_subagents = child_references.absent(&installed_subagents);
+    // An update in place finds the children that the provider wrote on
+    // this computer: no Pull brought them, as a transcript or as a
+    // reference without one, and their transcripts are here. The stored
+    // session may hold none of them. They stay children all the same.
+    if let (Some(main), Some(row)) = (&reviewed_transcript_target, live_binding) {
+        let main = Path::new(&main.target_path);
+        let directory = main.parent().ok_or("parent directory is missing")?;
+        let mut absent = BTreeSet::new();
+        for agent in installed_absent_subagents {
+            let came_with_a_pull = row.installed_absent_subagents.contains(&agent)
+                || row
+                    .installed_subagents
+                    .values()
+                    .any(|child| child.provider_thread_id == agent);
+            let child =
+                claude_subagents::child_path(main, &destination_provider_thread_id, &agent)?;
+            if came_with_a_pull || !claude_subagents::child_exists(&child, directory)? {
+                absent.insert(agent);
+            }
+        }
+        installed_absent_subagents = absent;
     }
     let mut transcript_target = None;
     let mut sidecar_bodies = prepared.cloud_sidecars.iter();
@@ -12332,6 +12851,7 @@ fn apply_prepared_pull_conversation(
         let PhysicalMappingState::Ready {
             root_mapping,
             raw_range_pin,
+            ..
         } = &mut checkpoint.physical
         else {
             return Err("conversation relocation source checkpoint is detached".to_string());
@@ -12408,6 +12928,10 @@ fn apply_prepared_pull_conversation(
                 end_byte_offset: installed_bytes.len() as u64,
                 range_sha256: hex_digest(Sha256::digest([]).as_slice()),
             },
+            // The file is installed after this after-state is fixed, so
+            // there is no file state to save: the next comparison reads
+            // the installed transcript in full.
+            source_state: None,
         },
         prefix_witness,
         binding_revision: 0,
@@ -12447,7 +12971,8 @@ fn apply_prepared_pull_conversation(
                 // keeps its marker on every device.
                 document_after.bindings.push(LocalConversationBinding {
                     installed_end: Some(installed_bytes.len() as u64),
-                    pulled_children_excluded: prepared.pulled_children_excluded,
+                    installed_absent_subagents: installed_absent_subagents.clone(),
+                    pulled_children_excluded: false,
                     installed_subagents: installed_subagents.clone(),
                     path_origins_ref: Some(path_origins_ref.clone()),
                     host_id: binding.host_id.clone(),
@@ -12472,8 +12997,8 @@ fn apply_prepared_pull_conversation(
                 })?;
                 let row = &mut document_after.bindings[index];
                 row.installed_end = Some(installed_bytes.len() as u64);
-                row.pulled_children_excluded = prepared.pulled_children_excluded;
                 row.installed_subagents = installed_subagents.clone();
+                row.installed_absent_subagents = installed_absent_subagents.clone();
                 row.path_origins_ref = Some(path_origins_ref.clone());
                 row.provider_thread_id = Some(destination_provider_thread_id.clone());
                 row.root_tail_layout = Some(imported_layout.clone());
@@ -12484,7 +13009,8 @@ fn apply_prepared_pull_conversation(
             (ConversationPlanActionType::CreateLocal, None) => {
                 document_after.bindings.push(LocalConversationBinding {
                     installed_end: Some(installed_bytes.len() as u64),
-                    pulled_children_excluded: prepared.pulled_children_excluded,
+                    installed_absent_subagents: installed_absent_subagents.clone(),
+                    pulled_children_excluded: false,
                     installed_subagents: installed_subagents.clone(),
                     path_origins_ref: Some(path_origins_ref.clone()),
                     host_id: binding.host_id.clone(),
@@ -12530,6 +13056,14 @@ fn apply_prepared_pull_conversation(
             }
             threads.insert(retained_thread_id, retained_checkpoint);
         }
+        // Read before Keep both moves the checkpoint away: the thread keeps
+        // its id, so its checkpoint continues the numbering. A generation
+        // that started again would let an observation of the file that was
+        // moved answer for the file that was installed.
+        let generation = threads
+            .get(&local_thread_id)
+            .map(|existing| existing.generation.saturating_add(1))
+            .unwrap_or(0);
         if let Some(keep_both) = &keep_both_minted {
             // Re-key the destination's checkpoint to the preserved thread as
             // local-only observed state: observed tail, mapping, and witness
@@ -12543,10 +13077,6 @@ fn apply_prepared_pull_conversation(
                 threads.insert(keep_both.preserved_thread_id.clone(), moved);
             }
         }
-        let generation = threads
-            .get(&local_thread_id)
-            .map(|existing| existing.generation.saturating_add(1))
-            .unwrap_or(0);
         let mut checkpoint = accepted_checkpoint.clone();
         checkpoint.generation = generation;
         threads.insert(local_thread_id.clone(), checkpoint);
@@ -13190,11 +13720,7 @@ pub(super) fn apply_bundle_restore_with_progress(
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>, String>>()?;
-            let references = std::mem::replace(
-                &mut transcript.child_references,
-                owned_subagents::ChildReferences::Claude(Default::default()),
-            );
-            let children = references.prepare(
+            let children = transcript.child_references.prepare(
                 &children,
                 &identities,
                 &transcript.cloud_provider_thread_id,
@@ -13548,14 +14074,6 @@ pub(super) fn apply_bundle_restore_with_progress(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let provider_home_changed = applied.receipts.iter().any(|receipt| {
-        receipt.status == ActionStatus::Applied
-            && (receipt.conversation.is_some()
-                || matches!(
-                    receipt.action_type,
-                    RestoreActionType::WriteFile | RestoreActionType::MergeFile
-                ))
-    });
     let success = overall_success;
     // A stopped Pull says so first: what it installed stays, what it did not
     // reach is not pulled, and the areas are not marked as reviewed. A
@@ -13622,15 +14140,6 @@ pub(super) fn apply_bundle_restore_with_progress(
         not_pulled_action_ids,
     };
     on_phase("build after-Pull offers", offers_started.elapsed());
-    let invalidation_started = Instant::now();
-    if provider_home_changed {
-        // These writes were performed by Mallard itself, so do not depend on
-        // asynchronous watcher delivery before the next Activity or review.
-        for home in resolved.homes.values() {
-            super::session_watch_service::session_watch_service().force_rebaseline(Path::new(home));
-        }
-    }
-    on_phase("invalidate provider caches", invalidation_started.elapsed());
     on_phase("persist receipts and finalize", phase_started.elapsed());
     Ok(result)
 }
@@ -16733,6 +17242,7 @@ fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    include!("session_refresh_regression_tests.rs");
     include!("owned_subagent_tests.rs");
     include!("claude_owned_subagent_tests.rs");
     include!("project_session_delete_tests.rs");
@@ -17723,11 +18233,11 @@ mod tests {
         assert!(!repo.root().join("conversation_push_plans").exists());
     }
 
-    /// Another project sharing the profile consumes the watcher event first.
-    /// The original project's cached inventory is then stale on its own
-    /// stamp, so the session header sees the new session without any reset.
+    /// Discovery runs on every call: a session created after an earlier
+    /// discovery is in the next session views and opens in detail, with no
+    /// reset and no event.
     #[test]
-    fn session_views_follow_a_membership_change_consumed_by_another_project() {
+    fn session_views_list_a_session_created_after_an_earlier_discovery() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let project = register(&repo);
@@ -17753,14 +18263,9 @@ mod tests {
                 .unwrap();
         let resource_id = conversation_resource_id(&codex_key(), &thread_id).unwrap();
         let capture_request = capture_request_for_binding(&repo, &binding).unwrap();
-        let (_, empty_views) = super::super::session_watch_service::session_watch_service()
-            .discovery_for(
-                provider_registry(),
-                &project.local_project_id,
-                &capture_request,
-            )
-            .unwrap();
-        assert!(empty_views.is_empty(), "the primed inventory must be empty");
+        let (_, empty_views) =
+            provider_capture::discover_sessions(provider_registry(), &capture_request).unwrap();
+        assert!(empty_views.is_empty());
 
         let session_path = codex_home.join(format!(
             "sessions/2026/08/18/rollout-2026-08-18T00-00-00-{provider_thread_id}.jsonl"
@@ -17778,22 +18283,10 @@ mod tests {
         )
         .unwrap();
 
-        // Another project sharing this profile drains the watcher event and
-        // walks first. Its fresh inventory carries the new epoch; the
-        // original project's empty inventory keeps the old one.
-        let cache_consumer = LocalProjectId::parse("session-detail-cache-consumer").unwrap();
-        let (_, refreshed_views) = super::super::session_watch_service::session_watch_service()
-            .discovery_for(provider_registry(), &cache_consumer, &capture_request)
-            .unwrap();
-        assert_eq!(refreshed_views.len(), 1);
         let views =
             load_project_session_views(&repo, &project.local_project_id, resource_id.as_str())
                 .unwrap();
-        assert_eq!(
-            views.len(),
-            1,
-            "the original project's inventory is stale on its own stamp"
-        );
+        assert_eq!(views.len(), 1);
         assert_eq!(views[0].provider_thread_id, provider_thread_id);
 
         let detail = ProjectSyncService::new(&repo)
@@ -18139,6 +18632,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -24737,10 +25231,9 @@ mod tests {
     /// still refuses to offer it.  If refresh ever starts hiding the row
     /// again, payload reads have crept back into the manifest-only path.
     /// A rollout crossing the conversation bound by append surfaces the
-    /// identical blocked row whether the cached-inventory path or a cold
-    /// rediscovery detects it.
+    /// identical blocked row with or without retained observations.
     #[test]
-    fn an_oversize_append_blocks_identically_under_cache_and_rediscovery() {
+    fn an_oversize_append_blocks_the_row_on_the_next_comparison() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("oversize-parity-store").unwrap();
@@ -24757,7 +25250,7 @@ mod tests {
         std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
         std::fs::write(&session_path, &base).unwrap();
 
-        // Warm the caches, then grow the file past the bound in place.
+        // Retain an observation, then grow the file past the bound in place.
         get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -24770,27 +25263,27 @@ mod tests {
             .unwrap()
             .set_len(conversation_file_limit_bytes() + 1)
             .unwrap();
-        let cached_path = get_project_thread_sync_comparison_with_repository(
+        let warm = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
         )
         .unwrap();
-        let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::session_watch_service::session_watch_service()
-            .force_rebaseline(&canonical_home);
-        let rediscovered = get_project_thread_sync_comparison_with_repository(
+        super::super::observation_cache::observation_cache()
+            .reset_and_purge_disk(repo.root())
+            .unwrap();
+        let cold = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
         )
         .unwrap();
         assert_eq!(
-            serde_json::to_value(&cached_path.entries).unwrap(),
-            serde_json::to_value(&rediscovered.entries).unwrap(),
-            "oversize detection is stage-independent"
+            serde_json::to_value(&warm.entries).unwrap(),
+            serde_json::to_value(&cold.entries).unwrap(),
+            "oversize detection does not depend on what was retained"
         );
-        let row = cached_path
+        let row = warm
             .entries
             .iter()
             .find(|entry| entry.provider_thread_id.as_deref() == Some(provider_id))
@@ -24865,12 +25358,13 @@ mod tests {
                 &self.provider_id,
             )
             .unwrap();
-            super::super::session_watch_service::session_watch_service().take_push_observations(
+            super::super::observation_cache::observation_cache().take_push_observations(
                 &self.home,
+                self.repo.root(),
                 &self.project.local_project_id,
                 &self.storage,
-                &[super::super::session_watch_service::PushObservationQuery {
-                    observation: super::super::session_watch_service::ObservationQuery {
+                &[super::super::observation_cache::PushObservationQuery {
+                    observation: super::super::observation_cache::ObservationQuery {
                         thread_id,
                         checkpoint_generation: generation,
                         binding_revision: revision,
@@ -24983,8 +25477,9 @@ mod tests {
         let cached = review();
         assert_eq!(metrics.snapshot().observation_reuse_hits, 1);
         assert_eq!(metrics.snapshot().full_graph_resolves, 1);
-        super::super::session_watch_service::session_watch_service()
-            .force_rebaseline(&fixture.home);
+        super::super::observation_cache::observation_cache()
+            .reset_and_purge_disk(fixture.repo.root())
+            .unwrap();
         let fresh = review();
         assert_eq!(metrics.snapshot().full_graph_resolves, 2);
         assert_eq!(cached.push_actions.len(), 1);
@@ -25001,7 +25496,7 @@ mod tests {
     }
 
     #[test]
-    fn push_observation_reuse_checks_stamps_without_watcher_delivery() {
+    fn push_observation_reuse_checks_the_stamps_of_every_source() {
         for mutation in ["append", "truncate", "rewrite", "replace"] {
             let fixture = PushReuseFixture::new(1);
             fixture.warm();
@@ -25036,7 +25531,6 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            // This lookup does not poll or drain the test watcher.
             assert!(fixture.cached(&stamp, None, None).is_empty(), "{mutation}");
             let current = jsonl_tail_io::SourceStamp::read(&fixture.source).unwrap();
             assert!(
@@ -25290,14 +25784,14 @@ mod tests {
             "Push Compare captures nothing"
         );
 
-        // Quiet second review uses cached inventory and observations.
+        // A second review of unchanged files opens none of them.
         let before = metrics.snapshot();
         service
             .prepare_push_review(&project.local_project_id, &storage_id)
             .unwrap();
         let delta = metrics.snapshot().delta_since(&before);
         assert_eq!(delta.selected_captures, 0);
-        assert_eq!(delta.files_head_read, 0, "inventory reused");
+        assert_eq!(delta.files_head_read, 0, "scans remembered");
         assert_eq!(delta.probe_bytes_read, 0, "observations reused");
         assert_eq!(delta.full_graph_resolves, 0);
         assert_eq!(delta.transcript_bytes_read, 0, "no content read at all");
@@ -25495,6 +25989,153 @@ mod tests {
         assert_eq!(checkpoint_of(&repo), detached);
     }
 
+    /// The reported failure, end to end. A provider appends a turn and keeps
+    /// its transcript open, so the platform delivers no change event until
+    /// the file is closed. The comparison must show the turn anyway, while
+    /// the handle is still open, and keep showing a synced row for the
+    /// sibling nobody touched.
+    #[test]
+    fn a_turn_appended_through_a_held_open_handle_shows_on_the_next_comparison() {
+        use std::io::Write;
+
+        for provider in ["codex", "claude"] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = repository(&temp);
+            let storage_id = StorageId::parse("held-open-store").unwrap();
+            add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+            let project = register(&repo);
+            let project_root = temp.path().join("project");
+            let home = temp.path().join("provider-home");
+            let (active_id, quiet_id) = match provider {
+                "codex" => (
+                    "019fb009-0000-7000-8000-0000000000a1",
+                    "019fb009-0000-7000-8000-0000000000a2",
+                ),
+                _ => ("held-open-active", "held-open-quiet"),
+            };
+            let transcript = |id: &str, turns: usize| match provider {
+                "codex" => command_test_transcript(
+                    id,
+                    &project_root,
+                    &[
+                        ("m-1", "user", "hello"),
+                        ("m-2", "assistant", "answer"),
+                        ("m-3", "user", "one more turn"),
+                    ][..turns],
+                ),
+                _ => claude_test_transcript(
+                    id,
+                    &project_root,
+                    &[
+                        ("m-1", None, "user", "hello"),
+                        ("m-2", Some("m-1"), "assistant", "answer"),
+                        ("m-3", Some("m-2"), "user", "one more turn"),
+                    ][..turns],
+                ),
+            };
+            let path_of = |id: &str| match provider {
+                "codex" => home
+                    .join("sessions/2026/09/28")
+                    .join(format!("rollout-2026-09-28T12-00-00-{id}.jsonl")),
+                _ => home.join("projects/source").join(format!("{id}.jsonl")),
+            };
+            match provider {
+                "codex" => {
+                    bind_and_link_test_replica(&repo, &project, &storage_id, &project_root, &home);
+                }
+                _ => {
+                    bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &home)
+                }
+            }
+            for id in [active_id, quiet_id] {
+                std::fs::create_dir_all(path_of(id).parent().unwrap()).unwrap();
+                std::fs::write(path_of(id), transcript(id, 2)).unwrap();
+            }
+            let review =
+                prepare_push_review_with_repository(&repo, &project.local_project_id, &storage_id)
+                    .unwrap();
+            push_bundle_reviewed_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+                recommended_review_recipe(&review, &storage_id),
+                empty_project_content_review(),
+                &mut |_| {},
+            )
+            .unwrap();
+            let states = || {
+                let comparison = get_project_thread_sync_comparison_with_repository(
+                    &repo,
+                    &project.local_project_id,
+                    &storage_id,
+                )
+                .unwrap();
+                let state_of = |id: &str| {
+                    comparison
+                        .entries
+                        .iter()
+                        .find(|entry| entry.provider_thread_id.as_deref() == Some(id))
+                        .map(|entry| entry.state)
+                        .unwrap()
+                };
+                (state_of(active_id), state_of(quiet_id))
+            };
+            // Twice: the second comparison is the one served from what the
+            // first retained.
+            for _ in 0..2 {
+                assert_eq!(
+                    states(),
+                    (ThreadSyncState::Synced, ThreadSyncState::Synced),
+                    "{provider}"
+                );
+            }
+
+            let before = transcript(active_id, 2);
+            let after = transcript(active_id, 3);
+            assert_eq!(&after[..before.len()], &before[..]);
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(path_of(active_id))
+                .unwrap();
+            writer.write_all(&after[before.len()..]).unwrap();
+            writer.flush().unwrap();
+            let metrics = mallard_infrastructure::sync_metrics::register_root(
+                &std::fs::canonicalize(&home).unwrap(),
+            );
+            assert_eq!(
+                states(),
+                (ThreadSyncState::LocalAhead, ThreadSyncState::Synced),
+                "{provider}: the writer still holds the transcript open"
+            );
+            let first = metrics.snapshot();
+            assert_eq!(
+                first.append_bytes_read,
+                (after.len() - before.len()) as u64,
+                "{provider}: only the active transcript's append is read"
+            );
+            assert_eq!(
+                first.observation_reuse_hits, 1,
+                "{provider}: the quiet sibling"
+            );
+
+            // The changed row is retained under its new stamp and served.
+            assert_eq!(
+                states(),
+                (ThreadSyncState::LocalAhead, ThreadSyncState::Synced),
+                "{provider}"
+            );
+            let second = metrics.snapshot().delta_since(&first);
+            assert_eq!(second.observation_reuse_hits, 2, "{provider}");
+            assert_eq!(second.append_bytes_read, 0, "{provider}");
+            drop(writer);
+            assert_eq!(
+                states(),
+                (ThreadSyncState::LocalAhead, ThreadSyncState::Synced),
+                "{provider}: closing the file changes nothing"
+            );
+        }
+    }
+
     /// Once a Codex thread rides a ready checkpoint, a plain comparison performs
     /// no capture and reads no transcript bytes beyond the probe window —
     /// and one appended record costs only the probe plus the append.
@@ -25540,9 +26181,10 @@ mod tests {
         .unwrap();
 
         // Warm no-change comparison: no capture, no full resolve, no
-        // transcript bytes, and the push review's inventory is reused so no
-        // head scan runs either. The applied push moved the checkpoint
-        // generation, so the cursor revalidates through one probe window.
+        // transcript bytes, and the push review already scanned this
+        // unchanged file so no head scan runs either. The applied push moved
+        // the checkpoint generation, so the cursor revalidates through one
+        // probe window.
         let canonical_home = std::fs::canonicalize(&codex_home).unwrap();
         let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let comparison = get_project_thread_sync_comparison_with_repository(
@@ -25558,7 +26200,7 @@ mod tests {
         assert_eq!(counted.full_graph_resolves, 0, "cursor rides the probe");
         assert_eq!(
             counted.files_head_read, 0,
-            "push review's inventory is reused"
+            "the push review's scan is remembered"
         );
         assert!(counted.probe_bytes_read > 0);
         assert_eq!(counted.append_bytes_read, 0);
@@ -25577,7 +26219,7 @@ mod tests {
         assert_eq!(&extended[..base.len()], &base[..]);
         std::fs::write(&session_path, &extended).unwrap();
         // A distinct mtime makes presentation-staleness deterministic: the
-        // dirty root's row must carry this stamp, cached or rebaselined.
+        // row must carry this stamp.
         std::fs::OpenOptions::new()
             .write(true)
             .open(&session_path)
@@ -25611,11 +26253,12 @@ mod tests {
         assert_eq!(
             appended_row.entries[0].local_updated_at,
             Some(1_800_000_000),
-            "a dirty root's presentation stamp is fresh even under reuse"
+            "every comparison stats the source it lists"
         );
 
-        // Quiet watcher: the next comparison serves inventory and
-        // observation from the caches, with a filename selection check.
+        // Nothing changed: the next comparison lists the tree twice, once
+        // to discover and once to check the rollout selection, and opens
+        // no file.
         let before_quiet = metrics.snapshot();
         let quiet = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -25624,42 +26267,44 @@ mod tests {
         )
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_quiet);
-        assert_eq!(delta.files_head_read, 0, "inventory reused, no head scan");
+        assert_eq!(delta.files_head_read, 0, "scan remembered, no head read");
         assert_eq!(
-            delta.directories_visited, 4,
-            "check current rollout selection without parsing"
+            delta.directories_visited, 8,
+            "discovery and the rollout selection check each list four directories"
         );
         assert_eq!(delta.probe_bytes_read, 0, "observation reused, no probe");
         assert_eq!(delta.append_bytes_read, 0);
         assert_eq!(delta.transcript_bytes_read, 0);
-        assert_eq!(delta.inventory_reuse_hits, 1);
         assert_eq!(delta.observation_reuse_hits, 1);
 
-        // A forced rebaseline invalidates both memory and disk observations.
-        // The next comparison rediscovers the inventory and rebuilds native
-        // child membership from one bounded main read. No payload is retained.
-        let canonical = std::fs::canonicalize(&codex_home).unwrap();
-        super::super::session_watch_service::session_watch_service().force_rebaseline(&canonical);
+        // Without its retained observations the next comparison rebuilds
+        // native child membership from one bounded main read. No payload is
+        // retained.
+        super::super::observation_cache::observation_cache()
+            .reset_and_purge_disk(repo.root())
+            .unwrap();
         let before_cold = metrics.snapshot();
-        let rebaselined = get_project_thread_sync_comparison_with_repository(
+        let rederived = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
         )
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_cold);
-        assert_eq!(delta.inventory_reuse_hits, 0);
-        assert_eq!(delta.observation_reuse_hits, 0, "disk cache invalidated");
+        assert_eq!(delta.observation_reuse_hits, 0, "nothing retained");
         assert!(delta.probe_bytes_read > 0, "bounded probe rebuilt");
         assert!(
             delta.transcript_bytes_read > 0,
             "cold native membership requires its source records"
         );
-        assert!(delta.files_head_read > 0, "rebaseline rediscovers");
+        assert_eq!(
+            delta.files_head_read, 0,
+            "the file is unchanged, so its scan is still remembered"
+        );
         assert_eq!(
             serde_json::to_value(&quiet.entries).unwrap(),
-            serde_json::to_value(&rebaselined.entries).unwrap(),
-            "cached and rebaselined comparisons produce identical rows"
+            serde_json::to_value(&rederived.entries).unwrap(),
+            "retained and re-derived comparisons produce identical rows"
         );
     }
 
@@ -27143,11 +27788,11 @@ mod tests {
 
     /// The Claude twin of the Codex probe-window proof: after a push, a
     /// comparison reads no Claude transcript bytes beyond the bounded probe
-    /// window, an append reads exactly the appended bytes, the quiet watcher
-    /// serves everything from the caches, and the persisted checkpoint
-    /// carries the real cursor.
+    /// window; an append costs one identity scan plus exactly the appended
+    /// bytes; an unchanged file is served without being opened; and the
+    /// persisted checkpoint carries the real cursor.
     #[test]
-    fn a_comparison_reads_no_claude_transcript_bytes_beyond_the_probe_window() {
+    fn a_claude_comparison_reads_the_probe_the_append_and_one_identity_scan() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("claude-metadata-refresh-store").unwrap();
@@ -27222,9 +27867,10 @@ mod tests {
         );
 
         // Warm no-change comparison: no capture, no full resolve, no
-        // transcript bytes, and the push review's inventory is reused so no
-        // head scan runs either. The applied push moved the checkpoint
-        // generation, so the cursor revalidates through one probe window.
+        // transcript bytes, and the push review already scanned this
+        // unchanged file so no head scan runs either. The applied push moved
+        // the checkpoint generation, so the cursor revalidates through one
+        // probe window.
         let canonical_home = std::fs::canonicalize(&claude_home).unwrap();
         let metrics = mallard_infrastructure::sync_metrics::register_root(&canonical_home);
         let comparison = get_project_thread_sync_comparison_with_repository(
@@ -27240,13 +27886,14 @@ mod tests {
         assert_eq!(counted.full_graph_resolves, 0, "cursor rides the probe");
         assert_eq!(
             counted.files_head_read, 0,
-            "push review's inventory is reused"
+            "the push review's scan is remembered"
         );
         assert!(counted.probe_bytes_read > 0);
         assert_eq!(counted.append_bytes_read, 0);
 
-        // One appended record: Compare reads the probe plus exactly the
-        // appended bytes and does not persist its observation.
+        // One appended record: discovery scans the changed transcript's
+        // identity once, and Compare reads the probe plus exactly the
+        // appended bytes.
         let extended = claude_test_transcript(
             session_id,
             &project_root,
@@ -27273,14 +27920,23 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_append);
         assert_eq!(delta.selected_captures, 0);
-        assert_eq!(delta.transcript_bytes_read, 0);
+        assert_eq!(
+            delta.transcript_bytes_read,
+            extended.len() as u64,
+            "an append can move a Claude session's identity, so it is scanned again"
+        );
+        assert_eq!(delta.files_head_read, 1);
         assert_eq!(delta.full_graph_resolves, 0);
         assert_eq!(
             delta.append_bytes_read,
             (extended.len() - base.len()) as u64,
-            "the append is the only content read"
+            "the append is the only content the cursor reads"
         );
-        assert_eq!(delta.records_parsed, 1);
+        assert_eq!(
+            delta.records_parsed,
+            3 + 1,
+            "the scan's records, then the append"
+        );
         let advanced_checkpoint = repo
             .load_config()
             .unwrap()
@@ -27312,11 +27968,11 @@ mod tests {
         assert_eq!(
             appended_row.entries[0].local_updated_at,
             Some(1_800_000_000),
-            "a dirty root's presentation stamp is fresh even under reuse"
+            "every comparison stats the source it lists"
         );
 
-        // Quiet watcher: the next comparison serves inventory and
-        // observation from the caches with zero local filesystem work.
+        // Nothing changed: the next comparison lists the tree and opens no
+        // file.
         let before_quiet = metrics.snapshot();
         let quiet = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -27325,12 +27981,10 @@ mod tests {
         )
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_quiet);
-        assert_eq!(delta.files_head_read, 0, "inventory reused, no head scan");
-        assert_eq!(delta.directories_visited, 0, "no tree walk");
+        assert_eq!(delta.files_head_read, 0, "scan remembered, no head read");
         assert_eq!(delta.probe_bytes_read, 0, "observation reused, no probe");
         assert_eq!(delta.append_bytes_read, 0);
         assert_eq!(delta.transcript_bytes_read, 0);
-        assert_eq!(delta.inventory_reuse_hits, 1);
         assert_eq!(delta.observation_reuse_hits, 1);
 
         // Push comparison is metadata-only. It never captures the changed
@@ -27352,31 +28006,34 @@ mod tests {
         assert_eq!(delta.selected_captures, 0);
         assert_eq!(delta.transcript_bytes_read, 0);
 
-        // A forced rebaseline invalidates both memory and disk observations.
-        // Claude's whole-thread comparison codec can reread this bounded
-        // transcript, but it still creates no captured payload.
-        super::super::session_watch_service::session_watch_service()
-            .force_rebaseline(&canonical_home);
+        // Without its retained observations Claude's whole-thread
+        // comparison codec rereads this bounded transcript, and still
+        // creates no captured payload.
+        super::super::observation_cache::observation_cache()
+            .reset_and_purge_disk(repo.root())
+            .unwrap();
         let before_cold = metrics.snapshot();
-        let rebaselined = get_project_thread_sync_comparison_with_repository(
+        let rederived = get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
             &storage_id,
         )
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_cold);
-        assert_eq!(delta.inventory_reuse_hits, 0);
-        assert_eq!(delta.observation_reuse_hits, 0, "disk cache invalidated");
+        assert_eq!(delta.observation_reuse_hits, 0, "nothing retained");
         assert!(
             delta.transcript_bytes_read > 0,
             "cold observation rebuilds parent child membership"
         );
         assert_eq!(delta.selected_captures, 0, "no captured payload");
-        assert!(delta.files_head_read > 0, "rebaseline rediscovers");
+        assert_eq!(
+            delta.files_head_read, 0,
+            "the file is unchanged, so its scan is still remembered"
+        );
         assert_eq!(
             serde_json::to_value(&quiet.entries).unwrap(),
-            serde_json::to_value(&rebaselined.entries).unwrap(),
-            "cached and rebaselined comparisons produce identical rows"
+            serde_json::to_value(&rederived.entries).unwrap(),
+            "retained and re-derived comparisons produce identical rows"
         );
     }
 
@@ -27455,8 +28112,8 @@ mod tests {
         assert_eq!(counted.full_graph_resolves, 1, "one full re-analyze");
         assert_eq!(
             counted.transcript_bytes_read,
-            rewound.len() as u64,
-            "the full path reads the file once"
+            2 * rewound.len() as u64,
+            "the identity scan and the full path each read the file once"
         );
         assert_eq!(comparison.entries.len(), 1);
         assert_eq!(
@@ -27538,7 +28195,7 @@ mod tests {
 
     /// A first "Open in Claude" rewrites the live transcript — thinking
     /// rows deleted, parents left dangling — and sync must not care. The
-    /// watcher-invalidated cursor degrades to exactly one bounded full
+    /// cursor, which the rewrite invalidates, degrades to exactly one bounded full
     /// re-analyze, the derived state is identical, the row stays Synced, and
     /// the re-seeded cursor rides the next append.
     #[test]
@@ -27614,8 +28271,8 @@ mod tests {
         assert_eq!(counted.full_graph_resolves, 1, "one bounded re-analyze");
         assert_eq!(
             counted.transcript_bytes_read,
-            imported.len() as u64,
-            "the full path reads the imported file once"
+            2 * imported.len() as u64,
+            "the identity scan and the full path each read the imported file once"
         );
         assert_eq!(counted.selected_captures, 0, "no capture: nothing changed");
         assert_eq!(comparison.entries.len(), 1);
@@ -27660,7 +28317,11 @@ mod tests {
         .unwrap();
         let delta = metrics.snapshot().delta_since(&before_append);
         assert_eq!(delta.full_graph_resolves, 1);
-        assert_eq!(delta.transcript_bytes_read, appended.len() as u64);
+        assert_eq!(
+            delta.transcript_bytes_read,
+            2 * appended.len() as u64,
+            "the identity scan, then the full path"
+        );
         assert_eq!(delta.append_bytes_read, 0);
         assert_eq!(after_append.entries[0].state, ThreadSyncState::LocalAhead);
         let scope = SyncScopeKey::Provider(ProviderKey::parse("claude").unwrap());
@@ -29086,6 +29747,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -29568,6 +30230,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -29774,13 +30437,8 @@ mod tests {
         let snapshot = observation.current.unwrap().0;
         let resolved = resolve_project_binding(&repo, &binding).unwrap();
         let capture_request = capture_request_for_binding(&repo, &binding).unwrap();
-        let (discovery, views) = super::super::session_watch_service::session_watch_service()
-            .discovery_for(
-                provider_registry(),
-                &project.local_project_id,
-                &capture_request,
-            )
-            .unwrap();
+        let (discovery, views) =
+            provider_capture::discover_sessions(provider_registry(), &capture_request).unwrap();
         let selected = views
             .iter()
             .map(|view| view.descriptor.resource_id.clone())
@@ -30016,10 +30674,11 @@ mod tests {
     }
 
     /// Session Detail is presentation: opening it locates its transcript
-    /// through the cached inventory and leaves every watcher cache, memory
-    /// and disk, exactly as the comparison left it.
+    /// through a discovery that scans nothing again, and leaves the
+    /// retained observations, memory and disk, exactly as the comparison
+    /// left them.
     #[test]
-    fn opening_session_detail_keeps_the_comparison_caches() {
+    fn opening_session_detail_keeps_the_retained_observations() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
         let storage_id = StorageId::parse("detail-keeps-caches-store").unwrap();
@@ -30031,7 +30690,7 @@ mod tests {
         let provider_id = "019f7601-0000-7000-8000-0000000000cc";
         write_codex_session(&codex_home, provider_id, &project_root);
 
-        // Warm the caches, then prove they serve.
+        // Retain the observation, then prove it serves.
         get_project_thread_sync_comparison_with_repository(
             &repo,
             &project.local_project_id,
@@ -30048,7 +30707,7 @@ mod tests {
         )
         .unwrap();
         let warm = metrics.snapshot().delta_since(&before);
-        assert_eq!(warm.inventory_reuse_hits, 1);
+        assert_eq!(warm.files_head_read, 0);
         assert_eq!(warm.observation_reuse_hits, 1);
         let cache_path = repo.root().join("observation_cache.json");
         let disk_before = std::fs::read(&cache_path).ok();
@@ -30070,19 +30729,16 @@ mod tests {
         assert_eq!(detail.provider_session_id, provider_id);
         let opened = metrics.snapshot().delta_since(&before);
         assert_eq!(
-            opened.inventory_reuse_hits, 1,
-            "detail locates its transcript through the cached inventory"
+            opened.files_head_read, 0,
+            "detail locates its transcript without scanning a head again"
         );
-        // The unbound thread's identity is derived from its transcript head,
-        // which is a read the detail owns; a rediscovery would walk the tree.
-        assert_eq!(opened.directories_visited, 0, "no tree walk");
         assert_eq!(
             std::fs::read(&cache_path).ok(),
             disk_before,
             "detail never rewrites the observation cache"
         );
 
-        // The next comparison still serves both caches.
+        // The next comparison is still served.
         let before = metrics.snapshot();
         get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -30091,7 +30747,6 @@ mod tests {
         )
         .unwrap();
         let after = metrics.snapshot().delta_since(&before);
-        assert_eq!(after.inventory_reuse_hits, 1);
         assert_eq!(
             after.observation_reuse_hits, 1,
             "observations survive a Session Detail open"
@@ -30100,11 +30755,11 @@ mod tests {
         assert_eq!(after.probe_bytes_read, 0, "no re-observation");
     }
 
-    /// Apply captures changes made after comparison even when watcher events
-    /// have not invalidated the old observation.
+    /// A session that changed after comparison is never served from, or
+    /// stored back into, the observation cache, and Apply captures it.
     #[test]
     fn push_apply_captures_a_session_that_changed_after_compare() {
-        use super::super::session_watch_service::{ObservationQuery, StoredObservation};
+        use super::super::observation_cache::{ObservationQuery, StoredObservation};
 
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -30142,10 +30797,9 @@ mod tests {
             checkpoint_generation: None,
             binding_revision: None,
         }];
-        let watcher = super::super::session_watch_service::session_watch_service();
-        let old_observation = watcher
+        let cache = super::super::observation_cache::observation_cache();
+        let old_observation = cache
             .take_reusable_observations(
-                &provider,
                 &codex_home,
                 repo.root(),
                 &project.local_project_id,
@@ -30160,7 +30814,10 @@ mod tests {
                 .join(format!("rollout-{}.jsonl", drifting_id)),
         )
         .unwrap();
-        let old_metadata = std::fs::metadata(&source_path).unwrap();
+        let old_stamps = jsonl_tail_io::SourceStamps::of(
+            &source_path,
+            &jsonl_tail_io::SourceStamp::read(&source_path).unwrap(),
+        );
 
         // The user keeps chatting in one thread while the review dialog is
         // open: the rollout stays valid but its bytes and chain move.
@@ -30177,51 +30834,32 @@ mod tests {
         )
         .unwrap();
 
-        // Drain the synchronous test scanner, then restore the old observation
-        // to model delayed event delivery without timing-dependent sleeps.
-        assert!(watcher
-            .take_reusable_observations(
-                &provider,
+        // The cached observation is refused at once, and a review that
+        // read the old bytes cannot store its result over the new file.
+        let served = || {
+            cache.take_reusable_observations(
                 &codex_home,
                 repo.root(),
                 &project.local_project_id,
                 &storage_id,
                 &queries,
             )
-            .is_empty());
-        watcher.store_observations(
+        };
+        assert!(served().is_empty());
+        cache.store_observations(
             &codex_home,
             repo.root(),
             &project.local_project_id,
             &storage_id,
             vec![StoredObservation {
                 thread_id: thread_id.clone(),
-                source_path: source_path.clone(),
-                depends_on: vec![source_path],
+                depends_on: old_stamps,
                 checkpoint_generation: None,
                 binding_revision: None,
                 observation: old_observation,
-                source_mtime_secs: old_metadata
-                    .modified()
-                    .unwrap()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                source_size: old_metadata.len(),
             }],
         );
-        let stale = watcher.take_reusable_observations(
-            &provider,
-            &codex_home,
-            repo.root(),
-            &project.local_project_id,
-            &storage_id,
-            &queries,
-        );
-        assert!(matches!(
-            &stale.get(&thread_id).expect("stale cache is available").evidence,
-            TailSideEvidence::Present(tail) if tail.accepted_end_record_count == 1
-        ));
+        assert!(served().is_empty(), "a stale observation is never retained");
 
         let pushed = push_bundle_reviewed_with_repository(
             &repo,
@@ -30356,6 +30994,7 @@ mod tests {
         repo.mutate_conversation_bindings(|document| {
             document.bindings.push(LocalConversationBinding {
                 installed_end: None,
+                installed_absent_subagents: Default::default(),
                 pulled_children_excluded: false,
                 installed_subagents: Default::default(),
                 path_origins_ref: None,
@@ -32815,10 +33454,21 @@ mod tests {
         let PhysicalMappingState::Ready {
             root_mapping,
             raw_range_pin,
+            source_state,
         } = &retained_checkpoint.physical
         else {
             panic!("retained source witness must keep its physical mapping");
         };
+        // The retained file is untouched, so the state its cursor was saved
+        // from is still the state it is in.
+        assert_eq!(
+            source_state.as_ref(),
+            Some(
+                &jsonl_tail_io::SourceStamp::stat(&std::fs::canonicalize(&base_rollout).unwrap())
+                    .unwrap()
+                    .file_state()
+            )
+        );
         assert_eq!(root_mapping.provider_thread_id, base_id);
         assert_eq!(
             Path::new(&root_mapping.root_path),
@@ -33368,25 +34018,32 @@ mod tests {
 
         // The witness failure is the thread's own: the Push reports it and
         // publishes nothing of the thread, so the head stays where it was.
-        // The mutated base is reported too — its own bytes changed under
-        // its cursor, so the apply-time review cannot prove it either.
+        // The mutated base is a session of its own. Its file changed
+        // without growing, so the review read it in full, and its content
+        // no longer matches what was accepted: it is held for a Pull.
         let blocked = push_bundle_with_repository(&fixture.repo, &project_id, &storage_id).unwrap();
         assert!(!blocked.success, "{}", blocked.message);
         assert_eq!(blocked.revision, Some(2));
-        let failed = blocked
-            .results
-            .iter()
-            .filter(|row| row.state == "failed")
-            .collect::<Vec<_>>();
-        assert_eq!(failed.len(), 2, "{:?}", blocked.results);
+        let rows_in = |state: &str| {
+            blocked
+                .results
+                .iter()
+                .filter(|row| row.state == state)
+                .collect::<Vec<_>>()
+        };
+        let failed = rows_in("failed");
+        assert_eq!(failed.len(), 1, "{:?}", blocked.results);
+        assert!(failed[0].resource_id.as_str().ends_with(leaf_id));
         assert!(
-            failed.iter().any(|row| {
-                row.message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("prefix witness no longer matches"))
-            }),
+            failed[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("prefix witness no longer matches")),
             "{failed:?}"
         );
+        let held = rows_in("held");
+        assert_eq!(held.len(), 1, "{:?}", blocked.results);
+        assert!(held[0].resource_id.as_str().ends_with(base_id));
 
         // Restoring the original prefix bytes publishes the advance cleanly.
         std::fs::write(&base_rollout, &base_bytes).unwrap();
@@ -33446,6 +34103,7 @@ mod tests {
         };
         let mut owner = LocalConversationBinding {
             installed_end: None,
+            installed_absent_subagents: Default::default(),
             pulled_children_excluded: false,
             installed_subagents: Default::default(),
             path_origins_ref: None,

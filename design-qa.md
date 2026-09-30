@@ -139,3 +139,230 @@ Scope: provider artwork and tile colors. No open P0, P1, or P2 visual findings r
 - [x] Preserve card and sidebar control geometry.
 - [x] Check light, dark, keyboard, and narrow states.
 - [x] Record assets, licenses, and validation limits.
+
+---
+
+# Icon system design QA
+
+final result: passed
+
+## Source
+
+- Approved direction: Combined option 1, Warm Solid Accent.
+- Reference image: `exec-1c8ad8cd-465e-4a98-96d0-1333a0c3c1df.png` (local-only image; not committed).
+- General icon reference: `exec-7e214221-5d48-4a7f-9615-98815d68f074.png` (local-only image; not committed).
+
+## Rendered implementation
+
+- Components: `src/components/Icons.tsx` and `src/components/sync-review/ThreadStatusIcon.tsx`.
+- Styles: `src/App.css`.
+- A temporary browser gallery rendered all general icons, all ten status states, and all provider marks side by side in the light and dark themes. The gallery was removed after the review.
+
+## Comparison
+
+- PASS: Shared glyphs use one rounded 24-unit vector system with a 2-unit stroke.
+- PASS: Small warm accents identify the active part of selected general icons.
+- PASS: Status icons use both shape and color. They remain distinct without color.
+- PASS: The 18 px and 24 px status forms are centered and legible.
+- PASS: Light-theme and dark-theme status colors clear the repository's non-text contrast checks.
+- PASS: Storage-provider artwork and the Claude provider mark remain unchanged.
+- PASS: No icon clips, overlaps, or changes control layout.
+- PASS: Reduced-motion mode stops the checking-state pulse.
+
+## Verification
+
+- `npm run build`
+- `npm run test:frontend-integration` — 471 passed, 0 failed
+
+---
+
+# Catalog resource orbit icons
+
+final result: passed
+
+## Source and scope
+
+- Approved source: `exec-b9bc4f70-692b-4c50-ad83-ab82bda3aa98.png` (local-only image; not committed).
+- Scope: Pet v1, Pet v2, and Plugin use the selected open-orbit family. Skill keeps the current lightbulb design.
+- Production components: `src/components/Icons.tsx`, `src/components/storage-catalog/model.ts`, and `src/App.css`.
+
+## Rendered implementation
+
+- Review page: `http://127.0.0.1:4173/output/catalog-resource-icons/review.html?theme=light`.
+- Browser fixture: `output/catalog-resource-icons/review.html` and `output/catalog-resource-icons/review.tsx`. It imports the production Icon component and app stylesheet.
+- Light capture: `output/catalog-resource-icons/light.png`, 1280 x 720 px.
+- Dark capture: `output/catalog-resource-icons/dark.png`, 1280 x 720 px.
+- CSS viewport: 1102 x 805. Device pixel ratio: 1. Browser capture normalizes the visible viewport.
+- Both captures include large forms, 32 px, 18 px, 14 px, and list-row uses.
+
+## Fidelity checks
+
+- Typography: unchanged.
+- Layout and spacing: no application layout changes. The icons use the existing size API and tile geometry.
+- Colors: the orbit and symbol use `currentColor`. Pet v2 and Plugin use the existing warning token for the small accent. Skill retains its current amber base treatment.
+- Assets: the new set composes existing Tabler vector components. It adds no raster asset and no hand-drawn SVG path.
+- Content: labels and resource behavior are unchanged.
+- Interaction: the icons are passive. The review page loads with no console error or warning.
+- Theme and size: all four icons remain distinct in the light and dark themes at 14 px and 18 px.
+
+## Comparison history
+
+- First pass used a segmented progress ring. It produced several gaps and did not match the selected single open orbit. This was a P2 finding.
+- Replaced it with the Tabler circle and one controlled dash gap, then rotated the gap to the selected position.
+- The first gallery rule overrode the amber point at large size. Increased the production accent selector specificity and rechecked computed colors and both themes.
+- The final source, light capture, and dark capture were reviewed together. No open P0, P1, or P2 finding remains.
+
+## Accepted differences
+
+- The Tabler paw has four toes. The mock has three. The library mark remains clearer at the application's small sizes.
+- Production Catalog tiles retain their existing red, purple, and yellow backgrounds. The mock's editorial rows do not reproduce these product surfaces.
+
+## Verification
+
+- `npm run build`: passed. The existing bundle-size warning remains.
+- `npm run test:frontend-integration`: 472 passed, 0 failed.
+- `git diff --check`: passed.
+- Native Tauri was not exercised. This change is frontend presentation only.
+
+---
+
+# Catalog resource icons — Soft Outline, 2026-09-30
+
+final result: passed
+
+## Source and scope
+
+- Selected source: `output/catalog-resource-icons/soft-outline-source.png`, 1536 x 1024 px. The user selected the second displayed mock and confirmed Soft Outline.
+- Pet v1 uses four solid paw pads and an outlined central pad. Pet v2 uses a cat outline with two eyes. Plugin uses the outlined two-prong plug.
+- The three icons have no outer circle or separate accent point. Skill keeps the current lightbulb.
+- The shared library mapping replaces the obsolete orbit component and styles.
+
+## Rendered evidence
+
+- Review URL: `http://127.0.0.1:4173/output/catalog-resource-icons/review.html?theme=light`. The `dark` query shows the dark theme.
+- Light capture: `output/catalog-resource-icons/soft-outline-light.png`, 1280 x 720 px.
+- Dark capture: `output/catalog-resource-icons/soft-outline-dark.png`, 1280 x 720 px.
+- Detail capture: `output/catalog-resource-icons/soft-outline-detail.png`, 1180 x 350 px.
+- Browser viewport: 1280 x 720 CSS px. Device pixel ratio: 2. The browser normalizes captured pixels to CSS dimensions.
+- The source is an enlarged design board. The review renders production components at 96, 32, 18, and 14 CSS px, plus existing list rows and tiles. Compare mark geometry and weight at each labeled size, not the board's text or page dimensions.
+- Full-view comparison: opened the source, light capture, and dark capture in one input. All four icons are visible with size samples and list rows.
+- Focused comparison: opened the source and detail capture together. The paw pads, cat eyes, plug prongs, and 14/18 px forms remain distinct.
+
+## Findings and fidelity
+
+- No open P0, P1, or P2 finding.
+- Fonts and typography: current app fonts, labels, and text sizes are retained. Mock headings are review-board content only.
+- Spacing and layout: current icon sizes, tile frames, and row alignment are retained. Each resource uses the full library viewBox instead of a small symbol inside a ring.
+- Colors: the three resource marks inherit the current foreground color. Skill retains its current amber base. Both themes have clear contrast.
+- Asset quality: existing Tabler vectors provide the three marks. No raster asset or custom SVG path is used in the application.
+- Copy and content: production labels and resource behavior are unchanged.
+- Interaction: the marks are passive. Existing navigation and actions are outside this presentation change. Both preview consoles contain no error or warning.
+
+## Comparison history and accepted P3 differences
+
+- Removed the former ring and point, restored the plug outline, and kept only the cat head and eyes before the first comparison.
+- The first full-view and detail comparison found no actionable P0/P1/P2 mismatch. No additional production correction was needed.
+- The library paw pads are more oval, the cat ears are taller, and the plug cable is straight. These small library-shape differences preserve the selected metaphor and outline style.
+- Existing Catalog tile colors and application typography differ from the illustrative board. They are retained product surfaces.
+
+## Verification and checklist
+
+- [x] Apply the selected Soft Outline design to the three resource marks.
+- [x] Remove the obsolete orbit component and styles.
+- [x] Keep the current Skill design.
+- [x] Compare light, dark, large, and small forms.
+- [x] Check both browser consoles.
+- `npm run build`: passed. Existing bundle-size warning remains.
+- `npm run test:frontend-integration`: 475 passed, 0 failed.
+- `git diff --check`: passed.
+- Native Tauri was not exercised. Browser evidence covers the production Icon component and stylesheet.
+
+---
+
+# Catalog pet correction — 2026-09-30
+
+final result: passed
+
+## Source and scope
+
+- Source visual truth: `output/catalog-resource-icons/soft-outline-pets-source.png`.
+- The user asked to revise both pet icons against the selected Soft Outline image.
+- Plugin, Skill, labels, row layout, and resource behavior stay unchanged.
+
+## Earlier findings and corrections
+
+- [P2] The former paw has narrow toe pads and an indented lower edge. The reference
+  has rounder toe pads and a flatter central base. Replace the Tabler paw with the
+  Fluent source contours. Keep the toes solid and outline the central pad.
+- [P2] The former cat is tall and narrow. Its straight ear sides differ from the
+  reference. Use the wider Lucide cat head. Omit the nose.
+- [P2] The first revised paw is larger than the cat. Adjust each source viewBox
+  for the reference's relative size. Keep the original path contours.
+- The prior report treated these pet differences as P3. The user's correction
+  makes them required fixes for this pass.
+- [P2] The first focused comparison shows low, oval cat eyes and a heavy head
+  outline. Use the round Tabler eye marks at the reference face height. Reduce
+  the head stroke to 1.75 units. Keep the eye marks at 2.25 units.
+
+## Rendered evidence and comparison history
+
+- Source board: 1536 x 1024 px. Production preview: 1280 x 720 CSS px.
+- Device pixel ratio: 2. Browser screenshots normalize pixels to CSS dimensions.
+- Initial revision: `output/catalog-resource-icons/soft-outline-pets-light.png`.
+- First focused comparison: `output/catalog-resource-icons/soft-outline-pets-comparison.png`.
+- Final light: `output/catalog-resource-icons/soft-outline-pets-final-light.jpg`,
+  1280 x 720 px.
+- Final dark: `output/catalog-resource-icons/soft-outline-pets-final-dark.jpg`,
+  1280 x 720 px.
+- Final focused comparison:
+  `output/catalog-resource-icons/soft-outline-pets-comparison-final.jpg`, 680 x
+  550 px. It places the source crops and production SVGs in the same 192 x 192
+  CSS slots. No source image resampling is used in this view.
+- The first revision corrected the lower paw edge and widened the cat head.
+  Adjusted the viewBoxes to correct their relative size.
+- The first focused comparison identified the eye position, eye shape, and cat
+  stroke findings. The final focused capture includes those corrections.
+- Opened the full source, final light, and final dark captures in one comparison
+  input. Checked all four marks at 96, 32, 18, and 14 CSS px and in existing rows.
+- Preview: `http://127.0.0.1:4173/output/catalog-resource-icons/review.html?theme=light`.
+- Focused comparison: `http://127.0.0.1:4173/output/catalog-resource-icons/pet-comparison.html`.
+
+## Required fidelity surfaces
+
+- Fonts and typography: production fonts, weights, text sizes, and labels stay
+  unchanged. The source's board headings are not application content.
+- Spacing and layout: production icon slots and rows stay unchanged. The source
+  viewBoxes balance the two pet silhouettes without clipping their strokes.
+- Colors and tokens: both marks inherit currentColor. Existing light and dark
+  foreground tokens and resource tile colors remain in use. Skill keeps its
+  amber base treatment.
+- Asset quality: source-library contours provide smooth vector marks. The paw
+  has four solid toe pads and an outlined central pad with a flat lower segment.
+  The cat has a broad head, round eyes, and no nose or whiskers. No outer ring is
+  present. Source libraries and licenses are recorded in THIRD_PARTY_NOTICES.md.
+- Copy and content: labels, resource mappings, and behavior stay unchanged.
+- States and accessibility: the marks are passive, aria-hidden, and not
+  focusable. Existing text labels remain visible. No new interaction is added.
+- Both final preview consoles contain no error or warning.
+
+## Remaining P3 differences
+
+- The library paw's central pad is more dome-shaped than the source's rounded
+  triangle. Its flat base and round toe pads retain the selected outline form.
+- The library cat ears turn inward more than the source. The final face width,
+  eye position, and stroke weight follow the selected proportions.
+- These are source-library adaptations, not exact tracings of the raster mock.
+  No open P0, P1, or P2 finding remains.
+
+## Verification and checklist
+
+- [x] Revise both pet icons.
+- [x] Correct relative size, eye shape, eye position, and outline weight.
+- [x] Keep Plugin, Skill, and resource behavior unchanged.
+- [x] Compare full and focused views in both themes.
+- [x] Check both preview consoles.
+- `npm run build`: passed. The existing bundle-size warning remains.
+- `npm run test:frontend-integration`: 475 passed, 0 failed.
+- `git diff --check`: passed.
+- Native Tauri was not exercised. Browser evidence covers the production Icon
+  component and stylesheet.

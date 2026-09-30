@@ -14,6 +14,5 @@ pub mod dropbox_setup;
 pub mod feishu_setup;
 pub mod managed_cloud_link;
 pub mod managed_cloud_setup;
+pub mod observation_cache;
 pub mod service;
-#[cfg_attr(test, allow(dead_code))]
-pub mod session_watch_service;

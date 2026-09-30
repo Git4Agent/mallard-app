@@ -6,9 +6,9 @@
 use super::claude::codec::analyze_claude_transcript;
 use super::traits::{
     DiscoveredSession, MaintenanceActionDescriptor, MaintenanceActionScope,
-    MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor, SessionActionContext,
-    SessionActionDescriptor, SessionActionOutcome, SessionActionRequest, SessionAdapter,
-    SessionAgentPreview, SessionAnalysis, SessionChildIdentity, SessionDiscovery,
+    MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor, ScanFailure,
+    SessionActionContext, SessionActionDescriptor, SessionActionOutcome, SessionActionRequest,
+    SessionAdapter, SessionAgentPreview, SessionAnalysis, SessionChildIdentity, SessionDiscovery,
     SessionDiscoveryContext, SessionEventDetail, SessionFileMetadata, SessionFileSummary,
     SessionTimelineContext, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery,
@@ -94,10 +94,6 @@ impl SessionAdapter for TestProviderAdapter {
         }
     }
 
-    fn watch_roots(&self) -> &'static [&'static str] {
-        &["sessions"]
-    }
-
     fn maintenance_actions(&self) -> Vec<MaintenanceActionDescriptor> {
         vec![MaintenanceActionDescriptor {
             action_id: mallard_domain::ActionKey::parse("testprov.home.inspect").unwrap(),
@@ -170,6 +166,7 @@ impl SessionAdapter for TestProviderAdapter {
 
     fn scan_metadata(&self, path: &Path) -> Result<SessionFileMetadata, String> {
         scan_session_metadata_with(path, parse_test_session_metadata)
+            .map_err(ScanFailure::into_message)
     }
 
     fn analyze(&self, bytes: &[u8]) -> SessionAnalysis {

@@ -200,7 +200,13 @@ mod tests {
     use crate::providers::traits::SessionAdapter;
     use std::time::{Duration, SystemTime};
 
-    fn write_rollout(directory: &Path, name: &str, cwd: &Path, subagent: bool, age_secs: u64) {
+    fn write_rollout(
+        directory: &Path,
+        name: &str,
+        cwd: &Path,
+        subagent: bool,
+        modified: SystemTime,
+    ) {
         let mut payload = serde_json::json!({ "id": name, "cwd": cwd });
         if subagent {
             payload["thread_source"] = serde_json::json!("subagent");
@@ -208,7 +214,6 @@ mod tests {
         let record = serde_json::json!({ "type": "session_meta", "payload": payload });
         let path = directory.join(format!("rollout-{name}.jsonl"));
         std::fs::write(&path, format!("{record}\n")).unwrap();
-        let modified = SystemTime::now() - Duration::from_secs(age_secs);
         std::fs::File::options()
             .write(true)
             .open(&path)
@@ -227,27 +232,36 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         let recent = temp.path().join("work/recent");
         let old = temp.path().join("work/old");
+        // The clock is read once. Every file time and the expected time
+        // come from this reading, however long the test takes.
+        let now = SystemTime::now();
+        let aged = |secs: u64| now - Duration::from_secs(secs);
         for index in 0..RECENT_SESSION_FILES {
             write_rollout(
                 &day,
                 &format!("recent-{index}"),
                 &recent,
                 false,
-                100 + index as u64,
+                aged(100 + index as u64),
             );
         }
-        write_rollout(&day, "old", &old, false, 10_000);
-        write_rollout(&day, "child", &temp.path().join("work/child"), true, 10);
+        write_rollout(&day, "old", &old, false, aged(10_000));
+        write_rollout(
+            &day,
+            "child",
+            &temp.path().join("work/child"),
+            true,
+            aged(10),
+        );
 
         let homes = CodexAdapter::new().recent_session_homes(&home).unwrap();
         assert_eq!(homes.len(), 1, "{homes:?}");
         assert_eq!(homes[0].home, recent);
-        let newest = SystemTime::now() - Duration::from_secs(100);
-        let newest = newest
+        let newest = aged(100)
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        assert!(homes[0].last_active.abs_diff(newest) <= 2);
+        assert_eq!(homes[0].last_active, newest);
     }
 
     #[test]

@@ -959,8 +959,8 @@ function MockReview({ flow, folders, mode = "push", initialStep = "history" }: {
         <SyncReviewSelectionBar
           count={counts[step]}
           total={totals[step]}
+          recommendedCount={totals[step]}
           recommendedTitle="Use the recommended selection"
-          recommendedAriaLabel="Use recommended selection"
           recommendedDisabled={false}
           onRecommended={() => undefined}
           clearDisabled={counts[step] === 0}

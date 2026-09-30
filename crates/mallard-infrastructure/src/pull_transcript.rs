@@ -248,14 +248,11 @@ pub fn prepare_pull_transcript_with_identities(
         let mut decoded_text = String::with_capacity(wire_text.len());
         let mut path_origins = PathOrigins::default();
         let mut child_links = crate::providers::claude::subagents::ChildLinks::new();
-        let mut offset = 0_u64;
         let mut failure = None;
         let mut records = wire_text
             .split('\n')
             .enumerate()
             .filter_map(|(index, line)| {
-                let record_offset = offset;
-                offset += line.len() as u64 + 1;
                 if index > 0 {
                     decoded_text.push('\n');
                 }
@@ -272,7 +269,6 @@ pub fn prepare_pull_transcript_with_identities(
                     crate::providers::claude::subagents::record_link(
                         &mut child_links,
                         &wire,
-                        record_offset,
                         &cloud_provider_thread_id,
                     )?;
                     // Identity changes precede origin capture. The record hash then
@@ -283,13 +279,26 @@ pub fn prepare_pull_transcript_with_identities(
                                 serde_json::Value::String(destination_provider_thread_id.clone());
                         }
                     }
-                    let decoded = mapper.decode_record_with_origins(&wire).map_err(|error| {
-                        format!(
-                            "conversation '{}' record {}: {error}",
-                            cloud_thread_id,
-                            index + 1
-                        )
-                    })?;
+                    // The desktop import takes the thinking out of a record.
+                    // The origins of that form are saved with those of the
+                    // record, so that a later Push finds them.
+                    let decoded = mapper
+                        .decode_record_with_origins(&wire)
+                        .and_then(|mut decoded| {
+                            decoded.origins.rewritten =
+                                crate::providers::claude::codec::origins_without_thinking(
+                                    &decoded.local,
+                                    &decoded.origins.fields,
+                                )?;
+                            Ok(decoded)
+                        })
+                        .map_err(|error| {
+                            format!(
+                                "conversation '{}' record {}: {error}",
+                                cloud_thread_id,
+                                index + 1
+                            )
+                        })?;
                     path_origins.push(&destination_provider_thread_id, decoded.origins);
                     let value = decoded.local;
                     let serialized = serde_json::to_string(&value).map_err(|error| {
