@@ -3368,6 +3368,21 @@ fn managed_cloud_bundle_snapshots(
     Ok(rows)
 }
 
+/// Supply the local origin to Cloud creation without putting paths in a manifest.
+fn set_cloud_project_origin(
+    engine: &StorageEngine,
+    project: &LocalProjectRegistration,
+    binding: &ProjectBinding,
+) -> Result<(), String> {
+    if let Some(cloud) = engine.store().managed_cloud() {
+        cloud.set_project_origin(
+            &project.bundle_id,
+            origin_url(Path::new(&binding.canonical_project_root)).as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Publish the registration claim that makes a just-linked bundle discoverable
 /// before its first push: an empty revision-1 manifest carrying the bundle
 /// identity and repository fingerprint. Idempotent — an established head of
@@ -3377,11 +3392,12 @@ fn publish_registration_claim(
     repository: &LocalStateRepository,
     storage: &StorageConfig,
     project: &LocalProjectRegistration,
-    replica_id: &ReplicaId,
+    binding: &ProjectBinding,
 ) -> Result<(), String> {
     let engine = engine_for_storage_config(storage)?;
+    set_cloud_project_origin(&engine, project, binding)?;
     let (origin_host_token, origin_replica_token) =
-        repository.derive_origin_tokens(&project.bundle_id, replica_id)?;
+        repository.derive_origin_tokens(&project.bundle_id, &binding.replica_id)?;
     engine
         .publish_registration(
             &BundleIdentity {
@@ -10548,6 +10564,7 @@ fn publish_reviewed(
     credential_redaction_enabled: bool,
 ) -> Result<ReviewedPublishOutcome, String> {
     let phase_started = Instant::now();
+    set_cloud_project_origin(engine, project, binding)?;
     let previous = observed.as_ref().map(|(snapshot, _)| snapshot);
     let expected_head = observed
         .as_ref()
@@ -15271,7 +15288,7 @@ pub(super) fn save_project_link_with_repository(
                 .load_bindings()?
                 .active_for(&request.local_project_id)
             {
-                publish_registration_claim(repository, &storage, &project, &binding.replica_id)?;
+                publish_registration_claim(repository, &storage, &project, &binding)?;
                 cloud_link_id(&storage, &project.bundle_id)?
             } else {
                 None
@@ -17153,7 +17170,7 @@ pub(super) fn finalize_project_setup_with_repository(
                 repository,
                 &storage,
                 &transaction.project,
-                &transaction.replica_id,
+                &transaction.binding,
             )?;
         }
         for link in &mut transaction.links {

@@ -420,9 +420,11 @@ This flow works with a new or existing Git project, or with a non-Git folder.
    connected as it is; a folder whose Git remote isn't the repository's asks
    for one tick first.
 4. Choose **Clone and connect** (**Connect** for an existing folder). A
-   repository linked to GitHub is cloned with `gh`, then `git`; anything else,
-   or a clone that does not work, gets an empty folder, and the project then
-   shows the command that clones into it. Nothing is pulled: choose **Pull**
+   repository linked to GitHub is cloned with `gh`, then `git`. If cloning
+   fails, Mallard initializes an empty Git repository and shows how to fetch
+   the source code. A missing GitHub URL also creates an empty Git repository.
+   Git must be installed. Only non-Git projects get a plain folder.
+   Nothing is pulled: choose **Pull**
    on the project when ready.
 
 ### Test Flow 4: A Mallard Cloud repository removed, and a draft discarded

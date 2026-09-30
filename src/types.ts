@@ -1918,23 +1918,24 @@ export interface CloudProjectFolderProbe {
 
 export interface CloudProjectFolderRequest {
   destination: string;
+  is_git_project: boolean;
   github_url: string | null;
   repository_fingerprint: string | null;
   operation_id: string;
 }
 
-export type CloneFailureReason = "no_git" | "refused" | "unreachable" | "failed";
+export type CloneFailureReason = "missing_source" | "refused" | "unreachable" | "failed";
 
-/** Why a GitHub repository was left as an empty folder, and the command
- *  that clones into it later. */
+/** Why source code is missing, and a command to fetch it when its URL is known. */
 export interface CloneFailure {
   reason: CloneFailureReason;
-  command: string;
+  command: string | null;
 }
 
 export type CloudProjectFolderResult =
   | { kind: "cloned"; canonical_path: string }
-  | { kind: "created"; canonical_path: string; failure: CloneFailure | null }
+  | { kind: "created"; canonical_path: string }
+  | { kind: "initialized"; canonical_path: string; failure: CloneFailure }
   | { kind: "existing"; canonical_path: string };
 
 export type CloudProjectFolderProgress =

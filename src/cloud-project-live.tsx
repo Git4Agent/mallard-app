@@ -83,8 +83,11 @@ const note = (line: string) => {
 };
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
-(window as unknown as { isTauri: boolean }).isTauri = true;
-mockIPC((command) => (command === "plugin:path|resolve_directory" ? HOME : null));
+const runtime = window as unknown as { isTauri: boolean };
+if (!runtime.isTauri) {
+  runtime.isTauri = true;
+  mockIPC((command) => (command === "plugin:path|resolve_directory" ? HOME : null));
+}
 
 projectSyncApi.listManagedCloudRepositories = async (storageId) => {
   await wait(300);
@@ -119,6 +122,7 @@ projectSyncApi.getCloudProjectFolder = async (request, onProgress) => {
   note(`get_cloud_project_folder ${request.destination} github_url=${request.github_url ?? "none"}`);
   cancelled = false;
   const canClone = knob("git", "yes") === "yes";
+  if (request.is_git_project && !canClone) throw new Error("Install Git to create this Git project.");
   if (request.github_url && canClone) {
     for (const percent of [null, 12, 48, 81]) {
       if (cancelled) throw new Error("Stopped.");
@@ -129,10 +133,12 @@ projectSyncApi.getCloudProjectFolder = async (request, onProgress) => {
   }
   onProgress({ stage: "creating" });
   await wait(300);
-  const failure = request.github_url
-    ? { reason: canClone ? "refused" as const : "no_git" as const, command: `gh repo clone acme/portal ${request.destination}` }
-    : null;
-  return { kind: "created", canonical_path: request.destination, failure };
+  return request.is_git_project
+    ? { kind: "initialized", canonical_path: request.destination, failure: {
+      reason: request.github_url ? "refused" : "missing_source",
+      command: request.github_url ? `git -C ${request.destination} pull origin HEAD` : null,
+    } }
+    : { kind: "created", canonical_path: request.destination };
 };
 let draft: ProjectSetupDraft | null = null;
 projectSyncApi.createSetupDraft = async (projectRoot) => {

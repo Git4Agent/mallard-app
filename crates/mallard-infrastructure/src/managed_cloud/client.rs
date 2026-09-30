@@ -454,6 +454,8 @@ pub struct CreateRepository {
     pub repository_fingerprint: Option<String>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CreateCatalogItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1663,6 +1665,7 @@ mod tests {
     fn a_create_request_flattens_the_catalog_half_and_omits_it_for_a_project() {
         let project = CreateRepository {
             repository_class: "non_git_project",
+            github_url: None,
             name: "Project".into(),
             bundle_id: Some("a".repeat(32)),
             repository_fingerprint: None,
@@ -1674,6 +1677,7 @@ mod tests {
         );
         let item = CreateRepository {
             repository_class: "catalog",
+            github_url: None,
             name: "my-skill".into(),
             bundle_id: None,
             repository_fingerprint: None,

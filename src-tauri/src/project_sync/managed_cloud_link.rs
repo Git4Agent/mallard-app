@@ -513,6 +513,7 @@ mod tests {
         let created = client(&owner_token)
             .create_repository(&CreateRepository {
                 repository_class: "git_project",
+                github_url: None,
                 name: "Horror Game".into(),
                 bundle_id: Some("b".repeat(32)),
                 repository_fingerprint: Some(fingerprint.clone()),
@@ -691,6 +692,7 @@ mod tests {
         let created = client(&owner_token)
             .create_repository(&CreateRepository {
                 repository_class: "non_git_project",
+                github_url: None,
                 name: "B".into(),
                 bundle_id: Some("e".repeat(32)),
                 repository_fingerprint: None,

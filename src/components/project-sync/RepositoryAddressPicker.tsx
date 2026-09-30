@@ -193,7 +193,7 @@ export function repositoryCautions(repository: Pick<ManagedCloudRepository, "git
  *  it clones, or why it starts as an empty folder. None without Git. */
 export function cloneSourceWord(repository: Pick<ManagedCloudRepository, "repository_class" | "github_url">): string | null {
   if (repository.repository_class !== "git_project") return null;
-  return repository.github_url ? repository.github_url.replace(/^https:\/\//, "") : "not on GitHub";
+  return repository.github_url ? repository.github_url.replace(/^https:\/\//, "") : "GitHub URL missing";
 }
 
 /** The account's standing in one word. */

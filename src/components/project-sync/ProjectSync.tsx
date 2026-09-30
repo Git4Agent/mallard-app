@@ -3580,23 +3580,24 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     });
   }
   /* A project from Mallard Cloud whose GitHub repository could not be
-     cloned has an empty folder; this says why, once, with the command. */
+     cloned has an empty Git repository; this says why and how to fetch it. */
   if (cloneFallback) {
     const { command } = cloneFallback.failure;
     shellNotices.push({
       key: "clone-fallback",
       severity: "warning",
-      title: `${cloneFallback.projectName} wasn’t cloned.`,
+      title: `${cloneFallback.projectName}: source code not downloaded.`,
       message: (
         <>
-          {cloneFailureText(cloneFallback.failure.reason)} The folder is empty; clone into it: <code>{command}</code>
+          {cloneFailureText(cloneFallback.failure.reason)} The project remains a Git repository.
+          {command ? <> Fetch the source code: <code>{command}</code></> : " Link its GitHub repository in Mallard Cloud."}
         </>
       ),
-      action: (
+      action: command ? (
         <button type="button" className="btn" onClick={() => void writeClipboardText(command).catch(() => {})}>
           Copy command
         </button>
-      ),
+      ) : undefined,
       onDismiss: () => setCloneFallback(null),
     });
   }

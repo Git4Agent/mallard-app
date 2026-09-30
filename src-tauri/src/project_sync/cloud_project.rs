@@ -1,8 +1,8 @@
 //! A project got from a Mallard Cloud repository: where its folder may go,
 //! and the folder itself. A repository whose GitHub address the service
-//! knows is cloned — with gh when it is installed, then git — and anything
-//! else, or a clone that does not work, gets an empty folder, exactly as a
-//! project without Git does. A folder the person already has is connected
+//! knows is cloned — with gh when it is installed, then git. A failed clone
+//! gets an empty Git repository; only a non-Git project gets a plain folder.
+//! A folder the person already has is connected
 //! as it is, and never comes through here. Connecting is setup's own finish,
 //! which the page runs next with the repository chosen; nothing here writes
 //! Mallard state.
@@ -60,6 +60,7 @@ pub struct CloudProjectFolderProbe {
 #[derive(Deserialize, Debug)]
 pub struct CloudProjectFolderRequest {
     pub destination: String,
+    pub is_git_project: bool,
     /// `https://github.com/{owner}/{name}`, when the service knows it.
     pub github_url: Option<String>,
     pub repository_fingerprint: Option<String>,
@@ -74,11 +75,14 @@ pub enum CloudProjectFolderResult {
     Cloned {
         canonical_path: String,
     },
-    /// Empty: made here, or already there and empty. `failure` says why a
-    /// GitHub repository was not cloned.
+    /// An empty non-Git folder.
     Created {
         canonical_path: String,
-        failure: Option<CloneFailure>,
+    },
+    /// A Git repository whose source code could not be downloaded.
+    Initialized {
+        canonical_path: String,
+        failure: CloneFailure,
     },
     /// Already this repository's checkout.
     Existing {
@@ -86,19 +90,17 @@ pub enum CloudProjectFolderResult {
     },
 }
 
-/// Why a GitHub repository ended up in an empty folder, and the command
-/// that clones into it later.
+/// Why source code is missing, and a command to fetch it when its URL is known.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CloneFailure {
     pub reason: CloneFailureReason,
-    pub command: String,
+    pub command: Option<String>,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CloneFailureReason {
-    /// Neither gh nor git runs here.
-    NoGit,
+    MissingSource,
     /// The host said no: no access, or not signed in.
     Refused,
     /// The host could not be reached.
@@ -112,7 +114,7 @@ pub enum CloudProjectFolderProgress {
     Cloning {
         percent: Option<u8>,
     },
-    /// Making the empty folder: no clone, or none worked.
+    /// Making a plain folder or initializing an empty Git repository.
     Creating,
 }
 
@@ -325,14 +327,14 @@ enum CloneError {
     Failed(CloneFailureReason),
 }
 
-/// Makes the folder: tries each clone in turn, and when none works (or
-/// there is nothing to clone) leaves the folder empty. A cancelled clone
+/// Makes the folder, preserving Git identity even when cloning fails. A cancelled clone
 /// stops the run; git removes what it wrote on the way out.
 pub(super) async fn get_folder(
     repository: LocalStateRepository,
     tools: CloneTools,
     destination: String,
     fingerprint: Option<String>,
+    is_git_project: bool,
     source: Option<CloneSource>,
     mut cancellation: watch::Receiver<bool>,
     on_progress: &(dyn Fn(CloudProjectFolderProgress) + Send + Sync),
@@ -361,17 +363,22 @@ pub(super) async fn get_folder(
         }
         CloudProjectFolder::New | CloudProjectFolder::Empty => {}
     }
+    if *cancellation.borrow() {
+        return Err("Stopped.".to_string());
+    }
+    if is_git_project && tools.git.is_none() {
+        return Err(
+            "Git is required to create this Git project. Install Git, then try again.".to_string(),
+        );
+    }
+    if !is_git_project && source.is_some() {
+        return Err("A non-Git project cannot have a clone source.".to_string());
+    }
 
-    let mut failure = None;
+    let mut reason = CloneFailureReason::MissingSource;
     if let Some(source) = &source {
-        let command = retry_command(&tools, source, &destination);
         match &tools.git {
-            None => {
-                failure = Some(CloneFailure {
-                    reason: CloneFailureReason::NoGit,
-                    command,
-                });
-            }
+            None => unreachable!("Git was checked before creating the folder"),
             Some(git) => {
                 let mut attempts: Vec<(PathBuf, Vec<OsString>)> = Vec::new();
                 if let (Some(gh), Some(repository)) = (&tools.gh, &source.gh_repository) {
@@ -401,7 +408,7 @@ pub(super) async fn get_folder(
                     .map(OsString::from)
                     .to_vec(),
                 ));
-                let mut reason = CloneFailureReason::Failed;
+                reason = CloneFailureReason::Failed;
                 for (program, args) in attempts {
                     if !absent_or_empty(&path)? {
                         return Err("The folder isn’t empty after a clone that failed.".to_string());
@@ -429,12 +436,55 @@ pub(super) async fn get_folder(
                         Err(CloneError::Failed(failed)) => reason = failed,
                     }
                 }
-                failure = Some(CloneFailure { reason, command });
             }
         }
     }
 
+    if *cancellation.borrow() {
+        return Err("Stopped.".to_string());
+    }
+    if !absent_or_empty(&path)? {
+        return Err("The folder isn’t empty after a clone that failed.".to_string());
+    }
     on_progress(CloudProjectFolderProgress::Creating);
+    if is_git_project {
+        let git = tools
+            .git
+            .as_ref()
+            .expect("Git was checked before creating the folder");
+        let mut commands = vec![vec!["init", "--quiet", "--", destination.as_str()]];
+        if let Some(source) = &source {
+            commands.push(vec![
+                "-C",
+                destination.as_str(),
+                "remote",
+                "add",
+                "origin",
+                source.git_url.as_str(),
+            ]);
+        }
+        for args in commands {
+            let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+            run_clone(git, &args, git.parent(), &mut cancellation, on_progress)
+                .await
+                .map_err(|error| match error {
+                    CloneError::Cancelled => "Stopped.".to_string(),
+                    CloneError::Failed(_) => {
+                        "Could not initialize the Git repository. Setup is incomplete.".to_string()
+                    }
+                })?;
+        }
+        if !path.join(".git").is_dir() {
+            return Err("Git did not create a repository. Setup is incomplete.".to_string());
+        }
+        return Ok(CloudProjectFolderResult::Initialized {
+            canonical_path: canonical(&path)?,
+            failure: CloneFailure {
+                reason,
+                command: source.as_ref().map(|_| retry_command(&destination)),
+            },
+        });
+    }
     if !existed {
         match fs::create_dir(&path) {
             Ok(()) => {}
@@ -447,7 +497,6 @@ pub(super) async fn get_folder(
     }
     Ok(CloudProjectFolderResult::Created {
         canonical_path: canonical(&path)?,
-        failure,
     })
 }
 
@@ -457,13 +506,10 @@ fn canonical(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("resolve '{}': {}", path.display(), error))
 }
 
-/// The clone to run by hand later, the way this computer can.
-fn retry_command(tools: &CloneTools, source: &CloneSource, destination: &str) -> String {
+/// Fetch the remote's default branch into the initialized, uncommitted repository.
+fn retry_command(destination: &str) -> String {
     let destination = shell_quote(destination);
-    match (&tools.gh, &source.gh_repository) {
-        (Some(_), Some(repository)) => format!("gh repo clone {repository} {destination}"),
-        _ => format!("git clone {} {destination}", source.git_url),
-    }
+    format!("git -C {destination} pull origin HEAD")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -797,7 +843,7 @@ pub async fn probe_cloud_project_folder(
     .map_err(|error| format!("project-sync worker failed: {error}"))?
 }
 
-/// Makes the new project's folder: a clone when one works, else empty.
+/// Makes the new project's folder while preserving its repository class.
 #[tauri::command]
 pub async fn get_cloud_project_folder(
     control: tauri::State<'_, CloudProjectControl>,
@@ -821,6 +867,7 @@ pub async fn get_cloud_project_folder(
         tools,
         request.destination,
         fingerprint,
+        request.is_git_project,
         source,
         run.cancellation.clone(),
         &|progress| {
@@ -924,6 +971,7 @@ mod tests {
             tools,
             destination.to_string_lossy().into_owned(),
             None,
+            source.is_some(),
             source,
             watch::channel(false).1,
             &|event| progress.lock().unwrap().push(event),
@@ -1094,18 +1142,13 @@ mod tests {
             classify("fatal: something else"),
             CloneFailureReason::Failed
         );
-        let tools = CloneTools {
-            gh: Some(PathBuf::from("/opt/homebrew/bin/gh")),
-            git: None,
-        };
-        let source = github_source("https://github.com/acme/portal", None).unwrap();
         assert_eq!(
-            retry_command(&tools, &source, "/Users/me/code/portal"),
-            "gh repo clone acme/portal /Users/me/code/portal"
+            retry_command("/Users/me/code/portal"),
+            "git -C /Users/me/code/portal pull origin HEAD"
         );
         assert_eq!(
-            retry_command(&CloneTools::default(), &source, "/Users/me/My Code/portal"),
-            "git clone https://github.com/acme/portal.git '/Users/me/My Code/portal'"
+            retry_command("/Users/me/My Code/portal"),
+            "git -C '/Users/me/My Code/portal' pull origin HEAD"
         );
     }
 
@@ -1123,61 +1166,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_clone_that_fails_leaves_an_empty_folder_and_says_why() {
+    async fn a_failed_clone_stays_git_and_can_fetch_the_source_later() {
         let fixture = fixture();
-        let missing = format!("file://{}", fixture.root.join("nowhere.git").display());
+        let missing = format!("file://{}", fixture.root.join("remote.git").display());
         let destination = fixture.root.join("code/portal");
         let result = get(&fixture, git_only(), &destination, Some(source(&missing)))
             .await
             .unwrap();
-        let CloudProjectFolderResult::Created {
-            failure: Some(failure),
-            ..
-        } = result
-        else {
-            panic!("an empty folder with a reason: {result:?}");
+        let CloudProjectFolderResult::Initialized { failure, .. } = result else {
+            panic!("an empty Git repository with a reason: {result:?}");
         };
-        assert!(failure.command.starts_with("git clone "));
-        assert!(destination.is_dir());
-        assert!(folder_is_empty(&destination).unwrap());
-
-        // An existing empty folder stays, empty, the same way.
-        let result = get(&fixture, git_only(), &destination, Some(source(&missing)))
-            .await
-            .unwrap();
-        assert!(matches!(
-            result,
-            CloudProjectFolderResult::Created {
-                failure: Some(_),
-                ..
-            }
+        assert_eq!(
+            failure.command.as_deref(),
+            Some(retry_command(&destination.to_string_lossy()).as_str())
+        );
+        assert!(destination.join(".git").is_dir());
+        assert!(mallard_infrastructure::project_activity::is_git_work_tree(
+            &destination
         ));
+        assert_eq!(origin_url(&destination).as_deref(), Some(missing.as_str()));
+        assert!(!destination.join("README.md").exists());
+        assert_eq!(bare_remote(&fixture.root), missing);
+        // The recovery command must work in a nonempty folder containing .git.
+        git(&destination, &["pull", "origin", "HEAD"]);
+        assert_eq!(
+            fs::read_to_string(destination.join("README.md")).unwrap(),
+            "portal\n"
+        );
     }
 
     #[tokio::test]
-    async fn no_git_or_no_github_address_means_an_empty_folder() {
+    async fn missing_git_stops_setup_and_only_non_git_projects_get_plain_folders() {
         let fixture = fixture();
         let github = github_source("https://github.com/acme/portal", None).unwrap();
         let destination = fixture.root.join("code/portal");
-        let result = get(&fixture, CloneTools::default(), &destination, Some(github))
+        let error = get(&fixture, CloneTools::default(), &destination, Some(github))
             .await
-            .unwrap();
-        let CloudProjectFolderResult::Created {
-            failure: Some(failure),
-            ..
-        } = result
-        else {
-            panic!("no git: an empty folder with a reason: {result:?}");
-        };
-        assert_eq!(failure.reason, CloneFailureReason::NoGit);
+            .unwrap_err();
+        assert!(error.contains("Git is required"));
+        assert!(!destination.exists());
 
         let destination = fixture.root.join("code/field-notes");
         let result = get(&fixture, git_only(), &destination, None).await.unwrap();
+        assert!(matches!(result, CloudProjectFolderResult::Created { .. }));
+        assert!(folder_is_empty(&destination).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_git_project_without_a_url_still_gets_a_git_repository() {
+        let fixture = fixture();
+        let destination = fixture.root.join("code/portal");
+        let result = get_folder(
+            fixture.repository.clone(),
+            git_only(),
+            destination.to_string_lossy().into_owned(),
+            None,
+            true,
+            None,
+            watch::channel(false).1,
+            &|_| {},
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             result,
-            CloudProjectFolderResult::Created { failure: None, .. }
+            CloudProjectFolderResult::Initialized {
+                failure: CloneFailure {
+                    reason: CloneFailureReason::MissingSource,
+                    command: None
+                },
+                ..
+            }
         ));
-        assert!(folder_is_empty(&destination).unwrap());
+        assert!(mallard_infrastructure::project_activity::is_git_work_tree(
+            &destination
+        ));
+        assert!(origin_url(&destination).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_git_init_never_returns_a_plain_folder() {
+        let fixture = fixture();
+        let destination = fixture.root.join("code/portal");
+        let tools = CloneTools {
+            gh: None,
+            git: Some(fixture.root.join("missing-git")),
+        };
+        let error = get(
+            &fixture,
+            tools,
+            &destination,
+            Some(source("file:///missing.git")),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("Setup is incomplete"));
+        assert!(!destination.exists());
     }
 
     #[tokio::test]
@@ -1222,6 +1306,7 @@ mod tests {
             tools,
             destination.to_string_lossy().into_owned(),
             None,
+            true,
             Some(source("https://github.com/acme/portal.git")),
             cancellation,
             &|_| {},

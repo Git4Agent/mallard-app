@@ -1474,6 +1474,19 @@ fn route(
             }
             (Some(bundle_id), fingerprint, None)
         };
+        let github_url = value["github_url"].as_str().map(str::to_owned);
+        if let Some(url) = &github_url {
+            if class != "git_project"
+                || crate::project_activity::normalize_github_repository_url(url).as_ref()
+                    != Some(url)
+                || fingerprint.as_deref() != Some(sha256_hex(url.as_bytes()).as_str())
+            {
+                return error(
+                    "invalid_request",
+                    "GitHub origin does not match the fingerprint",
+                );
+            }
+        }
         let base = normalize_repository_name(value["name"].as_str().unwrap_or_default());
         let held: BTreeSet<String> = state
             .repositories
@@ -1502,7 +1515,7 @@ fn route(
             repository_fingerprint: fingerprint,
             catalog,
             visibility: "private".to_owned(),
-            github_url: None,
+            github_url,
             revision: 1,
             private_revision: 0,
             public_revision: 0,

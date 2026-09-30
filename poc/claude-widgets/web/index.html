@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mallard · Claude widgets</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span class="brand-mark">M</span><strong>Mallard</strong><span class="divider">/</span><span>Claude widgets</span></div>
+      <span class="poc-label">Local proof of concept</span>
+    </header>
+    <main>
+      <div class="context"><span class="provider-mark">✳</span><span>Claude</span><span class="context-dot">·</span><span>Session preview</span><span class="runtime" id="runtime">Loading…</span></div>
+      <div class="toolbar">
+        <h1 id="widget-title">Child transcript locations</h1>
+        <div class="tabs" role="group" aria-label="Widget examples">
+          <button id="diagram-tab" aria-pressed="true">Diagram</button>
+          <button id="interactive-tab" aria-pressed="false">Interactive</button>
+          <button id="isolation-tab" aria-pressed="false">Isolation tests</button>
+        </div>
+      </div>
+      <p class="description" id="description">Saved SVG displayed as an image.</p>
+      <section class="widget" aria-label="Widget preview" id="widget-host"></section>
+      <div class="footnote"><span class="status-dot"></span><span id="policy-label">Existing app policy</span><button id="source-button" aria-expanded="false">Show source</button></div>
+      <pre id="source" hidden></pre>
+      <section id="checks-section" hidden aria-label="Isolation results">
+        <h2>Isolation results</h2>
+        <p id="check-status" role="status">Waiting for the frame…</p>
+        <dl id="checks"></dl>
+      </section>
+      <p class="error" id="error" hidden role="alert"></p>
+    </main>
+  </body>
+</html>

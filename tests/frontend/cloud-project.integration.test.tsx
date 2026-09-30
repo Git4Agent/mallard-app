@@ -172,7 +172,7 @@ test("the picker in clone mode compares no remote, offers no new repository, and
   assert.match(html, /Rika321\/notes[\s\S]*?<span>Owner<\/span>/);
 
   assert.equal(cloneSourceWord(repository()), "github.com/acme/portal");
-  assert.equal(cloneSourceWord(repository({ github_url: null })), "not on GitHub");
+  assert.equal(cloneSourceWord(repository({ github_url: null })), "GitHub URL missing");
   assert.equal(cloneSourceWord(repository({ repository_class: "non_git_project", github_url: null })), null);
   assert.equal(roleWord(repository({ role: null })), "Public");
   assert.equal(roleWord(repository({ role: "admin" })), "Admin");
@@ -190,9 +190,12 @@ test("the Folder line says where the project lands and how, in few words", () =>
     compact,
     "new",
   );
-  assert.deepEqual(verdict({ kind: "new" }), { tone: "ok", message: "New folder. Clones github.com/acme/portal; empty if that fails." });
-  assert.deepEqual(verdict({ kind: "new" }, false), { tone: "warn", message: "New, empty folder: no gh or git here." });
-  assert.deepEqual(verdict({ kind: "new" }, true, repository({ github_url: null })), { tone: "ok", message: "New, empty folder: not on GitHub." });
+  for (const kind of ["new", "empty"] as const) {
+    assert.deepEqual(verdict({ kind }), { tone: "ok", message: "Clones github.com/acme/portal; keeps an empty Git repository if cloning fails." });
+    assert.deepEqual(verdict({ kind }, false), { tone: "bad", message: "Install Git to create this Git project." });
+    assert.deepEqual(verdict({ kind }, true, repository({ github_url: null })), { tone: "warn", message: "Creates an empty Git repository. The repository URL is missing." });
+    assert.equal(verdict({ kind }, false, repository({ github_url: null }))?.tone, "bad");
+  }
   assert.deepEqual(
     verdict({ kind: "new" }, true, repository({ repository_class: "non_git_project", github_url: null, repository_fingerprint: null })),
     { tone: "ok", message: "New, empty folder." },
@@ -227,7 +230,7 @@ test("the Folder line says where the project lands and how, in few words", () =>
   assert.equal(clonesFrom(repository(), false), null);
   assert.equal(clonesFrom(repository({ github_url: null }), true), null);
   assert.equal(cloneFailureText("refused"), "GitHub said no.");
-  assert.equal(cloneFailureText("no_git"), "No gh or git here.");
+  assert.equal(cloneFailureText("missing_source"), "The repository URL is missing.");
 });
 
 test("an existing folder is used as it is, and says when setup's tick is needed", () => {

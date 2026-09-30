@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 490" role="img" aria-label="Child transcript locations">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-anchor: middle; }
+    .heading { fill: #eeede9; font-size: 20px; font-weight: 600; }
+    .name { fill: #a1ded0; font-size: 20px; font-weight: 600; }
+    .detail { fill: #70c4ac; font-size: 16px; }
+    .ref-name { fill: #e0dfd7; font-size: 20px; font-weight: 600; }
+    .ref-detail, .legend { fill: #bcbeb5; font-size: 16px; }
+    .column { fill: none; stroke: #404242; }
+    .present { fill: #075e4f; stroke: #68baa2; }
+    .reference { fill: #454744; stroke: #a2a79d; stroke-dasharray: 5 5; }
+  </style>
+  <rect width="1000" height="490" fill="#18191a" />
+  <rect class="column" x="52" y="36" width="275" height="371" rx="16" />
+  <rect class="column" x="363" y="36" width="275" height="371" rx="16" />
+  <rect class="column" x="674" y="36" width="275" height="371" rx="16" />
+  <text class="heading" x="190" y="74">Computer A</text>
+  <text class="heading" x="500" y="74">Storage</text>
+  <text class="heading" x="812" y="74">Computer B</text>
+  <rect class="present" x="81" y="100" width="217" height="80" rx="12" />
+  <text class="name" x="190" y="133">Child A1</text><text class="detail" x="190" y="158">Transcript here</text>
+  <rect class="present" x="81" y="200" width="217" height="80" rx="12" />
+  <text class="name" x="190" y="233">Child A2</text><text class="detail" x="190" y="258">Transcript here</text>
+  <rect class="reference" x="81" y="300" width="217" height="80" rx="12" />
+  <text class="ref-name" x="190" y="333">Child B1</text><text class="ref-detail" x="190" y="358">Reference only</text>
+  <rect class="present" x="392" y="100" width="217" height="80" rx="12" />
+  <text class="name" x="500" y="133">Child A1</text><text class="detail" x="500" y="158">Stored</text>
+  <rect class="present" x="392" y="200" width="217" height="80" rx="12" />
+  <text class="name" x="500" y="233">Child A2</text><text class="detail" x="500" y="258">Stored</text>
+  <rect class="reference" x="703" y="100" width="217" height="80" rx="12" />
+  <text class="ref-name" x="812" y="133">Child A1</text><text class="ref-detail" x="812" y="158">Reference only</text>
+  <rect class="reference" x="703" y="200" width="217" height="80" rx="12" />
+  <text class="ref-name" x="812" y="233">Child A2</text><text class="ref-detail" x="812" y="258">Reference only</text>
+  <rect class="present" x="703" y="300" width="217" height="80" rx="12" />
+  <text class="name" x="812" y="333">Child B1</text><text class="detail" x="812" y="358">Transcript here</text>
+  <rect class="present" x="54" y="434" width="16" height="16" rx="2" />
+  <text class="legend" x="80" y="448" style="text-anchor:start">Transcript is there</text>
+  <rect class="reference" x="337" y="434" width="16" height="16" rx="2" />
+  <text class="legend" x="365" y="448" style="text-anchor:start">Only the reference in the main transcript</text>
+</svg>

@@ -271,6 +271,8 @@ struct Inner {
     repositories: Mutex<BTreeMap<Scope, String>>,
     /// Exact repository destinations from link metadata.
     pinned: Mutex<BTreeMap<BundleId, String>>,
+    /// Local origin URLs supplied by the publisher, never local paths or credentials.
+    project_origins: Mutex<BTreeMap<BundleId, String>>,
     /// The scopes whose repository answered gone at their last stream
     /// listing: deleted, being deleted, or out of this account's reach. Each
     /// holds the repository this account collaborates on that is read in its
@@ -301,6 +303,7 @@ impl ManagedObjectStore {
                 runtime,
                 repositories: Mutex::new(BTreeMap::new()),
                 pinned: Mutex::new(BTreeMap::new()),
+                project_origins: Mutex::new(BTreeMap::new()),
                 moved: Mutex::new(BTreeMap::new()),
                 statuses: Mutex::new(BTreeMap::new()),
                 status_read: tokio::sync::Mutex::new(()),
@@ -309,6 +312,24 @@ impl ManagedObjectStore {
                 write_revisions: Mutex::new(BTreeMap::new()),
             }),
         }
+    }
+
+    /// Supply the actual GitHub origin for repository creation. No network access.
+    pub fn set_project_origin(
+        &self,
+        bundle: &BundleId,
+        remote: Option<&str>,
+    ) -> Result<(), String> {
+        let mut origins = Self::lock(&self.inner.project_origins)?;
+        match remote.and_then(crate::project_activity::normalize_github_repository_url) {
+            Some(url) => {
+                origins.insert(bundle.clone(), url);
+            }
+            None => {
+                origins.remove(bundle);
+            }
+        }
+        Ok(())
     }
 
     /// The link's saved repository, set at every engine open. The same pin
@@ -803,17 +824,28 @@ impl ManagedObjectStore {
         let repository_id = match self.repository_for(&scope).await? {
             Some(id) => id,
             None => {
+                let github_url = Self::lock(&self.inner.project_origins)?
+                    .get(bundle_id)
+                    .filter(|url| {
+                        manifest.bundle.repository_fingerprint.as_deref()
+                            == Some(sha256_hex(url.as_bytes()).as_str())
+                    })
+                    .cloned();
                 let spec = CreateRepository {
                     repository_class: if manifest.bundle.repository_fingerprint.is_some() {
                         "git_project"
                     } else {
                         "non_git_project"
                     },
-                    // The project title is the requested name; the service normalizes it.
-                    name: manifest.bundle.display_name.clone(),
+                    name: github_url
+                        .as_deref()
+                        .and_then(|url| url.rsplit('/').next())
+                        .unwrap_or(&manifest.bundle.display_name)
+                        .to_owned(),
                     bundle_id: Some(bundle_id.as_str().to_owned()),
                     repository_fingerprint: manifest.bundle.repository_fingerprint.clone(),
                     catalog: None,
+                    github_url,
                 };
                 self.create(&scope, &spec).await?
             }
@@ -881,6 +913,7 @@ impl ManagedObjectStore {
                 let item = library_item(stream, &manifest_bytes)?;
                 let spec = CreateRepository {
                     repository_class: "catalog",
+                    github_url: None,
                     name: item.display_name,
                     bundle_id: None,
                     repository_fingerprint: None,
@@ -1735,6 +1768,29 @@ mod stub_tests {
             "GET /v1/repositories/{id}/store?prefix={REPOSITORY_COMMITS_PREFIX}/{}",
             bundle(number)
         )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn creation_uses_the_real_origin_name_and_url_independently_of_the_cloud_owner() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "someone-else").await;
+        let url = "https://github.com/acme/private-repository";
+        let mut project = identity(901);
+        project.display_name = "Renamed local folder".into();
+        project.repository_fingerprint = Some(sha256_hex(url.as_bytes()));
+        managed(&store)
+            .set_project_origin(
+                &project.bundle_id,
+                Some("https://test-user:test-password@github.com/acme/private-repository.git"),
+            )
+            .unwrap();
+        let snapshot = manifest(project, 1, 100);
+        blocking(move || stored(push(&store, &snapshot, None, 1_000))).await;
+        let state = stub.state.lock().unwrap();
+        let created = state.repository_for_bundle(bundle(901).as_str()).unwrap();
+        assert_eq!(created.name, "private-repository");
+        assert_eq!(created.github_url.as_deref(), Some(url));
+        assert_eq!(created.class, "git_project");
     }
 
     fn by_bundle(number: u64) -> String {

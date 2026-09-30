@@ -35,7 +35,7 @@ import RepositoryAddressPicker, {
   type RepositorySelection,
 } from "./RepositoryAddressPicker";
 
-/** A GitHub repository left as an empty folder: said once on the project. */
+/** A Git repository whose source code is not downloaded. */
 export interface CloneFallback {
   projectName: string;
   failure: CloneFailure;
@@ -44,7 +44,7 @@ export interface CloneFallback {
 /** Why the folder is empty, in a few words. */
 export function cloneFailureText(reason: CloneFailureReason): string {
   switch (reason) {
-    case "no_git": return "No gh or git here.";
+    case "missing_source": return "The repository URL is missing.";
     case "refused": return "GitHub said no.";
     case "unreachable": return "GitHub couldn’t be reached.";
     case "failed": return "The clone failed.";
@@ -224,14 +224,14 @@ export function destinationVerdict(
         ],
       };
     case "new":
-      if (source) return { tone: "ok", message: `New folder. Clones ${source}; empty if that fails.` };
-      if (git && repository.github_url) return { tone: "warn", message: "New, empty folder: no gh or git here." };
-      if (git) return { tone: "ok", message: "New, empty folder: not on GitHub." };
+      if (source) return { tone: "ok", message: `Clones ${source}; keeps an empty Git repository if cloning fails.` };
+      if (git && !canClone) return { tone: "bad", message: "Install Git to create this Git project." };
+      if (git) return { tone: "warn", message: "Creates an empty Git repository. The repository URL is missing." };
       return { tone: "ok", message: "New, empty folder." };
     case "empty":
-      if (source) return { tone: "ok", message: `Empty folder. Clones ${source} into it; stays empty if that fails.` };
-      if (git && repository.github_url) return { tone: "warn", message: "Empty folder, stays empty: no gh or git here." };
-      if (git) return { tone: "ok", message: "Empty folder, stays empty: not on GitHub." };
+      if (source) return { tone: "ok", message: `Clones ${source}; keeps an empty Git repository if cloning fails.` };
+      if (git && !canClone) return { tone: "bad", message: "Install Git to create this Git project." };
+      if (git) return { tone: "warn", message: "Creates an empty Git repository. The repository URL is missing." };
       return { tone: "ok", message: "Empty folder." };
   }
 }
@@ -402,13 +402,13 @@ export default function CloudProjectSource({
     : incomplete.length > 0 ? `Choose a profile for ${incomplete.map((descriptor) => descriptor.display_name).join(", ")}.` : null;
 
   // Named for what the click will do, once the folder's verdict says it.
-  const verb = existing || !repository || !probe || folderKind === "checkout" || (folderKind === "empty" && !willClone)
+  const verb = existing || !repository || !probe || folderKind === "checkout"
     ? "Connect"
-    : willClone ? "Clone and connect" : "Create folder and connect";
+    : willClone ? "Clone and connect" : repository.repository_class === "git_project" ? "Create Git project" : "Create folder and connect";
   const connectable = existing
     ? folderKind === "empty" || folderKind === "checkout" || (folderKind === "occupied" && (!tick || ticked))
     : folderKind === "new" || folderKind === "empty" || folderKind === "checkout";
-  const ready = !!storage && !!repository?.bundle_id && !!destination && connectable && agentMessage === null;
+  const ready = !!storage && !!repository?.bundle_id && !!destination && connectable && verdict?.tone !== "bad" && agentMessage === null;
 
   const chooseStorage = (next: string) => {
     if (next === storageId) return;
@@ -476,6 +476,7 @@ export default function CloudProjectSource({
     try {
       folder = await projectSyncApi.getCloudProjectFolder({
         destination,
+        is_git_project: repository.repository_class === "git_project",
         github_url: repository.repository_class === "git_project" ? repository.github_url : null,
         repository_fingerprint: repository.repository_fingerprint,
         operation_id: operationId,
@@ -495,11 +496,10 @@ export default function CloudProjectSource({
     if (!isActive()) return;
     setRun({ phase: "connect" });
     try {
-      // `created` is an empty folder, made here or found; the rest is a checkout.
-      const holds = folder.kind === "created" ? "empty" : "checkout";
+      const holds = folder.kind === "created" || (folder.kind === "initialized" && !repository.github_url) ? "empty" : "checkout";
       const detail = await connectFolder(folder.canonical_path, choices, mismatchAcknowledged(holds, false));
       if (!isActive()) return;
-      const fallback = folder.kind === "created" && folder.failure
+      const fallback = folder.kind === "initialized"
         ? { projectName: detail.project.local_alias || detail.project.display_name, failure: folder.failure }
         : null;
       setRun({ phase: "idle" });
@@ -522,7 +522,7 @@ export default function CloudProjectSource({
 
   const status = run.phase === "folder"
     ? run.progress?.stage === "creating"
-      ? willClone ? "Clone failed · making an empty folder…" : "Making the folder…"
+      ? repository?.repository_class === "git_project" ? "Initializing the Git repository…" : "Making the folder…"
       : `Cloning ${source ?? repository?.address ?? ""}${run.progress?.stage === "cloning" && run.progress.percent !== null ? ` · ${run.progress.percent}%` : "…"}`
     : run.phase === "connect" && repository ? `Connecting to ${repository.address}…` : null;
   const primaryLabel = run.phase === "folder"
