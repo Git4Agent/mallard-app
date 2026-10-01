@@ -587,6 +587,9 @@ mod tests {
             specification: OFFICIAL_MAC_APP,
             bundle_path: temp.path().join("ChatGPT.app"),
         };
+        // Build the shipped layout independently of the resolver so a wrong
+        // bundled path cannot also silently change this test's fixture.
+        let bundled_cli = app.bundle_path.join("Contents/Resources/codex");
         let home = temp.path().join("codex-home");
         std::fs::create_dir_all(&home).unwrap();
         let before = home_entries(&home);
@@ -601,9 +604,9 @@ mod tests {
             (None, "Cannot determine the Codex CLI version bundled with"),
         ] {
             match body {
-                Some(body) => fake_cli(&app.bundled_cli(), body),
+                Some(body) => fake_cli(&bundled_cli, body),
                 None => {
-                    let _ = std::fs::remove_file(app.bundled_cli());
+                    let _ = std::fs::remove_file(&bundled_cli);
                 }
             }
             let mut announced = Vec::new();
@@ -620,7 +623,7 @@ mod tests {
             assert_eq!(home_entries(&home), before);
         }
 
-        fake_cli(&app.bundled_cli(), "echo 'codex-cli 0.159.2'");
+        fake_cli(&bundled_cli, "echo 'codex-cli 0.155.0-alpha.2.6'");
         let mut announced = Vec::new();
         let mut opened = Vec::new();
         open_session_in_mac_app(
