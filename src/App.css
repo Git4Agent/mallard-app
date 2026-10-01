@@ -2650,6 +2650,8 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
    shell's box at the line's height, in the mono face a bucket name is read
    in, with Suggest another beside it. A name outside Cloudflare's rule wears
    the danger edge while the note beside it spells the rule. */
+.r2-name-with-note { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; max-width: 100%; }
+.r2-name-with-note > .r2-name-field { flex-wrap: wrap; max-width: 100%; }
 .r2-name-field { display: inline-flex; align-items: center; gap: 6px; }
 .r2-name-input {
   width: 220px;

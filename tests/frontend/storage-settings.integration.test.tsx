@@ -48,6 +48,7 @@ import {
   type R2SetupFlow,
   type R2SetupMode,
   type R2SetupState,
+  type useR2Setup,
 } from "../../src/components/project-sync/R2Setup";
 import type {
   CatalogCapabilityDescriptor,
@@ -1861,6 +1862,99 @@ test("the bucket line proposes a name in a field, takes a rename, and hands a ta
   assert.match(lane, /const requested = bucket \?\? name\.trim\(\);/);
   assert.match(lane, /api\.setupR2Storage\(saved\.draft_id, saved\.revision, account\.id, jurisdiction, requested, progressFor\(live\)\)/);
 });
+
+/** Exercise the hook across explicit renders with the same draft and refs.
+ *  Native calls are supplied by each test; draft lifecycle effects stay idle. */
+function r2SetupHook(options: Parameters<typeof useR2Setup>[0]): () => R2SetupFlow {
+  const source = readFileSync("src/components/project-sync/R2Setup.tsx", "utf8");
+  const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+  const hook = transformSync(source.slice(source.indexOf("const PHASES:"), source.indexOf("/* ——— the lane"))
+    .replace(/^export /gm, ""), { loader: "ts" }).code;
+  let state = idleR2State();
+  const refs: { current: unknown }[] = [];
+  let refIndex = 0;
+  const context = {
+    useState: () => [state, (next: R2SetupState | ((previous: R2SetupState) => R2SetupState)) => {
+      state = typeof next === "function" ? next(state) : next;
+    }],
+    useRef: (current: unknown) => refs[refIndex++] ??= { current },
+    useEffect: noop,
+  };
+  const render = new Function("context", "options", `const { useState, useRef, useEffect } = context; ${hook}; return useR2Setup(options);`);
+  return () => {
+    refIndex = 0;
+    return render(context, options) as R2SetupFlow;
+  };
+}
+
+for (const createdBeforeFailure of [false, true]) {
+  for (const rename of ["typed", "suggested"] as const) {
+    test(`R2 retries a duplicate with the ${rename} name${createdBeforeFailure ? " after a created bucket's authorization fails" : " on the first attempt"}`, async () => {
+      const originalName = "mallard-fox";
+      const replacementName = "mallard-otter";
+      const requested: string[] = [];
+      let proposals = 0;
+      let adoptions = 0;
+      const render = r2SetupHook({
+        enabled: true, draftId: "fixture-draft", mode: "create",
+        port: {
+          blocked: () => false,
+          beginRun: () => ({ isCurrent: () => true, persist: async () => cloudDraft() }),
+          onRunStarted: noop,
+          adoptPrepared: async () => { adoptions += 1; return true; },
+        },
+        api: {
+          getR2SetupAccounts: async () => [account],
+          proposeR2BucketName: async () => ++proposals === 1 ? originalName : replacementName,
+          setupR2Storage: async (_draft, _revision, _account, _jurisdiction, bucket, progress) => {
+            requested.push(bucket);
+            if (createdBeforeFailure && requested.length === 1) {
+              progress?.({ status: "bucket_ready", bucket });
+              progress?.({ status: "authorization_link", stage: "bucket", url: "https://example.test/consent" });
+              throw { code: "authorization_timeout" };
+            }
+            if (bucket === originalName) throw { code: "bucket_name_taken" };
+            progress?.({ status: "bucket_ready", bucket });
+          },
+          discoverR2Storage: async () => { throw new Error("Unexpected discovery"); },
+          prepareExistingR2Storage: async () => { throw new Error("Unexpected existing-bucket setup"); },
+          cancelR2StorageSetup: async () => {},
+        },
+      });
+      const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+      render().start();
+      await settle();
+      render().continueWith(account.id);
+      await settle();
+      assert.equal(render().state.name, originalName);
+      render().createAndAuthorize();
+      await settle();
+      if (createdBeforeFailure) {
+        assert.equal(render().state.failed, "authorization_timeout");
+        assert.equal(render().state.bucket, originalName, "authorization failures retain the created bucket");
+        render().retry();
+        await settle();
+        assert.deepEqual(requested, [originalName, originalName]);
+      }
+      assert.equal(render().state.phase, "bucket");
+      assert.equal(render().state.failed, "bucket_name_taken");
+      assert.equal(render().isRunning(), false);
+      if (rename === "typed") render().setName(replacementName);
+      else render().suggestAnother();
+      await settle();
+      assert.equal(render().state.name, replacementName);
+      assert.equal(render().state.failed, null);
+      render().createAndAuthorize();
+      await settle();
+      assert.deepEqual(requested, createdBeforeFailure
+        ? [originalName, originalName, replacementName]
+        : [originalName, replacementName], "the request must use the name now shown in the field");
+      assert.equal(render().state.phase, "review");
+      assert.equal(render().state.bucket, replacementName);
+      assert.equal(adoptions, 1);
+    });
+  }
+}
 
 test("R2 activation failures explain dashboard setup and keep retry available", () => {
   const failed = r2SetupErrorCode({ code: "r2_not_enabled", message: "private-canary" });

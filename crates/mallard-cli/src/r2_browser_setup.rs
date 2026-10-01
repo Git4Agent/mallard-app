@@ -795,7 +795,6 @@ fn receive_credentials(
         }
         match listener.accept() {
             Ok((mut stream, peer)) => {
-                requests += 1;
                 if !peer.ip().is_loopback() {
                     let _ = write_http_response(&mut stream, 403);
                 } else {
@@ -836,11 +835,16 @@ fn receive_credentials(
                             }
                             let _ = write_http_response(&mut stream, 403);
                         }
+                        // Browsers may preconnect without sending HTTP yet.
+                        // Closing that idle socket lets them reconnect; sending
+                        // a 400 poisons the connection they later use to return.
+                        Err(CallbackRequestError::NoRequest) => continue,
                         Err(error) => {
                             let _ = write_http_response(&mut stream, error.status_code());
                         }
                     }
                 }
+                requests += 1;
                 if requests >= MAX_CALLBACK_REQUESTS {
                     return Err(CliError::remote(
                         "r2_authorization_callback_failed",
@@ -889,6 +893,7 @@ impl CallbackHttpRequest {
 
 #[derive(Clone, Copy)]
 enum CallbackRequestError {
+    NoRequest,
     BadRequest,
     MethodNotAllowed,
     NotFound,
@@ -897,7 +902,7 @@ enum CallbackRequestError {
 impl CallbackRequestError {
     fn status_code(self) -> u16 {
         match self {
-            Self::BadRequest => 400,
+            Self::NoRequest | Self::BadRequest => 400,
             Self::MethodNotAllowed => 405,
             Self::NotFound => 404,
         }
@@ -908,6 +913,11 @@ fn read_callback_request(
     stream: &mut TcpStream,
     callback_deadline: Instant,
 ) -> Result<CallbackHttpRequest, CallbackRequestError> {
+    // Accepted sockets inherit nonblocking mode on macOS. The bounded reads
+    // below must wait for HTTP bytes instead of rejecting WouldBlock as 400.
+    stream
+        .set_nonblocking(false)
+        .map_err(|_| CallbackRequestError::BadRequest)?;
     let request_deadline = callback_deadline.min(Instant::now() + CALLBACK_REQUEST_TIMEOUT);
     stream
         .set_write_timeout(Some(CALLBACK_REQUEST_TIMEOUT))
@@ -918,15 +928,34 @@ fn read_callback_request(
     loop {
         let remaining = request_deadline
             .checked_duration_since(Instant::now())
-            .ok_or(CallbackRequestError::BadRequest)?;
+            .ok_or_else(|| {
+                if request.is_empty() {
+                    CallbackRequestError::NoRequest
+                } else {
+                    CallbackRequestError::BadRequest
+                }
+            })?;
         stream
             .set_read_timeout(Some(remaining))
             .map_err(|_| CallbackRequestError::BadRequest)?;
         let count = stream
             .read(&mut *chunk)
-            .map_err(|_| CallbackRequestError::BadRequest)?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                    if request.is_empty() {
+                        CallbackRequestError::NoRequest
+                    } else {
+                        CallbackRequestError::BadRequest
+                    }
+                }
+                _ => CallbackRequestError::BadRequest,
+            })?;
         if count == 0 {
-            return Err(CallbackRequestError::BadRequest);
+            return Err(if request.is_empty() {
+                CallbackRequestError::NoRequest
+            } else {
+                CallbackRequestError::BadRequest
+            });
         }
         if request.len().saturating_add(count)
             > MAX_CALLBACK_REQUEST_BYTES + MAX_CALLBACK_BODY_BYTES
@@ -1568,6 +1597,41 @@ mod tests {
     }
 
     #[test]
+    fn callback_reader_waits_for_delayed_and_fragmented_requests() {
+        for split in [0, 20] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (ready, accepted) = mpsc::channel();
+            let client = thread::spawn(move || {
+                let mut stream = TcpStream::connect(address).unwrap();
+                accepted.recv_timeout(Duration::from_secs(2)).unwrap();
+                let request =
+                    callback_request("access-key-id=access-canary&secret-access-key=secret-canary");
+                stream.write_all(&request[..split]).unwrap();
+                thread::sleep(Duration::from_millis(50));
+                stream.write_all(&request[split..]).unwrap();
+            });
+            let (mut stream, _) = listener.accept().unwrap();
+            // macOS inherits this mode from the nonblocking listener. Set it
+            // explicitly so other platforms exercise the same read behavior.
+            stream.set_nonblocking(true).unwrap();
+            ready.send(()).unwrap();
+            let request =
+                read_callback_request(&mut stream, Instant::now() + Duration::from_secs(2));
+            client.join().unwrap();
+            let request = request
+                .unwrap_or_else(|_| panic!("a delayed callback must wait for its HTTP bytes"));
+            let Ok(CallbackAction::Credentials(credentials)) =
+                parse_callback_request(&request, BROKER_CALLBACK_ADDRESS, "/unused-start")
+            else {
+                panic!("the delayed callback must be accepted");
+            };
+            assert_eq!(credentials.access_key_id.as_str(), "access-canary");
+            assert_eq!(credentials.secret_access_key.as_str(), "secret-canary");
+        }
+    }
+
+    #[test]
     fn callback_parser_rejects_ambiguous_or_malformed_requests() {
         for request in [
             callback_request("access-key-id=a&access-key-id=b&secret-access-key=s"),
@@ -1605,6 +1669,43 @@ mod tests {
     }
 
     #[test]
+    fn idle_connections_close_silently_but_partial_requests_still_fail() {
+        for bytes in [b"".as_slice(), b"GET /".as_slice()] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (sender, receiver) = mpsc::channel();
+            let result = authorize_with_listener(
+                listener,
+                &broker_url(ACCOUNT, "mallard-safe"),
+                move |_| {
+                    let mut stream = TcpStream::connect(address).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    stream.write_all(bytes).unwrap();
+                    thread::spawn(move || {
+                        let mut response = String::new();
+                        stream.read_to_string(&mut response).unwrap();
+                        sender.send(response).unwrap();
+                    });
+                    Ok(())
+                },
+                Duration::from_millis(500),
+            );
+            assert!(result.is_err());
+            let response = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            if bytes.is_empty() {
+                assert!(
+                    response.is_empty(),
+                    "an idle connection must receive no HTTP response"
+                );
+            } else {
+                assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+            }
+        }
+    }
+
+    #[test]
     fn valid_browser_context_handshake_completes_without_echoing_credentials() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1625,6 +1726,15 @@ mod tests {
                     .to_string();
                 assert!(is_flow_token(&flow_id));
                 thread::spawn(move || {
+                    // An unused browser preconnection is not an HTTP request
+                    // and must not exhaust the flow's malformed-request budget.
+                    for _ in 0..=MAX_CALLBACK_REQUESTS {
+                        let mut idle = TcpStream::connect(address).unwrap();
+                        idle.shutdown(std::net::Shutdown::Write).unwrap();
+                        let mut response = String::new();
+                        idle.read_to_string(&mut response).unwrap();
+                        assert!(response.is_empty());
+                    }
                     let host = format!("localhost:{}", address.port());
                     let start_request = format!(
                         "GET {start_path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"

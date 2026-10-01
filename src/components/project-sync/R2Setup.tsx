@@ -246,7 +246,12 @@ export function useR2Setup({ enabled, draftId, mode, port, api = projectSyncApi 
       if (!isCurrent()) return;
       const code = r2SetupErrorCode(reason);
       if (code === "cancelled") patch({ cancelled: true, cancelling: false });
-      else patch({ failed: code, cancelling: false, phase: failedPhase(code, phaseRef.current, mode) });
+      else patch({
+        failed: code, cancelling: false, phase: failedPhase(code, phaseRef.current, mode),
+        // A duplicate reopens naming; the next request must follow that field,
+        // even if an earlier attempt created a bucket before authorization failed.
+        ...(code === "bucket_name_taken" && mode === "create" ? { bucket: null } : {}),
+      });
     } finally {
       runningRef.current = false;
       targetRef.current = null;
@@ -628,7 +633,7 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
       : null;
     return {
       key: "bucket", title: "Bucket", status,
-      fact: naming ? <>{nameField}{nameNote && <span>{nameNote}</span>}</>
+      fact: naming ? <span className="r2-name-with-note">{nameField}{nameNote && <span>{nameNote}</span>}</span>
         : status === "failed" ? `${failure()}${kept}`
         : status === "stopped" ? `Stopped${kept}`
         : state.phase === "create" ? (named ? <><code>{named}</code> · {reconnect ? "kept" : `${jurisdictionLabel(state.jurisdiction)} · created`}</> : reconnect ? "Checking the bucket…" : <>Creating <code>{state.name}</code>…</>)
