@@ -133,13 +133,13 @@ test("the picker names repositories by address and never by bundle id", () => {
       onSelect={() => undefined}
     />,
   );
-  assert.match(html, /Address or invitation code<\/span>/, "the code has a place before any lookup");
-  assert.match(html, /placeholder="mallard-ai\.com\/owner\/name, or XXXXX-XXXXX-XXXXX-XXXXX"/);
+  assert.match(html, /Address or invite code<\/span>/, "the code has a place before any lookup");
+  assert.match(html, /placeholder="owner\/name or invite code"/);
   assert.equal(html.match(/<input/g)?.length, 1, "one field takes the address or the code");
   assert.match(html, /Look up/);
   assert.doesNotMatch(html, /Invitation code \(optional\)|Join repository/);
-  assert.match(html, /or a code from the repository’s owner or an admin/);
-  assert.match(html, /class="repo-list-head">Your repositories<small>3<\/small><\/div>/);
+  assert.doesNotMatch(html, /Paste the page address/);
+  assert.match(html, /class="repo-list-head">Repositories<small>3<\/small><\/div>/);
   assert.doesNotMatch(html, /read-only/i);
   assert.match(html, /Rika321\/HorrorGame<small class="sync-bundle-recommended">Git match<\/small>/);
   assert.match(html, /Private · Owner/);
@@ -148,7 +148,7 @@ test("the picker names repositories by address and never by bundle id", () => {
   assert.match(html, /Public · Owner/);
   assert.match(html, /not pushed yet/);
   assert.match(html, /class="repo-new-address">Rika321\/HorrorGame-2<\/span>/);
-  assert.match(html, /HorrorGame is already used in this account/);
+  assert.match(html, /HorrorGame is already used\./);
   assert.doesNotMatch(html, new RegExp(BUNDLE), "no bundle id in the copy");
   assert.doesNotMatch(html, /a81b3c5d7e9f1a2b/);
   // Only the one true Git match wears the badge.
@@ -201,8 +201,8 @@ test("the picker names repositories by address and never by bundle id", () => {
       onSelect={() => undefined}
     />,
   );
-  assert.match(empty, /class="repo-list-head">Your repositories<\/div>/);
-  assert.match(empty, /<p class="repo-list-empty">None yet\. Repositories you create or join appear here\.<\/p>/);
+  assert.match(empty, /class="repo-list-head">Repositories<\/div>/);
+  assert.match(empty, /<p class="repo-list-empty">No repositories yet\.<\/p>/);
   assert.doesNotMatch(empty, /radiogroup|sync-bundle-match-options/);
   assert.doesNotMatch(empty, /Paste the page address/, "clone mode says fewer words");
 });
@@ -213,7 +213,7 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
       projectName="HorrorGame"
       currentBundleId="b751caac4627e21d5809e0cf925a7c1f"
       projectFingerprint={CHECKOUT}
-      storage={cloud}
+      storage={{ ...cloud, name: "Mallard Cloud Rika321" }}
       matches={[]}
       reason="link"
       busy={false}
@@ -223,12 +223,13 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
       onKeepCurrent={() => undefined}
     />,
   );
-  assert.match(html, /Connect HorrorGame to Mallard Cloud/);
-  assert.match(html, /Paste a repository address or an invitation code, or choose one of your repositories/);
-  assert.match(html, /Mallard Cloud · Rika321/);
-  assert.match(html, /Address or invitation code/);
-  assert.match(html, /Checking repositories you belong to/);
-  assert.match(html, /Paste an address or a code, or select a row/);
+  assert.match(html, /id="sync-bundle-connection-title">Connect HorrorGame<\/h1>/);
+  assert.doesNotMatch(html, /Repo identity|Paste a repository address|Connecting keeps/);
+  assert.match(html, /<strong>Mallard Cloud · Rika321<\/strong>/);
+  assert.doesNotMatch(html, /Mallard Cloud Rika321 · Rika321/);
+  assert.match(html, /Address or invite code/);
+  assert.match(html, /Loading repositories/);
+  assert.doesNotMatch(html, /Paste an address or a code/);
   assert.doesNotMatch(html, /Current local repo/, "no bundle id in the context line");
   assert.doesNotMatch(html, /Create separate repo/);
   assert.match(html, />Connect<\/button>/);
@@ -249,7 +250,7 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
       onKeepCurrent={() => undefined}
     />,
   );
-  assert.match(missing, /Choose the remote repo/);
+  assert.match(missing, /Choose a repository/);
   assert.match(missing, /Review separate Push/);
 });
 

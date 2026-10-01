@@ -141,7 +141,7 @@ test("an explicit Push scan presents new entries selected and locks both directo
   );
 
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
@@ -181,7 +181,7 @@ test("an explicit Push scan presents new entries selected and locks both directo
 test("Project file controls stay on the dedicated page", () => {
   const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
@@ -203,7 +203,7 @@ test("Project file controls stay on the dedicated page", () => {
 test("the footer carries the step navigator beside Push, forward then back", () => {
   const selected = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const render = (activeStep: "history" | "project_files") => renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={inventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
@@ -312,7 +312,7 @@ test("Push review shows only local-outstanding project files", () => {
   };
   const selected = new Set(mixedInventory.entries.map((candidate) => candidate.descriptor.resource_id));
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={mixedInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={selected}
@@ -368,7 +368,7 @@ test("Push gates storage deletions and Pull omits conflict deletions", () => {
   );
 
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={removalInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
       selected={new Set()}
@@ -458,7 +458,7 @@ test("file review details reuse the project copyable popover", () => {
 
 test("opening the files step scans by itself — no interstitial, just the scaffold", () => {
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[]}
       selected={new Set()}
@@ -635,7 +635,7 @@ test("Pull project content starts as keep-local and selecting a nested file requ
   const selected = includeRequiredPullProjectDirectories(items, new Set(["file-a"]));
   assert.deepEqual([...selected].sort(), ["dir-docs", "dir-specs", "file-a"]);
   const html = renderToStaticMarkup(
-    <RestorePlanView
+    <RestorePlanView onSessionActionError={() => undefined}
       projectName="Project B"
       plan={pullPlan}
       binding={binding}
@@ -747,7 +747,7 @@ test("generic pull rows wear the same operation chips", () => {
     ],
   };
   const html = renderToStaticMarkup(
-    <RestorePlanView
+    <RestorePlanView onSessionActionError={() => undefined}
       projectName="Project B"
       plan={genericPlan}
       binding={binding}

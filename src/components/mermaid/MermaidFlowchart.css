@@ -1,0 +1,12 @@
+.mermaid-flowchart { overflow: hidden; margin: 12px 0; border: 1px solid var(--border); border-radius: 8px; }
+.mermaid-flowchart-head { padding: 10px 14px; font-size: 12px; font-weight: 600; }
+.mermaid-flowchart-image { display: flex; justify-content: center; padding: 16px; background: var(--bg-1); }
+.mermaid-flowchart-image img { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; }
+.mermaid-flowchart-note { margin: 0; padding: 12px 14px; font-size: 13px; }
+.mermaid-flowchart-source { padding: 10px 14px; border-top: 1px solid var(--border); font-size: 12px; }
+.mermaid-flowchart-source summary { cursor: pointer; }
+.mermaid-flowchart-source button { margin: 10px 8px 8px 0; padding: 4px 8px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
+.mermaid-flowchart-source [role="status"] { font-size: 11px; color: var(--text-2); }
+.mermaid-flowchart-source pre { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mermaid-flowchart-source code { font-size: 11px; }
+.mermaid-parser-frame { position: absolute; left: -10000px; top: 0; width: 1000px; height: 1000px; visibility: hidden; pointer-events: none; border: 0; }

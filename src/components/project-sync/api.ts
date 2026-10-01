@@ -403,6 +403,7 @@ export const projectSyncApi = {
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
     subagentSelections: Record<string, import("../../types").SubagentSelection> = {},
+    gitHistoryReviewToken: string | null = null,
   ) => invoke<ProjectOperationResult>("push_bundle", {
     localProjectId,
     storageId,
@@ -412,6 +413,7 @@ export const projectSyncApi = {
     projectContentRemovalIds,
     acknowledgedWarningDigests,
     subagentSelections,
+    gitHistoryReviewToken,
   }),
 
   /** Run one declared action. The backend refuses an action the provider

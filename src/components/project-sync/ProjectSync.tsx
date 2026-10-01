@@ -240,6 +240,10 @@ interface SiblingBundleNotice {
 
 interface PendingPush {
   credentialRedactionEnabled: boolean;
+  gitHistory: import("../../types").GitHistorySnapshot | null;
+  gitHistoryReviewToken: string | null;
+  gitHistoryChanged: boolean;
+  gitHistoryOutgoing: import("../../types").GitHistoryOutgoing | null;
   projectId: string;
   storageId: string;
   projectName: string;
@@ -390,6 +394,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [pushListState, setPushListState] = useState<ReviewListState>("loading");
   const [projectContentLoading, setProjectContentLoading] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
+  /* A session action (open, resume, delete) that failed in an Activity or
+     review list. The list page reports it and clears it when it goes. */
+  const [sessionActionError, setSessionActionError] = useState<string | null>(null);
   const [pushReviewStep, setPushReviewStep] = useState<SyncReviewStep>("history");
   // A gate the push (or a pull plan) cannot get past never opens a review;
   // it lands as a banner on the storage card with the way forward on it.
@@ -520,6 +527,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     projectId: string,
     request: OpenSessionDetailRequest,
   ) => {
+    // The detail page reports its own action failures in its own zone.
+    setSessionActionError(null);
     setActiveProjectSubview({
       kind: "session_detail",
       localProjectId: projectId,
@@ -1946,6 +1955,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingPush({
         credentialRedactionEnabled: context.credential_redaction_enabled,
+        gitHistory: context.git_history,
+        gitHistoryReviewToken: context.git_history_review_token,
+        gitHistoryChanged: context.git_history_changed,
+        gitHistoryOutgoing: context.git_history_outgoing,
         projectId,
         storageId,
         projectName: projectLabel(nextDetail.project),
@@ -2126,6 +2139,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectContentRemovalIds,
         acknowledgedWarningDigests,
         Object.fromEntries((pendingPush?.threadComparison?.entries ?? []).map((entry) => [entry.resource_id, entry.subagent_selection])),
+        pendingPush.gitHistoryReviewToken,
       );
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       // The push is finished, so the review closes and the result lands on the
@@ -3328,6 +3342,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       deletionApproved: pushDeletionApproved,
       projectContentLoading,
       listState: pendingPushListState,
+      gitHistoryChanged: pendingPush.gitHistoryChanged,
     })
     : null;
   const inlineStorageReview = pendingPush ? {
@@ -3354,6 +3369,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     content: (
       <PushResourceWorkspace
         credentialRedactionEnabled={pendingPush.credentialRedactionEnabled}
+        onSessionActionError={setSessionActionError}
+        gitHistory={pendingPush.gitHistory}
+        gitHistoryChanged={pendingPush.gitHistoryChanged}
+        gitHistoryOutgoing={pendingPush.gitHistoryOutgoing}
         resources={pushResources(pendingPush)}
         selected={pushSelected}
         projectDefaults={pendingPush.projectDefaults}
@@ -3427,6 +3446,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     onClose: closePullReview,
     content: (
       <RestorePlanView
+        onSessionActionError={setSessionActionError}
         project={projects.find((candidate) => candidate.local_project_id === restoreBinding.local_project_id) ?? undefined}
         storageName={config.storages.find((storage) => storage.storage_id === restorePlan.storage_id)?.name ?? null}
         projectName={restoreProjectName}
@@ -3570,6 +3590,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       onDismiss: () => setPushError(null),
     }));
   }
+  /* A session action that failed in a list. The list scrolls as one page, so
+     a box at its top was off screen from any row further down; this zone is
+     on screen wherever the list was left. Session detail keeps the Activity
+     list mounted underneath, so a failure that settles after the detail opened
+     waits for the list instead of speaking over the detail's own zone. */
+  const listActionError = activeProjectSubview.kind === "session_detail" ? null : sessionActionError;
+  if (listActionError) {
+    shellNotices.push({
+      key: "session-action-failed",
+      severity: "danger",
+      message: listActionError,
+      onDismiss: () => setSessionActionError(null),
+    });
+  }
   if (notice) {
     shellNotices.push({
       key: "shell-notice",
@@ -3601,15 +3635,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       onDismiss: () => setCloneFallback(null),
     });
   }
-  /* Every rung of this zone is an event. `shellError` and a Push failure
-     report that what the user just did did not happen. `backendError` looks like standing
+  /* Every rung of this zone is an event. `shellError`, a Push failure and a
+     failed session action report that what the user just did did not happen.
+     `backendError` looks like standing
      content because the startup load writes it, but the same `refresh()` runs
      behind "Reload app data" and the path-bar overflow, so a backend that
      falls over on an explicit refresh would go unannounced if this zone were
      a region — and the shell paints the startup screen until the load
      settles, so even the startup case arrives as a change. A notice is
      advisory. The loudest present event re-times the whole box. */
-  const shellNoticeTiming: NoticeTiming = shellError || backendError || (pendingPush && pushError)
+  const shellNoticeTiming: NoticeTiming = shellError || backendError || (pendingPush && pushError) || listActionError
     ? { timing: "blocking" }
     : { timing: "progress" };
   /* Keeps `sync-backend-banner` for the shell's own geometry only: the zone is
@@ -3839,6 +3874,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             fetchProgress={fetchProgress}
             onSelectStorage={(projectId, storageId) => selectStorage(projectId, storageId)}
             onOpenSessionDetail={openSessionDetail}
+            onSessionActionError={setSessionActionError}
             onCloseSessionDetail={closeProjectSubview}
             onLinkStorage={(projectId, storageId) => linkStorage(projectId, storageId)}
             onUnlinkStorage={(projectId, storageId) => unlinkStorage(projectId, storageId)}

@@ -13,6 +13,7 @@ import { PUSH_FINISHED, unfinishedPushSentence } from "../../src/unfinishedPush"
 import { pushFailureNotice } from "../../src/components/project-sync/pushFailureNotice";
 import { NoticeZone } from "../../src/components/notice/Notice";
 import ResourceInventory from "../../src/components/project-sync/ResourceInventory";
+import SyncReviewSelectionBar from "../../src/components/sync-review/SyncReviewSelectionBar";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
 import type {
   BundleRecipe,
@@ -462,7 +463,7 @@ test("blocked resources cannot enter a published recipe", () => {
 test("the push review is one screen: header actions, list, Push in the footer", () => {
   const resource = { ...memoryResource("review"), category: "tools" as const };
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set([resource.resource_id])}
@@ -477,7 +478,7 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   assert.match(html, />Push review</);
   assert.match(html, /sync-sync-review-title/);
   assert.doesNotMatch(html, /Choose what to include/);
-  assert.match(html, /class="btn sync-sync-review-select"[^>]*>.*?Select <span class="sync-path-count">1<\/span>/);
+  assert.match(html, /class="btn sync-sync-review-select" title="Clear current selection">.*?Unselect <span class="sync-path-count">1<\/span>/);
   assert.match(html, /aria-label="Clear current selection"/);
   assert.match(html, /aria-label="Close push review"/);
   const recommendedAction = html.indexOf('class="btn sync-sync-review-select"');
@@ -493,6 +494,32 @@ test("the push review is one screen: header actions, list, Push in the footer", 
   assert.doesNotMatch(footer, /<small>/, "footers are buttons only");
   assert.doesNotMatch(footer, /\d+ included|Push \d+ resources?/);
   assert.doesNotMatch(html, /Remote history is missing/);
+});
+
+test("the recommendation button allows unselecting an active selection and respects busy and empty states", () => {
+  const renderBar = (overrides: Partial<Parameters<typeof SyncReviewSelectionBar>[0]> = {}) => {
+    const html = renderToStaticMarkup(<SyncReviewSelectionBar
+      count={7}
+      total={7}
+      recommendedCount={7}
+      recommendedTitle="Select the recommended sessions"
+      recommendedDisabled={true}
+      onRecommended={() => undefined}
+      clearDisabled={false}
+      onClear={() => undefined}
+      {...overrides}
+    />);
+    return html.match(/<button[^>]*class="btn sync-sync-review-select"[^>]*>.*?<\/button>/)![0];
+  };
+
+  assert.match(renderBar(), /Unselect <span class="sync-path-count">7<\/span>/);
+  assert.doesNotMatch(renderBar(), /disabled/);
+  assert.match(renderBar({ busy: true }), /disabled/);
+  assert.match(renderBar({ searchActive: true }), /title="Clear matching selection"/);
+  const empty = renderBar({ count: 0, recommendedDisabled: false, clearDisabled: true });
+  assert.match(empty, />.*?Select <span/);
+  assert.doesNotMatch(empty, /disabled/);
+  assert.match(renderBar({ recommendedCount: 0, recommendedDisabled: false }), /disabled/);
 });
 
 /* A Push failure is drawn by the shell zone under the path bar, not by the
@@ -525,7 +552,7 @@ test("a Push error names itself, closes, and offers no local-state reset", () =>
 test("the Push review no longer draws a failure of its own", () => {
   const resource = memoryResource("review");
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set([resource.resource_id])}
@@ -561,7 +588,7 @@ test("a push that did not finish offers Finish that push, and a finished one rea
 test("a failed comparison names the error and offers no reset", () => {
   const resource = memoryResource("review");
   const render = (threadComparisonError: string) => renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set()}
@@ -590,7 +617,7 @@ test("two steps render two plain tabs — never a Review tab", () => {
   // listed, and a review with nothing listed trades Push for its exit.
   const resource: InventoryResource = { ...memoryResource("review"), category: "tools" };
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[resource]}
       selected={new Set([resource.resource_id])}
@@ -713,7 +740,7 @@ test("held threads and storage blockers share one banner with one way forward", 
     ],
   };
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[held, pushable]}
       selected={new Set([pushable.resource_id])}
@@ -755,7 +782,7 @@ test("held threads and storage blockers share one banner with one way forward", 
   // The banner is plan-derived: deselecting every row leaves it identical, so
   // ticking a checkbox can never reflow the list underneath it.
   const deselected = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[held, pushable]}
       selected={new Set()}
@@ -825,7 +852,7 @@ test("the header count reserves its widest slot so ticking a row moves no icon",
     })),
   };
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={rows}
       selected={new Set(rows.slice(0, 9).map((row) => row.resource_id))}
@@ -876,7 +903,7 @@ test("a selected item that cannot be captured reports in the footer, not above t
     ],
   };
   const render = (selected: Set<string>) => renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[broken]}
       selected={selected}

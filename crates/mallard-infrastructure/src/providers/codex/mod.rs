@@ -3,10 +3,13 @@
 //! adapter is the sole registered gateway common code uses to reach them.
 
 pub mod actions;
+mod app_server;
+mod cli_version;
 mod deletion;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
+pub mod naming;
 mod timeline_sources;
 
 use super::traits::{

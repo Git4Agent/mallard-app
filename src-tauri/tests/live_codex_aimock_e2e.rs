@@ -9,16 +9,18 @@
 //! as the only test process so its temporary `HOME` override cannot affect
 //! other tests.
 
+#[path = "support/codex_home.rs"]
+mod codex_home;
 #[path = "support/codex_output.rs"]
 mod codex_output;
 #[path = "support/codex_failure_isolation.rs"]
 mod failure_isolation;
+#[path = "support/codex_open_rollout.rs"]
+mod open_rollout;
 #[path = "support/codex_reverted_rollouts.rs"]
 mod reverted_rollouts;
 #[path = "support/session_reconciliation.rs"]
 mod session_reconciliation;
-#[path = "support/codex_open_rollout.rs"]
-mod open_rollout;
 mod support;
 
 use mallard_domain::{
@@ -6980,8 +6982,10 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     // the UI. Each replica must forget its own accepted base; only the first
     // call has remote objects left to delete.
     eprintln!("live Codex phase: storage reset and session republish");
-    let codex_home_a_before_reset = storage_digest_inventory(&myconf1);
-    let codex_home_b_before_reset = storage_digest_inventory(&myconf2);
+    let codex_home_a_before_reset = codex_home::inventory(&myconf1);
+    let codex_home_b_before_reset = codex_home::inventory(&myconf2);
+    let conversations_a_before_reset = codex_home::conversations(&myconf1);
+    let conversations_b_before_reset = codex_home::conversations(&myconf2);
     let project_before_reset = redacted(
         service1.inspect_bundle(&storage_id, &bundle_id),
         "cannot inspect revision-11 bundle before storage reset",
@@ -7015,12 +7019,14 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     assert_eq!(reset_b.catalog_links_reset, 0);
     assert!(service1.inspect_bundle(&storage_id, &bundle_id).is_err());
     assert_eq!(
-        storage_digest_inventory(&myconf1),
-        codex_home_a_before_reset
+        codex_home::inventory(&myconf1),
+        codex_home_a_before_reset,
+        "storage clear changed replica A's Codex profile data"
     );
     assert_eq!(
-        storage_digest_inventory(&myconf2),
-        codex_home_b_before_reset
+        codex_home::inventory(&myconf2),
+        codex_home_b_before_reset,
+        "storage clear changed replica B's Codex profile data"
     );
 
     let reset_push = push(&service1, &project_id1, &storage_id);
@@ -7043,12 +7049,14 @@ fn live_codex_aimock_setup_push_pull_divergence() {
         1,
     );
     assert_eq!(
-        storage_digest_inventory(&myconf1),
-        codex_home_a_before_reset
+        codex_home::conversations(&myconf1),
+        conversations_a_before_reset,
+        "republish changed replica A's Codex transcripts or titles"
     );
     assert_eq!(
-        storage_digest_inventory(&myconf2),
-        codex_home_b_before_reset
+        codex_home::conversations(&myconf2),
+        conversations_b_before_reset,
+        "republish changed replica B's Codex transcripts or titles"
     );
 
     let project_before_library = redacted(

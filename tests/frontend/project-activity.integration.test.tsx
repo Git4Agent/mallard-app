@@ -146,7 +146,6 @@ const contentDefaults = {
   binding,
   loading: false,
   loadingMore: false,
-  actionError: null,
   loadError: null,
   onRetryLoad: () => undefined,
   actionBusyResourceId: null,
@@ -1008,6 +1007,91 @@ test("Push review shows only ready local-outstanding sessions", () => {
       assert.doesNotMatch(html, new RegExp(`Commit ${scenario.title}`));
     }
   }
+});
+
+test("Push review marks the commits it adds with ↑ on the session rail", () => {
+  const outgoingSha = "1".repeat(40);
+  const commits = [
+    { sha: outgoingSha, short_sha: "1111111", committed_at: 1_752_803_000, subject: "Add pelican artwork", session_refs: [] },
+    ...activity.git.commits,
+    { sha: "c".repeat(40), short_sha: "ccccccc", committed_at: 1_752_700_000, subject: "Older bare commit", session_refs: [] },
+  ];
+  const comparison = emptyComparison({
+    entries: [{
+      provider: "codex",
+      provider_display_name: "Codex",
+      access: "bound_ready",
+      thread_id: CODEX_SESSION_ID,
+      conversation_resource_id: codexResourceId,
+      resource_id: codexResourceId,
+      display_name: codexSession.title,
+      state: "local_only",
+      local_present: true,
+      storage_present: false,
+      cloud_thread_id: null,
+      compared_against_storage: true,
+      subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+      provider_thread_id: CODEX_SESSION_ID,
+      push_decision: reviewDecision("create_cloud", true),
+      pull_decision: reviewDecision("no_changes"),
+    }],
+  });
+  const review = (props: Partial<ComponentProps<typeof ProjectChatHistoryContent>>, withSession = true) => renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{
+        ...activity,
+        sessions: withSession ? activity.sessions : [],
+        git: { ...activity.git, commits, unique_session_count: withSession ? 1 : 0 },
+        older: null,
+      }}
+      comparison={withSession ? comparison : emptyComparison()}
+      activeStorageName="Local storage 1"
+      selectionMode="push"
+      selectableResourceIds={new Set([codexResourceId])}
+      onToggleResource={() => undefined}
+      {...props}
+    />,
+  );
+  const pushGitHistory = { outgoing: new Set([outgoingSha]), rewritten: false, changed: true };
+  const chip = /<span class="sync-history-branch-state sync-history-outgoing( history-only)?" title="([^"]+)"[^>]*>↑<\/span>/g;
+
+  // A bare commit the Push adds stays on the rail, marked; an old bare one
+  // does not, and the commit that only carries a session is not marked.
+  const html = review({ pushGitHistory });
+  assert.match(html, /Add pelican artwork/);
+  assert.doesNotMatch(html, /Older bare commit/);
+  const marks = [...html.matchAll(chip)];
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0][1], undefined);
+  assert.equal(marks[0][2], "New since the last Push to Local storage 1");
+  assert.ok(html.indexOf("Add pelican artwork") < html.indexOf(codexSession.title), "the rail keeps history order");
+
+  const rewritten = [...review({ pushGitHistory: { ...pushGitHistory, rewritten: true } }).matchAll(chip)];
+  assert.equal(rewritten.length, 1);
+  assert.equal(rewritten[0][1], " history-only", "a rewritten history marks in the warning tone");
+
+  // A search narrows to sessions, so bare commits leave with it.
+  assert.doesNotMatch(review({ pushGitHistory, searchQuery: "pelican-free query" }), /Add pelican artwork/);
+  // Storage shares no commit: nothing is marked and no bare commit is kept.
+  const unshared = review({ pushGitHistory: { ...pushGitHistory, outgoing: new Set<string>() } });
+  assert.doesNotMatch(unshared, /sync-history-outgoing|Add pelican artwork/);
+
+  // No session to push: one line says so, the history's commits still draw,
+  // and there is nothing to search.
+  const gitOnly = review({ pushGitHistory }, false);
+  assert.match(gitOnly, /<div class="sync-pull-empty compact">[\s\S]*?<strong>No session changes<\/strong><\/span><\/div>/);
+  assert.match(gitOnly, /Add pelican artwork/);
+  assert.equal([...gitOnly.matchAll(chip)].length, 1);
+  assert.doesNotMatch(gitOnly, /Search sessions|No local session changes are ready to push/);
+  const nothing = review({ pushGitHistory: { outgoing: new Set<string>(), rewritten: false, changed: false } }, false);
+  assert.match(nothing, /<strong>Nothing to push<\/strong>/);
+  assert.doesNotMatch(nothing, /sync-history-commit-rail|Search sessions/);
+
+  // Pull keeps its own empty copy and never marks a commit.
+  const pull = review({ selectionMode: "pull" }, false);
+  assert.match(pull, /<strong>No session changes<\/strong><small>Sessions already match this storage\.<\/small>/);
+  assert.doesNotMatch(pull, /sync-history-outgoing/);
 });
 
 test("an unlinked project still draws a badge on every row", () => {
@@ -2640,11 +2724,9 @@ test("a project without a bound provider profile stays in the workspace", () => 
       {...contentDefaults}
       binding={null}
       activity={null}
-      actionError="Provider profile path changed."
       onChooseAgentProfile={() => { choseProfile = true; }}
     />,
   );
-  assert.match(html, /role="alert"/);
   assert.match(html, /No agent profile is connected\./);
   assert.match(html, /Choose an Agent profile to load this project’s sessions\./);
   assert.match(html, /<button[^>]*>Choose Agent profile<\/button>/);
@@ -2655,6 +2737,45 @@ test("a project without a bound provider profile stays in the workspace", () => 
 
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /onChooseAgentProfile=\{\(\) => \{\s*void onConfigureBinding\(activeProject\.local_project_id\);/);
+});
+
+test("a failed row action is drawn under the path bar, never in the scrolling list", () => {
+  // The list's own notice zone sits at the top of a page that scrolls as one:
+  // a failure on a lower row landed hundreds of pixels above the viewport.
+  const html = renderToStaticMarkup(<ProjectChatHistoryContent {...contentDefaults} activity={activity} />);
+  assert.doesNotMatch(html, /class="notice[^"]*sync-history-notices/);
+  const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  assert.doesNotMatch(page, /action-failed|setActionError|actionError=/);
+  assert.match(page, /onActionError: \(message: string \| null\) => void;/);
+
+  // Every host of the list hands the failure to the shell.
+  for (const host of ["ProjectLinksWorkspace", "PushResourceWorkspace", "RestorePlanView"]) {
+    const source = readFileSync(`src/components/project-sync/${host}.tsx`, "utf8");
+    assert.match(source, /onActionError=\{onSessionActionError\}/, host);
+  }
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  for (const host of ["ProjectLinksWorkspace", "PushResourceWorkspace", "RestorePlanView"]) {
+    assert.match(shell, new RegExp(`<${host}[\\s\\S]*?onSessionActionError=\\{setSessionActionError\\}`), host);
+  }
+  // One item in the shell zone, closable, announced as the event it is, and
+  // gone once session detail opens: that page reports in its own zone.
+  // Session detail keeps the list mounted underneath; its failure waits there.
+  assert.match(shell, /const listActionError = activeProjectSubview\.kind === "session_detail" \? null : sessionActionError;/);
+  assert.match(shell, /key: "session-action-failed",\s*severity: "danger",\s*message: listActionError,\s*onDismiss: \(\) => setSessionActionError\(null\),/);
+  assert.match(shell, /shellNoticeTiming: NoticeTiming = [^?]*\|\| listActionError\s*\?\s*\{ timing: "blocking" \}/);
+  assert.match(shell, /const openSessionDetail = useCallback\(\([\s\S]*?\) => \{[\s\S]*?setSessionActionError\(null\);[\s\S]*?setActiveProjectSubview\(/);
+});
+
+test("only the page still showing a project may report its action failures", () => {
+  const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  // Leaving the page or switching project closes the report and clears it…
+  assert.match(page, /useEffect\(\(\) => \{\s*shownProjectRef\.current = project\.local_project_id;\s*return \(\) => \{\s*shownProjectRef\.current = null;\s*onActionError\(null\);\s*\};\s*\}, \[project\.local_project_id, onActionError\]\);/);
+  // …so a probe or delete that settles afterwards cannot surface on the next screen.
+  assert.match(page, /const reportActionError = \(message: string \| null\) => \{\s*if \(shownProjectRef\.current === project\.local_project_id\) onActionError\(message\);\s*\};/);
+  const directReports = page.match(/\bonActionError\(/g) ?? [];
+  assert.equal(directReports.length, 2, "only the clear-on-leave and the guarded report call the shell");
+  // A Terminal resume refused for an old CLI reports through the guard.
+  assert.match(page, /executeProjectSessionAction\([^)]*\);\s*\} catch \(reason\) \{ reportActionError\(errorMessage\(reason\)\); \}/);
 });
 
 test("completed projects use their main row for history and only mark Git repositories", () => {

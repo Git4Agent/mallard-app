@@ -204,7 +204,6 @@ function render(props: {
       selectedResourceIds={props.selectedResourceIds}
       loading={false}
       loadingMore={false}
-      actionError={null}
       loadError={null}
       onRetryLoad={() => undefined}
       actionBusyResourceId={null}

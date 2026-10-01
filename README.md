@@ -443,6 +443,21 @@ This flow works with a new or existing Git project, or with a non-Git folder.
    is ahead, the added one is only on this computer, and the rest are in
    sync with the public version. Pull, then Push, to start a new draft.
 
+## Claude widgets in session detail
+
+Mallard displays complete SVG widgets from Claude's `mcp__visualize__show_widget`
+tool in session detail. The Replies filter includes widgets. Other tool calls
+remain under Tool calls. Each widget has a Source control with a copy button.
+
+The widget source travels inside the Claude transcript through Push and Pull.
+Mallard Cloud displays it from the stored session preview when that preview
+contains the complete arguments. No extra widget file or bundle schema is needed.
+
+SVG widgets load as images with local presentation styles. Their scripts and
+external document resources do not run. HTML widgets, incomplete input, and
+malformed SVG show a message and retain the available source. Widget interaction
+state and external dependencies are not synced.
+
 ## How session-to-commit mapping works
 
 Mallard parses provider session archives locally to recover session metadata,

@@ -148,6 +148,7 @@ pub struct ScopePublishInput {
 #[derive(Clone, Debug)]
 pub struct PublishBundleRequest {
     pub identity: BundleIdentity,
+    pub git_history: Option<mallard_domain::GitHistorySnapshot>,
     pub published_by_origin: PortableOrigin,
     pub writable_scopes: BTreeMap<SyncScopeKey, ScopePublishInput>,
     /// The reviewed `(revision, content_sha256)` coordinates per writable
@@ -856,6 +857,9 @@ impl<S: ObjectStore> BundleEngine<S> {
         let bundle_id = manifest.bundle.bundle_id.clone();
         let manifest_bytes = serde_json::to_vec(&manifest)
             .map_err(|error| format!("serialize bundle manifest: {error}"))?;
+        if manifest_bytes.len() > 8 * 1024 * 1024 {
+            return Err("Bundle manifest exceeds 8 MiB. Reduce the Push selection.".into());
+        }
         let (name, record_bytes) =
             CommitRecord::build(&manifest, &manifest_bytes, parent, file_delta)?;
         let head = CommitRecord::parse(&bundle_id, &name, &record_bytes)?.head()?;
@@ -964,6 +968,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         }
 
         let manifest = BundleManifest {
+            git_history: None,
             schema_version: BUNDLE_SCHEMA,
             revision: 1,
             commit_id: random_named_id("commit")?,
@@ -1215,7 +1220,18 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .as_ref()
                 .map(|manifest| manifest.bundle != request.identity)
                 .unwrap_or(true);
-            if !any_change && !identity_changed {
+            if let Some(history) = &mut request.git_history {
+                history.map_sessions(
+                    scopes
+                        .values()
+                        .flat_map(|scope| scope.conversations.values()),
+                );
+            }
+            let git_history_changed = previous_manifest
+                .as_ref()
+                .map(|manifest| manifest.git_history != request.git_history)
+                .unwrap_or(request.git_history.is_some());
+            if !any_change && !identity_changed && !git_history_changed {
                 let (head, token) = current
                     .as_ref()
                     .expect("a semantic noop requires a current head");
@@ -1252,6 +1268,7 @@ impl<S: ObjectStore> BundleEngine<S> {
                 .map(|(head, _)| head.revision.saturating_add(1))
                 .unwrap_or(1);
             let manifest = BundleManifest {
+                git_history: request.git_history.clone(),
                 schema_version: BUNDLE_SCHEMA,
                 revision,
                 commit_id: random_named_id("commit")?,
@@ -2460,6 +2477,7 @@ mod tests {
 
         engine.publish_with_progress(
             PublishBundleRequest {
+                git_history: None,
                 identity,
                 published_by_origin: PortableOrigin {
                     origin_host_token: domain::OriginHostToken::parse("0".repeat(64))?,
@@ -3686,6 +3704,7 @@ mod tests {
         store.reset();
         let error = engine
             .publish(PublishBundleRequest {
+                git_history: None,
                 identity: first.manifest.bundle.clone(),
                 published_by_origin: first.manifest.published_by_origin.clone(),
                 writable_scopes: BTreeMap::from([(
@@ -3926,6 +3945,7 @@ mod tests {
 
     fn retained_publication(snapshot: &BundleSnapshot, token: &HeadToken) -> PublishBundleRequest {
         PublishBundleRequest {
+            git_history: snapshot.manifest.git_history.clone(),
             identity: snapshot.manifest.bundle.clone(),
             published_by_origin: snapshot.manifest.published_by_origin.clone(),
             writable_scopes: snapshot
@@ -4161,6 +4181,7 @@ mod tests {
             .map(|scope| (scope.revision, scope.content_sha256.clone()))
             .unwrap_or_else(absent_scope_pin);
         PublishBundleRequest {
+            git_history: None,
             identity: snapshot.manifest.bundle.clone(),
             published_by_origin: snapshot.manifest.published_by_origin.clone(),
             writable_scopes: BTreeMap::from([(

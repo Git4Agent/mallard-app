@@ -83,11 +83,9 @@ function ManagedCloudBody({
     && !existing.mismatch_acknowledged;
   const contributor = !!existing && chosen?.role === null;
   const verb = selection?.kind === "new" ? "Create and connect" : "Connect";
-  const footerNote = selection?.kind === "new"
-    ? "Creates the private repository shown above. The name is checked again when you connect."
-    : contributor
-      ? "Anyone signed in can push. Choose Pull when you are ready to review stored changes."
-      : "Choose Pull when you are ready to review stored changes.";
+  const footerNote = contributor
+    ? "Anyone signed in can push. Review changes with Pull."
+    : "Review changes with Pull.";
   const connect = () => {
     if (!selection) return;
     if (selection.kind === "new") {
@@ -104,21 +102,20 @@ function ManagedCloudBody({
     <>
       <header className="sync-modal-header">
         <div>
-          <span className="sync-eyebrow">Repo identity</span>
           <h1 id="sync-bundle-connection-title">
             {sibling
-              ? "Connect to this repository's repo"
+              ? "Connect to existing repository"
               : missing
-                ? "Choose the remote repo"
-                : `Connect ${projectName} to ${storage.name}`}
+                ? "Choose a repository"
+                : `Connect ${projectName}`}
           </h1>
-          <p>
-            {sibling
-              ? `${storage.name} already has this repository under another address. Connecting adopts it, so pushes and pulls from every machine converge; the current empty registration is abandoned.`
-              : missing
-                ? `${projectName} has a local-only identity. Paste a repository address or an invitation code, or choose one of your repositories.`
-                : "Paste a repository address or an invitation code, or choose one of your repositories. Connecting keeps the project folder in its current location."}
-          </p>
+          {(sibling || missing) && (
+            <p>
+              {sibling
+                ? "Use the existing repository for Push and Pull. Stop using the empty registration."
+                : `${projectName} is local only. Choose a cloud repository.`}
+            </p>
+          )}
         </div>
         <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} aria-label="Close repo chooser">
           <Icon name="x" size={17} />
@@ -128,7 +125,7 @@ function ManagedCloudBody({
       <div className="sync-modal-body repo-connect">
         <div className="sync-bundle-context">
           <Icon name={storageIconName(storage.provider, storage.icon)} size={17} />
-          <span><strong>{storage.name} · {account.login}</strong><small>{account.host}</small></span>
+          <span><strong>Mallard Cloud · {account.login}</strong><small>{account.host}</small></span>
         </div>
         <RepositoryAddressPicker
           storage={storage}
@@ -146,7 +143,7 @@ function ManagedCloudBody({
 
       <footer className="sync-modal-footer">
         {offerNew
-          ? <span>{selection ? footerNote : "Paste an address or a code, or select a row"}</span>
+          ? existing && <span>{footerNote}</span>
           : (
             <button type="button" className="btn btn-ghost" onClick={onKeepCurrent} disabled={busy}>
               {sibling ? "Not now" : "Review separate Push"}

@@ -8,6 +8,12 @@ import PushResourceWorkspace, {
   recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
+
+test("a reviewed Git-only change can be pushed without a session selection", () => {
+  assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, gitHistoryChanged: true }), null);
+  assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, gitHistoryChanged: false }), "Nothing is selected");
+  assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, gitHistoryChanged: true, listState: "loading" }), "Loading sessions…");
+});
 import { recipeWithSelection } from "../../src/components/project-sync/model";
 import {
   ProjectChatHistoryContent,
@@ -171,7 +177,6 @@ function renderReviewList(selectable: Set<string>) {
       activity={activity}
       loading={false}
       loadingMore={false}
-      actionError={null}
       loadError={null}
       onRetryLoad={() => undefined}
       actionBusyResourceId={null}
@@ -316,7 +321,7 @@ test("the default selection is a strict time prefix: the walk ends at the first 
 
 function renderWorkspace(selected: Set<string>, inventory: ProjectContentInventory | null = null) {
   return renderToStaticMarkup(
-    <PushResourceWorkspace
+    <PushResourceWorkspace onSessionActionError={() => undefined}
       credentialRedactionEnabled={true}
       resources={[conversationResource(fits), conversationResource(waits), ...(inventory ? [projectFile] : [])]}
       selected={selected}
@@ -341,7 +346,7 @@ test("an empty Push review offers a way back without enabling publication", () =
   });
   const render = (overrides: Partial<ComponentProps<typeof PushResourceWorkspace>> = {}) => (
     renderToStaticMarkup(
-      <PushResourceWorkspace
+      <PushResourceWorkspace onSessionActionError={() => undefined}
         credentialRedactionEnabled={true}
         project={{ ...project, is_git_repository: true }}
         resources={[conversationResource(synced)]}
@@ -370,6 +375,19 @@ test("an empty Push review offers a way back without enabling publication", () =
   assert.equal(footer(ready).match(/<button\b/g)?.length, 1, "the exit is the empty footer's only button");
   assert.doesNotMatch(ready, /sync-pull-apply-button/, "no dead Push in an empty review");
   assert.doesNotMatch(ready, /sync-review-budget-(glance|gauge)/, "no meter for a push that cannot happen");
+  const gitOnly = render({
+    gitHistoryChanged: true,
+    gitHistory: {
+      branch: "main", head_sha: "a".repeat(40), truncated: false,
+      commits: [{ sha: "a".repeat(40), committed_at: 100, subject: "Save artwork", session_refs: [] }],
+      uncommitted_session_refs: [], outside_history_session_refs: [],
+    },
+  });
+  // The history travels on the session rail; the review grows no band for it.
+  assert.doesNotMatch(gitOnly, /<details|Git history: main|Save artwork/);
+  assert.equal(exitButton(gitOnly), undefined, "a Git-only change keeps the Push action");
+  assert.match(footer(gitOnly), /class="btn btn-primary sync-pull-apply-button"/);
+  assert.doesNotMatch(footer(gitOnly), /disabled=""/, "the reviewed Git-only Push is enabled");
   assert.match(exitButton(render({ busy: true })) ?? "", /disabled=""/);
   for (const listState of ["loading", "failed"] as const) {
     assert.equal(exitButton(render({ listState })), undefined, "unsettled reads are not empty reviews");
@@ -588,7 +606,7 @@ test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () =
 test("Push review shows the selected redaction mode and the Off warning", () => {
   for (const enabled of [true, false]) {
     const html = renderToStaticMarkup(
-      <PushResourceWorkspace credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+      <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
     );
     assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
     assert.equal(html.includes("Exported content can include API keys, tokens, and passwords."), !enabled);
@@ -599,7 +617,7 @@ test("Push review shows the selected redaction mode and the Off warning", () => 
 test("current sessions remain selectable for a reviewed mode change", () => {
   const changed = entry("mode-change", { state: "synced", storage_present: true, status_detail: "Export settings changed", push_decision: { action: "publish", selectable: true } });
   const html = renderToStaticMarkup(
-    <PushResourceWorkspace credentialRedactionEnabled={false} resources={[conversationResource(changed)]}
+    <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled={false} resources={[conversationResource(changed)]}
       selected={new Set([changed.resource_id])} projectDefaults={new Set([changed.resource_id])}
       busy={false} threadComparison={comparison({ entries: [changed] })}
       onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,

@@ -7,6 +7,11 @@
 
 mod pull_review;
 pub use pull_review::PullReview;
+mod git_history;
+pub use git_history::{
+    closest_commit_index, GitHistoryCommit, GitHistoryOutgoing, GitHistorySnapshot,
+    MAX_GIT_HISTORY_COMMITS, MAX_GIT_SUBJECT_BYTES,
+};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -4898,6 +4903,8 @@ pub struct BundleManifest {
     pub updated_at: u64,
     pub bundle: BundleIdentity,
     pub published_by_origin: PortableOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_history: Option<GitHistorySnapshot>,
     #[serde(default)]
     pub scopes: BTreeMap<SyncScopeKey, BundleScope>,
 }
@@ -5002,6 +5009,16 @@ impl BundleManifest {
                 }
             }
         }
+        if let Some(history) = &self.git_history {
+            if self.bundle.repository_fingerprint.is_none() {
+                return Err("Only Git projects can publish Git history".into());
+            }
+            let conversations = self
+                .all_conversations()
+                .map(|(_, _, thread)| thread.resource_id.clone())
+                .collect();
+            history.validate(&conversations)?;
+        }
         Ok(())
     }
 
@@ -5010,14 +5027,15 @@ impl BundleManifest {
     /// nothing in them. Abandoning such a bundle loses nothing, which is what
     /// lets a split-brain twin connect away from it.
     pub fn is_registration_only(&self) -> bool {
-        self.scopes.values().all(|scope| {
-            scope.recipe.entries.is_empty()
-                && scope.conversations.is_empty()
-                && scope.resources.is_empty()
-                && scope.files.is_empty()
-                && scope.directories.is_empty()
-                && scope.tombstones.is_empty()
-        })
+        self.git_history.is_none()
+            && self.scopes.values().all(|scope| {
+                scope.recipe.entries.is_empty()
+                    && scope.conversations.is_empty()
+                    && scope.resources.is_empty()
+                    && scope.files.is_empty()
+                    && scope.directories.is_empty()
+                    && scope.tombstones.is_empty()
+            })
     }
 
     /// Registry validation for every scope. A scope whose contracts this

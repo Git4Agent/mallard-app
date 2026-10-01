@@ -1,7 +1,8 @@
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, time::Duration};
 
-use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 
 pub(super) fn delete(home: &Path, thread_id: &str) -> Result<(), String> {
     super::actions::validate_thread_uuid(thread_id)?;
@@ -10,53 +11,14 @@ pub(super) fn delete(home: &Path, thread_id: &str) -> Result<(), String> {
 }
 
 fn delete_with_binary(executable: &Path, home: &Path, thread_id: &str) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| "Could not start Codex deletion runtime.")?;
-    runtime.block_on(async {
-        let mut child = tokio::process::Command::new(executable)
-            .args(["app-server", "--stdio"])
-            .env("CODEX_HOME", home)
-            .current_dir(home)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn().map_err(|_| "Could not start Codex for session deletion.")?;
-        let result = tokio::time::timeout(Duration::from_secs(20), async {
-            let mut input = child.stdin.take().ok_or("Codex input is unavailable.")?;
-            let output = child.stdout.take().ok_or("Codex output is unavailable.")?;
-            let mut lines = BufReader::new(output.take(1024 * 1024)).lines();
-            for (id, request) in [
-                (1, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"mallard","version":env!("CARGO_PKG_VERSION")}}})),
-                (2, json!({"id":2,"method":"thread/delete","params":{"threadId":thread_id}})),
-            ] {
-                input.write_all(format!("{request}\n").as_bytes()).await
-                    .map_err(|_| "Could not send Codex deletion request.")?;
-                loop {
-                    let line = lines.next_line().await.map_err(|_| "Could not read Codex deletion response.")?
-                        .ok_or("Codex stopped before confirming deletion.")?;
-                    let response: Value = serde_json::from_str(&line)
-                        .map_err(|_| "Codex returned an invalid deletion response.")?;
-                    if response["id"].as_u64() != Some(id) { continue; }
-                    if let Some(error) = response.get("error") {
-                        return Err(format!("Codex session deletion failed (code {}).", error["code"]));
-                    }
-                    if response.get("result").is_none() {
-                        return Err("Codex did not confirm the request.".into());
-                    }
-                    break;
-                }
-                if id == 1 {
-                    input.write_all(b"{\"method\":\"initialized\"}\n").await
-                        .map_err(|_| "Could not initialize Codex deletion.")?;
-                }
-            }
-            Ok(())
-        }).await.unwrap_or_else(|_| Err("Codex deletion timed out; some files may already be deleted.".into()));
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        result
-    })
+    super::app_server::request(
+        executable,
+        home,
+        "thread/delete",
+        json!({"threadId": thread_id}),
+        Duration::from_secs(20),
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]

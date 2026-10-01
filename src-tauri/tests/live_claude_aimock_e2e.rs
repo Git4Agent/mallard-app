@@ -1303,6 +1303,100 @@ fn stderr_synopsis(bytes: &[u8]) -> String {
     )
 }
 
+fn claude_error_category(output: &Value) -> &'static str {
+    if output.get("is_error").and_then(Value::as_bool) != Some(true)
+        && output.get("type").and_then(Value::as_str) != Some("error")
+        && !output
+            .get("subtype")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("error"))
+    {
+        return "none";
+    }
+    let mut messages = Vec::new();
+    for value in [output.get("result"), output.get("error")] {
+        if let Some(message) = value.and_then(Value::as_str) {
+            messages.push(message);
+        }
+    }
+    if let Some(message) = output.pointer("/error/message").and_then(Value::as_str) {
+        messages.push(message);
+    }
+    if let Some(errors) = output.get("errors").and_then(Value::as_array) {
+        messages.extend(errors.iter().filter_map(Value::as_str));
+    }
+    let text = messages.join("\n").to_ascii_lowercase();
+    for (category, terms) in [
+        (
+            "billing_or_quota",
+            &[
+                "billing", "balance", "credit", "quota", "payment", "余额", "额度", "欠费", "配额",
+            ][..],
+        ),
+        (
+            "model_routing",
+            &[
+                "routing",
+                "no available channel",
+                "no available route",
+                "no channel",
+                "model_not_found",
+                "model not found",
+                "model unavailable",
+                "无可用渠道",
+                "无可用通道",
+            ][..],
+        ),
+        (
+            "authentication",
+            &[
+                "unauthorized",
+                "authentication",
+                "invalid_api_key",
+                "invalid api key",
+                "401",
+                "403",
+            ][..],
+        ),
+        (
+            "rate_limit",
+            &["rate limit", "rate_limit", "too many requests", "429"][..],
+        ),
+        (
+            "network",
+            &[
+                "connection",
+                "network",
+                "fetch failed",
+                "socket",
+                "timeout",
+                "timed out",
+            ][..],
+        ),
+        (
+            "provider_server",
+            &[
+                "500",
+                "502",
+                "503",
+                "504",
+                "529",
+                "overloaded",
+                "internal server error",
+            ][..],
+        ),
+        (
+            "invalid_request",
+            &["400", "404", "422", "invalid_request", "invalid request"][..],
+        ),
+    ] {
+        if terms.iter().any(|term| text.contains(term)) {
+            return category;
+        }
+    }
+    "unknown_provider_error"
+}
+
 fn stdout_synopsis(bytes: &[u8]) -> String {
     let parsed = serde_json::from_slice::<Value>(bytes).ok();
     let result = parsed
@@ -1322,24 +1416,32 @@ fn stdout_synopsis(bytes: &[u8]) -> String {
         })
     };
     format!(
-        "bytes={},json={},type={},subtype={},is_error={},api={},connection={},rate_limit={},invalid={},s400={},s401={},s404={},s422={},s500={},s503={},s529={},fixture={},tool={},fetch={},socket={},eof={},abort={},http={},overloaded={},internal={},unexpected={},stream={},closed={},terminate={},retry={},unable={},code={},index={}",
+        "bytes={},json={},type={},subtype={},is_error={},category={},api={},connection={},rate_limit={},invalid={},s400={},s401={},s404={},s422={},s500={},s503={},s529={},fixture={},tool={},fetch={},socket={},eof={},abort={},http={},overloaded={},internal={},unexpected={},stream={},closed={},terminate={},retry={},unable={},code={},index={}",
         bytes.len(),
         parsed.is_some(),
         parsed
             .as_ref()
             .and_then(|value| value.get("type"))
             .and_then(Value::as_str)
+            .map(|value| match value { "result" | "error" => value, _ => "other" })
             .unwrap_or("-"),
         parsed
             .as_ref()
             .and_then(|value| value.get("subtype"))
             .and_then(Value::as_str)
+            .map(|value| match value {
+                "success" | "error_during_execution" | "error_max_turns"
+                | "error_max_budget_usd" | "error_during_initialization"
+                | "error_max_structured_output_retries" => value,
+                _ => "other",
+            })
             .unwrap_or("-"),
         parsed
             .as_ref()
             .and_then(|value| value.get("is_error"))
             .and_then(Value::as_bool)
             .map_or("-", |value| if value { "true" } else { "false" }),
+        parsed.as_ref().map_or("unparsed", claude_error_category),
         result.contains("api"),
         result.contains("connect"),
         result.contains("rate limit"),
@@ -1537,7 +1639,10 @@ fn run_claude(
     );
     let output: Value = serde_json::from_slice(&stdout)
         .unwrap_or_else(|_| panic!("Claude stdout was not one JSON result ({synopsis})"));
-    assert_eq!(output.get("is_error").and_then(Value::as_bool), Some(false));
+    assert!(
+        output.get("is_error").and_then(Value::as_bool) == Some(false),
+        "Claude returned an unsuccessful result ({stdout_synopsis}; {synopsis})"
+    );
     assert_eq!(
         output.get("session_id").and_then(Value::as_str),
         Some(session_id),
@@ -1747,12 +1852,12 @@ fn run_live_tuzi_claude(
     );
     let output: Value = serde_json::from_slice(&stdout)
         .unwrap_or_else(|_| panic!("paid Claude stdout was not one JSON result ({synopsis})"));
-    assert_eq!(output.get("type").and_then(Value::as_str), Some("result"));
-    assert_eq!(
-        output.get("subtype").and_then(Value::as_str),
-        Some("success")
+    assert!(
+        output.get("type").and_then(Value::as_str) == Some("result")
+            && output.get("subtype").and_then(Value::as_str) == Some("success")
+            && output.get("is_error").and_then(Value::as_bool) == Some(false),
+        "paid Claude returned an unsuccessful result ({stdout_synopsis}; {synopsis})"
     );
-    assert_eq!(output.get("is_error").and_then(Value::as_bool), Some(false));
     assert_eq!(output.get("num_turns").and_then(Value::as_u64), Some(1));
     assert_eq!(
         output.get("session_id").and_then(Value::as_str),
@@ -3861,6 +3966,73 @@ fn relocated_lineage_of(
         );
     }
     lineage_of(relocated.as_bytes())
+}
+
+#[test]
+fn claude_error_synopsis_classifies_provider_failures_without_messages() {
+    for (message, expected) in [
+        ("API Error: insufficient_quota", "billing_or_quota"),
+        (
+            "API Error: account balance is exhausted",
+            "billing_or_quota",
+        ),
+        ("API Error: 余额不足", "billing_or_quota"),
+        (
+            "API Error: no available channel for the requested model",
+            "model_routing",
+        ),
+        ("API Error: 无可用渠道", "model_routing"),
+        ("API Error: invalid_api_key (401)", "authentication"),
+        ("API Error: rate_limit_error (429)", "rate_limit"),
+        ("API Error: connection timeout", "network"),
+        ("API Error: overloaded (503)", "provider_server"),
+        ("API Error: invalid_request (400)", "invalid_request"),
+        ("API Error: unrecognised refusal", "unknown_provider_error"),
+    ] {
+        let output = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "result": format!("{message}; sk-private-fixture /private/fixture"),
+        });
+        let synopsis = stdout_synopsis(&serde_json::to_vec(&output).unwrap());
+        assert!(
+            synopsis.contains(&format!("category={expected},")),
+            "{synopsis}"
+        );
+        assert!(!synopsis.contains(message));
+        assert!(!synopsis.contains("sk-private-fixture"));
+        assert!(!synopsis.contains("/private/fixture"));
+    }
+    for output in [
+        serde_json::json!({"type":"error", "error":{"message":"quota exceeded"}}),
+        serde_json::json!({"type":"result", "subtype":"error_during_execution", "errors":["quota exceeded"]}),
+    ] {
+        assert_eq!(claude_error_category(&output), "billing_or_quota");
+    }
+    assert_eq!(
+        claude_error_category(
+            &serde_json::json!({"type":"result", "subtype":"success", "is_error":false, "result":"quota"})
+        ),
+        "none"
+    );
+}
+
+#[test]
+fn claude_error_synopsis_redacts_unrecognised_result_fields() {
+    let output = serde_json::json!({
+        "type":"sk-private-fixture",
+        "subtype":"/private/fixture",
+        "is_error":true,
+        "result":"API Error: unknown refusal",
+        "error":{"code":"sk-private-fixture"},
+    });
+    let synopsis = stdout_synopsis(&serde_json::to_vec(&output).unwrap());
+    assert!(synopsis.contains("type=other,subtype=other,"));
+    assert!(synopsis.contains("category=unknown_provider_error,"));
+    assert!(!synopsis.contains("sk-private-fixture"));
+    assert!(!synopsis.contains("/private/fixture"));
+    assert!(stdout_synopsis(b"not-json sk-private-fixture").contains("category=unparsed,"));
 }
 
 #[test]

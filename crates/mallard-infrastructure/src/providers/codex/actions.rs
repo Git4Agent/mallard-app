@@ -1,5 +1,8 @@
 //! Safe Codex session actions: desktop-app deep links and Terminal resume.
 
+use super::cli_version::{require_session_resume, ResumeCli};
+#[cfg(target_os = "macos")]
+use crate::codex_app::{find_installed_mac_app, InstalledMacApp};
 use crate::providers::launch::{launch_terminal, shell_quote, TerminalCommand};
 use crate::providers::traits::{
     SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
@@ -66,9 +69,11 @@ fn codex_app_deep_links(
     ])
 }
 
-fn codex_app_open_command(codex_home: &Path, deep_link: &str) -> String {
+#[cfg(target_os = "macos")]
+fn codex_app_open_command(bundle_path: &Path, codex_home: &Path, deep_link: &str) -> String {
     format!(
-        "'/usr/bin/open' -n -a '/Applications/ChatGPT.app' --env {} {}",
+        "'/usr/bin/open' -n -a {} --env {} {}",
+        shell_quote(&bundle_path.to_string_lossy()),
         shell_quote(&format!("CODEX_HOME={}", codex_home.to_string_lossy())),
         shell_quote(deep_link)
     )
@@ -89,6 +94,7 @@ pub fn codex_app_project_open_command(codex_home: &Path, project_root: &Path) ->
     if !codex_home.is_absolute() || !project_root.is_absolute() {
         return None;
     }
+    #[cfg(any(target_os = "macos", windows))]
     let deep_link = codex_project_deep_link(project_root);
     #[cfg(windows)]
     {
@@ -99,24 +105,33 @@ pub fn codex_app_project_open_command(codex_home: &Path, project_root: &Path) ->
             &[deep_link.as_str()],
         ))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        Some(codex_app_open_command(codex_home, &deep_link))
+        let app = find_installed_mac_app()?;
+        Some(codex_app_open_command(
+            &app.bundle_path,
+            codex_home,
+            &deep_link,
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        None
     }
 }
 
 #[cfg(target_os = "macos")]
-fn run_codex_app_deep_link(codex_home: &Path, deep_link: &str, target: &str) -> Result<(), String> {
+fn run_codex_app_deep_link(
+    app: &InstalledMacApp,
+    codex_home: &Path,
+    deep_link: &str,
+    target: &str,
+) -> Result<(), String> {
     let environment = format!("CODEX_HOME={}", codex_home.to_string_lossy());
     let output = Command::new("/usr/bin/open")
-        .args([
-            "-n",
-            "-a",
-            "/Applications/ChatGPT.app",
-            "--env",
-            &environment,
-            deep_link,
-        ])
+        .args(["-n", "-a"])
+        .arg(&app.bundle_path)
+        .args(["--env", &environment, deep_link])
         .output()
         .map_err(|error| format!("open the Codex desktop app {target}: {error}"))?;
     if !output.status.success() {
@@ -154,27 +169,23 @@ pub(crate) fn launch_codex_app(
     #[cfg(target_os = "macos")]
     {
         let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
-        let commands = deep_links
-            .each_ref()
-            .map(|deep_link| codex_app_open_command(codex_home, deep_link));
-
-        // Existing-thread deep links ignore a workspace path. Send a dedicated
-        // new-thread route first, then wait for that profile to persist the
-        // project selection before replacing the composer with the target
-        // thread.
-        let state_path = codex_home.join(".codex-global-state.json");
-        let initial_state = file_stamp(&state_path);
-        before_launch(&commands[0]);
-        run_codex_app_deep_link(codex_home, &deep_links[0], "project")?;
-        wait_for_file_change(&state_path, initial_state);
-
-        before_launch(&commands[1]);
-        run_codex_app_deep_link(codex_home, &deep_links[1], "thread")?;
-        Ok(())
+        let app = find_installed_mac_app().ok_or_else(|| {
+            "the official Codex desktop app is not installed or its bundle identity is invalid"
+                .to_string()
+        })?;
+        open_session_in_mac_app(
+            &app,
+            &deep_links,
+            codex_home,
+            before_launch,
+            run_codex_app_deep_link,
+        )
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler_executable};
+        use crate::providers::windows_app::{
+            display_launch, launch_app, scheme_handler_executable,
+        };
         let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
         let executable = scheme_handler_executable("codex")?;
         let env = [("CODEX_HOME", codex_home)];
@@ -183,11 +194,19 @@ pub(crate) fn launch_codex_app(
         // project, the thread link then replaces the composer.
         let state_path = codex_home.join(".codex-global-state.json");
         let initial_state = file_stamp(&state_path);
-        before_launch(&display_launch(&executable, &env, &[deep_links[0].as_str()]));
+        before_launch(&display_launch(
+            &executable,
+            &env,
+            &[deep_links[0].as_str()],
+        ));
         launch_app(&executable, &env, &[deep_links[0].as_str()])?;
         wait_for_file_change(&state_path, initial_state);
 
-        before_launch(&display_launch(&executable, &env, &[deep_links[1].as_str()]));
+        before_launch(&display_launch(
+            &executable,
+            &env,
+            &[deep_links[1].as_str()],
+        ));
         launch_app(&executable, &env, &[deep_links[1].as_str()])
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -197,51 +216,49 @@ pub(crate) fn launch_codex_app(
     }
 }
 
+/// The macOS half of Open in Codex once the app is found: refuse an app whose
+/// bundled CLI cannot resume the session, then route project and thread.
+/// `open` is the deep-link launcher, injected so the refusal is testable.
+#[cfg(target_os = "macos")]
+fn open_session_in_mac_app(
+    app: &InstalledMacApp,
+    deep_links: &[String; 2],
+    codex_home: &Path,
+    before_launch: &mut dyn FnMut(&str),
+    mut open: impl FnMut(&InstalledMacApp, &Path, &str, &str) -> Result<(), String>,
+) -> Result<(), String> {
+    require_session_resume(&app.bundled_cli(), ResumeCli::DesktopApp)?;
+    let commands = deep_links
+        .each_ref()
+        .map(|deep_link| codex_app_open_command(&app.bundle_path, codex_home, deep_link));
+
+    // Existing-thread deep links ignore a workspace path. Send a dedicated
+    // new-thread route first, then wait for that profile to persist the
+    // project selection before replacing the composer with the target
+    // thread.
+    let state_path = codex_home.join(".codex-global-state.json");
+    let initial_state = file_stamp(&state_path);
+    before_launch(&commands[0]);
+    open(app, codex_home, &deep_links[0], "project")?;
+    wait_for_file_change(&state_path, initial_state);
+
+    before_launch(&commands[1]);
+    open(app, codex_home, &deep_links[1], "thread")
+}
+
 #[cfg(not(any(target_os = "macos", windows)))]
 const CODEX_APP_UNAVAILABLE: &str =
     "Open in Codex is supported only on macOS and Windows; use Open in Terminal";
 
-/// Windows resolves the CLI from PATH (`codex.exe`, or the npm `codex.cmd`
-/// launcher unwrapped to its packaged native binary) without a shell.
-#[cfg(windows)]
+/// Use the same CLI selection as provider maintenance and plugin commands.
+#[cfg(any(target_os = "macos", windows))]
 fn resolve_codex_cli() -> Result<PathBuf, String> {
     crate::codex_binary::find_binary("codex")
-        .map_err(|_| "Codex CLI is not on PATH; install it or use Open in Codex".to_string())
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
 fn resolve_codex_cli() -> Result<PathBuf, String> {
     Err("Open in Terminal is supported only on macOS and Windows".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_codex_cli() -> Result<PathBuf, String> {
-    // GUI applications inherit launchd's sparse PATH. A login shell sees the
-    // same Homebrew/npm/user configuration as the Terminal window we open.
-    let output = Command::new("/bin/zsh")
-        .args(["-lc", "command -v codex"])
-        .output()
-        .map_err(|error| format!("check for Codex CLI in the login shell: {error}"))?;
-    if !output.status.success() {
-        return Err(
-            "Codex CLI is unavailable in the login shell; install it or use Open in Codex"
-                .to_string(),
-        );
-    }
-    let value = String::from_utf8_lossy(&output.stdout);
-    let path = PathBuf::from(value.lines().next().unwrap_or_default().trim());
-    if !path.is_absolute() {
-        return Err("Codex CLI did not resolve to an absolute executable path".to_string());
-    }
-    let resolved = std::fs::canonicalize(&path)
-        .map_err(|error| format!("resolve Codex CLI '{}': {error}", path.display()))?;
-    if !resolved.is_file() {
-        return Err(format!(
-            "Codex CLI '{}' is not an executable file",
-            resolved.display()
-        ));
-    }
-    Ok(resolved)
 }
 
 fn terminal_resume_command(
@@ -269,9 +286,31 @@ pub(crate) fn launch_terminal_resume(
     before_launch: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     let codex_cli = resolve_codex_cli()?;
-    let command = terminal_resume_command(&codex_cli, thread_id, project_root, codex_home)?;
+    resume_in_terminal(
+        &codex_cli,
+        thread_id,
+        project_root,
+        codex_home,
+        before_launch,
+        launch_terminal,
+    )
+}
+
+/// Refuse a CLI that cannot resume the session, then hand Terminal the
+/// command. `launch` is the Terminal launcher, injected so the refusal is
+/// testable.
+fn resume_in_terminal(
+    codex_cli: &Path,
+    thread_id: &str,
+    project_root: &Path,
+    codex_home: &Path,
+    before_launch: &mut dyn FnMut(&str),
+    launch: impl FnOnce(&TerminalCommand) -> Result<(), String>,
+) -> Result<(), String> {
+    let command = terminal_resume_command(codex_cli, thread_id, project_root, codex_home)?;
+    require_session_resume(codex_cli, ResumeCli::Terminal)?;
     before_launch(&command.display_line());
-    launch_terminal(&command)
+    launch(&command)
 }
 
 /// Open the Codex desktop app reading one profile home, with no thread and
@@ -284,18 +323,23 @@ pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), 
     }
     #[cfg(target_os = "macos")]
     {
-        let deep_link = format!(
-            "codex://threads/new?path={}",
-            percent_encode_uri_component(&workspace.to_string_lossy())
-        );
-        run_codex_app_deep_link(codex_home, &deep_link, "workspace")
+        let app = find_installed_mac_app().ok_or_else(|| {
+            "the official Codex desktop app is not installed or its bundle identity is invalid"
+                .to_string()
+        })?;
+        let deep_link = codex_project_deep_link(workspace);
+        run_codex_app_deep_link(&app, codex_home, &deep_link, "workspace")
     }
     #[cfg(windows)]
     {
         use crate::providers::windows_app::{launch_app, scheme_handler_executable};
         let deep_link = codex_project_deep_link(workspace);
         let executable = scheme_handler_executable("codex")?;
-        launch_app(&executable, &[("CODEX_HOME", codex_home)], &[deep_link.as_str()])
+        launch_app(
+            &executable,
+            &[("CODEX_HOME", codex_home)],
+            &[deep_link.as_str()],
+        )
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -377,6 +421,21 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn app_command_uses_the_resolved_bundle_and_quotes_the_profile() {
+        assert_eq!(
+            codex_app_open_command(
+                Path::new("/tmp/owner's/Applications/ChatGPT.app"),
+                Path::new("/tmp/my codex's home"),
+                "codex://threads/0193b6c1-5352-7b12-9c6e-000000000001",
+            ),
+            "'/usr/bin/open' -n -a '/tmp/owner'\\''s/Applications/ChatGPT.app' --env \
+             'CODEX_HOME=/tmp/my codex'\\''s home' \
+             'codex://threads/0193b6c1-5352-7b12-9c6e-000000000001'"
+        );
+    }
+
+    #[test]
     fn deep_links_and_commands_are_argument_safe() {
         let links = codex_app_deep_links(
             "0193b6c1-5352-7b12-9c6e-000000000001",
@@ -437,5 +496,148 @@ mod tests {
         assert_eq!(actions[0].kind, SessionActionKind::OpenInApp);
         assert_eq!(actions[1].kind, SessionActionKind::OpenInTerminal);
         assert!(actions.iter().all(|action| action.enabled));
+    }
+
+    #[cfg(unix)]
+    use super::super::cli_version::tests::fake_cli;
+
+    #[cfg(unix)]
+    const THREAD: &str = "0193b6c1-5352-7b12-9c6e-000000000001";
+
+    /// A provider home whose every entry is listed, so a test can prove a
+    /// refused launch left it exactly as it was.
+    #[cfg(unix)]
+    fn home_entries(home: &Path) -> Vec<std::path::PathBuf> {
+        let mut entries = walkdir::WalkDir::new(home)
+            .into_iter()
+            .map(|entry| entry.unwrap().into_path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn terminal_resume_refuses_an_old_or_unreadable_cli_before_launching() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        let before = home_entries(&home);
+        let cli = temp.path().join("bin/codex");
+        for (body, expected) in [
+            (
+                "mkdir -p \"$CODEX_HOME/tmp/arg0\"; echo 'codex-cli 0.144.0'",
+                "Cannot open this session with Codex CLI 0.144.0.",
+            ),
+            (
+                "echo 'codex-cli 0.145.0-alpha.3'",
+                "with Codex CLI 0.145.0-alpha.3.",
+            ),
+            ("exit 1", "Cannot determine the Codex CLI version."),
+        ] {
+            fake_cli(&cli, body);
+            let mut announced = Vec::new();
+            let error = resume_in_terminal(
+                &cli,
+                THREAD,
+                Path::new("/Users/dev/project"),
+                &home,
+                &mut |line: &str| announced.push(line.to_string()),
+                |_| panic!("a refused resume reached the Terminal launcher"),
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{body}: {error}");
+            assert!(announced.is_empty(), "{body}: before_launch ran");
+            assert_eq!(home_entries(&home), before, "{body}: the home changed");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn terminal_resume_launches_a_supported_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        let cli = temp.path().join("bin/codex");
+        for version in ["0.145.0", "0.147.0", "0.156.0"] {
+            fake_cli(&cli, &format!("echo 'codex-cli {version}'"));
+            let mut announced = Vec::new();
+            let mut launched = Vec::new();
+            resume_in_terminal(
+                &cli,
+                THREAD,
+                Path::new("/Users/dev/project"),
+                Path::new("/Users/dev/.codex"),
+                &mut |line: &str| announced.push(line.to_string()),
+                |command| {
+                    launched.push(command.display_line());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(announced.len(), 1, "{version}");
+            assert_eq!(launched, announced, "{version}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn open_in_codex_checks_the_cli_bundled_in_the_app() {
+        use crate::codex_app::{InstalledMacApp, OFFICIAL_MAC_APP};
+        let temp = tempfile::tempdir().unwrap();
+        let app = InstalledMacApp {
+            specification: OFFICIAL_MAC_APP,
+            bundle_path: temp.path().join("ChatGPT.app"),
+        };
+        let home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = home_entries(&home);
+        let links = codex_app_deep_links(THREAD, Path::new("/Users/dev/project"), &home).unwrap();
+
+        // A newer CLI on PATH does not matter: the app runs its own copy.
+        for (body, expected) in [
+            (
+                Some("echo 'codex-cli 0.144.0'"),
+                "its bundled Codex CLI is 0.144.0.",
+            ),
+            (None, "Cannot determine the Codex CLI version bundled with"),
+        ] {
+            match body {
+                Some(body) => fake_cli(&app.bundled_cli(), body),
+                None => {
+                    let _ = std::fs::remove_file(app.bundled_cli());
+                }
+            }
+            let mut announced = Vec::new();
+            let error = open_session_in_mac_app(
+                &app,
+                &links,
+                &home,
+                &mut |line: &str| announced.push(line.to_string()),
+                |_, _, _, _| panic!("a refused session reached `open`"),
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(announced.is_empty());
+            assert_eq!(home_entries(&home), before);
+        }
+
+        fake_cli(&app.bundled_cli(), "echo 'codex-cli 0.159.2'");
+        let mut announced = Vec::new();
+        let mut opened = Vec::new();
+        open_session_in_mac_app(
+            &app,
+            &links,
+            &home,
+            &mut |line: &str| announced.push(line.to_string()),
+            |_, codex_home, deep_link, target| {
+                // The app persists the project selection; stand in for it so
+                // the route does not wait out its timeout.
+                std::fs::write(codex_home.join(".codex-global-state.json"), target).unwrap();
+                opened.push(deep_link.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(opened, links);
+        assert_eq!(announced.len(), 2);
     }
 }

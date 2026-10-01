@@ -8,6 +8,7 @@ import type {
   SessionTimelineEvent,
 } from "../../src/types";
 import { SessionDetailMarkdown } from "../../src/components/project-sync/session-detail/SessionDetailEvent";
+import { mermaidSourceProblem, readMermaidResult } from "../../src/components/mermaid/mermaidModel";
 import SessionDetailHeader from "../../src/components/project-sync/session-detail/SessionDetailHeader";
 import SessionDetailTimeline from "../../src/components/project-sync/session-detail/SessionDetailTimeline";
 import SessionDetailToolbar from "../../src/components/project-sync/session-detail/SessionDetailToolbar";
@@ -36,7 +37,68 @@ import {
   toolCommandLabel,
 } from "../../src/components/project-sync/session-detail/sessionDetailModel";
 
+import { diagram as suppliedFlowchart, fenced } from "../../poc/mermaid-flowcharts/fixtures";
+
 const exact = (value: number) => ({ value, quality: "exact" as const });
+
+test("session Markdown recognizes closed Mermaid fences in quotes and lists", () => {
+  for (const text of [
+    "```mermaid\nflowchart TD\nA-->B\n```",
+    "~~~~mermaid\ngraph LR\nA-->B\n~~~~~",
+    "> ```mermaid\n> graph LR\n> A-->B\n>```",
+    "- ```mermaid\n  flowchart TD\n  A-->B\n  ```",
+    "> - ```mermaid\n>   flowchart LR\n>   A-->B\n>   ```",
+    "```mermaid\r\nflowchart TD\r\nA-->B\r\n```",
+  ]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={text} />);
+    assert.match(html, /class="mermaid-flowchart"/);
+    assert.match(html, /data-status="loading"/);
+    assert.match(html, /<summary>Source<\/summary>/);
+    assert.doesNotMatch(html, /incomplete|<svg|<iframe|<script/);
+  }
+});
+
+test("session Markdown retains source controls for incomplete and unsupported diagrams", () => {
+  for (const text of [
+    "```mermaid\nflowchart TD\nA-->B",
+    "````mermaid\nflowchart TD\nA-->B\n```",
+    "```mermaid\nflowchart TD\nA-->B\n    ```",
+    "  ```mermaid\nflowchart TD\nA-->B\n    ```",
+    "> ```mermaid\n> flowchart TD\n> A-->B",
+    "- ```mermaid\n  flowchart TD\n  A-->B",
+  ]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={text} />);
+    assert.match(html, /data-status="error"/);
+    assert.match(html, /fence is incomplete/);
+    assert.match(html, /<summary>Source<\/summary>/);
+  }
+  const unsupported = renderToStaticMarkup(<SessionDetailMarkdown text={"```mermaid\nsequenceDiagram\nA->>B: message\n```"} />);
+  assert.match(unsupported, /Only Mermaid flowcharts are supported/);
+  const ordinary = renderToStaticMarkup(<SessionDetailMarkdown text={"```javascript\nconsole.log('code');\n```"} />);
+  assert.match(ordinary, /language-javascript/);
+  assert.doesNotMatch(ordinary, /mermaid-flowchart/);
+});
+
+test("the supplied six-node flowchart has a complete fence; css stays code", () => {
+  const html = renderToStaticMarkup(<SessionDetailMarkdown text={fenced(suppliedFlowchart)} />);
+  assert.match(html, /data-status="loading"/);
+  assert.doesNotMatch(html, /incomplete/);
+  const css = renderToStaticMarkup(<SessionDetailMarkdown text={fenced(suppliedFlowchart, "css")} />);
+  assert.match(css, /language-css/);
+  assert.doesNotMatch(css, /mermaid-flowchart/);
+});
+
+test("Mermaid source bounds use UTF-8 bytes and parser replies must keep the isolation settings", () => {
+  assert.equal(mermaidSourceProblem("flowchart TD\nA-->B"), null);
+  assert.equal(mermaidSourceProblem("graph LR\nA-->B"), null);
+  assert.match(mermaidSourceProblem("flowchart TD\n%% " + "🦆".repeat(8192))!, /32 KiB/);
+  const result = { svg: '<svg xmlns="http://www.w3.org/2000/svg"/>', strict: true, htmlLabels: false, tauriPresent: false };
+  assert.deepEqual(readMermaidResult(result), { svg: result.svg });
+  for (const unsafe of [null, {}, { ...result, tauriPresent: true }, { ...result, strict: false }, { ...result, htmlLabels: true }, { ...result, svg: "x".repeat(1024 * 1024 + 1) }]) {
+    assert.equal(readMermaidResult(unsafe).svg, undefined);
+    assert.ok(readMermaidResult(unsafe).error);
+  }
+});
 
 // 2026-08-06T07:06:40Z and onward, so the day divider and the card clock have
 // a real day boundary to work with.

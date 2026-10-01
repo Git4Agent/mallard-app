@@ -1,10 +1,15 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import { makeMermaidPre } from "../../mermaid/MermaidFlowchart";
+import { remarkMermaidFences } from "../../mermaid/remarkMermaidFences";
 import remarkGfm from "remark-gfm";
 import type { SessionAgentPreview, SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
 import { githubCommitUrl, openExternalUrl } from "../externalLink";
+import ClaudeSvgWidget from "../../widgets/ClaudeSvgWidget";
+import { isClaudeWidgetTool } from "../../widgets/claudeWidget";
+import { writeClipboardText } from "../../sync-review/clipboard";
 import SessionDetailToolCall, {
   PayloadSection,
   type SessionToolDetailState,
@@ -105,7 +110,7 @@ function ProjectMarkdownImage({
 
 /* A fresh array literal every render is a changed prop to ReactMarkdown, so
    this lives at module scope. */
-const REMARK_PLUGINS = [remarkGfm];
+const REMARK_PLUGINS = [remarkGfm, remarkMermaidFences];
 
 /* Parsing a markdown body is the most expensive thing this page does, and the
    page re-renders whenever any tool call expands or a tool detail resolves —
@@ -125,6 +130,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   projectRoot?: string;
 }) {
   const components = useMemo<Components>(() => ({
+        pre: makeMermaidPre(writeClipboardText),
         img: ({ src, alt }) => {
           const url = typeof src === "string" ? src : "";
           const label = alt ?? "";
@@ -607,7 +613,9 @@ export default function SessionDetailEvent({
           <div className="session-detail-event-flags"><EventQuality event={event} /></div>
         )}
 
-        {event.kind === "tool_call" ? (
+        {event.kind === "tool_call" && provider === "claude" && event.tool && isClaudeWidgetTool(event.tool) ? (
+          <ClaudeSvgWidget tool={event.tool} onCopy={writeClipboardText} />
+        ) : event.kind === "tool_call" ? (
           <SessionDetailToolCall
             event={event}
             expanded={expandedToolIds.has(event.event_id)}

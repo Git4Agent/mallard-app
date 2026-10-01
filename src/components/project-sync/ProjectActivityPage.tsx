@@ -69,12 +69,19 @@ interface SessionSearchProps {
 
 interface PageProps extends SessionSearchProps {
   comparisonErrorHandled?: boolean;
+  /**
+   * Reports the latest row-action failure (open, resume, delete), or null to
+   * clear it. The shell draws it under the path bar: this list scrolls as one
+   * page, so a box at its top was off screen from any row further down.
+   */
+  onActionError: (message: string | null) => void;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   refreshEpoch: number;
   activeStorageId?: string | null;
   activeStorageName?: string | null;
   selectionMode?: "push" | "pull";
+  pushGitHistory?: PushGitHistory;
   selectedResourceIds?: ReadonlySet<string>;
   selectableResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
@@ -114,9 +121,8 @@ interface ContentProps extends SessionSearchProps {
   activity: ProjectActivity | null;
   loading: boolean;
   loadingMore: boolean;
-  actionError: string | null;
-  /** Page-level load failure — kept apart from actionError so a failed row
-      action is never mistaken for an empty page and vice versa. */
+  /** Page-level load failure. A failed row action is never one of these: the
+      page reports it to the shell, under the path bar. */
   loadError: string | null;
   onRetryLoad: () => void;
   actionBusyResourceId: string | null;
@@ -138,6 +144,7 @@ interface ContentProps extends SessionSearchProps {
   comparisonError?: string | null;
   activeStorageName?: string | null;
   selectionMode?: "push" | "pull";
+  pushGitHistory?: PushGitHistory;
   selectedResourceIds?: ReadonlySet<string>;
   selectableResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
@@ -146,6 +153,17 @@ interface ContentProps extends SessionSearchProps {
   onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
   reviewScaffold?: ReviewScaffold;
+}
+
+/** A Push review's Git history against the history storage holds. */
+export interface PushGitHistory {
+  /** Commits storage lacks. The rail marks them ↑ and keeps them even when
+   *  no session sits under them. Empty when storage shares no commit. */
+  outgoing: ReadonlySet<string>;
+  /** Storage's head left this branch, so the marks take the warning tone. */
+  rewritten: boolean;
+  /** The Push sends Git history even with no session change. */
+  changed: boolean;
 }
 
 /** A review list is loading until both of its reads have settled. */
@@ -1657,11 +1675,11 @@ function providerNoticeSeverity(state: ProviderActivityState): NoticeSeverity {
 }
 
 export function ProjectChatHistoryContent({
-  project, binding, activity, loading, loadingMore, actionError, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
+  project, binding, activity, loading, loadingMore, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
   onSessionAction, onDeleteSession, onOpenSessionDetail, comparison = null,
   storageLoading = false, comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
-  selectionMode, selectedResourceIds = new Set(), selectableResourceIds,
+  selectionMode, pushGitHistory, selectedResourceIds = new Set(), selectableResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull,
   onChooseAgentProfile,
   continuityActionBusy = false,
@@ -1861,13 +1879,20 @@ export function ProjectChatHistoryContent({
         || leftSession.started_at - rightSession.started_at
         || left.resource_id.localeCompare(right.resource_id);
     });
+  const outgoingCommits = pushGitHistory?.outgoing;
+  const outgoingTitle = pushGitHistory?.rewritten
+    ? `New since the last Push to ${activeStorageName ?? "storage"}. History was rewritten: storage's latest commit is no longer on this branch.`
+    : `New since the last Push to ${activeStorageName ?? "storage"}`;
   const commits = useMemo(() => {
     const candidates = activity?.git?.commits ?? [];
     if (!selectionMode && !searching) return candidates;
+    /* A commit Push adds stays on the review rail with no session under it;
+       a search narrows to sessions, so it drops the bare ones. */
     return candidates.filter((commit) => (
       commit.session_refs.some((reference) => sessionsByResource.has(reference.resource_id))
+      || (!searching && outgoingCommits?.has(commit.sha) === true)
     ));
-  }, [activity?.git?.commits, selectionMode, searching, sessionsByResource]);
+  }, [activity?.git?.commits, selectionMode, searching, sessionsByResource, outgoingCommits]);
   // A review holds the whole span at once, so an empty one is truly empty.
   const selectionReviewEmpty = !searching && selectionMode != null
     && comparison != null
@@ -1886,11 +1911,10 @@ export function ProjectChatHistoryContent({
   };
 
   /* One notice zone takes the loudest severity and lists the remaining page,
-   * provider, refresh, continuity, and comparison messages in source order. */
+   * provider, refresh, continuity, and comparison messages in source order.
+   * A failed row action is not one of them: this zone scrolls away with the
+   * list, so the shell draws that failure under the path bar instead. */
   const notices: NoticeItem[] = [];
-  if (actionError) {
-    notices.push({ key: "action-failed", severity: "danger", message: actionError });
-  }
   /* A refresh that failed on top of an already-loaded page: the stale page
      stays useful, so the message owns the retry instead of replacing the list.
      A first load that failed has no list to keep and stays a whole-page state
@@ -1966,16 +1990,15 @@ export function ProjectChatHistoryContent({
       message: `comparison failed: ${message}`,
     });
   }
-  /* Only two of those six are events. `actionError` is set in the catch of a
-   * row action the user just ran, and a `loadError` sitting over a loaded page
-   * can only have come from the refresh or the load-more the user asked for;
-   * both are things that HAPPENED and did not finish, so either one re-times
-   * the whole box to assertive. Everything else here is standing content: the
+  /* Only one of those five is an event. A `loadError` sitting over a loaded
+   * page can only have come from the refresh or the load-more the user asked
+   * for; it HAPPENED and did not finish, so it re-times the whole box to
+   * assertive. Everything else here is standing content: the
    * continuity state, the provider access states and both comparison failures
    * all arrive with the data this view is first rendered from, and WCAG 2.2
    * SC 4.1.3 says content already present when the view renders is not a
    * status message. It gets a named region instead. */
-  const noticeTiming: NoticeTiming = actionError || refreshFailed
+  const noticeTiming: NoticeTiming = refreshFailed
     ? { timing: "blocking" }
     : { timing: "standing", label: "Notes about this project activity" };
 
@@ -2001,7 +2024,8 @@ export function ProjectChatHistoryContent({
         {/* A review's field lands with its rows: until then the caption
             stands in its slot, and a list that failed has nothing to search. */}
         {hasBoundProvider && !(storageLoading && searchableIds.size === 0)
-          && !(selectionMode && (activity === null || comparison === null)) && (
+          && !(selectionMode && (activity === null || comparison === null))
+          && !(selectionMode === "push" && selectionReviewEmpty) && (
           <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
             label={selectionMode ? "Search sessions" : "Search loaded sessions"}
             matches={searchResults.resourceIds.size} total={searchableIds.size} hiddenSelected={hiddenSelected} />
@@ -2085,19 +2109,23 @@ export function ProjectChatHistoryContent({
             {searching && searchResults.resourceIds.size === 0 && (
               <div className="sync-history-state">{selectionMode ? "No matching sessions." : "No matching loaded sessions."}</div>
             )}
-            {selectionReviewEmpty && (
+            {selectionReviewEmpty && (selectionMode === "push" ? (
+              /* One line: when the Git history still travels, its commits sit
+                 on the rail below, so the title only has to say the sessions
+                 are not part of it. */
+              <div className="sync-pull-empty compact">
+                <Icon name="check-circle" size={16} />
+                <span><strong>{pushGitHistory?.changed ? "No session changes" : "Nothing to push"}</strong></span>
+              </div>
+            ) : (
               <div className="sync-pull-empty">
                 <Icon name="check-circle" size={16} />
                 <span>
-                  <strong>{selectionMode === "push" ? "Nothing to push" : "No session changes"}</strong>
-                  <small>
-                    {selectionMode === "push"
-                      ? "No local session changes are ready to push."
-                      : "Sessions already match this storage."}
-                  </small>
+                  <strong>No session changes</strong>
+                  <small>Sessions already match this storage.</small>
                 </span>
               </div>
-            )}
+            ))}
             {!selectionReviewEmpty && activity.git && storageOnlyReferences.length > 0 && (
               /* Above the timeline, not on it: these rows have no commit and no
                  local file, so the group draws the timeline's frame treatment
@@ -2122,7 +2150,9 @@ export function ProjectChatHistoryContent({
                 )}
               </section>
             )}
-            {!selectionReviewEmpty && (activity.git ? (showGitTimeline ? (
+            {/* An empty Push review still draws the rail when it carries
+                commits: they are what the Push sends. */}
+            {(!selectionReviewEmpty || commits.length > 0) && (activity.git ? (showGitTimeline ? (
               <div className={`sync-history-timeline${branchUnmappedReferences.length > 0 ? " has-branch-unmapped" : ""}`}>
                 {branchUnmappedReferences.length > 0 && (
                   <section className={`sync-history-branch-unmapped${branchUnmappedCollapsed ? " collapsed" : ""}`} aria-labelledby="branch-unmapped-heading">
@@ -2197,6 +2227,13 @@ export function ProjectChatHistoryContent({
                                 an off-app target, so it exists only when the remote
                                 does — an unlinked sha is bare mono, not a chip. */}
                             <span className="sync-history-commit-meta">
+                              {outgoingCommits?.has(commit.sha) && (
+                                <span
+                                  className={`sync-history-branch-state sync-history-outgoing${pushGitHistory?.rewritten ? " history-only" : ""}`}
+                                  title={outgoingTitle}
+                                  aria-label={outgoingTitle}
+                                >↑</span>
+                              )}
                               {commitUrl ? (
                                 <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
                                   title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${displaySha} on GitHub`}
@@ -2352,6 +2389,7 @@ export default function ProjectActivityPage({
   activeStorageId = null,
   activeStorageName = null,
   selectionMode,
+  pushGitHistory,
   selectedResourceIds,
   selectableResourceIds,
   selectionDisabled = false,
@@ -2365,6 +2403,7 @@ export default function ProjectActivityPage({
   reviewScaffold,
   onHeaderModelChange,
   onOpenSessionDetail,
+  onActionError,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
 }: PageProps) {
   /* Keep loaded windows as a stack so Show less is a pop instead of a refetch. */
@@ -2383,9 +2422,23 @@ export default function ProjectActivityPage({
   const [branch, setBranch] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const actionInFlightRef = useRef(false);
+  /* The shell outlives this list, so only the page still showing the project
+     an action ran for may report on it. Leaving the page or switching project
+     clears the message, and a failure that lands after that is dropped
+     instead of surfacing over whatever screen came next. */
+  const shownProjectRef = useRef<string | null>(project.local_project_id);
+  useEffect(() => {
+    shownProjectRef.current = project.local_project_id;
+    return () => {
+      shownProjectRef.current = null;
+      onActionError(null);
+    };
+  }, [project.local_project_id, onActionError]);
+  const reportActionError = (message: string | null) => {
+    if (shownProjectRef.current === project.local_project_id) onActionError(message);
+  };
   const [actionBusyResourceId, setActionBusyResourceId] = useState<string | null>(null);
   const [actionBusyActionId, setActionBusyActionId] = useState<string | null>(null);
   const requestRef = useRef(0);
@@ -2397,7 +2450,7 @@ export default function ProjectActivityPage({
     const requestId = ++requestRef.current;
     if (beforeTime) setLoadingMore(true); else setLoading(true);
     setStorageLoading(activeStorageId !== null);
-    setActionError(null);
+    reportActionError(null);
     setLoadError(null);
     try {
       const next = await projectSyncApi.getProjectActivity(
@@ -2439,7 +2492,7 @@ export default function ProjectActivityPage({
     setStorageLoading(true);
     setLoadError(null);
     setComparisonError(null);
-    setActionError(null);
+    reportActionError(null);
     let receivedActivity = false;
     try {
       await projectSyncApi.refreshProjectActivity({
@@ -2495,7 +2548,7 @@ export default function ProjectActivityPage({
     // the next one, and a switch made mid-flight stranded the spinners on
     // because their owning request had already been superseded.
     setPages([]); setBranch(null); setComparison(null); setManagedCloudStatus(null);
-    setLoadError(null); setComparisonError(null); setActionError(null);
+    setLoadError(null); setComparisonError(null); reportActionError(null);
     setLoading(false); setComparisonLoading(false); setLoadingMore(false); setStorageLoading(false);
     void loadWorkspace(null);
     return () => { requestRef.current += 1; comparisonRequestRef.current += 1; };
@@ -2633,7 +2686,7 @@ export default function ProjectActivityPage({
         { title: "Delete local session?", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
       );
       if (!approved) return;
-      setActionError(null);
+      reportActionError(null);
       setActionBusyResourceId(session.resource_id);
       setActionBusyActionId("delete");
       let failure: string | null = null;
@@ -2645,8 +2698,8 @@ export default function ProjectActivityPage({
         ].filter(Boolean).join(" ") || null;
       } catch (reason) { failure = errorMessage(reason); }
       await loadWorkspace(branch);
-      setActionError(failure);
-    } catch (reason) { setActionError(errorMessage(reason)); }
+      reportActionError(failure);
+    } catch (reason) { reportActionError(errorMessage(reason)); }
     finally {
       setActionBusyResourceId(null);
       setActionBusyActionId(null);
@@ -2657,17 +2710,17 @@ export default function ProjectActivityPage({
   const runSessionAction = async (session: ProjectSessionSummary, action: SessionActionDescriptor) => {
     if (!action.enabled || actionInFlightRef.current) return;
     actionInFlightRef.current = true;
-    setActionError(null);
+    reportActionError(null);
     setActionBusyResourceId(session.resource_id);
     setActionBusyActionId(action.action_id);
     try {
       await projectSyncApi.executeProjectSessionAction(project.local_project_id, session.resource_id, action.action_id);
-    } catch (reason) { setActionError(errorMessage(reason)); }
+    } catch (reason) { reportActionError(errorMessage(reason)); }
     finally {
       setActionBusyResourceId(null);
       setActionBusyActionId(null);
       actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} actionError={actionError} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} />;
 }

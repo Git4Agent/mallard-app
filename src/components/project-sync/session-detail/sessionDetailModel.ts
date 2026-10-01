@@ -92,7 +92,7 @@ function sessionCountEmpty(count: SessionCount): boolean {
 }
 
 /**
- * Show prompts, replies, and supported checkpoints by default.
+ * Show prompts, replies (including Claude widgets), and supported checkpoints by default.
  * Steps, tool calls, and agents require selection.
  */
 export function createDefaultSessionDetailFilters(

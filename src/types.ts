@@ -1170,7 +1170,28 @@ export interface PushReviewContext {
   thread_comparison_error: string | null;
   project_files: ProjectContentInventory | null;
   project_files_error: string | null;
+  git_history: GitHistorySnapshot | null;
+  git_history_review_token: string | null;
+  git_history_changed: boolean;
+  /** Null when storage has no history, or none this branch shares. */
+  git_history_outgoing: GitHistoryOutgoing | null;
   prepared_at: number;
+}
+
+export interface GitHistorySnapshot {
+  branch: string;
+  head_sha: string | null;
+  commits: { sha: string; committed_at: number; subject: string; session_refs: string[] }[];
+  uncommitted_session_refs: string[];
+  outside_history_session_refs: string[];
+  truncated: boolean;
+}
+
+/** What a Push adds to storage's history: the leading `new_commits` of
+ *  `git_history.commits`, and whether storage's head left this branch. */
+export interface GitHistoryOutgoing {
+  new_commits: number;
+  rewritten: boolean;
 }
 
 /** Payload of the `project-sync-fetch-progress` Tauri event. */

@@ -29,6 +29,8 @@ petname = { version = "3.2", default-features = false, features = ["default-word
 chrono = "0.4"
 zeroize = "1"
 url = "2"
+# Codex CLI version order for session resume (already in the tree transitively).
+semver = "1"
 socket2 = "0.6"
 httparse = "1.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "multipart"] }

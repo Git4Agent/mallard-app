@@ -957,6 +957,7 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
 
 fn scoped_manifest(scopes: BTreeMap<SyncScopeKey, BundleScope>) -> BundleManifest {
     BundleManifest {
+        git_history: None,
         schema_version: BUNDLE_SCHEMA,
         revision: 1,
         commit_id: "commit-1".to_string(),

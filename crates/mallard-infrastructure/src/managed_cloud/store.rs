@@ -1640,6 +1640,7 @@ mod stub_tests {
 
     fn manifest(identity: BundleIdentity, revision: u64, updated_at: u64) -> BundleManifest {
         BundleManifest {
+            git_history: None,
             schema_version: BUNDLE_SCHEMA,
             revision,
             commit_id: mallard_domain::generated_named_id("commit").unwrap(),

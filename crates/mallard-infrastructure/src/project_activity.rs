@@ -3,8 +3,8 @@
 //! (bound or not), Git mapping over normalized evidence, and safe session
 //! actions dispatched through the registered adapters.
 //!
-//! Local-only concerns stay local: titles, summaries, and Git relations are
-//! recomputed on demand and never enter portable bundles. Viewing a remote
+//! Activity is recomputed on demand. Push also captures bounded Git metadata
+//! for the portable manifest. Viewing a remote
 //! session never advances any scope base and never writes to a provider
 //! home.
 
@@ -34,7 +34,7 @@ use std::time::UNIX_EPOCH;
 
 const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 7;
 const DAY_SECS: u64 = 24 * 60 * 60;
-const MAX_GIT_COMMITS: usize = 10_000;
+const MAX_GIT_COMMITS: usize = mallard_domain::MAX_GIT_HISTORY_COMMITS;
 const ACTIVE_WINDOW_SECS: u64 = 300;
 const ACTIVITY_CACHE_SCHEMA: u32 = 1;
 const MAX_ACTIVITY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
@@ -1783,22 +1783,31 @@ fn load_first_parent_commits(
     branch: &str,
     limit: usize,
 ) -> Result<Vec<GitCommitSummary>, String> {
-    let count = limit.min(MAX_GIT_COMMITS + 1).to_string();
     let branch_ref = if branch == "HEAD" {
-        "HEAD".to_string()
+        branch.to_string()
     } else {
         format!("refs/heads/{branch}")
     };
+    read_first_parent_commits(project_root, &branch_ref, limit, "--format=%H%x1f%ct%x1f%s")
+}
+
+fn read_first_parent_commits(
+    project_root: &Path,
+    reference: &str,
+    limit: usize,
+    format: &str,
+) -> Result<Vec<GitCommitSummary>, String> {
+    let count = limit.min(MAX_GIT_COMMITS + 1).to_string();
     let output = git_output(
         project_root,
         &[
             "log",
             "--first-parent",
             "--date-order",
-            "--format=%H%x1f%ct%x1f%s",
+            format,
             "-n",
             &count,
-            &branch_ref,
+            reference,
             "--",
         ],
     )?;
@@ -1827,6 +1836,114 @@ fn load_first_parent_commits(
     Ok(commits)
 }
 
+/// Capture the checked-out first-parent rail, including an unborn or detached
+/// HEAD. Read by the pinned object id so a concurrent commit cannot mix rails.
+pub fn capture_git_history(
+    project_root: &Path,
+) -> Result<mallard_domain::GitHistorySnapshot, String> {
+    let before = git_history_tip(project_root)?;
+    let loaded = match &before.1 {
+        Some(sha) => read_first_parent_commits(
+            project_root,
+            sha,
+            MAX_GIT_COMMITS + 1,
+            "--format=%H%x1f%ct%x1f%<(512,trunc)%s",
+        )?,
+        None => Vec::new(),
+    };
+    if before != git_history_tip(project_root)? {
+        return Err("Git history changed during capture. Review Push again.".into());
+    }
+    let shallow = git_output(project_root, &["rev-parse", "--is-shallow-repository"])?;
+    if !shallow.status.success() {
+        return Err(git_error("check history completeness", &shallow));
+    }
+    let truncated =
+        loaded.len() > MAX_GIT_COMMITS || String::from_utf8_lossy(&shallow.stdout).trim() == "true";
+    let commits = loaded
+        .into_iter()
+        .take(MAX_GIT_COMMITS)
+        .map(|commit| {
+            let mut subject: String = commit
+                .subject
+                .trim_end()
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            let mut end = subject.len().min(mallard_domain::MAX_GIT_SUBJECT_BYTES);
+            while !subject.is_char_boundary(end) {
+                end -= 1;
+            }
+            subject.truncate(end);
+            mallard_domain::GitHistoryCommit {
+                sha: commit.sha,
+                committed_at: commit.committed_at,
+                subject,
+                session_refs: Vec::new(),
+            }
+        })
+        .collect();
+    let history = mallard_domain::GitHistorySnapshot {
+        branch: before.0,
+        head_sha: before.1,
+        commits,
+        truncated,
+        uncommitted_session_refs: Vec::new(),
+        outside_history_session_refs: Vec::new(),
+    };
+    history.validate(&BTreeSet::new())?;
+    Ok(history)
+}
+
+fn git_history_tip(project_root: &Path) -> Result<(String, Option<String>), String> {
+    let inside = git_output(project_root, &["rev-parse", "--is-inside-work-tree"])?;
+    if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
+        return Err("The Git project is unavailable. Restore its repository before Push.".into());
+    }
+    let symbolic = git_output(project_root, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    let branch = if symbolic.status.success() {
+        String::from_utf8_lossy(&symbolic.stdout).trim().to_string()
+    } else {
+        "HEAD".to_string()
+    };
+    let head = git_output(project_root, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let head_sha = if head.status.success() {
+        let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        if !is_valid_git_object_id(&sha) {
+            return Err("Git HEAD is invalid".into());
+        }
+        Some(sha.to_ascii_lowercase())
+    } else {
+        // A missing symbolic branch is unborn. Other resolution errors fail.
+        let reference = format!("refs/heads/{branch}");
+        let exists = git_output(
+            project_root,
+            &["show-ref", "--verify", "--quiet", &reference],
+        )?;
+        if branch == "HEAD" || exists.status.code() != Some(1) {
+            return Err(git_error("read Git HEAD", &head));
+        }
+        None
+    };
+    Ok((branch, head_sha))
+}
+
+/// The review token covers only portable metadata, without a local path.
+pub fn git_history_review_token(
+    history: &mallard_domain::GitHistorySnapshot,
+) -> Result<String, String> {
+    let bytes =
+        serde_json::to_vec(history).map_err(|error| format!("serialize Git history: {error}"))?;
+    Ok(mallard_domain::sha256_hex(&bytes))
+}
+
+pub fn verify_git_history_review(project_root: &Path, token: &str) -> Result<(), String> {
+    if git_history_review_token(&capture_git_history(project_root)?)? != token {
+        return Err("Git history changed after review. Review Push again.".into());
+    }
+    Ok(())
+}
+
 /// Map every project session onto exactly one commit of the selected
 /// first-parent rail: the closest commit at or after its last human input, or
 /// after its end when the transcript recorded no input. A session with no such
@@ -1839,17 +1956,12 @@ fn map_sessions_to_commits(
 ) -> MappingResult {
     let mut mapped_sessions = BTreeSet::new();
     let mut unmapped = Vec::new();
+    let times: Vec<_> = commits.iter().map(|commit| commit.committed_at).collect();
     for session in sessions {
         let placed_at = session.last_prompt_at.unwrap_or(session.ended_at);
         // Oldest first, so two commits in the same second resolve to the
         // earlier one.
-        let closest = commits
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, commit)| commit.committed_at >= placed_at)
-            .min_by_key(|(_, commit)| commit.committed_at)
-            .map(|(index, _)| index);
+        let closest = mallard_domain::closest_commit_index(&times, placed_at);
         let Some(index) = closest else {
             let reason = if commits.is_empty() {
                 "The selected branch has no first-parent commits"
@@ -2017,6 +2129,109 @@ fn git_error(action: &str, output: &Output) -> String {
 #[cfg(test)]
 mod activity_only_tests {
     use super::*;
+    #[test]
+    fn captured_git_history_handles_unborn_detached_and_changed_heads() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_DATE", "2026-07-22T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2026-07-22T00:00:00Z")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        let unborn = capture_git_history(root).unwrap();
+        assert_eq!(unborn.branch, "main");
+        assert!(unborn.head_sha.is_none());
+        assert!(unborn.commits.is_empty());
+        run(&["config", "user.name", "Mallard Test"]);
+        run(&["config", "user.email", "mallard@example.test"]);
+        run(&["commit", "--allow-empty", "-m", "Initial"]);
+        let initial = capture_git_history(root).unwrap();
+        let token = git_history_review_token(&initial).unwrap();
+        verify_git_history_review(root, &token).unwrap();
+        run(&["switch", "-c", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "Side branch"]);
+        run(&["switch", "main"]);
+        run(&["merge", "--no-ff", "feature", "-m", "Merge feature"]);
+        let merged = capture_git_history(root).unwrap();
+        assert_eq!(
+            merged
+                .commits
+                .iter()
+                .map(|commit| commit.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["Merge feature", "Initial"]
+        );
+        assert!(verify_git_history_review(root, &token).is_err());
+        run(&["checkout", "--detach", initial.head_sha.as_ref().unwrap()]);
+        let detached = capture_git_history(root).unwrap();
+        assert_eq!(detached.branch, "HEAD");
+        assert_eq!(detached.head_sha, initial.head_sha);
+        fs::remove_dir_all(root.join(".git")).unwrap();
+        assert!(capture_git_history(root).is_err());
+    }
+
+    #[test]
+    fn captured_git_history_bounds_subjects_and_marks_shallow_checkouts() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let run = |root: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&source, &["init", "-b", "abcdef"]);
+        run(&source, &["config", "user.name", "Mallard Test"]);
+        run(&source, &["config", "user.email", "mallard@example.test"]);
+        run(&source, &["commit", "--allow-empty", "-m", "Initial"]);
+        let subject = "é🐥".repeat(600);
+        run(&source, &["commit", "--allow-empty", "-m", &subject]);
+        let complete = capture_git_history(&source).unwrap();
+        assert_eq!(complete.branch, "abcdef");
+        assert!(!complete.truncated);
+        assert_eq!(complete.commits.len(), 2);
+        assert!(!complete.commits[0].subject.is_empty());
+        assert!(complete.commits[0].subject.len() <= mallard_domain::MAX_GIT_SUBJECT_BYTES);
+        let shallow = temp.path().join("shallow");
+        run(
+            temp.path(),
+            &[
+                "clone",
+                "--depth",
+                "1",
+                &format!("file://{}", source.display()),
+                shallow.to_str().unwrap(),
+            ],
+        );
+        let captured = capture_git_history(&shallow).unwrap();
+        assert!(captured.truncated);
+        assert_eq!(captured.commits.len(), 1);
+        assert_eq!(captured.head_sha, complete.head_sha);
+    }
+
     use crate::providers::{
         MaterializationTargetRequest, PlannedProviderTarget, ProviderDescriptor,
         SessionActionOutcome, SessionAnalysis, SessionEventDetail, SessionFileMetadata,

@@ -1,12 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { mermaidRenderer } from "./scripts/mermaidRendererPlugin";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [react()],
+  plugins: [react(), mermaidRenderer(new URL("./src/components/mermaid/renderer.js", import.meta.url))],
 
   // The only consumer is the Tauri webview, so the browser baseline is the one
   // Tauri 2 guarantees — WKWebView on macOS 10.15+, WebView2 on Windows,

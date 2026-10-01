@@ -158,6 +158,9 @@ interface Props {
   fetchProgress?: BundleFetchProgress | null;
   onSelectStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onOpenSessionDetail: (projectId: string, request: OpenSessionDetailRequest) => void;
+  /** A failed session action in the Activity list, or null to clear it;
+      the shell draws it under the path bar. */
+  onSessionActionError: (message: string | null) => void;
   onCloseSessionDetail: () => void;
   onLinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
@@ -517,6 +520,7 @@ export default function ProjectLinksWorkspace({
   fetchProgress,
   onSelectStorage,
   onOpenSessionDetail,
+  onSessionActionError,
   onCloseSessionDetail,
   onLinkStorage,
   onUnlinkStorage,
@@ -3131,6 +3135,7 @@ export default function ProjectLinksWorkspace({
                 onChooseAgentProfile={() => {
                   void onConfigureBinding(activeProject.local_project_id);
                 }}
+                onActionError={onSessionActionError}
                 onOpenSessionDetail={(request, trigger) => (
                   openSessionDetail(activeProject.local_project_id, request, trigger)
                 )}

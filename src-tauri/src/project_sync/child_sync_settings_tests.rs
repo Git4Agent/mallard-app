@@ -624,6 +624,7 @@ fn replay_child_wire_to_dropbox(
     engine
         .publish_with_progress(
             PublishBundleRequest {
+                git_history: None,
                 identity: source.manifest.bundle.clone(),
                 published_by_origin: source.manifest.published_by_origin.clone(),
                 writable_scopes: scopes,

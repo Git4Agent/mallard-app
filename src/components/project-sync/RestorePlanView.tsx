@@ -38,6 +38,10 @@ import { formatBytes } from "../../format";
 
 interface Props {
   projectName: string;
+  /** A failed session action in the review's session list, or null to clear it;
+      the shell draws it under the path bar. */
+  onSessionActionError: (message: string | null) => void;
+
   project?: LocalProjectSummary;
   storageName?: string | null;
   plan: PullReview;
@@ -221,6 +225,7 @@ function ItemList({
 
 export default function RestorePlanView({
   projectName,
+  onSessionActionError,
   project,
   storageName = "storage",
   plan,
@@ -558,6 +563,7 @@ export default function RestorePlanView({
                   selectableResourceIds={conversationIds}
                   selectionDisabled={busy}
                   onToggleResource={toggle}
+                  onActionError={onSessionActionError}
                   onDropSelection={(resourceIds) => setSelected((current) => {
                     // Show less took these out of view. A tick you can no
                     // longer see is one you cannot check before it applies.

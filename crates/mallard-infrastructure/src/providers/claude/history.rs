@@ -1619,8 +1619,25 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
     (Some(preview), true)
 }
 
+/// A widget is visible output of the assistant. Replies include it without
+/// selecting general tool traffic; the stored event remains a tool call.
+pub(crate) fn is_reply_widget(
+    entry: &SessionTimelineIndexEntry,
+    query: &SessionTimelineQuery,
+) -> bool {
+    entry.kind == SessionTimelineEventKind::ToolCall
+        && entry
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.native_name == "mcp__visualize__show_widget")
+        && query
+            .included_event_kinds
+            .contains(&SessionTimelineEventKind::Response)
+}
+
 fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuery) -> bool {
-    if !query.included_event_kinds.contains(&entry.kind) {
+    let reply_widget = is_reply_widget(entry, query);
+    if !query.included_event_kinds.contains(&entry.kind) && !reply_widget {
         return false;
     }
     if let Some(turn_id) = &query.turn_id {
@@ -1629,7 +1646,7 @@ fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuer
         }
     }
     // Categories partition tool calls; an agent row answers to its own kind.
-    if entry.kind == SessionTimelineEventKind::AgentCall {
+    if entry.kind == SessionTimelineEventKind::AgentCall || reply_widget {
         return true;
     }
     if let Some(tool) = &entry.tool {

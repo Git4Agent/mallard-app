@@ -1279,6 +1279,7 @@ pub async fn push_bundle(
     recipe: BundleRecipe,
     subagent_selections: std::collections::BTreeMap<ResourceId, mallard_domain::SubagentSelection>,
     project_content_review_token: Option<String>,
+    git_history_review_token: Option<String>,
     project_content_removal_ids: Option<Vec<ResourceId>>,
     acknowledged_warning_digests: Option<Vec<String>>,
 ) -> Result<ProjectOperationResult, String> {
@@ -1335,6 +1336,7 @@ pub async fn push_bundle(
                 subagent_selections,
                 recipe,
                 project_content_review_token,
+                git_history_review_token,
                 project_content_removal_ids: project_content_removal_ids.unwrap_or_default(),
                 acknowledged_warning_digests: acknowledged_warning_digests.unwrap_or_default(),
             },

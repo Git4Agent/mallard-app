@@ -5,10 +5,14 @@
 //! only exact, validated application bundles, requests a graceful quit, and
 //! relaunches that same bundle after the process has stopped.
 
+#[cfg(target_os = "macos")]
+use crate::codex_app::{find_installed_mac_app, InstalledMacApp};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,7 +25,6 @@ const APP_OUTPUT_LIMIT: usize = 4 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum CodexAppKind {
     Codex,
-    CodexPlusPlus,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,38 +49,6 @@ pub struct CodexAppRestartResult {
     pub message: String,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct SupportedMacApp {
-    kind: CodexAppKind,
-    app_name: &'static str,
-    bundle_name: &'static str,
-    bundle_id: &'static str,
-    executable_name: &'static str,
-}
-
-#[derive(Clone, Debug)]
-struct InstalledMacApp {
-    specification: SupportedMacApp,
-    bundle_path: PathBuf,
-}
-
-const SUPPORTED_MAC_APPS: [SupportedMacApp; 2] = [
-    SupportedMacApp {
-        kind: CodexAppKind::Codex,
-        app_name: "Codex App",
-        bundle_name: "Codex.app",
-        bundle_id: "com.openai.codex",
-        executable_name: "Codex",
-    },
-    SupportedMacApp {
-        kind: CodexAppKind::CodexPlusPlus,
-        app_name: "Codex++",
-        bundle_name: "Codex++.app",
-        bundle_id: "com.bigpizzav3.codexplusplus",
-        executable_name: "CodexPlusPlus",
-    },
-];
-
 /// Offer a refresh for the app that will show the synced threads. The
 /// restart is home-aware: the default `~/.codex` profile relaunches through
 /// LaunchServices, while any other profile relaunches the validated bundle
@@ -97,40 +68,30 @@ pub fn refresh_offer(
                 )
             })
             .unwrap_or_default();
-        let mut manual_offer = None;
-        for specification in SUPPORTED_MAC_APPS {
-            let Some(app) = find_installed_mac_app(specification) else {
-                continue;
-            };
-            match mac_app_is_running(&app) {
-                Ok(true) => {
-                    return Some(CodexAppRefreshOffer {
-                        operation_id,
-                        app_kind: specification.kind,
-                        app_name: specification.app_name.to_string(),
-                        state: CodexAppRefreshState::RestartAvailable,
-                        message: format!(
-                            "{} may need a restart to refresh its conversation list.{}",
-                            specification.app_name, profile_note
-                        ),
-                    });
-                }
-                Err(_) if manual_offer.is_none() => {
-                    manual_offer = Some(CodexAppRefreshOffer {
-                        operation_id: operation_id.clone(),
-                        app_kind: specification.kind,
-                        app_name: specification.app_name.to_string(),
-                        state: CodexAppRefreshState::ManualRestart,
-                        message: format!(
-                            "Restart {} manually if the synced conversation is not visible.",
-                            specification.app_name
-                        ),
-                    });
-                }
-                Ok(false) | Err(_) => {}
-            }
+        let app = find_installed_mac_app()?;
+        match mac_app_is_running(&app) {
+            Ok(true) => Some(CodexAppRefreshOffer {
+                operation_id,
+                app_kind: CodexAppKind::Codex,
+                app_name: app.specification.app_name.to_string(),
+                state: CodexAppRefreshState::RestartAvailable,
+                message: format!(
+                    "{} may need a restart to refresh its conversation list.{}",
+                    app.specification.app_name, profile_note
+                ),
+            }),
+            Ok(false) => None,
+            Err(_) => Some(CodexAppRefreshOffer {
+                operation_id,
+                app_kind: CodexAppKind::Codex,
+                app_name: app.specification.app_name.to_string(),
+                state: CodexAppRefreshState::ManualRestart,
+                message: format!(
+                    "Restart {} manually if the synced conversation is not visible.",
+                    app.specification.app_name
+                ),
+            }),
         }
-        manual_offer
     }
     #[cfg(all(not(test), windows))]
     {
@@ -181,11 +142,8 @@ pub fn restart_after_pull(
 ) -> Result<CodexAppRestartResult, String> {
     #[cfg(target_os = "macos")]
     {
-        let specification = SUPPORTED_MAC_APPS
-            .into_iter()
-            .find(|candidate| candidate.kind == app_kind)
-            .ok_or_else(|| "Codex App restart adapter is unavailable".to_string())?;
-        let app = find_installed_mac_app(specification).ok_or_else(|| {
+        let CodexAppKind::Codex = app_kind;
+        let app = find_installed_mac_app().ok_or_else(|| {
             "the reviewed Codex App installation is no longer available".to_string()
         })?;
         if !mac_app_is_running(&app)? {
@@ -193,7 +151,7 @@ pub fn restart_after_pull(
                 success: true,
                 message: format!(
                     "{} is already closed; its conversation list will refresh next time it opens.",
-                    specification.app_name
+                    app.specification.app_name
                 ),
             });
         }
@@ -207,14 +165,12 @@ pub fn restart_after_pull(
         }
         Err(format!(
             "{} did not finish a graceful quit; Mallard did not force it closed",
-            specification.app_name
+            app.specification.app_name
         ))
     }
     #[cfg(windows)]
     {
-        if app_kind != CodexAppKind::Codex {
-            return Err("Codex App restart adapter is unavailable".to_string());
-        }
+        let CodexAppKind::Codex = app_kind;
         let app = find_installed_windows_app().ok_or_else(|| {
             "the reviewed Codex App installation is no longer available".to_string()
         })?;
@@ -430,16 +386,19 @@ fn relaunch_mac_app(
 /// pinned-environment launch path is chosen — the safe direction.
 #[cfg(any(target_os = "macos", windows))]
 fn is_default_codex_home(codex_home: &Path) -> bool {
-    let Some(default_home) = crate::persistence::user_home_dir().map(|home| home.join(".codex")) else {
+    let Some(default_home) = crate::persistence::user_home_dir().map(|home| home.join(".codex"))
+    else {
         return false;
     };
+    codex_home_matches_default(codex_home, &default_home)
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn codex_home_matches_default(codex_home: &Path, default_home: &Path) -> bool {
     if codex_home == default_home {
         return true;
     }
-    match (
-        fs::canonicalize(codex_home),
-        fs::canonicalize(&default_home),
-    ) {
+    match (fs::canonicalize(codex_home), fs::canonicalize(default_home)) {
         (Ok(profile), Ok(default_home)) => profile == default_home,
         _ => false,
     }
@@ -448,68 +407,6 @@ fn is_default_codex_home(codex_home: &Path) -> bool {
 #[cfg(target_os = "macos")]
 fn shell_quote_path(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
-}
-
-#[cfg(target_os = "macos")]
-fn find_installed_mac_app(specification: SupportedMacApp) -> Option<InstalledMacApp> {
-    mac_app_candidate_paths(specification.bundle_name)
-        .into_iter()
-        .find_map(|path| validate_mac_app_bundle(&path, specification))
-}
-
-#[cfg(target_os = "macos")]
-fn mac_app_candidate_paths(bundle_name: &str) -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/Applications").join(bundle_name)];
-    if let Some(home) = crate::persistence::user_home_dir() {
-        paths.push(home.join("Applications").join(bundle_name));
-    }
-    paths
-}
-
-#[cfg(target_os = "macos")]
-fn validate_mac_app_bundle(path: &Path, specification: SupportedMacApp) -> Option<InstalledMacApp> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return None;
-    }
-    let canonical = fs::canonicalize(path).ok()?;
-    if canonical != path {
-        return None;
-    }
-    let plist_path = canonical.join("Contents/Info.plist");
-    let plist_metadata = fs::symlink_metadata(&plist_path).ok()?;
-    if !plist_metadata.is_file() || plist_metadata.file_type().is_symlink() {
-        return None;
-    }
-    let dictionary = plist::Value::from_file(&plist_path)
-        .ok()?
-        .into_dictionary()?;
-    if dictionary
-        .get("CFBundleIdentifier")
-        .and_then(plist::Value::as_string)
-        != Some(specification.bundle_id)
-        || dictionary
-            .get("CFBundleExecutable")
-            .and_then(plist::Value::as_string)
-            != Some(specification.executable_name)
-    {
-        return None;
-    }
-    let executable = canonical
-        .join("Contents/MacOS")
-        .join(specification.executable_name);
-    let executable_metadata = fs::symlink_metadata(&executable).ok()?;
-    if !executable_metadata.is_file() || executable_metadata.file_type().is_symlink() {
-        return None;
-    }
-    let canonical_executable = fs::canonicalize(&executable).ok()?;
-    if !canonical_executable.starts_with(&canonical) {
-        return None;
-    }
-    Some(InstalledMacApp {
-        specification,
-        bundle_path: canonical,
-    })
 }
 
 #[cfg(target_os = "macos")]
@@ -627,38 +524,197 @@ fn run_status_bounded(command: &mut Command, timeout: Duration) -> Result<bool, 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use crate::codex_app::{
+        find_installed_mac_app_in, mac_app_candidate_paths, validate_mac_app_bundle,
+    };
+    use std::path::PathBuf;
 
-    #[test]
-    fn app_bundle_validation_requires_exact_identity_and_executable() {
-        let temp = tempfile::tempdir().unwrap();
-        let bundle = fs::canonicalize(temp.path()).unwrap().join("Codex.app");
+    fn bundle_fixture(
+        applications: &Path,
+        bundle_name: &str,
+        bundle_id: &str,
+        declared_executable: &str,
+        executable_file: &str,
+    ) -> PathBuf {
+        let bundle = applications.join(bundle_name);
         fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
-        fs::write(bundle.join("Contents/MacOS/Codex"), b"fixture").unwrap();
-        let mut dictionary = plist::Dictionary::new();
-        dictionary.insert(
-            "CFBundleIdentifier".to_string(),
-            plist::Value::String("com.openai.codex".to_string()),
-        );
-        dictionary.insert(
-            "CFBundleExecutable".to_string(),
-            plist::Value::String("Codex".to_string()),
-        );
+        fs::write(
+            bundle.join("Contents/MacOS").join(executable_file),
+            b"fixture",
+        )
+        .unwrap();
+        let dictionary = plist::Dictionary::from_iter([
+            (
+                "CFBundleIdentifier".to_string(),
+                plist::Value::String(bundle_id.to_string()),
+            ),
+            (
+                "CFBundleExecutable".to_string(),
+                plist::Value::String(declared_executable.to_string()),
+            ),
+        ]);
         plist::Value::Dictionary(dictionary)
             .to_file_xml(bundle.join("Contents/Info.plist"))
             .unwrap();
+        bundle
+    }
 
-        assert!(validate_mac_app_bundle(&bundle, SUPPORTED_MAC_APPS[0]).is_some());
-        assert!(validate_mac_app_bundle(&bundle, SUPPORTED_MAC_APPS[1]).is_none());
+    #[test]
+    fn app_bundle_validation_requires_exact_identity_and_executable() {
+        for (bundle_name, bundle_id, declared_executable, executable_file, valid) in [
+            (
+                "ChatGPT.app",
+                "com.openai.codex",
+                "ChatGPT",
+                "ChatGPT",
+                true,
+            ),
+            (
+                "ChatGPT.app",
+                "com.openai.chat",
+                "ChatGPT",
+                "ChatGPT",
+                false,
+            ),
+            ("ChatGPT.app", "com.openai.codex", "Codex", "Codex", false),
+            ("ChatGPT.app", "com.openai.codex", "ChatGPT", "Codex", false),
+            ("Codex.app", "com.openai.codex", "Codex", "Codex", false),
+            ("Codex.app", "com.openai.codex", "ChatGPT", "ChatGPT", false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let bundle = bundle_fixture(
+                &fs::canonicalize(temp.path()).unwrap(),
+                bundle_name,
+                bundle_id,
+                declared_executable,
+                executable_file,
+            );
+            assert_eq!(
+                validate_mac_app_bundle(&bundle).is_some(),
+                valid,
+                "{bundle_name}: id={bundle_id}, declared={declared_executable}, file={executable_file}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_lookup_selects_only_a_valid_official_bundle_in_install_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let applications = root.join("Applications");
+        let user_home = root.join("user");
+        assert_eq!(
+            mac_app_candidate_paths(&applications, Some(&user_home)),
+            vec![
+                applications.join("ChatGPT.app"),
+                user_home.join("Applications/ChatGPT.app"),
+            ]
+        );
+        assert!(find_installed_mac_app_in(&applications, Some(&user_home)).is_none());
+        bundle_fixture(
+            &applications,
+            "Codex.app",
+            "com.openai.codex",
+            "Codex",
+            "Codex",
+        );
+        assert!(find_installed_mac_app_in(&applications, Some(&user_home)).is_none());
+
+        let user_bundle = bundle_fixture(
+            &user_home.join("Applications"),
+            "ChatGPT.app",
+            "com.openai.codex",
+            "ChatGPT",
+            "ChatGPT",
+        );
+        assert_eq!(
+            find_installed_mac_app_in(&applications, Some(&user_home))
+                .unwrap()
+                .bundle_path,
+            user_bundle
+        );
+        bundle_fixture(
+            &applications,
+            "ChatGPT.app",
+            "com.openai.chat",
+            "ChatGPT",
+            "ChatGPT",
+        );
+        assert_eq!(
+            find_installed_mac_app_in(&applications, Some(&user_home))
+                .unwrap()
+                .bundle_path,
+            user_bundle
+        );
+        let system_bundle = bundle_fixture(
+            &applications,
+            "ChatGPT.app",
+            "com.openai.codex",
+            "ChatGPT",
+            "ChatGPT",
+        );
+        assert_eq!(
+            find_installed_mac_app_in(&applications, Some(&user_home))
+                .unwrap()
+                .bundle_path,
+            system_bundle
+        );
+    }
+
+    #[test]
+    fn app_bundle_validation_rejects_symlinked_bundle_plist_and_executable() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let bundle = bundle_fixture(
+            &root,
+            "ChatGPT.app",
+            "com.openai.codex",
+            "ChatGPT",
+            "ChatGPT",
+        );
+        for relative_path in ["Contents/Info.plist", "Contents/MacOS/ChatGPT"] {
+            let path = bundle.join(relative_path);
+            let outside = root.join("outside-file");
+            fs::rename(&path, &outside).unwrap();
+            symlink(&outside, &path).unwrap();
+            assert!(validate_mac_app_bundle(&bundle).is_none());
+            fs::remove_file(&path).unwrap();
+            fs::rename(&outside, &path).unwrap();
+        }
+        let outside = root.join("outside-bundle");
+        fs::rename(&bundle, &outside).unwrap();
+        symlink(&outside, &bundle).unwrap();
+        assert!(validate_mac_app_bundle(&bundle).is_none());
+    }
+
+    #[test]
+    fn app_kind_accepts_only_the_official_app() {
+        assert_eq!(
+            serde_json::to_string(&CodexAppKind::Codex).unwrap(),
+            "\"codex\""
+        );
+        assert!(serde_json::from_str::<CodexAppKind>("\"codex\"").is_ok());
+        assert!(serde_json::from_str::<CodexAppKind>("\"codex_plus_plus\"").is_err());
     }
 
     #[test]
     fn only_the_default_home_relaunches_through_launch_services() {
-        let default_home = dirs::home_dir().unwrap().join(".codex");
-        assert!(is_default_codex_home(&default_home));
-
         let temp = tempfile::tempdir().unwrap();
-        let profile_home = fs::canonicalize(temp.path()).unwrap().join("conf2/.codex");
-        assert!(!is_default_codex_home(&profile_home));
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let default_home = home.join(".codex");
+        let profile_home = home.join("conf2/.codex");
+        fs::create_dir_all(&default_home).unwrap();
+        fs::create_dir_all(&profile_home).unwrap();
+        assert!(codex_home_matches_default(&default_home, &default_home));
+        assert!(!codex_home_matches_default(&profile_home, &default_home));
+        assert!(!codex_home_matches_default(
+            &home.join("missing"),
+            &default_home
+        ));
+        let alias = home.join("codex-home-alias");
+        std::os::unix::fs::symlink(&default_home, &alias).unwrap();
+        assert!(codex_home_matches_default(&alias, &default_home));
     }
 
     #[test]

@@ -42,6 +42,9 @@ export default function SyncReviewSelectionBar({
     onClose: () => void;
   };
 }) {
+  const unselect = recommendedDisabled && recommendedCount > 0 && !clearDisabled;
+  const clearTitle = searchActive ? "Clear matching selection" : "Clear current selection";
+
   return (
     <div className="sync-push-resource-actions">
       {!listPending && (
@@ -55,25 +58,19 @@ export default function SyncReviewSelectionBar({
           >
             <b>{count}</b>/{total}
           </span>
-          {/* A labelled pill, not a bare tick: drawn as a ghost glyph beside the
-              count it read as a status mark, and a Pull review opens with nothing
-              ticked, where missing it means marking the version reviewed. Its
-              count is what it would tick — a property of the resource set, so it
-              never moves when a row is ticked; the live count before it answers
-              "how many are selected". The words and the count name the button;
-              the title is the sentence behind them. Nothing to recommend is
-              nothing to select: Clear is the control for emptying a step. */}
+          {/* The active recommendation can be cleared with the same button.
+              Feature callbacks keep the action scoped to this step or search. */}
           <button
             type="button"
             className="btn sync-sync-review-select"
-            onClick={onRecommended}
-            disabled={busy || recommendedDisabled || recommendedCount === 0}
-            title={recommendedTitle}
+            onClick={unselect ? onClear : onRecommended}
+            disabled={busy || (!unselect && (recommendedDisabled || recommendedCount === 0))}
+            title={unselect ? clearTitle : recommendedTitle}
           >
             <Icon name="check-circle" size={14} />
             {/* The space keeps the accessible name "Select 3", not "Select3";
                 a flex item's trailing space draws nothing. */}
-            {"Select "}
+            {unselect ? "Unselect " : "Select "}
             <span className="sync-path-count">{recommendedCount}</span>
           </button>
           <button
@@ -81,8 +78,8 @@ export default function SyncReviewSelectionBar({
             className="btn btn-ghost sync-sync-review-icon-action"
             onClick={onClear}
             disabled={busy || clearDisabled}
-            title={searchActive ? "Clear matching selection" : "Clear current selection"}
-            aria-label={searchActive ? "Clear matching selection" : "Clear current selection"}
+            title={clearTitle}
+            aria-label={clearTitle}
           >
             <Icon name="trash" size={15} />
           </button>

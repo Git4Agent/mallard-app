@@ -165,7 +165,7 @@ function renderReview(
   phase: "idle" | "restoring" = "idle",
 ) {
   return renderToStaticMarkup(
-    <RestorePlanView
+    <RestorePlanView onSessionActionError={() => undefined}
       projectName="gam2"
       storageName="Local storage 1"
       plan={plan}
@@ -1108,7 +1108,7 @@ test("a review with sessions paints its list in bone on the first render and hol
     conversation_review: [storedSession("older", 3 * MB, 200), storedSession("newest", 5 * MB, 300)],
   };
   const html = renderToStaticMarkup(
-    <RestorePlanView
+    <RestorePlanView onSessionActionError={() => undefined}
       projectName="gam2"
       project={project}
       storageName="Local storage 1"
@@ -1159,7 +1159,7 @@ test("the tools row says Checking… while its readiness checks run", () => {
     }],
   };
   const render = (supportLoading: boolean) => renderToStaticMarkup(
-    <RestorePlanView
+    <RestorePlanView onSessionActionError={() => undefined}
       projectName="gam2"
       storageName="Local storage 1"
       plan={plan}

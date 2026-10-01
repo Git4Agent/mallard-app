@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Push review Git history — directions</title>
+    <style>
+      /* App.css locks html, body and #root for the app shell; #root scrolls. */
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+
+      /* ——— specimen chrome (not app CSS) ——————————————————————— */
+      .spec { max-width: 2200px; margin: 0 auto; padding: 16px 20px 60px; display: grid; gap: 14px; font: 13px/1.45 system-ui, sans-serif; }
+      .spec-shot { padding-bottom: 16px; }
+      .spec-title { font: 700 18px/1.2 system-ui; }
+      .spec-controls { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+      .spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+      .spec-col-title { margin: 0 0 8px; display: flex; align-items: baseline; gap: 8px; font: 700 14px/1.3 system-ui; }
+      .spec-col-title em { padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); font: 600 11px/1.4 system-ui; font-style: normal; }
+      .spec-col-title > span { color: var(--text-2); font: 400 12px/1.3 system-ui; }
+      .spec-frame { position: relative; border: 1px dashed var(--border-strong); border-radius: 12px; overflow: hidden; background: var(--bg-0); font-family: var(--font-sans); }
+      .spec-frame .sync-main { height: auto !important; min-height: 200px; overflow: visible !important; }
+      /* The review page lifts this cap in the app; a bare frame keeps it (62vh). */
+      .spec-frame .sync-sync-review-scroll { max-height: none; }
+      .spec-frame.narrow .sync-project-links-page { padding-right: 18px; padding-left: 18px; }
+      .spec-grid { display: flex; flex-wrap: wrap; gap: 22px; align-items: start; }
+      .spec-foot { color: var(--text-2); font-size: 12px; }
+      .spec-foot a { color: inherit; }
+
+      /* ——— proposed app CSS (mock-only) ———————————————————————————
+         Scoped under .spec: App.css loads after this block and would
+         otherwise win every tie. */
+
+      /* B1 · the ↑ chip: the branch-state pill, sized for one glyph. */
+      .spec .mk-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; padding: 1px 7px; font-size: var(--type-xs); font-weight: var(--weight-semibold); }
+
+      /* B2 · the commit glyph becomes the sessions' push icon. */
+      .spec .sync-history-commit-icon.mk-push-icon { color: inherit; }
+
+      /* B3 · the storage tag, git log --decorate's origin/main. */
+      .spec .mk-tag {
+        display: inline-flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 7px;
+        font-size: var(--type-xs);
+        font-weight: var(--weight-semibold);
+        text-transform: none;
+        white-space: nowrap;
+      }
+      .spec .mk-tag-branch { margin-left: 2px; padding-left: 6px; border-left: 1px solid currentColor; font-family: var(--font-mono); font-weight: var(--weight-medium); }
+
+      /* B4 · the divider: the tag at the card edge, a dashed rule to the
+         right, and its own spine segment so the rail stays one line. */
+      .spec .mk-divider {
+        position: relative;
+        min-height: 22px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 10px var(--sync-history-card-offset);
+        list-style: none;
+      }
+      .spec .mk-divider::before {
+        content: "";
+        position: absolute;
+        top: -10px;
+        bottom: -15px;
+        left: calc(var(--sync-history-rail-x) - var(--sync-history-card-offset) - 1px);
+        width: 2px;
+        border-radius: 1px;
+        background: var(--border-mid);
+      }
+      .spec .mk-divider::after { content: ""; flex: 1 1 auto; border-top: 2px dashed var(--border-strong); }
+      .spec .mk-divider.warn::after { border-top-color: var(--warning-text); }
+
+      /* B3/B4 · a rewritten history's replaced commit, as a ghost card. */
+      .spec .sync-history-commit.mk-ghost { border-style: dashed; border-color: var(--border-strong); background: transparent; box-shadow: none; }
+      .spec .mk-ghost .sync-history-commit-title > strong,
+      .spec .mk-ghost .sync-history-commit-meta > code { color: var(--text-3); text-decoration: line-through; }
+
+      /* B5 · the push spine: the new stretch of the rail in the sessions'
+         push colour. */
+      .spec .sync-history-commit.mk-spine { --mk-spine: var(--status-icon-local); }
+      .spec .sync-history-commit.mk-spine.warn { --mk-spine: var(--warning-text); }
+      .spec .sync-history-commit.mk-spine::before { width: 3px; background: var(--mk-spine); }
+      /* Chevron only: the folds stay a bare ring (shaded folds were reverted 2026-09-01). */
+      .spec .mk-spine > .sync-history-spine-fold { opacity: 1; color: var(--mk-spine); }
+
+      /* One line for the empty row: the title alone. */
+      .spec .sync-pull-empty.mk-empty { min-height: 0; align-items: center; padding: 12px 2px; }
+      .spec .sync-history-content > .mk-empty:first-child { border-top: 0; }
+
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/git-history-push-mockup.tsx"></script>
+  </body>
+</html>

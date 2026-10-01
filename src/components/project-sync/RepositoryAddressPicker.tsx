@@ -532,14 +532,14 @@ export default function RepositoryAddressPicker({
   return (
     <>
       <label className="sync-folder-field compact">
-        <span>Address or invitation code</span>
+        <span>Address or invite code</span>
         <div>
           <input
             value={entry}
             disabled={disabled || joining}
             spellCheck={false}
             autoComplete="off"
-            placeholder={`${account.host}/owner/name, or XXXXX-XXXXX-XXXXX-XXXXX`}
+            placeholder="owner/name or invite code"
             aria-invalid={invalidAddress || join.kind === "failed" || undefined}
             aria-describedby={describedBy}
             onChange={(event) => {
@@ -558,11 +558,7 @@ export default function RepositoryAddressPicker({
             {joining ? "Joining…" : looking ? "Looking up…" : code ? "Join" : "Look up"}
           </button>
         </div>
-        {code ? (
-          <small>An invitation code. Join adds you to its private repository.</small>
-        ) : !cloning && (
-          <small>Paste the page address from {account.host} or owner/name, or a code from the repository’s owner or an admin.</small>
-        )}
+        {code && <small>Join to become a member.</small>}
         {join.kind === "failed" && fieldError(join.message)}
       </label>
 
@@ -570,15 +566,15 @@ export default function RepositoryAddressPicker({
       {acknowledgement}
 
       <div className="repo-list-head">
-        Your repositories{listing.state === "ready" && repositories.length > 0 && <small>{repositories.length}</small>}
+        Repositories{listing.state === "ready" && repositories.length > 0 && <small>{repositories.length}</small>}
       </div>
       {listing.state === "loading" ? (
-        <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> Checking repositories you belong to…</small>
+        <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> Loading repositories…</small>
       ) : listing.state === "error" ? (
         <Notice severity="danger" timing="blocking">{listing.message}</Notice>
       ) : !offerNew && repositories.length === 0 ? (
         /* No rows, no box: an empty bordered list reads as a text field. */
-        <p className="repo-list-empty">None yet. Repositories you create or join appear here.</p>
+        <p className="repo-list-empty">No repositories yet.</p>
       ) : (
         <div className={`${listClass} repo-rows`} role="radiogroup" aria-label="Repositories you belong to" aria-describedby={describedBy}>
           {offerNew && (
@@ -595,7 +591,7 @@ export default function RepositoryAddressPicker({
               <span className={copyClass}>
                 <strong>New repository</strong>
                 <span className="repo-new-address">{prediction.address}</span>
-                {prediction.suffixed && <span>{prediction.base} is already used in this account.</span>}
+                {prediction.suffixed && <span>{prediction.base} is already used.</span>}
               </span>
               <span className={metaClass}><small>Private</small></span>
             </button>

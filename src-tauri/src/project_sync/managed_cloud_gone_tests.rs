@@ -16,7 +16,7 @@ mod managed_cloud_gone {
 
     /// The stub, as a test body on a blocking thread reaches it.
     #[derive(Clone)]
-    struct Cloud {
+    pub(super) struct Cloud {
         endpoint: String,
         state: Arc<Mutex<StubState>>,
     }
@@ -88,7 +88,7 @@ mod managed_cloud_gone {
 
     /// Run a test body against a fresh stub, on a thread that may block on
     /// the store's requests.
-    async fn with_cloud(body: impl FnOnce(Cloud) + Send + 'static) {
+    pub(super) async fn with_cloud(body: impl FnOnce(Cloud) + Send + 'static) {
         let stub = StubManagedCloud::start().await;
         let cloud = Cloud {
             endpoint: stub.endpoint.clone(),
@@ -99,7 +99,7 @@ mod managed_cloud_gone {
             .unwrap();
     }
 
-    fn add_cloud_storage(
+    pub(super) fn add_cloud_storage(
         repo: &LocalStateRepository,
         cloud: &Cloud,
         login: &str,

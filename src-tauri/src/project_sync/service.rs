@@ -137,6 +137,7 @@ pub struct PushApproval {
     pub subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
     pub recipe: BundleRecipe,
     pub project_content_review_token: Option<String>,
+    pub git_history_review_token: Option<String>,
     pub project_content_removal_ids: Vec<ResourceId>,
     pub acknowledged_warning_digests: Vec<String>,
 }
@@ -155,6 +156,7 @@ impl PushApproval {
                 .collect(),
             recipe,
             project_content_review_token: None,
+            git_history_review_token: review.git_history_review_token.clone(),
             project_content_removal_ids: Vec::new(),
             acknowledged_warning_digests: Vec::new(),
         }
@@ -263,6 +265,7 @@ impl<'a> ProjectSyncService<'a> {
                 credential_redaction_enabled: approval.credential_redaction_enabled,
                 subagent_selections: approval.subagent_selections,
                 review_token: approval.project_content_review_token,
+                git_history_review_token: approval.git_history_review_token,
                 removal_ids: approval.project_content_removal_ids.into_iter().collect(),
                 acknowledged_warning_digests: approval
                     .acknowledged_warning_digests
@@ -648,6 +651,7 @@ pub(super) struct ProjectContentPushReview {
     pub(super) credential_redaction_enabled: bool,
     pub(super) subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
     pub(super) review_token: Option<String>,
+    pub(super) git_history_review_token: Option<String>,
     pub(super) removal_ids: BTreeSet<ResourceId>,
     pub(super) acknowledged_warning_digests: BTreeSet<String>,
 }
@@ -658,6 +662,7 @@ impl Default for ProjectContentPushReview {
             credential_redaction_enabled: true,
             subagent_selections: BTreeMap::new(),
             review_token: None,
+            git_history_review_token: None,
             removal_ids: BTreeSet::new(),
             acknowledged_warning_digests: BTreeSet::new(),
         }
@@ -8226,7 +8231,44 @@ pub struct PushReviewContext {
     pub thread_comparison_error: Option<String>,
     pub project_files: Option<ProjectContentInventory>,
     pub project_files_error: Option<String>,
+    pub git_history: Option<mallard_domain::GitHistorySnapshot>,
+    pub git_history_review_token: Option<String>,
     pub prepared_at: u64,
+    pub git_history_changed: bool,
+    /// The commits this Push adds, against storage's history. `None` when
+    /// storage has none, or none this branch shares.
+    pub git_history_outgoing: Option<mallard_domain::GitHistoryOutgoing>,
+}
+
+/// Git history travels only to Mallard Cloud, the one storage that shows it.
+/// Every other storage gets none: no capture, no review token, and so no
+/// history-only Push.
+fn capture_binding_git_history(
+    config: &SyncConfig,
+    storage_id: &StorageId,
+    project: &LocalProjectRegistration,
+    binding: &ProjectBinding,
+) -> Result<Option<mallard_domain::GitHistorySnapshot>, String> {
+    let shows_git_history = config.storages.iter().any(|storage| {
+        storage.id == *storage_id
+            && storage.provider
+                == mallard_infrastructure::storage_providers::managed_cloud::provider_key()
+    });
+    if !shows_git_history {
+        return Ok(None);
+    }
+    if project.repository_fingerprint.is_some() {
+        if project_file_sync_eligibility(binding).state
+            != ProjectFileSyncEligibilityState::GitManaged
+        {
+            return Err(
+                "The Git project is unavailable. Restore its repository before Push.".into(),
+            );
+        }
+        project_activity::capture_git_history(Path::new(&binding.project_root)).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -8395,6 +8437,30 @@ pub(super) fn prepare_push_review_with_progress(
     let detail = get_project_with_repository(repository, local_project_id)?
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
 
+    let git_history = capture_binding_git_history(config, storage_id, &project, &binding)?;
+    let git_history_review_token = git_history
+        .as_ref()
+        .map(project_activity::git_history_review_token)
+        .transpose()?;
+    let stored_git_history = remote
+        .as_ref()
+        .ok()
+        .and_then(|(_, current, _, _)| current.as_ref())
+        .and_then(|snapshot| snapshot.manifest.git_history.as_ref());
+    let previous_git_token = stored_git_history
+        .map(|history| {
+            let mut metadata = history.clone();
+            metadata.map_sessions(std::iter::empty());
+            project_activity::git_history_review_token(&metadata)
+        })
+        .transpose()?;
+    let git_history_changed =
+        git_history_review_token.is_some() && git_history_review_token != previous_git_token;
+    let git_history_outgoing = git_history
+        .as_ref()
+        .zip(stored_git_history)
+        .and_then(|(history, stored)| history.outgoing_since(stored));
+
     Ok(PushReviewContext {
         credential_redaction_enabled,
         project: detail,
@@ -8404,6 +8470,10 @@ pub(super) fn prepare_push_review_with_progress(
         thread_comparison_error,
         project_files,
         project_files_error,
+        git_history,
+        git_history_review_token,
+        git_history_changed,
+        git_history_outgoing,
         prepared_at: now_secs(),
     })
 }
@@ -10454,6 +10524,7 @@ fn build_publish_request(
     }
     Ok((
         PublishBundleRequest {
+            git_history: None,
             identity: BundleIdentity {
                 bundle_id: project.bundle_id.clone(),
                 display_name: project.display_name.clone(),
@@ -10562,6 +10633,7 @@ fn publish_reviewed(
     on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
     credential_redaction_enabled: bool,
+    git_history: Option<mallard_domain::GitHistorySnapshot>,
 ) -> Result<ReviewedPublishOutcome, String> {
     let phase_started = Instant::now();
     set_cloud_project_origin(engine, project, binding)?;
@@ -10576,7 +10648,7 @@ fn publish_reviewed(
     on_phase("build conversation actions", phase_started.elapsed());
     let phase_started = Instant::now();
     let resolved_binding = resolve_project_binding(repository, binding)?;
-    let (request, operations, publication_state, failures) = build_publish_request(
+    let (mut request, operations, publication_state, failures) = build_publish_request(
         repository,
         &plan_id,
         storage_id,
@@ -10592,6 +10664,17 @@ fn publish_reviewed(
         updated_at,
         credential_redaction_enabled,
     )?;
+    let git_history_review_token = git_history
+        .as_ref()
+        .map(project_activity::git_history_review_token)
+        .transpose()?;
+    request.git_history = git_history;
+    let verify_git = || -> Result<(), String> {
+        if let Some(token) = &git_history_review_token {
+            project_activity::verify_git_history_review(Path::new(&binding.project_root), token)?;
+        }
+        Ok(())
+    };
     validate_cloud_publication_binding_owners(
         &publication_state.bindings_before.bindings,
         &operations,
@@ -10614,6 +10697,7 @@ fn publish_reviewed(
                 failures,
             });
         }
+        verify_git()?;
         let outcome = engine.publish_with_progress(request, on_progress, on_phase)?;
         return Ok(ReviewedPublishOutcome {
             publication: Some(outcome),
@@ -10626,6 +10710,7 @@ fn publish_reviewed(
         operations,
         publication_state,
         || {
+            verify_git()?;
             let outcome = engine.publish_with_progress(request, on_progress, &mut *on_phase)?;
             let publication = cloud_publication_from_snapshot(outcome.snapshot());
             *publish_outcome.borrow_mut() = Some(outcome);
@@ -10652,9 +10737,24 @@ fn push_bundle_reviewed_with_repository(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
     requested_recipe: BundleRecipe,
-    project_content_review: ProjectContentPushReview,
+    mut project_content_review: ProjectContentPushReview,
     on_progress: &mut dyn FnMut(FetchProgress),
 ) -> Result<ProjectOperationResult, String> {
+    // Older content-review fixtures do not exercise the Git review. Supply
+    // that new approval from their temporary repository, as the UI now does.
+    if project_content_review.git_history_review_token.is_none() {
+        let state = repository.load_project_state_snapshot()?;
+        if let (Some(project), Some(binding)) = (
+            state.config.project(local_project_id),
+            state.bindings.active_for(local_project_id),
+        ) {
+            project_content_review.git_history_review_token =
+                capture_binding_git_history(&state.config, storage_id, project, binding)?
+                    .as_ref()
+                    .map(project_activity::git_history_review_token)
+                    .transpose()?;
+        }
+    }
     push_bundle_reviewed_with_progress(
         repository,
         local_project_id,
@@ -10861,6 +10961,14 @@ pub(super) fn push_bundle_reviewed_with_progress(
         return Err(eligibility.reason);
     }
     let resolved = resolve_project_binding_from_state(&state.bindings, &binding)?;
+    let git_history = capture_binding_git_history(config, storage_id, &project, &binding)?;
+    let actual_git_token = git_history
+        .as_ref()
+        .map(project_activity::git_history_review_token)
+        .transpose()?;
+    if actual_git_token != project_content_review.git_history_review_token {
+        return Err("Git history changed after review. Review Push again.".into());
+    }
     let mut capture_request = capture_request_for_resolved_binding_from_state(
         repository.root(),
         config,
@@ -11192,6 +11300,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         on_progress,
         &mut *on_phase,
         credential_redaction_enabled,
+        git_history,
     )
     .map_err(|error| unfinished_push_sentence(&storage.name, error))?;
     stop_using_cursors_of_edited_sessions(
@@ -12120,6 +12229,48 @@ fn failed_conversation_receipt_for(
     }
 }
 
+struct NativeCodexRename {
+    home: PathBuf,
+    row: CodexIndexRowSpec,
+}
+
+// Presentation only: all file writes and acceptance changes finish first.
+// Codex appends to the index, which would stale later actions in the batch.
+fn rename_committed_codex_titles(
+    repository: &LocalStateRepository,
+    requests: Vec<NativeCodexRename>,
+) {
+    for request in requests {
+        #[cfg(not(test))]
+        let outcome = mallard_infrastructure::providers::codex::naming::rename(
+            &request.home,
+            &request.row.provider_thread_id,
+            &request.row.thread_name,
+        );
+        #[cfg(test)]
+        let outcome = pull_test_support::rename(
+            &request.home,
+            &request.row.provider_thread_id,
+            &request.row.thread_name,
+        );
+        if outcome.is_err() {
+            use mallard_infrastructure::activity_log::{
+                ActivityLogContext, ActivityLogEntry, ActivityLogStore, ActivityLogType,
+            };
+            if let Ok(log) = ActivityLogStore::from_repository(repository) {
+                let _ = log.append(&ActivityLogEntry::new(
+                    ActivityLogType::Pull,
+                    "warn",
+                    "pull.codex_title_update_failed",
+                    "Codex title update failed. The completed conversation import is unchanged.",
+                    None,
+                    ActivityLogContext::default(),
+                ));
+            }
+        }
+    }
+}
+
 /// One reviewed Codex session-index row rewrite. `replace_existing` marks an
 /// identity that already owns index rows (MaterializeCloud's destination,
 /// keep-both's preserved rename): its existing rows are dropped and one current
@@ -12236,6 +12387,7 @@ fn apply_prepared_pull_conversation(
     destination_provider_thread_id: String,
     expected_bindings_document_revision: u64,
     applied_at: u64,
+    native_renames: &mut Vec<NativeCodexRename>,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ApplyReceipt, String> {
     let binding = &resolved.binding;
@@ -12731,6 +12883,7 @@ fn apply_prepared_pull_conversation(
         index_rows: vec![],
         bytes: installed_bytes.clone(),
     });
+    let mut committed_renames = Vec::new();
     if let Some(index_target) = action
         .pins
         .target
@@ -12795,6 +12948,11 @@ fn apply_prepared_pull_conversation(
             .map(|spec| spec.provider_thread_id.clone())
             .collect::<Vec<_>>();
         let (expected, bytes) = codex_index_payload(&index_path, &index_specs)?;
+        let home = PathBuf::from(resolved.home(&action.provider)?);
+        committed_renames.extend(index_specs.into_iter().map(|row| NativeCodexRename {
+            home: home.clone(),
+            row,
+        }));
         if let Some(bytes) = bytes {
             targets.push(ConversationTargetPayload {
                 target_path: index_path,
@@ -13173,6 +13331,7 @@ fn apply_prepared_pull_conversation(
             checked_transcript,
         },
     )?;
+    native_renames.extend(committed_renames);
     on_phase("stage and commit conversation", install_started.elapsed());
     Ok(ApplyReceipt {
         action_id: action.action_id.clone(),
@@ -13396,7 +13555,23 @@ fn pinned_version_for_apply(
 /// through the whole service: what another computer does in that instant.
 #[cfg(test)]
 mod pull_test_support {
-    use std::cell::RefCell;
+    use std::{cell::RefCell, path::Path};
+
+    type Rename = Box<dyn FnMut(&Path, &str, &str) -> Result<(), String>>;
+    thread_local! {
+        static RENAME: RefCell<Option<Rename>> = const { RefCell::new(None) };
+    }
+
+    pub fn set_rename(rename: Option<Rename>) {
+        RENAME.with(|slot| *slot.borrow_mut() = rename);
+    }
+
+    pub(super) fn rename(home: &Path, id: &str, title: &str) -> Result<(), String> {
+        RENAME.with(|slot| match slot.borrow_mut().as_mut() {
+            Some(rename) => rename(home, id, title),
+            None => Ok(()), // Unit tests never launch the installed provider.
+        })
+    }
 
     thread_local! {
         static BEFORE_DOWNLOAD: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
@@ -13669,6 +13844,7 @@ pub(super) fn apply_bundle_restore_with_progress(
         .map(Some)
         .collect::<Vec<_>>();
     let mut indexed_receipts = Vec::new();
+    let mut native_renames = Vec::new();
     let preparation_started = Instant::now();
     // A job reserves the cloud transcript and child rollout bytes it reads
     // while it runs. Results arrive in completion order: every install
@@ -13810,6 +13986,7 @@ pub(super) fn apply_bundle_restore_with_progress(
                     destination,
                     expected_revision,
                     applied_at,
+                    &mut native_renames,
                     on_phase,
                 );
                 // A write error may follow a successful file replacement.
@@ -14158,6 +14335,9 @@ pub(super) fn apply_bundle_restore_with_progress(
     };
     on_phase("build after-Pull offers", offers_started.elapsed());
     on_phase("persist receipts and finalize", phase_started.elapsed());
+    let rename_started = Instant::now();
+    rename_committed_codex_titles(repository, native_renames);
+    on_phase("update Codex titles", rename_started.elapsed());
     Ok(result)
 }
 
@@ -17259,9 +17439,11 @@ fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    include!("git_history_tests.rs");
     include!("session_refresh_regression_tests.rs");
     include!("owned_subagent_tests.rs");
     include!("claude_owned_subagent_tests.rs");
+    include!("claude_widget_tests.rs");
     include!("project_session_delete_tests.rs");
     include!("optional_redaction_tests.rs");
     include!("child_sync_settings_tests.rs");
@@ -17710,6 +17892,7 @@ mod tests {
         scopes: Vec<(SyncScopeKey, u64, &str)>,
     ) -> BundleSnapshot {
         let manifest = BundleManifest {
+            git_history: None,
             schema_version: mallard_domain::BUNDLE_SCHEMA,
             revision: head.revision,
             commit_id: head.commit_id.clone(),
@@ -18130,6 +18313,7 @@ mod tests {
         codex_home: &Path,
     ) -> ProjectBinding {
         std::fs::create_dir_all(project_root).unwrap();
+        ensure_test_git_repository(project, project_root);
         let profile_id = add_profile(repo, &codex_key(), codex_home);
         let binding = save_project_binding_with_repository(
             repo,
@@ -18680,6 +18864,7 @@ mod tests {
 
     fn empty_project_content_review() -> ProjectContentPushReview {
         ProjectContentPushReview {
+            git_history_review_token: None,
             credential_redaction_enabled: true,
             subagent_selections: BTreeMap::new(),
             review_token: None,
@@ -19344,6 +19529,7 @@ mod tests {
             &storage_id,
             recipe,
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: scanned.review_token.clone(),
@@ -19558,6 +19744,7 @@ mod tests {
             &storage_id,
             removal_recipe,
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: removal_scan.review_token.clone(),
@@ -19701,6 +19888,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&scanned),
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: scanned.review_token,
@@ -19747,6 +19935,7 @@ mod tests {
             &storage_id,
             recipe.clone(),
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: first.review_token.clone(),
@@ -19765,6 +19954,7 @@ mod tests {
             &storage_id,
             recipe,
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: first.review_token,
@@ -19787,6 +19977,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&refreshed),
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: refreshed.review_token,
@@ -19832,6 +20023,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&scanned),
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: scanned.review_token.clone(),
@@ -19884,6 +20076,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&rescanned),
             ProjectContentPushReview {
+                git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: rescanned.review_token.clone(),
@@ -20005,20 +20198,21 @@ mod tests {
                     .to_string(),
             ),
         ];
-        // The deep link carries the path percent-encoded, so the quoting rules
-        // differ from the CLI lines above.
+        let commands = project_open_commands(&resolved);
+        // App discovery can omit the launch command. If present, it must
+        // pin the same profile and checkout, whatever the install location.
         #[cfg(target_os = "macos")]
-        expected.extend([
-            (
-                "Codex app — new",
-                "'/usr/bin/open' -n -a '/Applications/ChatGPT.app' --env 'CODEX_HOME=/tmp/custom codex/.codex' 'codex://threads/new?path=%2Ftmp%2Fclient%27s%20project'"
-                    .to_string(),
-            ),
-            (
-                "Codex app — resume",
-                "use Open in Codex (one deep link cannot carry both project and chat)".to_string(),
-            ),
-        ]);
+        if let Some((_, command)) = commands.iter().find(|(label, _)| label == "Codex app — new") {
+            assert!(command.starts_with("'/usr/bin/open' -n -a '"));
+            assert!(command.ends_with(
+                " --env 'CODEX_HOME=/tmp/custom codex/.codex' 'codex://threads/new?path=%2Ftmp%2Fclient%27s%20project'"
+            ));
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        expected.push((
+            "Codex app — resume",
+            "use Open in Codex (one deep link cannot carry both project and chat)".to_string(),
+        ));
         expected.extend([
             (
                 "Claude — new",
@@ -20032,7 +20226,10 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            project_open_commands(&resolved),
+            commands
+                .into_iter()
+                .filter(|(label, _)| label != "Codex app — new")
+                .collect::<Vec<_>>(),
             expected
                 .into_iter()
                 .map(|(label, command)| (label.to_string(), command))
@@ -20961,6 +21158,7 @@ mod tests {
         let source_root = temp.path().join("project-a");
         let source_codex = temp.path().join("codex-home");
         std::fs::create_dir_all(&source_root).unwrap();
+        ensure_test_git_repository(&source, &source_root);
         std::fs::create_dir_all(source_codex.join("sessions/2026/07/18")).unwrap();
         let source_session_id = "019f742a-a206-7932-876c-9db8d8ce575a";
         std::fs::write(
@@ -21031,6 +21229,7 @@ mod tests {
         .unwrap();
         let other_root = temp.path().join("other-repo");
         std::fs::create_dir_all(&other_root).unwrap();
+        ensure_test_git_repository(&other, &other_root);
         save_project_binding_with_repository(
             &repo,
             SaveProjectBindingRequest {
@@ -21079,6 +21278,7 @@ mod tests {
         .unwrap();
         let replica_root = temp.path().join("project-b");
         std::fs::create_dir_all(&replica_root).unwrap();
+        ensure_test_git_repository(&replica, &replica_root);
         save_project_binding_with_repository(
             &repo,
             SaveProjectBindingRequest {
@@ -21163,6 +21363,7 @@ mod tests {
         .unwrap();
         let override_root = temp.path().join("override-replica");
         std::fs::create_dir_all(&override_root).unwrap();
+        ensure_test_git_repository(&override_replica, &override_root);
         save_project_binding_with_repository(
             &repo,
             SaveProjectBindingRequest {
@@ -22840,6 +23041,14 @@ mod tests {
 
     impl TwoComputers {
         fn new(storage: &str) -> Self {
+            Self::with_fingerprint(storage, Some("a".repeat(64)))
+        }
+
+        fn with_project_files(storage: &str) -> Self {
+            Self::with_fingerprint(storage, None)
+        }
+
+        fn with_fingerprint(storage: &str, fingerprint: Option<String>) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let repo = repository(&temp);
             let storage_id = StorageId::parse(storage).unwrap();
@@ -22851,7 +23060,7 @@ mod tests {
                     &repo,
                     RegisterLocalProjectRequest {
                         display_name: format!("Project on {name}"),
-                        repository_fingerprint: Some("a".repeat(64)),
+                        repository_fingerprint: fingerprint.clone(),
                         bundle_id: Some(bundle_id.clone()),
                     },
                 )
@@ -23308,7 +23517,7 @@ mod tests {
     /// and installs from that verified copy, as after the download (D3).
     #[test]
     fn a_pull_stops_before_installing_anything_when_the_storage_is_cleared_during_its_download() {
-        let world = TwoComputers::new("cleared-during-download-store");
+        let world = TwoComputers::with_project_files("cleared-during-download-store");
         let (a, b) = (&world.a, &world.b);
         std::fs::write(a.root.join("draft.md"), b"first draft\n").unwrap();
         let session = "019f7500-0000-7000-8000-0000000000a7";
@@ -23389,7 +23598,7 @@ mod tests {
     #[test]
     fn a_pull_installs_the_downloaded_sessions_and_stops_at_the_files_when_the_storage_is_cleared_after_its_download(
     ) {
-        let world = TwoComputers::new("cleared-after-download-store");
+        let world = TwoComputers::with_project_files("cleared-after-download-store");
         let (a, b) = (&world.a, &world.b);
         std::fs::write(
             a.root.join("draft.md"),
@@ -23470,7 +23679,7 @@ mod tests {
     /// Pull finishes.
     #[test]
     fn a_pull_stops_the_same_way_when_an_object_has_not_arrived_and_offers_the_rest_afterwards() {
-        let world = TwoComputers::new("replicating-folder-store");
+        let world = TwoComputers::with_project_files("replicating-folder-store");
         let (a, b) = (&world.a, &world.b);
         std::fs::write(
             a.root.join("draft.md"),
@@ -23522,7 +23731,7 @@ mod tests {
     /// with the storage's own error, and what was installed stays.
     #[test]
     fn a_pull_stops_with_the_storage_own_error_when_it_cannot_be_read() {
-        let world = TwoComputers::new("unreadable-store");
+        let world = TwoComputers::with_project_files("unreadable-store");
         let (a, b) = (&world.a, &world.b);
         std::fs::write(
             a.root.join("draft.md"),
@@ -26358,6 +26567,7 @@ mod tests {
         claude_home: &Path,
     ) {
         std::fs::create_dir_all(project_root).unwrap();
+        ensure_test_git_repository(project, project_root);
         std::fs::create_dir_all(claude_home.join("projects/source")).unwrap();
         let claude = ProviderKey::parse("claude").unwrap();
         let profile_id = add_profile(repo, &claude, claude_home);
@@ -29083,6 +29293,7 @@ mod tests {
         engine
             .publish(
                 mallard_infrastructure::bundle_engine::PublishBundleRequest {
+                    git_history: None,
                     identity: BundleIdentity {
                         bundle_id: bundle_id.clone(),
                         display_name: "redactMismatch".to_string(),
@@ -29269,6 +29480,7 @@ mod tests {
         engine
             .publish(
                 mallard_infrastructure::bundle_engine::PublishBundleRequest {
+                    git_history: None,
                     identity: BundleIdentity {
                         bundle_id: bundle_id.clone(),
                         display_name: "pathmapMismatch".to_string(),
@@ -29507,12 +29719,8 @@ mod tests {
     }
 
     fn write_git_identity(project_root: &Path, url: &str) {
-        std::fs::create_dir_all(project_root.join(".git")).unwrap();
-        std::fs::write(
-            project_root.join(".git/config"),
-            format!("[remote \"origin\"]\n\turl = {url}\n"),
-        )
-        .unwrap();
+        git_history_test_command(project_root, &["init", "-b", "main"], None);
+        git_history_test_command(project_root, &["remote", "add", "origin", url], None);
     }
 
     /// D1: creating a storage link publishes the registration claim that
@@ -31637,9 +31845,33 @@ mod tests {
             .unwrap();
         assert_eq!(divergent_action.action, ConversationReviewAction::KeepBoth);
         let marker_title = format!("{title} (Preserved 1 · {device_label})");
+        let rename_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let calls = rename_calls.clone();
+        let rename_repo = repo.clone();
+        let expected_marker = marker_title.clone();
+        pull_test_support::set_rename(Some(Box::new(move |home, id, name| {
+            // The full Pull receipt is durable before either native request.
+            let records = rename_repo.load_materializations().unwrap();
+            let record = records
+                .records
+                .iter()
+                .find(|record| record.receipts.iter().any(|receipt| {
+                    receipt.conversation.as_ref().is_some_and(|conversation| {
+                        conversation.preserved_display_title.as_deref()
+                            == Some(expected_marker.as_str())
+                    })
+                }))
+                .unwrap();
+            assert_eq!(record.status, MaterializationStatus::Complete);
+            calls
+                .borrow_mut()
+                .push((home.to_path_buf(), id.to_string(), name.to_string()));
+            Err("simulated native rename failure".into())
+        })));
         let divergent_result = ProjectSyncService::new(&repo)
             .apply_bundle_restore(&divergent_pull, vec![divergent_action.action_id.unwrap()])
             .unwrap();
+        pull_test_support::set_rename(None);
         assert!(
             divergent_result.success,
             "{:?}",
@@ -31689,6 +31921,32 @@ mod tests {
             .expect("keep-both minted the remote branch's provider id at apply");
         assert_ne!(remote_provider_thread_id, relocated_source_id);
         assert_ne!(preserved.thread_id, pulled.thread_id);
+        assert_eq!(
+            *rename_calls.borrow(),
+            vec![
+                (
+                    source_codex.canonicalize().unwrap(),
+                    relocated_source_id.clone(),
+                    marker_title.clone()
+                ),
+                (
+                    source_codex.canonicalize().unwrap(),
+                    remote_provider_thread_id.clone(),
+                    title.to_string()
+                ),
+            ]
+        );
+        let log =
+            mallard_infrastructure::activity_log::ActivityLogStore::from_repository(&repo).unwrap();
+        let entries = log.query(&Default::default()).unwrap();
+        assert_eq!(
+            entries
+                .entries
+                .iter()
+                .filter(|entry| entry.event == "pull.codex_title_update_failed")
+                .count(),
+            2
+        );
 
         // One transaction renamed the preserved copy's existing index row to
         // the marker title and appended the destination row.

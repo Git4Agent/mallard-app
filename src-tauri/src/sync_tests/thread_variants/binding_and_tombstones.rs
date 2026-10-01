@@ -86,6 +86,7 @@ fn reviewed_thread_tombstones_publish_once_and_retain_survivors() {
     let mut tombstones = codex_scope(&repeated.snapshot.manifest).tombstones.clone();
     tombstones.insert(final_tombstone.structural_key(), final_tombstone);
     let delete_all = PublishBundleRequest {
+        git_history: None,
         identity: repeated.snapshot.manifest.bundle.clone(),
         published_by_origin: origin,
         reviewed_scope_pins: BTreeMap::from([(

@@ -345,6 +345,7 @@ pub fn publish_request(
         tombstones: BTreeMap::new(),
     };
     PublishBundleRequest {
+        git_history: None,
         identity: BundleIdentity {
             bundle_id,
             display_name: "Thread test bundle".to_string(),

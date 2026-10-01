@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   BundleFetchProgress,
+  GitHistoryOutgoing,
+  GitHistorySnapshot,
   LocalProjectSummary,
   ProjectBinding,
   ProjectContentEntry,
@@ -11,7 +13,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
+import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type PushGitHistory, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
   projectFileDeletionCount,
@@ -38,6 +40,13 @@ export interface PushReviewBlocker {
 
 interface Props {
   credentialRedactionEnabled: boolean;
+  /** A failed session action in the review's session list, or null to clear it;
+      the shell draws it under the path bar. */
+  onSessionActionError: (message: string | null) => void;
+
+  gitHistory?: GitHistorySnapshot | null;
+  gitHistoryChanged?: boolean;
+  gitHistoryOutgoing?: GitHistoryOutgoing | null;
   resources: InventoryResource[];
   selected: Set<string>;
   projectDefaults: Set<string>;
@@ -404,6 +413,7 @@ export function pushReviewDisabledReason({
   deletionApproved,
   projectContentLoading = false,
   listState = "ready",
+  gitHistoryChanged = false,
 }: {
   /** Sanitized: `sanitizePushSelection`, which is what the push carries. */
   selected: ReadonlySet<string>;
@@ -416,6 +426,7 @@ export function pushReviewDisabledReason({
   /** The session list's state: a Push waits until its rows are on screen,
    *  so nothing ticked by default travels unseen. */
   listState?: ReviewListState;
+  gitHistoryChanged?: boolean;
 }): string | null {
   /* First: until the rows are on screen, or while the scan is running,
      every judgement below is provisional, including the size of the push. */
@@ -443,7 +454,7 @@ export function pushReviewDisabledReason({
   if (projectFileDeletionCount(impact) > 0 && !deletionApproved) {
     return "Approve the selected project file deletions";
   }
-  if (selected.size === 0 && projectContentRemovals.size === 0) return "Nothing is selected";
+  if (selected.size === 0 && projectContentRemovals.size === 0 && !gitHistoryChanged) return "Nothing is selected";
   return null;
 }
 
@@ -458,6 +469,10 @@ function pushBudgetBreakdown(total: PushBudget): string {
 
 export default function PushResourceWorkspace({
   credentialRedactionEnabled,
+  onSessionActionError,
+  gitHistory,
+  gitHistoryChanged = false,
+  gitHistoryOutgoing = null,
   resources,
   selected,
   projectDefaults,
@@ -514,6 +529,13 @@ export default function PushResourceWorkspace({
     () => resources.filter((resource) => resource.category === "conversations"),
     [resources],
   );
+  /* The Git history travels on the session rail itself: the commits storage
+     lacks are the snapshot's leading ones, and the rail marks them ↑. */
+  const pushGitHistory = useMemo<PushGitHistory | undefined>(() => gitHistory ? {
+    outgoing: new Set(gitHistory.commits.slice(0, gitHistoryOutgoing?.new_commits ?? 0).map((commit) => commit.sha)),
+    rewritten: gitHistoryOutgoing?.rewritten ?? false,
+    changed: gitHistoryChanged,
+  } : undefined, [gitHistory, gitHistoryOutgoing, gitHistoryChanged]);
   const projectFiles = useMemo(
     () => resources.filter((resource) => resource.category === "project_files"),
     [resources],
@@ -692,6 +714,7 @@ export default function PushResourceWorkspace({
     deletionApproved,
     projectContentLoading,
     listState,
+    gitHistoryChanged,
   });
   /* The meters and the count measure rows; until the rows land they would
      measure a default selection nobody has seen. */
@@ -704,7 +727,8 @@ export default function PushResourceWorkspace({
   const emptyReview = listState === "ready"
     && !projectContentLoading
     && visibleResources.length === 0
-    && projectContentRemovals.size === 0;
+    && projectContentRemovals.size === 0
+    && !gitHistoryChanged;
   // The page the review closes onto, as the path bar names it.
   const exitTarget = project?.is_git_repository ? "Git history" : project ? projectLabel(project) : "project";
   /* The review says it is ready once, when its rows land — after mount, so a
@@ -871,6 +895,7 @@ export default function PushResourceWorkspace({
                   activeStorageId={storageId}
                   activeStorageName={storageName}
                   selectionMode="push"
+                  pushGitHistory={pushGitHistory}
                   searchQuery={searchQuery}
                   onSearchQueryChange={setSearchQuery}
                   onSearchResultsChange={setSearchResults}
@@ -878,6 +903,7 @@ export default function PushResourceWorkspace({
                   selectableResourceIds={selectableConversationIds}
                   selectionDisabled={busy}
                   onToggleResource={toggleResource}
+                  onActionError={onSessionActionError}
                   onDropSelection={(resourceIds) => {
                     // Show less took these out of view. A tick you can no
                     // longer see is one you cannot check before it travels.

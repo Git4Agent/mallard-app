@@ -1535,6 +1535,11 @@ svg[data-icon="lightbulb"] path:last-child {
   z-index: 5;
   margin: 0 0 10px;
   min-height: 42px;
+  /* A message is never what gives when the workspace column runs short (a
+     short window with the log drawer pulled tall): shrinking it to its
+     min-height clipped a two-line error through its bottom padding. The
+     page below has its own floor and scrolls. */
+  flex-shrink: 0;
 }
 
 /* Opaque fills, one per rung, for this slot only. A translucent tint here sits
@@ -2033,6 +2038,9 @@ svg[data-icon="lightbulb"] path:last-child {
 .sync-pull-empty > span { display: flex; flex-direction: column; gap: 2px; }
 .sync-pull-empty strong { color: var(--text-0); font-size: var(--type-sm); }
 .sync-pull-empty small { color: var(--text-3); font-size: var(--type-xs); }
+/* Title only: one line, centred on its icon. It leads an empty Push review,
+   which has no search field above it to rule off. */
+.sync-pull-empty.compact { min-height: 0; align-items: center; padding: 12px 2px; border-top: 0; }
 
 /* Storage reviews stay inside Project settings. */
 
@@ -11646,6 +11654,20 @@ span.sync-update-pill {
   font-weight: var(--weight-medium);
   line-height: var(--leading-snug);
   letter-spacing: 0;
+}
+
+/* A commit the Push adds: the branch-state pill holding one ↑, ahead of the
+   sha it travels with. `.history-only` turns it to the warning tone when
+   storage's history was rewritten. */
+.sync-history-commit-meta > .sync-history-outgoing {
+  min-width: 24px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 7px;
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
 }
 
 .sync-history-commit-link {

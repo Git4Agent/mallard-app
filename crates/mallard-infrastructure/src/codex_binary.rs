@@ -5,10 +5,11 @@
 //! native Rust binary so PTY execution keeps an argv-only, no-shell process
 //! contract.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn binary_from_path(name: &str) -> Option<PathBuf> {
+fn binary_from_path(name: &str, search_path: Option<&OsStr>) -> Option<PathBuf> {
     let names = {
         #[cfg(windows)]
         {
@@ -23,7 +24,7 @@ fn binary_from_path(name: &str) -> Option<PathBuf> {
             vec![name.to_string()]
         }
     };
-    std::env::var_os("PATH")
+    search_path
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .flat_map(|directory| {
@@ -36,8 +37,8 @@ fn binary_from_path(name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn windows_codex_launcher_from_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
+fn windows_codex_launcher_from_path(name: &str, search_path: Option<&OsStr>) -> Option<PathBuf> {
+    search_path
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|directory| directory.join(format!("{name}.cmd")))
@@ -120,12 +121,20 @@ fn resolve_packaged_codex_native(anchor: &Path) -> Option<PathBuf> {
         })
 }
 
-fn resolved_binary_candidate(name: &str, path: PathBuf) -> PathBuf {
-    if name == "codex" {
+fn resolved_binary_candidate(name: &str, path: PathBuf) -> Result<PathBuf, String> {
+    let candidate = if name == "codex" {
         resolve_packaged_codex_native(&path).unwrap_or(path)
     } else {
         path
+    };
+    let resolved = fs::canonicalize(&candidate)
+        .map_err(|error| format!("resolve the `{name}` executable: {error}"))?;
+    if !resolved.is_absolute() || !resolved.is_file() {
+        return Err(format!(
+            "the `{name}` executable is not an absolute regular file"
+        ));
     }
+    Ok(resolved)
 }
 
 /// Resolve a CLI without assuming a POSIX shell exists. GUI apps on Unix can
@@ -142,12 +151,13 @@ pub fn find_binary(name: &str) -> Result<PathBuf, String> {
     {
         return Err("binary name must be one plain path component".to_string());
     }
-    if let Some(path) = binary_from_path(name) {
-        return Ok(resolved_binary_candidate(name, path));
+    let search_path = std::env::var_os("PATH");
+    if let Some(path) = binary_from_path(name, search_path.as_deref()) {
+        return resolved_binary_candidate(name, path);
     }
     #[cfg(windows)]
     if name == "codex" {
-        if let Some(launcher) = windows_codex_launcher_from_path(name) {
+        if let Some(launcher) = windows_codex_launcher_from_path(name, search_path.as_deref()) {
             if let Some(native) = resolve_packaged_codex_native(&launcher) {
                 return Ok(native);
             }
@@ -163,7 +173,7 @@ pub fn find_binary(name: &str) -> Result<PathBuf, String> {
             if out.status.success() {
                 let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !path.is_empty() {
-                    return Ok(resolved_binary_candidate(name, PathBuf::from(path)));
+                    return resolved_binary_candidate(name, PathBuf::from(path));
                 }
             }
         }
@@ -174,7 +184,7 @@ pub fn find_binary(name: &str) -> Result<PathBuf, String> {
             PathBuf::from(format!("/usr/local/bin/{}", name)),
         ] {
             if candidate.is_file() {
-                return Ok(resolved_binary_candidate(name, candidate));
+                return resolved_binary_candidate(name, candidate);
             }
         }
     }
@@ -187,6 +197,59 @@ pub fn find_binary(name: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_lookup_uses_the_first_installed_cli_and_reports_missing_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let search_path = std::env::join_paths([&first, &second]).unwrap();
+        assert!(binary_from_path("codex", None).is_none());
+        assert!(binary_from_path("codex", Some(&search_path)).is_none());
+        let (_, _, executable) = packaged_codex_target().unwrap();
+        fs::write(second.join(executable), b"second cli").unwrap();
+        assert_eq!(
+            binary_from_path("codex", Some(&search_path)),
+            Some(second.join(executable))
+        );
+        fs::write(first.join(executable), b"first cli").unwrap();
+        assert_eq!(
+            resolved_binary_candidate(
+                "codex",
+                binary_from_path("codex", Some(&search_path)).unwrap()
+            )
+            .unwrap(),
+            fs::canonicalize(first.join(executable)).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolved_cli_must_be_an_absolute_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(resolved_binary_candidate("codex", temp.path().join("missing")).is_err());
+        assert!(resolved_binary_candidate("codex", temp.path().to_path_buf()).is_err());
+        let executable = temp.path().join("native-codex");
+        fs::write(&executable, b"fixture").unwrap();
+        let resolved = resolved_binary_candidate("codex", executable.clone()).unwrap();
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, fs::canonicalize(&executable).unwrap());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_npm_launcher_is_found_without_a_direct_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = temp.path().join("codex.cmd");
+        fs::write(&launcher, b"fixture").unwrap();
+        let search_path = std::env::join_paths([temp.path()]).unwrap();
+        assert!(binary_from_path("codex", Some(&search_path)).is_none());
+        assert_eq!(
+            windows_codex_launcher_from_path("codex", Some(&search_path)),
+            Some(launcher)
+        );
+    }
 
     #[test]
     fn npm_launcher_resolution_finds_the_platform_native_codex_binary() {
@@ -212,8 +275,15 @@ mod tests {
 
         assert_eq!(
             resolve_packaged_codex_native(&anchor),
-            Some(fs::canonicalize(native).unwrap())
+            Some(fs::canonicalize(&native).unwrap())
         );
-        assert_eq!(resolved_binary_candidate("claude", anchor.clone()), anchor);
+        assert_eq!(
+            resolved_binary_candidate("codex", anchor.clone()).unwrap(),
+            fs::canonicalize(&native).unwrap()
+        );
+        assert_eq!(
+            resolved_binary_candidate("claude", anchor.clone()).unwrap(),
+            fs::canonicalize(anchor).unwrap()
+        );
     }
 }
