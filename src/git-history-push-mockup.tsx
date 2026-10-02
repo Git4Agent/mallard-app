@@ -2,6 +2,7 @@ import { StrictMode, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import Icon from "./components/Icons";
 import NameSearchField from "./components/sync-review/NameSearchField";
+import { sessionNoun } from "./components/project-sync/model";
 import ProviderMark from "./components/sync-review/ProviderMark";
 import { ReviewBudgetGauge, ReviewBudgetGlance } from "./components/sync-review/ReviewBudgetMeter";
 import SyncPathBar, { type PathBarCrumb } from "./components/sync-review/SyncPathBar";
@@ -368,7 +369,7 @@ function Review({ dir, s }: { dir: Dir; s: Scenario }) {
         <div className="sync-inline-action-scroll sync-sync-review-scroll">
           <div className="sync-history-page sync-history-embedded sync-history-selection-review">
             <section className="sync-history-content" aria-label="Sessions">
-              {search && <NameSearchField query="" onChange={() => undefined} label="Search sessions" matches={s.sessions.length} total={s.sessions.length} />}
+              {search && <NameSearchField noun={sessionNoun} query="" onChange={() => undefined} label="Search sessions" matches={s.sessions.length} total={s.sessions.length} />}
               <EmptyRow s={s} dir={dir} />
               <Rail s={s} variant={variant} />
             </section>

@@ -41,6 +41,90 @@ import { diagram as suppliedFlowchart, fenced } from "../../poc/mermaid-flowchar
 
 const exact = (value: number) => ({ value, quality: "exact" as const });
 
+test("session Markdown renders TeX and dollar-delimited inline and display math", () => {
+  for (const text of [String.raw`Time \(\Delta\tau\).`, String.raw`Time $\Delta\tau$.`]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={text} />);
+    assert.match(html, /class="katex"/);
+    assert.match(html, /<math xmlns="http:\/\/www.w3.org\/1998\/Math\/MathML"/);
+    assert.doesNotMatch(html, /katex-display|katex-error/);
+  }
+  const formula = String.raw`\beta=\frac vc,\qquad \gamma=\frac{1}{\sqrt{1-\beta^2}}`;
+  for (const text of [
+    `\\[ ${formula} \\]`,
+    `\\[\n${formula}\n\\]`,
+    `$$\n${formula}\n$$`,
+    `\`\`\`math\n${formula}\n\`\`\``,
+  ]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={text} />);
+    assert.match(html, /class="katex-display"/);
+    assert.match(html, /<mfrac>/);
+    assert.match(html, /<msqrt>/);
+    assert.doesNotMatch(html, /katex-error|<pre>|<em>/);
+  }
+});
+
+test("session Markdown protects underbraces and multiline math in lists and quotes", () => {
+  const formula = String.raw`\underbrace{\Delta t=\gamma\,\Delta\tau}_{\text{time dilation}}, \qquad \underbrace{L=\frac{L_0}{\gamma}}_{\text{length contraction}}`;
+  for (const text of [
+    `\\[ ${formula} \\]`,
+    `> \\[\n> ${formula}\n> \\]`,
+    `- \\[\n  ${formula}\n  \\]`,
+    `> - \\[\n>   ${formula}\n>   \\]`,
+  ]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={text} />);
+    assert.match(html, /class="katex-display"/);
+    assert.match(html, /<munder>/);
+    assert.match(html, /time dilation/);
+    assert.match(html, /length contraction/);
+    assert.doesNotMatch(html, /katex-error|<em>/);
+  }
+  const aligned = String.raw`\[
+\begin{aligned}
+\Delta x' &= \gamma(\Delta x-v\Delta t) \\
+\Delta t' &= \gamma(\Delta t-v\Delta x/c^2)
+\end{aligned}
+\]`;
+  const html = renderToStaticMarkup(<SessionDetailMarkdown text={aligned.replace(/\n/g, "\r\n")} />);
+  assert.match(html, /<mtable/);
+  assert.doesNotMatch(html, /katex-error/);
+});
+
+test("session Markdown keeps literal code, escaped delimiters, and currency readable", () => {
+  for (const text of [
+    "`\\(x_0\\)` and `\\[x_0\\]` and `$x_0$`",
+    "```text\n\\[x_0\\]\n$x_0$\n```",
+    "> ```latex\n> \\[x_0\\]\n> ```",
+    "    \\[x_0\\]",
+    String.raw`\\(x_0\\) and \\[x_0\\]`,
+    String.raw`Costs \$5 and \$10.`,
+    "Costs $5.",
+    String.raw`Incomplete \(x_0 or \[x_0`,
+  ]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={text} />);
+    assert.doesNotMatch(html, /class="katex|<math/);
+  }
+  const html = renderToStaticMarkup(<SessionDetailMarkdown text={'[Formula](https://example.com/\\(x\\))'} />);
+  assert.match(html, /href="https:\/\/example.com\/\(x\)"/);
+  assert.doesNotMatch(html, /class="katex/);
+});
+
+test("session math errors remain local and untrusted commands cannot create links or images", () => {
+  for (const formula of [
+    String.raw`\frac{1}{`,
+    String.raw`\def\loop{\loop}\loop`,
+  ]) {
+    const html = renderToStaticMarkup(<SessionDetailMarkdown text={`Before \\(${formula}\\) after **still readable**.`} />);
+    assert.match(html, /class="katex-error"/);
+    assert.match(html, /Before /);
+    assert.match(html, /after <strong>still readable<\/strong>/);
+  }
+  const html = renderToStaticMarkup(<SessionDetailMarkdown text={String.raw`\(\href{https://example.com}{link}\) \(\includegraphics{https://example.com/image.png}\)`} />);
+  assert.doesNotMatch(html, /<a\b|<img\b|<script\b|<iframe\b/);
+  const bounded = renderToStaticMarkup(<SessionDetailMarkdown text={String.raw`\(\rule{500em}{500em}\)`} />);
+  assert.doesNotMatch(bounded, /(?:width|height|border-[^:]*):500em/);
+  assert.match(bounded, /25em/);
+});
+
 test("session Markdown recognizes closed Mermaid fences in quotes and lists", () => {
   for (const text of [
     "```mermaid\nflowchart TD\nA-->B\n```",
@@ -216,6 +300,22 @@ const checkpointEvent: SessionTimelineEvent = {
     branch: "main",
   },
 };
+
+test("Codex and Claude session prompts, replies, and steps use the same math renderer", () => {
+  for (const provider of ["codex", "claude"]) {
+    const mathEvents: SessionTimelineEvent[] = (["prompt", "response", "intermediate_step"] as const).map((kind, index) => ({
+      event_id: `${provider}-math-${index}`,
+      ordinal: index,
+      timestamp: START + index,
+      kind,
+      quality: "exact",
+      text: String.raw`\[\Delta t=\gamma\Delta\tau\]`,
+    }));
+    const html = renderTimeline(mathEvents, { provider, providerDisplayName: provider });
+    assert.equal((html.match(/class="katex-display"/g) ?? []).length, 3);
+    assert.doesNotMatch(html, /katex-error/);
+  }
+});
 
 function renderTimeline(
   timelineEvents: SessionTimelineEvent[],

@@ -1,5 +1,6 @@
+import type { ManagedCloudLink, ManagedCloudPublicationStatus, ManagedCloudReleaseState, ManagedCloudStatus } from "./types";
 import type { IconName } from "../Icons";
-import type { ManagedCloudLink, ManagedCloudPublicationStatus, ManagedCloudReleaseState, ManagedCloudStatus } from "../../types";
+
 
 /** Whether the repository the link saved is gone: removed on the website,
  *  being deleted, or out of this account's reach. It reads as empty, Push and

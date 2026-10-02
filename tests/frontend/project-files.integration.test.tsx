@@ -8,7 +8,10 @@ import type {
   ProjectResourceDescriptor,
   PullReview,
 } from "../../src/types";
-import ProjectFilesReviewPage from "../../src/components/project-sync/ProjectFilesReviewPage";
+import ProjectFilesReviewPage, {
+  searchProjectFileReviewCards,
+  type ProjectFileReviewRow,
+} from "../../src/components/project-sync/ProjectFilesReviewPage";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
   pushProjectFileCommitImpact,
@@ -165,14 +168,14 @@ test("an explicit Push scan presents new entries selected and locks both directo
   // files. The tile head's control is the rows' own checkbox — here ticked,
   // since every file is selected — with the counter chip closing the strip;
   // the old check-circle/trash icon pair is gone.
-  assert.match(html, /sync-project-file-tile-head/);
+  assert.match(html, /sync-list-tile-head/);
   assert.match(html, />docs\/specs\/</);
   assert.match(html, /aria-label="1 of 1 selected in docs\/specs"/);
   assert.match(html, /aria-label="Exclude every file in docs\/specs"[^>]*checked/);
   assert.doesNotMatch(html, /Select all files in|Clear the .* selection|sync-sync-review-icon-action[\s\S]{0,400}folder/);
   assert.equal(html.match(/catalog-card/g)?.length, 1, "only the file draws a card");
   assert.match(html, /aria-label="Include docs\/specs\/a\.md"[^>]*checked/);
-  assert.match(html, /1 entry/);
+  assert.match(html, /class="sync-name-search-count">1 file</);
   assert.match(html, /2 ignored · 1 blocked/);
   assert.doesNotMatch(html, /sync-project-file-selection-placeholder/);
   assert.doesNotMatch(html, /Exact entries selected|Scanning cannot prove/);
@@ -330,7 +333,7 @@ test("Push review shows only local-outstanding project files", () => {
 
   assert.equal((html.match(/class="sync-thread-sync-indicator local"/g) ?? []).length, 2);
   assert.match(html, /aria-label="2 of 2 selected"/);
-  assert.match(html, />2 entries</);
+  assert.match(html, />2 files</);
   assert.doesNotMatch(html, /aria-label="Remove .* from storage"/);
   for (const candidate of cases) {
     const pattern = new RegExp(`${candidate.id}\\.md`);
@@ -481,7 +484,7 @@ test("opening the files step scans by itself — no interstitial, just the scaff
   // is gone and nothing claims "No changes" before the scan has spoken.
   assert.doesNotMatch(html, /Files outside Git|Scan files/);
   assert.doesNotMatch(html, /No changes/);
-  assert.match(html, /Rescan/, "the bar's retry survives a failed first scan");
+  assert.match(html, /Rescan/, "the search row's retry survives a failed first scan");
   assert.doesNotMatch(html, />Optional|Nothing is uploaded|New eligible files|Review them before continuing/);
   assert.doesNotMatch(html, /a\.md/);
 });
@@ -499,12 +502,50 @@ test("an empty file review keeps only the action and state", () => {
   );
 
   assert.match(html, /aria-label="Project files"/, "the section keeps its name without a heading row");
-  assert.match(html, /Rescan/);
   assert.match(html, /No changes/);
-  // The one-line bar keeps its search box (disabled — nothing to filter) and
-  // hides the tally rather than printing "0 entries".
-  assert.match(html, /placeholder="Search files…"[^>]*disabled/);
-  assert.doesNotMatch(html, /0 entries|0 selected|No eligible entries|Scanning cannot prove|<h3/);
+  // The shared search row stays (disabled — nothing to filter), counts in the
+  // shared noun, and the step's rescan closes it: the review has no path bar.
+  assert.match(html, /class="sync-name-search"/);
+  assert.match(html, /placeholder="Search files…"[^>]*aria-label="Search files"[^>]*disabled/);
+  assert.match(html, /class="sync-name-search-count">0 files</);
+  assert.match(html, /class="sync-name-search-results"[\s\S]*Rescan<\/button><\/div>/);
+  assert.doesNotMatch(html, /sync-project-files-search|entries|0 selected|No eligible entries|Scanning cannot prove|<h3/);
+});
+
+test("the file review's search matches path words and counts the selections it hides", () => {
+  const row = (resourceId: string, relativePath: string): ProjectFileReviewRow => ({
+    resourceId,
+    relativePath,
+    entryType: "file",
+    state: "local_only",
+    localPresent: true,
+    storagePresent: false,
+  });
+  const cards = [
+    row("a", "docs/specs/Plan.md"),
+    row("b", "docs/readme.md"),
+    row("c", "src/plan-notes.txt"),
+  ];
+  const selected = new Set(["a", "b"]);
+  const isSelected = (card: ProjectFileReviewRow) => selected.has(card.resourceId);
+
+  const all = searchProjectFileReviewCards(cards, "  ", isSelected);
+  assert.deepEqual(all.matchingCards.map((card) => card.resourceId), ["a", "b", "c"]);
+  assert.equal(all.hiddenSelected, 0);
+
+  // Every word must occur somewhere in the path, case-insensitively — the
+  // same rule the Files activity page and the session reviews search by.
+  const plan = searchProjectFileReviewCards(cards, "PLAN", isSelected);
+  assert.deepEqual(plan.matchingCards.map((card) => card.resourceId), ["a", "c"]);
+  assert.equal(plan.hiddenSelected, 1, "the selected readme is hidden");
+
+  const specs = searchProjectFileReviewCards(cards, "docs plan", isSelected);
+  assert.deepEqual(specs.matchingCards.map((card) => card.resourceId), ["a"]);
+  assert.equal(specs.hiddenSelected, 1);
+
+  const none = searchProjectFileReviewCards(cards, "missing", isSelected);
+  assert.deepEqual(none.matchingCards, []);
+  assert.equal(none.hiddenSelected, 2);
 });
 
 const binding: ProjectBinding = {

@@ -54,7 +54,7 @@ function Preview() {
         {sidebar && <ProjectSidebar
           projects={[]} drafts={[]} activeDraftId={null} storages={shown} storageDrafts={[]}
           storageProviders={providers} storageUsage={{}} activeProjectId={null} activeStorageId={null}
-          catalogScopes={[]} activeCatalogScopeId={null} addingCatalogScope={false}
+          catalogScopes={[]} activeCatalogScopeId={null} addingProject={false} addingCatalogScope={false} addingStorage={false}
           catalogIndexOpen={false} storageIndexOpen settingsOpen={false}
           loading={false} busy={false} activityOpen={false} unreadLogs={0}
           onOpenProjects={noop} onSelectProject={noop} onRemoveProject={noop} onSelectDraft={noop}

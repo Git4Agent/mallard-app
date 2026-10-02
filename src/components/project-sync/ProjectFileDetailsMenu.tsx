@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import Icon from "../Icons";
+import SessionRowIcon from "./SessionRowIcon";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
@@ -133,7 +133,7 @@ export default function ProjectFileDetailsMenu({
         aria-controls={menuId}
         onClick={() => open ? closeMenu() : setOpen(true)}
       >
-        <Icon name="info" size={14} />
+        <SessionRowIcon name="info" />
       </button>
       <TopLayer>
         <div

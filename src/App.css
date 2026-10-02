@@ -2871,6 +2871,74 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
   flex-wrap: wrap;
   gap: 6px;
 }
+/* A Mallard Cloud storage leads with the website it lives on: the address
+   in the display face on a box of its own — the ink edge and the control's
+   cast shadow — with Copy and Open website as real buttons, and the account
+   it signs in as on one quiet line under it. The scheme recedes; the host
+   is what a browser's address bar shows. */
+.managed-cloud-address {
+  padding: 14px 14px 13px;
+  display: grid;
+  gap: 9px;
+  border-bottom: 1px solid var(--border);
+}
+.managed-cloud-address-bar {
+  min-height: 52px;
+  padding: 7px 8px 7px 9px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: var(--box-border);
+  border-radius: 12px;
+  background: var(--surface-row);
+  box-shadow: var(--shadow-control);
+}
+.managed-cloud-address-mark {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.managed-cloud-address-url {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 2px 0;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  color: var(--text-0);
+  font-family: var(--font-display);
+  font-size: var(--type-xl);
+  font-weight: var(--weight-bold);
+  line-height: 1.2;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.managed-cloud-address-scheme { color: var(--text-3); font-weight: var(--weight-medium); }
+.managed-cloud-address-url:hover .managed-cloud-address-host {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+.managed-cloud-address-verbs { flex: none; display: inline-flex; align-items: center; gap: 7px; }
+.managed-cloud-address-verbs > .btn { min-height: 32px; padding: 0 12px; }
+.managed-cloud-address-account {
+  margin: 0;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+}
+.managed-cloud-address-account b { color: var(--text-0); font-weight: var(--weight-semibold); }
+.managed-cloud-address-error { margin: 0; padding: 0 2px; color: var(--danger-text); font-size: var(--type-xs); }
 .sync-storage-editor-footer {
   min-height: 44px;
   padding: 8px 14px;
@@ -4527,6 +4595,57 @@ span.sync-path-crumb {
   filter: brightness(0) invert(1);
 }
 
+/* The Projects landing with no projects: the ride, the heading, Add. The
+   column sits a little above the page's middle. */
+.projects-welcome {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 6vh;
+  text-align: center;
+}
+
+/* The art draws its own ink frame (rx 26 of 1200 × 560); the plate adds the
+   card's offset shadow, and in dark the ring that frame loses on the paper.
+   The ride is drawn over the still, so ending it never blanks the plate. */
+.projects-welcome-art {
+  position: relative;
+  width: min(420px, 100%);
+  aspect-ratio: 1200 / 560;
+  margin-bottom: 28px;
+  border-radius: 2.2% / 4.6%;
+  box-shadow: var(--shadow-card);
+}
+
+:root[data-theme="dark"] .projects-welcome-art {
+  box-shadow: 0 0 0 2px var(--ink-line), var(--shadow-card);
+}
+
+.projects-welcome-art img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.projects-welcome h1 {
+  margin: 0;
+  color: var(--text-0);
+  font-family: var(--font-display);
+  font-size: var(--type-2xl);
+  font-weight: var(--weight-heavy);
+}
+
+.projects-welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
 .profile-links-heading-actions {
   display: flex;
   flex-direction: column;
@@ -5450,6 +5569,13 @@ span.sync-path-crumb {
 .sync-setup-section > .sync-card-heading > div > span {
   margin-top: 3px;
 }
+/* New storage's doors, as a band here: on the column without the card's
+   inset, so the doors and the rule under them close on the edge the header's
+   rule and every band below close on. */
+.sync-setup-workspace .storage-mode-doors {
+  max-width: var(--sync-setup-column);
+  padding-inline: 0;
+}
 /* Stack Name over Folder because the path is the widest value on the page. */
 .sync-setup-project-fields {
   max-width: var(--sync-setup-column);
@@ -5910,12 +6036,36 @@ span.sync-path-crumb {
   border-radius: 8px;
 }
 
-/* The Sessions/Files switch of a non-Git project: the segmented pill, seated
-   at the page's start above the panel it controls. Its tabs carry a glyph
+/* The Sessions/Files switch of a non-Git project: the segmented pill, hugging
+   its two tabs at the start of the page's search row. Its tabs carry a glyph
    and a word, so they lay out as a row rather than a text run. */
 .sync-project-view-tabs {
-  align-self: flex-start;
-  margin: 0 0 10px;
+  flex: none;
+}
+
+/* A state with no search row still leads with the switch, on a row of its
+   own, so the pill holds still as the page loads. */
+.sync-project-view-row {
+  display: flex;
+  align-items: center;
+}
+
+/* A row the switch sits on alone is the search row's height — 38px with its
+   1px rule — so the pill lands on one line in every state of both faces. */
+.sync-project-view-row {
+  min-height: 38px;
+  padding-bottom: 1px;
+}
+
+.sync-history-content > .sync-project-view-row {
+  margin-bottom: 12px;
+}
+
+/* In the workspace the Files face takes the Sessions face's edges, so the
+   switch both of them lead with holds still between them. The review keeps
+   its own inset. */
+.sync-project-tab-panel > .sync-project-files-page {
+  padding: 0 0 22px;
 }
 
 .sync-project-view-tabs > button {
@@ -7718,39 +7868,18 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 14px 16px 22px;
 }
 
-.sync-project-files-search {
-  display: flex;
-  align-items: center;
-}
-
 .sync-project-files-page p { margin: 2px 0 0; color: var(--text-2); font-size: var(--type-xs); }
 .sync-project-files-page small { color: var(--text-3); font-size: var(--type-2xs); }
+
+/* The page spaces its children with its own gap, so the shared search row
+   sheds the margin it carries on the Sessions face. */
+.sync-project-files-page > .sync-name-search { margin-bottom: 0; }
 
 .sync-project-files-page > .sync-pull-empty {
   min-height: 0;
   align-items: center;
   padding: 12px 2px;
 }
-
-.sync-project-files-search {
-  gap: 10px;
-}
-
-.sync-project-files-search input {
-  min-width: 0;
-  height: 32px;
-  flex: 1;
-  padding: 0 14px;
-  border: var(--box-border);
-  border-radius: var(--r-pill);
-  box-shadow: var(--shadow-control);
-  color: var(--text-0);
-  background: var(--bg-1);
-  outline: none;
-}
-
-.sync-project-files-search input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-.sync-project-files-search > span { color: var(--text-3); font-size: var(--type-2xs); white-space: nowrap; }
 
 .sync-name-search {
   display: flex;
@@ -7760,6 +7889,24 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   min-height: 38px;
   margin-bottom: 12px;
   border-bottom: 1px solid var(--border);
+}
+
+/* The list head as a row: the search field with its own rule, and the
+   controls that ride beside it, outside the rule — a non-Git project's
+   Sessions/Files switch ahead of the field, a rescan or the Catalog row
+   page's Add from Mallard Cloud… after it. The field's bottom margin moves
+   to the row. */
+.sync-list-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.sync-list-head > .sync-name-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
 }
 
 .sync-name-search-input {
@@ -7838,16 +7985,14 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-scan-summary summary { cursor: pointer; }
 .sync-project-files-scan-summary p { margin: 5px 0 0 16px; font-size: var(--type-2xs); }
 
-/* The Files activity list's directory band: one per folder that directly
-   holds files, labelled with the full relative path so nesting needs no
-   indentation. */
-/* The shared folder tile: every directory — "Project root" included — is a
-   framed container with a header strip, on the activity face and in both
-   reviews. Rows are the two-line session-grammar cards, riding the shipped
-   thread-list wrapper (whose scoped rules own the card grid's spacing) with
-   the gap collapsed so borders join, the commit-section way. The
-   storage-only partition leads as the cloud-tinted tile. */
-.sync-project-file-tile {
+/* The shared list tile (`ListTile`): every group a project list sorts its
+   rows into — a folder, "Project root" included, on the Files face and in
+   both Files reviews; the session list on the Sessions face — is a framed
+   container with a header strip. Rows are the two-line session-grammar
+   cards, riding the flat thread list with its frame taken off so borders
+   join, the commit-section way. The storage-only group leads as the
+   cloud-tinted tile. */
+.sync-list-tile {
   overflow: hidden;
   border: var(--box-border);
   border-radius: var(--retro-panel-radius);
@@ -7855,7 +8000,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   box-shadow: var(--shadow-card);
 }
 
-.sync-project-file-tile-head {
+.sync-list-tile-head {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -7865,65 +8010,59 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   background: var(--surface-subtle);
 }
 
-.sync-project-file-tile-head > svg { flex: 0 0 auto; color: var(--text-2); }
-/* The label wears the section headings' display face and size — the tile head
-   is this page's "Only in <storage>" row, and the two must read as one
-   voice across the Sessions and Files faces. */
-.sync-project-file-tile-head > strong {
+.sync-list-tile-head > svg { flex: 0 0 auto; color: var(--text-2); }
+/* The label wears the section headings' display face and size, so a tile
+   head and the Git face's "Only in <storage>" heading read as one voice. */
+.sync-list-tile-head > strong {
   color: var(--text-0);
   font-size: var(--type-md);
 }
 /* The display face is for chrome. A directory path or storage name came out
    of the user's data, so it reads in the normal face even inside the label —
    the same carve-out the section heading gives its storage name. */
-.sync-project-file-tile-head > strong > span {
+.sync-list-tile-head > strong > span {
   font-family: var(--font-sans);
   font-weight: var(--weight-semibold);
 }
-.sync-project-file-tile-head > small { color: var(--text-3); font-size: var(--type-2xs); }
+.sync-list-tile-head > small { color: var(--text-3); font-size: var(--type-2xs); }
 
-.sync-project-file-tile.cloud {
+.sync-list-tile.cloud {
   border-color: color-mix(in srgb, var(--thread-status-cloud) 35%, var(--accent));
 }
-.sync-project-file-tile.cloud > .sync-project-file-tile-head {
+.sync-list-tile.cloud > .sync-list-tile-head {
   background: color-mix(in srgb, var(--thread-status-cloud) 7%, var(--surface-subtle));
 }
 
-/* Inside a path-band tile the list is the tile's own rows: the flat list's
-   box (border, radius, shadow) comes off here, the same reset the
+/* Inside a tile the list is the tile's own rows: the flat list's box
+   (border, radius, shadow) comes off here, the same reset the
    branch-unmapped and storage-only groups apply, or it draws a second frame
    flush inside the tile and the tile's clip cuts its shadow. */
-.sync-project-file-tile > .sync-history-thread-list.flat {
+.sync-list-tile > .sync-history-thread-list.flat {
   gap: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
 }
-.sync-project-file-tile .sync-history-thread-card {
+.sync-list-tile .sync-history-thread-card {
   border: 0;
   border-radius: 0;
   background: transparent;
 }
-.sync-project-file-tile .sync-history-thread-card + .sync-history-thread-card {
+.sync-list-tile .sync-history-thread-card + .sync-history-thread-card {
   border-top: 1px solid var(--border-mid);
 }
 
 /* The merged cloud tile keeps each row's directory as a quiet prefix. */
-.sync-project-file-tile .sync-history-thread-title > strong > span {
+.sync-list-tile .sync-history-thread-title > strong > span {
   color: var(--text-3);
   font-weight: var(--weight-regular);
 }
 
-/* The storage side this Mac does not hold leads the list under the same
-   section heading the catalog and sessions pages use. This page spaces its
-   children with its own 12px flex gap, so the shared heading sheds its stack
-   margins here and takes the bands' 2+6px inset; the sums land where the
-   catalog page lands — 18px above a heading, 6px from heading to a bare card
-   list. */
-.sync-project-files-page > .sync-history-section-heading {
-  margin: 6px 2px -6px;
-  padding: 0 6px;
+/* The non-Git Sessions face spaces its tiles the way the Files face does. */
+.sync-history-flat-groups {
+  display: grid;
+  gap: 12px;
 }
 
 /* ── Catalog cards ───────────────────────────────────────────────────────── */
@@ -7946,6 +8085,16 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 .catalog-card .sync-history-thread-title > strong {
   flex: 0 1 auto;
+}
+
+/* An item page's leaf crumb wears the pet's own preview at the size a
+   session leaf's provider mark takes. */
+.catalog-leaf-mark {
+  width: 16px;
+  height: 17px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  object-fit: contain;
 }
 
 /* The pet's idle frame in a fixed 44x48 tile — the atlas cell's 192:208 on
@@ -8551,6 +8700,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
    band rounds its own corners instead; the prose wraps anywhere and code
    blocks scroll in their own box, so nothing else needs the clip. */
 .session-detail-card {
+  min-width: 0;
   border: var(--box-border);
   border-radius: 8px;
   background: var(--surface-row);
@@ -8659,6 +8809,24 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   padding: 0;
   border: 0;
   background: transparent;
+}
+
+.session-detail-event-copy .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25em 0;
+}
+
+.session-detail-event-copy .katex-display > .katex {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}
+
+.session-detail-event-copy .katex-error {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .session-detail-event-copy blockquote {
@@ -9819,7 +9987,7 @@ body {
 .sync-sync-review-header h1,
 .sync-sync-review-header h2,
 .sync-history-section-heading h2,
-.sync-project-file-tile-head > strong,
+.sync-list-tile-head > strong,
 .sync-history-branch-state,
 .sync-history-preserved-badge,
 .sync-sync-review-tabs > button,
@@ -11778,6 +11946,13 @@ span.sync-update-pill {
   border-bottom-right-radius: calc(var(--retro-panel-radius) - 2px);
 }
 
+/* In a list tile the first row sits under the head strip, not the frame's
+   rounded top, so its hover tint keeps square corners there. */
+.sync-list-tile > .sync-history-thread-list.flat > .sync-history-thread-card:first-child {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
 /* The empty sentence already sits in the list's own frame — and it is the
    frame's only child, so it owns all four inner corners. Its own 5px radius
    would paint the hatch square over the frame's 12px inner curve, eating the
@@ -11796,10 +11971,10 @@ span.sync-update-pill {
 }
 
 /* A catalog item is a standalone box on its page — the full grammar — where
-   a flat review row stays a quiet list entry. Inside a Files path-band tile
-   the same card is a row of the tile's own box, so the tile context is
-   carved out here rather than overridden after the fact. */
-.sync-history-thread-card.catalog-card:not(.sync-project-file-tile .sync-history-thread-card) {
+   a flat review row stays a quiet list entry. Inside a list tile the same
+   card is a row of the tile's own box, so the tile context is carved out
+   here rather than overridden after the fact. */
+.sync-history-thread-card.catalog-card:not(.sync-list-tile .sync-history-thread-card) {
   border: var(--box-border);
   border-radius: var(--retro-panel-radius);
   box-shadow: var(--shadow-card);
@@ -12981,3 +13156,8 @@ span.sync-update-pill {
 .repo-list-empty { margin: -4px 0 0; color: var(--text-3); font-family: var(--font-sans); font-size: var(--type-xs); }
 .repo-answer-line { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); font-family: var(--font-sans); font-size: var(--type-xs); }
 .repo-answer-line svg { color: var(--success-text); }
+
+.catalog-cloud-connections { margin: 16px 0; padding: 18px; border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--bg-1); }
+.catalog-cloud-connect-actions, .catalog-cloud-item { display: flex; align-items: center; gap: 8px; }
+.catalog-cloud-connections .repo-list-head { display: flex; align-items: center; justify-content: space-between; }
+.catalog-cloud-error { max-width: 280px; font-size: var(--type-xs); color: var(--danger-text); }

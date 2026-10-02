@@ -2,11 +2,7 @@ import { useId, useRef, useState } from "react";
 import { clockOptions } from "../../clock";
 import Icon, { type IconName } from "../Icons";
 import { DismissButton } from "../notice/Notice";
-import type {
-  SyncOutcome,
-  SyncOutcomeAction,
-  SyncOutcomeRowStatus,
-} from "./syncOutcome";
+import type { SyncOutcomeView, OutcomeAction, OutcomeActionPresentation, SyncOutcomeRowStatus } from "./outcome";
 
 const ROW_PRESENTATION: Record<
   SyncOutcomeRowStatus,
@@ -16,24 +12,10 @@ const ROW_PRESENTATION: Record<
   held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
   preserved: { icon: "git-fork", className: "preserved", label: "Kept independently" },
   failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
+  not_attempted: { icon: "git-compare-arrows", className: "unavailable", label: "Not attempted" },
+  skipped: { icon: "git-compare-arrows", className: "unavailable", label: "Skipped" },
   not_pulled: { icon: "git-compare-arrows", className: "diverged", label: "Not pulled" },
 };
-
-function actionIcon(action: SyncOutcomeAction): IconName {
-  if (action.kind === "open_pull") return "download";
-  return "refresh";
-}
-
-function actionTitle(action: SyncOutcomeAction): string | undefined {
-  if (action.kind === "after_pull_action") return action.title;
-  return undefined;
-}
-
-function actionKey(action: SyncOutcomeAction, index: number): string {
-  return action.kind === "after_pull_action"
-    ? `${action.kind}:${action.offer.provider}:${action.offer.action_id}:${index}`
-    : `${action.kind}:${index}`;
-}
 
 function formatTime(seconds: number): string {
   return new Date(seconds * 1_000).toLocaleString(undefined, {
@@ -44,20 +26,22 @@ function formatTime(seconds: number): string {
 }
 
 /**
- * A completed project sync rendered as a full-width section of its storage
- * card. The summary announces the result; the per-session rows stay behind a
+ * A completed sync rendered as a full-width section of its storage
+ * card. The summary announces the result; the per-item rows stay behind a
  * disclosure so assistive technology does not repeat the entire result list.
  */
-export default function SyncOutcomeNotice({
+export default function SyncOutcomeNotice<A extends OutcomeAction>({
   outcome,
   busy = false,
   onAction,
   onDismiss,
+  presentAction = (action, index) => ({ key: `${action.kind}:${index}`, icon: "refresh", available: true }),
 }: {
-  outcome: SyncOutcome;
+  outcome: SyncOutcomeView<A>;
   busy?: boolean;
-  onAction?: (action: SyncOutcomeAction) => void;
+  onAction?: (action: A) => void;
   onDismiss: () => void;
+  presentAction?: (action: A, index: number) => OutcomeActionPresentation;
 }) {
   const [open, setOpen] = useState(outcome.defaultOpen);
   const rendered = useRef(outcome);
@@ -69,15 +53,9 @@ export default function SyncOutcomeNotice({
   /* A strip of the storage card in the notice recipe: the rung's word leads
      the title, the way every notice names its own severity. */
   const word = outcome.tone === "success" ? "Done" : "Warning";
-  const runnableActions = outcome.actions.filter((action) => (
-    action.kind !== "after_pull_action" || action.offer.available
-  ));
-  const manualActions = outcome.actions.filter((action): action is Extract<
-    SyncOutcomeAction,
-    { kind: "after_pull_action" }
-  > => (
-    action.kind === "after_pull_action" && !action.offer.available
-  ));
+  const presented = outcome.actions.map((action, index) => ({ action, presentation: presentAction(action, index) }));
+  const runnableActions = presented.filter(({ presentation }) => presentation.available);
+  const manualActions = presented.filter(({ presentation }) => !presentation.available);
 
   return (
     <div
@@ -100,16 +78,16 @@ export default function SyncOutcomeNotice({
         </span>
         {runnableActions.length > 0 && onAction && (
           <span className="sync-outcome-actions">
-            {runnableActions.map((action, index) => (
+            {runnableActions.map(({ action, presentation }) => (
               <button
-                key={actionKey(action, index)}
+                key={presentation.key}
                 type="button"
                 className="btn btn-ghost"
                 disabled={busy}
-                title={actionTitle(action)}
+                title={presentation.title}
                 onClick={() => onAction(action)}
               >
-                <Icon name={actionIcon(action)} size={13} />
+                <Icon name={presentation.icon} size={13} />
                 {action.label}
               </button>
             ))}
@@ -136,8 +114,8 @@ export default function SyncOutcomeNotice({
       )}
       {manualActions.length > 0 && (
         <div className="sync-outcome-guidance">
-          {manualActions.map((action, index) => (
-            <p key={actionKey(action, index)}>{action.title}</p>
+          {manualActions.map(({ presentation }) => (
+            <p key={presentation.key}>{presentation.title}</p>
           ))}
         </div>
       )}

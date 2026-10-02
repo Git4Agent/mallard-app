@@ -22,7 +22,7 @@ import { projectSyncApi } from "./api";
 import { LoadingBone } from "../LoadingScaffold";
 import { rowReceipt, statusLine, useSettingsReceipts, type RowReceipt, type StatusLine } from "./settingsReceipts";
 import { AUTO_CHECK_INTERVAL_HOURS, useInstalledVersion, type AppUpdates } from "../AppUpdater";
-import { formatRelativeTime } from "./model";
+import { formatRelativeTime } from "../../clock";
 
 /**
  * The app-wide Settings page: a primary-nav destination like the Storages

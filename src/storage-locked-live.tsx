@@ -1,6 +1,8 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { StorageLockedForm, StorageReconnectBand, formFromDraft, secretPresenceOf } from "./components/project-sync/StorageSettings";
+import ManagedCloudAddress from "./components/managed-cloud/ManagedCloudAddress";
+import { isManagedCloudStorage, managedCloudAccount } from "./components/project-sync/RepositoryAddressPicker";
 import type { StorageConnectionHealth, StorageProviderDescriptor, StorageSetupDraft, StorageSummary } from "./types";
 import "./App.css";
 
@@ -35,11 +37,32 @@ const LOCAL: StorageProviderDescriptor = {
   fields: [{ field_id: "directory", label: "Location path", kind: "directory", required: true }],
   secrets: [], managed_secret_id: null,
 };
+const MALLARD: StorageProviderDescriptor = {
+  key: "managed_cloud", config_version: 1, display_name: "Mallard Cloud", description: "", display_rank: 5, icon: "cloud",
+  clear_mode: "unavailable", local_setup: "managed_cloud", fields: [],
+  secrets: [{ secret_id: "account_token", label: "Sign-in token", required: true, help: "Issued at sign-in and valid 90 days. Reconnect to renew it." }],
+  managed_secret_id: "account_token",
+};
+const mallardSummary = (connection: StorageConnectionHealth | null = null): StorageSummary => ({
+  storage_id: connection ? "storage-mallard-refused" : "storage-mallard", name: "Mallard Cloud octocat", provider: "managed_cloud",
+  config_version: 1, provider_label: "Mallard Cloud", icon: "cloud", available: true,
+  summary: [
+    { field_id: "account_login", label: "Account", value: "octocat", is_path: false },
+    { field_id: "service_origin", label: "Service", value: "https://mallard-ai.com", is_path: false },
+  ],
+  settings: { service_origin: "https://mallard-ai.com", account_id: "user_1", account_login: "octocat" },
+  secrets: [{ secret_id: "account_token", present: true }], connection,
+});
 const refusal: StorageConnectionHealth = {
   state: "reconnect_required", code: "r2_access_denied", observed_at: 1,
   message: "Cloudflare R2 rejected the stored access key (403 · InvalidAccessKeyId).",
 };
 const storages: { storage: StorageSummary; descriptor: StorageProviderDescriptor; verified?: number | null }[] = [
+  { descriptor: MALLARD, verified: Date.now() - 120_000, storage: mallardSummary() },
+  { descriptor: MALLARD, storage: mallardSummary({
+    state: "token_expired", code: "managed_cloud_reconnect_required", observed_at: 1,
+    message: "Mallard Cloud rejected the saved sign-in. Reconnect to sign in again.",
+  }) },
   { descriptor: R2, verified: Date.now() - 180_000, storage: {
     storage_id: "storage-r2", name: "mallard-quick", provider: "r2", config_version: 1, provider_label: "Cloudflare R2", icon: "cloud", available: true, summary: [],
     settings: { api_url: "https://023e105f4ecef8ad9ca31a8372d0c353.r2.cloudflarestorage.com", bucket: "mallard-quick", account_id: "023e105f4ecef8ad9ca31a8372d0c353", access_key_id: "4a2b9c1d7e8f0a3b5c6d7e8f9a0b1c2d" },
@@ -61,6 +84,7 @@ const storages: { storage: StorageSummary; descriptor: StorageProviderDescriptor
   } },
 ];
 const VALUES: Record<string, string> = {
+  account_token: "desktop-session-demo-0123456789abcdef",
   secret_access_key: "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4",
   access_token: "sl.u.AFyQ3nR8kZt0b2LxPq9WvJm7Hc4YeTd1oSaG6NiUf5XrBwK2lM8pDzE0vC3hQ7yJ",
   refresh_token: "rt_9XkQ2mPz7LbT4vWn8HcJ3sYd6FgR1aE5uKoI0NxZ",
@@ -111,6 +135,10 @@ function Card({ storage, descriptor, verified = null }: { storage: StorageSummar
             />
           ),
         }}
+        lead={isManagedCloudStorage(storage) ? {
+          band: <ManagedCloudAddress account={managedCloudAccount(storage)} onOpenUrl={(url) => window.open(url, "_blank")} />,
+          facts: ["account_login", "service_origin"],
+        } : undefined}
       />
     </div>
   );

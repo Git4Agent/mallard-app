@@ -1,7 +1,9 @@
-import { createContext, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
 import Notice from "../notice/Notice";
 import { menuOptions, moveMenuFocus } from "./menuKeyboard";
+import TopLayer from "./TopLayer";
+import { useDebugPopoverPlacement } from "./debugPopoverPlacement";
 
 /**
  * The workspace header is one row: a trail that says where you are, and the
@@ -482,7 +484,17 @@ export function PathBarPopover({
   const panelId = `${useId().replace(/[^a-zA-Z0-9_-]/g, "-")}-panel`;
   const anchorRef = useRef<HTMLSpanElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const open = !disabled && bar?.open === key;
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = !disabled && (bar ? bar.open === key : localOpen);
+  const close = useCallback((returnFocus: boolean) => {
+    if (bar) bar.close(key, returnFocus);
+    else {
+      setLocalOpen(false);
+      if (returnFocus) triggerRef.current?.focus();
+    }
+  }, [bar, key]);
+  const placement = useDebugPopoverPlacement(anchorRef, panelRef, !bar && open, () => close(false), false);
   const register = bar?.registerPopover;
 
   useEffect(() => {
@@ -492,14 +504,38 @@ export function PathBarPopover({
   }, [register, key]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !bar) return;
     const frame = window.requestAnimationFrame(() => {
       panelRef.current?.querySelector<HTMLElement>("button:not([disabled]), a[href]")?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [open]);
+  }, [open, bar]);
 
-  const close = (returnFocus: boolean) => bar?.close(key, returnFocus);
+  useEffect(() => {
+    if (bar || !open) return;
+    const outside = (event: MouseEvent) => {
+      if (event.target instanceof Node && !anchorRef.current?.contains(event.target) && !panelRef.current?.contains(event.target)) close(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+    };
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [bar, open, close]);
+
+  const panel = open && (
+    <div ref={panelRef} id={panelId} className="sync-path-menu end sync-path-popover-panel" role="dialog" aria-label={label}
+      style={bar ? undefined : placement ? { position: "fixed", right: "auto", zIndex: 100, ...placement } : { visibility: "hidden" }}>
+      {children(close)}
+    </div>
+  );
   return (
     <span
       ref={anchorRef}
@@ -508,11 +544,11 @@ export function PathBarPopover({
         // Only a move to a node outside closes it; a blur to nowhere is the
         // panel hiding itself or a click on its own padding.
         const next = event.relatedTarget;
-        if (open && next instanceof Node && !anchorRef.current?.contains(next)) close(false);
+        if (open && next instanceof Node && !anchorRef.current?.contains(next) && !panelRef.current?.contains(next)) close(false);
       }}
     >
       <button
-        ref={bar?.registerOpener(key)}
+        ref={bar ? bar.registerOpener(key) : triggerRef}
         type="button"
         className={className}
         aria-haspopup="dialog"
@@ -521,15 +557,11 @@ export function PathBarPopover({
         aria-label={ariaLabel}
         data-tooltip={open ? undefined : tooltip}
         disabled={disabled}
-        onClick={() => bar?.toggle(key)}
+        onClick={() => bar ? bar.toggle(key) : setLocalOpen((value) => !value)}
       >
         {face}
       </button>
-      {open && (
-        <div ref={panelRef} id={panelId} className="sync-path-menu end sync-path-popover-panel" role="dialog" aria-label={label}>
-          {children(close)}
-        </div>
-      )}
+      {bar ? panel : <TopLayer>{panel}</TopLayer>}
     </span>
   );
 }

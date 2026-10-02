@@ -45,9 +45,29 @@ resources portable across teammates and machines.
   and grows one row per **(provider home × resource kind)** the user adds. A
   row's page works like a project's: one storage chosen in the path bar, one
   list of resources each wearing the same status badge a thread wears, and
-  Push and Pull as page verbs with a review. Pairing a resource with a storage
-  is a side effect of those verbs, not a step the user takes; Refresh, Unlink,
-  and local Fork stay behind the individual resource.
+  Push and Pull as page verbs with a review. Storage setup returns to the
+  originating Catalog row. On Mallard Cloud, each item is its own repository
+  and has its own page, as a project does: its name opens it, and its path
+  bar carries the Cloud chip (status, release, draft) and Pull and Push for
+  that item alone. An item with no repository shows the private one its first
+  Push creates, and Change… opens the project's connect dialog: create it now,
+  or choose one by address or invite code. A connected item keeps its
+  repository. The row's + adds someone else's item from Mallard Cloud, and so
+  does Add Catalog resource's From Mallard Cloud door; nothing is pulled on its
+  own. An item two repositories hold waits on its page for a choice. Push
+  reviews name each item's repository, new ones included.
+  Push and Pull show preparation, per-item progress, and persistent results;
+  a partial Push keeps successful items and offers a fresh review of the rest.
+  Repository bindings are machine-local schema-1 state; portable schemas stay
+  at 1. Refresh, Unlink, and local Fork remain available on each Catalog row.
+  Add Catalog resource is New project's two steps: the agent home, chosen as
+  the project chooses its agents (one card per provider, the saved profile
+  preselected when the machine has exactly one, Custom path… and Browse for
+  any other), then that home's setup page — one kind as the Kind cards with
+  what the home holds on each, the storage, Finish — making one row per
+  pass. Setup pages list storages Mallard Cloud first, then the other
+  clouds, then local folders, and open on the first; a Catalog row opens on
+  the storage a row used last.
 
 The first Library catalog supports Codex and Claude skills/plugins and Codex
 pet v1/v2. Pet formats are separate resources — and separate menu rows — and

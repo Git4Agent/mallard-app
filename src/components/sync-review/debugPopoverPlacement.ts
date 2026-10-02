@@ -36,6 +36,7 @@ export function useDebugPopoverPlacement(
   panelRef: RefObject<HTMLElement | null>,
   open: boolean,
   onDismiss: () => void,
+  anchorToRow = true,
 ): DebugPopoverPlacement | null {
   const [placement, setPlacement] = useState<DebugPopoverPlacement | null>(null);
   const dismissRef = useRef(onDismiss);
@@ -49,14 +50,13 @@ export function useDebugPopoverPlacement(
     const panel = panelRef.current;
     // Anchor to the row so the panel stays within the card instead of following
     // the trigger icon's variable position.
-    const anchorEl = rootRef.current?.closest<HTMLElement>(".sync-history-thread-card")
-      ?? rootRef.current;
+    const anchorEl = (anchorToRow ? rootRef.current?.closest<HTMLElement>(".sync-history-thread-card") : null) ?? rootRef.current;
     if (!panel || !anchorEl) return;
     const anchor = anchorEl.getBoundingClientRect();
 
     const width = Math.max(
       POPOVER_MIN_WIDTH,
-      Math.min(POPOVER_WIDTH, anchor.width - POPOVER_INSET * 2),
+      Math.min(POPOVER_WIDTH, anchorToRow ? anchor.width - POPOVER_INSET * 2 : window.innerWidth - POPOVER_EDGE * 2),
     );
     // Measure at the width it will be drawn at, uncapped, before it paints —
     // the value rows wrap, so height is meaningless at any other width.
@@ -77,12 +77,12 @@ export function useDebugPopoverPlacement(
       top: dropUp ? anchor.top - POPOVER_GAP - maxHeight : anchor.bottom + POPOVER_GAP,
       left: Math.max(
         POPOVER_EDGE,
-        Math.min(anchor.left + POPOVER_INSET, window.innerWidth - width - POPOVER_EDGE),
+        Math.min(anchorToRow ? anchor.left + POPOVER_INSET : anchor.right - width, window.innerWidth - width - POPOVER_EDGE),
       ),
       width,
       maxHeight,
     });
-  }, [rootRef, panelRef, open]);
+  }, [rootRef, panelRef, open, anchorToRow]);
 
   useEffect(() => {
     if (!open) return;

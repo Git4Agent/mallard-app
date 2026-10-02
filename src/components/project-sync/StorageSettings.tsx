@@ -11,7 +11,8 @@ import type {
 } from "../../types";
 import Icon, { storageIconName, type IconName } from "../Icons";
 import { openExternalUrl } from "./externalLink";
-import { compactProjectPath, formatRelativeTime } from "./model";
+import { compactProjectPath } from "./model";
+import { formatRelativeTime } from "../../clock";
 import { rowReceipt, useSettingsReceipts } from "./settingsReceipts";
 
 /**
@@ -754,7 +755,8 @@ type Revealed = { value: string; hidesAt: number };
  * because a destination is fixed for the life of a storage. Two verbs
  * remain — the name, which saves itself, and Test connection — plus the
  * one editable moment, replacing a refused credential, which the workspace
- * seats here as `reconnect.band`.
+ * seats here as `reconnect.band`. A provider whose facts deserve more than a
+ * read-only field gets a `lead` band from the workspace, under those two.
  *
  * A saved secret is not in the page. Show asks the backend for that one
  * value and the field masks itself again after SECRET_REVEAL_MS, on Hide,
@@ -771,6 +773,7 @@ export function StorageLockedForm({
   testing,
   verifiedAt,
   reconnect,
+  lead,
 }: {
   storage: StorageSummary;
   descriptor: StorageProviderDescriptor;
@@ -790,6 +793,12 @@ export function StorageLockedForm({
     onOpen: () => void;
     /** The secrets-only editor, seated under the guide row while open. */
     band: ReactNode;
+  };
+  /** The provider's own band, and the summary facts it already states: the
+   *  fields grid leaves those out rather than saying them twice. */
+  lead?: {
+    band: ReactNode;
+    facts: readonly string[];
   };
 }) {
   const fieldIdPrefix = useId();
@@ -889,9 +898,11 @@ export function StorageLockedForm({
   /* What the adapter reports about the storage beyond its typed fields: a
      folder's name, the signed-in account, the date a sign-in runs out.
      Read-only facts in the fields' grammar; a path fact is the folder
-     field's own. */
+     field's own, and a fact the lead band states is the band's. */
   const extraFacts = storage.summary.filter((fact) => (
-    !fact.is_path && !descriptor.fields.some((field) => field.field_id === fact.field_id)
+    !fact.is_path
+    && !descriptor.fields.some((field) => field.field_id === fact.field_id)
+    && !lead?.facts.includes(fact.field_id)
   ));
   const managed = hasManagedCredentials(descriptor, presence);
   const suspended = connectionSuspends(storage.connection);
@@ -965,6 +976,7 @@ export function StorageLockedForm({
         </div>
       )}
       {reconnect.open && reconnect.band}
+      {lead?.band}
 
       {folderFields.map((field) => (
         <label key={field.field_id} className="sync-folder-field compact">

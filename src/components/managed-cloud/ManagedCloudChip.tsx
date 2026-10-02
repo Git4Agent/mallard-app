@@ -1,8 +1,9 @@
+import type { ManagedCloudStatus } from "./types";
 import { useEffect, useState } from "react";
 import Icon, { type IconName } from "../Icons";
 import { writeClipboardText } from "../sync-review/clipboard";
 import { PathBarPopover } from "../sync-review/SyncPathBar";
-import type { ManagedCloudStatus } from "../../types";
+
 import {
   cloudContributor, cloudFacts, cloudHeadline, cloudReleaseUrl, cloudStatusNotice, cloudVerbs, cloudVersionUrl, discardDraftQuestion,
 } from "./managedCloudLink";
@@ -204,8 +205,9 @@ export function ManagedCloudPanel({
 }
 
 export default function ManagedCloudChip({
-  status, storageName, busy, refreshing, ...actions
+  status, storageName, busy, refreshing, id = "managed-cloud", ...actions
 }: ManagedCloudChipActions & {
+  id?: string;
   /** Null while the first answer is on its way: the chip checks, inert. */
   status: ManagedCloudStatus | null;
   storageName: string;
@@ -216,7 +218,7 @@ export default function ManagedCloudChip({
   const name = `Mallard Cloud: ${head.word}. ${head.line}`;
   return (
     <PathBarPopover
-      id="managed-cloud"
+      id={id}
       label="Mallard Cloud"
       className={`sync-path-attention sync-path-cloud-status ${status ? head.tone : "checking"}`}
       ariaLabel={name}

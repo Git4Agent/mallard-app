@@ -8,7 +8,7 @@ import {
   PREPARING_GATE_MS,
   createReviewPreparing,
   type PreparingTimers,
-} from "../../src/components/project-sync/reviewPreparing";
+} from "../../src/components/sync-review/reviewPreparationLifecycle";
 
 interface FakeTimer { run: () => void; ms: number; cleared: boolean }
 

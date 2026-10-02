@@ -4,25 +4,36 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StorageCatalogPage from "../../src/components/storage-catalog/StorageCatalogPage";
 import CatalogIndexPage from "../../src/components/storage-catalog/CatalogIndexPage";
+import CatalogConnectDialog from "../../src/components/storage-catalog/CatalogConnectDialog";
 import { storageCatalogApi } from "../../src/components/storage-catalog/api";
 import {
   actionLabel,
   catalogAddChoices,
+  catalogChoiceKey,
+  catalogDefaultKind,
+  catalogDefaultStorage,
   catalogDoors,
+  catalogKindCardFoot,
+  catalogKindCards,
   catalogNoun,
   catalogPresentation,
   catalogProviderList,
   catalogScopeLabel,
   catalogScopeViews,
   catalogPullRecommendation,
+  catalogStorageHint,
   catalogStorageRepositoryViews,
   filterCatalogPullReviewItems,
   rowStatus,
   rowStatusLabel,
+  unambiguousProfile,
 } from "../../src/components/storage-catalog/model";
+import { formatRelativeTime } from "../../src/clock";
 import type {
   CatalogCapabilityDescriptor,
+  CatalogCloudRepository,
   CatalogProfile,
+  CatalogProfileHolding,
   CatalogPullAction,
   CatalogScopeDto,
   CatalogScopePullItem,
@@ -31,6 +42,8 @@ import type {
 } from "../../src/components/storage-catalog/types";
 
 const commandNames = [
+  "list_catalog_cloud_repositories", "list_catalog_cloud_shared", "resolve_catalog_cloud_repository", "join_catalog_cloud_repository",
+  "connect_catalog_cloud_repository", "create_catalog_cloud_repository", "get_catalog_cloud_status", "request_catalog_cloud_release", "discard_catalog_cloud_draft",
   "apply_catalog_resource_fork",
   "apply_catalog_scope_pull",
   "apply_catalog_scope_push",
@@ -38,6 +51,7 @@ const commandNames = [
   "delete_catalog_scope",
   "finish_catalog_unfinished_push",
   "get_catalog_resource_preview",
+  "inspect_catalog_resource_profile",
   "link_catalog_scope_storage",
   "list_catalog_capabilities",
   "list_catalog_resource_profiles",
@@ -49,6 +63,7 @@ const commandNames = [
   "prepare_catalog_resource_fork",
   "prepare_catalog_scope_pull",
   "prepare_catalog_scope_push",
+  "probe_catalog_resource_profile",
   "rename_catalog_resource_profile",
   "save_catalog_resource_profile",
   "unlink_catalog_scope_storage",
@@ -186,6 +201,8 @@ test("the Catalog API exposes only the scope-level command surface", () => {
   const callers = [
     readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8"),
     readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8"),
+    readFileSync("src/components/storage-catalog/CatalogHomeStep.tsx", "utf8"),
+    readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8"),
   ].join("\n");
   const invoked = [...source.matchAll(/invoke(?:<[^>]+>)?\("([^"]+)"/g)]
     .map((match) => match[1])
@@ -196,7 +213,7 @@ test("the Catalog API exposes only the scope-level command surface", () => {
     /storage_catalog_binding|prepare_storage_catalog|publish_storage_catalog|apply_storage_catalog|catalog_profiles|setup_draft/,
   );
   for (const method of [
-    "listCapabilities", "listProfiles", "saveProfile", "renameProfile",
+    "listCapabilities", "listProfiles", "saveProfile", "renameProfile", "probeProfile", "inspectProfile",
     "createScope", "listScopeResources", "getPreview", "linkScopeStorage",
     "unlinkScopeStorage", "openProfileApp", "openProfileTerminal",
     "preparePush", "applyPush", "finishUnfinishedPush", "preparePull", "applyPull",
@@ -351,15 +368,6 @@ test("Catalog Pull review keeps only cloud-outstanding and divergent rows", () =
     { id: "local", capability: CODEX_PLUGINS, state: "local_changed", relation: "local_changed", localPresent: true, visible: false },
     { id: "blocked", capability: CODEX_PETS_V1, state: "blocked", relation: "blocked", localPresent: true, visible: false },
   ];
-  const rows: CatalogScopeRow[] = cases.map((candidate) => ({
-    row_id: `resource:${candidate.id}`,
-    display_name: candidate.id,
-    resource_id: candidate.id,
-    state: candidate.state,
-    local_present: candidate.localPresent,
-    remote_present: true,
-    warnings: [],
-  }));
   const items: CatalogScopePullItem[] = cases.map((candidate) => ({
     item: {
       resource_id: candidate.id,
@@ -379,7 +387,7 @@ test("Catalog Pull review keeps only cloud-outstanding and divergent rows", () =
   }));
 
   assert.deepEqual(
-    filterCatalogPullReviewItems(items, rows).map((item) => item.item.resource_id),
+    filterCatalogPullReviewItems(items).map((item) => item.item.resource_id),
     cases.filter((candidate) => candidate.visible).map((candidate) => candidate.id),
   );
 });
@@ -497,6 +505,7 @@ function renderScopePage(scope: CatalogScopeView = scopeView) {
       scope={scope}
       scopes={[scopeView, unavailableScope]}
       storages={STORAGES}
+      capabilities={CAPABILITIES}
       appActions={[]}
       onOpenScope={() => undefined}
       onOpenStorageDetails={() => undefined}
@@ -534,7 +543,7 @@ test("an unavailable row states the backend's reason and offers no link, push, o
   // made refuses first.
   assert.match(page, /if \(!scope\.available\) \{\s*setLoading\(false\);\s*return;\s*\}[\s\S]*?storageCatalogApi\.listScopeResources\(/);
   assert.match(page, /if \(!scope\.available\) throw new Error\(unavailableReason\);[\s\S]*?storageCatalogApi\.linkScopeStorage\(/);
-  assert.match(page, /const syncDisabled = busy \|\| !storageId \|\| loading \|\| unavailable;/);
+  assert.match(page, /const syncDisabled = busy \|\| !storageId \|\| loading \|\| unavailable \|\| cloudClosedReason !== null\s*\|\| \(managedCloud && mode\.kind !== "list"\);/);
   assert.match(page, /const syncDisabledReason = unavailable\s*\? unavailableReason/);
 
   // The index card says the same thing where its profile fact goes.
@@ -597,16 +606,31 @@ test("the Add chooser lists the backend's capabilities in its order and records 
     [["Skills", "lightbulb"], ["Plugins", "catalog-plugin"], ["Pets v1", "catalog-pet-v1"], ["Pets v2", "catalog-pet-v2"]],
   );
 
-  // The workspace draws exactly these choices, and Add records the one
-  // descriptor the two choices name.
-  const add = readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8");
-  assert.match(add, /const choices = useMemo\(\(\) => catalogDoors\(capabilities\), \[capabilities\]\);/);
-  assert.match(add, /role="radiogroup"[\s\S]*?choices\.map\(\(option\) => \{/);
-  assert.match(add, /<Icon name=\{option\.icon\} size=\{24\} \/>/);
-  assert.match(add, /<strong>\{option\.label\}<\/strong>/);
-  assert.match(add, /catalogProviderList\(option\.providers\.map\(\(capability\) => capability\.provider_label\)\)/);
-  assert.match(add, /const descriptor = choice\?\.providers\.find\(\(capability\) => capability\.provider === provider\) \?\? null;/);
-  assert.match(add, /storageCatalogApi\.createScope\(descriptor, chosenProfileId\)/);
+  // The setup page draws the same shapes as cards — the capabilities the
+  // home's provider registers, in the registry's order — and Finish records
+  // the one card chosen, on the one home chosen a step earlier.
+  const codexHome = { profile_id: "catprofile-1", provider: "codex" };
+  assert.deepEqual(
+    catalogKindCards(CAPABILITIES, codexHome, [], null).map((card) => [card.capability.label, card.key]),
+    [
+      ["Skills", catalogChoiceKey(CODEX_SKILLS)],
+      ["Plugins", catalogChoiceKey(CODEX_PLUGINS)],
+      ["Pets v1", catalogChoiceKey(CODEX_PETS_V1)],
+      ["Pets v2", catalogChoiceKey(CODEX_PETS_V2)],
+    ],
+  );
+  assert.deepEqual(
+    catalogKindCards(CAPABILITIES, { profile_id: "catprofile-3", provider: "claude" }, [], null).map((card) => card.capability.label),
+    ["Skills", "Plugins"],
+  );
+  const setup = readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8");
+  assert.match(setup, /const cards = catalogKindCards\(capabilities, profile, scopes, inspection\?\.holdings \?\? null\);/);
+  assert.match(setup, /role="radiogroup" aria-label="Resource kind"[\s\S]*?cards\.map\(\(candidate\) => \{/);
+  assert.match(setup, /className=\{`setup-choice-card\$\{active \? " active" : ""\}`\}/);
+  assert.match(setup, /<Icon name=\{catalogPresentation\(candidate\.capability\)\.icon\} size=\{24\} \/>/);
+  assert.match(setup, /\{candidate\.capability\.label\}/);
+  assert.match(setup, /\{catalogKindCardFoot\(candidate\)\}/);
+  assert.match(setup, /storageCatalogApi\.createScope\(card\.capability, profile\.profile_id\)/);
 
   // And the call sends the four coordinate fields under Tauri's camelCase
   // keys — captured at the bridge, where the desktop app would receive it.
@@ -774,15 +798,17 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.match(page, /verbs=\{\["Mark reviewed", "Reviewed"\]\}/);
   assert.match(page, /verbs=\{\["Approve overwrite", "Approved"\]\}/);
   assert.doesNotMatch(page, /Reviewed this warning — |I understand this replaces/);
-  // The count rides the verb at the point of commitment.
-  assert.match(page, /Push \{pushSelected\.size\}/);
-  assert.match(page, /Pull \{pullReviewSelectedCount\}/);
+  // The count rides the verb at the point of commitment; on Mallard Cloud
+  // Push says only Push, as a project's does.
+  assert.match(page, /`Push \$\{pushSelected\.size\}`/);
+  assert.match(page, /`Pull \$\{pullReviewSelectedCount\}`/);
 });
 
 test("an empty Catalog review's footer holds only the way back to the page it closes onto", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // The exit takes the commit's slot: the footer's only button, a box rather
-  // than the gold or a ghost, named for the page headed by the scope's label.
+  // than the gold or a ghost, named for the page it lands on: the item's, or
+  // the one headed by the scope's label.
   for (const [empty, verb] of [["selectableRows", "Push"], ["reviewItems", "Pull"]] as const) {
     const footer = page.match(new RegExp(
       `<footer className="sync-inline-action-footer sync-sync-review-footer">\\s*\\{${empty}\\.length === 0 \\? \\([\\s\\S]*?</footer>`,
@@ -790,11 +816,11 @@ test("an empty Catalog review's footer holds only the way back to the page it cl
     assert.ok(footer, `${verb} footer branches on an empty review`);
     const [exitBranch, commitBranch] = footer.split(") : (");
     assert.match(exitBranch, /className="btn sync-review-exit"/);
-    assert.match(exitBranch, new RegExp(`title=\\{\`Close ${verb} review — back to \\$\\{scope\\.label\\}\`\\}`));
-    assert.match(exitBranch, /<span>\{`Back to \$\{scope\.label\}`\}<\/span>/);
+    assert.match(exitBranch, new RegExp(`title=\\{\`Close ${verb} review — back to \\$\\{itemRow\\?\\.display_name \\?\\? scope\\.label\\}\`\\}`));
+    assert.match(exitBranch, /<span>\{`Back to \$\{itemRow\?\.display_name \?\? scope\.label\}`\}<\/span>/);
     assert.match(exitBranch, /onClick=\{\(\) => setMode\(\{ kind: "list" \}\)\}/);
     assert.doesNotMatch(exitBranch, /btn-primary|btn-ghost|chevron-left/);
-    assert.match(commitBranch, new RegExp(`${verb} \\{`));
+    assert.match(commitBranch, new RegExp(`${verb} \\$\\{`));
   }
   // "Library" is not a name the app shows; the sidebar and index say Catalog.
   assert.doesNotMatch(page, /Back to Library/);
@@ -832,15 +858,15 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   // The bar owns both verbs, with the count the list itself produced.
   assert.match(page, /sync-path-sync[\s\S]*Pull<\/span>[\s\S]*counts\.pull/);
   assert.match(page, /sync-path-sync[\s\S]*Push<\/span>[\s\S]*counts\.push/);
-  assert.match(page, /counts = useMemo\(\(\) => rows\.reduce/);
+  assert.match(page, /counts = useMemo\(\(\) => barRows\.reduce/);
   // Push and Pull create the one scope-storage pairing they need; the user
   // never links by hand, and each review consumes exactly one plan.
   assert.match(page, /ensureLink[\s\S]*storageCatalogApi\.linkScopeStorage/);
   assert.match(page, /await ensureLink\(\);[\s\S]*storageCatalogApi\.preparePush\(scope\.scope\.scope_id, storageId\)/);
-  assert.match(page, /storageCatalogApi\.applyPush\(pushPlan\.plan_id, selected, \[\.\.\.pushAcks\]\)/);
-  assert.match(page, /await ensureLink\(\);[\s\S]*storageCatalogApi\.preparePull\(scope\.scope\.scope_id, storageId, null\)/);
-  assert.match(page, /storageCatalogApi\.applyPull\(pullPlan\.plan_id, choices, acknowledgements\)/);
-  assert.match(page, /const reviewItems = filterCatalogPullReviewItems\(pullPlan\.items, rows\);[\s\S]*for \(const item of reviewItems\)/);
+  assert.match(page, /storageCatalogApi\.applyPush\(pushPlan\.plan_id, \[\.\.\.pushSelected\], \[\.\.\.pushAcks\],/);
+  assert.match(page, /await ensureLink\(\);[\s\S]*storageCatalogApi\.preparePull\(scope\.scope\.scope_id, storageId\)/);
+  assert.match(page, /storageCatalogApi\.applyPull\(pullPlan\.plan_id, choices, \[\.\.\.pullAcks\]/);
+  assert.match(page, /for \(const \{ item \} of filterCatalogPullReviewItems\(pullPlan\.items\)\)/);
   // The reviews are the project's own review chrome.
   assert.match(page, /SyncReviewSelectionBar/);
   assert.match(page, /sync-inline-push-review sync-sync-review-workspace/);
@@ -914,7 +940,7 @@ test("the active path-bar Pull commits only the visible reviewed selection", () 
 test("Push review shows only local-outstanding rows, whatever their capability", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
 
-  assert.match(page, /const selectableRows = pushPlan\.rows\.filter\(\(row\) => row\.row\.selectable\);/);
+  assert.match(page, /const selectableRows = planRows\.filter\(\(row\) => row\.row\.selectable\);/);
   assert.match(page, /const visibleRows = selectableRows\.filter/);
   assert.doesNotMatch(page, /row\.row\.selectable \|\| row\.row\.relation === "matching"/);
   assert.match(page, /total=\{selectableRows\.length\}/);
@@ -929,59 +955,145 @@ test("Push review shows only local-outstanding rows, whatever their capability",
   assert.match(page, /\{cloudRows\.map\(renderRow\)\}[\s\S]*\{localRows\.map\(renderRow\)\}/);
 });
 
-test("Add is Kind then agent profile, and never picks a storage or resource", () => {
+test("Add is New project's two steps: the agent home as the project's Agent band, then that home's setup page", () => {
   const add = readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8");
-  const order = ["Kind", "Agent profile"]
-    .map((label) => add.indexOf(`<strong>${label}</strong>`));
-  assert.ok(order.every((index) => index >= 0), "both Add bands render");
-  assert.deepEqual(order, [...order].sort((left, right) => left - right));
-  // Kind is a visible choice over the backend's capabilities, not a hidden
-  // select and not a table of the frontend's own.
-  assert.match(add, /role="radiogroup"[\s\S]*?choices\.map/);
-  assert.doesNotMatch(add, /CATALOG_KINDS|Codex only|Codex and Claude/);
-  assert.match(add, /storageCatalogApi\.createScope\(descriptor, chosenProfileId\)/);
-  // No storage, no repository, no local resource: those belong to the row's
-  // own page, chosen per resource link.
-  assert.doesNotMatch(
-    add,
-    /storage_id|storageId|onAddStorage|repository_id|local_resource_id|listScopeResources|linkScopeResource/,
-  );
-  // It wears the project-setup language.
+  const home = readFileSync("src/components/storage-catalog/CatalogHomeStep.tsx", "utf8");
+  const setup = readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8");
+
+  // New project's two doors, at the top of step one.
+  assert.match(add, /title="On this computer"[\s\S]*title="From Mallard Cloud"/);
+  assert.match(add, /className="storage-mode-doors" role="radiogroup"/);
+  // From Mallard Cloud is New project's bands: the account, the repository
+  // (its kind comes with it), then the row it lands in.
+  const cloud = ["Storage", "Repository", "Catalog row"].map((label) => add.indexOf(`<strong>${label}</strong>`));
+  assert.ok(cloud.every((index) => index >= 0));
+  assert.deepEqual(cloud, [...cloud].sort((left, right) => left - right));
+  assert.match(add, /No Mallard Cloud account yet\./);
+  assert.match(add, /Can’t be changed later\./);
+  assert.match(add, /storageCatalogApi\.connectCloudRepository\(/);
+  assert.doesNotMatch(add + home + setup, /preparePull|applyPull|preparePush|applyPush/);
+
+  // Step one is the project's Agent band: one card per registered provider,
+  // the mark and name on the toggle line, and under the chosen card the
+  // project's profile row — saved profiles and Custom path… in one select,
+  // the inline path, Browse, and the hint the project writes. One row per
+  // pass, so the toggle is a radio.
+  assert.match(home, /className="sync-provider-cards" role="radiogroup"/);
+  assert.match(home, /className="sync-provider-toggle setup-marked-toggle"/);
+  assert.match(home, /type="radio"\s+name="catalog-home-provider"/);
+  assert.match(home, /sync-agent-profile-row/);
+  assert.match(home, /<option value="">Choose profile<\/option>/);
+  assert.match(home, /<option value="__pending">Custom path…<\/option>/);
+  assert.match(home, /<Icon name="folder" size=\{13\} \/> Browse/);
+  assert.match(home, /from "\.\.\/\.\.\/profilePath"/);
+  assert.match(home, /profilePathHint\(probe, selection\.path, homePath, \{ display_name: label \}, profiles\)/);
+  assert.match(home, /storageCatalogApi\.probeProfile\(provider, path\)/);
+  // The project's preselection rule, verbatim: one profile for the provider
+  // is chosen, none or several wait on "Choose profile" and the project's
+  // field message.
+  assert.match(home, /const only = unambiguousProfile\(profiles, key\);/);
+  assert.match(home, /Choose a profile for \{label\}\./);
+  // The button names the step it opens, from the saved name or the one the
+  // probe would give a typed folder.
+  assert.match(home, /homeName \? `Set up \$\{homeName\}` : "Set up"/);
+  assert.match(home, /resolvedProbe\?\.suggested_name/);
+
+  // Step two is the project's setup page for that home: Home, one kind as
+  // the shipped cards, Storage as New project's pill row, Finish.
+  const bands = ["Home", "Resource", "Storage"].map((label) => setup.indexOf(`<strong>${label}</strong>`));
+  assert.ok(bands.every((index) => index >= 0), "all three bands render");
+  assert.deepEqual(bands, [...bands].sort((left, right) => left - right));
+  assert.match(setup, /storageCatalogApi\.inspectProfile\(profile\.profile_id\)/);
+  assert.match(setup, /catalogDefaultKind\(cards, initialChoiceKey\)/);
+  assert.match(setup, /catalogDefaultStorage\(storages, inspection\?\.last_used_storage_id\)/);
+  assert.match(setup, /label="None yet"/);
+  assert.match(setup, /storageIconName\(candidate\.provider, candidate\.icon\)/);
+  assert.match(setup, /chosenStorage \? "Finish" : "Finish locally"/);
+  // Finish makes exactly one row and links it once; a link that fails after
+  // the row was made leaves the row standing and says so.
+  assert.equal((setup.match(/storageCatalogApi\.createScope\(/g) ?? []).length, 1);
+  assert.equal((setup.match(/storageCatalogApi\.linkScopeStorage\(/g) ?? []).length, 1);
+  assert.match(setup, /onFinished\(created, null, errorMessage\(reason\)\)/);
+  assert.match(setup, /if \(!storage\) \{\s*onFinished\(created, null, null\);/);
+  // The shell lands on the row with the storage it was linked to.
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /if \(storageId\) setCatalogPreferredStorage\(\(current\) => \(\{ \.\.\.current, \[scope\.scope\.scope_id\]: storageId \}\)\);/);
+  assert.match(shell, /storages=\{catalogStorages\}/);
+
+  // Both steps wear the project-setup language, and the Kind is never a
+  // table of the frontend's own.
+  for (const source of [add, home, setup]) {
+    assert.doesNotMatch(source, /CATALOG_KINDS|Codex only|Codex and Claude/);
+  }
   assert.match(add, /sync-inline-new-project sync-setup-workspace/);
-  assert.match(add, /sync-setup-section/);
-  assert.match(add, /sync-setup-footer/);
-  // Profile selection uses the same row as project setup: saved homes and a
-  // Custom path… choice in one select, an inline path, and Browse.
-  assert.match(add, /sync-agent-profile-row/);
-  assert.match(add, /<option value="__pending">Custom path…<\/option>/);
-  assert.match(add, /<Icon name="folder" size=\{13\} \/> Browse/);
-  // Choosing a profile is an independent setup step. It remains usable before
-  // Kind is chosen — every registered provider is offered — and picking a
-  // Kind the provider is not registered for later clears the provider.
-  assert.match(add, /choice \? choice\.providers : capabilities/);
-  assert.match(add, /const stillSupported = next\.providers\.some\(\(capability\) => capability\.provider === provider\);/);
-  assert.match(add, /aria-label="Provider"[\s\S]*?disabled=\{working\}/);
-  assert.doesNotMatch(add, /disabled=\{working \|\| !kind\}/);
-  assert.doesNotMatch(add, /Add profile|className="catalog-inline-form"/);
-  assert.doesNotMatch(add, /Manage saved homes|removeProfile|storageCatalogApi\.deleteProfile/);
-  assert.doesNotMatch(add, /probe_catalog_resource_profile|probeProviderProfile/);
+  assert.match(setup, /sync-inline-new-project sync-setup-workspace/);
+  assert.match(home, /sync-setup-section/);
+  assert.match(home, /sync-setup-footer/);
+  assert.match(setup, /sync-setup-footer/);
+  assert.doesNotMatch(add + home + setup, /Add profile|className="catalog-inline-form"|Manage saved homes|removeProfile|storageCatalogApi\.deleteProfile/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-setup-(grid|card|step)/);
 });
 
+test("Add's setup page chooses by the project's rules: one unambiguous profile, the found kind, the preferred storage", () => {
+  const codex = profile("codex", "Codex", "Default Codex", "/Users/ada/.codex");
+  const work = { ...codex, profile_id: "catprofile-2", display_name: "Work Codex", configured_home: "/Users/ada/work/.codex" };
+  const claude = { ...profile("claude", "Claude", "Default Claude", "/Users/ada/.claude"), profile_id: "catprofile-3" };
+  assert.equal(unambiguousProfile([codex, claude], "codex"), codex);
+  assert.equal(unambiguousProfile([codex, work, claude], "codex"), null, "two profiles: no guess");
+  assert.equal(unambiguousProfile([codex], "claude"), null);
+
+  const holding = (capability: CatalogCapabilityDescriptor, count: number | null, scope_id: string | null = null): CatalogProfileHolding => ({
+    capability, count, newest_modified_at: count ? 1_700_000_000 : null, roots: ["Codex home"], scope_id,
+  });
+  const found = [holding(CODEX_SKILLS, 12), holding(CODEX_PLUGINS, 3), holding(CODEX_PETS_V1, 0), holding(CODEX_PETS_V2, 2)];
+  const cards = catalogKindCards(CAPABILITIES, codex, [], found);
+  assert.equal(catalogDefaultKind(cards, null), catalogChoiceKey(CODEX_SKILLS), "the first kind with something in it");
+  assert.equal(catalogDefaultKind(cards, catalogChoiceKey(CODEX_PETS_V1)), catalogChoiceKey(CODEX_PETS_V1), "a Kind door is the answer outright");
+  assert.equal(catalogKindCardFoot(cards[0]), `12 skills · ${formatRelativeTime(1_700_000_000)}`);
+  assert.equal(catalogKindCardFoot(cards[2]), "Nothing here yet");
+  assert.equal(catalogKindCardFoot(catalogKindCards(CAPABILITIES, codex, [], null)[0]), "Agent Skill", "the format label until the count arrives");
+  // A kind this home already has a row for is Added, never the default —
+  // from the inspection, or from the rows the shell already lists.
+  const added = catalogKindCards(CAPABILITIES, codex, [], [holding(CODEX_SKILLS, 12, "scope-1"), ...found.slice(1)]);
+  assert.equal(added[0].existingScopeId, "scope-1");
+  assert.equal(catalogDefaultKind(added, catalogChoiceKey(CODEX_SKILLS)), catalogChoiceKey(CODEX_PLUGINS));
+  const listed = catalogKindCards(CAPABILITIES, codex, [{ scope: { ...CODEX_SKILLS, scope_id: "scope-9", profile_id: codex.profile_id, revision: 1, created_at: 1, updated_at: 1 } }], null);
+  assert.equal(listed[0].existingScopeId, "scope-9");
+  // Nothing found and no door: nothing guessed.
+  assert.equal(catalogDefaultKind(catalogKindCards(CAPABILITIES, codex, [], null), null), null);
+
+  // Storage: the one a row used last, else the first as the shell orders
+  // them — Mallard Cloud, the other clouds, local — else none; and why.
+  const storages = [{ id: "cloud", provider: "managed_cloud" }, { id: "vault", provider: "r2" }, { id: "drive", provider: "local" }];
+  assert.equal(catalogDefaultStorage(storages, null), "cloud");
+  assert.equal(catalogDefaultStorage(storages, "vault"), "vault");
+  assert.equal(catalogDefaultStorage(storages, "gone"), "cloud");
+  assert.equal(catalogDefaultStorage([], null), null);
+  assert.equal(catalogStorageHint(storages, "cloud", null), "Mallard Cloud first.");
+  assert.equal(catalogStorageHint(storages, "vault", "vault"), "Used last by the Catalog.");
+  assert.equal(catalogStorageHint(storages.slice(1, 2), "vault", null), "Your only storage.");
+  assert.equal(catalogStorageHint(storages, "drive", null), null);
+  assert.equal(catalogStorageHint([], null, null), "No storage yet.");
+});
+
 test("the profile is named by its folder, and renamed from the row's page", () => {
-  const add = readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8");
-  // Setup never asks for a name: no name input, no separate commit step. A
-  // pending path is saved as part of Add itself, then the scope lands on it.
-  assert.doesNotMatch(add, /Profile name|Save home|catalog-profile-save-row/);
-  // A display name reaches this page only as the label a provider mark draws
-  // itself with — never as a field, a piece of state, or a value Add sends.
+  const home = readFileSync("src/components/storage-catalog/CatalogHomeStep.tsx", "utf8");
+  // Step one never asks for a name: a typed path is saved as part of Set up
+  // itself, named by its folder, and the home's setup page opens on it.
+  assert.doesNotMatch(home, /Profile name|Save home|catalog-profile-save-row/);
+  // A display name reaches step one only as the label a provider mark draws
+  // itself with — never as a field, a piece of state, or a value it sends.
   assert.doesNotMatch(
-    add.replace(/<ProviderMark[\s\S]*?\/>/g, ""),
+    home.replace(/<ProviderMark[\s\S]*?\/>/g, ""),
     /displayName/,
     "displayName is only the provider mark's prop",
   );
-  assert.match(add, /await storageCatalogApi\.saveProfile\(descriptor\.provider, expandedProfilePath\)/);
-  assert.match(add, /profileId !== null \|\| customPathReady/);
+  assert.match(home, /const saved = await storageCatalogApi\.saveProfile\(provider, expandedPath\);[\s\S]*?onChosen\(saved\)/);
+  assert.match(home, /const ready = existing !== null \|\| resolvedProbe !== null;/);
+  // Step two's Name is the project's: the home renamed through the command
+  // the row's page uses, pinned to the profile's revision.
+  const setup = readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8");
+  assert.match(setup, /storageCatalogApi\.renameProfile\(profile\.profile_id, name\.trim\(\), profile\.revision\)/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-profile-save-row/);
 
   // Renaming lives on the row's page: the scope crumb's menu opens the same
@@ -1076,6 +1188,9 @@ test("provider, kind, and format are open keys with backend labels in the fronte
     "src/components/storage-catalog/StorageCatalogPage.tsx",
     "src/components/storage-catalog/CatalogIndexPage.tsx",
     "src/components/storage-catalog/AddCatalogScopeWorkspace.tsx",
+    "src/components/storage-catalog/CatalogHomeStep.tsx",
+    "src/components/storage-catalog/CatalogScopeSetupStep.tsx",
+    "src/components/storage-catalog/setupFurniture.tsx",
     "src/components/storage-catalog/api.ts",
     "src/components/storage-catalog/model.ts",
     "src/components/storage-catalog/types.ts",
@@ -1118,13 +1233,16 @@ test("Pull labels are the protocol's four outcomes, the same for every format", 
   assert.doesNotMatch(types, /install_skill|install_plugin|install_pet|overwrite_plugin_with_storage/);
   assert.match(types, /conflicting_claims: CatalogClaimPin\[\]/);
   assert.match(page, /claimed by[\s\S]*Preserve a copy, acknowledge overwrite, or Skip/);
-  assert.match(page, /Pull did not advance the comparison base/);
+  assert.match(readFileSync("src/components/storage-catalog/outcomes.ts", "utf8"), /Completed changes were kept/);
 });
 
 test("the Catalog remains independent from project sync", () => {
   const liveFiles = [
     "src/components/storage-catalog/StorageCatalogPage.tsx",
     "src/components/storage-catalog/AddCatalogScopeWorkspace.tsx",
+    "src/components/storage-catalog/CatalogHomeStep.tsx",
+    "src/components/storage-catalog/CatalogScopeSetupStep.tsx",
+    "src/components/storage-catalog/setupFurniture.tsx",
     "src/components/storage-catalog/api.ts",
     "src/components/storage-catalog/model.ts",
     "src/components/storage-catalog/types.ts",
@@ -1201,4 +1319,306 @@ test("the Library page offers Finish that push on the unfinished-push sentence o
   assert.match(page, /Finish that push/);
   assert.match(page, /storageCatalogApi\.finishUnfinishedPush\(scope\.scope\.scope_id, storageId\)/);
   assert.match(page, /notify\(PUSH_FINISHED\)/);
+});
+
+
+test("Catalog Push reports completed, failed and unattempted items without claiming rollback", async () => {
+  const { pushOutcome } = await import("../../src/components/storage-catalog/outcomes");
+  const result = pushOutcome({ plan_id: "review", published: true, revision: null, stopped: "Second item refused", message: "1 of 3 completed", results: [
+    { resource_id: "a", display_name: "Duck", state: "published", message: null },
+    { resource_id: "b", display_name: "Seal", state: "failed", message: "No access" },
+    { resource_id: "c", display_name: "Fox", state: "not_attempted", message: null },
+  ] });
+  assert.equal(result.title, "Pushed 1 of 3 items");
+  assert.deepEqual(result.rows.map((row) => row.status), ["synced", "failed", "not_attempted"]);
+  assert.deepEqual(result.actions[0].resourceIds, ["b", "c"]);
+  const { default: Outcome } = await import("../../src/components/sync-review/SyncOutcomeNotice");
+  const html = renderToStaticMarkup(<Outcome outcome={result} onDismiss={() => {}} />);
+  assert.match(html, /Duck/); assert.match(html, /Not attempted/);
+  assert.doesNotMatch(html, /nothing was published|Not pulled/);
+});
+
+test("Catalog Pull keeps preserved, skipped and failed results distinct", async () => {
+  const { pullOutcome } = await import("../../src/components/storage-catalog/outcomes");
+  const result = pullOutcome({ plan_id: "review", remote_accepted: false, results: [
+    { resource_id: "a", display_name: "Duck", outcome: "preserved_and_updated" },
+    { resource_id: "b", display_name: "Seal", outcome: "skipped" },
+    { resource_id: "c", display_name: "Fox", outcome: "partial", message: "Provider apply stopped" },
+  ] });
+  assert.deepEqual(result.rows.map((row) => row.status), ["preserved", "skipped", "failed"]);
+  assert.deepEqual(result.actions[0].resourceIds, ["b", "c"]);
+});
+
+test("Cloud repository and review components are shared without feature imports", () => {
+  for (const file of ["managed-cloud/ManagedCloudChip.tsx", "managed-cloud/managedCloudLink.ts", "managed-cloud/RepositoryLookupField.tsx", "sync-review/SyncOutcomeNotice.tsx", "sync-review/reviewPreparationLifecycle.ts"]) {
+    const source = readFileSync(`src/components/${file}`, "utf8");
+    assert.doesNotMatch(source, /project-sync|storage-catalog|from ["'].*ipc["']/);
+  }
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.doesNotMatch(page, /nothing was published|nothing was changed/);
+  assert.match(page, /applyInFlight.current/);
+  assert.match(page, /PREPARING_CANCELLED/);
+});
+
+for (const verb of ["push", "pull"] as const) {
+  test(`Catalog ${verb} cancel, failure and retry release busy state without automatic request loops`, async () => {
+    const { createRequire } = await import("node:module");
+    const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+    const { createReviewPreparing, PREPARING_CANCELLED } = await import("../../src/components/sync-review/reviewPreparationLifecycle");
+    const source = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+    const slice = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+    const handlers = transformSync([
+      slice("  const openReview = async", "  /* On an item's page the review holds"),
+      slice("  const runPush = async", "  /* Finish that push:"),
+      slice("  const runPull = async", "  const unlinkStorage ="),
+    ].join("\n"), { loader: "ts" }).code;
+    const pending: { resolve: (value: unknown) => void; reject: (error: unknown) => void }[] = [];
+    const deferred = () => new Promise<unknown>((resolve, reject) => pending.push({ resolve, reject }));
+    const noop = () => {};
+    let busy = false;
+    let shown: unknown = null;
+    let mode: unknown = { kind: verb };
+    let error: unknown = null;
+    let refreshes = 0;
+    const reviewPreparing = createReviewPreparing({ shown: noop, writing: noop, finished: noop }, { set: () => 0, clear: noop });
+    const plan = {
+      plan_id: "fresh", rows: [{ row: { resource_id: "duck", selected_by_default: true } }],
+      items: [{ item: { resource_id: "duck", relation: "storage_only", default_action_id: "install" } }],
+    };
+    const context = {
+      storageId: "cloud", scope: { scope: { scope_id: "pets" } }, prepareInFlight: { current: false }, applyInFlight: { current: false },
+      operationEpoch: { current: 0 }, preparingKind: { current: "push" }, reviewPreparing, PREPARING_CANCELLED,
+      setBusy: (value: boolean) => { busy = value; }, setError: (value: unknown) => { error = value; },
+      setPushPlan: (value: unknown) => { shown = value; }, setFailures: noop, setOutcome: noop, ensureLink: async () => {},
+      setPushSelected: noop, setPushAcks: noop, setMode: (value: unknown) => { mode = value; },
+      setPullPlan: (value: unknown) => { shown = value; }, setPullSelected: noop, setPullChoice: noop, setPullAcks: noop,
+      filterCatalogPullReviewItems, storageCatalogApi: { preparePush: deferred, applyPush: deferred, preparePull: deferred, applyPull: deferred }, storageFailureMessage: String,
+      pushPlan: plan, pushSelected: new Set(["duck"]), pushAcks: new Set(), setProgress: noop, noun: () => "pets",
+      pullPlan: plan, pullSelected: new Set(["duck"]), pullChoice: { duck: "install" }, pullAcks: new Set(), pullResult: noop,
+      load: async () => { refreshes += 1; }, pushResult: noop, finishPushOffered: () => false, storageName: "Cloud",
+    };
+    const flow = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handlers}; return { openReview, apply: context.verb === "push" ? runPush : runPull };`)({ ...context, verb }) as {
+      openReview: (verb: "push" | "pull") => Promise<void>; apply: () => Promise<void>;
+    };
+    const cancelled = flow.openReview(verb);
+    await Promise.resolve();
+    await flow.openReview(verb);
+    assert.equal(pending.length, 1, "double clicks cannot start duplicate preparations");
+    reviewPreparing.cancel();
+    await cancelled;
+    assert.equal(busy, false);
+    assert.equal(context.prepareInFlight.current, false);
+    assert.deepEqual(mode, { kind: "list" }, "cancelling a replacement review leaves no obsolete Apply control");
+    assert.equal(shown, null);
+    const retry = flow.openReview(verb);
+    await Promise.resolve();
+    pending[1].resolve(plan);
+    await retry;
+    pending[0].resolve({ ...plan, plan_id: "late" });
+    await Promise.resolve();
+    assert.equal(shown, plan, "a cancelled request cannot replace the current review");
+    assert.equal(pending.length, 2, "settling a read never triggers another read");
+    const applying = flow.apply();
+    await flow.apply();
+    assert.equal(pending.length, 3, "apply is single flight");
+    pending[2].reject(new Error("Connection lost"));
+    await applying;
+    assert.equal(busy, false);
+    assert.equal(context.applyInFlight.current, false);
+    assert.equal(shown, null, "a failed apply removes the stale plan before another attempt");
+    assert.equal(refreshes, 1);
+    assert.match(String(error), verb === "push" ? /Review again before retrying/ : /Compare again to check completed changes/);
+    assert.equal(pending.length, 3, "a failed write is never retried automatically");
+    const failedReview = flow.openReview(verb);
+    await Promise.resolve();
+    pending[3].reject(new Error("Account unavailable"));
+    await failedReview;
+    assert.equal(busy, false);
+    assert.equal(context.prepareInFlight.current, false);
+    assert.equal(shown, null);
+    assert.deepEqual(mode, { kind: "list" });
+    assert.equal(pending.length, 4, "a failed comparison waits for an explicit retry");
+  });
+}
+
+function cloudRepository(overrides: Partial<CatalogCloudRepository> = {}): CatalogCloudRepository {
+  const owner = overrides.owner_login ?? "kai";
+  const name = overrides.name ?? "Duck";
+  return {
+    provider: "codex", resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 2,
+    provider_label: "Codex", kind_label: "Pets", format_label: "Codex pet v2",
+    repository_id: `repo_${owner}_${name}`, owner_login: owner, name, address: `${owner}/${name}`,
+    website_url: `https://mallard-ai.com/${owner}/${name}`, visibility: "private", role: "member", can_push: true,
+    revision: 4, updated_at: 1, registration_only: false, resource_id: "duck", display_name: "Duck", available: true,
+    ...overrides,
+  };
+}
+
+test("a pet's chooser names every misfit in one sentence, and the backend checks again on Connect", async () => {
+  const { cloudRepositoryMisfit, cloudRoleWord } = await import("../../src/components/storage-catalog/CloudRepositoryChoice");
+  const pet = { provider: "codex", resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 2 };
+  const item = { kind: "item" as const, coordinate: pet, noun: "pet v2", resourceId: "duck", name: "Duck", offerNew: true };
+  const add = { kind: "add" as const, coordinate: pet, noun: "pet v2", rowLabel: "Pets v2 · Codex home", listed: new Set(["duck"]) };
+  const skill = cloudRepository({ owner_login: "maya", name: "pdf-tools", resource_kind: "agent_skill", format: "agentskills.io.skill", format_version: 1, kind_label: "Skills" });
+  const classic = cloudRepository({ owner_login: "Rika321", name: "Duck-classic", format_version: 1, format_label: "Codex pet v1" });
+  const owl = cloudRepository({ owner_login: "Rika321", name: "Owl", resource_id: "owl", display_name: "Owl", role: "owner" });
+  assert.equal(cloudRepositoryMisfit(skill, item, CAPABILITIES), "maya/pdf-tools is a skill, not a pet v2.");
+  assert.equal(cloudRepositoryMisfit(classic, item, CAPABILITIES), "Rika321/Duck-classic is a Pets v1 repository.");
+  assert.equal(cloudRepositoryMisfit(owl, item, CAPABILITIES), "Rika321/Owl holds Owl, not Duck.");
+  assert.equal(cloudRepositoryMisfit(cloudRepository(), item, CAPABILITIES), null);
+  // Add brings in someone else's item the row has not got.
+  assert.equal(cloudRepositoryMisfit(owl, add, CAPABILITIES), "Rika321/Owl is yours — already listed.");
+  assert.equal(cloudRepositoryMisfit(cloudRepository(), add, CAPABILITIES), "Pets v2 · Codex home already has Duck.");
+  assert.equal(cloudRepositoryMisfit(cloudRepository({ resource_id: "biscuit", display_name: "Biscuit" }), add, CAPABILITIES), null);
+  assert.equal(cloudRepositoryMisfit(skill, { kind: "door" }, CAPABILITIES), null, "the door takes any kind");
+  assert.match(cloudRepositoryMisfit({ ...skill, available: false }, { kind: "door" }, CAPABILITIES) ?? "", /can't open/);
+  assert.equal(cloudRoleWord({ role: null, visibility: "public" }), "Public · Contributor");
+  assert.equal(cloudRoleWord({ role: "member", visibility: "private" }), "Member");
+  assert.equal(cloudRoleWord({ role: "owner", visibility: "public" }), "Public · Owner");
+});
+
+test("a closed chooser drops its late answer, and a lookup never asks twice", async () => {
+  const { createRequire } = await import("node:module");
+  const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+  const source = readFileSync("src/components/storage-catalog/CloudRepositoryChoice.tsx", "utf8");
+  const slice = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+  const handlers = transformSync(slice("  const submit = async", "  const choose ="), { loader: "ts" }).code;
+  let resolve!: (value: unknown) => void;
+  let selection: unknown = "new";
+  let calls = 0;
+  const noop = () => {};
+  const context = {
+    entry: "maya/Duck", working: false, joining: false, lookup: { kind: "idle" }, selection: "new",
+    sequence: { current: 0 }, storageId: "cloud",
+    setJoinError: noop, setJoining: noop, setLookup: noop, setEntry: noop,
+    setSelection: (value: unknown) => { selection = value; },
+    isInvitationCodeShaped: () => false, errorMessage: String,
+    answer: (resolution: { kind: string; repository?: unknown }) => resolution.kind === "found"
+      ? { kind: "found", repository: resolution.repository, joined: false }
+      : { kind: "error", message: "no" },
+    storageCatalogApi: { resolveCloudRepository: () => { calls += 1; return new Promise((done) => { resolve = done; }); } },
+  };
+  const flow = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handlers}; return { submit };`)(context) as {
+    submit: () => Promise<void>;
+  };
+  const pending = flow.submit();
+  context.sequence.current += 1; // The dialog closed: its cleanup moves the number on.
+  resolve({ kind: "found", repository: cloudRepository() });
+  await pending;
+  assert.equal(selection, "new", "a closed chooser's answer selects nothing");
+  assert.equal(calls, 1, "nothing asks again on its own");
+});
+
+test("the connect dialog is the project's, with fewer words, and opens no review", () => {
+  const html = renderToStaticMarkup(
+    <CatalogConnectDialog
+      reason={{ kind: "connect", resourceId: "duck", name: "Duck" }}
+      scopeId="pets" storageId="cloud" accountLogin="Rika321"
+      coordinate={{ provider: "codex", resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 2 }}
+      noun="pet v2" rowLabel="Pets v2 · Codex home" listed={new Set()} capabilities={CAPABILITIES}
+      onClose={() => undefined} onConnected={() => undefined}
+    />,
+  );
+  assert.match(html, /<h1[^>]*>Connect Duck<\/h1>/);
+  assert.match(html, /class="sync-modal sync-bundle-connection-dialog"/);
+  assert.match(html, /<span class="sync-visually-hidden">Address or invite code<\/span>/, "the placeholder says it; the label is for screen readers");
+  assert.match(html, /Loading repositories…/);
+  assert.doesNotMatch(html, /sync-bundle-context|repo-list-head/, "no context row, no list heading");
+  assert.doesNotMatch(html, /Can’t be changed later/, "said once the choice can be made");
+  const dialog = readFileSync("src/components/storage-catalog/CatalogConnectDialog.tsx", "utf8");
+  assert.match(dialog, /Can’t be changed later\./);
+  assert.match(dialog, /storageCatalogApi\.createCloudRepository\(/);
+  assert.match(dialog, /storageCatalogApi\.connectCloudRepository\(/);
+  assert.doesNotMatch(dialog, /preparePull|applyPull|openPull|Connect and review|Disconnect/);
+});
+
+test("on Mallard Cloud an item has its own page and its repository lives in its bar", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // The list carries no Cloud chip and no per-row connect; its names open
+  // the item's page on Mallard Cloud only.
+  assert.doesNotMatch(page, /CatalogCloudItem|CatalogCloudConnections|Connect Cloud repository|>Cloud repositories</);
+  assert.match(page, /onOpen=\{managedCloud && resourceId && !itemRow \?/);
+  assert.match(page, /className="sync-history-session-title-button" title=\{`\$\{row\.display_name\} · View \$\{kindNoun\} details`\}/);
+  // One chip, in the bar, on an item's page; read once per load.
+  assert.equal(page.match(/<ManagedCloudChip/g)?.length, 1);
+  assert.match(page, /\{itemRow && itemRepository && \(\s*<ManagedCloudChip/);
+  assert.match(page, /readKey: page,/);
+  // The project's notes, and Pull and Push close as they do for a project.
+  assert.match(page, /cloudStatusNotice\(status\)/);
+  assert.match(page, /itemRow && cloudSyncBlocked\(itemStatus\)/);
+  // A connected item keeps its repository: no Change or Disconnect verbs.
+  assert.doesNotMatch(page, /onReconnect|onDisconnect|disconnectCloudRepository/);
+  // Add from Mallard Cloud is the list head's verb beside the search, on
+  // Mallard Cloud's list only: the head is a row, the search keeps its own
+  // rule with no count, and the bar holds no round +. An empty row offers
+  // the same verb in its empty state.
+  assert.doesNotMatch(page, /sync-path-icon-action"\s+title="Add from Mallard Cloud…"/);
+  assert.match(page, /const addFromCloud = managedCloud && \(\s*<button\s+type="button"\s+className="btn"\s+aria-haspopup="dialog"/);
+  assert.match(page, /<NameSearchField[^/]*count=\{!managedCloud\} trailing=\{addFromCloud\} \/>/);
+  assert.match(page, /none stored yet\.`\}\s*\{addFromCloud\}/);
+  const field = readFileSync("src/components/sync-review/NameSearchField.tsx", "utf8");
+  assert.match(field, /\{count \? \(/);
+  assert.match(field, /className="sync-visually-hidden" role="status"/);
+  assert.match(field, /<div className="sync-list-head">\s*\{leading\}\s*\{field\}\s*\{trailing\}/);
+  const headCss = readFileSync("src/App.css", "utf8");
+  assert.match(headCss, /\.sync-list-head\s*\{[^}]*display:\s*flex;/);
+  assert.match(headCss, /\.sync-list-head > \.sync-name-search\s*\{[^}]*margin-bottom:\s*0;/);
+  // Reviews opened on an item's page hold that item alone.
+  assert.match(page, /openReview\("push", itemRow\?\.resource_id \? \[itemRow\.resource_id\] : undefined\)/);
+  assert.match(page, /const planRows = pushPlan\.rows\.filter\(\(row\) => !itemRow \|\| row\.row\.resource_id === itemRow\.resource_id\);/);
+  assert.match(page, /repository=\{pushRepository\(pushPlan\.destinations\?\.\[resourceId\]\)\}/);
+  assert.match(page, /repository=\{managedCloud \? pullRepository\(pullPlan\.sources\?\.\[resourceId\]\) : undefined\}/);
+  // A review, its Preparing… and a finished Push or Pull sit on the Storage
+  // card, as a project's do; any other storage keeps the Catalog's page.
+  assert.match(page, /<StorageCard name=\{storageName \?\? "Mallard Cloud"\} review>\s*<div className="sync-storage-inline-review" tabIndex=\{-1\}>/);
+  assert.match(page, /Reading the latest version from \$\{storageWord\}/);
+  assert.match(page, /Comparing this computer with \$\{storageWord\}/);
+  assert.match(page, /const outcomeCard = managedCloud && outcomeNotice/);
+  assert.match(page, /managedCloud \? \(pushing \? "Pushing…" : "Push"\) : `Push \$\{pushSelected\.size\}`/);
+  assert.match(page, /A running push finishes or fails whole — it can’t be cancelled midway\./);
+  assert.match(page, /Pull cannot be cancelled while changes are being applied\./);
+  assert.match(page, /\? cloudPushOutcome\(result, \{/);
+  const api = readFileSync("src/components/storage-catalog/api.ts", "utf8");
+  assert.doesNotMatch(api, /disconnect/);
+  const chip = readFileSync("src/components/managed-cloud/ManagedCloudChip.tsx", "utf8");
+  assert.doesNotMatch(chip, /Change repository…|Disconnect repository|onReconnect|onDisconnect/);
+});
+
+test("a Mallard Cloud outcome speaks the project's words: what moved, its repository, one version", async () => {
+  const { cloudPushOutcome, cloudPullOutcome, pushOutcome } = await import("../../src/components/storage-catalog/outcomes");
+  const noun = (count: number) => (count === 1 ? "pet v2" : "pets v2");
+  const addresses: Record<string, string> = { duck: "Rika321/Duck", pip: "kai/Pip", mossy: "Rika321/Mossy" };
+  const words = { noun, addressOf: (id: string) => addresses[id], at: 100 };
+  const single = cloudPushOutcome({ plan_id: "review", published: true, revision: null, stopped: null, message: "", results: [
+    { resource_id: "duck", display_name: "Duck", state: "published", message: null, revision: 3 },
+  ] }, words);
+  assert.equal(single.title, "Push complete");
+  assert.deepEqual(single.stats, [
+    { icon: "upload", value: "1", label: "pet v2" },
+    { icon: "git-branch", label: "Version", value: "3", lead: true },
+  ]);
+  assert.deepEqual(single.rows[0], { key: "duck", title: "Duck", status: "synced", reason: null, threadId: "Rika321/Duck", updatedAt: 100 });
+  const batch = cloudPushOutcome({ plan_id: "review", published: true, revision: null, stopped: "Pip refused", message: "", results: [
+    { resource_id: "duck", display_name: "Duck", state: "published", message: null, revision: 3 },
+    { resource_id: "pip", display_name: "Pip", state: "failed", message: "No access", revision: null },
+  ] }, words);
+  assert.equal(batch.title, "Pushed 1 of 2 pets v2");
+  assert.deepEqual(batch.stats.map((stat) => stat.label), ["pushed", "not pushed"], "a batch has no one version");
+  assert.deepEqual(batch.actions[0].resourceIds, ["pip"]);
+  const pulled = cloudPullOutcome({ plan_id: "review", remote_accepted: true, results: [
+    { resource_id: "pip", display_name: "Pip", outcome: "updated" },
+    { resource_id: "mossy", display_name: "Mossy", outcome: "preserved_and_updated" },
+  ] }, { ...words, keptAs: (id) => (id === "mossy" ? "Mossy 2" : null), version: null });
+  assert.equal(pulled.title, "Pull complete");
+  assert.deepEqual(pulled.stats.map((stat) => `${stat.value} ${stat.label}`), ["1 restored", "1 kept independently"]);
+  assert.deepEqual(pulled.rows.map((row) => [row.title, row.status, row.threadId]), [["Pip", "synced", "kai/Pip"], ["Mossy 2", "preserved", "Mossy 2"]]);
+  const one = cloudPullOutcome({ plan_id: "review", remote_accepted: true, results: [
+    { resource_id: "pip", display_name: "Pip", outcome: "installed" },
+  ] }, { ...words, keptAs: () => null, version: 7 });
+  assert.equal(one.stats.find((stat) => stat.lead)?.value, "7");
+  // Any other storage keeps the Catalog's own card and its one version.
+  const folder = pushOutcome({ plan_id: "review", published: true, revision: 8, stopped: null, message: "", results: [
+    { resource_id: "duck", display_name: "Duck", state: "published", message: null },
+  ] });
+  assert.deepEqual(folder.stats.map((stat) => stat.label), ["completed", "Version"]);
 });

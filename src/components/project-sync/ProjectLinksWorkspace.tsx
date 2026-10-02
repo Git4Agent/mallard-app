@@ -1,3 +1,5 @@
+import { projectOutcomeAction } from "./syncOutcome";
+import type { ManagedCloudStatus } from "../managed-cloud/types";
 import {
 
   lazy,
@@ -17,9 +19,7 @@ import type {
   CommitStorageDraftResult,
   LocalProjectSummary,
   ProjectBinding,
-  ManagedCloudStatus,
   ProjectStorageLink,
-  ProviderDescriptor,
   ProviderProfileSummary,
   RemoteBundleSummary,
   SiblingBundleStatus,
@@ -30,10 +30,11 @@ import type {
 } from "../../types";
 import Icon, { storageIconName } from "../Icons";
 import { NoticeChip, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import { formatDateTime, toEpochMilliseconds } from "../../clock";
+import { formatDateTime, formatRelativeTime, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
-import ProjectFilesActivityPage, { type FilesActivityHeaderModel } from "./ProjectFilesActivityPage";
+import { ProjectFilesActivityView, projectFileSyncCounts, useProjectFilesScan } from "./ProjectFilesActivityPage";
+import ProjectViewSwitch, { PROJECT_VIEW_PANEL_ID, projectViewTabId, type ProjectView } from "./ProjectViewSwitch";
 import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
@@ -43,7 +44,7 @@ import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
-import SyncOutcomeNotice from "./SyncOutcomeNotice";
+import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import SiblingRepoNotice from "./SiblingRepoNotice";
 import StorageLinkDialog from "./StorageLinkDialog";
 import type { SyncOutcome, SyncOutcomeAction } from "./syncOutcome";
@@ -78,13 +79,14 @@ import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
 import { FeishuSetupLane, useFeishuSetup } from "./FeishuSetup";
 import { ManagedCloudSetupLane, useManagedCloudSetup } from "./ManagedCloudSetup";
-import { cloudRepositoryGone, cloudStatusNotice, cloudSyncBlocked, cloudVerbs, discardCloudDraft } from "./managedCloudLink";
-import ManagedCloudChip from "./ManagedCloudChip";
+import { cloudRepositoryGone, cloudStatusNotice, cloudSyncBlocked, cloudVerbs, discardCloudDraft } from "../managed-cloud/managedCloudLink";
+import ManagedCloudChip from "../managed-cloud/ManagedCloudChip";
+import ManagedCloudAddress from "../managed-cloud/ManagedCloudAddress";
+import { isManagedCloudStorage, managedCloudAccount } from "./RepositoryAddressPicker";
 import { openExternalUrl } from "./externalLink";
 import type { StorageSetupPort } from "./StorageSetupStep";
 import {
   compactProjectPath,
-  formatRelativeTime,
   projectLabel,
   providerLabel,
   type RenameResult,
@@ -143,9 +145,6 @@ interface Props {
   activeProjectSubview: ActiveProjectSubview;
   bindings: ProjectBinding[];
   profiles: ProviderProfileSummary[];
-  /** Registered agent provider descriptors. The agent-setup cluster derives
-   *  its run buttons from these; it never holds a fixed provider list. */
-  providers: ProviderDescriptor[];
   /** Compiled storage provider descriptors: every field, secret, and
    *  assistant the storage form shows comes from one of these. */
   storageProviders: StorageProviderDescriptor[];
@@ -183,6 +182,8 @@ interface Props {
   onDeleteProjectSessions: (projectId: string) => Promise<void> | void;
   onRefresh: () => void;
   onAddProject: () => void;
+  /** Add project with Mallard Cloud already chosen as the source. */
+  onAddCloudProject: () => void;
   onSelectProject: (projectId: string) => void;
   /**
    * Theme and app-wide commands. The path bar doubles as the window titlebar
@@ -475,12 +476,6 @@ export function projectPushActionLabel({
   return "Push";
 }
 
-/** The two faces of a non-Git project, in the order the strip shows them. */
-const PROJECT_VIEWS = [
-  { id: "sessions", label: "Sessions", icon: "message" },
-  { id: "files", label: "Files", icon: "file" },
-] as const;
-
 export function projectPullActionLabel({
   preparing,
   applying,
@@ -494,6 +489,17 @@ export function projectPullActionLabel({
   if (applying) return "Pulling…";
   if (preparing) return "Preparing…";
   return "Pull";
+}
+
+/** What a Pull or Push badge stands for, in the units the verb moves: the
+ *  comparison's threads and, for a non-Git project, its scanned files. The
+ *  badge is decorative, so the button's name has to say this. */
+export function projectSyncCountPhrase(threads: number, files: number): string {
+  const phrases = [
+    threads > 0 ? `${threads} newer thread${threads === 1 ? "" : "s"}` : null,
+    files > 0 ? `${files} changed file${files === 1 ? "" : "s"}` : null,
+  ].filter((phrase): phrase is string => phrase !== null);
+  return phrases.join(" and ");
 }
 
 export function storageActionLockedForReview(
@@ -510,7 +516,6 @@ export default function ProjectLinksWorkspace({
   activeProjectSubview,
   bindings,
   profiles,
-  providers,
   storageProviders,
   storages,
   storageSetupDrafts,
@@ -533,6 +538,7 @@ export default function ProjectLinksWorkspace({
   onDeleteProjectSessions,
   onRefresh,
   onAddProject,
+  onAddCloudProject,
   onSelectProject,
   appActions,
   onAddStorage,
@@ -677,12 +683,7 @@ export default function ProjectLinksWorkspace({
   /* Which face of the activity page a non-git project shows. The path bar's
      leaf crumb is the switch; a git project has no Files face, so the state
      resets whenever the project changes. */
-  const [activityView, setActivityView] = useState<"sessions" | "files">("sessions");
-  const [filesActivityHeader, setFilesActivityHeader] = useState<FilesActivityHeaderModel | null>(null);
-  const handleFilesActivityHeaderChange = useCallback(
-    (model: FilesActivityHeaderModel | null) => setFilesActivityHeader(model),
-    [],
-  );
+  const [activityView, setActivityView] = useState<ProjectView>("sessions");
   const bundleRequestRef = useRef(0);
   const storageSettingsRef = useRef<HTMLDivElement>(null);
   const workspaceScrollRef = useRef<HTMLElement>(null);
@@ -1215,6 +1216,22 @@ export default function ProjectLinksWorkspace({
   const workspaceProject = newProjectSetup ? null : activeProject;
   const activeLocalProjectId = activeProject?.local_project_id ?? null;
   useEffect(() => { setActivityView("sessions"); }, [activeLocalProjectId]);
+  /* A non-Git project's files travel with its Pull and Push, so their scan
+     feeds the bar's badges on either face, and the Files face renders the
+     same scan. The scan holds the host-operation lock a review needs, so it
+     stands down while one is open and runs again once it closes. */
+  const projectFilesScan = useProjectFilesScan(
+    activeProject && !activeProject.is_git_repository && !newProjectSetup && !inlineStorageReview
+      ? activeProject.local_project_id
+      : null,
+    activeStorageId,
+    historyRefreshEpoch,
+  );
+  const projectFileCounts = useMemo(
+    () => projectFileSyncCounts(projectFilesScan.inventory),
+    [projectFilesScan.inventory],
+  );
+  const filesFaceShown = activityView === "files" && !!activeProject && !activeProject.is_git_repository;
   const sessionDetailSubview = activeProjectSubview.kind === "session_detail"
     && workspaceProject?.local_project_id === activeProjectSubview.localProjectId
     ? activeProjectSubview
@@ -1394,12 +1411,19 @@ export default function ProjectLinksWorkspace({
     || storageActionLockedForReview(workspaceReviewKind, "storage");
 
   // The section the page is showing. The activity page picks Git history for a
-  // git repo; a non-git project has two faces — Sessions and Files — and the
-  // crumb names the one on screen. It reads the same facts off the project and
-  // the view state so the trail is right before the page has finished loading.
+  // git repo, and its crumb names it; a non-git project has two faces —
+  // Sessions and Files — and the way back from a session names the one it
+  // left. It reads the same facts off the project and the view state so the
+  // trail is right before the page has finished loading.
   const workspaceSectionLabel = workspaceProject?.is_git_repository
     ? "Git history"
     : activityView === "files" ? "Files" : "Sessions";
+  // One switch for a non-Git project's two faces. Each face seats it at the
+  // start of its own search row, so the trail ends at the project and the
+  // choice sits on the page it changes.
+  const projectViewSwitch = workspaceProject && !workspaceProject.is_git_repository
+    ? <ProjectViewSwitch view={activityView} onChange={setActivityView} />
+    : undefined;
   const [sessionHeader, setSessionHeader] = useState<SessionHeaderModel | null>(null);
   const handleSessionHeaderChange = useCallback((header: SessionHeaderModel | null) => {
     setSessionHeader(header);
@@ -1454,6 +1478,11 @@ export default function ProjectLinksWorkspace({
     const supportsManagedClear = storageAvailable && (descriptor?.clear_mode === "revision_checked" || descriptor?.clear_mode === "unconditional");
     const storageLinkCount = links.filter((link) => link.storage_id === pageStorageId).length;
     const pathFact = savedEditedStorage?.summary.find((field) => field.is_path) ?? null;
+    /* A Mallard Cloud storage leads its card with the website it lives on,
+       and the ⋯ menu opens it, as a folder's Reveal in Finder does. */
+    const cloudAccount = savedEditedStorage && isManagedCloudStorage(savedEditedStorage)
+      ? managedCloudAccount(savedEditedStorage)
+      : null;
     const formLocked = busy || !!runningAction || r2.state.running || dropbox.state.running || feishu.state.running;
     const storageActionBlocked = formLocked || !storageReady || destinationConflict !== null;
 
@@ -1676,6 +1705,13 @@ export default function ProjectLinksWorkspace({
             detail: compactProjectPath(pathFact.value),
             icon: "folder" as const,
             onSelect: () => revealPath(pathFact.value),
+          }] : []),
+          ...(cloudAccount ? [{
+            id: "open-website",
+            label: "Open website",
+            detail: cloudAccount.host,
+            icon: "external-link" as const,
+            onSelect: () => void openExternalUrl(cloudAccount.origin),
           }] : []),
           {
             id: "rename",
@@ -1943,6 +1979,11 @@ export default function ProjectLinksWorkspace({
                       <div className="sync-storage-repository-state"><span className="status-loader" /> Opening the reconnect…</div>
                     ),
                   }}
+                  lead={cloudAccount ? {
+                    band: <ManagedCloudAddress account={cloudAccount} onOpenUrl={(url) => void openExternalUrl(url)} />,
+                    // The two facts managedCloudAccount reads.
+                    facts: ["account_login", "service_origin"],
+                  } : undefined}
                 />
               )}
             </div>
@@ -2056,9 +2097,9 @@ export default function ProjectLinksWorkspace({
         <ProjectPicker
           projects={projects}
           profiles={profiles}
-          providers={providers}
           storages={storages}
           onAddProject={onAddProject}
+          onAddCloudProject={onAddCloudProject}
           onSelectProject={onSelectProject}
         />
       </main>
@@ -2319,8 +2360,9 @@ export default function ProjectLinksWorkspace({
         ) : undefined,
       });
     } else if (workspaceProject.is_git_repository) {
-      // Git history keeps its section and branch in the trail. For a non-Git
-      // project, the compact Sessions/Files switch replaces this crumb.
+      // Git history keeps its section and branch in the trail. A non-Git
+      // project's trail ends at the project: its Sessions/Files switch leads
+      // the page instead, on the search row.
       pathCrumbs.push({
         id: "section",
         label: workspaceSectionLabel,
@@ -2338,42 +2380,6 @@ export default function ProjectLinksWorkspace({
           />
         ) : undefined,
       });
-    } else if (!inlineStorageReview) {
-      // A non-Git project has two faces, and the crumb names the one on
-      // screen — the same shape the Git project's section crumb has, so both
-      // kinds of project read as one trail. The other face is the crumb's own
-      // menu rather than a control parked in the leaf's position: every crumb
-      // in this bar offers its alternatives that way, and a two-button pill
-      // showed both faces at once while naming neither. The current view is
-      // the menu's header, so no row carries a tick.
-      const otherView = activityView === "files" ? "sessions" : "files";
-      const viewIcon = (view: typeof activityView) => (view === "files" ? "file" as const : "message" as const);
-      const viewLabel = (view: typeof activityView) => (view === "files" ? "Files" : "Sessions");
-      const viewDetail = (view: typeof activityView) => (
-        view === "files" ? "Files outside Git" : "Agent sessions"
-      );
-      pathCrumbs.push({
-        id: "section",
-        label: workspaceSectionLabel,
-        icon: viewIcon(activityView),
-        tone: "section",
-        menuLabel: "Switch view",
-        menuHeader: {
-          label: workspaceSectionLabel,
-          detail: viewDetail(activityView),
-          icon: viewIcon(activityView),
-        },
-        menu: [{
-          label: "Switch to",
-          items: [{
-            id: `view-${otherView}`,
-            label: viewLabel(otherView),
-            detail: viewDetail(otherView),
-            icon: viewIcon(otherView),
-            onSelect: () => setActivityView(otherView),
-          }],
-        }],
-      });
     }
   }
 
@@ -2385,8 +2391,15 @@ export default function ProjectLinksWorkspace({
   // A badge on the button that clears it, rather than a tally beside it: "3 to
   // push" is what Push does, said once. The counts stand down while that
   // button is mid-review or mid-transfer, where its own label is the readout.
-  const pullCount = activityHeader?.counts.pull ?? 0;
-  const pushCount = activityHeader?.counts.push ?? 0;
+  // Both verbs act on the whole project, so a non-Git project's files count
+  // beside its threads, on either face.
+  const pullThreadCount = activityHeader?.counts.pull ?? 0;
+  const pushThreadCount = activityHeader?.counts.push ?? 0;
+  const pullCount = pullThreadCount + projectFileCounts.pull;
+  const pushCount = pushThreadCount + projectFileCounts.push;
+  // The file scan holds the host-operation lock both verbs take, so a click
+  // during it would only be refused; they wait it out, and say why.
+  const projectFilesScanIssue = projectFilesScan.loading ? "Scanning project files…" : null;
   const showPullCount = pullCount > 0 && !workspacePullReviewOpen && !workspacePullProgress;
   const showPushCount = pushCount > 0 && !workspacePushReviewOpen && !workspacePushProgress;
   const attention = activityHeader?.counts.attention ?? 0;
@@ -2400,11 +2413,11 @@ export default function ProjectLinksWorkspace({
       onRefresh: sessionHeader.onRefresh,
       label: sessionHeader.refreshing ? "Refreshing session" : "Refresh session",
     }
-    : activityView === "files"
-      ? filesActivityHeader && {
-        refreshing: filesActivityHeader.refreshing,
-        onRefresh: filesActivityHeader.onRefresh,
-        label: filesActivityHeader.refreshing ? "Rescanning project files" : "Rescan project files",
+    : filesFaceShown
+      ? {
+        refreshing: projectFilesScan.loading,
+        onRefresh: projectFilesScan.rescan,
+        label: projectFilesScan.loading ? "Rescanning project files" : "Rescan project files",
       }
       : activityHeader && {
         refreshing: activityHeader.refreshing,
@@ -2471,6 +2484,7 @@ export default function ProjectLinksWorkspace({
         className={`sync-path-sync${workspacePullReviewOpen ? " active" : ""}`}
         disabled={busy
           || !!runningAction
+          || projectFilesScan.loading
           || workspaceStorageUnavailable
           || cloudBlocksSync
           || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_pull)
@@ -2493,6 +2507,7 @@ export default function ProjectLinksWorkspace({
         }}
         title={workspaceStorageIssue
           ?? workspaceProfileIssue
+          ?? projectFilesScanIssue
           ?? (!workspaceBindingActive
             ? "Confirm project setup before pulling"
             : workspacePullReviewOpen
@@ -2505,7 +2520,7 @@ export default function ProjectLinksWorkspace({
           : workspacePullReviewOpen
           ? `${inlineStorageReview?.continueLabel ?? "Pull selected changes"} — ${workspaceStorage.name || "storage"}`
           : showPullCount
-            ? `Pull ${pullCount} newer thread${pullCount === 1 ? "" : "s"} from ${workspaceStorage.name || "storage"}`
+            ? `Pull ${projectSyncCountPhrase(pullThreadCount, projectFileCounts.pull)} from ${workspaceStorage.name || "storage"}`
             : `Pull from ${workspaceStorage.name || "storage"}`}
         aria-expanded={workspacePullReviewOpen}
       >
@@ -2527,6 +2542,7 @@ export default function ProjectLinksWorkspace({
         className={`sync-path-sync${workspacePushReviewOpen ? " active" : ""}`}
         disabled={busy
           || !!runningAction
+          || projectFilesScan.loading
           || workspaceStorageUnavailable
           || cloudBlocksSync
           || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_push)
@@ -2546,13 +2562,14 @@ export default function ProjectLinksWorkspace({
         }}
         title={workspaceStorageIssue
           ?? workspaceProfileIssue
+          ?? projectFilesScanIssue
           ?? (workspacePushReviewOpen
             ? (inlineStorageReview?.continueTitle ?? "Push the selected resources to this storage")
             : "Choose resources, then push them to this storage")}
         aria-label={workspacePushReviewOpen
           ? `Push selected resources to ${workspaceStorage.name || "storage"}`
           : showPushCount
-            ? `Push ${pushCount} newer thread${pushCount === 1 ? "" : "s"} to ${workspaceStorage.name || "storage"}`
+            ? `Push ${projectSyncCountPhrase(pushThreadCount, projectFileCounts.push)} to ${workspaceStorage.name || "storage"}`
             : `Push to ${workspaceStorage.name || "storage"}`}
         aria-expanded={workspacePushReviewOpen}
       >
@@ -2997,7 +3014,7 @@ export default function ProjectLinksWorkspace({
                             />
                           )}
                           {activeNotice && activeNotice.kind === "outcome" && (
-                            <SyncOutcomeNotice
+                            <SyncOutcomeNotice presentAction={projectOutcomeAction}
                               outcome={activeNotice.outcome}
                               busy={noticeActionsDisabled}
                               onAction={(action) => onStorageNoticeAction?.(activeNotice.outcome, action)}
@@ -3059,70 +3076,30 @@ export default function ProjectLinksWorkspace({
           </div>
         ))}
 
-        {activeProject && !newProjectSetup && !inlineStorageReview && !activeProject.is_git_repository && (
-          /* The switch itself, on the page: the section crumb names the view
-             and offers the other in its menu, but a menu behind a chevron is
-             not a control anyone finds. The app's segmented pill, as a real
-             tablist with the arrow-key contract. */
-          <div className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view">
-            {PROJECT_VIEWS.map((view) => {
-              const active = activityView === view.id;
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  id={`project-view-${view.id}-tab`}
-                  role="tab"
-                  aria-selected={active}
-                  aria-controls="project-history-panel"
-                  tabIndex={active ? 0 : -1}
-                  className={active ? "active" : undefined}
-                  onClick={() => setActivityView(view.id)}
-                  onKeyDown={(event) => {
-                    const index = PROJECT_VIEWS.findIndex((candidate) => candidate.id === view.id);
-                    const next = event.key === "ArrowRight" || event.key === "ArrowDown"
-                      ? PROJECT_VIEWS[(index + 1) % PROJECT_VIEWS.length]
-                      : event.key === "ArrowLeft" || event.key === "ArrowUp"
-                        ? PROJECT_VIEWS[(index - 1 + PROJECT_VIEWS.length) % PROJECT_VIEWS.length]
-                        : event.key === "Home"
-                          ? PROJECT_VIEWS[0]
-                          : event.key === "End"
-                            ? PROJECT_VIEWS[PROJECT_VIEWS.length - 1]
-                            : null;
-                    if (!next) return;
-                    event.preventDefault();
-                    const strip = event.currentTarget.parentElement;
-                    setActivityView(next.id);
-                    window.requestAnimationFrame(() => {
-                      strip?.querySelector<HTMLButtonElement>(`#project-view-${next.id}-tab`)?.focus();
-                    });
-                  }}
-                >
-                  <Icon name={view.icon} size={13} />
-                  <span>{view.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
         {activeProject && !newProjectSetup && !inlineStorageReview && (
           <div
-            id="project-history-panel"
+            id={PROJECT_VIEW_PANEL_ID}
             className="sync-project-tab-panel"
             role={activeProject.is_git_repository ? undefined : "tabpanel"}
-            aria-labelledby={activeProject.is_git_repository ? undefined : `project-view-${activityView}-tab`}
+            aria-labelledby={activeProject.is_git_repository ? undefined : projectViewTabId(activityView)}
           >
-            {activityView === "files" && !activeProject.is_git_repository ? (
-              <ProjectFilesActivityPage
-                project={activeProject}
-                activeStorageId={activeStorageId}
-                activeStorageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name ?? null}
-                refreshEpoch={historyRefreshEpoch}
-                onHeaderModelChange={handleFilesActivityHeaderChange}
+            {filesFaceShown && (
+              <ProjectFilesActivityView
+                inventory={projectFilesScan.inventory}
+                storageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name.trim() || "storage"}
+                loading={projectFilesScan.loading}
+                error={projectFilesScan.error}
                 onOpenFile={(relativePath) => openProjectFile(activeProject.local_project_id, relativePath)}
                 onRevealPath={revealPath}
+                viewSwitch={projectViewSwitch}
               />
-            ) : (
+            )}
+            {/* The Sessions face stays mounted under the Files face: its
+                comparison is what the bar's thread counts, attention chip and
+                Cloud status read, and those speak for the project on both
+                faces. Only the face on screen seats the switch, so its tab
+                ids stay unique for the focus hand-off. */}
+            <div hidden={filesFaceShown}>
               <ProjectActivityPage
                 comparisonErrorHandled={!!managedCloudKey}
                 project={activeProject}
@@ -3139,8 +3116,9 @@ export default function ProjectLinksWorkspace({
                 onOpenSessionDetail={(request, trigger) => (
                   openSessionDetail(activeProject.local_project_id, request, trigger)
                 )}
+                viewSwitch={filesFaceShown ? undefined : projectViewSwitch}
               />
-            )}
+            </div>
           </div>
         )}
       </section>

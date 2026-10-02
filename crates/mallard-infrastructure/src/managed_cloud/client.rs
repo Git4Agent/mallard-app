@@ -912,9 +912,13 @@ impl ManagedCloudClient {
         Ok(answer.repositories)
     }
 
-    pub async fn list_project_repositories(&self) -> Result<Vec<RepositorySummary>> {
+    pub async fn list_repositories(&self, class: &str) -> Result<Vec<RepositorySummary>> {
         let route = "v1/repositories";
-        let request = self.request(Method::GET, route, "/v1/repositories?class=project")?;
+        let request = self.request(
+            Method::GET,
+            route,
+            &format!("/v1/repositories?{}", query_string(&[("class", class)])),
+        )?;
         let list: RepositoryList = self.json(route, true, request).await?;
         Ok(list.repositories)
     }

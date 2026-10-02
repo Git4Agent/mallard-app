@@ -270,7 +270,7 @@ struct Inner {
     /// Scope → repository id, learned from lookups, listings and creates.
     repositories: Mutex<BTreeMap<Scope, String>>,
     /// Exact repository destinations from link metadata.
-    pinned: Mutex<BTreeMap<BundleId, String>>,
+    pinned: Mutex<BTreeMap<Scope, String>>,
     /// Local origin URLs supplied by the publisher, never local paths or credentials.
     project_origins: Mutex<BTreeMap<BundleId, String>>,
     /// The scopes whose repository answered gone at their last stream
@@ -280,7 +280,7 @@ struct Inner {
     /// answers again or is replaced; any other scope only while nothing
     /// stands in, because what stands in is what the table learns.
     moved: Mutex<BTreeMap<Scope, Option<String>>>,
-    statuses: Mutex<BTreeMap<BundleId, ManagedCloudStatus>>,
+    statuses: Mutex<BTreeMap<Scope, ManagedCloudStatus>>,
     // Keep a superseded refresh from overwriting the next status observation.
     status_read: tokio::sync::Mutex<()>,
     /// Objects written before their manifest, per scope.
@@ -336,7 +336,14 @@ impl ManagedObjectStore {
     /// again changes nothing: a pin that answered gone stays gone, with what
     /// stands in for it, until a Push or a Pull has saved another.
     pub fn set_pin(&self, bundle: &BundleId, id: Option<&str>) -> Result<(), String> {
-        let scope = Scope::Project(bundle.clone());
+        self.set_scope_pin(&Scope::Project(bundle.clone()), id)
+    }
+
+    pub fn set_library_pin(&self, stream: &str, id: Option<&str>) -> Result<(), String> {
+        self.set_scope_pin(&Scope::Library(stream.to_owned()), id)
+    }
+
+    fn set_scope_pin(&self, scope: &Scope, id: Option<&str>) -> Result<(), String> {
         if let Some(id) = id {
             if id.is_empty()
                 || id.len() > 128
@@ -346,18 +353,18 @@ impl ManagedObjectStore {
             {
                 return Err("Invalid Mallard Cloud repository ID.".to_string());
             }
-            let previous = Self::lock(&self.inner.pinned)?.insert(bundle.clone(), id.to_owned());
+            let previous = Self::lock(&self.inner.pinned)?.insert(scope.clone(), id.to_owned());
             if previous.as_deref() != Some(id) {
-                Self::lock(&self.inner.statuses)?.remove(bundle);
-                Self::lock(&self.inner.moved)?.remove(&scope);
+                Self::lock(&self.inner.statuses)?.remove(scope);
+                Self::lock(&self.inner.moved)?.remove(scope);
             }
-            self.remember(&scope, id)
+            self.remember(scope, id)
         } else {
-            if Self::lock(&self.inner.pinned)?.remove(bundle).is_some() {
-                Self::lock(&self.inner.repositories)?.remove(&scope);
-                Self::lock(&self.inner.moved)?.remove(&scope);
+            if Self::lock(&self.inner.pinned)?.remove(scope).is_some() {
+                Self::lock(&self.inner.repositories)?.remove(scope);
+                Self::lock(&self.inner.moved)?.remove(scope);
             }
-            Self::lock(&self.inner.statuses)?.remove(bundle);
+            Self::lock(&self.inner.statuses)?.remove(scope);
             Ok(())
         }
     }
@@ -366,7 +373,11 @@ impl ManagedObjectStore {
     /// reported it, or the connection's own state while it suspends the
     /// store.
     pub fn status(&self, bundle: &BundleId) -> Option<ManagedCloudStatus> {
-        let repository_id = Self::lock(&self.inner.pinned).ok()?.get(bundle)?.clone();
+        self.scope_status(&Scope::Project(bundle.clone()))
+    }
+
+    fn scope_status(&self, scope: &Scope) -> Option<ManagedCloudStatus> {
+        let repository_id = Self::lock(&self.inner.pinned).ok()?.get(scope)?.clone();
         if let Some(health) = self
             .inner
             .client
@@ -385,7 +396,7 @@ impl ManagedObjectStore {
                 message: Some(health.describe()),
             });
         }
-        Self::lock(&self.inner.statuses).ok()?.get(bundle).cloned()
+        Self::lock(&self.inner.statuses).ok()?.get(scope).cloned()
     }
 
     pub fn resolve_repository(&self, bundle: &BundleId) -> Result<String, String> {
@@ -403,14 +414,26 @@ impl ManagedObjectStore {
     /// the pin, else what the store learned. `None` when the bundle has no
     /// repository. No request is made.
     pub fn repository_in_use(&self, bundle: &BundleId) -> Result<Option<String>, String> {
-        let scope = Scope::Project(bundle.clone());
-        if let Some(standing) = Self::lock(&self.inner.moved)?.get(&scope).cloned() {
+        self.scope_repository_in_use(&Scope::Project(bundle.clone()))
+    }
+
+    pub fn library_repository_in_use(&self, stream: &str) -> Result<Option<String>, String> {
+        self.scope_repository_in_use(&Scope::Library(stream.to_owned()))
+    }
+
+    fn scope_repository_in_use(&self, scope: &Scope) -> Result<Option<String>, String> {
+        if let Some(standing) = Self::lock(&self.inner.moved)?.get(scope).cloned() {
             return Ok(standing);
         }
-        if let Some(id) = Self::lock(&self.inner.pinned)?.get(bundle).cloned() {
+        if let Some(id) = Self::lock(&self.inner.pinned)?.get(scope).cloned() {
             return Ok(Some(id));
         }
-        Ok(Self::lock(&self.inner.repositories)?.get(&scope).cloned())
+        Ok(Self::lock(&self.inner.repositories)?.get(scope).cloned())
+    }
+
+    /// Shares the HTTP client and credential health, but owns routing, pins and transfers.
+    pub fn for_operation(&self) -> Self {
+        Self::new(self.inner.client.clone(), self.inner.runtime.clone())
     }
 
     pub fn client(&self) -> &ManagedCloudClient {
@@ -449,7 +472,29 @@ impl ManagedObjectStore {
         Ok(self
             .inner
             .runtime
-            .block_on(self.inner.client.list_project_repositories())?)
+            .block_on(self.inner.client.list_repositories("project"))?)
+    }
+
+    /// The account's catalog repositories, for a Library Push review to name
+    /// where each item goes. Display only, like the project listing.
+    pub fn list_catalog_repositories(
+        &self,
+    ) -> Result<Vec<super::client::RepositorySummary>, String> {
+        Ok(self
+            .inner
+            .runtime
+            .block_on(self.inner.client.list_repositories("catalog"))?)
+    }
+
+    /// One repository's summary by id. Display only.
+    pub fn repository_summary(
+        &self,
+        repository_id: &str,
+    ) -> Result<super::client::RepositorySummary, String> {
+        Ok(self
+            .inner
+            .runtime
+            .block_on(self.inner.client.get_repository(repository_id))?)
     }
 
     fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
@@ -471,10 +516,8 @@ impl ManagedObjectStore {
         if let Some(standing) = Self::lock(&self.inner.moved)?.get(scope).cloned() {
             return Ok(standing);
         }
-        if let Scope::Project(bundle_id) = scope {
-            if let Some(id) = Self::lock(&self.inner.pinned)?.get(bundle_id).cloned() {
-                return Ok(Some(id));
-            }
+        if let Some(id) = self.pin_of(scope)? {
+            return Ok(Some(id));
         }
         if let Some(id) = Self::lock(&self.inner.repositories)?.get(scope).cloned() {
             return Ok(Some(id));
@@ -501,10 +544,7 @@ impl ManagedObjectStore {
     }
 
     fn pin_of(&self, scope: &Scope) -> Result<Option<String>, String> {
-        match scope {
-            Scope::Project(bundle) => Ok(Self::lock(&self.inner.pinned)?.get(bundle).cloned()),
-            Scope::Library(_) => Ok(None),
-        }
+        Ok(Self::lock(&self.inner.pinned)?.get(scope).cloned())
     }
 
     /// Record what a stream listing told about a pinned bundle. The status
@@ -514,8 +554,8 @@ impl ManagedObjectStore {
         scope: &Scope,
         status: impl FnOnce(&str) -> ManagedCloudStatus,
     ) -> Result<(), String> {
-        if let (Scope::Project(bundle), Some(pin)) = (scope, self.pin_of(scope)?) {
-            Self::lock(&self.inner.statuses)?.insert(bundle.clone(), status(&pin));
+        if let Some(pin) = self.pin_of(scope)? {
+            Self::lock(&self.inner.statuses)?.insert(scope.clone(), status(&pin));
         }
         Ok(())
     }

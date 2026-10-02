@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProjectPicker from "../../src/components/project-sync/ProjectPicker";
-import type { LocalProjectSummary, ProviderDescriptor, ProviderProfileSummary, StorageSummary } from "../../src/types";
+import { pickWelcomeRide, WELCOME_RIDE_MS, WELCOME_RIDES } from "../../src/components/project-sync/ProjectsWelcome";
+import type { LocalProjectSummary, ProviderProfileSummary, StorageSummary } from "../../src/types";
 
 const storages = [
   { storage_id: "storage-local", name: "Local storage 1", provider: "local", provider_label: "Local folder", icon: "drive", available: true, summary: [] },
@@ -14,11 +15,6 @@ const profiles = [
   { profile_id: "profile-claude", provider: "claude", display_name: "Default Claude" },
   { profile_id: "profile-codex", provider: "codex", display_name: "Default Codex" },
 ] as unknown as ProviderProfileSummary[];
-
-const providers = [
-  { key: "codex", display_name: "Codex", display_rank: 0, profile_label: "Codex home", setup_default: true },
-  { key: "claude", display_name: "Claude", display_rank: 1, profile_label: "Claude config", setup_default: true },
-] as unknown as ProviderDescriptor[];
 
 const projects: LocalProjectSummary[] = [
   {
@@ -46,7 +42,7 @@ const projects: LocalProjectSummary[] = [
 
 test("the projects landing lists every registered project as a door built from the registry alone", () => {
   const html = renderToStaticMarkup(
-    <ProjectPicker projects={projects} profiles={profiles} providers={providers} storages={storages} onAddProject={() => {}} onSelectProject={() => {}} />,
+    <ProjectPicker projects={projects} profiles={profiles} storages={storages} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
   );
   // Heading, count, and the one action.
   assert.match(html, /<h1 id="landing-picker-title" class="settings-section-title">Projects<\/h1>/);
@@ -69,24 +65,39 @@ test("the projects landing lists every registered project as a door built from t
   assert.doesNotMatch(html, /landing-picker-door|landing-picker-caption/);
 });
 
-test("with no projects the landing is the filled page ghosted: the head, one door, one line", () => {
+test("with no projects the landing welcomes: a mallard ride, the heading, and the two ways Add starts", () => {
   const html = renderToStaticMarkup(
-    <ProjectPicker projects={[]} profiles={profiles} providers={providers} storages={storages} onAddProject={() => {}} onSelectProject={() => {}} />,
+    <ProjectPicker projects={[]} profiles={profiles} storages={storages} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
   );
-  // The same head as the filled page, with the count at zero.
-  assert.match(html, /<h1 id="landing-picker-title" class="settings-section-title">Projects<\/h1>/);
-  assert.match(html, /0 on this machine/);
+  assert.match(html, /<section class="projects-welcome" aria-labelledby="projects-welcome-title">/);
+  assert.match(html, /<h1 id="projects-welcome-title">Add your first project<\/h1>/);
+  // The art is decoration, and a first paint is always the still: the ride
+  // starts on the client, and never under reduced motion.
+  assert.match(html, /class="projects-welcome-art" aria-hidden="true"><img src="\/welcome\/mallard-(bicycle|rocket|submarine)-still\.svg" alt=""/);
+  assert.doesNotMatch(html, /\.gif/);
+  // One primary action and the cloud source beside it, nothing else.
   assert.match(html, /class="btn btn-primary"[^>]*>.*Add project…/);
-  // One door, because Add project opens setup at its Folder field: a dashed
-  // card in the card's anatomy, wearing every agent the build knows.
-  assert.equal((html.match(/class="landing-picker-door"/g) ?? []).length, 1);
-  assert.match(html, /class="landing-picker-door" aria-label="Add project"[\s\S]*?data-icon="folder"[\s\S]*?<strong>Add a folder…<\/strong>[\s\S]*?data-icon="plus"/);
-  assert.match(html, /landing-picker-door-bar"[\s\S]*?landing-picker-door-marks"[\s\S]*?sync-provider-mark codex[\s\S]*?sync-provider-mark claude/);
-  assert.match(html, /landing-picker-caption"[\s\S]*?data-icon="cloud"[\s\S]*?Sessions &amp; memory travel with it/);
-  // No mark, no "No projects yet", no explainer.
-  assert.doesNotMatch(html, /mallard-logo-duck|No projects yet|landing-picker-empty/);
-  assert.doesNotMatch(html, /Add a folder you run|sessions show up here|keeps them safe/);
-  assert.doesNotMatch(html, /landing-picker-card"/);
+  assert.match(html, /class="btn btn-ghost"[^>]*>.*data-icon="cloud".*From Mallard Cloud…/);
+  assert.equal((html.match(/<button/g) ?? []).length, 2);
+  // The filled page's head, doors and caption are not drawn.
+  assert.doesNotMatch(html, /landing-picker|on this machine/);
+});
+
+test("the welcome never shows the same ride twice in a row, and one ride ends inside five seconds", () => {
+  for (const previous of WELCOME_RIDES) {
+    for (const roll of [0, 0.34, 0.5, 0.67, 0.999, 1]) {
+      const ride = pickWelcomeRide(previous, () => roll);
+      assert.ok(WELCOME_RIDES.includes(ride));
+      assert.notEqual(ride, previous);
+    }
+  }
+  // With no previous ride every one of the three can open the page.
+  assert.deepEqual(
+    new Set([0, 0.4, 0.8].map((roll) => pickWelcomeRide(null, () => roll))),
+    new Set(WELCOME_RIDES),
+  );
+  // WCAG 2.2.2: moving content that stops within five seconds needs no pause control.
+  assert.ok(WELCOME_RIDE_MS <= 5000);
 });
 
 test("every box in a landing row stands as tall as the row", () => {

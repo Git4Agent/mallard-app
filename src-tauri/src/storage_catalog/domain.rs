@@ -1175,6 +1175,9 @@ pub struct CatalogScopeLink {
     /// coordinate.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub accepted_items: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
+    /// Exact Cloud repositories selected for these items. Machine-local only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cloud_repositories: BTreeMap<CatalogResourceId, String>,
     pub revision: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -1189,6 +1192,19 @@ impl CatalogScopeLink {
                     "catalog scope link '{}' accepted a different repository",
                     self.link_id
                 ));
+            }
+        }
+        if self.cloud_repositories.len() > MAX_CATALOG_RESOURCES {
+            return Err("too many Cloud repository bindings".to_string());
+        }
+        for id in self.cloud_repositories.values() {
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            {
+                return Err("invalid Cloud repository binding".to_string());
             }
         }
         if self.accepted_items.len() > MAX_CATALOG_RESOURCES {
@@ -2244,6 +2260,32 @@ impl CatalogScopePushRow {
     }
 }
 
+/// Where one item's Pull reads on Mallard Cloud. Display only: the plan's
+/// item head is what the Pull applies.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPullSource {
+    pub repository_id: String,
+    /// `{owner}/{name}`.
+    pub address: String,
+    /// `draft` for a collaborator; `public` on a public repository the
+    /// account does not belong to.
+    pub reads: String,
+    /// The version the review read.
+    pub revision: u64,
+}
+
+/// Where one item's Push goes on Mallard Cloud. Display only: the Push
+/// resolves its repository again when it writes.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPushDestination {
+    /// The repository it pushes to; `None` when the Push creates it.
+    pub repository_id: Option<String>,
+    /// `{owner}/{name}`; for a new repository, the name the service is
+    /// expected to give it.
+    pub address: String,
+    pub create: bool,
+}
+
 /// Immutable Push review for one scope link: one observed repository head and
 /// one row per resource on either side. Reviews live only in the in-memory
 /// plan store; serialization is the one-way trip to the review dialog.
@@ -2266,6 +2308,10 @@ pub struct CatalogScopePushPlan {
     /// item's stream as the review observed it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub observed_items: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
+    /// On Mallard Cloud: where each pushable item goes, named before the
+    /// Push, including the repositories it will create.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub destinations: BTreeMap<CatalogResourceId, CatalogPushDestination>,
     pub rows: Vec<CatalogScopePushRow>,
     pub warning_digests: Vec<String>,
     pub created_at: u64,
@@ -2408,6 +2454,9 @@ pub struct CatalogScopePullPlan {
     pub head: Option<LibraryHeadCoordinate>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub item_heads: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
+    /// On Mallard Cloud: the repository each item reads, and which version.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<CatalogResourceId, CatalogPullSource>,
     pub items: Vec<CatalogScopePullItem>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -3055,6 +3104,7 @@ mod tests {
             accepted_head: None,
             accepted_resources: BTreeMap::new(),
             accepted_items: BTreeMap::new(),
+            cloud_repositories: BTreeMap::new(),
             revision: 1,
             created_at: 1,
             updated_at: 1,
@@ -3258,6 +3308,7 @@ mod tests {
             }],
             observed_head: None,
             observed_items: BTreeMap::new(),
+            destinations: BTreeMap::new(),
             rows: vec![CatalogScopePushRow {
                 row,
                 resource: Some(resource),

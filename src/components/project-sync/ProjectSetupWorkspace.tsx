@@ -1,3 +1,4 @@
+import { formatRelativeTime } from "../../clock";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { homeDir } from "@tauri-apps/api/path";
@@ -19,11 +20,15 @@ import type {
 import Icon, { storageIconName } from "../Icons";
 import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
-import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
+import {
+  expandHomePath,
+  isAbsoluteProfilePath,
+  profilePathHint,
+  type ProfilePathProbeState as ProbeState,
+} from "../../profilePath";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import {
-  formatRelativeTime,
   projectLabel,
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
@@ -109,17 +114,8 @@ export function mergeSavedSetupDraft(
    probe only reads the filesystem. */
 const PATH_PROBE_DELAY_MS = 350;
 
-export type ProfilePathProbeState =
-  | { status: "checking" }
-  | { status: "ok"; probe: ProviderProfileProbe }
-  | { status: "error"; message: string };
-
-export interface ProfilePathHint {
-  tone: "mute" | "ok" | "warn" | "bad";
-  message: string;
-  /** Rendered in the mono face when present — it is a machine identifier. */
-  path?: string;
-}
+/** The project's probe, in the shared state the hint reads. */
+export type ProfilePathProbeState = ProbeState<ProviderProfileProbe>;
 
 export interface ProfileProbeTarget {
   provider: ProviderKey;
@@ -189,60 +185,6 @@ export function useProfilePathProbes(
     return () => window.clearTimeout(timer);
   }, [fingerprint]);
   return probes;
-}
-
-/**
- * Probe refusals are written for people ("cannot be a symlink; choose the
- * resolved directory"), so they are shown as they arrive — minus the internal
- * call prefix. The one exception is the miss that happens on every keystroke
- * of a path being typed, which deserves a sentence rather than an errno.
- */
-function readableProbeError(message: string): string {
-  if (/no such file or directory|cannot find the path|os error 2/i.test(message)) {
-    return "No folder at this path yet.";
-  }
-  return message.replace(/^inspect provider profile '[^']*':\s*/, "");
-}
-
-/** What the line under a custom path field says, for every state it has. */
-export function profilePathHint(
-  state: ProfilePathProbeState | undefined,
-  rawPath: string,
-  home: string | null,
-  descriptor: Pick<ProviderDescriptor, "display_name" | "default_profile_directory">,
-  profiles: Array<Pick<ProviderProfileSummary, "profile_id" | "display_name">>,
-): ProfilePathHint {
-  const expanded = expandHomePath(rawPath, home);
-  if (!expanded) {
-    return { tone: "mute", message: "Type or paste a path, or Browse. ~ means your home folder." };
-  }
-  if (!isAbsoluteProfilePath(expanded)) {
-    return { tone: "mute", message: "Paths must be absolute — start with ~/, / or a drive letter." };
-  }
-  if (!state || state.status === "checking") {
-    return { tone: "mute", message: "Checking", path: expanded };
-  }
-  if (state.status === "error") {
-    return { tone: "bad", message: readableProbeError(state.message) };
-  }
-  const { probe } = state;
-  const registered = probe.existing_profile_id
-    ? profiles.find((profile) => profile.profile_id === probe.existing_profile_id) ?? null
-    : null;
-  if (registered) {
-    return { tone: "ok", message: `Already set up as “${registered.display_name}” — setup will reuse it.` };
-  }
-  if (!probe.readable) {
-    return { tone: "warn", message: "This folder can’t be read. Check its permissions.", path: probe.canonical_path };
-  }
-  if (probe.detected_child && descriptor.default_profile_directory) {
-    return {
-      tone: "ok",
-      message: `Found ${descriptor.default_profile_directory} inside — using`,
-      path: probe.canonical_path,
-    };
-  }
-  return { tone: "ok", message: `${descriptor.display_name} profile ·`, path: probe.canonical_path };
 }
 
 function sectionState(sections: SetupSectionStatus[], id: string): SetupSectionStatus | null {

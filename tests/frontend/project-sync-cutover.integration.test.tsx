@@ -7,14 +7,14 @@ import Icon from "../../src/components/Icons";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import SyncPathBar from "../../src/components/sync-review/SyncPathBar";
 import {
+  orderStorages,
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
 } from "../../src/components/project-sync/model";
-import { expandHomePath } from "../../src/profilePath";
-import { PROJECT_SYNC_SCHEMA, type ProjectSetupDraft } from "../../src/types";
+import { expandHomePath, profilePathHint } from "../../src/profilePath";
+import { PROJECT_SYNC_SCHEMA, type ProjectSetupDraft, type StorageProviderDescriptor } from "../../src/types";
 import {
   defaultSetupRepository,
-  profilePathHint,
   type ProfilePathProbeState,
 } from "../../src/components/project-sync/ProjectSetupWorkspace";
 
@@ -1056,4 +1056,42 @@ test("project session deletion requires warning approval and replaces metadata-o
   assert.match(api, /invoke<ProjectSessionsDeleteResult>\("delete_local_project_sessions"/);
   assert.match(commands, /commands::delete_local_project_sessions,/);
   assert.doesNotMatch(api + commands, /reset_project_sync_metadata/);
+});
+
+test("setup pages list storages Mallard Cloud first, then the other clouds, then local, and open on the first", () => {
+  // The registry's display rank is the preference; the name decides among
+  // equals; a provider this build does not register sorts last.
+  const providers = [
+    { key: "local", display_rank: 30 },
+    { key: "r2", display_rank: 10 },
+    { key: "managed_cloud", display_rank: 5 },
+    { key: "dropbox", display_rank: 20 },
+  ] as StorageProviderDescriptor[];
+  const storages = [
+    { storage_id: "b", name: "Backup drive", provider: "local" },
+    { storage_id: "v", name: "Vault", provider: "r2" },
+    { storage_id: "c", name: "Mallard Cloud", provider: "managed_cloud" },
+    { storage_id: "d", name: "Drop", provider: "dropbox" },
+    { storage_id: "a", name: "Archive", provider: "local" },
+    { storage_id: "x", name: "Mystery", provider: "unknown" },
+  ];
+  assert.deepEqual(orderStorages(storages, providers).map((storage) => storage.storage_id), ["c", "v", "d", "a", "b", "x"]);
+  assert.deepEqual(storages.map((storage) => storage.storage_id), ["b", "v", "c", "d", "a", "x"], "the input is not reordered in place");
+
+  // The shell orders once, and every setup page lists what it is given: the
+  // draft's setup page, New project (its Cloud door included), and Add
+  // Catalog resource.
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /const setupStorages = useMemo\(\s*\(\) => orderStorages\(config\.storages, storageProviders\),/);
+  assert.equal((shell.match(/storages=\{setupStorages\}/g) ?? []).length, 2);
+  assert.match(shell, /const catalogStorages: CatalogStorageOption\[\] = setupStorages\.map\(/);
+
+  // A new draft opens on the first by the same rule, seeded where the
+  // profiles are seeded; "None yet" stays one click away.
+  const rust = readFileSync("src-tauri/src/project_sync/service.rs", "utf8");
+  assert.match(
+    rust,
+    /let descriptors = storage_provider_descriptors\(\);[\s\S]*?\.min_by\(\|left, right\| \{[\s\S]*?\.cmp\(&right\.0\)[\s\S]*?then_with\(\|\| left\.1\.name\.cmp\(&right\.1\.name\)\)/,
+  );
+  assert.doesNotMatch(rust, /config\.storages\.len\(\) == 1/);
 });

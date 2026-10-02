@@ -1,12 +1,14 @@
+import type { ManagedCloudPublicationStatus, ManagedCloudReleaseState } from "./components/managed-cloud/types";
+import type { ManagedCloudLink, ManagedCloudStatus } from "./components/managed-cloud/types";
 import { StrictMode, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import Icon, { type IconName } from "./components/Icons";
 import { NoticeZone, type NoticeItem } from "./components/notice/Notice";
 import { PathBarMenu, type PathBarMenuGroup, type PathBarMenuItem } from "./components/sync-review/SyncPathBar";
-import { cloudStatusNotice, cloudVerbs, cloudVersionUrl } from "./components/project-sync/managedCloudLink";
-import type { ManagedCloudPublicationStatus, ManagedCloudReleaseState } from "./types";
+import { cloudStatusNotice, cloudVerbs, cloudVersionUrl } from "./components/managed-cloud/managedCloudLink";
+
 import { writeClipboardText } from "./components/sync-review/clipboard";
-import type { ManagedCloudLink, ManagedCloudStatus } from "./types";
+
 import "./App.css";
 import "./cloud-status-mockup.css";
 

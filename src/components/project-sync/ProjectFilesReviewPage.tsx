@@ -4,16 +4,21 @@ import type { ProjectFileSyncEligibility } from "../../types";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
 import Notice, { Acknowledgement, NoticeChip } from "../notice/Notice";
+import ListTile from "../sync-review/ListTile";
+import NameSearchField from "../sync-review/NameSearchField";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
-import { formatDateTime } from "../../clock";
+import { nameMatchesSearch } from "../sync-review/nameSearch";
+import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
 import {
   PROJECT_FILE_CARD_RENDER_LIMIT,
   STORAGE_BLOCKING_STATES,
   fileKindLabel,
+  fileNoun,
   projectFileWarningLabel,
 } from "./model";
 import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
+import SessionRowIcon from "./SessionRowIcon";
 
 export type ProjectFileReviewEntryType = "file" | "directory" | "blocked";
 
@@ -194,6 +199,20 @@ function rowIsSelectable(
   return true;
 }
 
+/** The search row's projection of the cards: the ones whose path matches the
+ * query, and how many selected cards the query hides. */
+export function searchProjectFileReviewCards(
+  cardRows: ProjectFileReviewRow[],
+  query: string,
+  isSelected: (row: ProjectFileReviewRow) => boolean,
+) {
+  const matchingCards = query.trim()
+    ? cardRows.filter((row) => nameMatchesSearch(row.relativePath, query))
+    : cardRows;
+  const selectedIn = (cards: ProjectFileReviewRow[]) => cards.filter(isSelected).length;
+  return { matchingCards, hiddenSelected: selectedIn(cardRows) - selectedIn(matchingCards) };
+}
+
 /** One directory band's worth of cards: the file rows directly inside it. */
 interface ReviewFileGroup {
   directory: string;
@@ -224,7 +243,6 @@ export default function ProjectFilesReviewPage({
 }: Props) {
   const [search, setSearch] = useState("");
   const eligible = eligibility.state === "eligible";
-  const normalizedSearch = search.trim().toLocaleLowerCase();
 
   /* Which rows draw a card. Files always do. A directory does only when
      nothing else speaks for it — no descendant rows at all (an empty folder
@@ -245,12 +263,17 @@ export default function ProjectFilesReviewPage({
     ));
   }, [rows]);
 
+  const { matchingCards, hiddenSelected } = useMemo(
+    () => searchProjectFileReviewCards(
+      cardRows,
+      search,
+      (row) => selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId),
+    ),
+    [cardRows, search, selectedIds, removalIds],
+  );
   const shownCards = useMemo(
-    () => (normalizedSearch
-      ? cardRows.filter((row) => row.relativePath.toLocaleLowerCase().includes(normalizedSearch))
-      : cardRows
-    ).slice(0, PROJECT_FILE_CARD_RENDER_LIMIT),
-    [cardRows, normalizedSearch],
+    () => matchingCards.slice(0, PROJECT_FILE_CARD_RENDER_LIMIT),
+    [matchingCards],
   );
 
   const groups = useMemo<ReviewFileGroup[]>(() => {
@@ -308,7 +331,7 @@ export default function ProjectFilesReviewPage({
 
   /* Opening the step is the opt-in: the scan starts itself, once per mount.
      A failed scan leaves `scanned` false with the parent's error notice on
-     screen, and the toolbar's Rescan is the retry — the guard is what keeps
+     screen, and the search row's Rescan is the retry — the guard is what keeps
      a failing walk from re-launching in a loop. */
   const autoScanRequested = useRef(false);
   useEffect(() => {
@@ -402,7 +425,7 @@ export default function ProjectFilesReviewPage({
                 data-tooltip={`Kind · ${isDirectory ? "Folder" : fileKindLabel(row.relativePath)}`}
                 tabIndex={0}
               >
-                <Icon name={isDirectory ? "folder" : "file"} size={12} />
+                <SessionRowIcon name={isDirectory ? "folder" : "file"} />
                 <b>{isDirectory ? "Folder" : fileKindLabel(row.relativePath)}</b>
               </span>
               {size != null
@@ -412,7 +435,7 @@ export default function ProjectFilesReviewPage({
                     data-tooltip={`${row.localPresent ? "On disk" : "In storage"} · ${size}`}
                     tabIndex={0}
                   >
-                    <Icon name="drive" size={12} /><b>{size}</b>
+                    <SessionRowIcon name="size" /><b>{size}</b>
                   </span>
                 )
                 : <span className="sync-history-thread-metric" aria-hidden="true" />}
@@ -424,7 +447,7 @@ export default function ProjectFilesReviewPage({
               projectRoot={projectRoot}
               entryTypeLabel={isDirectory ? "Directory" : row.entryType === "blocked" ? "Blocked entry" : "Regular file"}
               mode={displayMode}
-              modified={row.sourceMtime == null ? null : formatDateTime(row.sourceMtime * 1_000)}
+              modified={row.sourceMtime == null ? null : formatFullDateTime(row.sourceMtime)}
               preservedCopyPath={row.preservedCopyPath}
               blockedReason={row.blockedReason}
             />
@@ -432,10 +455,10 @@ export default function ProjectFilesReviewPage({
             {row.sourceMtime != null && (
               <span
                 className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-                data-tooltip={`${row.localPresent ? "Modified" : "Updated in storage"} · ${formatDateTime(row.sourceMtime * 1_000)}`}
+                data-tooltip={`${row.localPresent ? "Modified" : "Updated in storage"} · ${formatFullDateTime(row.sourceMtime)}`}
                 tabIndex={0}
               >
-                <time>{formatDateTime(row.sourceMtime * 1_000)}</time>
+                <time dateTime={new Date(row.sourceMtime * 1_000).toISOString()}>{formatFullDateTime(row.sourceMtime)}</time>
               </span>
             )}
           </div>
@@ -471,21 +494,26 @@ export default function ProjectFilesReviewPage({
     );
   };
 
-  const renderTileHead = (directory: string) => {
+  /* The folder's own row control leads its strip: the same checkbox its rows
+     wear — ticked, unticked, or a dash while the folder is partly selected —
+     and one click applies or clears the subtree. An icon pair here would
+     spend a check-circle the header already means something else by ("use
+     the recommended selection"), and a trash that reads as deletion on a
+     page where a card's trash really deletes from storage. The counter chip
+     closes the strip. */
+  const renderTile = (group: ReviewFileGroup) => {
+    const { directory } = group;
     const { picked, total } = subtreeSelection(directory);
     const all = total > 0 && picked === total;
     const verb = all ? "Exclude" : mode === "pull" ? "Apply" : "Include";
     const spoken = directory === "" ? "the project root" : directory;
     return (
-      <div className="sync-project-file-tile-head">
-        {/* The folder's own row control: the same checkbox its rows wear —
-            ticked, unticked, or a dash while the folder is partly selected —
-            and one click applies or clears the subtree. An icon pair here
-            would spend a check-circle the header already means something
-            else by ("use the recommended selection"), and a trash that
-            reads as deletion on a page where a card's trash really deletes
-            from storage. The counter chip closes the strip. */}
-        {eligible && (
+      <ListTile
+        key={directory || "(root)"}
+        icon="folder"
+        label={directory === "" ? "Project root" : <span>{directory}/</span>}
+        facts={groupFacts(directory)}
+        leading={eligible && (
           <label className="sync-sync-row-choice" title={`${verb} every file in ${spoken}`}>
             <input
               type="checkbox"
@@ -497,21 +525,19 @@ export default function ProjectFilesReviewPage({
             />
           </label>
         )}
-        <Icon name={directory === "" ? "git-folder" : "folder"} size={14} />
-        {/* "Project root" is chrome and keeps the pixel face; a path is the
-            user's data and reads in the normal face, via the head's span
-            carve-out. */}
-        <strong>{directory === "" ? "Project root" : <span>{directory}/</span>}</strong>
-        <small>{groupFacts(directory)}</small>
-        <span
-          className="sync-sync-review-selected"
-          style={{ "--review-count-digits": String(total).length } as CSSProperties}
-          aria-label={`${picked} of ${total} selected in ${spoken}`}
-          title={`${picked} of ${total} selected in ${spoken}`}
-        >
-          <b>{picked}</b>/{total}
-        </span>
-      </div>
+        trailing={(
+          <span
+            className="sync-sync-review-selected"
+            style={{ "--review-count-digits": String(total).length } as CSSProperties}
+            aria-label={`${picked} of ${total} selected in ${spoken}`}
+            title={`${picked} of ${total} selected in ${spoken}`}
+          >
+            <b>{picked}</b>/{total}
+          </span>
+        )}
+      >
+        {group.cards.map(renderCard)}
+      </ListTile>
     );
   };
 
@@ -519,36 +545,26 @@ export default function ProjectFilesReviewPage({
     <section className="sync-project-files-page" aria-label="Project files">
       {!eligible && <ProjectFilesLockedNotice eligibility={eligibility} withDetectedRoot />}
 
-      {/* One line: the tab already says "Project files", so the bar spends
-          its row on the controls — search, the tally, and the step's verb. */}
-      <div className="sync-project-files-search">
-        <input
-          type="search"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          /* Escape clears the filter, the same as any search field. Without
-             this it reaches the review's own window listener and throws the
-             whole prepared push away. An empty field has nothing to clear,
-             so it still closes the review. */
-          onKeyDown={(event) => {
-            if (event.key !== "Escape" || !search) return;
-            event.preventDefault();
-            event.stopPropagation();
-            setSearch("");
-          }}
-          placeholder="Search files…"
-          aria-label="Search project file paths"
-          disabled={rows.length === 0}
-        />
-        {rows.length > 0 && <span>{cardRows.length} entr{cardRows.length === 1 ? "y" : "ies"}</span>}
-        {onScan && (
-          /* Both directions: on Push this re-walks the folder; on Pull it
-             rebuilds the plan against the storage's current head. */
+      {/* The shared search row. The review has no path bar, so the step's
+          rescan closes this row instead: on Push it re-walks the folder; on
+          Pull it rebuilds the plan against the storage's current head. The
+          field stops its own Escape, so a filled field clears instead of
+          throwing the prepared review away. */}
+      <NameSearchField
+        query={search}
+        onChange={setSearch}
+        label="Search files"
+        matches={matchingCards.length}
+        total={cardRows.length}
+        noun={fileNoun}
+        hiddenSelected={hiddenSelected}
+        disabled={rows.length === 0}
+        trailing={onScan && (
           <button type="button" className="btn btn-ghost" onClick={onScan} disabled={disabled || loading || !eligible}>
             <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? "Scanning…" : "Rescan"}
           </button>
         )}
-      </div>
+      />
 
       {rows.length === 0 ? (
         mode === "push" && !scanned && eligible ? (
@@ -556,17 +572,12 @@ export default function ProjectFilesReviewPage({
         ) : (
           <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
         )
+      ) : matchingCards.length === 0 ? (
+        <div className="sync-history-state">No matching files.</div>
       ) : (
         <>
-          {groups.map((group) => (
-            <div key={group.directory || "(root)"} className="sync-project-file-tile">
-              {renderTileHead(group.directory)}
-              <div className="sync-history-thread-list flat">
-                {group.cards.map(renderCard)}
-              </div>
-            </div>
-          ))}
-          {shownCards.length >= PROJECT_FILE_CARD_RENDER_LIMIT && cardRows.length > shownCards.length && (
+          {groups.map(renderTile)}
+          {matchingCards.length > shownCards.length && (
             <div className="sync-project-file-limit">First {PROJECT_FILE_CARD_RENDER_LIMIT} shown. Search to narrow the list.</div>
           )}
         </>

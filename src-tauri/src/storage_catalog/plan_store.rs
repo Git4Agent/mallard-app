@@ -104,6 +104,7 @@ mod tests {
             target_pins: Vec::new(),
             observed_head: None,
             observed_items: BTreeMap::new(),
+            destinations: BTreeMap::new(),
             rows: Vec::new(),
             warning_digests: Vec::new(),
             created_at,

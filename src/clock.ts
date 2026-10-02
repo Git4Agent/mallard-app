@@ -27,6 +27,17 @@ export function toEpochMilliseconds(value: number): number {
   return value > 10_000_000_000 ? value : value * 1_000;
 }
 
+/** How long ago, coarsely: `just now`, `5m ago`, `3h ago`, then the date.
+ *  Seconds or milliseconds, as `toEpochMilliseconds` reads them. */
+export function formatRelativeTime(epoch?: number): string {
+  if (!epoch) return "Unknown";
+  const delta = Date.now() - toEpochMilliseconds(epoch);
+  if (delta < 60_000) return "just now";
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
+  return new Date(toEpochMilliseconds(epoch)).toLocaleDateString();
+}
+
 export function formatDateTime(milliseconds: number): string {
   return new Date(milliseconds).toLocaleString(undefined, {
     month: "short",

@@ -90,7 +90,7 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
                 label: "Sign-in token".into(),
                 required: true,
                 placeholder: Some("Issued by the browser sign-in".into()),
-                help: Some("The desktop session Mallard Cloud issued at sign-in, valid 90 days. Reconnect through the lane to renew it.".into()),
+                help: Some("Issued at sign-in and valid 90 days. Reconnect to renew it.".into()),
                 help_url: None,
             }],
             managed_secret_id: Some(token_key()),

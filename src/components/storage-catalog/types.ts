@@ -1,3 +1,4 @@
+import type { ManagedCloudStatus } from "../managed-cloud/types";
 /** Scope-rowed Library contracts. These mirror the Rust command DTOs
  * (`storage_catalog/service.rs`, `registry.rs`, `domain.rs`) and remain
  * independent from project-sync DTOs. Providers, kinds, formats, and targets
@@ -61,6 +62,38 @@ export interface CatalogProfile {
   revision: number;
   created_at: number;
   updated_at: number;
+}
+
+/** `CatalogProfileProbeDto`: what a typed home would become, answered
+ * without writing — the project's probe shape in the Catalog's words. */
+export interface CatalogProfileProbe {
+  canonical_path: string;
+  readable: boolean;
+  /** The saved profile this folder already is, when it is one. */
+  existing_profile_id?: string | null;
+  /** The name Set up would give it: the saved one, else its folder's. */
+  suggested_name: string;
+}
+
+/** `CatalogProfileHoldingDto`: what one saved home holds of one capability
+ * its provider registers, and the row that already lists it. */
+export interface CatalogProfileHolding {
+  capability: CatalogCapabilityDescriptor;
+  /** Null when this capability's inventory could not run for the home. */
+  count?: number | null;
+  newest_modified_at?: number | null;
+  /** The target roots as the adapter names them — summaries, never paths. */
+  roots: string[];
+  scope_id?: string | null;
+}
+
+/** `CatalogProfileInspectionDto`: one saved home read for its setup page. */
+export interface CatalogProfileInspection {
+  profile: CatalogProfile;
+  /** The storage a Catalog row used last, when one did. */
+  last_used_storage_id?: string | null;
+  /** In the registry's order. */
+  holdings: CatalogProfileHolding[];
 }
 
 /** One Catalog menu row: every resource of one coordinate under one provider
@@ -173,6 +206,14 @@ export interface CatalogScopeResources extends CatalogCoordinateLabels {
   warnings: string[];
   /** Startup-recovery messages from the operations journal. */
   recovery: string[];
+  /** On Mallard Cloud: each item's repository, saved or learned from the
+   *  account's listing. */
+  cloud_repositories: Record<string, string>;
+  /** The repositories this row has saved; the rest were learned. */
+  cloud_connections: Record<string, string>;
+  /** On Mallard Cloud, when the page's request was refused for the
+   *  account's sake: the rows list only this Mac, and nothing is compared. */
+  cloud_status?: ManagedCloudStatus | null;
 }
 
 export interface CatalogScopeLinkOutcome {
@@ -231,15 +272,40 @@ export interface CatalogScopePushPlan {
   observed_head?: LibraryHeadCoordinate;
   /** On Mallard Cloud, which holds one item per repository: each stored item's head as the review observed it. */
   observed_items?: Record<string, LibraryHeadCoordinate>;
+  /** On Mallard Cloud: where each pushable item goes, new repositories
+   *  included. */
+  destinations?: Record<string, CatalogPushDestination>;
   rows: CatalogScopePushRow[];
   warning_digests: string[];
   created_at: number;
   expires_at: number;
 }
 
+/** Where one item's Pull reads on Mallard Cloud. */
+export interface CatalogPullSource {
+  repository_id: string;
+  /** `owner/name`. */
+  address: string;
+  /** The draft for a collaborator; the public version for anyone else. */
+  reads: "draft" | "public";
+  /** The version the review read. */
+  revision: number;
+}
+
+/** Where one item's Push goes on Mallard Cloud. */
+export interface CatalogPushDestination {
+  /** Null when the Push creates the repository. */
+  repository_id: string | null;
+  /** `owner/name`; for a new repository, the name it is expected to get. */
+  address: string;
+  create: boolean;
+}
+
 export interface CatalogScopePushOutcome {
   plan_id: string;
   published: boolean;
+  results: CatalogPushResult[];
+  stopped: string | null;
   revision?: number | null;
   message: string;
 }
@@ -318,6 +384,8 @@ export interface CatalogScopePullPlan {
   /** The reviewed version of the coordinate repository; absent on Mallard Cloud, where `item_heads` carries each item's. */
   head?: LibraryHeadCoordinate;
   item_heads?: Record<string, LibraryHeadCoordinate>;
+  /** On Mallard Cloud: the repository each item reads, and which version. */
+  sources?: Record<string, CatalogPullSource>;
   items: CatalogScopePullItem[];
   created_at: number;
   expires_at: number;
@@ -388,3 +456,52 @@ export interface CatalogStorageRepository extends CatalogCoordinate, CatalogCoor
 export interface CatalogStorageRepositoryView extends CatalogStorageRepository {
   capability: CatalogCapabilityDescriptor | null;
 }
+
+export interface CatalogPushResult {
+  resource_id: string;
+  display_name: string;
+  state: "published" | "unchanged" | "failed" | "not_attempted";
+  message: string | null;
+  /** On Mallard Cloud: the version this item's repository holds after the
+   *  Push. */
+  revision?: number | null;
+}
+export interface CatalogSyncProgress {
+  plan_id: string;
+  completed: number;
+  total: number;
+  message: string;
+}
+/** One Mallard Cloud repository of a Catalog item, as Connect and Add list
+ *  or resolve it. */
+export interface CatalogCloudRepository extends CatalogCoordinate, CatalogCoordinateLabels {
+  repository_id: string;
+  owner_login: string;
+  name: string;
+  /** `owner/name`, the service's spelling. */
+  address: string;
+  website_url: string;
+  visibility: "private" | "public";
+  /** Null for a public repository the account does not belong to. */
+  role: string | null;
+  can_push: boolean;
+  /** The draft's version for a collaborator, the public one otherwise. */
+  revision: number;
+  updated_at: number;
+  /** Created, nothing pushed yet. */
+  registration_only: boolean;
+  resource_id: string;
+  display_name: string;
+  /** Whether this build registers the coordinate. */
+  available: boolean;
+}
+
+/** What one typed address or invitation code answered. Whether the item
+ *  fits is the chooser's to say. */
+export type CatalogCloudResolution =
+  | { kind: "found"; repository: CatalogCloudRepository }
+  | { kind: "not_found"; address: string }
+  | { kind: "not_catalog"; address: string }
+  | { kind: "wrong_service"; host: string; expected: string }
+  | { kind: "github" }
+  | { kind: "invalid" };

@@ -359,6 +359,20 @@ impl ConfiguredObjectStore {
         self.inner.managed_cloud()
     }
 
+    /// A Catalog operation may bind the same item stream to a different
+    /// repository in each profile. Its routing and publication cache must
+    /// never leak into another operation; the HTTP connection remains shared.
+    pub fn for_catalog_operation(&self) -> Self {
+        match self.managed_cloud() {
+            Some(cloud) => Self {
+                inner: Arc::new(cloud.for_operation()),
+                storage_id: self.storage_id.clone(),
+                publications: Arc::new(publication::PublicationCache::default()),
+            },
+            None => self.clone(),
+        }
+    }
+
     /// The process-shared store for `config`, opened through the production
     /// registry. The Mallard storage marker is verified exactly once, when
     /// the entry is created; two concurrent first opens produce one marker

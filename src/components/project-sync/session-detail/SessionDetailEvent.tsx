@@ -3,6 +3,11 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import { makeMermaidPre } from "../../mermaid/MermaidFlowchart";
 import { remarkMermaidFences } from "../../mermaid/remarkMermaidFences";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import type { PluggableList } from "unified";
+import { remarkLatexMath } from "./remarkLatexMath";
+import "katex/dist/katex.min.css";
 import type { SessionAgentPreview, SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
@@ -110,7 +115,12 @@ function ProjectMarkdownImage({
 
 /* A fresh array literal every render is a changed prop to ReactMarkdown, so
    this lives at module scope. */
-const REMARK_PLUGINS = [remarkGfm, remarkMermaidFences];
+const REMARK_PLUGINS = [remarkGfm, remarkMermaidFences, remarkMath, remarkLatexMath];
+const REHYPE_PLUGINS: PluggableList = [[rehypeKatex, {
+  trust: false,
+  maxExpand: 1000,
+  maxSize: 25,
+}]];
 
 /* Parsing a markdown body is the most expensive thing this page does, and the
    page re-renders whenever any tool call expands or a tool detail resolves —
@@ -215,6 +225,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   return (
     <ReactMarkdown
       remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
       skipHtml
       urlTransform={safeMarkdownUrl}
       components={components}

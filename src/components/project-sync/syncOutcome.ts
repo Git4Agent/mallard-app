@@ -1,4 +1,4 @@
-import type { IconName } from "../Icons";
+import type { SyncOutcomeView, SyncOutcomeRow, SyncOutcomeStat, OutcomeActionPresentation } from "../sync-review/outcome";
 import type {
   AfterPullActionOffer,
   BundleReadiness,
@@ -10,26 +10,6 @@ import type {
 import { compactThreadTitle, syncHoldDetail } from "./ProjectActivityPage";
 import { pushReviewPullHolds } from "./PushResourceWorkspace";
 import { pullActionResourceIds, type PullReviewItem } from "./pullReviewModel";
-
-/** A finished operation rendered on the storage card after its review closes. */
-export type SyncOutcomeRowStatus = "synced" | "held" | "preserved" | "failed" | "not_pulled";
-
-export interface SyncOutcomeRow {
-  key: string;
-  title: string;
-  status: SyncOutcomeRowStatus;
-  reason?: string | null;
-  threadId?: string | null;
-  updatedAt?: number | null;
-}
-
-export interface SyncOutcomeStat {
-  icon: IconName;
-  value?: string;
-  label: string;
-  /** Renders "Version 6" rather than "6 version". */
-  lead?: boolean;
-}
 
 export type SyncOutcomeAction =
   /** A follow-up the provider declared for a finished Pull. Available offers
@@ -44,19 +24,9 @@ export type SyncOutcomeAction =
   | { kind: "recheck"; label: string }
   | { kind: "open_pull"; label: string };
 
-export interface SyncOutcome {
+export interface SyncOutcome extends SyncOutcomeView<SyncOutcomeAction> {
   projectId: string;
   storageId: string;
-  tone: "success" | "warning";
-  title: string;
-  /** One line under the title, when the result has one to say: why a Pull
-   *  stopped, or the storage's own error. */
-  message?: string;
-  stats: SyncOutcomeStat[];
-  rows: SyncOutcomeRow[];
-  actions: SyncOutcomeAction[];
-  defaultOpen: boolean;
-  technical: Array<{ label: string; value: string }>;
 }
 
 function plural(count: number, one: string, many = `${one}s`): string {
@@ -372,4 +342,10 @@ export function buildPullOutcome({
       ...(result.plan_id ? [{ label: "Plan", value: result.plan_id }] : []),
     ],
   };
+}
+
+export function projectOutcomeAction(action: SyncOutcomeAction, index: number): OutcomeActionPresentation {
+  return action.kind === "after_pull_action"
+    ? { key: `${action.kind}:${action.offer.provider}:${action.offer.action_id}:${index}`, icon: "refresh", title: action.title, available: action.offer.available }
+    : { key: `${action.kind}:${index}`, icon: action.kind === "open_pull" ? "download" : "refresh", available: true };
 }

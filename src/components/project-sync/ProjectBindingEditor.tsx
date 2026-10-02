@@ -7,10 +7,9 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import Notice, { FieldMessage } from "../notice/Notice";
-import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
+import { expandHomePath, isAbsoluteProfilePath, profilePathHint } from "../../profilePath";
 import { compactProjectPath } from "./model";
 import {
-  profilePathHint,
   useHomePath,
   useProfilePathProbes,
   type ProfileProbeTarget,

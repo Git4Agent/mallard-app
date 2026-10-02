@@ -705,7 +705,9 @@ function Frame({ knobs, fillRef, dropRef }: {
       activeStorageId={null}
       catalogScopes={[]}
       activeCatalogScopeId={null}
+      addingProject={false}
       addingCatalogScope={false}
+      addingStorage={false}
       catalogIndexOpen={false}
       storageIndexOpen={false}
       settingsOpen={false}
@@ -742,7 +744,7 @@ function Frame({ knobs, fillRef, dropRef }: {
   );
 
   const landing = knobs.base === "before" ? (
-    <ProjectPicker projects={projects} profiles={profiles} providers={PROVIDERS} storages={STORAGES} onAddProject={addProject} onSelectProject={(projectId) => setScreen({ kind: "project", projectId })} />
+    <ProjectPicker projects={projects} profiles={profiles} storages={STORAGES} onAddProject={addProject} onAddCloudProject={addProject} onSelectProject={(projectId) => setScreen({ kind: "project", projectId })} />
   ) : (
     <LandingPicker
       title="Projects"

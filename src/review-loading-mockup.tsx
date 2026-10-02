@@ -4,6 +4,7 @@ import Icon from "./components/Icons";
 import LoadingScaffold, { LoadingBone } from "./components/LoadingScaffold";
 import { NoticeZone, type NoticeItem } from "./components/notice/Notice";
 import NameSearchField from "./components/sync-review/NameSearchField";
+import { sessionNoun } from "./components/project-sync/model";
 import ProviderMark from "./components/sync-review/ProviderMark";
 import { ReviewBudgetGauge, ReviewBudgetGlance, type ReviewBudget } from "./components/sync-review/ReviewBudgetMeter";
 import SyncPathBar, { PathBarBelow } from "./components/sync-review/SyncPathBar";
@@ -599,7 +600,7 @@ function ReviewRows({ verb }: { verb: Verb }) {
   return (
     <div className="sync-history-page sync-history-embedded sync-history-selection-review">
       <section className="sync-history-content" aria-label="Sessions">
-        <NameSearchField query={query} onChange={setQuery} label="Search sessions" matches={rows.length} total={rows.length} />
+        <NameSearchField noun={sessionNoun} query={query} onChange={setQuery} label="Search sessions" matches={rows.length} total={rows.length} />
         {verb === "pull" ? <StorageOnlyGroup rows={PULL_ROWS} review /> : (
           <div className="sync-history-thread-list flat">
             {PUSH_ROWS.map((row) => (

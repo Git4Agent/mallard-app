@@ -1,3 +1,5 @@
+import RepositoryLookupField, { isInvitationCodeShaped } from "../managed-cloud/RepositoryLookupField";
+import { predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   ManagedCloudRepository,
@@ -9,7 +11,8 @@ import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { openExternalUrl } from "./externalLink";
-import { formatRelativeTime, repositoryFingerprintsRequireAcknowledgement } from "./model";
+import { repositoryFingerprintsRequireAcknowledgement } from "./model";
+import { formatRelativeTime } from "../../clock";
 
 /**
  * Deciding which Mallard Cloud repository a project connects to, by the
@@ -69,40 +72,6 @@ export function managedCloudAccount(storage: Pick<StorageSummary, "settings" | "
     origin,
     host: origin.replace(/^[a-z]+:\/\//i, ""),
   };
-}
-
-const REPOSITORY_NAME_MAX = 100;
-
-/** Preserve valid names exactly; clean up other project titles using the
- *  service's rules. */
-export function normalizeRepositoryName(requested: string): string {
-  const trimmed = requested.trim();
-  if (/^[A-Za-z0-9._-]{1,100}$/.test(trimmed) && trimmed !== "." && trimmed !== "..") return trimmed;
-  let name = trimmed.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
-  if (name.length > REPOSITORY_NAME_MAX) name = name.slice(0, REPOSITORY_NAME_MAX).replace(/-+$/g, "");
-  return /^[A-Za-z0-9._-]{1,100}$/.test(name) && name !== "." && name !== ".." ? name : "repository";
-}
-
-/** The address a new repository would get: the normalized project name,
- *  suffixed `-2`, `-3`, … while the account already owns the name. The
- *  service stays the authority; this is the preview on the New row. */
-export function predictRepositoryAddress(
-  login: string,
-  requestedName: string,
-  repositories: ReadonlyArray<Pick<ManagedCloudRepository, "owner_login" | "name">>,
-): { address: string; name: string; base: string; suffixed: boolean } {
-  const base = normalizeRepositoryName(requestedName);
-  const taken = new Set(
-    repositories
-      .filter((repository) => repository.owner_login.toLowerCase() === login.toLowerCase())
-      .map((repository) => repository.name.toLowerCase()),
-  );
-  let name = base;
-  for (let n = 2; taken.has(name.toLowerCase()); n++) {
-    const suffix = `-${n}`;
-    name = `${base.slice(0, REPOSITORY_NAME_MAX - suffix.length).replace(/-+$/g, "")}${suffix}`;
-  }
-  return { address: `${login}/${name}`, name, base, suffixed: name !== base };
 }
 
 export type RepositoryListing =
@@ -211,16 +180,6 @@ type Join =
   | { kind: "idle" }
   | { kind: "joining" }
   | { kind: "failed"; message: string };
-
-/** An invitation code rather than an address: no `/` or `.` (an address
- *  always has a `/`), and 20 characters once spaces and hyphens go. The
- *  alphabet is the service's to check, so a mistyped code gets the code's
- *  error rather than the address's. */
-export function isInvitationCodeShaped(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed || /[/.]/.test(trimmed)) return false;
-  return trimmed.replace(/[\s-]+/g, "").length === 20;
-}
 
 /** Whether a repository the field named is already one of the rows: then
  *  the row is the selection, and the field only points at it. */
@@ -531,36 +490,11 @@ export default function RepositoryAddressPicker({
 
   return (
     <>
-      <label className="sync-folder-field compact">
-        <span>Address or invite code</span>
-        <div>
-          <input
-            value={entry}
-            disabled={disabled || joining}
-            spellCheck={false}
-            autoComplete="off"
-            placeholder="owner/name or invite code"
-            aria-invalid={invalidAddress || join.kind === "failed" || undefined}
-            aria-describedby={describedBy}
-            onChange={(event) => {
-              setEntry(event.target.value);
-              if (join.kind === "failed") setJoin({ kind: "idle" });
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                submit();
-              }
-            }}
-          />
-          <button type="button" className="btn repo-verb" disabled={disabled || looking || joining || !entry.trim()} onClick={submit}>
-            <Icon name={code ? "user" : "search"} size={12} />
-            {joining ? "Joining…" : looking ? "Looking up…" : code ? "Join" : "Look up"}
-          </button>
-        </div>
-        {code && <small>Join to become a member.</small>}
-        {join.kind === "failed" && fieldError(join.message)}
-      </label>
+      <RepositoryLookupField value={entry} onChange={(value) => {
+        setEntry(value); if (join.kind === "failed") setJoin({ kind: "idle" });
+      }} onSubmit={submit} disabled={disabled} looking={looking} joining={joining}
+        invalid={invalidAddress || join.kind === "failed"} describedBy={describedBy}
+        error={join.kind === "failed" ? fieldError(join.message) : undefined} />
 
       {answer}
       {acknowledgement}

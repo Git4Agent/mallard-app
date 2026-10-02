@@ -12,10 +12,12 @@ use super::domain::{
     CatalogScopePullPlan, CatalogScopePushPlan, LocalCatalogProfileId, ProviderKey,
 };
 use super::registry::CatalogCapabilityDescriptor;
+use super::service::cloud::{CatalogCloudRepository, CatalogCloudResolution};
 use super::service::{
-    CatalogProfileDto, CatalogPullApproval, CatalogPushApproval, CatalogScopeDto,
-    CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto, CatalogScopePushOutcomeDto,
-    CatalogScopeResourcesDto, CatalogStorageRepositoryDto, StorageCatalogService,
+    CatalogProfileDto, CatalogProfileInspectionDto, CatalogProfileProbeDto, CatalogPullApproval,
+    CatalogPushApproval, CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
+    CatalogScopePushOutcomeDto, CatalogScopeResourcesDto, CatalogStorageRepositoryDto,
+    StorageCatalogService,
 };
 
 async fn run_blocking<T: Send + 'static>(
@@ -59,6 +61,23 @@ pub async fn rename_catalog_resource_profile(
         )
     })
     .await
+}
+
+#[tauri::command]
+pub async fn probe_catalog_resource_profile(
+    provider: ProviderKey,
+    path: String,
+) -> Result<CatalogProfileProbeDto, String> {
+    run_blocking(move || StorageCatalogService::from_user_home()?.probe_profile(provider, path))
+        .await
+}
+
+#[tauri::command]
+pub async fn inspect_catalog_resource_profile(
+    profile_id: LocalCatalogProfileId,
+) -> Result<CatalogProfileInspectionDto, String> {
+    run_blocking(move || StorageCatalogService::from_user_home()?.inspect_profile(&profile_id))
+        .await
 }
 
 #[tauri::command]
@@ -189,13 +208,18 @@ pub async fn apply_catalog_scope_push(
     plan_id: CatalogPlanId,
     selected_resource_ids: Vec<CatalogResourceId>,
     acknowledged_warning_digests: Vec<String>,
+    on_progress: tauri::ipc::Channel<super::service::CatalogSyncProgress>,
 ) -> Result<CatalogScopePushOutcomeDto, String> {
     run_blocking(move || {
-        StorageCatalogService::from_user_home()?.apply_push(CatalogPushApproval {
-            plan_id,
-            selected_resource_ids,
-            acknowledged_warning_digests,
-        })
+        StorageCatalogService::from_user_home()?
+            .with_progress(move |progress| {
+                let _ = on_progress.send(progress);
+            })
+            .apply_push(CatalogPushApproval {
+                plan_id,
+                selected_resource_ids,
+                acknowledged_warning_digests,
+            })
     })
     .await
 }
@@ -234,13 +258,18 @@ pub async fn apply_catalog_scope_pull(
     plan_id: CatalogPlanId,
     choices: BTreeMap<CatalogResourceId, CatalogPlanActionId>,
     destructive_acknowledged: Vec<CatalogResourceId>,
+    on_progress: tauri::ipc::Channel<super::service::CatalogSyncProgress>,
 ) -> Result<CatalogScopePullOutcomeDto, String> {
     run_blocking(move || {
-        StorageCatalogService::from_user_home()?.apply_pull(CatalogPullApproval {
-            plan_id,
-            choices,
-            destructive_acknowledged,
-        })
+        StorageCatalogService::from_user_home()?
+            .with_progress(move |progress| {
+                let _ = on_progress.send(progress);
+            })
+            .apply_pull(CatalogPullApproval {
+                plan_id,
+                choices,
+                destructive_acknowledged,
+            })
     })
     .await
 }
@@ -267,5 +296,118 @@ pub async fn apply_catalog_resource_fork(
     plan_id: CatalogPlanId,
 ) -> Result<CatalogActionResult, String> {
     run_blocking(move || StorageCatalogService::from_user_home()?.apply_fork(&scope_id, &plan_id))
+        .await
+}
+
+#[tauri::command]
+pub async fn list_catalog_cloud_repositories(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    resource_id: CatalogResourceId,
+) -> Result<Vec<CatalogCloudRepository>, String> {
+    StorageCatalogService::from_user_home()?
+        .list_cloud_repositories(&scope_id, &storage_id, &resource_id)
+        .await
+}
+#[tauri::command]
+pub async fn list_catalog_cloud_shared(
+    storage_id: StorageId,
+) -> Result<Vec<CatalogCloudRepository>, String> {
+    StorageCatalogService::from_user_home()?
+        .list_cloud_shared(&storage_id)
+        .await
+}
+#[tauri::command]
+pub async fn resolve_catalog_cloud_repository(
+    storage_id: StorageId,
+    address: String,
+) -> Result<CatalogCloudResolution, String> {
+    StorageCatalogService::from_user_home()?
+        .resolve_cloud_repository(&storage_id, &address)
+        .await
+}
+#[tauri::command]
+pub async fn join_catalog_cloud_repository(
+    storage_id: StorageId,
+    code: String,
+) -> Result<CatalogCloudResolution, String> {
+    StorageCatalogService::from_user_home()?
+        .join_cloud_repository(&storage_id, &code)
+        .await
+}
+#[tauri::command]
+pub async fn connect_catalog_cloud_repository(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    resource_id: CatalogResourceId,
+    repository_id: String,
+    expected_link_revision: u64,
+) -> Result<(), String> {
+    StorageCatalogService::from_user_home()?
+        .connect_cloud_repository(
+            &scope_id,
+            &storage_id,
+            &resource_id,
+            &repository_id,
+            expected_link_revision,
+        )
+        .await
+}
+#[tauri::command]
+pub async fn create_catalog_cloud_repository(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    resource_id: CatalogResourceId,
+    expected_link_revision: u64,
+) -> Result<CatalogCloudRepository, String> {
+    StorageCatalogService::from_user_home()?
+        .create_cloud_repository(&scope_id, &storage_id, &resource_id, expected_link_revision)
+        .await
+}
+#[tauri::command]
+pub async fn get_catalog_cloud_status(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    resource_id: CatalogResourceId,
+    repository_id: String,
+) -> Result<mallard_infrastructure::managed_cloud::client::ManagedCloudStatus, String> {
+    StorageCatalogService::from_user_home()?
+        .cloud_status(&scope_id, &storage_id, &resource_id, &repository_id)
+        .await
+}
+#[tauri::command]
+pub async fn request_catalog_cloud_release(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    resource_id: CatalogResourceId,
+    repository_id: String,
+    expected_revision: u64,
+) -> Result<(), String> {
+    StorageCatalogService::from_user_home()?
+        .request_cloud_release(
+            &scope_id,
+            &storage_id,
+            &resource_id,
+            &repository_id,
+            expected_revision,
+        )
+        .await
+}
+#[tauri::command]
+pub async fn discard_catalog_cloud_draft(
+    scope_id: CatalogScopeId,
+    storage_id: StorageId,
+    resource_id: CatalogResourceId,
+    repository_id: String,
+    expected_revision: u64,
+) -> Result<mallard_infrastructure::managed_cloud::client::DiscardedDraft, String> {
+    StorageCatalogService::from_user_home()?
+        .discard_cloud_draft(
+            &scope_id,
+            &storage_id,
+            &resource_id,
+            &repository_id,
+            expected_revision,
+        )
         .await
 }

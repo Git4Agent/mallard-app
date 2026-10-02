@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useLayoutEffect, useRef, useState, type CSSPrope
 import { createRoot } from "react-dom/client";
 import Icon from "./components/Icons";
 import NameSearchField from "./components/sync-review/NameSearchField";
+import { sessionNoun } from "./components/project-sync/model";
 import ProviderMark from "./components/sync-review/ProviderMark";
 import { ReviewBudgetGauge, ReviewBudgetGlance } from "./components/sync-review/ReviewBudgetMeter";
 import SyncPathBar from "./components/sync-review/SyncPathBar";
@@ -351,7 +352,7 @@ function ReviewList({ dir, verb, s, rows }: { dir: Dir; verb: Verb; s: Scenario;
   return (
     <div ref={list} className="sync-history-page sync-history-embedded sync-history-selection-review">
       <section className="sync-history-content" aria-label="Sessions">
-        <NameSearchField
+        <NameSearchField noun={sessionNoun}
           query={s.query}
           onChange={() => undefined}
           label="Search sessions"

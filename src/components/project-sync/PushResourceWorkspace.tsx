@@ -25,7 +25,7 @@ import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
-import { STORAGE_BLOCKING_STATES, projectLabel } from "./model";
+import { STORAGE_BLOCKING_STATES, projectLabel, sessionNoun } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../sync-review/ReviewBudgetMeter";
@@ -920,7 +920,7 @@ export default function PushResourceWorkspace({
               ) : (
                 <>
                   <NameSearchField query={searchQuery} onChange={setSearchQuery} label="Search sessions"
-                    matches={matchingConversations.length} total={visibleConversations.length}
+                    matches={matchingConversations.length} total={visibleConversations.length} noun={sessionNoun}
                     hiddenSelected={countSelected(visibleConversations, effectiveSelected) - countSelected(matchingConversations, effectiveSelected)} />
                   {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">No matching sessions.</div>}
                   {(!searchActive || matchingConversations.length > 0) && (

@@ -1,3 +1,4 @@
+import { projectOutcomeAction } from "../../src/components/project-sync/syncOutcome";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -15,7 +16,7 @@ import type {
 import RestorePlanView, {
   pullSelectableResourceIds,
 } from "../../src/components/project-sync/RestorePlanView";
-import SyncOutcomeNotice from "../../src/components/project-sync/SyncOutcomeNotice";
+import SyncOutcomeNotice from "../../src/components/sync-review/SyncOutcomeNotice";
 import {
   buildPullOutcome,
   type SyncOutcome,
@@ -40,7 +41,7 @@ import {
 
 function renderOutcome(outcome: SyncOutcome) {
   return renderToStaticMarkup(
-    <SyncOutcomeNotice
+    <SyncOutcomeNotice presentAction={projectOutcomeAction}
       outcome={outcome}
       onAction={() => undefined}
       onDismiss={() => undefined}

@@ -7,12 +7,16 @@
 //! registry: a scope whose coordinate this build does not register lists as
 //! unavailable and cannot be operated on.
 
+pub mod cloud;
+
 use bytes::Bytes;
 use mallard_domain::{
     now_secs, sha256_hex, Mainline, RecordName, StorageConfig, StorageId, SyncConfig,
 };
 use mallard_infrastructure::bundle_engine::{NOT_PULLED, VERSION_INCOMPLETE};
-use mallard_infrastructure::managed_cloud::client::CoordinateQuery;
+use mallard_infrastructure::managed_cloud::client::{
+    CoordinateQuery, ManagedCloudStatus, ManagedCloudStatusState,
+};
 use mallard_infrastructure::managed_cloud::ManagedObjectStore;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::publication::{
@@ -33,12 +37,13 @@ use super::apply::{
 use super::domain::{
     CatalogActionOutcome, CatalogActionResult, CatalogCapturedWith, CatalogCoordinate,
     CatalogCoordinateLabels, CatalogFormatKey, CatalogLinkId, CatalogLinkState,
-    CatalogPlanActionId, CatalogPlanId, CatalogProviderConfig, CatalogPullItem,
-    CatalogResourceEnvelope, CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey,
-    CatalogResourcePlanDocument, CatalogResourceRepositoryId, CatalogResourceWarning, CatalogScope,
-    CatalogScopeId, CatalogScopeLink, CatalogScopePullPlan, CatalogScopePushPlan,
-    CatalogTargetConfig, LibraryHeadCoordinate, LibraryResourceManifest, LibraryResourceTag,
-    LocalCatalogProfile, LocalCatalogProfileId, ProviderKey, PublishedResourceEntry,
+    CatalogPlanActionId, CatalogPlanId, CatalogProviderConfig, CatalogPullItem, CatalogPullSource,
+    CatalogPushDestination, CatalogResourceEnvelope, CatalogResourceForkPlan, CatalogResourceId,
+    CatalogResourceKindKey, CatalogResourcePlanDocument, CatalogResourceRepositoryId,
+    CatalogResourceWarning, CatalogScope, CatalogScopeId, CatalogScopeLink, CatalogScopePullPlan,
+    CatalogScopePushPlan, CatalogTargetConfig, LibraryHeadCoordinate, LibraryResourceManifest,
+    LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId, ProviderKey,
+    PublishedResourceEntry,
 };
 use super::inventory::{inventory_local, CatalogLocalInventory, LocalResourceRecord};
 use super::persistence::CatalogStateRepository;
@@ -82,9 +87,9 @@ fn engine_for(
     storage: &StorageConfig,
 ) -> Result<LibraryResourceEngine<ConfiguredObjectStore>, String> {
     storage.validate()?;
-    Ok(LibraryResourceEngine::new(ConfiguredObjectStore::shared(
-        storage,
-    )?))
+    Ok(LibraryResourceEngine::new(
+        ConfiguredObjectStore::shared(storage)?.for_catalog_operation(),
+    ))
 }
 
 /// Machine-local, digest-keyed, and disposable: wiping `~/.mallard` wipes it,
@@ -122,6 +127,40 @@ fn profile_dto(registry: &CatalogRegistry, profile: &LocalCatalogProfile) -> Cat
         created_at: profile.created_at,
         updated_at: profile.updated_at,
     }
+}
+
+/// What a typed home would become, answered without writing: the project's
+/// probe shape in the Catalog's words.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogProfileProbeDto {
+    pub canonical_path: String,
+    pub readable: bool,
+    /// The saved profile this folder already is, when it is one.
+    pub existing_profile_id: Option<LocalCatalogProfileId>,
+    /// The name Add would give it: the saved one, else its folder's.
+    pub suggested_name: String,
+}
+
+/// What one saved home holds of one capability its provider registers: a
+/// count, the newest stamp, the roots as the adapter names them, and the
+/// row that already lists it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogProfileHoldingDto {
+    pub capability: CatalogCapabilityDescriptor,
+    /// Null when this capability's inventory could not run for the home.
+    pub count: Option<u32>,
+    pub newest_modified_at: Option<u64>,
+    pub roots: Vec<String>,
+    pub scope_id: Option<CatalogScopeId>,
+}
+
+/// One saved home read for its setup page: its holdings, in the registry's
+/// order, and the storage a Catalog row used last.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogProfileInspectionDto {
+    pub profile: CatalogProfileDto,
+    pub last_used_storage_id: Option<StorageId>,
+    pub holdings: Vec<CatalogProfileHoldingDto>,
 }
 
 /// One Catalog menu row plus the profile its label derives from and the
@@ -237,6 +276,15 @@ pub struct CatalogScopeResourcesDto {
     /// Startup-recovery messages from the operations journal, surfaced at
     /// page load since no other screen hosts them.
     pub recovery: Vec<String>,
+    /// On Mallard Cloud: each item's repository, saved or learned from the
+    /// account's listing.
+    pub cloud_repositories: BTreeMap<CatalogResourceId, String>,
+    /// The repositories this row has saved; the rest were learned.
+    pub cloud_connections: BTreeMap<CatalogResourceId, String>,
+    /// On Mallard Cloud, when the page's one request was refused for the
+    /// account's sake: the rows list only what is on this Mac, and Push and
+    /// Pull stay closed.
+    pub cloud_status: Option<ManagedCloudStatus>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -249,9 +297,32 @@ pub struct CatalogScopeLinkOutcomeDto {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct CatalogPushResult {
+    pub resource_id: CatalogResourceId,
+    pub display_name: String,
+    pub state: String,
+    pub message: Option<String>,
+    /// On Mallard Cloud, where each item has its own repository: the
+    /// version this item's repository holds after the Push.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct CatalogSyncProgress {
+    pub plan_id: CatalogPlanId,
+    pub completed: usize,
+    pub total: usize,
+    pub message: String,
+}
+type ProgressReporter = dyn Fn(CatalogSyncProgress) + Send + Sync;
+
+#[derive(Serialize, Clone, Debug)]
 pub struct CatalogScopePushOutcomeDto {
     pub plan_id: CatalogPlanId,
     pub published: bool,
+    pub results: Vec<CatalogPushResult>,
+    pub stopped: Option<String>,
     pub revision: Option<u64>,
     pub message: String,
 }
@@ -317,10 +388,19 @@ pub struct StorageCatalogService {
     catalog: CatalogStateRepository,
     registry: Arc<CatalogRegistry>,
     runner: Box<dyn PluginProcessRunner>,
+    progress: Arc<ProgressReporter>,
     user_home: PathBuf,
 }
 
 impl StorageCatalogService {
+    pub fn with_progress(
+        mut self,
+        report: impl Fn(CatalogSyncProgress) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Arc::new(report);
+        self
+    }
+
     pub fn from_user_home() -> Result<Self, String> {
         let user_home = mallard_infrastructure::persistence::user_home_dir()
             .ok_or_else(|| "could not resolve the user home directory".to_string())?;
@@ -371,6 +451,7 @@ impl StorageCatalogService {
             catalog: CatalogStateRepository::from_home_dir(machine_home)?,
             registry,
             runner,
+            progress: Arc::new(|_| {}),
             user_home,
         })
     }
@@ -422,6 +503,31 @@ impl StorageCatalogService {
             now_secs(),
         )?;
         Ok(profile_dto(&self.registry, &profile))
+    }
+
+    pub fn probe_profile(
+        &self,
+        provider: ProviderKey,
+        path: String,
+    ) -> Result<CatalogProfileProbeDto, String> {
+        probe_catalog_resource_profile_with_repository(
+            &self.registry,
+            &self.catalog,
+            provider,
+            path,
+        )
+    }
+
+    pub fn inspect_profile(
+        &self,
+        profile_id: &LocalCatalogProfileId,
+    ) -> Result<CatalogProfileInspectionDto, String> {
+        inspect_catalog_resource_profile_with_repository(
+            &self.registry,
+            &self.catalog,
+            profile_id,
+            &self.user_home,
+        )
     }
 
     pub fn open_profile_in_app(&self, profile_id: &LocalCatalogProfileId) -> Result<(), String> {
@@ -601,6 +707,7 @@ impl StorageCatalogService {
             approval.acknowledged_warning_digests,
             &self.user_home,
             now_secs(),
+            self.progress.as_ref(),
         )
     }
 
@@ -636,6 +743,7 @@ impl StorageCatalogService {
             approval.destructive_acknowledged,
             &self.user_home,
             now_secs(),
+            self.progress.as_ref(),
         )
     }
 
@@ -859,6 +967,126 @@ fn save_catalog_resource_profile_with_repository(
     })
 }
 
+/// What a typed home would become, answered without writing: the canonical
+/// folder, whether it can be read, the saved profile it already is, and the
+/// name Add would give it. Validation is the save's own, so what the hint
+/// accepts is what Set up saves. Never scans a project folder.
+fn probe_catalog_resource_profile_with_repository(
+    registry: &CatalogRegistry,
+    catalog: &CatalogStateRepository,
+    provider: ProviderKey,
+    path: String,
+) -> Result<CatalogProfileProbeDto, String> {
+    let provider_label = registry.require_provider(&provider)?.descriptor().label;
+    let canonical = validate_new_profile_home(catalog.root(), &path)?;
+    if !canonical.exists() {
+        return Err(format!(
+            "inspect catalog profile '{}': No such file or directory",
+            canonical.display()
+        ));
+    }
+    if !canonical.is_dir() {
+        return Err(format!(
+            "inspect catalog profile '{}': not a directory",
+            canonical.display()
+        ));
+    }
+    let canonical_home = canonical.to_string_lossy().to_string();
+    let profiles = catalog.load_profiles()?.profiles;
+    let existing = profiles
+        .iter()
+        .find(|profile| profile.provider == provider && profile.configured_home == canonical_home);
+    Ok(CatalogProfileProbeDto {
+        readable: fs::read_dir(&canonical).is_ok(),
+        existing_profile_id: existing.map(|profile| profile.profile_id.clone()),
+        suggested_name: existing
+            .map(|profile| profile.display_name.clone())
+            .unwrap_or_else(|| derived_profile_name(&provider_label, &canonical, &profiles)),
+        canonical_path: canonical_home,
+    })
+}
+
+/// One saved home for its setup page: per capability its provider
+/// registers, the row page's own inventory reduced to a count, the newest
+/// stamp, the target summaries, and the row that already exists — plus the
+/// storage a Catalog row used last. Nothing captured crosses IPC. A
+/// capability whose inventory cannot run counts as unknown rather than
+/// failing the page.
+fn inspect_catalog_resource_profile_with_repository(
+    registry: &CatalogRegistry,
+    catalog: &CatalogStateRepository,
+    profile_id: &LocalCatalogProfileId,
+    user_home: &Path,
+) -> Result<CatalogProfileInspectionDto, String> {
+    let profiles = catalog.load_profiles()?;
+    let profile = profiles
+        .profile(profile_id)
+        .ok_or_else(|| format!("unknown catalog profile '{}'", profile_id))?
+        .clone();
+    let scopes = catalog.load_scopes()?.scopes;
+    let last_used_storage_id = catalog
+        .load_scope_links()?
+        .links
+        .iter()
+        .max_by_key(|link| (link.updated_at, link.created_at))
+        .map(|link| link.storage_id.clone());
+    let context = resolve_profile_context(
+        registry,
+        &profiles,
+        profile_id,
+        &profile.provider,
+        user_home,
+    )
+    .ok();
+    let mut holdings = Vec::new();
+    for descriptor in registry.descriptors() {
+        if descriptor.provider != profile.provider {
+            continue;
+        }
+        let Some(capability) = registry.capability(&descriptor.coordinate()) else {
+            continue;
+        };
+        let inventory = context
+            .as_ref()
+            .and_then(|context| inventory_local(registry, &capability, context).ok());
+        holdings.push(CatalogProfileHoldingDto {
+            count: inventory
+                .as_ref()
+                .map(|inventory| inventory.resources.len() as u32),
+            newest_modified_at: inventory.as_ref().and_then(|inventory| {
+                inventory
+                    .resources
+                    .values()
+                    .filter_map(|record| record.local_modified_at)
+                    .max()
+            }),
+            roots: context
+                .as_ref()
+                .map(|context| {
+                    context
+                        .targets_for(&capability)
+                        .iter()
+                        .map(|target| target.summary.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            scope_id: scopes
+                .iter()
+                .find(|scope| {
+                    scope.profile_id == profile.profile_id
+                        && scope.coordinate() == descriptor.coordinate()
+                })
+                .map(|scope| scope.scope_id.clone()),
+            capability: descriptor,
+        });
+    }
+    Ok(CatalogProfileInspectionDto {
+        profile: profile_dto(registry, &profile),
+        last_used_storage_id,
+        holdings,
+    })
+}
+
 fn rename_catalog_resource_profile_with_repository(
     catalog: &CatalogStateRepository,
     profile_id: &LocalCatalogProfileId,
@@ -1017,6 +1245,8 @@ fn scope_storage(
 /// storage participates — the storage config, the scope link, and the
 /// verified repository view.
 struct ResolvedScopeWorkspace {
+    engine: Option<LibraryResourceEngine<ConfiguredObjectStore>>,
+    cloud_repositories: BTreeMap<CatalogResourceId, String>,
     scope: CatalogScope,
     profile: LocalCatalogProfile,
     capability: Arc<CatalogCapability>,
@@ -1042,6 +1272,13 @@ struct ResolvedScopeWorkspace {
     /// Every item stream the storage answered for the coordinate, stored
     /// or not yet.
     item_streams: BTreeMap<CatalogResourceId, CatalogResourceRepositoryId>,
+    /// Items several repositories hold and none is saved for: blocked
+    /// until the user chooses one.
+    several: BTreeMap<CatalogResourceId, SeveralRepositories>,
+    /// Mallard Cloud refused the page's request for the account's sake
+    /// (signed out, or the account refused): only this Mac's side is known,
+    /// so nothing may be reviewed.
+    cloud_status: Option<ManagedCloudStatus>,
     /// The stored resources, whichever model the storage holds.
     remote: BTreeMap<CatalogResourceId, CatalogResourceEnvelope>,
     remote_updated: BTreeMap<CatalogResourceId, u64>,
@@ -1091,9 +1328,20 @@ impl ResolvedScopeWorkspace {
         }
     }
 
+    /// Push, Pull, and Finish that push need both sides.
+    fn require_cloud_answered(&self) -> Result<(), String> {
+        match &self.cloud_status {
+            Some(status) => Err(status
+                .message
+                .clone()
+                .unwrap_or_else(|| "Mallard Cloud refused this account.".to_string())),
+            None => Ok(()),
+        }
+    }
+
     fn storage_revision(&self) -> Option<u64> {
         match &self.items {
-            Some(items) => items.values().map(|item| item.observed.head.revision).max(),
+            Some(_) => None, // Independent item repositories have no shared version.
             None => self
                 .observed
                 .as_ref()
@@ -1102,32 +1350,89 @@ impl ResolvedScopeWorkspace {
     }
 }
 
+/// What the one Mallard Cloud request answered for a coordinate.
+struct ManagedItems {
+    items: BTreeMap<CatalogResourceId, ObservedItem>,
+    /// Every item stream the storage answered for, stored or not yet.
+    streams: BTreeMap<CatalogResourceId, CatalogResourceRepositoryId>,
+    /// Items more than one repository answered for, none of them saved:
+    /// left out of the comparison until the user chooses one.
+    several: BTreeMap<CatalogResourceId, SeveralRepositories>,
+}
+
+/// An item that two or more repositories the account can see hold.
+struct SeveralRepositories {
+    repositories: Vec<String>,
+    /// The item as the first of them stored it, to name its row when it is
+    /// not on this Mac.
+    presented: Option<(CatalogResourceEnvelope, u64)>,
+}
+
 /// The one request a Library refresh makes on Mallard Cloud: the account's
 /// item repositories of the coordinate, each with its stream's names and
 /// the selected record and manifest inline. Names and bytes are R2's; the
 /// selection is this desktop's; a stream the answer could not carry whole
 /// is read the ordinary way. Nothing here is a stream listing: a later
-/// Push still lists before it writes.
+/// Push still lists before it writes. An item two repositories answer for
+/// is reported, not compared: a saved repository is the one the item uses.
 fn observe_managed_items(
     cloud: &ManagedObjectStore,
     engine: &LibraryResourceEngine<ConfiguredObjectStore>,
     capability: &CatalogCapability,
     coordinate: &CatalogCoordinate,
-) -> Result<
-    (
-        BTreeMap<CatalogResourceId, ObservedItem>,
-        BTreeMap<CatalogResourceId, CatalogResourceRepositoryId>,
-    ),
-    String,
-> {
-    let answers = cloud.library_coordinate(&CoordinateQuery {
+    pins: &BTreeMap<CatalogResourceId, String>,
+) -> Result<ManagedItems, String> {
+    for (resource, repository) in pins {
+        cloud.set_library_pin(
+            CatalogResourceRepositoryId::for_item(coordinate, resource).as_str(),
+            Some(repository),
+        )?;
+    }
+    let mut answers = cloud.library_coordinate(&CoordinateQuery {
         provider: coordinate.provider.as_str().to_string(),
         resource_kind: coordinate.resource_kind.as_str().to_string(),
         format: coordinate.format.as_str().to_string(),
         format_version: coordinate.format_version,
     })?;
-    let mut items = BTreeMap::new();
-    let mut streams = BTreeMap::new();
+    answers.retain(|answer| {
+        pins.iter().all(|(resource, id)| {
+            resource.as_str() != answer.resource_id || id == &answer.repository_id
+        })
+    });
+    for (resource, repository) in pins {
+        if !answers
+            .iter()
+            .any(|answer| &answer.repository_id == repository)
+        {
+            answers.push(
+                mallard_infrastructure::managed_cloud::client::LibraryItemAnswer {
+                    repository_id: repository.clone(),
+                    resource_id: resource.as_str().to_owned(),
+                    library_repository_id: CatalogResourceRepositoryId::for_item(
+                        coordinate, resource,
+                    )
+                    .as_str()
+                    .to_owned(),
+                    names: Vec::new(),
+                    truncated: false,
+                    record: None,
+                    manifest: None,
+                },
+            );
+        }
+    }
+    let mut holders: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for answer in &answers {
+        holders
+            .entry(answer.resource_id.clone())
+            .or_default()
+            .push(answer.repository_id.clone());
+    }
+    let mut observed = ManagedItems {
+        items: BTreeMap::new(),
+        streams: BTreeMap::new(),
+        several: BTreeMap::new(),
+    };
     for answer in answers {
         let resource_id = CatalogResourceId::parse(answer.resource_id.clone())?;
         let stream = CatalogResourceRepositoryId::parse(answer.library_repository_id.clone())?;
@@ -1137,103 +1442,153 @@ fn observe_managed_items(
                     .to_string(),
             );
         }
-        streams.insert(resource_id.clone(), stream.clone());
-        let inline = answer.record.as_ref().filter(|_| !answer.truncated);
-        let (mainline, observed, manifest) = if let Some(record) = inline {
-            let names = answer
-                .names
-                .iter()
-                .filter_map(|name| RecordName::parse(name))
-                .collect::<Vec<_>>();
-            let mainline = Mainline::select(names.iter().cloned());
-            let Some(selected) = mainline.selected().cloned() else {
+        let repositories = &holders[&answer.resource_id];
+        if repositories.len() > 1 {
+            if observed.several.contains_key(&resource_id) {
                 continue;
-            };
-            if sha256_hex(record) != selected.token().record_sha256() {
-                return Err(format!(
-                    "the record of item '{}' does not match the digest in its name",
-                    stream
-                ));
             }
-            let commit = parse_library_record(&stream, &selected, record)?;
-            let head = commit.head();
-            head.validate()?;
-            let manifest = match &answer.manifest {
-                Some(bytes)
-                    if bytes.len() as u64 == head.manifest_size
-                        && sha256_hex(bytes) == head.manifest_sha256 =>
-                {
-                    let manifest: LibraryResourceManifest = serde_json::from_slice(bytes)
-                        .map_err(|error| format!("parse Library resource manifest: {}", error))?;
-                    manifest.validate()?;
-                    if manifest.repository_id != head.repository_id
-                        || manifest.revision != head.revision
-                        || manifest.commit_id != head.commit_id
-                    {
-                        return Err(
-                            "Library manifest coordinates do not match its head".to_string()
-                        );
-                    }
-                    manifest
-                }
-                Some(_) => {
-                    return Err(format!(
-                        "the manifest of item '{}' does not match its record",
-                        stream
-                    ))
-                }
-                None => engine.read_manifest(&head)?,
-            };
-            if let Some(cache) = engine.store().publication_cache() {
-                cache.prime(
-                    &RecordStream::library(stream.as_str())?,
-                    &names,
-                    Some((selected.token(), record.as_slice())),
-                );
-            }
-            let observed = ObservedLibraryHead {
-                record_sha256: selected.token().record_sha256().to_string(),
-                head,
-            };
-            (mainline, observed, manifest)
-        } else {
-            let (mainline, observed) = engine.observe(&stream)?;
-            let Some(observed) = observed else {
-                continue;
-            };
-            let manifest = engine.read_manifest(&observed.head)?;
-            (mainline, observed, manifest)
-        };
-        if !manifest.is_item_stream() {
-            return Err(format!(
-                "the item stream '{}' holds a set that is not one item",
-                stream
-            ));
+            // Only to name the row: an item that cannot be read here is
+            // still one to choose a repository for.
+            let presented = observe_item_answer(
+                engine,
+                capability,
+                coordinate,
+                &answer,
+                &resource_id,
+                &stream,
+            )
+            .ok()
+            .flatten()
+            .and_then(|item| {
+                item.manifest
+                    .resources
+                    .get(&resource_id)
+                    .map(|entry| (entry.resource.clone(), entry.updated_at))
+            });
+            observed.several.insert(
+                resource_id,
+                SeveralRepositories {
+                    repositories: repositories.clone(),
+                    presented,
+                },
+            );
+            continue;
         }
-        let Some(entry) = manifest.resources.get(&resource_id) else {
-            return Err(format!(
-                "the item stream '{}' holds another item than the one it is derived from",
-                stream
-            ));
-        };
-        if entry.resource.coordinate() != *coordinate {
-            return Err("the stored repository holds a resource of another coordinate".to_string());
+        observed.streams.insert(resource_id.clone(), stream.clone());
+        if let Some(item) = observe_item_answer(
+            engine,
+            capability,
+            coordinate,
+            &answer,
+            &resource_id,
+            &stream,
+        )? {
+            observed.items.insert(resource_id, item);
         }
-        capability
-            .codec
-            .validate(&entry.resource)
-            .map_err(|error| format!("a stored resource failed validation: {}", error))?;
-        items.insert(
-            resource_id,
-            ObservedItem {
-                stream,
-                mainline,
-                observed,
-                manifest,
-            },
-        );
     }
-    Ok((items, streams))
+    Ok(observed)
+}
+
+/// One item's stream as the coordinate answer carried it, or as the
+/// ordinary read finds it when the answer could not carry it whole. `None`
+/// when the stream holds nothing yet.
+fn observe_item_answer(
+    engine: &LibraryResourceEngine<ConfiguredObjectStore>,
+    capability: &CatalogCapability,
+    coordinate: &CatalogCoordinate,
+    answer: &mallard_infrastructure::managed_cloud::client::LibraryItemAnswer,
+    resource_id: &CatalogResourceId,
+    stream: &CatalogResourceRepositoryId,
+) -> Result<Option<ObservedItem>, String> {
+    let inline = answer.record.as_ref().filter(|_| !answer.truncated);
+    let (mainline, observed, manifest) = if let Some(record) = inline {
+        let names = answer
+            .names
+            .iter()
+            .filter_map(|name| RecordName::parse(name))
+            .collect::<Vec<_>>();
+        let mainline = Mainline::select(names.iter().cloned());
+        let Some(selected) = mainline.selected().cloned() else {
+            return Ok(None);
+        };
+        if sha256_hex(record) != selected.token().record_sha256() {
+            return Err(format!(
+                "the record of item '{}' does not match the digest in its name",
+                stream
+            ));
+        }
+        let commit = parse_library_record(stream, &selected, record)?;
+        let head = commit.head();
+        head.validate()?;
+        let manifest = match &answer.manifest {
+            Some(bytes)
+                if bytes.len() as u64 == head.manifest_size
+                    && sha256_hex(bytes) == head.manifest_sha256 =>
+            {
+                let manifest: LibraryResourceManifest = serde_json::from_slice(bytes)
+                    .map_err(|error| format!("parse Library resource manifest: {}", error))?;
+                manifest.validate()?;
+                if manifest.repository_id != head.repository_id
+                    || manifest.revision != head.revision
+                    || manifest.commit_id != head.commit_id
+                {
+                    return Err("Library manifest coordinates do not match its head".to_string());
+                }
+                manifest
+            }
+            Some(_) => {
+                return Err(format!(
+                    "the manifest of item '{}' does not match its record",
+                    stream
+                ))
+            }
+            None => engine.read_manifest(&head)?,
+        };
+        if let Some(cache) = engine.store().publication_cache() {
+            cache.prime(
+                &RecordStream::library(stream.as_str())?,
+                &names,
+                Some((selected.token(), record.as_slice())),
+            );
+        }
+        let observed = ObservedLibraryHead {
+            record_sha256: selected.token().record_sha256().to_string(),
+            head,
+        };
+        (mainline, observed, manifest)
+    } else {
+        let (mainline, observed) = engine.observe(stream)?;
+        let Some(observed) = observed else {
+            return Ok(None);
+        };
+        let manifest = engine.read_manifest(&observed.head)?;
+        (mainline, observed, manifest)
+    };
+    if !manifest.is_item_stream() {
+        return Err(format!(
+            "the item stream '{}' holds a set that is not one item",
+            stream
+        ));
+    }
+    let Some(entry) = manifest.resources.get(resource_id) else {
+        return Err(format!(
+            "the item stream '{}' holds another item than the one it is derived from",
+            stream
+        ));
+    };
+    if entry.resource.coordinate() != *coordinate {
+        return Err("the stored repository holds a resource of another coordinate".to_string());
+    }
+    capability
+        .codec
+        .validate(&entry.resource)
+        .map_err(|error| format!("a stored resource failed validation: {}", error))?;
+    Ok(Some(ObservedItem {
+        stream: stream.clone(),
+        mainline,
+        observed,
+        manifest,
+    }))
 }
 
 fn resolve_scope_workspace(
@@ -1286,21 +1641,84 @@ fn resolve_scope_workspace(
     let mut chain = None;
     let mut items = None;
     let mut item_streams = BTreeMap::new();
+    let mut several = BTreeMap::new();
+    let mut cloud_status = None;
+    let mut cloud_repositories = BTreeMap::new();
+    let engine = storage.as_ref().map(engine_for).transpose()?;
     let mut remote = BTreeMap::new();
     let mut remote_updated = BTreeMap::new();
     if let Some(storage) = &storage {
-        let engine = engine_for(storage)?;
+        let engine = engine.as_ref().expect("a storage has an engine");
         let storage_identity = storage_identity_for_config(storage)?;
         if let Some(cloud) = engine.store().managed_cloud() {
             // One item per repository: one request observes every item of
             // the coordinate. Continuity is per item; an accepted item head
             // off its stream's chain, or of a stream the storage no longer
             // answers for, is read as absent, and nothing is written.
-            let (observed_items, streams) =
-                observe_managed_items(cloud, &engine, &capability, &coordinate)?;
-            if let Some(link) = link.as_mut() {
+            let answered = observe_managed_items(
+                cloud,
+                engine,
+                &capability,
+                &coordinate,
+                &link
+                    .as_ref()
+                    .map(|link| link.cloud_repositories.clone())
+                    .unwrap_or_default(),
+            );
+            // A sign-in the service rejected, or an account it refused, is
+            // the account's state, not the page's: the rows still list what
+            // is on this Mac, and the page says why nothing else is known.
+            let ManagedItems {
+                items: observed_items,
+                streams,
+                several: held,
+            } = match answered {
+                Ok(answered) => answered,
+                Err(error) => {
+                    let Some(health) = cloud.client().health().filter(|health| health.suspends())
+                    else {
+                        return Err(error);
+                    };
+                    cloud_status = Some(ManagedCloudStatus {
+                        repository_id: String::new(),
+                        state: if health.state
+                            == mallard_infrastructure::storage_core::ConnectionState::PermissionDenied
+                        {
+                            ManagedCloudStatusState::Inaccessible
+                        } else {
+                            ManagedCloudStatusState::SignInRequired
+                        },
+                        link: None,
+                        publication: None,
+                        message: Some(health.describe()),
+                    });
+                    ManagedItems {
+                        items: BTreeMap::new(),
+                        streams: BTreeMap::new(),
+                        several: BTreeMap::new(),
+                    }
+                }
+            };
+            for (resource, stream) in &streams {
+                if let Some(id) = cloud.library_repository_in_use(stream.as_str())? {
+                    cloud_repositories.insert(resource.clone(), id);
+                }
+            }
+            if let Some(link) = &link {
+                for (resource, id) in &link.cloud_repositories {
+                    cloud_repositories
+                        .entry(resource.clone())
+                        .or_insert_with(|| id.clone());
+                }
+            }
+            if let Some(link) = link.as_mut().filter(|_| cloud_status.is_none()) {
                 let accepted: Vec<_> = link.accepted_items.keys().cloned().collect();
                 for resource_id in accepted {
+                    if held.contains_key(&resource_id) {
+                        // Waiting for a choice, not replaced: its acceptance
+                        // stays for the repository the user picks.
+                        continue;
+                    }
                     let replaced = match observed_items.get(&resource_id) {
                         Some(item) => {
                             verify_library_continuity(
@@ -1326,6 +1744,7 @@ fn resolve_scope_workspace(
             }
             items = Some(observed_items);
             item_streams = streams;
+            several = held;
         } else {
             let (mainline, selected) = engine.observe(&repository_id)?;
             observed = selected;
@@ -1382,6 +1801,8 @@ fn resolve_scope_workspace(
         }
     }
     Ok(ResolvedScopeWorkspace {
+        engine,
+        cloud_repositories,
         scope,
         profile,
         capability,
@@ -1396,6 +1817,8 @@ fn resolve_scope_workspace(
         manifest,
         items,
         item_streams,
+        several,
+        cloud_status,
         remote,
         remote_updated,
     })
@@ -1425,15 +1848,26 @@ fn list_catalog_scope_resources_with_repositories(
     let mut resource_ids: BTreeSet<&CatalogResourceId> =
         workspace.inventory.resources.keys().collect();
     resource_ids.extend(remote.keys());
+    resource_ids.extend(workspace.several.keys());
 
     let mut rows: Vec<CatalogScopeRowDto> = Vec::new();
     for resource_id in resource_ids {
         let local = workspace.inventory.resources.get(resource_id);
+        let several = workspace.several.get(resource_id);
         let remote_resource = remote.get(resource_id);
+        // Several repositories hold it and none is chosen: what they hold is
+        // shown, never compared.
+        let stored = remote_resource.or(several
+            .and_then(|several| several.presented.as_ref())
+            .map(|(resource, _)| resource));
         let local_sha = local.map(|record| record.resource.content_sha256.as_str());
         let remote_sha = remote_resource.map(|resource| resource.content_sha256.as_str());
-        let state = if workspace.storage.is_none() {
+        // Nothing is compared without a storage, or while Mallard Cloud
+        // refuses the account.
+        let state = if workspace.storage.is_none() || workspace.cloud_status.is_some() {
             None
+        } else if several.is_some() {
+            Some(CatalogLinkState::Blocked)
         } else {
             Some(match &workspace.link {
                 Some(link) => scope_resource_state(link, resource_id, local_sha, remote_sha),
@@ -1448,7 +1882,7 @@ fn list_catalog_scope_resources_with_repositories(
                 },
             })
         };
-        let Some(presented) = local.map(|record| &record.resource).or(remote_resource) else {
+        let Some(presented) = local.map(|record| &record.resource).or(stored) else {
             continue;
         };
         let mut row = CatalogScopeRowDto {
@@ -1464,22 +1898,31 @@ fn list_catalog_scope_resources_with_repositories(
             local_modified_at: local.and_then(|record| record.local_modified_at),
             local_files: local.map(|record| record.resource.file_count() as u64),
             local_bytes: local.map(|record| record.resource.payload_bytes()),
-            remote_present: remote_resource.is_some(),
-            remote_updated_at: remote_updated.get(resource_id).copied(),
-            content_sha256: local_sha.or(remote_sha).map(str::to_string),
+            remote_present: stored.is_some(),
+            remote_updated_at: remote_updated.get(resource_id).copied().or(several
+                .and_then(|several| several.presented.as_ref())
+                .map(|(_, updated_at)| *updated_at)),
+            content_sha256: local_sha
+                .or(stored.map(|resource| resource.content_sha256.as_str()))
+                .map(str::to_string),
             preview_png: None,
             description: codec.description(presented),
             warnings: local
                 .map(|record| record.warnings.clone())
                 .unwrap_or_default(),
-            blocker: None,
+            blocker: several.map(|several| {
+                format!(
+                    "In {} repositories you can see. Choose one on its page.",
+                    several.repositories.len()
+                )
+            }),
         };
         decorate_local_preview(&mut row, &workspace.capability, local, user_home);
         if local.is_none() {
             // The scope listing already verified this manifest. Read cached
             // artwork here so each card avoids another head and manifest read.
             // A cache miss stays lazy and must not fetch payloads in the list.
-            row.preview_png = remote_resource.and_then(|resource| {
+            row.preview_png = stored.and_then(|resource| {
                 codec
                     .preview(resource, &preview_cache_dir(user_home), &|_, _| {
                         Err("the stored preview is not cached".to_string())
@@ -1544,6 +1987,13 @@ fn list_catalog_scope_resources_with_repositories(
         rows,
         warnings: workspace.inventory.warnings,
         recovery,
+        cloud_connections: workspace
+            .link
+            .as_ref()
+            .map(|link| link.cloud_repositories.clone())
+            .unwrap_or_default(),
+        cloud_repositories: workspace.cloud_repositories,
+        cloud_status: workspace.cloud_status,
     })
 }
 
@@ -1595,14 +2045,21 @@ fn get_catalog_resource_preview_with_repositories(
     resource_id: &CatalogResourceId,
     user_home: &Path,
 ) -> Result<String, String> {
-    let ResolvedScope { scope, .. } = resolve_scope(catalog, scope_id)?;
-    let capability = require_capability(registry, &scope)?;
-    let storage = storage_for(state, storage_id)?;
-    let engine = engine_for(&storage)?;
-    let repository_id = capability.repository_id();
+    let workspace = resolve_scope_workspace(
+        registry,
+        state,
+        catalog,
+        scope_id,
+        Some(storage_id),
+        user_home,
+    )?;
+    let engine = workspace.engine.as_ref().expect("a storage has an engine");
+    let repository_id = workspace.stream_for(resource_id);
     let (_, manifest) = engine
         .inspect(&repository_id)?
         .ok_or("the stored resource disappeared")?;
+    let scope = &workspace.scope;
+    let capability = &workspace.capability;
     let resource = manifest
         .resources
         .get(resource_id)
@@ -1671,20 +2128,24 @@ fn read_managed_storage_repository(
         resource_names: Vec::new(),
         error: Some(message),
     };
-    let (items, _) = match observe_managed_items(cloud, engine, capability, &coordinate) {
-        Ok(observed) => observed,
-        Err(message) => return Some(refusal(message)),
-    };
-    if items.is_empty() {
+    let ManagedItems { items, several, .. } =
+        match observe_managed_items(cloud, engine, capability, &coordinate, &BTreeMap::new()) {
+            Ok(observed) => observed,
+            Err(message) => return Some(refusal(message)),
+        };
+    if items.is_empty() && several.is_empty() {
         return None;
     }
     let names = items
         .iter()
-        .map(|(resource_id, item)| {
-            capability
-                .codec
-                .display_name(&item.manifest.resources[resource_id].resource)
-        })
+        .map(|(resource_id, item)| &item.manifest.resources[resource_id].resource)
+        .chain(
+            several
+                .values()
+                .filter_map(|several| several.presented.as_ref())
+                .map(|(resource, _)| resource),
+        )
+        .map(|resource| capability.codec.display_name(resource))
         .collect::<Result<Vec<String>, String>>();
     let mut resource_names = match names {
         Ok(names) => names,
@@ -1808,6 +2269,41 @@ fn link_catalog_scope_storage_with_repositories(
     now: u64,
 ) -> Result<CatalogScopeLinkOutcomeDto, String> {
     let _operation = state.acquire_host_operation()?;
+    let storage = storage_for(state, storage_id)?;
+    if storage.provider.as_str() == "managed_cloud" {
+        // Connecting must work even when several accessible repositories
+        // contain the same item. Only a later review observes content;
+        // repository selection is metadata and never accepts a remote base.
+        let resolved = resolve_scope(catalog, scope_id)?;
+        let repository_id = require_capability(registry, &resolved.scope)?.repository_id();
+        return catalog.mutate_scope_links(|document| {
+            let link = match document.link_for(scope_id, storage_id) {
+                Some(link) => link.clone(),
+                None => {
+                    let link = CatalogScopeLink {
+                        link_id: CatalogLinkId::generate()?,
+                        scope_id: scope_id.clone(),
+                        storage_id: storage_id.clone(),
+                        repository_id,
+                        accepted_head: None,
+                        accepted_resources: BTreeMap::new(),
+                        accepted_items: BTreeMap::new(),
+                        cloud_repositories: BTreeMap::new(),
+                        revision: 1,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    document.links.push(link.clone());
+                    link
+                }
+            };
+            Ok(CatalogScopeLinkOutcomeDto {
+                link_id: link.link_id,
+                revision: link.revision,
+                completion: "open".to_string(),
+            })
+        });
+    }
     let workspace = resolve_scope_workspace(
         registry,
         state,
@@ -1879,6 +2375,7 @@ fn link_catalog_scope_storage_with_repositories(
             accepted_head: accepted_head.clone(),
             accepted_resources: accepted_resources.clone(),
             accepted_items: accepted_items.clone(),
+            cloud_repositories: BTreeMap::new(),
             revision: 1,
             created_at: now,
             updated_at: now,
@@ -2013,6 +2510,9 @@ fn prepare_push_with_repositories(
     user_home: &Path,
     now: u64,
 ) -> Result<CatalogScopePushPlan, String> {
+    // Supersede when the request starts. A cancelled request can finish
+    // after its replacement; its late result must never discard that review.
+    discard_scope_plans(catalog, scope_id, storage_id);
     let workspace = resolve_scope_workspace(
         registry,
         state,
@@ -2022,6 +2522,7 @@ fn prepare_push_with_repositories(
         user_home,
     )?;
     let link = require_link(&workspace)?;
+    workspace.require_cloud_answered()?;
     let storage = workspace
         .storage
         .as_ref()
@@ -2033,7 +2534,7 @@ fn prepare_push_with_repositories(
     )?
     .is_some();
     let remote = workspace.remote_map();
-    let plan = build_scope_push_plan(ScopePushPlanInputs {
+    let mut plan = build_scope_push_plan(ScopePushPlanInputs {
         scope: &workspace.scope,
         capability: &workspace.capability,
         link,
@@ -2047,15 +2548,121 @@ fn prepare_push_with_repositories(
             .as_ref()
             .map(|observed| head_coordinate(&observed.head, &storage_identity)),
         observed_items: workspace.item_heads(&storage_identity),
+        blocked: workspace
+            .several
+            .iter()
+            .map(|(resource_id, several)| {
+                (
+                    resource_id.clone(),
+                    format!(
+                        "In {} repositories you can see. Choose one on its page.",
+                        several.repositories.len()
+                    ),
+                )
+            })
+            .collect(),
         now,
     })?;
-    discard_scope_plans(catalog, scope_id, storage_id);
+    plan.destinations = push_destinations(&workspace, storage, &plan);
     plan_store::save(
         catalog.root(),
         CatalogResourcePlanDocument::Push(plan.clone()),
         now,
     )?;
     Ok(plan)
+}
+
+/// The account's catalog repositories, for a review to name where each item
+/// goes or comes from: one listing, and one read for a saved repository the
+/// account does not belong to. `None` off Mallard Cloud, or when the listing
+/// fails: the review still opens, its rows unnamed.
+struct CloudNames<'a> {
+    cloud: &'a ManagedObjectStore,
+    login: String,
+    summaries: Vec<mallard_infrastructure::managed_cloud::client::RepositorySummary>,
+}
+
+impl<'a> CloudNames<'a> {
+    fn load(workspace: &'a ResolvedScopeWorkspace, storage: &StorageConfig) -> Option<Self> {
+        let cloud = workspace.engine.as_ref()?.store().managed_cloud()?;
+        let (settings, _) = mallard_infrastructure::storage_providers::managed_cloud::client_for(
+            &storage.provider_config,
+        )
+        .ok()?;
+        Some(Self {
+            cloud,
+            login: settings.account_login,
+            summaries: cloud.list_catalog_repositories().ok()?,
+        })
+    }
+
+    fn summary(
+        &self,
+        repository_id: &str,
+    ) -> Option<mallard_infrastructure::managed_cloud::client::RepositorySummary> {
+        self.summaries
+            .iter()
+            .find(|summary| summary.id == repository_id)
+            .cloned()
+            .or_else(|| self.cloud.repository_summary(repository_id).ok())
+    }
+}
+
+/// Where each pushable item goes on Mallard Cloud: the repository it has,
+/// saved or learned, or the one this Push creates, named as the service is
+/// expected to name it. One listing of the account's catalog repositories
+/// serves every row; a listing that fails names none, and the review still
+/// opens.
+fn push_destinations(
+    workspace: &ResolvedScopeWorkspace,
+    storage: &StorageConfig,
+    plan: &CatalogScopePushPlan,
+) -> BTreeMap<CatalogResourceId, CatalogPushDestination> {
+    let pushable = plan
+        .rows
+        .iter()
+        .filter(|row| row.row.selectable)
+        .collect::<Vec<_>>();
+    if pushable.is_empty() {
+        return BTreeMap::new();
+    }
+    let Some(names) = CloudNames::load(workspace, storage) else {
+        return BTreeMap::new();
+    };
+    // Names the account owns, and the names this Push takes as it goes.
+    let mut taken = names
+        .summaries
+        .iter()
+        .filter(|summary| summary.role.as_deref() == Some("owner"))
+        .map(|summary| summary.name.to_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut destinations = BTreeMap::new();
+    for row in pushable {
+        let resource_id = &row.row.resource_id;
+        let destination = match workspace.cloud_repositories.get(resource_id) {
+            Some(repository_id) => {
+                let Some(summary) = names.summary(repository_id) else {
+                    continue;
+                };
+                CatalogPushDestination {
+                    repository_id: Some(repository_id.clone()),
+                    address: format!("{}/{}", summary.owner.github_login, summary.name),
+                    create: false,
+                }
+            }
+            None => {
+                let name = cloud::predicted_repository_name(&row.row.display_name, &taken);
+                taken.insert(name.to_lowercase());
+                CatalogPushDestination {
+                    repository_id: None,
+                    address: format!("{}/{}", names.login, name),
+                    create: true,
+                }
+            }
+        };
+        destinations.insert(resource_id.clone(), destination);
+    }
+    destinations
 }
 
 fn observed_matches(
@@ -2094,11 +2701,15 @@ fn finish_unfinished_push_with_repositories(
         user_home,
     )?;
     let link = require_link(&workspace)?;
+    workspace.require_cloud_answered()?;
     let storage = workspace
         .storage
         .as_ref()
         .expect("a linked workspace always has its storage");
-    let engine = engine_for(storage)?;
+    let engine = workspace
+        .engine
+        .as_ref()
+        .expect("a linked workspace has its engine");
     if workspace.items.is_some() {
         // One item per repository: finish the unfinished push of every item
         // stream that holds one; a stream that holds none is not a change.
@@ -2132,6 +2743,7 @@ fn apply_push_with_repositories(
     acknowledged_warning_digests: Vec<String>,
     user_home: &Path,
     now: u64,
+    report: &ProgressReporter,
 ) -> Result<CatalogScopePushOutcomeDto, String> {
     let CatalogResourcePlanDocument::Push(plan) = plan_store::load(catalog.root(), &plan_id)?
     else {
@@ -2145,6 +2757,8 @@ fn apply_push_with_repositories(
         return Ok(CatalogScopePushOutcomeDto {
             plan_id,
             published: false,
+            results: Vec::new(),
+            stopped: None,
             revision: plan.observed_head.map(|head| head.revision),
             message: "Nothing was pushed".to_string(),
         });
@@ -2162,6 +2776,7 @@ fn apply_push_with_repositories(
         user_home,
     )?;
     let link = require_link(&workspace)?;
+    workspace.require_cloud_answered()?;
     if link.link_id != plan.link_id || link.revision != plan.link_revision {
         return Err("the scope link changed after review".to_string());
     }
@@ -2230,6 +2845,7 @@ fn apply_push_with_repositories(
             &selected_records,
             state.load_or_create_host_identity()?.host_id.as_str(),
             now,
+            report,
         );
     }
 
@@ -2259,9 +2875,18 @@ fn apply_push_with_repositories(
         }
     }
 
-    let engine = engine_for(storage)?;
+    let engine = workspace
+        .engine
+        .as_ref()
+        .expect("a linked workspace has its engine");
     let repository_id = link.repository_id.clone();
     let host = state.load_or_create_host_identity()?;
+    report(CatalogSyncProgress {
+        plan_id: plan.plan_id.clone(),
+        completed: 0,
+        total: selected_records.len(),
+        message: "Publishing reviewed items…".to_string(),
+    });
     let published = engine
         .publish(PublishLibraryResourceRequest {
             repository_id: repository_id.clone(),
@@ -2304,7 +2929,7 @@ fn apply_push_with_repositories(
     let link_id = link.link_id.clone();
     let link_revision = plan.link_revision;
     let stale_acceptance = workspace.stale_acceptance;
-    catalog.mutate_scope_links(|document| {
+    let acceptance = catalog.mutate_scope_links(|document| {
         let link = document
             .links
             .iter_mut()
@@ -2326,12 +2951,36 @@ fn apply_push_with_repositories(
         link.revision = link.revision.saturating_add(1);
         link.updated_at = now;
         Ok(())
-    })?;
+    });
     plan_store::discard(catalog.root(), &plan_id);
     let revision = published.head().revision;
     Ok(CatalogScopePushOutcomeDto {
         plan_id,
         published: published.stored(),
+        results: selected_records
+            .iter()
+            .map(|(id, record)| CatalogPushResult {
+                resource_id: (*id).clone(),
+                display_name: workspace
+                    .capability
+                    .codec
+                    .display_name(&record.resource)
+                    .unwrap_or_else(|_| id.as_str().to_owned()),
+                state: if published.stored() {
+                    "published"
+                } else {
+                    "unchanged"
+                }
+                .to_string(),
+                message: None,
+                revision: None,
+            })
+            .collect(),
+        stopped: acceptance.err().map(|error| {
+            format!(
+                "Published, but local comparison state could not be saved: {error}. Compare again."
+            )
+        }),
         revision: Some(revision),
         message: match published {
             PublishedLibraryResource::Stored { .. } => format!("Published version {}", revision),
@@ -2358,6 +3007,7 @@ fn apply_push_items(
     selected_records: &[(&CatalogResourceId, &LocalResourceRecord)],
     host_id: &str,
     now: u64,
+    report: &ProgressReporter,
 ) -> Result<CatalogScopePushOutcomeDto, String> {
     let link = require_link(workspace)?;
     let observed_items = workspace.item_heads(storage_identity);
@@ -2366,122 +3016,139 @@ fn apply_push_items(
             return Err("the storage head changed after review".to_string());
         }
     }
-    let items = workspace
-        .items
-        .as_ref()
-        .expect("a per-item workspace holds its items");
-    let coordinate = workspace.scope.coordinate();
-    let engine = engine_for(storage)?;
-    let mut accepted: Vec<(CatalogResourceId, String, LibraryHeadCoordinate)> = Vec::new();
+    let items = workspace.items.as_ref().expect("per-item workspace");
+    let engine = workspace.engine.as_ref().expect("linked workspace engine");
+    let mut accepted = Vec::new();
+    let mut results = Vec::new();
     let mut published = false;
-    let mut failure: Option<String> = None;
+    let mut stopped = None;
     for row in &plan.rows {
         let Some((resource_id, record)) = selected_records
             .iter()
-            .find(|(resource_id, _)| **resource_id == row.row.resource_id)
+            .find(|(id, _)| **id == row.row.resource_id)
         else {
             continue;
         };
-        let stream = workspace.stream_for(resource_id);
-        // Local single-flight per item stream: a second Apply of this review
-        // must not list the same childless parent and write a sibling.
-        let _publication = catalog.acquire_publication_lock(&plan.storage_id, &stream)?;
-        let observed = items.get(*resource_id).map(|item| item.observed.clone());
-        let outcome = engine.publish(PublishLibraryResourceRequest {
-            repository_id: stream.clone(),
-            tag: LibraryResourceTag::for_item(&coordinate, resource_id),
-            observed,
-            resources: BTreeMap::from([(
-                (*resource_id).clone(),
-                PublishedResourceEntry {
-                    resource: record.resource.clone(),
+        let mut result = CatalogPushResult {
+            resource_id: (*resource_id).clone(),
+            display_name: row.row.display_name.clone(),
+            state: "not_attempted".to_string(),
+            message: None,
+            revision: None,
+        };
+        if stopped.is_none() {
+            report(CatalogSyncProgress {
+                plan_id: plan.plan_id.clone(),
+                completed: results.len(),
+                total: selected_records.len(),
+                message: format!("Pushing {}…", row.row.display_name),
+            });
+            let stream = workspace.stream_for(resource_id);
+            let attempt = (|| {
+                let _publication = catalog.acquire_publication_lock(&plan.storage_id, &stream)?;
+                let origin =
+                    super::domain::derive_library_origin(host_id, link.link_id.as_str(), &stream)?;
+                engine.publish(PublishLibraryResourceRequest {
+                    repository_id: stream.clone(),
+                    tag: LibraryResourceTag::for_item(&workspace.scope.coordinate(), resource_id),
+                    observed: items.get(*resource_id).map(|item| item.observed.clone()),
+                    resources: BTreeMap::from([(
+                        (*resource_id).clone(),
+                        PublishedResourceEntry {
+                            resource: record.resource.clone(),
+                            updated_at: now,
+                        },
+                    )]),
+                    payloads: record
+                        .captured
+                        .as_ref()
+                        .map(|captured| captured.payloads())
+                        .unwrap_or_default(),
+                    captured_with: CatalogCapturedWith {
+                        app: "mallard".to_string(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                    },
+                    published_by_origin: origin,
                     updated_at: now,
-                },
-            )]),
-            payloads: record
-                .captured
-                .as_ref()
-                .map(|captured| captured.payloads())
-                .unwrap_or_default(),
-            captured_with: CatalogCapturedWith {
-                app: "mallard".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            },
-            published_by_origin: super::domain::derive_library_origin(
-                host_id,
-                link.link_id.as_str(),
-                &stream,
-            )?,
-            updated_at: now,
-        });
-        match outcome {
-            Ok(result) => {
-                published |= result.stored();
-                accepted.push((
-                    (*resource_id).clone(),
-                    record.resource.content_sha256.clone(),
-                    head_coordinate(result.head(), storage_identity),
-                ));
-            }
-            Err(error) => {
-                failure = Some(format!(
-                    "{}: {}",
-                    row.row.display_name,
-                    unfinished_push_sentence(&storage.name, error)
-                ));
-                break;
+                })
+            })();
+            match attempt {
+                Ok(outcome) => {
+                    published |= outcome.stored();
+                    result.state = if outcome.stored() {
+                        "published"
+                    } else {
+                        "unchanged"
+                    }
+                    .to_string();
+                    result.revision = Some(outcome.head().revision);
+                    let repository = engine.store().managed_cloud().and_then(|cloud| {
+                        cloud
+                            .library_repository_in_use(stream.as_str())
+                            .ok()
+                            .flatten()
+                    });
+                    accepted.push((
+                        (*resource_id).clone(),
+                        record.resource.content_sha256.clone(),
+                        head_coordinate(outcome.head(), storage_identity),
+                        repository,
+                    ));
+                }
+                Err(error) => {
+                    result.state = "failed".to_string();
+                    result.message = Some(unfinished_push_sentence(&storage.name, error));
+                    stopped = result.message.clone();
+                }
             }
         }
+        results.push(result);
     }
-    let stale_items = workspace.stale_items.clone();
-    if !accepted.is_empty() || !stale_items.is_empty() {
-        let link_id = link.link_id.clone();
-        let link_revision = plan.link_revision;
-        catalog.mutate_scope_links(|document| {
-            let link = document
+    if !accepted.is_empty() || !workspace.stale_items.is_empty() {
+        let saved = catalog.mutate_scope_links(|document| {
+            let saved = document
                 .links
                 .iter_mut()
-                .find(|link| link.link_id == link_id)
+                .find(|saved| saved.link_id == link.link_id)
                 .ok_or("the scope link disappeared while publishing")?;
-            if link.revision != link_revision {
+            if saved.revision != plan.link_revision {
                 return Err("the scope link changed while publishing".to_string());
             }
-            // An accepted item head off its stream's chain describes a
-            // history the storage no longer has: from here on only what
-            // this Push accepted counts for it.
-            for resource_id in &stale_items {
-                link.accepted_items.remove(resource_id);
-                link.accepted_resources.remove(resource_id);
+            for id in &workspace.stale_items {
+                saved.accepted_items.remove(id);
+                saved.accepted_resources.remove(id);
             }
-            for (resource_id, content, head) in &accepted {
-                link.accepted_resources
-                    .insert(resource_id.clone(), content.clone());
-                link.accepted_items
-                    .insert(resource_id.clone(), head.clone());
+            for (id, digest, head, repository) in &accepted {
+                saved.accepted_resources.insert(id.clone(), digest.clone());
+                saved.accepted_items.insert(id.clone(), head.clone());
+                if let Some(repository) = repository {
+                    saved
+                        .cloud_repositories
+                        .insert(id.clone(), repository.clone());
+                }
             }
-            link.revision = link.revision.saturating_add(1);
-            link.updated_at = now;
+            saved.revision = saved.revision.saturating_add(1);
+            saved.updated_at = now;
             Ok(())
-        })?;
-    }
-    if let Some(failure) = failure {
-        return Err(failure);
+        });
+        if let Err(error) = saved {
+            stopped = Some(format!("Cloud publications completed, but local comparison state could not be saved: {error}. Compare again."));
+        }
     }
     plan_store::discard(catalog.root(), &plan.plan_id);
-    let count = accepted.len();
+    report(CatalogSyncProgress {
+        plan_id: plan.plan_id.clone(),
+        completed: results.len(),
+        total: results.len(),
+        message: "Push finished".to_string(),
+    });
     Ok(CatalogScopePushOutcomeDto {
         plan_id: plan.plan_id.clone(),
         published,
-        revision: accepted.iter().map(|(_, _, head)| head.revision).max(),
-        message: if published {
-            format!(
-                "Published {} {}",
-                count,
-                if count == 1 { "item" } else { "items" }
-            )
-        } else {
-            "The linked storage already had this content".to_string()
-        },
+        revision: None, // Each item has its own version; a batch has no version.
+        message: format!("{} of {} items completed", accepted.len(), results.len()),
+        results,
+        stopped,
     })
 }
 
@@ -2528,6 +3195,7 @@ fn prepare_pull_with_repositories(
     user_home: &Path,
     now: u64,
 ) -> Result<CatalogScopePullPlan, String> {
+    discard_scope_plans(catalog, scope_id, storage_id);
     let workspace = resolve_scope_workspace(
         registry,
         state,
@@ -2537,6 +3205,7 @@ fn prepare_pull_with_repositories(
         user_home,
     )?;
     let link = require_link(&workspace)?;
+    workspace.require_cloud_answered()?;
     let storage = workspace
         .storage
         .as_ref()
@@ -2551,7 +3220,7 @@ fn prepare_pull_with_repositories(
     let remote = workspace.remote_map();
     let claims = catalog.load_materializations()?.claims;
     let name_taken = name_taken_index(&workspace.inventory);
-    let plan = build_scope_pull_plan(ScopePullPlanInputs {
+    let mut plan = build_scope_pull_plan(ScopePullPlanInputs {
         scope: &workspace.scope,
         capability: &workspace.capability,
         link,
@@ -2566,13 +3235,60 @@ fn prepare_pull_with_repositories(
         name_taken: &name_taken,
         now,
     })?;
-    discard_scope_plans(catalog, scope_id, storage_id);
+    plan.sources = pull_sources(&workspace, storage, &plan);
     plan_store::save(
         catalog.root(),
         CatalogResourcePlanDocument::Pull(plan.clone()),
         now,
     )?;
     Ok(plan)
+}
+
+/// Where each item of a Pull review reads on Mallard Cloud: its repository's
+/// address, whether that is its draft or its public version, and the version
+/// the review read. Named from the same listing a Push review uses.
+fn pull_sources(
+    workspace: &ResolvedScopeWorkspace,
+    storage: &StorageConfig,
+    plan: &CatalogScopePullPlan,
+) -> BTreeMap<CatalogResourceId, CatalogPullSource> {
+    let read = plan
+        .items
+        .iter()
+        .map(|item| &item.item.resource_id)
+        .filter(|resource_id| workspace.cloud_repositories.contains_key(*resource_id))
+        .collect::<Vec<_>>();
+    if read.is_empty() {
+        return BTreeMap::new();
+    }
+    let Some(names) = CloudNames::load(workspace, storage) else {
+        return BTreeMap::new();
+    };
+    let mut sources = BTreeMap::new();
+    for resource_id in read {
+        let repository_id = &workspace.cloud_repositories[resource_id];
+        let (Some(summary), Some(head)) = (
+            names.summary(repository_id),
+            plan.item_heads.get(resource_id),
+        ) else {
+            continue;
+        };
+        sources.insert(
+            resource_id.clone(),
+            CatalogPullSource {
+                repository_id: repository_id.clone(),
+                address: format!("{}/{}", summary.owner.github_login, summary.name),
+                reads: if summary.role.is_some() {
+                    "draft"
+                } else {
+                    "public"
+                }
+                .to_string(),
+                revision: head.revision,
+            },
+        );
+    }
+    sources
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2586,6 +3302,7 @@ fn apply_pull_with_repositories(
     destructive_acknowledged: Vec<CatalogResourceId>,
     user_home: &Path,
     now: u64,
+    report: &ProgressReporter,
 ) -> Result<CatalogScopePullOutcomeDto, String> {
     let CatalogResourcePlanDocument::Pull(plan) = plan_store::load(catalog.root(), &plan_id)?
     else {
@@ -2603,6 +3320,7 @@ fn apply_pull_with_repositories(
         user_home,
     )?;
     let link = require_link(&workspace)?;
+    workspace.require_cloud_answered()?;
     if link.link_id != plan.link_id || link.revision != plan.link_revision {
         return Err("the scope link changed after review".to_string());
     }
@@ -2685,7 +3403,10 @@ fn apply_pull_with_repositories(
                 .map(|resource| (item.item.resource_id.clone(), resource.clone()))
         })
         .collect();
-    let engine = engine_for(storage)?;
+    let engine = workspace
+        .engine
+        .as_ref()
+        .expect("a linked workspace has its engine");
     let mut results = Vec::new();
     let mut accepted_updates: Vec<(CatalogResourceId, String)> = Vec::new();
     let mut all_accepted = true;
@@ -2703,6 +3424,12 @@ fn apply_pull_with_repositories(
             all_accepted = false;
             continue;
         }
+        report(CatalogSyncProgress {
+            plan_id: plan.plan_id.clone(),
+            completed: results.len(),
+            total: selections.len(),
+            message: format!("Pulling {}…", selection.item.item.display_name),
+        });
         // Payloads come from the stream the item was published on: its
         // own on a per-item storage, the coordinate's repository otherwise.
         let stream = workspace.stream_for(&selection.item.item.resource_id);
@@ -2785,7 +3512,7 @@ fn apply_pull_with_repositories(
         let link_id = link.link_id.clone();
         let link_revision = plan.link_revision;
         let head = plan.head.clone();
-        catalog.mutate_scope_links(|document| {
+        let saved = catalog.mutate_scope_links(|document| {
             let link = document
                 .links
                 .iter_mut()
@@ -2806,6 +3533,10 @@ fn apply_pull_with_repositories(
                     .insert(resource_id.clone(), content.clone());
             }
             for (resource_id, item_head) in &accepted_items {
+                if let Some(repository) = workspace.cloud_repositories.get(resource_id) {
+                    link.cloud_repositories
+                        .insert(resource_id.clone(), repository.clone());
+                }
                 link.accepted_items
                     .insert(resource_id.clone(), item_head.clone());
             }
@@ -2817,12 +3548,15 @@ fn apply_pull_with_repositories(
             link.revision = link.revision.saturating_add(1);
             link.updated_at = now;
             Ok(())
-        })?;
+        });
+        if let Err(error) = saved {
+            stopped = Some(format!("Applied changes were kept, but local comparison state could not be saved: {error}. Compare again."));
+        }
     }
     plan_store::discard(catalog.root(), &plan_id);
     Ok(CatalogScopePullOutcomeDto {
         plan_id,
-        remote_accepted: advance_head,
+        remote_accepted: advance_head && stopped.is_none(),
         results,
         stopped,
     })
@@ -3077,6 +3811,127 @@ mod tests {
             profile,
             storage,
         }
+    }
+
+    #[test]
+    fn probing_a_home_names_what_set_up_would_save() {
+        let fixture = library_fixture();
+        // The saved home answers with its profile and its name.
+        let saved = probe_catalog_resource_profile_with_repository(
+            &fixture.registry,
+            &fixture.catalog,
+            provider("codex"),
+            fixture.profile.configured_home.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.existing_profile_id.as_ref(),
+            Some(&fixture.profile.profile_id)
+        );
+        assert_eq!(saved.suggested_name, fixture.profile.display_name);
+        assert!(saved.readable);
+        assert_eq!(saved.canonical_path, fixture.profile.configured_home);
+
+        // A folder with no profile yet answers with the name it would get.
+        let other = fixture.user_home.join("other-home");
+        fs::create_dir_all(&other).unwrap();
+        let fresh = probe_catalog_resource_profile_with_repository(
+            &fixture.registry,
+            &fixture.catalog,
+            provider("codex"),
+            other.to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert_eq!(fresh.existing_profile_id, None);
+        assert_eq!(fresh.suggested_name, "other-home");
+        assert_eq!(
+            fresh.canonical_path,
+            fs::canonicalize(&other).unwrap().to_string_lossy()
+        );
+
+        // A missing folder is a miss, said the way the hint expects.
+        let missing = probe_catalog_resource_profile_with_repository(
+            &fixture.registry,
+            &fixture.catalog,
+            provider("codex"),
+            fixture.user_home.join("nope").to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+        assert!(missing.contains("No such file or directory"), "{missing}");
+
+        // An unknown provider never resolves. (The Mallard state root is
+        // refused by `validate_new_profile_home`, the save's own check,
+        // tested beside it.)
+        assert!(probe_catalog_resource_profile_with_repository(
+            &fixture.registry,
+            &fixture.catalog,
+            provider("cursor"),
+            other.to_string_lossy().to_string(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inspecting_a_home_counts_each_capability_and_names_the_last_storage() {
+        let fixture = library_fixture();
+        let service = StorageCatalogService::from_home_dirs(
+            &fixture.user_home,
+            &fixture.user_home,
+            Box::new(PanicRunner),
+        )
+        .unwrap();
+        let before = service
+            .inspect_profile(&fixture.profile.profile_id)
+            .unwrap();
+        assert_eq!(before.profile.profile_id, fixture.profile.profile_id);
+        assert_eq!(before.last_used_storage_id, None);
+        // Every capability the provider registers, in the registry's order.
+        assert_eq!(
+            before
+                .holdings
+                .iter()
+                .map(|holding| holding.capability.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Skills", "Plugins", "Pets v1", "Pets v2"]
+        );
+        let skills = &before.holdings[0];
+        assert_eq!(skills.count, Some(1));
+        assert!(skills.newest_modified_at.is_some());
+        // Roots are the adapter's summaries, never paths.
+        assert_eq!(skills.roots.len(), 1);
+        assert!(!skills.roots[0].contains(&fixture.profile.configured_home));
+        assert_eq!(skills.scope_id, None);
+
+        // A row for Skills, linked to the fixture's storage: the inspection
+        // joins the row and names the storage as the one used last.
+        let scope = service
+            .create_scope(
+                provider("codex"),
+                fixture.profile.profile_id.clone(),
+                codex_skills().resource_kind,
+                codex_skills().format,
+                1,
+            )
+            .unwrap()
+            .scope
+            .scope_id;
+        service
+            .link_scope_storage(&scope, &fixture.storage.id)
+            .unwrap();
+        let after = service
+            .inspect_profile(&fixture.profile.profile_id)
+            .unwrap();
+        assert_eq!(after.holdings[0].scope_id.as_ref(), Some(&scope));
+        assert_eq!(
+            after.last_used_storage_id.as_ref(),
+            Some(&fixture.storage.id)
+        );
+        assert_eq!(after.holdings[0].count, Some(1));
+
+        // An unknown profile is refused.
+        assert!(service
+            .inspect_profile(&LocalCatalogProfileId::generate().unwrap())
+            .is_err());
     }
 
     fn write_plugin_fixture(home: &Path) {
@@ -3362,6 +4217,7 @@ mod tests {
             plan.warning_digests.clone(),
             &fixture.user_home,
             now_secs(),
+            &|_| {},
         )
     }
 
@@ -3825,6 +4681,7 @@ mod tests {
             Vec::new(),
             &fixture.user_home,
             now_secs(),
+            &|_| {},
         )
         .unwrap();
         assert!(outcome.remote_accepted);
@@ -4835,6 +5692,7 @@ mod tests {
             Vec::new(),
             &fixture.user_home,
             now_secs(),
+            &|_| {},
         )
         .unwrap();
         assert!(outcome.remote_accepted);
@@ -4902,6 +5760,7 @@ mod tests {
             Vec::new(),
             &fixture.user_home,
             now_secs(),
+            &|_| {},
         )
     }
 
@@ -5604,6 +6463,7 @@ mod tests {
     #[cfg(test)]
     mod managed_cloud_tests {
         use super::*;
+        include!("cloud_flow_tests.rs");
         use mallard_domain::{BoundedConfigObject, SecretMap, SecretValue, StorageProviderConfig};
         use mallard_infrastructure::managed_cloud::stub::StubManagedCloud;
         use mallard_infrastructure::storage_providers::managed_cloud::{
@@ -5768,7 +6628,7 @@ mod tests {
                 .rows
                 .iter()
                 .all(|row| row.state == Some(CatalogLinkState::InSync)));
-            assert_eq!(refreshed.storage_revision, Some(1));
+            assert_eq!(refreshed.storage_revision, None);
             assert_eq!(
                 stub.request_lines(),
                 vec![coordinate_request("agent_skill", "agentskills.io.skill", 1)]
@@ -5868,7 +6728,7 @@ mod tests {
             let bob_scope = blocking(&bob, |fixture| {
                 let scope = skill_scope(fixture).scope.scope_id;
                 let link = link_scope(fixture, &scope, &fixture.storage.id, 4);
-                assert_eq!(link.completion, "review_pull");
+                assert_eq!(link.completion, "open", "Cloud linking saves metadata; the next step explicitly prepares Pull");
                 let plan = prepare_pull(fixture, &scope);
                 assert!(plan.head.is_none());
                 assert_eq!(plan.item_heads.len(), 1);
@@ -6273,7 +7133,7 @@ mod tests {
             let pull = blocking(&puller, |fixture| {
                 let scope = skill_scope(fixture).scope.scope_id;
                 let link = link_scope(fixture, &scope, &fixture.storage.id, 4);
-                assert_eq!(link.completion, "review_pull");
+                assert_eq!(link.completion, "open");
                 let plan = prepare_pull(fixture, &scope);
                 let outcome = apply_pull_defaults(fixture, &plan).unwrap();
                 assert!(outcome.remote_accepted, "{:?}", outcome.results);

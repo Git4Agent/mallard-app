@@ -1,5 +1,5 @@
 import type { IconName } from "../Icons";
-import { clockOptions } from "../../clock";
+import { clockOptions, formatRelativeTime } from "../../clock";
 import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { isPullReviewStatus } from "../sync-review/pullReviewStatus";
@@ -7,6 +7,7 @@ import type {
   CatalogCapabilityDescriptor,
   CatalogCoordinate,
   CatalogProfile,
+  CatalogProfileHolding,
   CatalogPullAction,
   CatalogScopeDto,
   CatalogScopePullItem,
@@ -114,12 +115,20 @@ export interface CatalogAddChoice {
   providers: CatalogCapabilityDescriptor[];
 }
 
+/** The portable shape a capability names — kind, format, version — as the
+ * key a Kind door hands to Add. */
+export function catalogChoiceKey(
+  capability: Pick<CatalogCoordinate, "resource_kind" | "format" | "format_version">,
+): string {
+  return `${capability.resource_kind}/${capability.format}@${capability.format_version}`;
+}
+
 export function catalogAddChoices(
   capabilities: readonly CatalogCapabilityDescriptor[],
 ): CatalogAddChoice[] {
   const choices: CatalogAddChoice[] = [];
   for (const capability of capabilities) {
-    const key = `${capability.resource_kind}/${capability.format}@${capability.format_version}`;
+    const key = catalogChoiceKey(capability);
     const existing = choices.find((choice) => choice.key === key);
     if (existing) existing.providers.push(capability);
     else choices.push({ key, label: capability.label, providers: [capability] });
@@ -199,7 +208,13 @@ export function rowStatus(row: CatalogScopeRow): ThreadStatusIconName {
  * in the one place the state is shown. */
 export function rowStatusLabel(row: CatalogScopeRow, storageName: string | null): string {
   const storage = storageName ?? "storage";
-  if (!row.state) return "Only on this Mac. Choose a storage to compare and sync it.";
+  /* No state with a storage chosen: that storage refused the account, and
+     the page's note says why. */
+  if (!row.state) {
+    return storageName
+      ? `Not compared with ${storageName}.`
+      : "Only on this Mac. Choose a storage to compare and sync it.";
+  }
   switch (row.state) {
     case "in_sync":
       return `Up to date here and in ${storage}.`;
@@ -233,17 +248,10 @@ export function rowPullable(row: CatalogScopeRow): boolean {
 }
 
 /** Keep one Catalog Pull plan's visible and selectable rows aligned. */
-export function filterCatalogPullReviewItems(
-  items: readonly CatalogScopePullItem[],
-  rows: readonly CatalogScopeRow[],
-): CatalogScopePullItem[] {
-  const rowsByResource = new Map(rows
-    .filter((row): row is CatalogScopeRow & { resource_id: string } => Boolean(row.resource_id))
-    .map((row) => [row.resource_id, row]));
-  return items.filter((item) => {
-    const row = rowsByResource.get(item.item.resource_id);
-    return row != null && rowPullable(row);
-  });
+export function filterCatalogPullReviewItems(items: readonly CatalogScopePullItem[]): CatalogScopePullItem[] {
+  // The reviewed plan is authoritative, including items discovered while
+  // connecting a repository that were absent from the previous page.
+  return items.filter(({ item }) => ["storage_only", "storage_changed", "changed_both", "unavailable_locally"].includes(item.relation));
 }
 
 /** A Library Pull's recommended selection: every item's default action, and
@@ -291,4 +299,95 @@ export function actionLabel(action: CatalogPullAction): string {
     case "update":
       return "Update from storage";
   }
+}
+
+/* ——— Add Catalog resource's two steps ——————————————————————————————— */
+
+/** New project's rule for a provider's profile before anyone clicks: the
+ * one profile this computer has for it, or none — never a guess among
+ * several. */
+export function unambiguousProfile(
+  profiles: readonly CatalogProfile[],
+  provider: string,
+): CatalogProfile | null {
+  const candidates = profiles.filter((profile) => profile.provider === provider);
+  return candidates.length === 1 ? candidates[0] ?? null : null;
+}
+
+/** One card of the setup page's Resource band: a capability the home's
+ * provider registers, what the home holds of it once the inspection has
+ * answered, and the row that already exists. */
+export interface CatalogKindCard {
+  capability: CatalogCapabilityDescriptor;
+  /** The Kind door's key for this shape. */
+  key: string;
+  holding: CatalogProfileHolding | null;
+  existingScopeId: string | null;
+}
+
+export function catalogKindCards(
+  capabilities: readonly CatalogCapabilityDescriptor[],
+  profile: Pick<CatalogProfile, "profile_id" | "provider">,
+  scopes: readonly Pick<CatalogScopeDto, "scope">[],
+  holdings: readonly CatalogProfileHolding[] | null,
+): CatalogKindCard[] {
+  return capabilities
+    .filter((capability) => capability.provider === profile.provider)
+    .map((capability) => {
+      const holding = holdings?.find((candidate) => sameCatalogCoordinate(candidate.capability, capability)) ?? null;
+      const scope = scopes.find((candidate) => (
+        candidate.scope.profile_id === profile.profile_id && sameCatalogCoordinate(candidate.scope, capability)
+      )) ?? null;
+      return {
+        capability,
+        key: catalogChoiceKey(capability),
+        holding,
+        existingScopeId: holding?.scope_id ?? scope?.scope.scope_id ?? null,
+      };
+    });
+}
+
+/** The card chosen before anyone clicks: the Kind door's, else the first
+ * with something in it and no row yet. Nothing found: nothing guessed. */
+export function catalogDefaultKind(cards: readonly CatalogKindCard[], doorKey: string | null): string | null {
+  const open = (card: CatalogKindCard) => card.existingScopeId === null;
+  const door = doorKey ? cards.find((card) => card.key === doorKey && open(card)) : null;
+  if (door) return door.key;
+  return cards.find((card) => open(card) && (card.holding?.count ?? 0) > 0)?.key ?? null;
+}
+
+/** A card's foot line: the count and the newest stamp, "Nothing here yet",
+ * or the format label while the count is unknown. */
+export function catalogKindCardFoot(card: CatalogKindCard): string {
+  const count = card.holding?.count;
+  if (count == null) return card.capability.presentation.format_label;
+  if (count === 0) return "Nothing here yet";
+  const counted = `${count} ${catalogNoun(card.capability.label, card.capability.singular_label, count)}`;
+  const newest = card.holding?.newest_modified_at;
+  return newest ? `${counted} · ${formatRelativeTime(newest)}` : counted;
+}
+
+/** The storage a new row starts on: the one a Catalog row used last, else
+ * the first of the storages as the shell orders them — Mallard Cloud, the
+ * other clouds, then local folders — else none. */
+export function catalogDefaultStorage(
+  storages: readonly { id: string }[],
+  lastUsed: string | null | undefined,
+): string | null {
+  if (lastUsed && storages.some((storage) => storage.id === lastUsed)) return lastUsed;
+  return storages[0]?.id ?? null;
+}
+
+/** Why the storage default is the default, in a few words; nothing when the
+ * row says it already. */
+export function catalogStorageHint(
+  storages: readonly { id: string; provider: string }[],
+  chosen: string | null,
+  lastUsed: string | null | undefined,
+): string | null {
+  if (storages.length === 0) return "No storage yet.";
+  if (!chosen) return null;
+  if (chosen === lastUsed) return "Used last by the Catalog.";
+  if (storages.length === 1) return "Your only storage.";
+  return storages[0]?.id === chosen && storages[0].provider === "managed_cloud" ? "Mallard Cloud first." : null;
 }

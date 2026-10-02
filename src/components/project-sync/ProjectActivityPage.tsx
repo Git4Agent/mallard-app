@@ -1,8 +1,8 @@
+import type { ManagedCloudStatus } from "../managed-cloud/types";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   GitBranchSummary,
-  ManagedCloudStatus,
   LocalProjectSummary,
   NoticeSeverity,
   OlderActivity,
@@ -23,9 +23,10 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
 import LoadingScaffold from "../LoadingScaffold";
+import ListTile from "../sync-review/ListTile";
 import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
-import { projectLabel } from "./model";
+import { projectLabel, sessionNoun } from "./model";
 import { clearedStorageNotice } from "./clearedStorageNotice";
 import { clearStorageWarningDismissal, dismissStorageWarning, useDismissedStorageWarning } from "../../preferences";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -112,6 +113,8 @@ interface PageProps extends SessionSearchProps {
    * review hosts render this page inside their own chrome.
    */
   onHeaderModelChange?: (model: ActivityHeaderModel | null) => void;
+  /** A non-Git project's Sessions/Files switch; only the workspace passes it. */
+  viewSwitch?: ReactNode;
 }
 
 interface ContentProps extends SessionSearchProps {
@@ -153,6 +156,7 @@ interface ContentProps extends SessionSearchProps {
   onChooseAgentProfile?: () => void;
   continuityActionBusy?: boolean;
   reviewScaffold?: ReviewScaffold;
+  viewSwitch?: ReactNode;
 }
 
 /** A Push review's Git history against the history storage holds. */
@@ -1685,6 +1689,7 @@ export function ProjectChatHistoryContent({
   continuityActionBusy = false,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
   reviewScaffold,
+  viewSwitch,
 }: ContentProps) {
   const [localQuery, setLocalQuery] = useState("");
   /* A review's list is keyed on settled reads, not on request flags: every
@@ -2002,6 +2007,19 @@ export function ProjectChatHistoryContent({
     ? { timing: "blocking" }
     : { timing: "standing", label: "Notes about this project activity" };
 
+  /* A review's field lands with its rows: until then the caption stands in
+     its slot, and a list that failed has nothing to search. */
+  const searchField = hasBoundProvider && !(storageLoading && searchableIds.size === 0)
+    && !(selectionMode && (activity === null || comparison === null))
+    && !(selectionMode === "push" && selectionReviewEmpty)
+    ? (
+      <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
+        label={selectionMode ? "Search sessions" : "Search loaded sessions"}
+        matches={searchResults.resourceIds.size} total={searchableIds.size} noun={sessionNoun} hiddenSelected={hiddenSelected}
+        leading={viewSwitch} />
+    )
+    : null;
+
   const content = (
       <section
         className="sync-history-content"
@@ -2014,6 +2032,11 @@ export function ProjectChatHistoryContent({
           </span>
         )}
 
+        {/* A non-Git project's view switch leads the page in every state,
+            so it holds its place across the two faces and the notes below
+            never push it down; the search rides its row whenever there is
+            one. */}
+        {viewSwitch && (searchField ?? <div className="sync-project-view-row">{viewSwitch}</div>)}
         <NoticeZone
           key={JSON.stringify([project.local_project_id, comparisonStorageId])}
           items={notices}
@@ -2021,15 +2044,7 @@ export function ProjectChatHistoryContent({
           className="sync-history-notices"
           {...noticeTiming}
         />
-        {/* A review's field lands with its rows: until then the caption
-            stands in its slot, and a list that failed has nothing to search. */}
-        {hasBoundProvider && !(storageLoading && searchableIds.size === 0)
-          && !(selectionMode && (activity === null || comparison === null))
-          && !(selectionMode === "push" && selectionReviewEmpty) && (
-          <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
-            label={selectionMode ? "Search sessions" : "Search loaded sessions"}
-            matches={searchResults.resourceIds.size} total={searchableIds.size} hiddenSelected={hiddenSelected} />
-        )}
+        {!viewSwitch && searchField}
         {!hasBoundProvider ? (
           <div className="sync-history-state sync-history-profile-state">
             <Icon name="alert-triangle" size={18} />
@@ -2269,12 +2284,13 @@ export function ProjectChatHistoryContent({
                 )}
               </div>
             ) : null) : (
-              <section>
-                {/* The flat list partitions the way the Catalog page and the
-                    Files face do: stored-only sessions lead under the shared
-                    plain section heading — no frame, no fold, no count — and
-                    the local half takes a heading only while the partition
-                    exists; alone, the leaf crumb already names it. */}
+              <section className="sync-history-flat-groups">
+                {/* The flat list groups the way the Files face does:
+                    stored-only sessions lead in the cloud-tinted tile — no
+                    counts, each row's badge already says "Pull to download it
+                    here" — and the local half takes a tile headed "Sessions"
+                    only while the partition exists. Alone, the switch already
+                    names it, so it stays the bare framed list. */}
                 {sessions.length === 0 ? (searching ? null : (
                   <div className="sync-history-thread-list flat">
                     {/* Same rule as the empty rail: the window is named only
@@ -2289,30 +2305,19 @@ export function ProjectChatHistoryContent({
                 )) : (
                   <>
                     {cloudSessions.length > 0 && (
-                      <>
-                        <div className="sync-history-section-heading">
-                          <h2>
-                            <Icon name="cloud" size={14} />
-                            Only in <span className="sync-history-storage-name">{storageOnlyName}</span>
-                          </h2>
-                        </div>
-                        <div className="sync-history-thread-list flat">
-                          {cloudSessions.map((session) => renderSession(session, `storage-only:${session.resource_id}`))}
-                        </div>
-                      </>
+                      <ListTile icon="cloud" cloud label={<>Only in <span className="sync-history-storage-name">{storageOnlyName}</span></>}>
+                        {cloudSessions.map((session) => renderSession(session, `storage-only:${session.resource_id}`))}
+                      </ListTile>
                     )}
-                    {localSessions.length > 0 && (
-                      <>
-                        {cloudSessions.length > 0 && (
-                          <div className="sync-history-section-heading">
-                            <h2><Icon name="message" size={14} />Sessions</h2>
-                          </div>
-                        )}
-                        <div className="sync-history-thread-list flat">
-                          {localSessions.map((session) => renderSession(session, session.resource_id))}
-                        </div>
-                      </>
-                    )}
+                    {localSessions.length > 0 && (cloudSessions.length > 0 ? (
+                      <ListTile icon="message" label="Sessions">
+                        {localSessions.map((session) => renderSession(session, session.resource_id))}
+                      </ListTile>
+                    ) : (
+                      <div className="sync-history-thread-list flat">
+                        {localSessions.map((session) => renderSession(session, session.resource_id))}
+                      </div>
+                    ))}
                   </>
                 )}
                 {/* Same control, no rail to hang it from: a project with no
@@ -2405,6 +2410,7 @@ export default function ProjectActivityPage({
   onOpenSessionDetail,
   onActionError,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
+  viewSwitch,
 }: PageProps) {
   /* Keep loaded windows as a stack so Show less is a pop instead of a refetch. */
   const [pages, setPages] = useState<ProjectActivity[]>([]);
@@ -2722,5 +2728,5 @@ export default function ProjectActivityPage({
       actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} />;
 }

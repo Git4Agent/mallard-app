@@ -11,6 +11,7 @@ import type {
 import {
   ProjectFilesActivityView,
   buildProjectFilesActivityProjection,
+  projectFileSyncCounts,
 } from "../../src/components/project-sync/ProjectFilesActivityPage";
 import { PROJECT_FILE_CARD_RENDER_LIMIT } from "../../src/components/project-sync/model";
 
@@ -91,7 +92,6 @@ function renderView(inventory: ProjectContentInventory | null, loading = false, 
       storageName="Attic R2"
       loading={loading}
       error={error}
-      onRescan={() => undefined}
       onOpenFile={() => undefined}
       onRevealPath={() => undefined}
     />,
@@ -107,6 +107,68 @@ test("file inspections share concurrent native work", () => {
 
   assert.match(inspectProjectFiles, /projectSyncSingleFlight/);
   assert.match(inspectProjectFiles, /\["inspect_project_files", request\]/);
+});
+
+test("a scan's Pull and Push tallies follow the verbs its rows name", () => {
+  const counts = projectFileSyncCounts(inventoryWith([
+    // Push sends what is only here or newer here.
+    entry("only-here", "draft.md", "local_only"),
+    entry("newer-here", "notes/outline.md", "local_ahead"),
+    // Pull brings what is only in storage or newer there — a removal in
+    // storage included.
+    entry("only-there", "press-kit.pdf", "storage_only", { local_present: false, storage_present: true }),
+    entry("newer-there", "score.mp3", "storage_ahead"),
+    entry("removed-there", "retired.md", "storage_ahead", { storage_present: false, base_present: true }),
+    // Neither verb claims a file waiting on the reader's choice, a settled
+    // one, an unknown one, or one that cannot travel.
+    entry("both-sides", "both.md", "diverged"),
+    entry("gone-here", "doc/test-design.md", "missing", { local_present: false, storage_present: true, base_present: true }),
+    entry("same", "same.md", "synced"),
+    entry("unknown", "unknown.md", "unknown"),
+    entry("blocked", "poster.psd", "blocked", {
+      entry_type: "blocked",
+      blocked_reason: "File exceeds the 16 MiB project-content limit",
+      storage_present: false,
+    }),
+    // Directory rows are never drawn, so they are never counted.
+    {
+      ...entry("dir-assets", "assets", "storage_only", { local_present: false, storage_present: true }),
+      entry_type: "directory",
+      descriptor: { ...descriptor("dir-assets", "assets"), kind: { key: "project_content_directory", version: 1 } },
+    },
+  ]));
+  assert.deepEqual(counts, { pull: 3, push: 2 });
+
+  // No scan yet, or a folder whose files cannot travel, claims nothing.
+  assert.deepEqual(projectFileSyncCounts(null), { pull: 0, push: 0 });
+  assert.deepEqual(
+    projectFileSyncCounts(inventoryWith([entry("file-a", "a.md", "local_only")], {
+      eligibility: { state: "git_managed", reason: "Git manages files in this project folder." },
+    })),
+    { pull: 0, push: 0 },
+  );
+});
+
+test("the workspace holds the one file scan the Files face and the path bar read", () => {
+  const files = readFileSync("src/components/project-sync/ProjectFilesActivityPage.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  // The face is a pure view of the scan; it neither scans nor reports a
+  // header of its own.
+  assert.doesNotMatch(files, /export default function|onHeaderModelChange|FilesActivityHeaderModel/);
+  assert.equal((files.match(/projectSyncApi\.inspectProjectFiles\(/g) ?? []).length, 1);
+  assert.match(files, /export function useProjectFilesScan\(/);
+  assert.equal((workspace.match(/useProjectFilesScan\(/g) ?? []).length, 1);
+  assert.match(workspace, /<ProjectFilesActivityView\s+inventory=\{projectFilesScan\.inventory\}/);
+  // A Git project has no Files face to scan for, and a review owns the
+  // project and the host lock while it is open; the scan reruns on its close.
+  assert.match(
+    workspace,
+    /useProjectFilesScan\(\s*activeProject && !activeProject\.is_git_repository && !newProjectSetup && !inlineStorageReview/,
+  );
+  // A result is read only for the pair it was scanned for, so one project's
+  // files never count on another's bar while its own scan is in flight.
+  assert.match(files, /const current = scanned\?\.key === key \? scanned : null;/);
+  assert.match(files, /loading: key !== null && scanningKey === key,/);
 });
 
 test("the activity list searches the full inventory but renders at most 500 file cards", () => {
@@ -177,7 +239,7 @@ test("storage-only files lead the list under an Only-in-storage heading", () => 
   // counts, no phrase; the rows' own badges carry "Pull to download it here".
   // Nested cloud files keep their directory as a quiet prefix inside it, and
   // the local half follows as framed tiles headed "Project root" and by path.
-  const cloudTile = markup.indexOf("sync-project-file-tile cloud");
+  const cloudTile = markup.indexOf("sync-list-tile cloud");
   const cloudName = markup.indexOf('sync-history-storage-name">Attic R2');
   const cloudFile = markup.indexOf("press-kit.pdf");
   const cloudPrefix = markup.indexOf("archive/");
@@ -197,9 +259,40 @@ test("storage-only files lead the list under an Only-in-storage heading", () => 
   const unpartitioned = renderView(inventoryWith([
     entry("file-local", "cold-joke.md", "local_only"),
   ]));
-  assert.doesNotMatch(unpartitioned, /sync-project-file-tile cloud|sync-history-section-heading/);
+  assert.doesNotMatch(unpartitioned, /sync-list-tile cloud|sync-history-section-heading/);
   assert.match(unpartitioned, />Project root</);
-  assert.match(unpartitioned, / Rescan</, "the bar carries its own rescan beside the tally");
+});
+
+test("the Files face wears the Sessions face's chrome", () => {
+  const markup = renderView(inventoryWith([
+    entry("file-root", "cold-joke.md", "local_only", { source_mtime: 1_752_800_000 }),
+    entry("file-notes", "notes/outline.md", "synced"),
+  ]));
+
+  // One search row: the Sessions face's field, its count naming what it counts.
+  assert.match(markup, /<div class="sync-name-search">/);
+  assert.match(markup, /aria-label="Search files"/);
+  assert.match(markup, /class="sync-name-search-count">2 files</);
+  assert.doesNotMatch(markup, /sync-project-files-search|entries|Rescan/);
+  // One refresh: the path bar's glyph already rescans this face.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /onRefresh: projectFilesScan\.rescan,/);
+  assert.doesNotMatch(workspace, /onRescan=/);
+
+  // One info glyph and one readout family: the session rows' own square ⓘ,
+  // and Kind and Size in the same 14px row glyphs as messages and tokens.
+  assert.match(markup, /sync-history-debug-trigger[^>]*>[^<]*<svg[^>]*data-icon="info" class="session-row-icon"/);
+  assert.match(markup, /<svg[^>]*data-icon="file" class="session-row-icon"/);
+  assert.match(markup, /<svg[^>]*data-icon="size" class="session-row-icon"/);
+  assert.doesNotMatch(markup, /data-icon="drive"/);
+
+  // One stamp: the Sessions face's formatter, closing the row.
+  assert.match(markup, /<time dateTime="2025-07-18T[^"]+">[^<]+ at [^<]+<\/time>/);
+
+  // A non-Git project's root is a plain folder, and a file shows in Finder.
+  assert.doesNotMatch(markup, /data-icon="git-folder"/);
+  assert.match(markup, /title="Show cold-joke\.md in Finder"/);
+  assert.doesNotMatch(markup, /Reveal/);
 });
 
 test("missing local files remain actionable storage copies", () => {
@@ -293,4 +386,40 @@ test("ineligible scans, missing storage, and scan problems each speak", () => {
 
   const summary = renderView(inventoryWith([entry("file-a", "a.md", "local_only")]));
   assert.ok(summary.includes("1 ignored · 1 blocked · 1 scan warning"), "the scan summary keeps its counts");
+});
+
+test("the project's view switch leads the Files face in every state", () => {
+  const viewSwitch = <div className="sync-project-view-tabs" role="tablist" aria-label="Project view" />;
+  const render = (inventory: ProjectContentInventory | null, loading = false, error: string | null = null) => (
+    renderToStaticMarkup(
+      <ProjectFilesActivityView
+        inventory={inventory}
+        storageName="Attic R2"
+        loading={loading}
+        error={error}
+        viewSwitch={viewSwitch}
+      />,
+    )
+  );
+  const lead = /^<section class="sync-project-files-page" aria-label="Project files">/;
+
+  // With files to search, the pill rides the search row, ahead of the field
+  // and outside its rule.
+  const listed = render(inventoryWith([entry("file-a", "a.md", "local_only")]));
+  assert.match(listed, new RegExp(`${lead.source}<div class="sync-list-head"><div class="sync-project-view-tabs"[^>]*></div><div class="sync-name-search">`));
+
+  // Every other state still opens with it, on a row of its own, so the switch
+  // never moves between the faces or while a scan lands.
+  for (const [label, html] of [
+    ["scanning", render(null, true)],
+    ["unlinked", render(null)],
+    ["failed", render(null, false, "scan failed: folder unreadable")],
+    ["locked", render(inventoryWith([], { eligibility: { state: "git_managed", reason: "Git manages files in this project folder." } }))],
+    ["empty", render(inventoryWith([]))],
+  ] as const) {
+    assert.match(html, new RegExp(`${lead.source}<div class="sync-project-view-row"><div class="sync-project-view-tabs"`), label);
+  }
+
+  // The review renders the same page with no switch.
+  assert.doesNotMatch(renderView(inventoryWith([entry("file-a", "a.md", "local_only")])), /sync-project-view/);
 });

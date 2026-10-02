@@ -45,7 +45,7 @@ import { PROJECT_SYNC_SCHEMA } from "../../types";
 import Icon from "../Icons";
 import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import BundleConnectionDialog, { type BundleConnectionChoice } from "./BundleConnectionDialog";
-import { isManagedCloudStorage } from "./RepositoryAddressPicker";
+import { isManagedCloudStorage, managedCloudAccount } from "./RepositoryAddressPicker";
 import ActivityLogDrawer from "./ActivityLogDrawer";
 import SettingsPage from "./SettingsPage";
 import { getPreference } from "../../preferences";
@@ -85,7 +85,7 @@ import StorageCatalogPage, {
   type CatalogStorageOption,
 } from "../storage-catalog/StorageCatalogPage";
 import CatalogIndexPage from "../storage-catalog/CatalogIndexPage";
-import AddCatalogScopeWorkspace from "../storage-catalog/AddCatalogScopeWorkspace";
+import AddCatalogScopeWorkspace, { type CatalogCloudLanding } from "../storage-catalog/AddCatalogScopeWorkspace";
 import { storageCatalogApi } from "../storage-catalog/api";
 import type { CatalogCapabilityDescriptor, CatalogScopeDto, CatalogScopeView } from "../storage-catalog/types";
 import {
@@ -101,7 +101,7 @@ import {
   PREPARING_CANCELLED,
   createReviewPreparing,
   type PreparingHandle,
-} from "./reviewPreparing";
+} from "../sync-review/reviewPreparationLifecycle";
 import StartupLoadingScreen, { type StartupStage } from "./StartupLoadingScreen";
 import { type SyncReviewStep } from "./reviewSteps";
 import { buildPullReviewItems, pullActionResourceIds } from "./pullReviewModel";
@@ -133,6 +133,7 @@ import {
   recipeSelection,
   recipeWithSelection,
   type RenameResult,
+  orderStorages,
 } from "./model";
 
 interface Props {
@@ -334,6 +335,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   /* The Kind a door chose on the way into Add; null when the verb was bare. */
   const [catalogAddChoiceKey, setCatalogAddChoiceKey] = useState<string | null>(null);
   const [catalogScopeId, setCatalogScopeId] = useState<string | null>(null);
+  /* An item Add from Mallard Cloud just brought in: its row opens on its page. */
+  const [catalogLandingItem, setCatalogLandingItem] = useState<{ scopeId: string; resourceId: string } | null>(null);
   const [addingCatalogScope, setAddingCatalogScope] = useState(false);
   const [catalogIndexOpen, setCatalogIndexOpen] = useState(false);
   const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
@@ -452,6 +455,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // Only storage setup started from New project returns there after saving.
   const cloudProjectSetupStorageRef = useRef<string | null>(null);
   const cloudLandingRef = useRef<string | null>(null);
+  const catalogStorageSetupRef = useRef<{ scopeId: string; draftId: string | null; storageId?: string } | null>(null);
+  const catalogStorageLandingRef = useRef<{ scopeId: string; storageId: string } | null>(null);
+  const [catalogPreferredStorage, setCatalogPreferredStorage] = useState<Record<string, string>>({});
   /* A GitHub repository that got an empty folder: said once, with the
      command that clones into it. */
   const [cloneFallback, setCloneFallback] = useState<CloneFallback | null>(null);
@@ -818,7 +824,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (catalogStorageMenuRequest?.scopeId !== activeCatalogScope?.scope.scope_id) return;
     setCatalogStorageMenuRequest(null);
   }, [activeCatalogScope?.scope.scope_id, catalogStorageMenuRequest]);
-  const catalogStorages: CatalogStorageOption[] = config.storages.map((storage) => ({
+  /* The setup pages — New project, a draft's setup page, Add Catalog
+     resource — list storages by preference: Mallard Cloud, the other clouds,
+     then local folders, the order the storage type picker already draws. */
+  const setupStorages = useMemo(
+    () => orderStorages(config.storages, storageProviders),
+    [config.storages, storageProviders],
+  );
+  const catalogStorages: CatalogStorageOption[] = setupStorages.map((storage) => ({
     id: storage.storage_id,
     provider: storage.provider,
     name: storage.name,
@@ -826,7 +839,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     icon: storage.icon,
     detail: storageSubtitle(storage),
     detailIsPath: storageSubtitleIsPath(storage),
+    account_login: isManagedCloudStorage(storage) ? managedCloudAccount(storage).login : null,
   }));
+  const catalogCloudAccounts = catalogStorages
+    .filter((storage) => storage.provider === "managed_cloud" && storage.account_login)
+    .map((storage) => ({ id: storage.id, name: storage.name, account_login: storage.account_login ?? "" }));
   // The project workspace names itself in its path bar, so the titlebar stays
   // silent there and speaks only for the screens that carry no trail.
   const workspaceTitle = activeDraftSummary?.display_name
@@ -895,6 +912,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   ]);
   const clearHostScopedWorkflows = useCallback(() => {
     hostWorkflowEpoch.current += 1;
+    catalogStorageSetupRef.current = null;
+    catalogStorageLandingRef.current = null;
+    setCatalogPreferredStorage({});
     restoreRequest.current += 1;
     setPendingBundleConnection(null);
     setPendingPush(null);
@@ -1504,6 +1524,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       repositories — shared by the sidebar, the Storages index, the Catalog,
       and the banners that deep-link a storage. */
   const openStorageWorkspace = async (storageId: string) => {
+    const catalogLanding = catalogStorageLandingRef.current;
+    catalogStorageLandingRef.current = null;
+    if (catalogLanding?.storageId === storageId) {
+      setCatalogPreferredStorage((current) => ({ ...current, [catalogLanding.scopeId]: storageId }));
+      openCatalogScope(catalogLanding.scopeId);
+      return;
+    }
     // Consume the return to New project when its Cloud setup has finished.
     const landing = cloudLandingRef.current;
     cloudLandingRef.current = null;
@@ -1635,15 +1662,42 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!(await closeWorkspaceSettings())) return;
     setSetupView(null);
     setCatalogIndexOpen(false);
+    setCatalogLandingItem(null);
     setCatalogScopeId(scopeId);
   };
 
-  const completeAddCatalogScope = async (scope: CatalogScopeDto, workflowEpoch: number) => {
+  /** Add from Mallard Cloud lands on the item's page, in the row it went
+      to, with the storage it came from; nothing is pulled. */
+  const completeAddCatalogCloudItem = async (landing: CatalogCloudLanding, workflowEpoch: number) => {
+    if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    const scopeId = landing.scope.scope.scope_id;
+    setAddingCatalogScope(false);
+    setCatalogIndexOpen(false);
+    setCatalogPreferredStorage((current) => ({ ...current, [scopeId]: landing.storageId }));
+    setCatalogLandingItem({ scopeId, resourceId: landing.resourceId });
+    setCatalogScopeId(scopeId);
+    notify(landing.note);
+    await refreshCatalogScopes(undefined, workflowEpoch);
+  };
+
+  /** Finish on Add's setup page: the row exists; it lands on its page with
+   *  the storage it was linked to. A link that failed after the row was made
+   *  is said in the row's own words, and the page's storage menu retries. */
+  const completeAddCatalogScope = async (
+    scope: CatalogScopeDto,
+    storageId: string | null,
+    linkError: string | null,
+    workflowEpoch: number,
+  ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
+    if (storageId) setCatalogPreferredStorage((current) => ({ ...current, [scope.scope.scope_id]: storageId }));
     setCatalogScopeId(scope.scope.scope_id);
-    notify(`${catalogScopeLabel(scope)} added to the Catalog.`);
+    const label = catalogScopeLabel(scope);
+    notify(linkError
+      ? `${label} added to the Catalog, but its storage could not be linked: ${linkError}`
+      : `${label} added to the Catalog.`);
     await refreshCatalogScopes(undefined, workflowEpoch);
   };
 
@@ -1739,6 +1793,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       await storageDraftSaveQueue.enqueue(() => projectSyncApi.discardStorageSetupDraft(draftId));
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      if (catalogStorageSetupRef.current?.draftId === draftId) catalogStorageSetupRef.current = null;
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify("Storage draft discarded.");
@@ -3110,6 +3165,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         cloudProjectSetupStorageRef.current = null;
         if (!result.replaced && isManagedCloudStorage(committed)) cloudLandingRef.current = result.storage_id;
       }
+      if (catalogStorageSetupRef.current?.draftId === draftId) {
+        catalogStorageLandingRef.current = { scopeId: catalogStorageSetupRef.current.scopeId, storageId: result.storage_id };
+        catalogStorageSetupRef.current = null;
+      }
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       return hostWorkflowEpoch.current === workflowEpoch ? result : null;
     } catch (reason) {
@@ -3223,9 +3282,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   /** Add storage starts with a provider choice. The picker is its own
       screen, rooted at the Storages crumb like every storage page; the
       card's type switch can still change the choice afterwards. */
-  const openNewStorageConfiguration = async () => {
+  const openNewStorageConfiguration = async (returnToCatalog?: string) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
+    catalogStorageSetupRef.current = returnToCatalog ? { scopeId: returnToCatalog, draftId: null } : null;
     setSetupView(null);
     setStorageProviderPickerOpen(true);
   };
@@ -3260,7 +3320,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   /** The chosen provider mints the draft; the backend binds it to that
       provider for good, and the form opens on it. */
-  const createStorageDraft = async (provider: StorageProviderKey, name?: string, returnToNewProject = false) => {
+  const createStorageDraft = async (provider: StorageProviderKey, name?: string, returnToNewProject = false, keepCatalogReturn = false) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     if (!(await saveStorageDraftBeforeNavigation())) return;
     setBusy(true);
@@ -3289,6 +3349,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!draft || hostWorkflowEpoch.current !== workflowEpoch) return;
     await refreshStorageSetupDrafts(undefined, workflowEpoch);
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    if (catalogStorageSetupRef.current && (catalogStorageSetupRef.current.draftId === null || keepCatalogReturn)) {
+      catalogStorageSetupRef.current.draftId = draft.draft_id;
+      catalogStorageSetupRef.current.storageId = draft.storage_id;
+    }
     cloudProjectSetupStorageRef.current = returnToNewProject ? draft.storage_id : null;
     openStorageDraftForm(draft);
   };
@@ -3705,7 +3769,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         catalogScopes={catalogScopes}
         catalogCapabilities={catalogCapabilities}
         activeCatalogScopeId={activeCatalogScope?.scope.scope_id ?? null}
+        addingProject={choosingProjectFolder}
         addingCatalogScope={addingCatalogScope}
+        addingStorage={storageProviderPickerOpen}
         catalogIndexOpen={catalogIndexOpen}
         storageIndexOpen={storageIndexOpen || storageProviderPickerOpen}
         settingsOpen={settingsOpen}
@@ -3792,19 +3858,29 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             isWorkflowCurrent={(epoch) => hostWorkflowEpoch.current === epoch}
             busy={busy}
             initialChoiceKey={catalogAddChoiceKey}
+            scopes={catalogScopes}
+            storages={catalogStorages}
+            cloudAccounts={catalogCloudAccounts}
+            onSetUpCloud={() => beginAddStorage("managed_cloud")}
             onClose={openCatalogIndex}
-            onCreated={(scope, epoch) => void completeAddCatalogScope(scope, epoch)}
+            onCreated={(scope, storageId, linkError, epoch) => void completeAddCatalogScope(scope, storageId, linkError, epoch)}
+            onAdded={(landing, epoch) => void completeAddCatalogCloudItem(landing, epoch)}
           />
         ) : activeCatalogScope ? (
           <StorageCatalogPage
             key={activeCatalogScope.scope.scope_id}
             scope={activeCatalogScope}
+            initialStorageId={catalogPreferredStorage[activeCatalogScope.scope.scope_id]}
+            initialResourceId={catalogLandingItem?.scopeId === activeCatalogScope.scope.scope_id
+              ? catalogLandingItem.resourceId
+              : undefined}
             scopes={catalogScopes}
             storages={catalogStorages}
+            capabilities={catalogCapabilities}
             appActions={appActions}
             onOpenScope={openCatalogScope}
             onOpenStorageDetails={(storageId) => void openStorageWorkspace(storageId)}
-            onAddStorage={openNewStorageConfiguration}
+            onAddStorage={() => void openNewStorageConfiguration(activeCatalogScope.scope.scope_id)}
             onAddScope={() => beginAddCatalogScope()}
             onRemoveScope={() => void removeCatalogScope(activeCatalogScope.scope.scope_id)}
             onProfileRenamed={() => void refreshCatalogScopes()}
@@ -3841,7 +3917,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             busy={busy}
             appActions={appActions}
             onChoose={(provider) => void createStorageDraft(provider)}
-            onCancel={openStorageIndex}
+            onCancel={() => {
+              const source = catalogStorageSetupRef.current;
+              catalogStorageSetupRef.current = null;
+              if (source) void openCatalogScope(source.scopeId);
+              else void openStorageIndex();
+            }}
           />
         ) : storageIndexOpen ? (
           <StorageIndexPage
@@ -3864,7 +3945,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             activeProjectSubview={activeProjectSubview}
             bindings={bindings}
             profiles={profiles}
-            providers={agentProviders}
             storageProviders={storageProviders}
             storages={config.storages}
             storageSetupDrafts={storageSetupDrafts}
@@ -3889,11 +3969,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onDeleteProjectSessions={(projectId) => deleteLocalProjectSessions(projectId)}
             onRefresh={() => void refresh()}
             onAddProject={() => void beginAddProject()}
+            onAddCloudProject={() => void beginAddProject({ source: "cloud" })}
             onSelectProject={openProject}
             appActions={appActions}
             onAddStorage={openNewStorageConfiguration}
             onCreateStorageDraft={(provider, name) => createStorageDraft(provider, name,
-              cloudProjectSetupStorageRef.current !== null && cloudProjectSetupStorageRef.current === activeStorageSettingsId)}
+              cloudProjectSetupStorageRef.current !== null && cloudProjectSetupStorageRef.current === activeStorageSettingsId,
+              catalogStorageSetupRef.current?.storageId === activeStorageSettingsId)}
             onOpenStorage={openStorageWorkspace}
             onOpenStorageIndex={openStorageIndex}
             onClearStorage={(storageId) => void clearStorageData(storageId)}
@@ -3926,7 +4008,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 providers={agentProviders}
                 profiles={profiles}
                 projects={projects}
-                storages={config.storages}
+                storages={setupStorages}
                 busy={busy}
                 onClose={() => void closeSetupDraft()}
                 onDiscard={(draftId) => void discardSetupDraft(draftId)}
@@ -3944,7 +4026,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 projects={projects}
                 providers={agentProviders}
                 profiles={profiles}
-                storages={config.storages}
+                storages={setupStorages}
                 busy={busy}
                 initialSource={setupFolderView?.source}
                 initialStorageId={setupFolderView?.storageId ?? null}

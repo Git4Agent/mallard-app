@@ -155,7 +155,7 @@ async fn list_repositories(
     local_fingerprint: Option<&str>,
 ) -> Result<Vec<ManagedCloudRepository>, String> {
     let mut rows = client
-        .list_project_repositories()
+        .list_repositories("project")
         .await?
         .iter()
         .filter(|summary| summary.bundle_id.is_some())

@@ -4,6 +4,7 @@ import Icon from "./components/Icons";
 import { NoticeZone } from "./components/notice/Notice";
 import { projectReviewTabs } from "./components/project-sync/reviewSteps";
 import NameSearchField from "./components/sync-review/NameSearchField";
+import { sessionNoun } from "./components/project-sync/model";
 import { ReviewBudgetGauge, ReviewBudgetGlance } from "./components/sync-review/ReviewBudgetMeter";
 import SyncPathBar, { type PathBarCrumb } from "./components/sync-review/SyncPathBar";
 import SyncReviewSelectionBar from "./components/sync-review/SyncReviewSelectionBar";
@@ -199,7 +200,7 @@ function Body({ s, rowExit }: { s: Scenario; rowExit: ReactNode }) {
     return (
       <>
         <HeldBanner s={s} />
-        <NameSearchField query="" onChange={() => undefined} label={`Search ${SCOPE.toLowerCase()}`} matches={0} total={0} />
+        <NameSearchField noun={() => SCOPE.toLowerCase()} query="" onChange={() => undefined} label={`Search ${SCOPE.toLowerCase()}`} matches={0} total={0} />
         <div className="sync-history-thread-list">
           <EmptyRow s={s} exit={rowExit} />
         </div>
@@ -222,7 +223,7 @@ function Body({ s, rowExit }: { s: Scenario; rowExit: ReactNode }) {
       <HeldBanner s={s} />
       <div className="sync-history-page sync-history-embedded sync-history-selection-review">
         <section className="sync-history-content" aria-label="Sessions">
-          <NameSearchField query="" onChange={() => undefined} label="Search sessions" matches={0} total={0} />
+          <NameSearchField noun={sessionNoun} query="" onChange={() => undefined} label="Search sessions" matches={0} total={0} />
           <EmptyRow s={s} exit={rowExit} />
         </section>
       </div>

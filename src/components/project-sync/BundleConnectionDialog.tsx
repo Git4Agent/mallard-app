@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { BundleSnapshotSummary, ManagedCloudRepository, StorageSummary } from "../../types";
 import Icon, { storageIconName } from "../Icons";
 import Notice, { NoticeZone, type NoticeItem } from "../notice/Notice";
-import { formatRelativeTime } from "./model";
+import { formatRelativeTime } from "../../clock";
 import RepositoryAddressPicker, {
   isManagedCloudStorage,
   managedCloudAccount,

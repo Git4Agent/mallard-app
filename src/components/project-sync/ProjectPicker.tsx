@@ -1,8 +1,9 @@
-import type { LocalProjectSummary, ProviderDescriptor, ProviderProfileSummary, StorageSummary } from "../../types";
+import type { LocalProjectSummary, ProviderProfileSummary, StorageSummary } from "../../types";
 import Icon from "../Icons";
 import ProviderMark from "../sync-review/ProviderMark";
 import LandingPicker from "./LandingPicker";
 import { compactProjectPath, projectLabel, providerLabel } from "./model";
+import ProjectsWelcome from "./ProjectsWelcome";
 
 /**
  * The Projects landing: one door per registered project, built from the
@@ -11,18 +12,20 @@ import { compactProjectPath, projectLabel, providerLabel } from "./model";
  * summary is only filled for the active project), and the linked storage's
  * name.
  *
- * Empty, it has one door: Add project opens setup at its Folder field, so
- * there is nothing to choose before it. The door wears every agent the build
- * knows, which is what a project can bind to.
+ * Empty, it is the welcome instead: a mallard ride and the two ways Add
+ * starts, from a folder or from Mallard Cloud.
  */
-export default function ProjectPicker({ projects, profiles, providers, storages, onAddProject, onSelectProject }: {
+export default function ProjectPicker({ projects, profiles, storages, onAddProject, onAddCloudProject, onSelectProject }: {
   projects: LocalProjectSummary[];
   profiles: ProviderProfileSummary[];
-  providers: ProviderDescriptor[];
   storages: StorageSummary[];
   onAddProject: () => void;
+  onAddCloudProject: () => void;
   onSelectProject: (projectId: string) => void;
 }) {
+  if (projects.length === 0) {
+    return <ProjectsWelcome onAddProject={onAddProject} onAddCloudProject={onAddCloudProject} />;
+  }
   const storageNames = new Map(storages.map((storage) => [storage.storage_id, storage.name]));
   const profileNames = new Map(profiles.map((profile) => [profile.profile_id, profile.display_name]));
   return (
@@ -31,19 +34,6 @@ export default function ProjectPicker({ projects, profiles, providers, storages,
       count={projects.length === 1 ? "1 on this machine" : `${projects.length} on this machine`}
       actionLabel="Add project…"
       onAction={onAddProject}
-      doors={[{
-        key: "folder",
-        icon: "folder",
-        label: "Add a folder…",
-        ariaLabel: "Add project",
-        marks: providers.length > 0
-          ? providers.map((provider) => (
-            <ProviderMark key={provider.key} provider={provider.key} displayName={provider.display_name} />
-          ))
-          : undefined,
-        onOpen: onAddProject,
-      }]}
-      caption={{ icons: ["cloud"], text: "Sessions & memory travel with it" }}
       cards={projects.map((project) => {
         const label = projectLabel(project);
         const boundProviders = Object.entries(project.profile_ids ?? {});

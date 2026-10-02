@@ -16,7 +16,7 @@ import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSteps } from "./reviewSteps";
-import { providerLabel } from "./model";
+import { providerLabel, sessionNoun } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { compareAgainOffered } from "./pullReviewFlow";
 import type { PullApplyPhase, PullReviewSelection } from "./pullReviewFlow";
@@ -543,7 +543,7 @@ export default function RestorePlanView({
               {!activityHistoryInUse && conversationItems.length > 0 && (
                 <>
                   <NameSearchField query={searchQuery} onChange={setSearchQuery} label="Search sessions"
-                    matches={matchingConversations.length} total={conversationItems.length}
+                    matches={matchingConversations.length} total={conversationItems.length} noun={sessionNoun}
                     hiddenSelected={selectedIn(conversationItems) - selectedIn(matchingConversations)} />
                   {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">No matching sessions.</div>}
                 </>

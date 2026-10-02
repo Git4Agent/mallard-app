@@ -138,6 +138,7 @@ mod tests {
             target_pins: Vec::new(),
             observed_head: None,
             observed_items: std::collections::BTreeMap::new(),
+            destinations: std::collections::BTreeMap::new(),
             rows: Vec::new(),
             warning_digests: Vec::new(),
             created_at: 1,

@@ -1,20 +1,23 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
-  LocalProjectSummary,
   ProjectContentEntry,
   ProjectContentInventory,
 } from "../../types";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
 import Notice, { NoticeChip } from "../notice/Notice";
+import ListTile from "../sync-review/ListTile";
+import NameSearchField from "../sync-review/NameSearchField";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
+import { nameMatchesSearch } from "../sync-review/nameSearch";
 import { formatBytes } from "../../format";
-import { formatDateTime } from "../../clock";
+import { formatFullDateTime } from "../../clock";
 import { errorMessage } from "../../storageError";
-import { PROJECT_FILE_CARD_RENDER_LIMIT, fileKindLabel, projectFileWarningLabel } from "./model";
+import { PROJECT_FILE_CARD_RENDER_LIMIT, fileKindLabel, fileNoun, projectFileWarningLabel } from "./model";
 import { projectSyncApi } from "./api";
 import { ProjectFilesLockedNotice } from "./ProjectFilesReviewPage";
 import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
+import SessionRowIcon from "./SessionRowIcon";
 
 /**
  * The Files face of a non-git project's activity page. Read-only on purpose:
@@ -23,26 +26,97 @@ import ProjectFileDetailsMenu from "./ProjectFileDetailsMenu";
  * standing-list contract as the Sessions face beside it.
  *
  * Every file is a two-line session-grammar card — Kind and Size ride the
- * readout line the way a session's messages and tokens do — and every
- * folder is a framed tile with a header strip, the storage-only partition
- * leading as the cloud-tinted tile. Hierarchy is containment, never
- * floating headings.
+ * readout line in the session rows' glyphs, the way a session's messages and
+ * tokens do — and every folder is a `ListTile`, the storage-only partition
+ * leading as the cloud-tinted tile. Hierarchy is containment, never floating
+ * headings. The search row is the Sessions face's own field, and the path
+ * bar's refresh is this face's rescan, so the two faces share their chrome.
  */
 
-/** What this page hands the workspace path bar: its refresh, nothing else. */
-export interface FilesActivityHeaderModel {
-  refreshing: boolean;
-  onRefresh: () => void;
+/** One scan of a non-Git project's files against its storage. */
+export interface ProjectFilesScan {
+  inventory: ProjectContentInventory | null;
+  loading: boolean;
+  error: string | null;
+  rescan: () => void;
 }
 
-interface PageProps {
-  project: LocalProjectSummary;
-  activeStorageId?: string | null;
-  activeStorageName?: string | null;
-  refreshEpoch: number;
-  onHeaderModelChange?: (model: FilesActivityHeaderModel | null) => void;
-  onOpenFile?: (relativePath: string) => void;
-  onRevealPath?: (path: string) => void;
+/**
+ * The workspace holds the scan, not the Files face: the path bar's Pull and
+ * Push badges count these files on both faces, and the face renders this
+ * same scan instead of running a second one. A null project stands the scan
+ * down and drops its result, so a later scan starts clean. A rescan of the
+ * same pair keeps the last inventory on screen until the new one lands.
+ */
+export function useProjectFilesScan(
+  localProjectId: string | null,
+  storageId: string | null,
+  refreshEpoch: number,
+): ProjectFilesScan {
+  const key = localProjectId && storageId ? `${localProjectId}\n${storageId}` : null;
+  const [scanned, setScanned] = useState<{
+    key: string;
+    inventory: ProjectContentInventory | null;
+    error: string | null;
+  } | null>(null);
+  const [scanningKey, setScanningKey] = useState<string | null>(null);
+  const [scanEpoch, setScanEpoch] = useState(0);
+
+  useEffect(() => {
+    if (!key || !localProjectId || !storageId) {
+      setScanned(null);
+      return;
+    }
+    let stale = false;
+    setScanningKey(key);
+    projectSyncApi.inspectProjectFiles(localProjectId, storageId)
+      .then((inventory) => { if (!stale) setScanned({ key, inventory, error: null }); })
+      .catch((reason) => { if (!stale) setScanned({ key, inventory: null, error: errorMessage(reason) }); })
+      .finally(() => { if (!stale) setScanningKey(null); });
+    return () => { stale = true; };
+  }, [key, localProjectId, storageId, refreshEpoch, scanEpoch]);
+
+  const rescan = useCallback(() => setScanEpoch((epoch) => epoch + 1), []);
+  const current = scanned?.key === key ? scanned : null;
+  return {
+    inventory: current?.inventory ?? null,
+    loading: key !== null && scanningKey === key,
+    error: current?.error ?? null,
+    rescan,
+  };
+}
+
+/** Files a scan says Pull or Push would move. */
+export interface ProjectFileSyncCounts {
+  pull: number;
+  push: number;
+}
+
+/**
+ * Tallied in the rows' own vocabulary: a file only in storage or newer there
+ * is one Pull brings here; a file only here or newer here is one Push sends.
+ * Directory rows are not drawn, a blocked file moves with neither verb, and a
+ * diverged or missing file waits on the reader's choice, so none is counted.
+ */
+export function projectFileSyncCounts(inventory: ProjectContentInventory | null): ProjectFileSyncCounts {
+  const counts = { pull: 0, push: 0 };
+  if (!inventory || inventory.eligibility.state !== "eligible") return counts;
+  for (const entry of inventory.entries) {
+    if (entry.entry_type === "directory") continue;
+    switch (entry.state) {
+      case "storage_only":
+      case "storage_ahead":
+        counts.pull += 1;
+        break;
+      case "local_only":
+      case "local_ahead":
+        counts.push += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  return counts;
 }
 
 /** The row's status vocabulary, said against the storage by name — the same
@@ -111,16 +185,15 @@ function groupByDirectory(entries: ProjectContentEntry[]): FileGroup[] {
     .map((directory) => ({ directory, entries: byDirectory.get(directory)! }));
 }
 
-/** Search the complete file inventory, then apply one global card budget
- * before the cloud/local partition and directory grouping. */
+/** Search the complete file inventory — by path, word for word, the way the
+ * Sessions face matches titles — then apply one global card budget before
+ * the cloud/local partition and directory grouping. */
 export function buildProjectFilesActivityProjection(
   fileEntries: ProjectContentEntry[],
-  normalizedSearch: string,
+  query: string,
 ) {
-  const matchingEntries = normalizedSearch
-    ? fileEntries.filter((entry) => (
-      entry.relative_path.toLocaleLowerCase().includes(normalizedSearch)
-    ))
+  const matchingEntries = query.trim()
+    ? fileEntries.filter((entry) => nameMatchesSearch(entry.relative_path, query))
     : fileEntries;
   const visibleEntries = matchingEntries.slice(0, PROJECT_FILE_CARD_RENDER_LIMIT);
   const cloudEntries = visibleEntries.filter((entry) => (
@@ -138,7 +211,7 @@ export function buildProjectFilesActivityProjection(
 
 function groupFacts(entries: ProjectContentEntry[]): string {
   const bytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
-  const count = `${entries.length} file${entries.length === 1 ? "" : "s"}`;
+  const count = `${entries.length} ${fileNoun(entries.length)}`;
   return bytes > 0 ? `${count} · ${formatBytes(bytes)}` : count;
 }
 
@@ -199,10 +272,10 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
             type="button"
             className="btn btn-ghost sync-history-launch-action"
             disabled={!entry.local_present || !onRevealPath}
-            title={entry.local_present ? `Reveal ${entry.relative_path} in Finder` : "Not on this Mac"}
+            title={entry.local_present ? `Show ${entry.relative_path} in Finder` : "Not on this Mac"}
             aria-label={entry.local_present
-              ? `Reveal ${entry.relative_path} in Finder`
-              : `Cannot reveal ${entry.relative_path}: not on this Mac`}
+              ? `Show ${entry.relative_path} in Finder`
+              : `Cannot show ${entry.relative_path}: not on this Mac`}
             onClick={() => onRevealPath?.(`${projectRoot}/${entry.relative_path}`)}
           >
             <Icon name="folder" size={14} />
@@ -217,7 +290,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
               data-tooltip={`Kind · ${fileKindLabel(entry.relative_path)}`}
               tabIndex={0}
             >
-              <Icon name="file" size={12} /><b>{fileKindLabel(entry.relative_path)}</b>
+              <SessionRowIcon name="file" /><b>{fileKindLabel(entry.relative_path)}</b>
             </span>
             {entry.size != null
               ? (
@@ -226,7 +299,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
                   data-tooltip={`${entry.local_present ? "On disk" : `In ${storageName}`} · ${formatBytes(entry.size)}`}
                   tabIndex={0}
                 >
-                  <Icon name="drive" size={12} /><b>{formatBytes(entry.size)}</b>
+                  <SessionRowIcon name="size" /><b>{formatBytes(entry.size)}</b>
                 </span>
               )
               : <span className="sync-history-thread-metric" aria-hidden="true" />}
@@ -238,17 +311,17 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
               projectRoot={projectRoot}
               entryTypeLabel={entry.entry_type === "blocked" ? "Blocked entry" : "Regular file"}
               mode={formatMode(entry.mode)}
-              modified={entry.source_mtime == null ? null : formatDateTime(entry.source_mtime * 1_000)}
+              modified={entry.source_mtime == null ? null : formatFullDateTime(entry.source_mtime)}
               blockedReason={entry.blocked_reason}
             />
           </div>
           {entry.source_mtime != null && (
             <span
               className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-              data-tooltip={`${entry.local_present ? "Modified" : `Updated in ${storageName}`} · ${formatDateTime(entry.source_mtime * 1_000)}`}
+              data-tooltip={`${entry.local_present ? "Modified" : `Updated in ${storageName}`} · ${formatFullDateTime(entry.source_mtime)}`}
               tabIndex={0}
             >
-              <time>{formatDateTime(entry.source_mtime * 1_000)}</time>
+              <time dateTime={new Date(entry.source_mtime * 1_000).toISOString()}>{formatFullDateTime(entry.source_mtime)}</time>
             </span>
           )}
         </div>
@@ -257,28 +330,26 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
   );
 }
 
-/** The list itself, a pure function of the scan — exported for the DOM-less
- * integration tests, which render markup rather than run effects. */
+/** The list itself, a pure function of the scan the workspace holds. */
 export function ProjectFilesActivityView({
   inventory,
   storageName,
   loading,
   error,
-  onRescan,
   onOpenFile,
   onRevealPath,
+  viewSwitch,
 }: {
   inventory: ProjectContentInventory | null;
   storageName: string;
   loading: boolean;
   error: string | null;
-  onRescan?: () => void;
   onOpenFile?: (relativePath: string) => void;
   onRevealPath?: (path: string) => void;
+  viewSwitch?: ReactNode;
 }) {
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
-  const normalizedSearch = deferredSearch.trim().toLocaleLowerCase();
   /* Directory rows carry no bytes and no per-file identity, and the tiles
      already speak for the folders — files (and blocked candidates) are the
      rows. */
@@ -287,13 +358,17 @@ export function ProjectFilesActivityView({
     [inventory],
   );
   const { matchingCount, cloudEntries, localGroups } = useMemo(
-    () => buildProjectFilesActivityProjection(fileEntries, normalizedSearch),
-    [fileEntries, normalizedSearch],
+    () => buildProjectFilesActivityProjection(fileEntries, deferredSearch),
+    [fileEntries, deferredSearch],
   );
+  /* The switch rides the search row when there is one, and stands alone at
+     the top of every other state, so it never moves between the two faces. */
+  const switchRow = viewSwitch ? <div className="sync-project-view-row">{viewSwitch}</div> : null;
 
   if (error) {
     return (
       <section className="sync-project-files-page" aria-label="Project files">
+        {switchRow}
         {/* The scan the reader asked for did not happen; the box interrupts. */}
         <Notice severity="danger" timing="blocking">{error}</Notice>
       </section>
@@ -302,6 +377,7 @@ export function ProjectFilesActivityView({
   if (!inventory) {
     return (
       <section className="sync-project-files-page" aria-label="Project files">
+        {switchRow}
         {loading
           ? <LoadingScaffold shape="rows" label="Scanning project files" />
           : (
@@ -317,6 +393,7 @@ export function ProjectFilesActivityView({
   if (inventory.eligibility.state !== "eligible") {
     return (
       <section className="sync-project-files-page" aria-label="Project files">
+        {switchRow}
         <ProjectFilesLockedNotice eligibility={inventory.eligibility} withDetectedRoot />
       </section>
     );
@@ -324,83 +401,68 @@ export function ProjectFilesActivityView({
 
   return (
     <section className="sync-project-files-page" aria-label="Project files">
-      {fileEntries.length > 0 && (
-        <div className="sync-project-files-search">
-          <input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape" || !search) return;
-              event.preventDefault();
-              event.stopPropagation();
-              setSearch("");
-            }}
-            placeholder="Search files…"
-            aria-label="Search project file paths"
-          />
-          <span>{fileEntries.length} entr{fileEntries.length === 1 ? "y" : "ies"}</span>
-          {onRescan && (
-            <button type="button" className="btn btn-ghost" onClick={onRescan} disabled={loading}>
-              <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? "Scanning…" : "Rescan"}
-            </button>
-          )}
-        </div>
-      )}
+      {fileEntries.length > 0 ? (
+        /* The Sessions face's own search row: the switch leads it, and the
+           path bar's refresh is this face's rescan, so neither face carries
+           a second one. */
+        <NameSearchField
+          query={search}
+          onChange={setSearch}
+          label="Search files"
+          matches={matchingCount}
+          total={fileEntries.length}
+          noun={fileNoun}
+          leading={viewSwitch}
+        />
+      ) : switchRow}
       {fileEntries.length === 0 ? (
         <div className="sync-pull-empty">
           <Icon name="check-circle" size={16} />
           <span><strong>No files</strong><small>Nothing in this folder syncs yet.</small></span>
         </div>
+      ) : matchingCount === 0 ? (
+        <div className="sync-history-state">No matching files.</div>
       ) : (
         <>
           {cloudEntries.length > 0 && (
-            <div className="sync-project-file-tile cloud">
-              {/* No counts and no phrase in the head — each row's badge
-                  already says "Pull to download it here" against the storage
-                  by name. */}
-              <div className="sync-project-file-tile-head">
-                <Icon name="cloud" size={14} />
-                <strong>Only in <span className="sync-history-storage-name">{storageName}</span></strong>
-              </div>
-              <div className="sync-history-thread-list">
-                {cloudEntries.map((entry) => (
-                  <FileActivityCard
-                    key={entry.descriptor.resource_id}
-                    entry={entry}
-                    storageName={storageName}
-                    projectRoot={inventory.project_root}
-                    onOpenFile={onOpenFile}
-                    onRevealPath={onRevealPath}
-                    withPathPrefix
-                  />
-                ))}
-              </div>
-            </div>
+            /* No counts and no phrase in the head — each row's badge already
+               says "Pull to download it here" against the storage by name. */
+            <ListTile icon="cloud" cloud label={<>Only in <span className="sync-history-storage-name">{storageName}</span></>}>
+              {cloudEntries.map((entry) => (
+                <FileActivityCard
+                  key={entry.descriptor.resource_id}
+                  entry={entry}
+                  storageName={storageName}
+                  projectRoot={inventory.project_root}
+                  onOpenFile={onOpenFile}
+                  onRevealPath={onRevealPath}
+                  withPathPrefix
+                />
+              ))}
+            </ListTile>
           )}
           {localGroups.map((group) => (
-            <div key={group.directory || "(root)"} className="sync-project-file-tile">
-              <div className="sync-project-file-tile-head">
-                <Icon name={group.directory === "" ? "git-folder" : "folder"} size={14} />
-                {/* "Project root" is chrome and keeps the pixel face; a path
-                    is the user's data and reads in the normal face, via the
-                    head's span carve-out. */}
-                <strong>{group.directory === "" ? "Project root" : <span>{group.directory}/</span>}</strong>
-                <small>{groupFacts(group.entries)}</small>
-              </div>
-              <div className="sync-history-thread-list">
-                {group.entries.map((entry) => (
-                  <FileActivityCard
-                    key={entry.descriptor.resource_id}
-                    entry={entry}
-                    storageName={storageName}
-                    projectRoot={inventory.project_root}
-                    onOpenFile={onOpenFile}
-                    onRevealPath={onRevealPath}
-                  />
-                ))}
-              </div>
-            </div>
+            /* "Project root" is chrome and keeps the pixel face; a path is
+               the user's data and reads in the normal face, via the head's
+               span carve-out. A plain folder: this face exists only for
+               projects Git does not manage. */
+            <ListTile
+              key={group.directory || "(root)"}
+              icon="folder"
+              label={group.directory === "" ? "Project root" : <span>{group.directory}/</span>}
+              facts={groupFacts(group.entries)}
+            >
+              {group.entries.map((entry) => (
+                <FileActivityCard
+                  key={entry.descriptor.resource_id}
+                  entry={entry}
+                  storageName={storageName}
+                  projectRoot={inventory.project_root}
+                  onOpenFile={onOpenFile}
+                  onRevealPath={onRevealPath}
+                />
+              ))}
+            </ListTile>
           ))}
           {matchingCount > PROJECT_FILE_CARD_RENDER_LIMIT && (
             <div className="sync-project-file-limit">
@@ -418,57 +480,5 @@ export function ProjectFilesActivityView({
         </details>
       )}
     </section>
-  );
-}
-
-export default function ProjectFilesActivityPage({
-  project,
-  activeStorageId = null,
-  activeStorageName = null,
-  refreshEpoch,
-  onHeaderModelChange,
-  onOpenFile,
-  onRevealPath,
-}: PageProps) {
-  const [inventory, setInventory] = useState<ProjectContentInventory | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [scanEpoch, setScanEpoch] = useState(0);
-
-  useEffect(() => {
-    if (!activeStorageId) {
-      setInventory(null);
-      setError(null);
-      return;
-    }
-    let stale = false;
-    setLoading(true);
-    setError(null);
-    projectSyncApi.inspectProjectFiles(project.local_project_id, activeStorageId)
-      .then((inspected) => { if (!stale) setInventory(inspected); })
-      .catch((reason) => { if (!stale) setError(errorMessage(reason)); })
-      .finally(() => { if (!stale) setLoading(false); });
-    return () => { stale = true; };
-  }, [project.local_project_id, activeStorageId, refreshEpoch, scanEpoch]);
-
-  /* The bar's one refresh follows the view; this page's is the rescan. */
-  useEffect(() => {
-    onHeaderModelChange?.({
-      refreshing: loading,
-      onRefresh: () => setScanEpoch((epoch) => epoch + 1),
-    });
-  }, [loading, onHeaderModelChange]);
-  useEffect(() => () => { onHeaderModelChange?.(null); }, [onHeaderModelChange]);
-
-  return (
-    <ProjectFilesActivityView
-      inventory={inventory}
-      storageName={activeStorageName?.trim() || "storage"}
-      loading={loading}
-      error={error}
-      onRescan={() => setScanEpoch((epoch) => epoch + 1)}
-      onOpenFile={onOpenFile}
-      onRevealPath={onRevealPath}
-    />
   );
 }

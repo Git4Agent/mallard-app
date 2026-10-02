@@ -1,3 +1,4 @@
+import type { ManagedCloudLink, ManagedCloudStatus } from "../../src/components/managed-cloud/types";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -927,7 +928,9 @@ test("storage drafts ride the sidebar rail like project drafts do", () => {
       activeStorageId="storage-drafted"
       catalogScopes={[]}
       activeCatalogScopeId={null}
+      addingProject={false}
       addingCatalogScope={false}
+      addingStorage={false}
       catalogIndexOpen={false}
       storageIndexOpen={false}
       settingsOpen={false}
@@ -1400,7 +1403,7 @@ test("a refused credential badges the index and the rail and leads to the settin
       storages={[refused]} storageDrafts={[]} storageProviders={[cloudProvider]}
       storageUsage={{}} storageIssues={{ "storage-refused": "Listing failed" }}
       activeProjectId={null} activeStorageId={null}
-      catalogScopes={[]} activeCatalogScopeId={null} addingCatalogScope={false}
+      catalogScopes={[]} activeCatalogScopeId={null} addingProject={false} addingCatalogScope={false} addingStorage={false}
       catalogIndexOpen={false} storageIndexOpen settingsOpen={false}
       loading={false} busy={false} activityOpen={false} unreadLogs={0}
       onOpenProjects={() => undefined} onSelectProject={() => undefined} onRemoveProject={() => undefined}
@@ -2595,18 +2598,73 @@ test("Mallard Cloud review names the account and the service, and reconnect ends
   assert.match(mismatch, /Change login/);
 });
 
+// A settled Mallard Cloud storage leads its card with the website it lives on.
+import ManagedCloudAddress from "../../src/components/managed-cloud/ManagedCloudAddress";
+import { managedCloudAccount } from "../../src/components/project-sync/RepositoryAddressPicker";
+test("a settled Mallard Cloud storage leads with its website: Copy, Open website and the account, not two read-only fields", () => {
+  const storage = cloudSummary({
+    name: "Mallard Cloud octocat", provider: "managed_cloud", provider_label: "Mallard Cloud",
+    summary: [
+      { field_id: "account_login", label: "Account", value: "octocat", is_path: false },
+      { field_id: "service_origin", label: "Service", value: "https://mallard-ai.com", is_path: false },
+    ],
+    settings: { account_id: "user_1", service_origin: "https://mallard-ai.com", account_login: "octocat" },
+    secrets: [{ secret_id: "account_token", present: true }],
+  });
+  const opened: string[] = [];
+  const render = (withLead: boolean) => renderToStaticMarkup(
+    <StorageLockedForm storage={storage} descriptor={managedCloudProvider} disabled={false}
+      onRename={async () => true} onRevealSecret={async () => ""} onTest={noop} testing={false} verifiedAt={null}
+      reconnect={{ open: false, onOpen: noop, band: null }}
+      lead={withLead ? {
+        band: <ManagedCloudAddress account={managedCloudAccount(storage)} onOpenUrl={(url) => opened.push(url)} />,
+        facts: ["account_login", "service_origin"],
+      } : undefined} />,
+  );
+  const html = render(true);
+  // The address leads, under the guide row and over the token: the scheme
+  // recedes, the host is the display text, and both verbs are labelled.
+  assert.match(html, /<section class="managed-cloud-address" aria-label="Mallard Cloud website">/);
+  assert.match(html, /managed-cloud-address-scheme">https:\/\/<\/span><span class="managed-cloud-address-host">mallard-ai\.com</);
+  assert.match(html, /<button type="button" class="btn" title="Copy https:\/\/mallard-ai\.com">[^]*?Copy<\/button>/);
+  assert.match(html, /title="Open https:\/\/mallard-ai\.com in your browser">[^]*?<\/svg> Open website<\/button>/);
+  assert.match(html, /Signed in as <b>octocat<\/b>/);
+  assert.ok(html.indexOf("storage-setup-guide") < html.indexOf("managed-cloud-address"));
+  assert.ok(html.indexOf("managed-cloud-address") < html.indexOf("Sign-in token"));
+  // The band states Account and Service, so the grid does not say them
+  // again; the token keeps its masked field with Copy and Show.
+  assert.doesNotMatch(html, /value="https:\/\/mallard-ai\.com"|value="octocat"/);
+  assert.match(html, /<input type="password"[^>]*value="•+"/);
+  assert.match(html, /aria-label="Copy Sign-in token"/);
+  assert.deepEqual(opened, [], "nothing opens on render");
+  // Without a lead band — every other provider — the facts stay read-only fields.
+  const plain = render(false);
+  assert.match(plain, /value="https:\/\/mallard-ai\.com"/);
+  assert.match(plain, /value="octocat"/);
+  assert.doesNotMatch(plain, /managed-cloud-address/);
+
+  // Copy takes the shared clipboard path; only a Mallard Cloud storage gets
+  // the band, and the ⋯ menu's Open website opens the same origin.
+  const band = readFileSync("src/components/managed-cloud/ManagedCloudAddress.tsx", "utf8");
+  assert.match(band, /writeClipboardText\(account\.origin\)/);
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /const cloudAccount = savedEditedStorage && isManagedCloudStorage\(savedEditedStorage\)\s*\? managedCloudAccount\(savedEditedStorage\)/);
+  assert.match(workspace, /lead=\{cloudAccount \? \{\s*band: <ManagedCloudAddress account=\{cloudAccount\} onOpenUrl=\{\(url\) => void openExternalUrl\(url\)\} \/>/);
+  assert.match(workspace, /id: "open-website",\s*label: "Open website",\s*detail: cloudAccount\.host,[^]*?onSelect: \(\) => void openExternalUrl\(cloudAccount\.origin\)/);
+});
+
 // The website bridge: one chip in the path bar for whatever the service
 // answered, and the repository's verbs in the chip's panel
 // (docs/PLAN_CLOUD_STATUS_CHIP.md).
 import {
   canDiscardDraft, cloudContributor, cloudFacts, cloudHeadline, cloudPinMoved, cloudReleaseUrl, cloudRepositoryGone, cloudReviewWord,
   cloudStatusNotice, cloudSyncBlocked, cloudVerbs, cloudVersionUrl, discardCloudDraft, discardDraftQuestion,
-} from "../../src/components/project-sync/managedCloudLink";
-import { ManagedCloudPanel } from "../../src/components/project-sync/ManagedCloudChip";
-import type { ManagedCloudLink, ManagedCloudStatus } from "../../src/types";
+} from "../../src/components/managed-cloud/managedCloudLink";
+import { ManagedCloudPanel } from "../../src/components/managed-cloud/ManagedCloudChip";
+
 test("the Cloud verbs live in the chip's panel, and the project menu keeps only the project's own", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  const chip = readFileSync("src/components/project-sync/ManagedCloudChip.tsx", "utf8");
+  const chip = readFileSync("src/components/managed-cloud/ManagedCloudChip.tsx", "utf8");
   assert.doesNotMatch(workspace, /getManagedCloudLink/);
   assert.match(workspace, /activityHeader\.managedCloudStatus/);
   assert.match(workspace, /managedCloudRepositoryId \? workspaceActionPrefix : null/);

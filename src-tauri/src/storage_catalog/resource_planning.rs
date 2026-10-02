@@ -232,6 +232,9 @@ pub struct ScopePushPlanInputs<'a> {
     pub observed_head: Option<LibraryHeadCoordinate>,
     /// Per item, on a storage that holds one item per repository.
     pub observed_items: BTreeMap<CatalogResourceId, LibraryHeadCoordinate>,
+    /// Items that cannot push yet, with why: several repositories hold
+    /// them and none is chosen.
+    pub blocked: BTreeMap<CatalogResourceId, String>,
     pub now: u64,
 }
 
@@ -257,12 +260,14 @@ pub fn build_scope_push_plan(
         let Some(presented) = local.map(|record| &record.resource).or(remote) else {
             continue;
         };
+        let blocked = inputs.blocked.get(resource_id);
         let selectable = local.is_some()
+            && blocked.is_none()
             && matches!(
                 state,
                 CatalogLinkState::New | CatalogLinkState::LocalChanged
             );
-        let blocked_reason = match state {
+        let held_reason = match state {
             CatalogLinkState::StorageChanged | CatalogLinkState::Diverged => {
                 Some("Storage changed; review Pull before pushing".to_string())
             }
@@ -280,6 +285,8 @@ pub fn build_scope_push_plan(
                 None
             }
         };
+        let held_for_pull = blocked.is_none() && held_reason.is_some();
+        let blocked_reason = blocked.cloned().or(held_reason);
         let warnings = local
             .map(|record| record.warnings.clone())
             .unwrap_or_default();
@@ -296,7 +303,7 @@ pub fn build_scope_push_plan(
                 relation: relation_for_state(state),
                 selectable,
                 selected_by_default: selectable,
-                held_for_pull: blocked_reason.is_some(),
+                held_for_pull,
                 local_content_sha256: local.map(|record| record.resource.content_sha256.clone()),
                 storage_content_sha256: remote.map(|resource| resource.content_sha256.clone()),
                 blocked_reason,
@@ -336,6 +343,7 @@ pub fn build_scope_push_plan(
         target_pins: inputs.context.target_pins(),
         observed_head: inputs.observed_head,
         observed_items: inputs.observed_items,
+        destinations: BTreeMap::new(),
         rows,
         warning_digests: warning_digests.into_iter().collect(),
         created_at: inputs.now,
@@ -750,6 +758,7 @@ pub fn build_scope_pull_plan(
         target_pins: inputs.context.target_pins(),
         head: inputs.head,
         item_heads: inputs.item_heads,
+        sources: BTreeMap::new(),
         items,
         created_at: inputs.now,
         expires_at: inputs
@@ -1026,6 +1035,7 @@ mod tests {
             accepted_head: None,
             accepted_resources: accepted.iter().cloned().collect(),
             accepted_items: BTreeMap::new(),
+            cloud_repositories: BTreeMap::new(),
             revision: 1,
             created_at: 1,
             updated_at: 1,
@@ -1120,6 +1130,7 @@ mod tests {
             remote: &remote,
             observed_head: Some(head(&link)),
             observed_items: BTreeMap::new(),
+            blocked: BTreeMap::new(),
             now: 100,
         })
         .unwrap();

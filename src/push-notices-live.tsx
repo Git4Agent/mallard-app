@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { NoticeZone } from "./components/notice/Notice";
 import { clearedStorageNotice } from "./components/project-sync/clearedStorageNotice";
-import SyncOutcomeNotice from "./components/project-sync/SyncOutcomeNotice";
+import SyncOutcomeNotice from "./components/sync-review/SyncOutcomeNotice";
 import { REVIEW_EXPIRED, REVIEW_SUPERSEDED } from "./components/project-sync/pullReviewFlow";
 import { PUSH_FINISHED, ownUnfinishedPushSentence, unfinishedPushSentence } from "./unfinishedPush";
 import { pushFailureNotice } from "./components/project-sync/pushFailureNotice";

@@ -1,18 +1,42 @@
 import { homeDir } from "@tauri-apps/api/path";
-import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
-import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage } from "../../storageError";
 import { storageCatalogApi } from "./api";
-import { catalogDoors, catalogProviderList, type CatalogAddChoice } from "./model";
+import CatalogHomeStep from "./CatalogHomeStep";
+import CatalogScopeSetupStep from "./CatalogScopeSetupStep";
+import { useCloudRepositoryChoice } from "./CloudRepositoryChoice";
+import {
+  catalogCapabilityFor,
+  catalogPresentation,
+  catalogScopeLabel,
+  sameCatalogCoordinate,
+} from "./model";
+import { SetupPill, SourceDoor } from "./setupFurniture";
+import type { CatalogStorageOption } from "./StorageCatalogPage";
 import type {
   CatalogCapabilityDescriptor,
   CatalogProfile,
   CatalogScopeDto,
 } from "./types";
+
+/** A Mallard Cloud account the door can add from. */
+export interface CatalogCloudAccount {
+  id: string;
+  name: string;
+  account_login: string;
+}
+
+/** Where an added item lands: its row, on its page. */
+export interface CatalogCloudLanding {
+  scope: CatalogScopeDto;
+  storageId: string;
+  resourceId: string;
+  /** "Biscuit added from kai/Biscuit." */
+  note: string;
+}
 
 interface Props {
   workflowEpoch: number;
@@ -20,42 +44,188 @@ interface Props {
   busy: boolean;
   /** The Kind a door chose on the way in, as a choice key; null asks. */
   initialChoiceKey: string | null;
+  /** The Catalog's rows: what a home already has, and where an item from
+   *  Mallard Cloud lands. */
+  scopes: readonly CatalogScopeDto[];
+  /** Storages as the shell orders them for setup pages. */
+  storages: readonly CatalogStorageOption[];
+  cloudAccounts: readonly CatalogCloudAccount[];
+  onSetUpCloud: () => void;
   onClose: () => void;
-  onCreated: (scope: CatalogScopeDto, workflowEpoch: number) => void;
+  /** Finish on this computer: the row, the storage it was linked to, and the
+   *  link's failure when the row was made but the link was not. */
+  onCreated: (scope: CatalogScopeDto, storageId: string | null, linkError: string | null, workflowEpoch: number) => void;
+  onAdded: (landing: CatalogCloudLanding, workflowEpoch: number) => void;
 }
 
-function attentionBadge(show: boolean) {
-  if (!show) return null;
+/** From Mallard Cloud, as New project's door is: the account, then the
+ *  repository (shared with you, or by address or invite code, its kind
+ *  coming with it), then the Catalog row it lands in. Add saves the
+ *  repository, makes the row and links it when either is missing, and opens
+ *  the item's page. Nothing is pulled. */
+function CloudSource({ accounts, scopes, profiles, capabilities, working, onSetUpCloud, onChosen }: {
+  accounts: readonly CatalogCloudAccount[];
+  scopes: readonly CatalogScopeDto[];
+  profiles: readonly CatalogProfile[];
+  capabilities: readonly CatalogCapabilityDescriptor[];
+  working: boolean;
+  onSetUpCloud: () => void;
+  onChosen: (choice: CloudChoice | null) => void;
+}) {
+  const [accountId, setAccountId] = useState<string | null>(accounts[0]?.id ?? null);
+  const account = accounts.find((candidate) => candidate.id === accountId) ?? null;
   return (
-    <span className="sync-setup-state attention" aria-label="Needs review" title="Needs review">
-      <Icon name="alert-triangle" size={14} />
-    </span>
+    <>
+      <section className="sync-setup-section">
+        <div className="sync-card-heading"><div><strong>Storage</strong></div></div>
+        {accounts.length === 0 ? (
+          <div className="r2-step-list">
+            <div className="storage-found-empty" role="status">
+              <Icon name="storage-mallard" size={24} />
+              <strong>No Mallard Cloud account yet.</strong>
+              <span className="storage-found-empty-verbs">
+                <button type="button" className="btn btn-primary" onClick={onSetUpCloud} disabled={working}>
+                  <Icon name="link" size={13} /> Set up Mallard Cloud
+                </button>
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="setup-pill-row" role="radiogroup" aria-label="Storage">
+            {accounts.map((candidate) => (
+              <SetupPill key={candidate.id} active={candidate.id === accountId} disabled={working}
+                mark={<Icon name="storage-mallard" size={12} />} label={`${candidate.name || "Mallard Cloud"} · ${candidate.account_login}`}
+                onClick={() => { setAccountId(candidate.id); onChosen(null); }} />
+            ))}
+          </div>
+        )}
+      </section>
+      {account && (
+        <CloudRepositoryBands key={account.id} account={account} scopes={scopes} profiles={profiles}
+          capabilities={capabilities} working={working} onChosen={onChosen} />
+      )}
+    </>
   );
 }
 
-/** Adding a Catalog row is Kind then provider home, and nothing else: no
- * storage, no repository, no resource. Those belong to the row's own page,
- * chosen per resource link. Kind is a portable shape the backend registers,
- * offered in the backend's order; the providers offered are the ones it is
- * registered for. */
+/** What the door's Add acts on. */
+export interface CloudChoice {
+  storageId: string;
+  repository: { repository_id: string; resource_id: string; address: string; display_name: string };
+  /** The row it lands in, or how to make one. */
+  landing: { kind: "row"; scope: CatalogScopeDto } | { kind: "new"; capability: CatalogCapabilityDescriptor; profileId: string };
+}
+
+function CloudRepositoryBands({ account, scopes, profiles, capabilities, working, onChosen }: {
+  account: CatalogCloudAccount;
+  scopes: readonly CatalogScopeDto[];
+  profiles: readonly CatalogProfile[];
+  capabilities: readonly CatalogCapabilityDescriptor[];
+  working: boolean;
+  onChosen: (choice: CloudChoice | null) => void;
+}) {
+  const choice = useCloudRepositoryChoice({
+    storageId: account.id,
+    accountLogin: account.account_login,
+    target: { kind: "door" },
+    working,
+    capabilities,
+    list: () => storageCatalogApi.listCloudShared(account.id),
+    listKey: account.id,
+  });
+  const chosen = choice.chosen;
+  const capability = chosen ? catalogCapabilityFor(capabilities, chosen) : null;
+  const rowsOfKind = chosen ? scopes.filter((scope) => sameCatalogCoordinate(scope.scope, chosen)) : [];
+  const providerProfiles = capability ? profiles.filter((profile) => profile.provider === capability.provider) : [];
+  const [rowId, setRowId] = useState<string | null>(null);
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const row = rowsOfKind.find((scope) => scope.scope.scope_id === rowId) ?? rowsOfKind[0] ?? null;
+  const profile = providerProfiles.find((candidate) => candidate.profile_id === profileId) ?? providerProfiles[0] ?? null;
+
+  const repositoryId = chosen?.repository_id ?? null;
+  const landingKey = row ? `row:${row.scope.scope_id}` : profile ? `profile:${profile.profile_id}` : null;
+  useEffect(() => {
+    if (!chosen || !capability || !landingKey) {
+      onChosen(null);
+      return;
+    }
+    onChosen({
+      storageId: account.id,
+      repository: chosen,
+      landing: row ? { kind: "row", scope: row } : { kind: "new", capability, profileId: profile!.profile_id },
+    });
+  }, [repositoryId, landingKey]);
+
+  const glyph = catalogPresentation(capability).icon;
+  return (
+    <>
+      <section className="sync-setup-section repo-connect cloud-project-repository">
+        <div className="sync-card-heading"><div><strong>Repository</strong></div></div>
+        {choice.field}
+        {choice.found}
+        {choice.list}
+      </section>
+      <section className="sync-setup-section">
+        <div className="sync-card-heading"><div><strong>Catalog row</strong></div></div>
+        {!chosen || !capability ? (
+          <small className="sync-setup-hint">Choose a repository first.</small>
+        ) : rowsOfKind.length > 0 ? (
+          <div className="setup-pill-row" role="radiogroup" aria-label="Catalog row">
+            {rowsOfKind.map((scope) => (
+              <SetupPill key={scope.scope.scope_id} active={scope.scope.scope_id === row?.scope.scope_id} disabled={working}
+                mark={<Icon name={glyph} size={12} />} label={catalogScopeLabel(scope)}
+                onClick={() => setRowId(scope.scope.scope_id)} />
+            ))}
+          </div>
+        ) : providerProfiles.length > 0 ? (
+          <>
+            <div className="setup-pill-row" role="radiogroup" aria-label="Agent profile">
+              {providerProfiles.map((candidate) => (
+                <SetupPill key={candidate.profile_id} active={candidate.profile_id === profile?.profile_id} disabled={working}
+                  mark={<ProviderMark provider={candidate.provider} displayName={candidate.provider_label} size={12} />}
+                  label={candidate.display_name} onClick={() => setProfileId(candidate.profile_id)} />
+              ))}
+            </div>
+            <small className="sync-setup-hint">Add creates {capability.label} · {profile?.display_name}.</small>
+          </>
+        ) : (
+          <small className="sync-setup-hint">Add a {capability.provider_label} home first, on this computer.</small>
+        )}
+      </section>
+    </>
+  );
+}
+
+/** Where the local door stands: choosing the home, or setting it up. */
+type Stage = { kind: "home" } | { kind: "setup"; profile: CatalogProfile };
+
+/**
+ * Add Catalog resource: New project's two doors. On this computer is New
+ * project's two steps — the agent home, chosen as the project chooses its
+ * agents, then that home's setup page: one kind, the storage, Finish. From
+ * Mallard Cloud is a repository shared with you, which brings its kind with
+ * it. Either way one row is added per pass.
+ */
 export default function AddCatalogScopeWorkspace({
   workflowEpoch,
   isWorkflowCurrent,
   busy,
   initialChoiceKey,
+  scopes,
+  storages,
+  cloudAccounts,
+  onSetUpCloud,
   onClose,
   onCreated,
+  onAdded,
 }: Props) {
-  // A key no registered shape answers to simply leaves Kind unchosen.
-  const [choiceKey, setChoiceKey] = useState<string | null>(initialChoiceKey);
-  const [provider, setProvider] = useState<string | null>(null);
-  const [profileId, setProfileId] = useState<string | null>(null);
+  const [source, setSource] = useState<"local" | "cloud">("local");
+  const [stage, setStage] = useState<Stage>({ kind: "home" });
+  const [cloudChoice, setCloudChoice] = useState<CloudChoice | null>(null);
+  /* A row Add made before its repository could be saved: a retry uses it. */
+  const [madeScopes, setMadeScopes] = useState<CatalogScopeDto[]>([]);
   const [profiles, setProfiles] = useState<CatalogProfile[]>([]);
   const [capabilities, setCapabilities] = useState<CatalogCapabilityDescriptor[]>([]);
-  const [profileEditor, setProfileEditor] = useState<{
-    provider: string;
-    path: string;
-  } | null>(null);
   const [homePath, setHomePath] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,115 +273,79 @@ export default function AddCatalogScopeWorkspace({
     };
   }, []);
 
-  /** The Add chooser's choices, each wearing the glyph of the shape it names:
-   * the very list the Catalog landing draws as doors, so the door you opened
-   * is still on screen, now as the choice it made. */
-  const choices = useMemo(() => catalogDoors(capabilities), [capabilities]);
-  const choice = choices.find((candidate) => candidate.key === choiceKey) ?? null;
-  /** The providers on offer, with the backend's labels: those registered for
-   * the chosen shape, or every registered provider before a shape is chosen,
-   * so choosing a profile first stays usable. */
-  const supportedProviders = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const capability of choice ? choice.providers : capabilities) {
-      if (!seen.has(capability.provider)) seen.set(capability.provider, capability.provider_label);
-    }
-    return [...seen].map(([key, label]) => ({ key, label }));
-  }, [capabilities, choice]);
-  const labelForProvider = (key: string) =>
-    capabilities.find((capability) => capability.provider === key)?.provider_label ?? key;
-  const compatibleProfiles = useMemo(
-    () => profiles.filter((profile) => provider !== null && profile.provider === provider),
-    [profiles, provider],
-  );
-  const selectedProfile = compatibleProfiles.find((profile) => profile.profile_id === profileId) ?? null;
-
-  const chooseKind = (next: CatalogAddChoice) => {
-    setChoiceKey(next.key);
-    setError(null);
-    // A provider the new shape is not registered for is dropped rather than
-    // kept invalid.
-    const stillSupported = next.providers.some((capability) => capability.provider === provider);
-    if (!stillSupported) {
-      setProvider(null);
-      setProfileId(null);
-      setProfileEditor(null);
-    }
-  };
-
-  const chooseProvider = (next: string | null) => {
-    setProvider(next);
-    setProfileEditor(null);
-    setProfileId(
-      next
-        ? profiles.find((profile) => profile.provider === next)?.profile_id ?? null
-        : null,
-    );
-  };
-
-  const chooseProfileFolder = async () => {
-    if (!provider) return;
-    try {
-      const picked = await open({ directory: true, multiple: false });
-      if (!workflowIsActive() || typeof picked !== "string" || !picked) return;
-      setProfileId(null);
-      setProfileEditor({ provider, path: picked });
-    } catch (reason) {
-      if (workflowIsActive()) setError(errorMessage(reason));
-    }
-  };
-
   const working = busy || submitting;
-  const expandedProfilePath = expandHomePath(profileEditor?.path ?? "", homePath);
-  const customPathReady = profileEditor !== null && isAbsoluteProfilePath(expandedProfilePath);
-  /** The one descriptor the two choices name: the chosen shape at the chosen
-   * provider. Its coordinate is what the row records. */
-  const descriptor = choice?.providers.find((capability) => capability.provider === provider) ?? null;
 
-  /** A pending path is saved as part of Add itself — its name derives from
-   * the folder, and renaming afterwards lives on the row's page. If scope
-   * creation then fails, the freshly saved profile stays selected so a retry
-   * is just pressing Add again. */
-  const submit = async () => {
-    if (!descriptor) return;
+  /* Add from Mallard Cloud: make the row and link Mallard Cloud when either
+     is missing, then save the repository. Each step is safe to repeat. */
+  const addFromCloud = async () => {
+    if (!cloudChoice) return;
     setSubmitting(true);
     setError(null);
     try {
-      let chosenProfileId = profileId;
-      if (chosenProfileId === null) {
-        if (!customPathReady) return;
-        const saved = await storageCatalogApi.saveProfile(descriptor.provider, expandedProfilePath);
+      const { landing, repository, storageId } = cloudChoice;
+      let scope = landing.kind === "row" ? landing.scope : madeScopes.find((made) => (
+        made.profile.profile_id === landing.profileId && sameCatalogCoordinate(made.scope, landing.capability)
+      )) ?? null;
+      if (!scope && landing.kind === "new") {
+        scope = await storageCatalogApi.createScope(landing.capability, landing.profileId);
         if (!workflowIsActive()) return;
-        setProfiles((current) => (
-          current.some((profile) => profile.profile_id === saved.profile_id)
-            ? current
-            : [...current, saved]
-        ));
-        setProfileEditor(null);
-        setProfileId(saved.profile_id);
-        chosenProfileId = saved.profile_id;
+        const made = scope;
+        setMadeScopes((current) => [...current, made]);
       }
-      const created = await storageCatalogApi.createScope(descriptor, chosenProfileId);
+      if (!scope) return;
+      const link = await storageCatalogApi.linkScopeStorage(scope.scope.scope_id, storageId);
+      await storageCatalogApi.connectCloudRepository(scope.scope.scope_id, storageId, repository.resource_id, repository.repository_id, link.revision);
       if (!workflowIsActive()) return;
-      onCreated(created, workflowEpoch);
+      onAdded({
+        scope,
+        storageId,
+        resourceId: repository.resource_id,
+        note: `${repository.display_name} added from ${repository.address}.`,
+      }, workflowEpoch);
     } catch (reason) {
-      if (!workflowIsActive()) return;
-      setError(errorMessage(reason));
+      if (workflowIsActive()) setError(errorMessage(reason));
     } finally {
       if (workflowIsActive()) setSubmitting(false);
     }
   };
 
-  const canAdd = descriptor !== null
-    && (profileId !== null || customPathReady)
-    && !working;
-  const customPathHint = profileEditor
-    ? !expandedProfilePath
-      ? "Type or paste a path, or Browse. ~ means your home folder."
-      : !isAbsoluteProfilePath(expandedProfilePath)
-        ? "Paths must be absolute — start with ~/, / or a drive letter."
-        : `${provider ? labelForProvider(provider) : "Agent"} profile ·`
-    : null;
+  if (stage.kind === "setup") {
+    return (
+      <main className="sync-main sync-project-links-page sync-project-setup-page">
+        <section className="profile-links-section">
+          <CatalogScopeSetupStep
+            key={stage.profile.profile_id}
+            profile={stage.profile}
+            capabilities={capabilities}
+            scopes={[...scopes, ...madeScopes]}
+            storages={storages}
+            initialChoiceKey={initialChoiceKey}
+            busy={busy}
+            isActive={workflowIsActive}
+            onBack={() => setStage({ kind: "home" })}
+            onClose={onClose}
+            onFinished={(scope, storageId, linkError) => onCreated(scope, storageId, linkError, workflowEpoch)}
+          />
+        </section>
+      </main>
+    );
+  }
+
+  const doors = (
+    <div className="storage-mode-doors" role="radiogroup" aria-label="Where the resource comes from">
+      <SourceDoor icon="computer" title="On this computer" detail="An agent home you have."
+        checked={source === "local"} disabled={submitting} onChoose={() => { setSource("local"); setError(null); }} />
+      <SourceDoor icon="storage-mallard" title="From Mallard Cloud" detail="A repository shared with you."
+        checked={source === "cloud"} disabled={submitting} onChoose={() => { setSource("cloud"); setError(null); }} />
+    </div>
+  );
+  const errorNotice = error && (
+    /* The page's failure, not a field's: the profile save, the scope creation
+       or the mount listing that did not happen. It announces assertively. */
+    <Notice severity="danger" timing="blocking" className="sync-setup-system-error">
+      {error}
+    </Notice>
+  );
 
   return (
     <main className="sync-main sync-project-links-page sync-project-setup-page">
@@ -236,194 +370,55 @@ export default function AddCatalogScopeWorkspace({
             </button>
           </header>
 
-          <div className="sync-modal-body">
-            {/* Kind */}
-            <section className="sync-setup-section">
-              <div className="sync-card-heading">
-                <div><strong>Kind</strong></div>
-                {attentionBadge(choice === null)}
+          {source === "cloud" ? (
+            <>
+              <div className="sync-modal-body">
+                {doors}
+                <CloudSource accounts={cloudAccounts} scopes={[...scopes, ...madeScopes]} profiles={profiles}
+                  capabilities={capabilities} working={working} onSetUpCloud={onSetUpCloud} onChosen={setCloudChoice} />
+                {errorNotice}
               </div>
-              <div className="setup-choice-grid" role="radiogroup" aria-label="Resource kind">
-                {choices.map((option) => {
-                  const active = choiceKey === option.key;
-                  return (
-                    <button
-                      key={option.key}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      className={`setup-choice-card${active ? " active" : ""}`}
-                      disabled={working}
-                      onClick={() => chooseKind(option)}
-                    >
-                      <span className="setup-choice-card-head">
-                        <span className="setup-choice-mark" aria-hidden="true">
-                          <Icon name={option.icon} size={24} />
-                        </span>
-                        <strong>{option.label}</strong>
-                        <span className="setup-choice-card-check" aria-hidden="true">
-                          {active && <Icon name="check" size={12} />}
-                        </span>
-                      </span>
-                      <span className="setup-choice-card-foot">
-                        {option.providers.map((capability) => (
-                          <ProviderMark
-                            key={capability.provider}
-                            provider={capability.provider}
-                            displayName={capability.provider_label}
-                            size={12}
-                          />
-                        ))}
-                        {catalogProviderList(option.providers.map((capability) => capability.provider_label))}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            {/* Provider home */}
-            <section className="sync-setup-section">
-              <div className="sync-card-heading">
-                <div><strong>Agent profile</strong></div>
-                {attentionBadge(choice !== null
-                  && (provider === null || (profileId === null && !customPathReady)))}
-              </div>
-              {/* Two or three registered agents is a row, not a menu — and a
-                  native select cannot hold the mark that tells them apart. */}
-              <div className="setup-pill-row" role="radiogroup" aria-label="Provider">
-                {supportedProviders.map((supported) => {
-                  const active = provider === supported.key;
-                  return (
-                    <button
-                      key={supported.key}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      className={`setup-pill${active ? " active" : ""}`}
-                      disabled={working}
-                      onClick={() => chooseProvider(supported.key)}
-                    >
-                      <ProviderMark provider={supported.key} displayName={supported.label} size={12} />
-                      <span className="setup-pill-label">{supported.label}</span>
-                      <span className="setup-pill-check" aria-hidden="true">
-                        {active && <Icon name="check" size={12} />}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              {provider && (
-                /* The list is what supplies the row's container: without it
-                   the narrow-window fallback, where the path field takes its
-                   own line, has nothing to query and never fires. */
-                <div className="sync-agent-profile-list">
-                  <div className={`sync-agent-profile-row${profileEditor ? " has-custom-path" : ""}`}>
-                    <span className="sync-select-shell">
-                      <select
-                        aria-label={`${labelForProvider(provider)} profile`}
-                        value={profileEditor ? "__pending" : profileId ?? ""}
-                        disabled={working}
-                        aria-describedby={profileEditor ? `catalog-profile-path-hint-${provider}` : undefined}
-                        onChange={(event) => {
-                          const next = event.target.value;
-                          if (next === "__pending") {
-                            setProfileId(null);
-                            setProfileEditor({ provider, path: "" });
-                            return;
-                          }
-                          setProfileEditor(null);
-                          setProfileId(next || null);
-                        }}
-                      >
-                        <option value="">Choose profile</option>
-                        {compatibleProfiles.map((profile) => (
-                          <option key={profile.profile_id} value={profile.profile_id}>
-                            {profile.display_name}
-                          </option>
-                        ))}
-                        <option value="__pending">Custom path…</option>
-                      </select>
-                    </span>
-                    {profileEditor && (
-                      <input
-                        value={profileEditor.path}
-                        disabled={working}
-                        aria-label={`${labelForProvider(provider)} custom profile path`}
-                        aria-describedby={`catalog-profile-path-hint-${provider}`}
-                        placeholder={`${labelForProvider(provider)} profile path`}
-                        spellCheck={false}
-                        autoFocus
-                        onChange={(event) => setProfileEditor({
-                          ...profileEditor,
-                          path: event.target.value,
-                        })}
-                      />
-                    )}
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={working}
-                      onClick={() => void chooseProfileFolder()}
-                    >
-                      <Icon name="folder" size={13} /> Browse
-                    </button>
-                    {profileEditor && customPathHint && (
-                      <p
-                        id={`catalog-profile-path-hint-${provider}`}
-                        className="sync-setup-path-hint mute"
-                      >
-                        {customPathHint}
-                        {customPathReady && <code>{expandedProfilePath}</code>}
-                      </p>
-                    )}
-                    {/* A saved home says where it points in the same slot a
-                        typed one does; column 2 holds Browse here, so this one
-                        spans the row. */}
-                    {!profileEditor && selectedProfile && (
-                      <p className="sync-setup-path-hint ok spans-row">
-                        {labelForProvider(provider)} profile ·<code>{selectedProfile.configured_home}</code>
-                      </p>
-                    )}
-                  </div>
+              <footer className="sync-modal-footer sync-setup-footer">
+                {/* An added item keeps its repository; said before Add. */}
+                {cloudChoice && <span className="sync-setup-save-state">Can’t be changed later.</span>}
+                <div>
+                  <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={working || !cloudChoice}
+                    onClick={() => void addFromCloud()}
+                  >
+                    <Icon name="plus" size={13} />
+                    {submitting ? "Adding…" : "Add"}
+                  </button>
                 </div>
-              )}
-            </section>
-
-            {error && (
-              /* The page's failure, not a field's: it wore the field-error
-                 class for the colour and describes no control. Add is what
-                 fills it — the profile save or the scope creation that did not
-                 happen — so it announces assertively. The mount listing writes
-                 here too, and a Catalog page that could not load its providers
-                 is worth the same rung. */
-              <Notice severity="danger" timing="blocking" className="sync-setup-system-error">
-                {error}
-              </Notice>
-            )}
-          </div>
-
-          <footer className="sync-modal-footer sync-setup-footer">
-            <div>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={onClose}
-                disabled={submitting}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={!canAdd}
-                onClick={() => void submit()}
-              >
-                <Icon name="plus" size={13} />
-                {submitting ? "Adding…" : "Add resource"}
-              </button>
-            </div>
-          </footer>
+              </footer>
+            </>
+          ) : (
+            <CatalogHomeStep
+              doors={doors}
+              error={errorNotice}
+              profiles={profiles}
+              capabilities={capabilities}
+              homePath={homePath}
+              working={busy}
+              isActive={workflowIsActive}
+              onError={setError}
+              onClose={onClose}
+              onChosen={(profile) => {
+                setError(null);
+                setProfiles((current) => (
+                  current.some((candidate) => candidate.profile_id === profile.profile_id)
+                    ? current.map((candidate) => (candidate.profile_id === profile.profile_id ? profile : candidate))
+                    : [...current, profile]
+                ));
+                setStage({ kind: "setup", profile });
+              }}
+            />
+          )}
         </section>
       </section>
     </main>

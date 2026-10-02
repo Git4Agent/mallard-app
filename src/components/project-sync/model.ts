@@ -34,6 +34,10 @@ export const STORAGE_BLOCKING_STATES: ReadonlySet<string> = new Set([
  * the complete inventory; this bounds only the rendered result. */
 export const PROJECT_FILE_CARD_RENDER_LIMIT = 500;
 
+/** The nouns the project lists count in — the search row and tile heads. */
+export const sessionNoun = (count: number) => (count === 1 ? "session" : "sessions");
+export const fileNoun = (count: number) => (count === 1 ? "file" : "files");
+
 export function projectLabel(project: { display_name: string; local_alias?: string | null }): string {
   return project.local_alias?.trim() || project.display_name;
 }
@@ -181,6 +185,19 @@ export interface StorageDoor {
   label: string;
 }
 
+/** Storages in the order both setup pages list them — Mallard Cloud, then
+ *  the other clouds, then local folders: the registry's display rank, and
+ *  the name among equals. A provider this build does not register sorts
+ *  last. The default a setup page opens on is the first of these. */
+export function orderStorages<T extends { provider: string; name: string }>(
+  storages: readonly T[],
+  providers: readonly StorageProviderDescriptor[],
+): T[] {
+  const rank = new Map<string, number>(providers.map((provider) => [provider.key, provider.display_rank]));
+  const rankOf = (storage: T) => rank.get(storage.provider) ?? Number.MAX_SAFE_INTEGER;
+  return [...storages].sort((left, right) => rankOf(left) - rankOf(right) || left.name.localeCompare(right.name));
+}
+
 export function storageDoors(providers: readonly StorageProviderDescriptor[]): StorageDoor[] {
   const doors: StorageDoor[] = [];
   for (const provider of providers) {
@@ -208,16 +225,6 @@ export function compactProjectPath(path?: string | null): string {
 export function providerLabel(provider?: ProviderKey | null): string {
   if (!provider) return "Shared";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
-}
-
-export function formatRelativeTime(epoch?: number): string {
-  if (!epoch) return "Unknown";
-  const milliseconds = epoch > 10_000_000_000 ? epoch : epoch * 1000;
-  const delta = Date.now() - milliseconds;
-  if (delta < 60_000) return "just now";
-  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
-  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
-  return new Date(milliseconds).toLocaleDateString();
 }
 
 /** Find one declared maintenance action by its stable ID. */

@@ -1,3 +1,4 @@
+import { isInvitationCodeShaped } from "../../src/components/managed-cloud/RepositoryLookupField";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -8,13 +9,11 @@ import { mergeSavedSetupDraft } from "../../src/components/project-sync/ProjectS
 import RepositoryAddressPicker, {
   gitRemoteWord,
   inListing,
-  isInvitationCodeShaped,
   managedCloudAccount,
-  normalizeRepositoryName,
-  predictRepositoryAddress,
   repositoryCautions,
   repositoryVerdict,
 } from "../../src/components/project-sync/RepositoryAddressPicker";
+import { normalizeRepositoryName, predictRepositoryAddress } from "../../src/components/managed-cloud/repositoryAddress";
 
 /* Connecting a project to a Mallard Cloud repository by its website
    address, or by a private repository's invitation code. The picker never
@@ -276,7 +275,7 @@ test("linking a Mallard Cloud storage always opens the address dialog, and setup
 
   // A public repository the account does not belong to is a contributor's, not read-only.
   const card = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  const cloud = readFileSync("src/components/project-sync/managedCloudLink.ts", "utf8");
+  const cloud = readFileSync("src/components/managed-cloud/managedCloudLink.ts", "utf8");
   assert.match(cloud, /link\.role === null && link\.visibility === "public" && link\.can_push/);
   assert.match(cloud, /"Contributor"/);
   assert.doesNotMatch(card, /Read-only/);

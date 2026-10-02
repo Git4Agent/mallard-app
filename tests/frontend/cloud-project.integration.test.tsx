@@ -431,7 +431,7 @@ test("New project opens on From Mallard Cloud when asked, on the account it name
   assert.match(html, /class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud rika-acme/);
 });
 
-for (const scenario of ["Storages", "New project", "another storage", "reconnect", "reset", "R2"] as const) {
+for (const scenario of ["Storages", "New project", "another storage", "reconnect", "reset", "R2", "Catalog", "Catalog reset"] as const) {
   test(`storage setup returns to its source: ${scenario}`, async () => {
     const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
     const body = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -445,11 +445,15 @@ for (const scenario of ["Storages", "New project", "another storage", "reconnect
     const destinations: unknown[] = [];
     const errors: unknown[] = [];
     let draftStorage = scenario === "R2" ? r2 : personal;
-    const committed = scenario === "another storage" || scenario === "reset" ? work : scenario === "R2" ? r2 : personal;
+    const committed = scenario === "another storage" || scenario === "reset" || scenario === "Catalog reset" ? work : scenario === "R2" ? r2 : personal;
     const cloudProjectSetupStorageRef = { current: null as string | null };
     const context = {
       hostWorkflowEpoch: { current: 1 }, cloudProjectSetupStorageRef,
       cloudLandingRef: { current: null as string | null },
+      catalogStorageSetupRef: { current: null as { scopeId: string; draftId: string | null } | null },
+      catalogStorageLandingRef: { current: null as { scopeId: string; storageId: string } | null },
+      setCatalogPreferredStorage: noop,
+      openCatalogScope: (scopeId: string) => { destinations.push({ scopeId }); },
       PROJECT_SYNC_SCHEMA: 1, isManagedCloudStorage, restorePlan: null,
       saveStorageDraftBeforeNavigation: async () => true,
       storageDraftSaveQueue: { enqueue: (action: () => Promise<unknown>) => action() },
@@ -471,23 +475,25 @@ for (const scenario of ["Storages", "New project", "another storage", "reconnect
     };
     const create = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handlers}; return { createStorageDraft, commitStorageDraft, openStorageWorkspace };`);
     const flow = create(context) as {
-      createStorageDraft: (provider: string, name?: string, returnToNewProject?: boolean) => Promise<void>;
+      createStorageDraft: (provider: string, name?: string, returnToNewProject?: boolean, keepCatalogReturn?: boolean) => Promise<void>;
       commitStorageDraft: (draftId: string, revision: number) => Promise<unknown>;
       openStorageWorkspace: (storageId: string) => Promise<void>;
     };
-    if (scenario === "Storages") await flow.createStorageDraft("managed_cloud");
+    if (scenario.startsWith("Catalog")) context.catalogStorageSetupRef.current = { scopeId: "pets", draftId: null };
+    if (scenario === "Storages" || scenario.startsWith("Catalog")) await flow.createStorageDraft("managed_cloud");
     else await flow.createStorageDraft(draftStorage.provider, undefined, true);
-    if (scenario === "reset") {
+    if (scenario === "reset" || scenario === "Catalog reset") {
       const activeStorageSettingsId = draftStorage.storage_id;
       draftStorage = work;
       await flow.createStorageDraft("managed_cloud", undefined,
-        cloudProjectSetupStorageRef.current !== null && cloudProjectSetupStorageRef.current === activeStorageSettingsId);
+        cloudProjectSetupStorageRef.current !== null && cloudProjectSetupStorageRef.current === activeStorageSettingsId,
+        scenario === "Catalog reset");
     }
     await flow.commitStorageDraft(`draft-${committed.storage_id}`, 1);
     await flow.openStorageWorkspace(committed.storage_id);
     assert.deepEqual(errors, []);
     const returnsToProject = scenario === "New project" || scenario === "reset";
-    assert.deepEqual(destinations, [returnsToProject
+    assert.deepEqual(destinations, [scenario.startsWith("Catalog") ? { scopeId: "pets" } : returnsToProject
       ? { source: "cloud", storageId: committed.storage_id }
       : { mode: "open", storageId: committed.storage_id, requestId: 1 }]);
     // The redirect is consumed. Opening this storage again opens its own page.

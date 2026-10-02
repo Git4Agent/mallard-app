@@ -1,6 +1,6 @@
 import type { ThreadSyncComparison } from "../../types";
 import type { NoticeItem } from "../notice/Notice";
-import { cloudPinMoved } from "./managedCloudLink";
+import { cloudPinMoved } from "../managed-cloud/managedCloudLink";
 
 /**
  * The standing notice of a storage whose history this computer is no longer

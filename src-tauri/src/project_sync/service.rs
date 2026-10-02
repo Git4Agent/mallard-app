@@ -16502,13 +16502,30 @@ pub(super) fn create_setup_draft_with_repository(
             );
         }
     }
-    let storage = if config.storages.len() == 1 {
-        Some(DraftStorageSelection {
-            storage_id: config.storages[0].id.clone(),
-        })
-    } else {
-        None
+    // The storage a new draft starts on: the first by preference — Mallard
+    // Cloud, then the other clouds, then local folders, which is the
+    // registry's display rank — and by name among equals. "None yet" stays
+    // one click away on the setup page; a provider this build does not
+    // register is never the default.
+    let descriptors = storage_provider_descriptors();
+    let rank_of = |provider: &StorageProviderKey| {
+        descriptors
+            .iter()
+            .find(|descriptor| &descriptor.key == provider)
+            .map(|descriptor| descriptor.display_rank)
     };
+    let storage = config
+        .storages
+        .iter()
+        .filter_map(|storage| rank_of(&storage.provider).map(|rank| (rank, storage)))
+        .min_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.name.cmp(&right.1.name))
+        })
+        .map(|(_, storage)| DraftStorageSelection {
+            storage_id: storage.id.clone(),
+        });
     let display_name = suggested_project_name(&canonical);
     let now = now_secs();
     let draft = ProjectSetupDraft {
@@ -33168,6 +33185,60 @@ mod tests {
                 descriptor.display_name,
             );
         }
+    }
+
+    #[test]
+    fn setup_draft_starts_on_the_preferred_storage() {
+        let fixture = setup_fixture();
+        // A second storage on a cloud provider, named to sort after the
+        // fixture's local folder: the default is the registry's rank —
+        // Mallard Cloud and the other clouds before local folders — and only
+        // then the name.
+        fixture
+            .repo
+            .mutate_config(|config| {
+                use mallard_infrastructure::storage_providers::r2::{
+                    parse_r2_api_url, provider_key, r2_settings_v1, secret_access_key,
+                    R2_CONFIG_VERSION,
+                };
+                let destination = parse_r2_api_url(
+                    "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/team",
+                )
+                .unwrap();
+                let settings = mallard_domain::BoundedConfigObject::encode(&r2_settings_v1(
+                    &destination,
+                    "access-key-id",
+                ))
+                .unwrap();
+                let mut secrets = mallard_domain::SecretMap::empty();
+                secrets
+                    .insert(
+                        secret_access_key(),
+                        mallard_domain::SecretValue::parse("secret").unwrap(),
+                    )
+                    .unwrap();
+                config.storages.push(StorageConfig {
+                    id: StorageId::parse("zed-vault").unwrap(),
+                    name: "Zed vault".to_string(),
+                    provider: provider_key(),
+                    provider_config: mallard_domain::StorageProviderConfig::new(
+                        R2_CONFIG_VERSION,
+                        settings,
+                        secrets,
+                    ),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let created = create_setup_draft_with_repository(
+            &fixture.repo,
+            &fixture.project_dir.to_string_lossy(),
+        )
+        .unwrap();
+        assert_eq!(
+            created.draft.storage.map(|storage| storage.storage_id),
+            Some(StorageId::parse("zed-vault").unwrap()),
+        );
     }
 
     #[test]

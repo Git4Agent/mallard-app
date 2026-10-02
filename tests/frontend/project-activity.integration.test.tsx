@@ -14,6 +14,7 @@ import {
   sessionSyncPresentation,
   unresolvedSyncPresentation,
 } from "../../src/components/project-sync/ProjectActivityPage";
+import { projectSyncCountPhrase } from "../../src/components/project-sync/ProjectLinksWorkspace";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import Icon from "../../src/components/Icons";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
@@ -313,6 +314,37 @@ test("path bar counts tally the whole comparison, split by the button that clear
   assert.equal(empty.detail, "");
 });
 
+test("a non-Git project's Pull and Push badges count its files and hold on both faces", () => {
+  // The badge is aria-hidden, so the button's name carries the tally in the
+  // units the verb moves.
+  assert.equal(projectSyncCountPhrase(1, 0), "1 newer thread");
+  assert.equal(projectSyncCountPhrase(2, 0), "2 newer threads");
+  assert.equal(projectSyncCountPhrase(0, 1), "1 changed file");
+  assert.equal(projectSyncCountPhrase(3, 2), "3 newer threads and 2 changed files");
+
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  // Pull and Push act on the whole project: the scanned files add to the
+  // comparison's threads, whichever face is on screen.
+  assert.match(workspace, /const pullCount = pullThreadCount \+ projectFileCounts\.pull;/);
+  assert.match(workspace, /const pushCount = pushThreadCount \+ projectFileCounts\.push;/);
+  assert.match(workspace, /projectFileSyncCounts\(projectFilesScan\.inventory\)/);
+
+  // The Sessions face stays mounted under the Files face, so the header it
+  // hands the bar (thread counts, attention, Cloud status) is never withdrawn
+  // by a switch of faces. Unmounting it was what emptied the bar on Files.
+  assert.match(workspace, /<div hidden=\{filesFaceShown\}>\s*<ProjectActivityPage/);
+  assert.doesNotMatch(workspace, /activityView === "files" && !activeProject\.is_git_repository \? \(/);
+  assert.match(workspace, /const filesFaceShown = activityView === "files" && !!activeProject && !activeProject\.is_git_repository;/);
+  // The Files face's refresh is the shared scan's rescan.
+  assert.match(workspace, /: filesFaceShown\s*\? \{\s*refreshing: projectFilesScan\.loading,\s*onRefresh: projectFilesScan\.rescan,/);
+
+  // The scan holds the host-operation lock both verbs take, so they wait it
+  // out — with a reason — rather than be refused mid-scan.
+  assert.equal((workspace.match(/\|\| !!runningAction\s*\|\| projectFilesScan\.loading/g) ?? []).length, 2);
+  assert.match(workspace, /const projectFilesScanIssue = projectFilesScan\.loading \? "Scanning project files…" : null;/);
+  assert.equal((workspace.match(/\?\? workspaceProfileIssue\s*\?\? projectFilesScanIssue/g) ?? []).length, 2);
+});
+
 test("the path bar hangs the branch on the section crumb and keeps one overflow", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const bar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
@@ -322,22 +354,27 @@ test("the path bar hangs the branch on the section crumb and keeps one overflow"
   // as a fourth one — and a session replaces the crumb, taking the chip with it.
   assert.match(workspace, /id: "section",[\s\S]*?scope: activityHeader && activityHeader\.branches\.length > 0 \? \(\s*<BranchPicker/);
   assert.match(bar, /\{crumb\.scope\}/);
-  // A non-Git project's section crumb names the view on screen and offers the
-  // other one in its own menu — the crumb grammar every other step of this bar
-  // uses. The segmented pill this replaced sat in the leaf's position showing
-  // both faces at once while naming neither, in the form vocabulary the storage
-  // cards use rather than the bar's.
+  // Only a Git project has a section crumb. A non-Git project's trail ends at
+  // the project: one control holds the Sessions/Files view, and it sits on
+  // the page it changes rather than behind a crumb's chevron as well.
   assert.match(workspace, /else if \(workspaceProject\.is_git_repository\) \{/);
-  assert.match(workspace, /label: workspaceSectionLabel,\s*icon: viewIcon\(activityView\),\s*tone: "section",/);
-  assert.match(workspace, /menuLabel: "Switch view",/);
-  assert.match(workspace, /menuHeader: \{\s*label: workspaceSectionLabel,/);
-  assert.match(workspace, /label: "Switch to",[\s\S]*?onSelect: \(\) => setActivityView\(otherView\),/);
+  assert.doesNotMatch(workspace, /menuLabel: "Switch view"|setActivityView\(otherView\)/);
   assert.doesNotMatch(workspace, /sync-path-view-switch|activityViewSwitch/);
-  // The switch is also a control on the page, not only a crumb menu: the
-  // app's segmented pill as a tablist, arrows moving between its two tabs.
-  assert.match(workspace, /className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view"/);
-  assert.match(workspace, /role="tab"\s*aria-selected=\{active\}\s*aria-controls="project-history-panel"\s*tabIndex=\{active \? 0 : -1\}/);
-  assert.match(workspace, /event\.key === "ArrowRight" \|\| event\.key === "ArrowDown"/);
+  // The switch is the app's segmented pill as a tablist, arrows moving between
+  // its two tabs, and both faces seat it through their own slot.
+  const viewSwitch = readFileSync("src/components/project-sync/ProjectViewSwitch.tsx", "utf8");
+  assert.match(viewSwitch, /className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view"/);
+  assert.match(viewSwitch, /role="tab"\s*aria-selected=\{active\}\s*aria-controls=\{PROJECT_VIEW_PANEL_ID\}\s*tabIndex=\{active \? 0 : -1\}/);
+  assert.match(viewSwitch, /event\.key === "ArrowRight" \|\| event\.key === "ArrowDown"/);
+  // Choosing the other face replaces the pill along with the page, so focus
+  // that was on it follows to the new pill by id.
+  assert.match(viewSwitch, /document\.getElementById\(projectViewTabId\(next\)\)\?\.focus\(\)/);
+  // Both faces seat the one switch, but only the face on screen does: the
+  // Sessions face stays mounted under Files, and a second hidden tablist
+  // would duplicate the tab ids the focus hand-off looks up.
+  assert.equal((workspace.match(/viewSwitch=\{projectViewSwitch\}/g) ?? []).length, 1);
+  assert.match(workspace, /viewSwitch=\{filesFaceShown \? undefined : projectViewSwitch\}/);
+  assert.match(workspace, /const projectViewSwitch = workspaceProject && !workspaceProject\.is_git_repository/);
   assert.match(workspace, /role=\{activeProject\.is_git_repository \? undefined : "tabpanel"\}/);
   // A popover that closes on outside focus must move focus in when it opens,
   // or Tab closes it before reaching a Copy button. All three share the recipe.
@@ -365,8 +402,8 @@ test("the path bar hangs the branch on the section crumb and keeps one overflow"
   assert.match(workspace, /\{showPushCount && <span className="sync-path-count" aria-hidden="true">\{pushCount\}<\/span>\}/);
   // The number is decorative only because the button's own name already says
   // it — never let the badge become the only place the count is spoken.
-  assert.match(workspace, /`Pull \$\{pullCount\} newer thread\$\{pullCount === 1 \? "" : "s"\} from /);
-  assert.match(workspace, /`Push \$\{pushCount\} newer thread\$\{pushCount === 1 \? "" : "s"\} to /);
+  assert.match(workspace, /`Pull \$\{projectSyncCountPhrase\(pullThreadCount, projectFileCounts\.pull\)\} from /);
+  assert.match(workspace, /`Push \$\{projectSyncCountPhrase\(pushThreadCount, projectFileCounts\.push\)\} to /);
 
   // One overflow, at the end of the row. Two `⋯` in one bar was the reason a
   // command could only be found by opening both.
@@ -661,6 +698,36 @@ test("every row leads with exactly one glyph, so the titles form a column", () =
     // Nothing else may claim a leading 18px box on a plain browse row.
     assert.doesNotMatch(lead, /sync-history-thread-kind|sync-history-branch-state current/);
   }
+});
+
+test("a non-Git project's view switch leads the Sessions face on its search row", () => {
+  const viewSwitch = <div className="sync-project-view-tabs" role="tablist" aria-label="Project view" />;
+  const noted = {
+    ...activity,
+    git: null,
+    providers: [{ provider: "claude", display_name: "Claude", access: "bound_unavailable" as const }],
+  };
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={noted} viewSwitch={viewSwitch} />,
+  );
+  // The pill rides the search row, ahead of the field and outside its rule —
+  // the line is the field's own — and the notes follow the row so they never
+  // push the switch down.
+  assert.match(html, /<div class="sync-list-head"><div class="sync-project-view-tabs"[^>]*><\/div><div class="sync-name-search"><div class="sync-name-search-input">/);
+  assert.ok(html.indexOf("sync-name-search") < html.indexOf("sync-history-notices"), "the switch row leads the notes");
+
+  // With no search to ride — nothing loaded yet — it stands on a row of its own.
+  const loading = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={null} storageLoading loading viewSwitch={viewSwitch} />,
+  );
+  assert.match(loading, /<div class="sync-project-view-row"><div class="sync-project-view-tabs"/);
+  assert.doesNotMatch(loading, /sync-name-search/);
+
+  // Without a switch — a Git project, or a review — the field keeps its
+  // place under the notes.
+  const plain = renderToStaticMarkup(<ProjectChatHistoryContent {...contentDefaults} activity={noted} />);
+  assert.doesNotMatch(plain, /sync-project-view/);
+  assert.ok(plain.indexOf("sync-history-notices") < plain.indexOf("sync-name-search"));
 });
 
 test("fresh storage matches portable Activity rows to conversation comparisons", () => {
@@ -2577,11 +2644,11 @@ test("Pull review hides view-only rows but keeps their provider notice", () => {
   assert.doesNotMatch(html, /sync-history-session-title-button|aria-label="View session details"/);
 });
 
-test("stored-only sessions lead the non-git flat list under an Only-in-storage heading", () => {
-  // The Catalog page's partition grammar, applied to the flat Sessions face:
-  // stored-only rows lift into a plain "Only in <storage>" section — no
-  // frame, no fold, no count, unlike the git face's framed group — and the
-  // local half is headed "Sessions" only while the partition exists.
+test("non-git sessions group in the Files face's tiles, stored-only ones leading", () => {
+  // The Files face's grammar, applied to the flat Sessions face: stored-only
+  // rows lead in the cloud-tinted tile named after the storage, and the
+  // local half follows in a tile headed "Sessions" — no tally, which would
+  // count the rows on screen rather than what Push and Pull act on.
   const storedOnly = {
     ...codexSession,
     resource_id: "codex:conversation:stored-only-1",
@@ -2600,17 +2667,19 @@ test("stored-only sessions lead the non-git flat list under an Only-in-storage h
       activeStorageName="Local storage 1"
     />,
   );
-  const cloudHeading = html.indexOf('sync-history-storage-name">Local storage 1');
+  const cloudTile = html.indexOf('<div class="sync-list-tile cloud">');
+  const cloudName = html.indexOf('sync-history-storage-name">Local storage 1');
   const storedTitle = html.indexOf("Stored-only session");
-  const localHeading = html.indexOf("Sessions</h2>");
+  const localTile = html.indexOf("<strong>Sessions</strong></div>");
   const localTitle = html.indexOf("Add Git history mapping");
-  assert.ok(cloudHeading >= 0, "the partition is named after the storage");
-  assert.ok(storedTitle > cloudHeading, "stored-only sessions render inside the partition");
-  assert.ok(localHeading > storedTitle, "the local half is headed while the partition exists");
-  assert.ok(localTitle > localHeading, "local sessions follow their heading");
-  assert.doesNotMatch(html, /sync-history-storage-only|sync-history-spine-fold|sync-history-heading-count/);
+  assert.ok(cloudTile >= 0, "stored-only sessions sit in the cloud-tinted tile");
+  assert.ok(cloudName > cloudTile, "the tile head names the storage");
+  assert.ok(storedTitle > cloudName, "stored-only sessions render inside the tile");
+  assert.ok(localTile > storedTitle, "the local half follows in its own tile");
+  assert.ok(localTitle > localTile, "local sessions render inside it");
+  assert.doesNotMatch(html, /sync-history-section-heading|sync-history-storage-only|sync-history-spine-fold/);
 
-  // Alone, the leaf crumb already names the page: no partition, no headings.
+  // Alone, the switch already names the list: no tile head repeats it.
   const plain = renderToStaticMarkup(
     <ProjectChatHistoryContent
       {...contentDefaults}
@@ -2618,7 +2687,10 @@ test("stored-only sessions lead the non-git flat list under an Only-in-storage h
       activeStorageName="Local storage 1"
     />,
   );
-  assert.doesNotMatch(plain, /sync-history-section-heading|Sessions<\/h2>/);
+  assert.doesNotMatch(plain, /sync-list-tile|sync-history-section-heading|>Sessions</);
+  assert.match(plain, /<div class="sync-history-thread-list flat"><article/);
+  // The search row counts sessions by name, the Files face's way.
+  assert.match(plain, /class="sync-name-search-count">1 session</);
 });
 
 test("session actions render from backend descriptors with disabled reasons", () => {
@@ -2810,7 +2882,9 @@ test("completed projects use their main row for history and only mark Git reposi
       activeStorageId={null}
       catalogScopes={[]}
       activeCatalogScopeId={null}
+      addingProject={false}
       addingCatalogScope={false}
+      addingStorage={false}
       catalogIndexOpen={false}
       storageIndexOpen={false}
       settingsOpen={false}
@@ -2915,7 +2989,9 @@ test("the project menu accepts multiple bound provider profiles", () => {
       activeStorageId={null}
       catalogScopes={[]}
       activeCatalogScopeId={null}
+      addingProject={false}
       addingCatalogScope={false}
+      addingStorage={false}
       catalogIndexOpen={false}
       storageIndexOpen={false}
       settingsOpen={false}
@@ -3036,7 +3112,9 @@ test("the Catalog rail starts empty and lists one row per added scope", () => {
         catalogScopes={scopes}
         catalogCapabilities={capabilities}
         activeCatalogScopeId={activeScopeId}
+        addingProject={false}
         addingCatalogScope={false}
+        addingStorage={false}
         /* The rail shows the root the workspace is standing in: a selected
            row puts Catalog there, and with none selected the index does. */
         catalogIndexOpen={activeScopeId === null}
@@ -3137,7 +3215,9 @@ test("an empty Storages rail prompts the way Projects and Catalog do", () => {
         activeStorageId={null}
         catalogScopes={[]}
         activeCatalogScopeId={null}
+        addingProject={false}
         addingCatalogScope={false}
+        addingStorage={false}
         catalogIndexOpen={false}
         /* Storages owns the rail while its index is the page. */
         storageIndexOpen={true}
@@ -3229,7 +3309,9 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
       activeStorageId={null}
       catalogScopes={[]}
       activeCatalogScopeId={null}
+      addingProject={false}
       addingCatalogScope={false}
+      addingStorage={false}
       catalogIndexOpen={false}
       storageIndexOpen={storageIndexOpen}
       settingsOpen={false}
@@ -3282,6 +3364,105 @@ test("the sidebar locks project and storage navigation during a sync workflow", 
   // Busy locks the strip as well: no destination can be left mid-workflow.
   // Logs is the exception — a drawer over the page, not a way off it.
   assert.equal((html.match(/class="sidebar-root-tab[^"]*"[^>]*disabled=""/g) ?? []).length, 4);
+});
+
+test("a root's add page holds that rail's + and doors, and nothing else", () => {
+  const base: ComponentProps<typeof ProjectSidebar> = {
+    projects: [project],
+    drafts: [],
+    activeDraftId: null,
+    storages: [],
+    storageUsage: {},
+    storageDrafts: [],
+    storageProviders: [],
+    onOpenStorageDraft: () => undefined,
+    onDiscardStorageDraft: () => undefined,
+    activeProjectId: null,
+    activeStorageId: null,
+    catalogScopes: [],
+    activeCatalogScopeId: null,
+    addingProject: false,
+    addingCatalogScope: false,
+    addingStorage: false,
+    catalogIndexOpen: false,
+    storageIndexOpen: false,
+    settingsOpen: false,
+    loading: false,
+    busy: false,
+    activityOpen: false,
+    unreadLogs: 0,
+    onOpenProjects: () => undefined,
+    onSelectProject: () => undefined,
+    onRemoveProject: () => undefined,
+    onSelectDraft: () => undefined,
+    onDiscardDraft: () => undefined,
+    onToggleActivity: () => undefined,
+    onAddProject: () => undefined,
+    onOpenSettings: () => undefined,
+    onOpenStorage: () => undefined,
+    onRemoveStorage: () => undefined,
+    onAddStorage: () => undefined,
+    onOpenCatalogIndex: () => undefined,
+    onOpenCatalogScope: () => undefined,
+    onAddCatalogScope: () => undefined,
+    onRemoveCatalogScope: () => undefined,
+    onOpenStorageIndex: () => undefined,
+  };
+  const render = (props: Partial<ComponentProps<typeof ProjectSidebar>>) =>
+    renderToStaticMarkup(<ProjectSidebar {...base} {...props} />);
+  const buttonAt = (html: string, marker: string) => {
+    const at = html.indexOf(marker);
+    assert.ok(at >= 0, `missing ${marker}`);
+    const start = html.lastIndexOf("<button", at);
+    return html.slice(start, html.indexOf(">", start) + 1);
+  };
+  // The + sits in the rail's heading, ahead of any door that shares its name.
+  const add = (html: string, label: string) => {
+    const button = buttonAt(html, `aria-label="${label}"`);
+    assert.match(button, /class="sidebar-section-action sidebar-add-action"/);
+    return button;
+  };
+  const doors = (html: string) => [...html.matchAll(/<button[^>]*class="sidebar-door"[^>]*>/g)].map((match) => match[0]);
+
+  // New project holds the +; the rows stay live, so another project or a
+  // draft is still one press away.
+  const newProject = render({ addingProject: true });
+  assert.match(add(newProject, "Add project"), /disabled=""/);
+  assert.match(add(newProject, "Add project"), /title="Already adding a project"/);
+  assert.doesNotMatch(buttonAt(newProject, "<span>Mallard local</span>"), /disabled=""/);
+  // Anywhere else — a draft's own page included — it is live.
+  const draftPage = render({
+    drafts: [{ draft_id: "draft-1", display_name: "draft repo", project_root: "/tmp/draft", updated_at: 1, revision: 1, status: "draft" }],
+    activeDraftId: "draft-1",
+  });
+  assert.doesNotMatch(add(draftPage, "Add project"), /disabled=""/);
+  assert.match(add(draftPage, "Add project"), /title="Add project"/);
+  // An empty rail's door is the same action, so it is held with the +.
+  const emptyProjects = doors(render({ projects: [], addingProject: true }));
+  assert.equal(emptyProjects.length, 1);
+  assert.match(emptyProjects[0], /disabled=""/);
+  assert.doesNotMatch(doors(render({ projects: [] }))[0], /disabled=""/);
+
+  // Add Catalog resource holds the Catalog rail's + and its doors.
+  const catalog = render({ addingCatalogScope: true });
+  assert.match(add(catalog, "Add Catalog resource"), /disabled=""/);
+  assert.match(add(catalog, "Add Catalog resource"), /title="Already adding a Catalog resource"/);
+  assert.ok(doors(catalog).length > 0 && doors(catalog).every((door) => /disabled=""/.test(door)));
+
+  // The storage type picker holds the Storages rail's + and its doors; a
+  // storage draft's form does not, since the picker is the only add page.
+  const storages = render({ storageIndexOpen: true, addingStorage: true });
+  assert.match(add(storages, "Add storage"), /disabled=""/);
+  assert.match(add(storages, "Add storage"), /title="Already adding storage"/);
+  assert.ok(doors(storages).length > 0 && doors(storages).every((door) => /disabled=""/.test(door)));
+  assert.doesNotMatch(add(render({ storageIndexOpen: true }), "Add storage"), /disabled=""/);
+
+  // The shell names the add pages: New project's folder step, not a draft,
+  // and the storage type picker, not a storage draft's form.
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(workspace, /addingProject=\{choosingProjectFolder\}/);
+  assert.match(workspace, /const choosingProjectFolder = setupView\?\.kind === "folder";/);
+  assert.match(workspace, /addingStorage=\{storageProviderPickerOpen\}/);
 });
 
 test("the rail's foot names the day one press lands on", () => {

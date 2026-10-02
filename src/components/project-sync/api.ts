@@ -1,11 +1,22 @@
+import type { ManagedCloudDiscardedDraft, ManagedCloudLink } from "../managed-cloud/types";
 import { listen } from "@tauri-apps/api/event";
 import { Channel, invoke } from "../../ipc";
 import type {
-  DropboxSetupMode, DropboxSetupLogin, DropboxSetupProgress,
-  FeishuSetupLogin, FeishuSetupMode, FeishuSetupProgress,
-  CloudProjectFolderProbe, CloudProjectFolderProgress, CloudProjectFolderRequest, CloudProjectFolderResult,
-  ManagedCloudDiscardedDraft, ManagedCloudLink, ManagedCloudRepository, ManagedCloudRepositoryResolution,
-  ManagedCloudSetupLogin, ManagedCloudSetupMode, ManagedCloudSetupProgress,
+  DropboxSetupMode,
+  DropboxSetupLogin,
+  DropboxSetupProgress,
+  FeishuSetupLogin,
+  FeishuSetupMode,
+  FeishuSetupProgress,
+  CloudProjectFolderProbe,
+  CloudProjectFolderProgress,
+  CloudProjectFolderRequest,
+  CloudProjectFolderResult,
+  ManagedCloudRepository,
+  ManagedCloudRepositoryResolution,
+  ManagedCloudSetupLogin,
+  ManagedCloudSetupMode,
+  ManagedCloudSetupProgress,
   R2Account,
   R2Jurisdiction,
   R2SetupProgress,

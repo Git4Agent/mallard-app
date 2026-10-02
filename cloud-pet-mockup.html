@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pets on Mallard Cloud — mockup</title>
+    <style>
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+
+      /* The harness around the app frame: scene steps, then what each one shows.
+         Everything inside the frame is the app's own markup and classes. */
+      .harness { max-width: 1320px; margin: 0 auto; padding: 14px 20px 60px; display: grid; gap: 12px; font: 13px/1.45 system-ui, sans-serif; }
+      .harness-controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .harness-controls > strong { font-size: 13px; }
+      .harness-controls > label { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+      .harness-scope { color: var(--text-2); font-size: 12px; }
+      .harness-scenes { display: flex; flex-wrap: wrap; gap: 4px; }
+      .harness-scenes button { padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: inherit; font-size: 12px; cursor: pointer; }
+      .harness-scenes button b { color: var(--text-3); font-weight: 600; margin-right: 2px; }
+      .harness-scenes button.today { border-style: dashed; }
+      .harness-scenes button.active { border-color: var(--text-1); background: var(--text-0); color: var(--bg-0); }
+      .harness-scenes button.active b { color: inherit; opacity: 0.7; }
+      .harness-notes { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .harness-notes p { margin: 0; color: var(--text-1); }
+      .harness-notes p > span { display: inline-block; min-width: 64px; margin-right: 6px; color: var(--text-3); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .harness-frame { height: 720px; border: 1px dashed var(--border-strong); border-radius: 12px; overflow: hidden; }
+      .harness-frame .sync-main { overflow-y: auto; }
+
+      /* The pet leaf crumb's mark: the pet's own preview at the size a session
+         leaf's provider mark takes. */
+      .pet-leaf-mark { width: 16px; height: 17px; border-radius: 4px; object-fit: contain; }
+
+      /* The comparison board: the project's notification beside the proposed
+         one, each inside the same Storage card. */
+      .mock-compare { display: grid; gap: 22px; }
+      .mock-compare-columns, .mock-compare-cells { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+      .mock-compare-columns > strong { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); }
+      .mock-compare-row { display: grid; gap: 8px; }
+      .mock-compare-row > header { display: grid; gap: 1px; }
+      .mock-compare-row > header > span { color: var(--text-2); font-size: 12px; }
+      .mock-compare-cells > div { display: grid; gap: 4px; align-content: start; }
+
+      /* Fewer words: the field's label repeats its placeholder, so a pet's
+         chooser keeps it for screen readers only. */
+      .mock-lean .sync-folder-field > span:first-child { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+      /* The connect board: the live dialog, frozen in each state, laid out
+         in place instead of over the page. */
+      .connect-states { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 22px 24px; align-items: start; }
+      .connect-state { display: grid; gap: 8px; align-content: start; }
+      .connect-state > header > strong { font-size: 13px; }
+      .connect-state > .mock-frozen-dialog { position: static; inset: auto; width: 100%; max-width: none; max-height: none; margin: 0; }
+
+      /* The states board lays specimens out; each specimen is shipped parts. */
+      .pet-states { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 18px 22px; }
+      .pet-state { display: grid; gap: 8px; align-content: start; }
+      .pet-state > header { display: grid; gap: 1px; }
+      .pet-state > header > span { color: var(--text-2); font-size: 12px; }
+      .pet-state-bar { justify-content: flex-start !important; padding: 0 !important; }
+      .pet-state-quiet { margin: 0; color: var(--text-3); font-size: 12px; }
+      .pet-held-panel { position: static !important; width: 320px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/cloud-pet-mockup.tsx"></script>
+  </body>
+</html>

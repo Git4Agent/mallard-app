@@ -42,9 +42,9 @@ const SECTION_TITLES: Record<SectionId, string> = {
 /** An empty rail's rows: one dashed tile per way Add can start — the glyph
  * and a plus, no words — so the count of tiles is the count of choices, and
  * a tile opens Add with that choice already made. */
-function SidebarDoors({ doors, busy }: {
+function SidebarDoors({ doors, disabled }: {
   doors: Array<{ key: string; icon: IconName; label: string; onOpen: () => void }>;
-  busy: boolean;
+  disabled: boolean;
 }) {
   return (
     <div className="sidebar-doors">
@@ -55,7 +55,7 @@ function SidebarDoors({ doors, busy }: {
           className="sidebar-door"
           title={door.label}
           aria-label={door.label}
-          disabled={busy}
+          disabled={disabled}
           onClick={door.onOpen}
         >
           <Icon name={door.icon} size={16} />
@@ -106,7 +106,11 @@ interface Props {
       door per shape it registers. */
   catalogCapabilities?: CatalogCapabilityDescriptor[];
   activeCatalogScopeId: string | null;
+  /** A root's add page is open: New project, Add Catalog resource, or the
+      storage type picker. A draft's own page is not one. */
+  addingProject: boolean;
   addingCatalogScope: boolean;
+  addingStorage: boolean;
   catalogIndexOpen: boolean;
   storageIndexOpen: boolean;
   settingsOpen: boolean;
@@ -152,7 +156,9 @@ export default function ProjectSidebar({
   catalogScopes,
   catalogCapabilities = [],
   activeCatalogScopeId,
+  addingProject,
   addingCatalogScope,
+  addingStorage,
   catalogIndexOpen,
   storageIndexOpen,
   settingsOpen,
@@ -209,16 +215,21 @@ export default function ProjectSidebar({
       ? catalogScopes.length
       : storages.length + storageDrafts.length;
 
-  /* One add action, named for the root the rail is showing. */
+  /* One add action, named for the root the rail is showing. While that
+     root's add page is open it is held off, doors and all: pressing it again
+     would only reopen the page, and drop a choice already made there. */
   const railAdd = railRoot === "projects"
-    ? { onClick: onAddProject, title: "Add project", label: "Add project" }
+    ? { onClick: onAddProject, title: "Add project", label: "Add project", open: addingProject, openTitle: "Already adding a project" }
     : railRoot === "catalog"
       ? {
         onClick: () => onAddCatalogScope(),
         title: "Add a resource: one kind from one agent profile",
         label: "Add Catalog resource",
+        open: addingCatalogScope,
+        openTitle: "Already adding a Catalog resource",
       }
-      : { onClick: () => onAddStorage(), title: "Add storage", label: "Add storage" };
+      : { onClick: () => onAddStorage(), title: "Add storage", label: "Add storage", open: addingStorage, openTitle: "Already adding storage" };
+  const addHeld = busy || railAdd.open;
 
   const projectRows = () => (
     <>
@@ -280,7 +291,7 @@ export default function ProjectSidebar({
       ) : projects.length === 0 && drafts.length === 0 ? (
         /* One door: Add project opens setup at its Folder field. */
         <SidebarDoors
-          busy={busy}
+          disabled={addHeld}
           doors={[{ key: "folder", icon: "folder", label: "Add project", onOpen: onAddProject }]}
         />
       ) : projects.map((project) => {
@@ -347,7 +358,7 @@ export default function ProjectSidebar({
       /* One door per shape the registry offers; before it answers, the
          chooser itself. */
       <SidebarDoors
-        busy={busy}
+        disabled={addHeld}
         doors={catalogCapabilities.length > 0
           ? catalogDoors(catalogCapabilities).map((door) => ({
             key: door.key,
@@ -397,7 +408,7 @@ export default function ProjectSidebar({
         /* One door per provider the build ships; before the descriptors
            arrive, the picker itself. */
         <SidebarDoors
-          busy={busy}
+          disabled={addHeld}
           doors={storageProviders.length > 0
             ? storageDoors(storageProviders).map((door) => ({
               key: door.key,
@@ -585,8 +596,8 @@ export default function ProjectSidebar({
             type="button"
             className="sidebar-section-action sidebar-add-action"
             onClick={railAdd.onClick}
-            disabled={busy}
-            title={railAdd.title}
+            disabled={addHeld}
+            title={railAdd.open ? railAdd.openTitle : railAdd.title}
             aria-label={railAdd.label}
           >
             <Icon name="plus" size={16} />

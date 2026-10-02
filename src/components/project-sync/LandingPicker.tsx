@@ -56,7 +56,7 @@ export default function LandingPicker({
   count,
   actionLabel,
   cards,
-  doors,
+  doors = [],
   caption,
   busy = false,
   onAction,
@@ -66,8 +66,10 @@ export default function LandingPicker({
   count: string;
   actionLabel: string;
   cards: LandingCard[];
-  doors: LandingDoor[];
-  caption: LandingCaption;
+  /** The empty page's doors and line. A root whose empty page is its own
+      (Projects, which welcomes instead) never renders without cards. */
+  doors?: LandingDoor[];
+  caption?: LandingCaption;
   busy?: boolean;
   onAction: () => void;
 }) {
@@ -106,10 +108,12 @@ export default function LandingPicker({
               </li>
             ))}
           </ul>
-          <p className="landing-picker-caption">
-            {caption.icons.map((icon) => <Icon key={icon} name={icon} size={14} />)}
-            <span>{caption.text}</span>
-          </p>
+          {caption && (
+            <p className="landing-picker-caption">
+              {caption.icons.map((icon) => <Icon key={icon} name={icon} size={14} />)}
+              <span>{caption.text}</span>
+            </p>
+          )}
         </>
       ) : (
         <ul className="landing-picker-grid">

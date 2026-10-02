@@ -1,11 +1,12 @@
+import type { ManagedCloudLink, ManagedCloudStatus } from "./components/managed-cloud/types";
 import { StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { NoticeZone, type NoticeItem } from "./components/notice/Notice";
-import ManagedCloudChip, { ManagedCloudPanel } from "./components/project-sync/ManagedCloudChip";
+import ManagedCloudChip, { ManagedCloudPanel } from "./components/managed-cloud/ManagedCloudChip";
 import { clearedStorageNotice } from "./components/project-sync/clearedStorageNotice";
-import { cloudStatusNotice, cloudSyncBlocked, discardDraftQuestion } from "./components/project-sync/managedCloudLink";
+import { cloudStatusNotice, cloudSyncBlocked, discardDraftQuestion } from "./components/managed-cloud/managedCloudLink";
 import Icon from "./components/Icons";
-import type { ManagedCloudLink, ManagedCloudStatus, ScopeContinuity, ThreadSyncComparison } from "./types";
+import type { ScopeContinuity, ThreadSyncComparison } from "./types";
 import "./App.css";
 
 /* A dev harness for PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md: what the

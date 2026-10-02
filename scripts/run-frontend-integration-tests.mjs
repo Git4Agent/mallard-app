@@ -25,6 +25,7 @@ try {
       platform: "node",
       format: "cjs",
       target: "node20",
+      loader: { ".woff": "file", ".woff2": "file", ".ttf": "file" },
       define: { "process.env.NODE_ENV": '"test"' },
       logLevel: "warning",
     });
