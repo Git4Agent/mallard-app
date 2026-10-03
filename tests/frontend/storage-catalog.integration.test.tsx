@@ -42,7 +42,7 @@ import type {
 } from "../../src/components/storage-catalog/types";
 
 const commandNames = [
-  "list_catalog_cloud_repositories", "list_catalog_cloud_shared", "resolve_catalog_cloud_repository", "join_catalog_cloud_repository",
+  "list_catalog_cloud_repositories", "list_catalog_cloud_shared", "list_catalog_cloud_starred", "list_catalog_cloud_public", "resolve_catalog_cloud_repository", "join_catalog_cloud_repository",
   "connect_catalog_cloud_repository", "create_catalog_cloud_repository", "get_catalog_cloud_status", "request_catalog_cloud_release", "discard_catalog_cloud_draft",
   "apply_catalog_resource_fork",
   "apply_catalog_scope_pull",
@@ -1450,6 +1450,7 @@ function cloudRepository(overrides: Partial<CatalogCloudRepository> = {}): Catal
     repository_id: `repo_${owner}_${name}`, owner_login: owner, name, address: `${owner}/${name}`,
     website_url: `https://mallard-ai.com/${owner}/${name}`, visibility: "private", role: "member", can_push: true,
     revision: 4, updated_at: 1, registration_only: false, resource_id: "duck", display_name: "Duck", available: true,
+    description: null, star_count: 0, viewer_starred: false,
     ...overrides,
   };
 }
@@ -1492,6 +1493,7 @@ test("a closed chooser drops its late answer, and a lookup never asks twice", as
     sequence: { current: 0 }, storageId: "cloud",
     setJoinError: noop, setJoining: noop, setLookup: noop, setEntry: noop,
     setSelection: (value: unknown) => { selection = value; },
+    setTab: noop, setResolvingRow: noop, scopeHolding: () => null,
     isInvitationCodeShaped: () => false, errorMessage: String,
     answer: (resolution: { kind: string; repository?: unknown }) => resolution.kind === "found"
       ? { kind: "found", repository: resolution.repository, joined: false }
@@ -1521,7 +1523,7 @@ test("the connect dialog is the project's, with fewer words, and opens no review
   );
   assert.match(html, /<h1[^>]*>Connect Duck<\/h1>/);
   assert.match(html, /class="sync-modal sync-bundle-connection-dialog"/);
-  assert.match(html, /<span class="sync-visually-hidden">Address or invite code<\/span>/, "the placeholder says it; the label is for screen readers");
+  assert.match(html, /<span class="sync-visually-hidden">Search, address or invite code<\/span>/, "the placeholder says it; the label is for screen readers");
   assert.match(html, /Loading repositories…/);
   assert.doesNotMatch(html, /sync-bundle-context|repo-list-head/, "no context row, no list heading");
   assert.doesNotMatch(html, /Can’t be changed later/, "said once the choice can be made");

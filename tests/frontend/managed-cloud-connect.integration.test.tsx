@@ -1,4 +1,5 @@
-import { isInvitationCodeShaped } from "../../src/components/managed-cloud/RepositoryLookupField";
+import { entryKind, isAddressShaped, isInvitationCodeShaped } from "../../src/components/managed-cloud/RepositoryLookupField";
+import { listingRoleWord, matchesFilter } from "../../src/components/managed-cloud/CloudScopes";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -60,6 +61,9 @@ function repository(overrides: Partial<ManagedCloudRepository>): ManagedCloudRep
     updated_at: 1_787_298_240,
     resources: 3,
     registration_only: false,
+    description: null,
+    star_count: 0,
+    viewer_starred: false,
     ...overrides,
   };
 }
@@ -132,15 +136,16 @@ test("the picker names repositories by address and never by bundle id", () => {
       onSelect={() => undefined}
     />,
   );
-  assert.match(html, /Address or invite code<\/span>/, "the code has a place before any lookup");
-  assert.match(html, /placeholder="owner\/name or invite code"/);
+  assert.match(html, /address or invite code<\/span>/i, "the code has a place before any lookup");
+  assert.match(html, /placeholder="Search, or paste a link, owner\/name or an invite code"/, "words filter; a link, an address or a code is looked up");
   assert.equal(html.match(/<input/g)?.length, 1, "one field takes the address or the code");
   assert.match(html, /Look up/);
   assert.doesNotMatch(html, /Invitation code \(optional\)|Join repository/);
   assert.doesNotMatch(html, /Paste the page address/);
-  assert.match(html, /class="repo-list-head">Repositories<small>3<\/small><\/div>/);
+  assert.match(html, /role="tablist"[\s\S]*?data-scope="yours">[\s\S]*?Yours<small>3<\/small><\/button>/, "Yours heads the scopes, with its count");
+  assert.match(html, /data-scope="starred"[\s\S]*?data-scope="public"/);
   assert.doesNotMatch(html, /read-only/i);
-  assert.match(html, /Rika321\/HorrorGame<small class="sync-bundle-recommended">Git match<\/small>/);
+  assert.match(html, /Rika321\/HorrorGame<\/span><small class="sync-bundle-recommended">Git match<\/small>/);
   assert.match(html, /Private · Owner/);
   assert.match(html, /rikaqu0223-arch\/tidewatch/);
   assert.match(html, /Private · Member/);
@@ -200,9 +205,10 @@ test("the picker names repositories by address and never by bundle id", () => {
       onSelect={() => undefined}
     />,
   );
-  assert.match(empty, /class="repo-list-head">Repositories<\/div>/);
-  assert.match(empty, /<p class="repo-list-empty">No repositories yet\.<\/p>/);
-  assert.doesNotMatch(empty, /radiogroup|sync-bundle-match-options/);
+  assert.match(empty, /data-scope="yours">[\s\S]*?Yours<\/button>/, "no count on an empty scope");
+  assert.match(empty, /<strong>No repositories yet\.<\/strong>/);
+  assert.match(empty, /Browse Public/, "the empty scope offers the other way in");
+  assert.doesNotMatch(empty, /radiogroup/);
   assert.doesNotMatch(empty, /Paste the page address/, "clone mode says fewer words");
 });
 
@@ -226,8 +232,8 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
   assert.doesNotMatch(html, /Repo identity|Paste a repository address|Connecting keeps/);
   assert.match(html, /<strong>Mallard Cloud · Rika321<\/strong>/);
   assert.doesNotMatch(html, /Mallard Cloud Rika321 · Rika321/);
-  assert.match(html, /Address or invite code/);
-  assert.match(html, /Loading repositories/);
+  assert.match(html, /address or invite code/i);
+  assert.match(html, /Loading…/);
   assert.doesNotMatch(html, /Paste an address or a code/);
   assert.doesNotMatch(html, /Current local repo/, "no bundle id in the context line");
   assert.doesNotMatch(html, /Create separate repo/);
@@ -302,4 +308,42 @@ test("a saved folder name reaches the preview without replacing newer name or fo
   assert.equal(editedFolder.canonical_project_root, submitted.canonical_project_root);
   assert.equal(editedFolder.repository_fingerprint, null);
   assert.equal(editedFolder.revision, 2);
+});
+
+test("rows carry the description and the stars, and the one field knows words from an address or a code", () => {
+  const rows = [
+    repository({ description: "Customer portal.", star_count: 3, viewer_starred: true }),
+    repository({ repository_id: "repo_2", name: "notes", address: "Rika321/notes", bundle_id: "a".repeat(32), repository_class: "non_git_project", git_remote: "differs", repository_fingerprint: null, description: null, star_count: 0 }),
+  ];
+  const html = renderToStaticMarkup(
+    <RepositoryAddressPicker
+      storage={cloud}
+      projectName="HorrorGame"
+      localFingerprint={CHECKOUT}
+      listing={{ state: "ready", repositories: rows }}
+      selection={null}
+      rows="choice"
+      offerNew={false}
+      disabled={false}
+      onSelect={() => undefined}
+    />,
+  );
+  assert.match(html, /class="sync-bundle-choice repo-row starred"[\s\S]*?Rika321\/HorrorGame[\s\S]*?class="repo-row-blurb">Customer portal\.<\/span>/, "the description is the second line");
+  assert.match(html, /data-icon="star-filled"[^>]*>[\s\S]*?<\/svg> 3 · /, "the account's own star is filled, with the count");
+  assert.match(html, /Rika321\/notes[\s\S]*?class="repo-row-blurb"><\/span>/, "no description, no line");
+  assert.doesNotMatch(html, /Rika321\/notes[\s\S]*?data-icon="star"/, "no stars, no star");
+  assert.match(html, /<strong>Private · Owner<\/strong>/, "the role stays in the meta column");
+
+  assert.equal(entryKind(""), "idle");
+  assert.equal(entryKind("bis"), "filter");
+  assert.equal(entryKind("maya/Mochi"), "address");
+  assert.equal(entryKind("https://mallard-ai.com/zoe/Lantern"), "address");
+  assert.equal(entryKind("mallard-ai.com/zoe/Lantern/sessions/1"), "address");
+  assert.equal(entryKind("mallard-waffle-ivy-2026"), "code");
+  assert.ok(isAddressShaped("Rika321/HorrorGame") && !isAddressShaped("horror game"));
+  assert.ok(matchesFilter("beagle", "kai/Biscuit", "A beagle that fetches finished builds."));
+  assert.ok(matchesFilter("BIS", "kai/Biscuit", null) && !matchesFilter("tofu", "kai/Biscuit", null));
+  assert.equal(listingRoleWord({ role: null, visibility: "public" }), "Public");
+  assert.equal(listingRoleWord({ role: "member", visibility: "private" }), "Member");
+  assert.equal(listingRoleWord({ role: "member", visibility: "public" }), "Public · Member");
 });

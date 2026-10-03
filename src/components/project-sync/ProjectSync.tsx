@@ -29,6 +29,7 @@ import type {
   ProviderProfileSummary,
   ResourceInventory as ResourceInventoryModel,
   PullReview,
+  PushScope,
   SetupDraftSummary,
   SiblingBundleStatus,
   CommitStorageDraftResult,
@@ -72,6 +73,7 @@ import PushResourceWorkspace, {
   recommendedPushSelection,
   sanitizePushSelection,
 } from "./PushResourceWorkspace";
+import { sessionPushDisabledReason } from "./session-detail/sessionDetailModel";
 import ProjectSetupWorkspace from "./ProjectSetupWorkspace";
 import NewProjectFolderStep, { type NewProjectSource } from "./NewProjectFolderStep";
 import { cloneFailureText, type CloneFallback } from "./CloudProjectSource";
@@ -95,7 +97,8 @@ import {
   catalogScopeViews,
 } from "../storage-catalog/model";
 import RestorePlanView, { type PullReviewPrimary } from "./RestorePlanView";
-import type { ReviewListState } from "./ProjectActivityPage";
+import type { PushSessionFacts, ReviewListState } from "./ProjectActivityPage";
+import SessionPushReview from "./SessionPushReview";
 import ReviewPreparing from "../sync-review/ReviewPreparing";
 import {
   PREPARING_CANCELLED,
@@ -165,7 +168,14 @@ const ACTIVE_STORAGE_BY_PROJECT_KEY = "mallard.active-storage-by-project";
 const DEFAULT_PROJECT_SIDEBAR_WIDTH = 298;
 const MIN_PROJECT_SIDEBAR_WIDTH = 220;
 const MAX_PROJECT_SIDEBAR_WIDTH = 560;
+// The workspace tile's floor, which is the path bar's: its container-query
+// ladder is laid out down to 580px and no further.
 const MIN_PROJECT_WORKSPACE_WIDTH = 580;
+// What the window spends around the two tiles: the 8px frame on each side
+// (`--retro-gutter-x`) and the 8px the resize seam takes (12px less its two
+// -2px margins). Left out, a sidebar dragged to its limit put the bar 24px
+// under its floor, and the trail ran under the actions.
+const PROJECT_WINDOW_FRAME_WIDTH = 24;
 const FOCUS_RECONCILE_MIN_AWAY_MS = 5000;
 
 function clampSidebarWidth(width: number, maxWidth = MAX_PROJECT_SIDEBAR_WIDTH): number {
@@ -175,7 +185,10 @@ function clampSidebarWidth(width: number, maxWidth = MAX_PROJECT_SIDEBAR_WIDTH):
 function availableProjectSidebarWidth(): number {
   return Math.max(
     MIN_PROJECT_SIDEBAR_WIDTH,
-    Math.min(MAX_PROJECT_SIDEBAR_WIDTH, window.innerWidth - MIN_PROJECT_WORKSPACE_WIDTH),
+    Math.min(
+      MAX_PROJECT_SIDEBAR_WIDTH,
+      window.innerWidth - PROJECT_WINDOW_FRAME_WIDTH - MIN_PROJECT_WORKSPACE_WIDTH,
+    ),
   );
 }
 
@@ -240,6 +253,9 @@ interface SiblingBundleNotice {
 }
 
 interface PendingPush {
+  scope: PushScope;
+  /** A session's own review: what its page had loaded, for the review's row. */
+  session?: PushSessionFacts;
   credentialRedactionEnabled: boolean;
   gitHistory: import("../../types").GitHistorySnapshot | null;
   gitHistoryReviewToken: string | null;
@@ -247,7 +263,6 @@ interface PendingPush {
   gitHistoryOutgoing: import("../../types").GitHistoryOutgoing | null;
   projectId: string;
   storageId: string;
-  projectName: string;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
   storage: StorageSummary;
@@ -526,13 +541,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   }, []);
 
   const closeProjectSubview = useCallback(() => {
+    preparingTracker.cancel();
     setActiveProjectSubview({ kind: "overview" });
-  }, []);
+  }, [preparingTracker]);
 
   const openSessionDetail = useCallback((
     projectId: string,
     request: OpenSessionDetailRequest,
   ) => {
+    preparingTracker.cancel();
     // The detail page reports its own action failures in its own zone.
     setSessionActionError(null);
     setActiveProjectSubview({
@@ -541,7 +558,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       resourceId: request.resourceId,
       occurrenceKey: request.occurrenceKey,
     });
-  }, []);
+  }, [preparingTracker]);
 
   const toggleSidebar = useCallback(() => {
     sidebarResizeRef.current = null;
@@ -1906,6 +1923,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const openPushChooser = async (
     projectId: string,
     storageId: string,
+    scope: PushScope,
+    session?: PushSessionFacts,
     workflowEpoch = hostWorkflowEpoch.current,
   ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
@@ -1923,7 +1942,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setStorageNotice(null);
       // One backend call runs a single discovery pass and a single remote
       // snapshot for every review section.
-      const context = await preparing.race(projectSyncApi.preparePushReview(projectId, storageId));
+      const context = await preparing.race(projectSyncApi.preparePushReview(projectId, storageId, scope));
       if (context === PREPARING_CANCELLED) return;
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       const nextDetail = context.project;
@@ -1947,6 +1966,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           kind: "action_failed",
           action: "push",
           message: storageFailureMessage(storageId, destination.message),
+          scope,
+          session,
         });
         setActiveProjectId(projectId);
         setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
@@ -1978,6 +1999,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // Degraded sections such as offline storage or capture failures open
       // without a comparison.
       const nextThreadComparison = context.thread_comparison ?? undefined;
+      if (scope.kind === "session") {
+        const reason = context.thread_comparison_error ?? sessionPushDisabledReason(
+          nextThreadComparison?.entries.find((entry) => entry.resource_id === scope.resource_id),
+        );
+        if (reason) {
+          setStorageNotice({ projectId, storageId, kind: "action_failed", action: "push", scope, session, message: reason });
+          setHistoryRefreshEpoch((epoch) => epoch + 1);
+          return;
+        }
+      }
       const isGitRepository = repositoryKinds[projectId] ?? false;
       const lockedProjectContentInventory =
         context.project_files && context.project_files.entries.length > 0
@@ -2009,6 +2040,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       };
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingPush({
+        scope,
+        session,
         credentialRedactionEnabled: context.credential_redaction_enabled,
         gitHistory: context.git_history,
         gitHistoryReviewToken: context.git_history_review_token,
@@ -2016,7 +2049,6 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         gitHistoryOutgoing: context.git_history_outgoing,
         projectId,
         storageId,
-        projectName: projectLabel(nextDetail.project),
         project: projectSummary,
         binding: nextDetail.binding ?? null,
         storage,
@@ -2029,9 +2061,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           : null,
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
-        showProjectFiles: !isGitRepository || lockedProjectContentInventory !== null,
+        showProjectFiles: scope.kind === "project" && (!isGitRepository || lockedProjectContentInventory !== null),
       });
-      setPushSelected(new Set(projectDefaults));
+      // A session's own review has nothing to select: its session travels
+      // whole, and one past the limit is refused there instead of unticked.
+      setPushSelected(scope.kind === "session" ? new Set([scope.resource_id]) : new Set(projectDefaults));
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
     } catch (reason) {
@@ -2042,6 +2076,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           kind: "action_failed",
           action: "push",
           message: storageFailureMessage(storageId, reason),
+          scope,
+          session,
         });
       }
     } finally {
@@ -2077,7 +2113,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const scanPendingProjectFiles = async () => {
     const pending = pendingPush;
-    if (!pending || projectContentLoading) return;
+    if (!pending || pending.scope.kind === "session" || projectContentLoading) return;
     const workflowEpoch = hostWorkflowEpoch.current;
     setProjectContentLoading(true);
     setPushError(null);
@@ -2188,6 +2224,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const result = await projectSyncApi.pushBundle(
         projectId,
         storageId,
+        pendingPush.scope,
         recipe,
         pendingPush.credentialRedactionEnabled,
         projectContentReviewToken,
@@ -2222,6 +2259,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     } catch (reason) {
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       const message = storageFailureMessage(storageId, reason);
+      if (pendingPush.scope.kind === "session") {
+        setHistoryRefreshEpoch((epoch) => epoch + 1);
+      }
       if (pendingPush) {
         try {
           const destinationStatus = await projectSyncApi.getPushDestinationStatus(
@@ -2770,7 +2810,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       } else {
         setPendingBundleConnection(null);
         notify("Kept local-only identity — Push publishes it separately.");
-        await openPushChooser(pending.projectId, pending.storageId, workflowEpoch);
+        await openPushChooser(pending.projectId, pending.storageId, { kind: "project" }, undefined, workflowEpoch);
         return;
       }
       setPendingBundleConnection(null);
@@ -3388,14 +3428,20 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       pendingPush.projectContentInventory,
     )
     : pushSelected;
+  // A session's own review draws that session's row from its scoped
+  // comparison, including a session outside the activity window. It lists
+  // nothing, so it runs no activity scan and never waits on one.
+  const pushSessionScope = pendingPush?.scope.kind === "session" ? pendingPush.scope : null;
+  const pushSessionEntry = pushSessionScope
+    ? pendingPush?.threadComparison?.entries.find((entry) => entry.resource_id === pushSessionScope.resource_id)
+    : undefined;
+  const pushActivityBinding = pendingPush?.scope.kind === "project" ? pendingPush.binding : null;
+  const pendingPushListState: ReviewListState = pushActivityBinding ? pushListState : "ready";
   /* One rule for both buttons that publish this review — the panel's own
      footer Push and the path bar's, which continues the open review rather
      than opening one. They were two rules once, and the bar's knew nothing
      about the capture budget or the deletion acknowledgement, so a review the
      footer refused could still be pushed from above it. */
-  /* Without a binding the review lists from the inventory it already holds,
-     which is on screen from the first render. */
-  const pendingPushListState: ReviewListState = pendingPush?.binding ? pushListState : "ready";
   const pendingPushDisabledReason = pendingPush
     ? pushReviewDisabledReason({
       selected: safePushSelection,
@@ -3407,8 +3453,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       projectContentLoading,
       listState: pendingPushListState,
       gitHistoryChanged: pendingPush.gitHistoryChanged,
+      sessionScope: pushSessionScope !== null,
     })
     : null;
+  const closePushReview = () => {
+    if (busy) return;
+    setPendingPush(null);
+    setPushError(null);
+    setPushProjectContentRemovals(new Set());
+    setPushWarningAcknowledgements(new Set());
+  };
   const inlineStorageReview = pendingPush ? {
     kind: "push" as const,
     projectId: pendingPush.projectId,
@@ -3423,14 +3477,21 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     /* Until the rows land, both buttons wear the wait itself. */
     continueLabel: pendingPushListState === "loading" ? "Loading sessions…" : null,
     continuePending: pendingPushListState === "loading",
-    onClose: () => {
-      if (busy) return;
-      setPendingPush(null);
-      setPushError(null);
-      setPushProjectContentRemovals(new Set());
-      setPushWarningAcknowledgements(new Set());
-    },
-    content: (
+    onClose: closePushReview,
+    content: pushSessionEntry && pendingPush.threadComparison ? (
+      <SessionPushReview
+        credentialRedactionEnabled={pendingPush.credentialRedactionEnabled}
+        entry={pushSessionEntry}
+        facts={pendingPush.session ?? null}
+        storageName={pendingPush.storage.name}
+        selected={safePushSelection}
+        threadComparison={pendingPush.threadComparison}
+        busy={busy}
+        fetchProgress={fetchProgress}
+        onClose={closePushReview}
+        onPush={() => void publishPendingPush()}
+      />
+    ) : (
       <PushResourceWorkspace
         credentialRedactionEnabled={pendingPush.credentialRedactionEnabled}
         onSessionActionError={setSessionActionError}
@@ -3443,7 +3504,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         busy={busy || projectContentLoading}
         threadComparisonError={pendingPush.threadComparisonError}
         project={pendingPush.project}
-        binding={pendingPush.binding}
+        binding={pushActivityBinding}
         storageId={pendingPush.storageId}
         storageName={pendingPush.storage.name}
         refreshEpoch={historyRefreshEpoch}
@@ -3475,13 +3536,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           else next.add(warningDigest);
           return next;
         })}
-        onClose={() => {
-          if (busy) return;
-          setPendingPush(null);
-          setPushError(null);
-          setPushProjectContentRemovals(new Set());
-          setPushWarningAcknowledgements(new Set());
-        }}
+        onClose={closePushReview}
         onPush={() => void publishPendingPush()}
         onPull={() => {
           setPendingPush(null);
@@ -3958,7 +4013,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onCloseSessionDetail={closeProjectSubview}
             onLinkStorage={(projectId, storageId) => linkStorage(projectId, storageId)}
             onUnlinkStorage={(projectId, storageId) => unlinkStorage(projectId, storageId)}
-            onPush={(projectId, storageId) => openPushChooser(projectId, storageId)}
+            onPush={(projectId, storageId, scope, session) => openPushChooser(projectId, storageId, scope, session)}
             onPull={(projectId, storageId) => beginProjectRestore(projectId, storageId)}
             siblingNotice={siblingNotice}
             onConnectSibling={(projectId, storageId, matches) => {

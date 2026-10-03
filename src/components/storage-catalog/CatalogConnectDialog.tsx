@@ -65,6 +65,7 @@ export default function CatalogConnectDialog({
     : { kind: "item", coordinate, noun, resourceId: reason.resourceId, name: reason.name, offerNew: reason.kind === "connect" };
   const choice = useCloudRepositoryChoice({
     storageId,
+    scopeId,
     accountLogin,
     target,
     working,

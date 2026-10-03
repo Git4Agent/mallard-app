@@ -1,15 +1,15 @@
 import {
-  IconCircle,
-  IconCircleCheck,
-  IconCircleMinus,
-  IconClock,
-  IconCloudDownload,
+  IconArrowFork,
+  IconCircleArrowDownFilled,
+  IconCircleArrowUpFilled,
+  IconCircleCheckFilled,
+  IconCircleDashed,
+  IconCircleFilled,
+  IconClockFilled,
   IconDots,
   IconExclamationCircleFilled,
-  IconGitMerge,
-  IconHelpCircle,
-  IconSquareRounded,
-  IconUpload,
+  IconHelpCircleFilled,
+  IconMinus,
   type TablerIcon,
 } from "@tabler/icons-react";
 import type { HTMLAttributes } from "react";
@@ -32,20 +32,20 @@ interface ThreadStatusIconProps extends Omit<HTMLAttributes<HTMLSpanElement>, "c
 }
 
 const PRIMARY_ICONS = {
-  synced: IconCircleCheck,
-  pending: IconClock,
+  synced: IconCircleCheckFilled,
+  "cloud-outstanding": IconCircleArrowDownFilled,
+  "local-outstanding": IconCircleArrowUpFilled,
+  pending: IconClockFilled,
   conflict: IconExclamationCircleFilled,
-  unavailable: IconCircleMinus,
-  unknown: IconHelpCircle,
+  untracked: IconCircleDashed,
+  unknown: IconHelpCircleFilled,
 } satisfies Partial<Record<ThreadStatusIconName, TablerIcon>>;
 
 type CompositeStatus = Exclude<ThreadStatusIconName, keyof typeof PRIMARY_ICONS>;
 
 const COMPOSITE_GLYPHS: Record<CompositeStatus, TablerIcon> = {
-  "cloud-outstanding": IconCloudDownload,
-  "local-outstanding": IconUpload,
-  divergent: IconGitMerge,
-  untracked: IconSquareRounded,
+  divergent: IconArrowFork,
+  unavailable: IconMinus,
   checking: IconDots,
 };
 
@@ -59,7 +59,7 @@ export default function ThreadStatusIcon({
   const classes = ["thread-status-icon", className].filter(Boolean).join(" ");
   const PrimaryIcon = (PRIMARY_ICONS as Partial<Record<ThreadStatusIconName, TablerIcon>>)[status];
   const CompositeGlyph = PrimaryIcon ? null : COMPOSITE_GLYPHS[status as CompositeStatus];
-  const glyphSize = Math.max(8, Math.round(size * 0.56));
+  const glyphSize = Math.max(8, Math.round(size * 0.6));
 
   return (
     <span
@@ -77,16 +77,15 @@ export default function ThreadStatusIcon({
         />
       ) : (
         <>
-          <IconCircle
+          <IconCircleFilled
             className="thread-status-icon-badge"
             size={size}
-            stroke={2}
           />
           {CompositeGlyph && (
             <CompositeGlyph
               className={`thread-status-icon-glyph${status === "checking" ? " thread-status-icon-dots" : ""}`}
               size={glyphSize}
-              stroke={2}
+              stroke={3}
             />
           )}
         </>

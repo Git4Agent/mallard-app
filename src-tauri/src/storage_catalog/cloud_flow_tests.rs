@@ -351,6 +351,63 @@ async fn cloud_public_repository_can_be_connected_without_account_membership() {
             .is_empty(),
         "a public repository is no one's share"
     );
+    // Starred and Public list it for the reader, by this row's coordinate
+    // and, at the door, by any coordinate this build opens.
+    let reader_id = {
+        let mut state = stub.state.lock().unwrap();
+        let reader_id = state
+            .users
+            .values()
+            .find(|user| user.login == "public-reader")
+            .unwrap()
+            .id
+            .clone();
+        state.star(&reader_id, &repository.repository_id);
+        state.describe(&repository.repository_id, "Public fixture skill.");
+        reader_id
+    };
+    {
+        use mallard_infrastructure::managed_cloud::client::PublicSort;
+        let starred = service
+            .list_cloud_starred(Some(&reader_scope), &reader.storage.id, None)
+            .await
+            .unwrap();
+        assert_eq!(starred.rows.len(), 1);
+        assert_eq!(starred.rows[0].address, repository.address);
+        assert_eq!(starred.rows[0].role, None);
+        assert!(starred.rows[0].viewer_starred);
+        assert_eq!(
+            starred.rows[0].description.as_deref(),
+            Some("Public fixture skill.")
+        );
+        let listed = service
+            .list_cloud_public(
+                Some(&reader_scope),
+                &reader.storage.id,
+                PublicSort::Newest,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .rows
+                .iter()
+                .map(|row| row.repository_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![repository.repository_id.as_str()]
+        );
+        assert_eq!(listed.rows[0].star_count, 1);
+        let any = service
+            .list_cloud_public(None, &reader.storage.id, PublicSort::Stars, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            any.rows.len(),
+            1,
+            "the door lists every kind this build opens"
+        );
+    }
     let public = found(
         service
             .resolve_cloud_repository(&reader.storage.id, &repository.address)
@@ -370,6 +427,13 @@ async fn cloud_public_repository_can_be_connected_without_account_membership() {
         )
         .await
         .unwrap();
+    // Add put the public item on the reader's Catalog on the service, so
+    // another computer's Library refresh lists it too.
+    assert!(stub
+        .state
+        .lock()
+        .unwrap()
+        .catalog_added(&reader_id, &repository.repository_id));
     blocking(&reader, move |fixture| {
         let plan = prepare_pull(fixture, &reader_scope);
         let source = plan.sources.values().next().unwrap();

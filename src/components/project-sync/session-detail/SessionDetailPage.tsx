@@ -28,7 +28,9 @@ import {
   sessionDetailFilterFingerprint,
   sessionDetailFilterToggles,
   type SessionDetailFilters,
+  sessionPushFacts,
 } from "./sessionDetailModel";
+import type { PushSessionFacts } from "../ProjectActivityPage";
 
 const TIMELINE_PAGE_SIZE = 50;
 
@@ -47,6 +49,8 @@ export type SessionHeaderModel =
     active: boolean;
     refreshing: boolean;
     onRefresh: () => void;
+    /** What the row of this session's own Push review prints. */
+    pushFacts: PushSessionFacts;
     /** Set on an agent's page: the parent session the crumb trail returns to. */
     parent?: { resourceId: string; title: string } | null;
   }
@@ -192,6 +196,7 @@ export default function SessionDetailPage({
       active: detail.is_active,
       refreshing: detailLoading,
       onRefresh: refreshSession,
+      pushFacts: sessionPushFacts(detail),
       parent: detail.agent
         ? { resourceId: detail.agent.parent_resource_id, title: detail.agent.parent_title }
         : null,

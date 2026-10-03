@@ -16,6 +16,7 @@ import type {
   CatalogScopeRow,
   CatalogScopeView,
 } from "./components/storage-catalog/types";
+import type { ManagedCloudListingRow } from "./components/managed-cloud/types";
 import ProviderMark from "./components/sync-review/ProviderMark";
 import SyncPathBar, { PathBarBelow, type PathBarCrumb } from "./components/sync-review/SyncPathBar";
 import ThreadStatusIcon from "./components/sync-review/ThreadStatusIcon";
@@ -147,7 +148,7 @@ function repository(id: PetId, owner: string, role: string | null, visibility: "
   const it = PETS[id];
   return {
     ...COORDINATE, provider_label: "Codex", kind_label: "Pets v2", format_label: "Codex pet v2",
-    repository_id: `repo_${owner.toLowerCase()}_${id}`, owner_login: owner, name: it.name, address: `${owner}/${it.name}`,
+    repository_id: `repo_${owner.toLowerCase()}_${id}`, owner_login: owner, name: it.name, address: `${owner}/${it.name}`, description: null, star_count: 0, viewer_starred: false,
     website_url: `https://${HOST}/${owner}/${it.name}`, visibility, role, can_push: role !== null, revision, updated_at: updatedAt,
     registration_only: false, resource_id: id, display_name: it.name, available: true,
   };
@@ -174,6 +175,19 @@ let listedNow: ReadonlySet<string> = new Set();
 storageCatalogApi.listCloudShared = async () => {
   await wait(300);
   return SHARED.filter((row) => !listedNow.has(row.resource_id));
+};
+const listedPet = (id: PetId, owner: string, stars: number, starred: boolean, revision: number, updatedAt: number): ManagedCloudListingRow => ({
+  repository_id: `repo_${owner.toLowerCase()}_${id}`, owner_login: owner, name: PETS[id].name, address: `${owner}/${PETS[id].name}`,
+  website_url: `https://${HOST}/${owner}/${PETS[id].name}`, repository_class: "catalog", catalog: COORDINATE, visibility: "public",
+  role: null, github_url: null, description: PETS[id].description, star_count: stars, viewer_starred: starred, revision, updated_at: updatedAt,
+});
+const STARRED_PETS = [listedPet("mochi", "maya", 12, true, 5, now - 6 * DAY)];
+const PUBLIC_PETS = [listedPet("pebble", "nova", 31, false, 8, now - DAY), ...STARRED_PETS, listedPet("fable", "jun", 2, false, 2, now - 20 * DAY)];
+storageCatalogApi.listCloudStarred = async () => { await wait(300); return { rows: STARRED_PETS, next_cursor: null }; };
+storageCatalogApi.listCloudPublic = async (_scopeId, _storageId, sort) => {
+  await wait(400);
+  const rows = sort === "stars" ? [...PUBLIC_PETS].sort((a, b) => b.star_count - a.star_count) : PUBLIC_PETS;
+  return { rows, next_cursor: null };
 };
 storageCatalogApi.resolveCloudRepository = async (_storageId, address) => {
   await wait(400);

@@ -2957,9 +2957,9 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
   font-variant-numeric: tabular-nums;
 }
 
-/* Breakpoints: the window floor is 800×560 (tauri.conf.json minWidth/minHeight),
-   so no max-width query below 800px can ever fire — don't add one. The live
-   ladder is 820 / 900 / 980 / 1040; anything narrower is unreachable. */
+/* Breakpoints: the window floor is 824×560 (tauri.conf.json minWidth/minHeight),
+   so no max-width query below 824px can ever fire — don't add one. The live
+   ladder is 860 / 900 / 980 / 1040; anything narrower is unreachable. */
 @media (max-width: 980px) {
   .sync-field-grid.three { grid-template-columns: 1fr 1fr; }
 }
@@ -3676,12 +3676,17 @@ span.sync-path-crumb {
   text-align: left;
   white-space: normal;
   pointer-events: none;
-  visibility: hidden;
+  display: none;
 }
 
+/* `display`, not `visibility`, the way the bar's menus open. The tooltip hangs
+   past the bar over the page panel, which WebKit keeps on a layer of its own. A
+   box that only turns visible is not checked against that layer again, so it
+   stayed under it and was cut off at the panel's top edge. A box that is
+   created is checked. */
 .sync-path-attention[data-tooltip]:hover::after,
 .sync-path-attention[data-tooltip]:focus-visible::after {
-  visibility: visible;
+  display: block;
 }
 
 /* Refresh: maintenance, not one of the two verbs, so it keeps the row without
@@ -3728,8 +3733,8 @@ span.sync-path-crumb {
 
 /* Below this the row cannot hold three names, two verbs and the branch at once.
    Keep the data-moving verbs visible. Reduce secondary path and branch detail
-   first. The floor is 580px: an 800px minimum window less the 220px minimum
-   sidebar. */
+   first. The floor is 580px: an 824px minimum window less the 220px minimum
+   sidebar and the 24px frame around the two tiles. */
 @container sync-pathbar (max-width: 760px) {
   .sync-path-sync {
     padding: 0 8px;
@@ -3763,10 +3768,10 @@ span.sync-path-crumb {
   }
 }
 
-/* Near the floor — 580px, an 800px minimum window less a 220px minimum sidebar
-   — both ancestors are down to their icons and the section keeps six
-   characters. The branch never gives up a letter: it is the only thing in the
-   row that nothing else on screen repeats. */
+/* Near the floor — 580px, an 824px minimum window less a 220px minimum sidebar
+   and the 24px frame — both ancestors are down to their icons and the section
+   keeps six characters. The branch never gives up a letter: it is the only
+   thing in the row that nothing else on screen repeats. */
 @container sync-pathbar (max-width: 640px) {
   .sync-path-crumb-link > span {
     display: none;
@@ -5478,24 +5483,6 @@ span.sync-path-crumb {
 
 }
 
-@media (max-width: 820px) {
-    .profile-links-heading {
-    flex-direction: column;
-  }
-
-  .profile-links-heading-actions {
-    width: 100%;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .profile-link-card {
-    grid-template-columns: 1fr;
-  }
-
-}
-
 /* Project setup workspace (resumable drafts) */
 /* The page scrolls the way every other workspace screen does: .sync-main is
    the scroller, so the one scrollbar rides the workspace tile's edge instead
@@ -6546,6 +6533,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+  color: var(--status-icon-cutout);
 }
 
 .thread-status-icon[data-thread-status="synced"] { color: var(--status-icon-synced); }
@@ -6614,19 +6602,21 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-thread-sync-indicator.checking,
 .sync-thread-sync-indicator.unknown { color: var(--text-3); }
 
-/* A restrained pulse makes comparison activity visible without changing the
-   status icon's geometry or relying on hue alone. */
-.thread-status-icon-dots {
-  animation: thread-status-pulse 1.2s ease-in-out infinite;
+/* Move the dots in sequence while the badge and row stay fixed. */
+.thread-status-icon-dots > path:not([stroke="none"]) {
+  animation: thread-status-dot-bounce 0.9s ease-in-out infinite;
 }
 
-@keyframes thread-status-pulse {
-  0%, 100% { opacity: 0.32; }
-  50% { opacity: 1; }
+.thread-status-icon-dots > path:nth-last-child(2) { animation-delay: 0.15s; }
+.thread-status-icon-dots > path:last-child { animation-delay: 0.3s; }
+
+@keyframes thread-status-dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-4px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .thread-status-icon-dots { animation: none; opacity: 1; }
+  .thread-status-icon-dots > path:not([stroke="none"]) { animation: none; transform: none; }
 }
 
 /* The provider's own mark, on the button that opens that provider. Monochrome:
@@ -9780,6 +9770,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --status-icon-untracked: #aaa69d;
   --status-icon-checking: #62d0e8;
   --status-icon-unknown: #d4b7ff;
+  --status-icon-cutout: #211c14;
   --focus-ring: #e9b949;
   /* On espresso paper the ink line is the light edge and the cast shadow the
      dark one. The line is the tan control edge (5.9:1 on the paper) rather
@@ -9918,6 +9909,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --status-icon-untracked: #6b7280;
   --status-icon-checking: #00758a;
   --status-icon-unknown: #6d529d;
+  --status-icon-cutout: #fffdf7;
   --focus-ring: #805b15;
   /* Cream paper is printed in espresso: the ink line and the cast shadow
      are both the text ink, a hard cut rather than a translucent wash. */
@@ -12669,7 +12661,8 @@ span.sync-update-pill {
    the only tinted things left are the banner and the footer, which is what
    makes each of them read as a distinct band. */
 
-.sync-sync-review-tabs button {
+/* The strip's own tabs only: the cloud picker's sort pill rides inside it. */
+.sync-sync-review-tabs > button {
   border-radius: 3px;
 }
 
@@ -13156,6 +13149,41 @@ span.sync-update-pill {
 .repo-list-empty { margin: -4px 0 0; color: var(--text-3); font-family: var(--font-sans); font-size: var(--type-xs); }
 .repo-answer-line { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); font-family: var(--font-sans); font-size: var(--type-xs); }
 .repo-answer-line svg { color: var(--success-text); }
+/* The picker's scopes — Yours or Shared with you, Starred, Public — are
+   the review strip's tabs at the dialog's measure; Public's sort rides at
+   the strip's end while Public is open. */
+.repo-scope-tabs { min-height: 36px; margin: 0; padding: 0; gap: 18px; }
+.repo-scope-tabs > button { min-height: 35px; font-size: var(--type-xs); }
+.repo-scope-tabs > button > svg { flex: none; }
+.repo-scope-tabs > .repo-scope-sort { margin-left: auto; margin-bottom: 5px; }
+.repo-scope-sort button { height: 22px; padding: 0 8px; }
+/* A row: the choice row with a tile, the address and its marks on one
+   line, the description (else the role) under it, and a meta column that
+   says role, stars and age. The pet tile is the Catalog card's preview at
+   the row's size; the star takes the warning ink once it is the account's. */
+.repo-row { align-items: flex-start; }
+.repo-row > .sync-bundle-radio { margin-top: 5px; }
+.repo-row > .sync-storage-repository-icon { margin-top: 1px; }
+.repo-row > .repo-row-tile { width: 36px; height: 40px; border-radius: 8px; }
+.repo-row .sync-bundle-choice-copy strong,
+.repo-row .sync-bundle-match-copy strong { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.repo-row .sync-bundle-choice-copy strong > span,
+.repo-row .sync-bundle-match-copy strong > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: inherit; font-size: inherit; color: inherit; }
+.repo-row .sync-bundle-choice-copy strong > svg,
+.repo-row .sync-bundle-match-copy strong > svg { flex: none; color: var(--text-3); }
+.repo-row .sync-bundle-choice-copy strong > code,
+.repo-row .sync-bundle-match-copy strong > code { flex: none; color: var(--text-3); font-family: var(--font-mono); font-size: var(--type-3xs); font-weight: var(--weight-regular); }
+.repo-row .sync-bundle-choice-copy > .repo-row-blurb,
+.repo-row .sync-bundle-match-copy > .repo-row-blurb { font-family: var(--font); font-size: var(--type-2xs); color: var(--text-2); white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.repo-row .repo-row-blurb:empty { display: none; }
+.repo-row .sync-bundle-choice-meta { gap: 2px; }
+.repo-row .sync-bundle-choice-meta small { display: inline-flex; align-items: center; gap: 4px; }
+.repo-row .sync-bundle-choice-meta small > svg { color: var(--text-3); }
+.repo-row.starred .sync-bundle-choice-meta small > svg { color: var(--warning-text); }
+/* The empty tab and the next page: the shipped empty box inside the list's
+   frame, and the Activity page's Load-earlier foot without its rail. */
+.repo-scope-empty { border-bottom: 0; }
+.repo-list-foot { --sync-history-card-offset: 0px; margin-top: 8px; }
 
 .catalog-cloud-connections { margin: 16px 0; padding: 18px; border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--bg-1); }
 .catalog-cloud-connect-actions, .catalog-cloud-item { display: flex; align-items: center; gap: 8px; }

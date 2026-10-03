@@ -239,9 +239,35 @@ test("the path bar's trail is sized by the bar, never by the window", () => {
     /\.sync-path-sync-label\s*\{[^}]*display:\s*none/,
     "compact layouts must keep Push and Pull visible",
   );
-  assert.match(shell, /const MIN_PROJECT_WORKSPACE_WIDTH = 580;/);
-  assert.match(shell, /window\.innerWidth - MIN_PROJECT_WORKSPACE_WIDTH/);
+  assert.match(shell, /window\.innerWidth - PROJECT_WINDOW_FRAME_WIDTH - MIN_PROJECT_WORKSPACE_WIDTH/);
   assert.match(css, /\.sync-pathbar \.sync-history-branch-name,[\s\S]*?display: none;/);
+});
+
+// The ladder is laid out down to a 580px bar. The window frame sits between the
+// window and the bar: an 8px gutter each side and the 8px resize seam. Counted
+// as bar, it let an 800px window, or a sidebar dragged to its limit in any
+// window, put the bar at 556px, and the Git trail ran under the attention chip.
+test("the path bar never goes under its 580px floor", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")) as {
+    app: { windows: { minWidth: number }[] };
+  };
+  const constant = (name: string) => Number(shell.match(new RegExp(`const ${name} = (\\d+);`))?.[1]);
+
+  assert.match(css, /--retro-gutter-x: 8px;/);
+  assert.match(css, /\n\.sync-app \{[^}]*padding: var\(--retro-gutter\) var\(--retro-gutter-x\);/);
+  assert.match(css, /\n\.sync-sidebar-resizer \{[^}]*width: 12px;[^}]*margin-right: -2px;[^}]*margin-left: -2px;/);
+  const frame = 2 * 8 + (12 - 2 - 2);
+  assert.equal(constant("PROJECT_WINDOW_FRAME_WIDTH"), frame);
+
+  const floor = constant("MIN_PROJECT_WORKSPACE_WIDTH");
+  assert.equal(floor, 580);
+  assert.equal(
+    config.app.windows[0].minWidth - constant("MIN_PROJECT_SIDEBAR_WIDTH") - frame,
+    floor,
+    "the smallest window must still give the bar its floor",
+  );
 });
 
 // The bar does not clip and its action cluster runs the bar's full height, so
@@ -571,7 +597,7 @@ test("host-scoped workflows keep their originating epoch across async continuati
 
   const keepBundle = section(workspace, "keepPendingBundle", "removeProject");
   capturesBefore(keepBundle, "await saveStorageLink");
-  assert.match(keepBundle, /openPushChooser\(pending\.projectId, pending\.storageId, workflowEpoch\)/);
+  assert.match(keepBundle, /openPushChooser\(pending\.projectId, pending\.storageId, \{ kind: "project" \}, undefined, workflowEpoch\)/);
 
   const removeProject = section(workspace, "removeProject", "closePullReview");
   capturesBefore(removeProject, "await confirm(");

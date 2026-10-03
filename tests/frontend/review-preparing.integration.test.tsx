@@ -136,7 +136,7 @@ test("every prepare ends the card with what replaces it, and nothing celebrates 
   // Both prepares race their calls and close the card in their finally.
   assert.match(sync, /const preparing = beginPreparing\("push", projectId, storageId\);/);
   assert.match(sync, /const preparing = beginPreparing\("pull", projectId, storageId\);/);
-  assert.match(sync, /preparing\.race\(projectSyncApi\.preparePushReview\(projectId, storageId\)\)/);
+  assert.match(sync, /preparing\.race\(projectSyncApi\.preparePushReview\(projectId, storageId, scope\)\)/);
   assert.equal(sync.match(/} finally \{\s*(?:\/\/[^\n]*\n\s*)*preparing\.finish\(\);/g)?.length, 3);
   // Pull's metadata accept is a write: Cancel is withdrawn before it.
   assert.match(sync, /preparing\?\.writing\(\);\s*await acceptPullMetadata/);

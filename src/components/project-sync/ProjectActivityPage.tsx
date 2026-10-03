@@ -58,6 +58,7 @@ export interface ActivityHeaderModel {
   counts: ActivityHeaderCounts;
   /** The whole comparison failed, as against one provider's failing. */
   comparisonError: string | null;
+  comparison: ThreadSyncComparison | null;
   refreshing: boolean;
   onRefresh: () => void;
 }
@@ -731,7 +732,7 @@ export function unresolvedSyncPresentation({
    the interval; the start is that minus the duration sitting beside the other
    readouts. Both ends, and the last input between them — the time that places
    the session on its commit — are spelled out in full in the label. */
-function SessionTimestamp({ session }: { session: ProjectSessionSummary }) {
+function SessionTimestamp({ session }: { session: SessionRowMetrics }) {
   const startedLabel = `Started ${formatFullDateTime(session.started_at)}`;
   const endedLabel = `${session.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(session.ended_at)}${session.is_active ? ", active" : ""}`;
   const lastInputLabel = session.last_prompt_at == null
@@ -756,6 +757,32 @@ export interface ReviewSizeReadout {
   label: "Push size" | "Pull size";
 }
 
+function ReviewSizeMetric({ readout }: { readout: ReviewSizeReadout }) {
+  return (
+    <span className="sync-history-thread-metric" data-tooltip={`${readout.label} · ${formatBytes(readout.bytes)}`} aria-label={`${readout.label}: ${formatBytes(readout.bytes)}`} tabIndex={0}>
+      <Icon name="drive" size={12} /><b>{formatBytes(readout.bytes)}</b>
+    </span>
+  );
+}
+
+/** The readouts a session row prints, as the summary fields that hold them.
+ *  Activity rows pass the whole summary; a session's own page reports the
+ *  same fields for the row of its Push review. */
+export type SessionRowMetrics = Pick<
+  ProjectSessionSummary,
+  | "started_at"
+  | "ended_at"
+  | "last_prompt_at"
+  | "is_active"
+  | "user_round_count"
+  | "agent_message_count"
+  | "tool_call_count"
+  | "total_input_tokens"
+  | "total_output_tokens"
+  | "total_tokens"
+  | "metrics_complete"
+>;
+
 export function reviewSizeReadout(
   mode: "push" | "pull" | undefined,
   entry: ThreadSyncEntry | undefined,
@@ -770,11 +797,14 @@ export function SessionMetrics({
   id,
   showTimestamp = true,
   sizeReadout = null,
+  subagents = null,
 }: {
-  session: ProjectSessionSummary;
+  session: SessionRowMetrics;
   id?: string;
   showTimestamp?: boolean;
   sizeReadout?: ReviewSizeReadout | null;
+  /** The subagent transcripts a Push of this session carries with it. */
+  subagents?: { count: number; bytes: number } | null;
 }) {
   const durationText = formatDuration(session.started_at, session.ended_at);
   const durationLabel = durationText
@@ -783,6 +813,9 @@ export function SessionMetrics({
   const totalTokens = formatCount(session.total_tokens);
   const totalInputTokens = formatCount(session.total_input_tokens);
   const totalOutputTokens = formatCount(session.total_output_tokens);
+  /* A total with neither part beside it prints alone: "Not reported" twice
+     would speak for a split the row was never given. */
+  const tokenSplit = session.total_input_tokens != null || session.total_output_tokens != null;
 
   return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
     {/* Ordered by what the row is about: the exchange first, then the work it
@@ -791,18 +824,24 @@ export function SessionMetrics({
         split, one value per line. */}
     <span className="sync-history-thread-metric" data-tooltip={`Prompts · ${session.user_round_count}\nReplies · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. Prompts: ${session.user_round_count}. Replies: ${session.agent_message_count}`} tabIndex={0}><SessionRowIcon name="message" /><b>{session.user_round_count + session.agent_message_count}</b></span>
     {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><SessionRowIcon name="tool" /><b>{session.tool_call_count}</b></span>}
-    <span className="sync-history-thread-metric" data-tooltip={`Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}`} aria-label={`Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}`} tabIndex={0}><SessionRowIcon name="token" /><b>{totalTokens}</b></span>
+    <span
+      className="sync-history-thread-metric"
+      data-tooltip={tokenSplit ? `Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}` : `Total tokens · ${totalTokens}`}
+      aria-label={tokenSplit ? `Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}` : `Total tokens: ${totalTokens}`}
+      tabIndex={0}
+    ><SessionRowIcon name="token" /><b>{totalTokens}</b></span>
     {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
         <SessionRowIcon name={session.is_active ? "activity" : "clock"} /><b>{durationText}</b>
       </span>
     )}
-    {sizeReadout && (
-      <span className="sync-history-thread-metric" data-tooltip={`${sizeReadout.label} · ${formatBytes(sizeReadout.bytes)}`} aria-label={`${sizeReadout.label}: ${formatBytes(sizeReadout.bytes)}`} tabIndex={0}>
-        <Icon name="drive" size={12} /><b>{formatBytes(sizeReadout.bytes)}</b>
+    {subagents && subagents.count > 0 && (
+      <span className="sync-history-thread-metric" data-tooltip={`Subagents · ${subagents.count}\nPush size · ${formatBytes(subagents.bytes)}`} aria-label={`Subagents: ${subagents.count}. Push size: ${formatBytes(subagents.bytes)}`} tabIndex={0}>
+        <Icon name="git-fork" size={12} /><b>{subagents.count}</b>
       </span>
     )}
+    {sizeReadout && <ReviewSizeMetric readout={sizeReadout} />}
     {showTimestamp && <SessionTimestamp session={session} />}
   </div>;
 }
@@ -1602,15 +1641,92 @@ function SyncEntryCard({
           takes all 36 characters whole. */}
       <span className="sync-history-stored-thread-meta">
         <span className="sync-history-stored-thread-id"><code>{entry.thread_id}</code></span>
-        {sizeReadout && (
-          <span className="sync-history-thread-metric" data-tooltip={`${sizeReadout.label} · ${formatBytes(sizeReadout.bytes)}`} aria-label={`${sizeReadout.label}: ${formatBytes(sizeReadout.bytes)}`} tabIndex={0}>
-            <Icon name="drive" size={12} /><b>{formatBytes(sizeReadout.bytes)}</b>
-          </span>
-        )}
+        {sizeReadout && <ReviewSizeMetric readout={sizeReadout} />}
         {updatedAt != null && (
           <time dateTime={new Date(updatedAt * 1_000).toISOString()}>{formatDate(updatedAt)}</time>
         )}
       </span>
+    </article>
+  );
+}
+
+/** What a session's own page knows about it, for the row of its Push review.
+ *  The review's comparison carries the rest: status, provider, size. */
+export interface PushSessionFacts {
+  title: string;
+  metrics: SessionRowMetrics;
+}
+
+/** The one row of a session's own Push review: the review's session row with
+ *  nothing to select and nothing to open. `facts` is null when the session's
+ *  page had not loaded; the comparison entry alone still names and sizes it. */
+export function SessionPushRow({ entry, storageName, facts }: {
+  entry: ThreadSyncEntry;
+  storageName: string;
+  facts: PushSessionFacts | null;
+}) {
+  const fullTitle = facts?.title
+    ?? (entry.display_name.trim() && entry.display_name !== entry.thread_id ? entry.display_name : "Untitled session");
+  const title = compactThreadTitle(fullTitle);
+  const reviewStateLabel = syncReviewStateLabel("push", entry, true);
+  const sizeReadout = reviewSizeReadout("push", entry);
+  const subagents = {
+    count: entry.subagent_selection.keys.length,
+    bytes: entry.subagent_selection.estimated_bytes,
+  };
+  return (
+    <article className="sync-history-thread-card">
+      <div className="sync-history-thread-topline">
+        <div className="sync-history-thread-title">
+          {reviewStateLabel ? (
+            <ReviewSyncIndicator
+              entry={entry}
+              storageName={storageName}
+              label={reviewStateLabel}
+              detail={syncHoldDetail("push", entry)}
+            />
+          ) : (
+            <SessionSyncIndicator presentation={sessionSyncPresentation(entry, storageName)} />
+          )}
+          <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+          {entry.subagent_selection.omitted && <ChildOmissionIcon />}
+          {entry.state === "synced" && entry.push_decision.action === "publish" && (
+            <span className="sync-history-branch-state history-only">{entry.status_detail ?? "Export settings changed"}</span>
+          )}
+        </div>
+        {/* The session's page already opens it elsewhere, so the mark is the
+            row's provider identity and nothing more. */}
+        <div className="sync-history-thread-actions">
+          <span
+            className="sync-history-launch-action sync-history-provider-inert"
+            title={`${entry.provider_display_name} session`}
+            aria-label={`${entry.provider_display_name} session`}
+          >
+            <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
+          </span>
+        </div>
+      </div>
+      <div className="sync-history-session-details">
+        <div className="sync-history-session-summary">
+          {facts ? (
+            <>
+              <SessionMetrics session={facts.metrics} showTimestamp={false} sizeReadout={sizeReadout} subagents={subagents} />
+              <SessionTimestamp session={facts.metrics} />
+            </>
+          ) : (
+            <>
+              <div className="sync-history-thread-meta" aria-label="Session details">
+                {sizeReadout && <ReviewSizeMetric readout={sizeReadout} />}
+              </div>
+              {entry.local_updated_at != null && (
+                <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end">
+                  <time dateTime={new Date(entry.local_updated_at * 1_000).toISOString()}>{formatFullDateTime(entry.local_updated_at)}</time>
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </article>
   );
 }
@@ -2661,6 +2777,7 @@ export default function ProjectActivityPage({
     onSelectBranch: changeBranch,
     counts: headerCounts,
     comparisonError,
+    comparison,
     refreshing: loading || comparisonLoading,
     onRefresh: refreshActivity,
   }), [
@@ -2672,6 +2789,7 @@ export default function ProjectActivityPage({
     activeStorageId,
     managedCloudStatus,
     comparisonError,
+    comparison,
     loading,
     comparisonLoading,
     refreshActivity,

@@ -21,6 +21,7 @@ import type {
   ProjectBinding,
   ProjectStorageLink,
   ProviderProfileSummary,
+  PushScope,
   RemoteBundleSummary,
   SiblingBundleStatus,
   StorageProviderDescriptor,
@@ -32,13 +33,14 @@ import Icon, { storageIconName } from "../Icons";
 import { NoticeChip, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDateTime, formatRelativeTime, toEpochMilliseconds } from "../../clock";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
-import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel } from "./ProjectActivityPage";
+import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel, type PushSessionFacts } from "./ProjectActivityPage";
 import { ProjectFilesActivityView, projectFileSyncCounts, useProjectFilesScan } from "./ProjectFilesActivityPage";
 import ProjectViewSwitch, { PROJECT_VIEW_PANEL_ID, projectViewTabId, type ProjectView } from "./ProjectViewSwitch";
 import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
 } from "./session-detail/sessionDetailModel";
+import { sessionPushDisabledReason } from "./session-detail/sessionDetailModel";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
@@ -131,7 +133,8 @@ export type StorageNotice = {
   storageId: string;
 } & (
   | { kind: "requires_pull"; copy: PullRequiredCopy }
-  | { kind: "action_failed"; action: "push" | "pull"; message: string }
+  | { kind: "action_failed"; action: "push"; scope: PushScope; session?: PushSessionFacts; message: string }
+  | { kind: "action_failed"; action: "pull"; message: string }
   /** A cleared storage this computer synced with before: nothing to pull. */
   | { kind: "nothing_to_pull"; message: string }
   /** A finished Push or Pull; the flow has already closed behind it. */
@@ -163,7 +166,7 @@ interface Props {
   onCloseSessionDetail: () => void;
   onLinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
-  onPush: (projectId: string, storageId: string) => Promise<void> | void;
+  onPush: (projectId: string, storageId: string, scope: PushScope, session?: PushSessionFacts) => Promise<void> | void;
   onPull: (projectId: string, storageId: string) => Promise<void> | void;
   /** Sibling detection for the active pair: another repo in this storage
       carries the same repository. */
@@ -1410,11 +1413,7 @@ export default function ProjectLinksWorkspace({
     || !!runningAction
     || storageActionLockedForReview(workspaceReviewKind, "storage");
 
-  // The section the page is showing. The activity page picks Git history for a
-  // git repo, and its crumb names it; a non-git project has two faces —
-  // Sessions and Files — and the way back from a session names the one it
-  // left. It reads the same facts off the project and the view state so the
-  // trail is right before the page has finished loading.
+  // Name the destination when returning from a session to its project.
   const workspaceSectionLabel = workspaceProject?.is_git_repository
     ? "Git history"
     : activityView === "files" ? "Files" : "Sessions";
@@ -2236,6 +2235,18 @@ export default function ProjectLinksWorkspace({
       // Inside a session the repo is the ancestor you came from, so its label
       // walks back out to the project's page; the menu stays on its chevron.
       onActivate: sessionDetailSubview ? closeSessionDetail : undefined,
+      scope: !sessionDetailSubview && workspaceProject.is_git_repository
+        && activityHeader && activityHeader.branches.length > 0 ? (
+          <>
+            <span className="sync-path-separator" aria-hidden="true">/</span>
+            <BranchPicker
+              branches={activityHeader.branches}
+              selectedBranch={activityHeader.selectedBranch}
+              disabled={activityHeader.refreshing}
+              onChange={activityHeader.onSelectBranch}
+            />
+          </>
+        ) : undefined,
       menuHeader: {
         label: projectLabel(workspaceProject),
         detail: workspaceProject.project_root
@@ -2309,9 +2320,7 @@ export default function ProjectLinksWorkspace({
       disabled: busy || !!inlineStorageReview,
     });
 
-    // A session is not inside Git history — it is the thing the history lists.
-    // So the section crumb names the page you are on and steps aside once you
-    // open a session, giving the title the width it needs.
+    // An open session follows its project in the trail.
     if (sessionDetailSubview) {
       // An agent's page sits under the session that delegated to it; the
       // parent is the crumb before the title, and the way back.
@@ -2359,27 +2368,6 @@ export default function ProjectLinksWorkspace({
           </span>
         ) : undefined,
       });
-    } else if (workspaceProject.is_git_repository) {
-      // Git history keeps its section and branch in the trail. A non-Git
-      // project's trail ends at the project: its Sessions/Files switch leads
-      // the page instead, on the search row.
-      pathCrumbs.push({
-        id: "section",
-        label: workspaceSectionLabel,
-        tone: "section",
-        // Which branch the history is showing is part of where you are, so it
-        // rides the crumb that names the section rather than a row of its own.
-        // A session replaces this crumb outright. The branch selects the Git
-        // commit rail; sessions remain project-wide.
-        scope: activityHeader && activityHeader.branches.length > 0 ? (
-          <BranchPicker
-            branches={activityHeader.branches}
-            selectedBranch={activityHeader.selectedBranch}
-            disabled={activityHeader.refreshing}
-            onChange={activityHeader.onSelectBranch}
-          />
-        ) : undefined,
-      });
     }
   }
 
@@ -2391,12 +2379,25 @@ export default function ProjectLinksWorkspace({
   // A badge on the button that clears it, rather than a tally beside it: "3 to
   // push" is what Push does, said once. The counts stand down while that
   // button is mid-review or mid-transfer, where its own label is the readout.
-  // Both verbs act on the whole project, so a non-Git project's files count
-  // beside its threads, on either face.
+  const sessionPushEntry = sessionDetailSubview
+    ? activityHeader?.comparison?.entries.find(
+      (entry) => entry.conversation_resource_id === sessionDetailSubview.resourceId,
+    )
+    : undefined;
+  const sessionPushIssue = !sessionDetailSubview ? null
+    : activityHeader?.projectId !== workspaceProject?.local_project_id
+      || activityHeader?.storageId !== workspaceStorage?.storage_id
+      || activityHeader.refreshing
+      ? "Checking session…"
+      : activityHeader.comparisonError
+        ?? sessionPushDisabledReason(sessionPushEntry);
   const pullThreadCount = activityHeader?.counts.pull ?? 0;
-  const pushThreadCount = activityHeader?.counts.push ?? 0;
+  const pushThreadCount = sessionDetailSubview
+    ? sessionPushIssue === null ? 1 : 0
+    : activityHeader?.counts.push ?? 0;
+  const pushFileCount = sessionDetailSubview ? 0 : projectFileCounts.push;
   const pullCount = pullThreadCount + projectFileCounts.pull;
-  const pushCount = pushThreadCount + projectFileCounts.push;
+  const pushCount = pushThreadCount + pushFileCount;
   // The file scan holds the host-operation lock both verbs take, so a click
   // during it would only be refused; they wait it out, and say why.
   const projectFilesScanIssue = projectFilesScan.loading ? "Scanning project files…" : null;
@@ -2405,13 +2406,13 @@ export default function ProjectLinksWorkspace({
   const attention = activityHeader?.counts.attention ?? 0;
 
   // One unlabelled refresh, scoped to the view: the open session when there is
-  // one, the activity comparison otherwise. Pull and Push keep their names and
-  // their project scope — only the bare glyph follows what you are looking at.
+  // one, the activity comparison otherwise. Refresh both reads in session
+  // detail so its Push eligibility is also current.
   const viewRefresh = sessionDetailSubview
     ? sessionHeader?.state === "ready" && {
-      refreshing: sessionHeader.refreshing,
-      onRefresh: sessionHeader.onRefresh,
-      label: sessionHeader.refreshing ? "Refreshing session" : "Refresh session",
+      refreshing: sessionHeader.refreshing || !!activityHeader?.refreshing,
+      onRefresh: () => { sessionHeader.onRefresh(); activityHeader?.onRefresh(); },
+      label: sessionHeader.refreshing || activityHeader?.refreshing ? "Refreshing session" : "Refresh session",
     }
     : filesFaceShown
       ? {
@@ -2547,6 +2548,7 @@ export default function ProjectLinksWorkspace({
           || cloudBlocksSync
           || (currentManagedCloudLink !== null && !currentManagedCloudLink.can_push)
           || !workspaceCanSync
+          || (!workspacePushReviewOpen && sessionPushIssue !== null)
           || storageActionLockedForReview(workspaceReviewKind, "push")
           || (workspacePushReviewOpen && inlineStorageReview?.continueDisabled)}
         onClick={() => {
@@ -2554,10 +2556,15 @@ export default function ProjectLinksWorkspace({
             inlineStorageReview?.onContinue?.();
             return;
           }
+          if (sessionDetailSubview && !sessionPushEntry) return;
           setLinkingProjectId(null);
           void run(
             `push:${workspaceActionPrefix}`,
-            () => onPush(workspaceProject.local_project_id, workspaceStorage.storage_id),
+            () => onPush(workspaceProject.local_project_id, workspaceStorage.storage_id,
+              sessionDetailSubview && sessionPushEntry
+                ? { kind: "session", resource_id: sessionPushEntry.resource_id }
+                : { kind: "project" },
+              sessionDetailSubview && sessionHeader?.state === "ready" ? sessionHeader.pushFacts : undefined),
           );
         }}
         title={workspaceStorageIssue
@@ -2565,11 +2572,13 @@ export default function ProjectLinksWorkspace({
           ?? projectFilesScanIssue
           ?? (workspacePushReviewOpen
             ? (inlineStorageReview?.continueTitle ?? "Push the selected resources to this storage")
-            : "Choose resources, then push them to this storage")}
+            : sessionPushIssue ?? (sessionDetailSubview
+              ? "Review and push this session to this storage"
+              : "Choose resources, then push them to this storage"))}
         aria-label={workspacePushReviewOpen
           ? `Push selected resources to ${workspaceStorage.name || "storage"}`
           : showPushCount
-            ? `Push ${projectSyncCountPhrase(pushThreadCount, projectFileCounts.push)} to ${workspaceStorage.name || "storage"}`
+            ? `Push ${projectSyncCountPhrase(pushThreadCount, pushFileCount)} to ${workspaceStorage.name || "storage"}`
             : `Push to ${workspaceStorage.name || "storage"}`}
         aria-expanded={workspacePushReviewOpen}
       >
@@ -2985,7 +2994,9 @@ export default function ProjectLinksWorkspace({
                                   disabled={noticeActionsDisabled}
                                   onClick={() => void run(
                                     `${failedAction}:${actionPrefix}`,
-                                    () => (failedAction === "push" ? onPush : onPull)(project.local_project_id, storage.storage_id),
+                                    () => activeNotice.action === "push"
+                                      ? onPush(project.local_project_id, storage.storage_id, activeNotice.scope, activeNotice.session)
+                                      : onPull(project.local_project_id, storage.storage_id),
                                   )}
                                 >
                                   Retry
@@ -3123,6 +3134,14 @@ export default function ProjectLinksWorkspace({
         )}
       </section>
 
+      {sessionDetailSubview && sessionPushIssue && !workspaceReviewOpen && (
+        <NoticeZone
+          items={[{ key: "session-push", severity: "info", message: sessionPushIssue }]}
+          subject="session Push status"
+          timing="standing"
+          label="Session Push status"
+        />
+      )}
       {sessionDetailSubview && workspaceProject && (
         <Suspense fallback={(
           /* Not role="status": the region and its sentence mount in the same

@@ -37,7 +37,7 @@ use super::service::{
     ProjectContentInventory, ProjectDetail, ProjectFolderProbe, ProjectMarkdownImage,
     ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSessionsDeleteResult,
     ProjectSyncConfigView, ProjectSyncService, ProviderDescriptor, ProviderProfileProbe,
-    ProviderProfileSummary, PushApproval, PushDestinationStatus, PushReviewContext,
+    ProviderProfileSummary, PushApproval, PushDestinationStatus, PushReviewContext, PushScope,
     ResourceInventory, RestoreResult, SaveProjectBindingRequest, SaveProjectLinkRequest,
     SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind, SessionToolCategory,
     SetupDraftInspection, SetupDraftList, SiblingBundleStatus, StorageDataClearResult,
@@ -1277,6 +1277,7 @@ pub async fn push_bundle(
     local_project_id: LocalProjectId,
     storage_id: StorageId,
     recipe: BundleRecipe,
+    scope: PushScope,
     subagent_selections: std::collections::BTreeMap<ResourceId, mallard_domain::SubagentSelection>,
     project_content_review_token: Option<String>,
     git_history_review_token: Option<String>,
@@ -1332,6 +1333,7 @@ pub async fn push_bundle(
             &local_project_id,
             &storage_id,
             PushApproval {
+                scope,
                 credential_redaction_enabled,
                 subagent_selections,
                 recipe,
@@ -1692,6 +1694,7 @@ pub async fn prepare_push_review(
     app: tauri::AppHandle,
     local_project_id: LocalProjectId,
     storage_id: StorageId,
+    scope: PushScope,
 ) -> Result<PushReviewContext, String> {
     let repository = repository()?;
     let context_repository = repository.clone();
@@ -1721,6 +1724,7 @@ pub async fn prepare_push_review(
         ProjectSyncService::new(&repository).prepare_push_review_with_phases(
             &local_project_id,
             &storage_id,
+            scope,
             &mut |phase, elapsed| {
                 phase_log.emit(
                     &phase_app,

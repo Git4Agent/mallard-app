@@ -50,3 +50,41 @@ export interface ManagedCloudLink {
    *  public repository. */
   can_push: boolean;
 }
+
+/** The coordinate a listed Catalog repository is bound to. */
+export interface ManagedCloudListingCatalog {
+  provider: string;
+  resource_kind: string;
+  format: string;
+  format_version: number;
+}
+
+/** One row of a listing the website shows too — Starred, or Public: less
+ *  than a repository, enough for a row. A pick resolves its address. */
+export interface ManagedCloudListingRow {
+  repository_id: string;
+  owner_login: string;
+  name: string;
+  /** `{owner_login}/{name}` in the service's spelling. */
+  address: string;
+  website_url: string;
+  repository_class: string;
+  catalog: ManagedCloudListingCatalog | null;
+  visibility: string;
+  /** `member` when the account belongs to it; null on a public face. */
+  role: string | null;
+  github_url: string | null;
+  description: string | null;
+  star_count: number;
+  viewer_starred: boolean;
+  revision: number;
+  updated_at: number;
+}
+
+/** One page of a listing: its rows, and the cursor of the next page. */
+export interface ManagedCloudListingPage {
+  rows: ManagedCloudListingRow[];
+  next_cursor: string | null;
+}
+
+export type ManagedCloudPublicSort = "newest" | "stars";

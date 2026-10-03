@@ -408,11 +408,198 @@ pub struct RepositorySummary {
     pub public_summary: Option<TagSummary>,
     #[serde(default)]
     pub open_release_request: Option<OpenReleaseRequest>,
+    /// The Owner's own line about the repository, and GitHub's short
+    /// description mirrored for a linked git project.
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub github_description: Option<String>,
+    #[serde(default)]
+    pub star_count: u64,
+    /// Whether the caller has starred it.
+    #[serde(default)]
+    pub viewer_starred: bool,
+}
+
+impl RepositorySummary {
+    /// The line a row prints: the Owner's own, else GitHub's.
+    pub fn blurb(&self) -> Option<String> {
+        self.description
+            .as_deref()
+            .or(self.github_description.as_deref())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct RepositoryList {
     repositories: Vec<RepositorySummary>,
+}
+
+/// One row of a listing the website shows too — the account's starred
+/// repositories (`GET /v1/me/starred`) or the public ones
+/// (`GET /v1/public/repositories`): less than a summary, enough for a
+/// row. A pick resolves the address for the summary.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ListingRow {
+    pub repository_id: String,
+    pub owner_login: String,
+    pub name: String,
+    /// `{owner_login}/{name}`, the service's spelling.
+    pub address: String,
+    pub website_url: String,
+    pub repository_class: String,
+    pub catalog: Option<ListingCatalog>,
+    pub visibility: String,
+    /// `member` when the account belongs to it (a starred repository of its
+    /// own); `None` on a public face.
+    pub role: Option<String>,
+    pub github_url: Option<String>,
+    /// The Owner's line, else GitHub's.
+    pub description: Option<String>,
+    pub star_count: u64,
+    pub viewer_starred: bool,
+    /// The version the account reads; 0 before any push.
+    pub revision: u64,
+    pub updated_at: u64,
+}
+
+/// The coordinate a listed catalog repository is bound to.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListingCatalog {
+    pub provider: String,
+    pub resource_kind: String,
+    pub format: String,
+    pub format_version: u32,
+}
+
+/// One page of a listing: its rows, and the cursor of the next page.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct RepositoryListing {
+    pub rows: Vec<ListingRow>,
+    pub next_cursor: Option<String>,
+}
+
+/// The order of the public listing. `Stars` has no pages: the service
+/// sorts the whole set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicSort {
+    Newest,
+    Stars,
+}
+
+impl PublicSort {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "newest" => Some(Self::Newest),
+            "stars" => Some(Self::Stars),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Newest => "newest",
+            Self::Stars => "stars",
+        }
+    }
+}
+
+/// What the public listing is asked for: a class, and for a Catalog row
+/// its coordinate's provider and kind.
+pub struct PublicFilter<'a> {
+    pub class: &'a str,
+    pub provider: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub sort: PublicSort,
+}
+
+#[derive(Deserialize)]
+struct ListingHeadWire {
+    scope: String,
+    revision: u64,
+    updated_at: u64,
+}
+
+#[derive(Deserialize)]
+struct StarredRowWire {
+    id: String,
+    owner: PushedBy,
+    name: String,
+    repository_class: String,
+    #[serde(default)]
+    catalog: Option<ListingCatalog>,
+    #[serde(default)]
+    github_url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    github_description: Option<String>,
+    visibility: String,
+    #[serde(default)]
+    star_count: u64,
+    #[serde(default)]
+    viewer_starred: bool,
+    #[serde(default)]
+    head: Option<ListingHeadWire>,
+    #[serde(default)]
+    summary: Option<serde_json::Value>,
+    updated_at: u64,
+}
+
+#[derive(Deserialize)]
+struct StarredListWire {
+    repositories: Vec<StarredRowWire>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PublicRowWire {
+    id: String,
+    owner: PushedBy,
+    name: String,
+    repository_class: String,
+    #[serde(default)]
+    catalog: Option<ListingCatalog>,
+    #[serde(default)]
+    github_url: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    github_description: Option<String>,
+    #[serde(default)]
+    public_revision: u64,
+    #[serde(default)]
+    manifest_revision: u64,
+    published_at: u64,
+    #[serde(default)]
+    star_count: u64,
+    #[serde(default)]
+    viewer_starred: bool,
+    #[serde(default)]
+    summary: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct PublicListWire {
+    repositories: Vec<PublicRowWire>,
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+/// The publication summary's revision, when the service inlined one.
+fn summary_revision(summary: Option<&serde_json::Value>) -> Option<u64> {
+    summary?.get("revision")?.as_u64()
+}
+
+fn blurb_of(description: Option<String>, github_description: Option<String>) -> Option<String> {
+    description
+        .or(github_description)
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -921,6 +1108,134 @@ impl ManagedCloudClient {
         )?;
         let list: RepositoryList = self.json(route, true, request).await?;
         Ok(list.repositories)
+    }
+
+    /// `GET /v1/me/starred?cursor=`: the repositories the account starred
+    /// that it may still read, newest star first, 50 a page. Every class
+    /// comes back; the caller keeps the ones its picker lists.
+    pub async fn list_starred(&self, cursor: Option<&str>) -> Result<RepositoryListing> {
+        let route = "v1/me/starred";
+        let path = match cursor {
+            Some(cursor) => format!("/v1/me/starred?{}", query_string(&[("cursor", cursor)])),
+            None => "/v1/me/starred".to_owned(),
+        };
+        let request = self.request(Method::GET, route, &path)?;
+        let list: StarredListWire = self.json(route, true, request).await?;
+        let rows = list
+            .repositories
+            .into_iter()
+            .map(|row| {
+                let member = row
+                    .head
+                    .as_ref()
+                    .is_some_and(|head| head.scope == "private");
+                let revision = summary_revision(row.summary.as_ref())
+                    .or(row.head.as_ref().map(|head| head.revision))
+                    .unwrap_or(0);
+                let updated_at = row
+                    .head
+                    .as_ref()
+                    .map(|head| head.updated_at)
+                    .unwrap_or(row.updated_at);
+                ListingRow {
+                    address: format!("{}/{}", row.owner.github_login, row.name),
+                    website_url: self.website_url(&row.owner.github_login, &row.name),
+                    repository_id: row.id,
+                    owner_login: row.owner.github_login,
+                    name: row.name,
+                    repository_class: row.repository_class,
+                    catalog: row.catalog,
+                    visibility: row.visibility,
+                    role: member.then(|| "member".to_owned()),
+                    github_url: row.github_url,
+                    description: blurb_of(row.description, row.github_description),
+                    star_count: row.star_count,
+                    viewer_starred: row.viewer_starred,
+                    revision,
+                    updated_at,
+                }
+            })
+            .collect();
+        Ok(RepositoryListing {
+            rows,
+            next_cursor: list.next_cursor,
+        })
+    }
+
+    /// `GET /v1/public/repositories`: the released repositories of one
+    /// class, newest first or by stars, 50 a page.
+    pub async fn list_public(
+        &self,
+        filter: &PublicFilter<'_>,
+        cursor: Option<&str>,
+    ) -> Result<RepositoryListing> {
+        let route = "v1/public/repositories";
+        let mut pairs: Vec<(&str, &str)> =
+            vec![("class", filter.class), ("sort", filter.sort.as_str())];
+        if let Some(provider) = filter.provider {
+            pairs.push(("provider", provider));
+        }
+        if let Some(kind) = filter.kind {
+            pairs.push(("kind", kind));
+        }
+        if let Some(cursor) = cursor {
+            pairs.push(("cursor", cursor));
+        }
+        let path = format!("/v1/public/repositories?{}", query_string(&pairs));
+        let request = self.request(Method::GET, route, &path)?;
+        let list: PublicListWire = self.json(route, true, request).await?;
+        let rows = list
+            .repositories
+            .into_iter()
+            .map(|row| {
+                let revision = summary_revision(row.summary.as_ref()).unwrap_or(
+                    if row.manifest_revision > 0 {
+                        row.manifest_revision
+                    } else {
+                        row.public_revision
+                    },
+                );
+                ListingRow {
+                    address: format!("{}/{}", row.owner.github_login, row.name),
+                    website_url: self.website_url(&row.owner.github_login, &row.name),
+                    repository_id: row.id,
+                    owner_login: row.owner.github_login,
+                    name: row.name,
+                    repository_class: row.repository_class,
+                    catalog: row.catalog,
+                    visibility: "public".to_owned(),
+                    role: None,
+                    github_url: row.github_url,
+                    description: blurb_of(row.description, row.github_description),
+                    star_count: row.star_count,
+                    viewer_starred: row.viewer_starred,
+                    revision,
+                    updated_at: row.published_at,
+                }
+            })
+            .collect();
+        Ok(RepositoryListing {
+            rows,
+            next_cursor: list.next_cursor,
+        })
+    }
+
+    /// `PUT /v1/repositories/{id}/catalog-addition`: put a public Catalog
+    /// item on the account's Catalog, so the Library listing carries it on
+    /// every computer. Idempotent. A collaborator's item is listed already,
+    /// which the service answers `already_present`; that is not a failure.
+    pub async fn add_catalog_item(&self, repository_id: &str) -> Result<()> {
+        let route = "v1/repositories/{id}/catalog-addition";
+        let request = self.request(
+            Method::PUT,
+            route,
+            &format!("/v1/repositories/{repository_id}/catalog-addition"),
+        )?;
+        match self.send(route, false, request).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind == ErrorKind::AlreadyPresent => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// The repository at an address (section 4.1): the collaborator summary,

@@ -31,6 +31,7 @@ import {
   safeProjectMarkdownPath,
   sessionDetailFilterToggles,
   sessionEventCoverage,
+  sessionPushFacts,
   sessionToolDescriptor,
   sessionTurnDurationLabel,
   sessionTurnSpans,
@@ -1256,4 +1257,35 @@ test("workspace navigation lazy-loads detail and preserves the mounted Activity 
   assert.match(apiSource, /"get_project_session_event_detail"/);
   assert.match(apiSource, /"open_project_markdown_path"/);
   assert.doesNotMatch(apiSource, /"get_project_session_details"/);
+});
+
+// The row of a session's own Push review prints what its page counted. The
+// page has a token total and no input/output split, and a lower bound on any
+// readout marks the row's readouts partial.
+test("the session page reports its counts in the fields its Push row prints", () => {
+  assert.deepEqual(sessionPushFacts(detail), {
+    title: "Build provider-neutral session detail",
+    metrics: {
+      started_at: START,
+      ended_at: START + 660,
+      is_active: false,
+      user_round_count: 2,
+      agent_message_count: 3,
+      tool_call_count: 4,
+      total_tokens: 1_063_252,
+      metrics_complete: false,
+    },
+  });
+  const unstamped = sessionPushFacts({
+    ...detail,
+    title: "",
+    started_at: null,
+    ended_at: null,
+    tokens: { quality: "unsupported" },
+  });
+  assert.equal(unstamped.title, "Untitled session");
+  assert.deepEqual(
+    [unstamped.metrics.started_at, unstamped.metrics.ended_at, unstamped.metrics.total_tokens, unstamped.metrics.metrics_complete],
+    [0, 0, null, true],
+  );
 });

@@ -1,4 +1,5 @@
 import type {
+  ProjectSessionDetail,
   ProjectSessionTimelinePage,
   SessionAgentStatus,
   SessionCount,
@@ -7,7 +8,10 @@ import type {
   SessionTimelineEventKind,
   SessionToolCallPreview,
   SessionToolCategory,
+  ThreadSyncEntry,
 } from "../../../types";
+import { isPushReviewDecision } from "../../sync-review/pullReviewStatus";
+import type { PushSessionFacts } from "../ProjectActivityPage";
 import {
   clockOptions,
   formatDateTime,
@@ -27,6 +31,40 @@ export type ActiveProjectSubview =
 export interface OpenSessionDetailRequest {
   resourceId: string;
   occurrenceKey: string;
+}
+
+export function sessionPushDisabledReason(entry: ThreadSyncEntry | undefined): string | null {
+  if (!entry) return "This session cannot be pushed independently.";
+  if (!entry.local_present) return "No local session to push.";
+  if (isPushReviewDecision(entry.push_decision)) return null;
+  switch (entry.push_decision.action) {
+    case "no_changes": return "This session is up to date.";
+    case "require_pull": return "Storage has changes. Review Pull before pushing this session.";
+    case "require_pull_metadata": return "Review storage metadata in Pull before pushing this session.";
+    default: return entry.push_decision.blocked_reason ?? entry.status_detail ?? "This session is not available to push.";
+  }
+}
+
+/** What the session's page reports for the row of its own Push review: the
+ *  page's counts, in the fields the row prints. A count the transcript does
+ *  not give prints as zero, and a lower bound marks the readouts partial. */
+export function sessionPushFacts(detail: ProjectSessionDetail): PushSessionFacts {
+  const { prompts, responses, tool_calls: toolCalls } = detail.event_counts;
+  const startedAt = detail.started_at ?? detail.ended_at ?? 0;
+  return {
+    title: detail.title || "Untitled session",
+    metrics: {
+      started_at: startedAt,
+      ended_at: Math.max(detail.ended_at ?? startedAt, startedAt),
+      is_active: detail.is_active,
+      user_round_count: prompts.value ?? 0,
+      agent_message_count: responses.value ?? 0,
+      tool_call_count: toolCalls.value ?? 0,
+      total_tokens: detail.tokens.value ?? null,
+      metrics_complete: [detail.tokens, prompts, responses, toolCalls]
+        .every((count) => count.quality !== "lower_bound"),
+    },
+  };
 }
 
 export interface SessionDetailFilters {

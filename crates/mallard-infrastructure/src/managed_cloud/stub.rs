@@ -120,6 +120,10 @@ pub struct Repository {
     pub members: BTreeMap<String, (String, String)>,
     pub release_requests: Vec<Value>,
     pub invite_code: Option<InviteCode>,
+    /// The Owner's line about the repository.
+    pub description: Option<String>,
+    /// The accounts that starred it.
+    pub stars: BTreeSet<String>,
 }
 
 fn keep_manifest_content(value: &Value, prefix: &str, keys: &mut BTreeSet<String>) {
@@ -288,6 +292,9 @@ pub struct StubState {
     pub suspended: BTreeSet<String>,
     /// The next record lands without its index batch: the index lags R2.
     pub skip_next_index: bool,
+    /// (user id, repository id): the public Catalog items an account added
+    /// to its Catalog (`PUT …/catalog-addition`).
+    pub catalog_additions: BTreeSet<(String, String)>,
 }
 
 impl StubState {
@@ -304,6 +311,26 @@ impl StubState {
         self.users.insert(user.id.clone(), user.clone());
         self.tokens.insert(token.clone(), user.id.clone());
         (user, token)
+    }
+    /// The account stars the repository, as the website's star does.
+    pub fn star(&mut self, user_id: &str, repository_id: &str) {
+        self.repositories
+            .get_mut(repository_id)
+            .expect("a repository")
+            .stars
+            .insert(user_id.to_owned());
+    }
+    /// The Owner's line about the repository.
+    pub fn describe(&mut self, repository_id: &str, text: &str) {
+        self.repositories
+            .get_mut(repository_id)
+            .expect("a repository")
+            .description = Some(text.to_owned());
+    }
+    /// Whether the account put the public item on its Catalog.
+    pub fn catalog_added(&self, user_id: &str, repository_id: &str) -> bool {
+        self.catalog_additions
+            .contains(&(user_id.to_owned(), repository_id.to_owned()))
     }
     /// One more session of an account: another computer signed in to it.
     pub fn add_session(&mut self, user_id: &str) -> String {
@@ -774,6 +801,10 @@ fn summary(state: &StubState, repository: &Repository, role: Option<&str>, write
         "private_revision": repository.private_revision,
         "public_revision": repository.public_revision,
         "committed_bytes": repository.committed_bytes,
+        "description": repository.description,
+        "github_description": Value::Null,
+        "star_count": repository.stars.len(),
+        "viewer_starred": false,
         "role": role,
         "writer": writer,
         "private_head": if member { private_head } else { None },
@@ -782,6 +813,94 @@ fn summary(state: &StubState, repository: &Repository, role: Option<&str>, write
         "public_summary": public_tag,
         "open_release_request": if member { open_request } else { None },
     })
+}
+
+fn owner_value(state: &StubState, repository: &Repository) -> Value {
+    state
+        .users
+        .get(&repository.owner_id)
+        .map(|u| json!({"user_id": u.id, "github_login": u.login}))
+        .unwrap_or(Value::Null)
+}
+
+fn coordinate_value(repository: &Repository) -> Value {
+    repository
+        .catalog
+        .as_ref()
+        .map(|item| {
+            json!({"provider": item.provider, "resource_kind": item.resource_kind, "format": item.format, "format_version": item.format_version})
+        })
+        .unwrap_or(Value::Null)
+}
+
+/// One row of a viewer-aware listing (the Starred list): a collaborator
+/// gets the private head, everyone else the public one.
+fn viewer_row(state: &StubState, repository: &Repository, user_id: &str) -> Value {
+    let member = repository.members.contains_key(user_id);
+    let (scope, publication) = if member {
+        ("private", repository.head())
+    } else {
+        ("public", repository.public_head())
+    };
+    json!({
+        "id": repository.id,
+        "owner": owner_value(state, repository),
+        "name": repository.name,
+        "repository_class": repository.class,
+        "catalog": coordinate_value(repository),
+        "github_url": repository.github_url,
+        "description": repository.description,
+        "github_description": Value::Null,
+        "visibility": repository.visibility,
+        "star_count": repository.stars.len(),
+        "viewer_starred": repository.stars.contains(user_id),
+        "head": publication.map(|p| json!({
+            "scope": scope, "revision": p.manifest_revision, "commit_id": p.commit_id, "updated_at": p.created_at,
+            "pushed_by": state.users.get(&p.created_by).map(|u| json!({"user_id": u.id, "github_login": u.login})),
+        })),
+        "summary": publication.map(|p| p.summary.clone()),
+        "updated_at": publication.map(|p| p.created_at).unwrap_or(0),
+    })
+}
+
+/// One row of the public listing: the released head dates it.
+fn public_row(state: &StubState, repository: &Repository, user_id: &str) -> Value {
+    let publication = repository
+        .public_head()
+        .expect("an open repository has a public head");
+    json!({
+        "id": repository.id,
+        "owner": owner_value(state, repository),
+        "name": repository.name,
+        "repository_class": repository.class,
+        "catalog": coordinate_value(repository),
+        "github_url": repository.github_url,
+        "description": repository.description,
+        "github_description": Value::Null,
+        "public_revision": repository.public_revision,
+        "commit_id": publication.commit_id,
+        "manifest_revision": publication.manifest_revision,
+        "published_at": publication.created_at,
+        "pushed_by": state.users.get(&publication.created_by).map(|u| json!({"user_id": u.id, "github_login": u.login})),
+        "star_count": repository.stars.len(),
+        "viewer_starred": repository.stars.contains(user_id),
+        "updated_at": publication.created_at,
+        "summary": publication.summary.clone(),
+    })
+}
+
+/// The summary as one account reads it: `viewer_starred` is that
+/// account's, as the service joins it into every summary it answers.
+fn summary_viewed(
+    state: &StubState,
+    repository: &Repository,
+    role: Option<&str>,
+    writer: bool,
+    viewer: &str,
+) -> Value {
+    let mut body = summary(state, repository, role, writer);
+    body["viewer_starred"] = json!(repository.stars.contains(viewer));
+    body
 }
 
 fn query(uri: &hyper::Uri, name: &str) -> Option<String> {
@@ -1353,15 +1472,107 @@ fn route(
                 _ => true,
             })
             .map(|r| {
-                summary(
+                summary_viewed(
                     state,
                     r,
                     r.members.get(&user_id).map(|(_, role)| role.as_str()),
                     true,
+                    &user_id,
                 )
             })
             .collect::<Vec<_>>();
         return json(StatusCode::OK, json!({"repositories": rows}));
+    }
+    if method == Method::GET && path == "/v1/me/starred" {
+        // Section 4.8: the stars the account may still read, newest first.
+        // The stub keeps no star stamp, so the newest repository leads.
+        let mut starred = state
+            .repositories
+            .values()
+            .filter(|r| {
+                r.active()
+                    && r.stars.contains(&user_id)
+                    && (r.open() || r.members.contains_key(&user_id))
+            })
+            .collect::<Vec<_>>();
+        starred.sort_by(|a, b| b.id.cmp(&a.id));
+        let rows = starred
+            .iter()
+            .map(|r| {
+                let mut row = viewer_row(state, r, &user_id);
+                row["starred_at"] = json!(0);
+                row
+            })
+            .collect::<Vec<_>>();
+        return json(
+            StatusCode::OK,
+            json!({"repositories": rows, "next_cursor": Value::Null}),
+        );
+    }
+    if method == Method::GET && path == "/v1/public/repositories" {
+        let class = query(uri, "class");
+        let provider = query(uri, "provider");
+        let kind = query(uri, "kind");
+        let sort = query(uri, "sort").unwrap_or_else(|| "newest".to_owned());
+        let limit = query(uri, "limit")
+            .and_then(|limit| limit.parse::<usize>().ok())
+            .unwrap_or(50)
+            .max(1);
+        let cursor = query(uri, "cursor");
+        let stamp = |r: &Repository| r.public_head().map(|p| p.created_at).unwrap_or(0);
+        let mut rows = state
+            .repositories
+            .values()
+            .filter(|r| r.open())
+            .filter(|r| match class.as_deref() {
+                Some("project") => r.class != "catalog",
+                Some("catalog") => r.class == "catalog",
+                _ => true,
+            })
+            .filter(|r| match provider.as_deref() {
+                Some(wanted) => r
+                    .catalog
+                    .as_ref()
+                    .is_some_and(|item| item.provider == wanted),
+                None => true,
+            })
+            .filter(|r| match kind.as_deref() {
+                Some(wanted) => r
+                    .catalog
+                    .as_ref()
+                    .is_some_and(|item| item.resource_kind == wanted),
+                None => true,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| {
+            let newest = stamp(b).cmp(&stamp(a)).then_with(|| a.id.cmp(&b.id));
+            if sort == "stars" {
+                b.stars.len().cmp(&a.stars.len()).then(newest)
+            } else {
+                newest
+            }
+        });
+        // The cursor names the last row of the page before: `{stamp}:{id}`.
+        if let Some(cursor) = cursor {
+            if let Some(position) = rows
+                .iter()
+                .position(|r| cursor == format!("{}:{}", stamp(r), r.id))
+            {
+                rows = rows.split_off(position + 1);
+            }
+        }
+        let next_cursor = (sort != "stars" && rows.len() > limit)
+            .then(|| rows[limit - 1])
+            .map(|r| format!("{}:{}", stamp(r), r.id));
+        rows.truncate(limit);
+        let rows = rows
+            .iter()
+            .map(|r| public_row(state, r, &user_id))
+            .collect::<Vec<_>>();
+        return json(
+            StatusCode::OK,
+            json!({"repositories": rows, "next_cursor": next_cursor}),
+        );
     }
     if method == Method::GET && path == "/v1/repositories/library" {
         let wanted = |name: &str| query(uri, name).unwrap_or_default();
@@ -1371,10 +1582,16 @@ fn route(
             wanted("format"),
         );
         let version: u32 = wanted("format_version").parse().unwrap_or(0);
+        // Memberships, and the public items the account added to its
+        // Catalog while they stay public.
         let rows = state
             .repositories
             .values()
-            .filter(|r| r.active() && r.members.contains_key(&user_id))
+            .filter(|r| {
+                r.active()
+                    && (r.members.contains_key(&user_id)
+                        || (r.open() && state.catalog_added(&user_id, &r.id)))
+            })
             .filter(|r| {
                 r.catalog.as_ref().is_some_and(|item| {
                     item.provider == provider
@@ -1528,6 +1745,8 @@ fn route(
             members: BTreeMap::from([(user_id.clone(), (user.login.clone(), "owner".to_owned()))]),
             release_requests: vec![],
             invite_code: None,
+            description: None,
+            stars: BTreeSet::new(),
         };
         state.repositories.insert(id.clone(), repository);
         let repository = state.repositories[&id].clone();
@@ -1620,11 +1839,17 @@ fn route(
             };
         }
         if let Some((_, role)) = repository.members.get(&user_id) {
-            return json(StatusCode::OK, summary(state, repository, Some(role), true));
+            return json(
+                StatusCode::OK,
+                summary_viewed(state, repository, Some(role), true, &user_id),
+            );
         }
         if repository.open() {
             // Anyone signed in is a writer on an open repository (section 4.3).
-            return json(StatusCode::OK, summary(state, repository, None, true));
+            return json(
+                StatusCode::OK,
+                summary_viewed(state, repository, None, true, &user_id),
+            );
         }
         return error("not_found", "not visible");
     }
@@ -1705,7 +1930,7 @@ fn route(
             (&Method::GET, []) => {
                 return json(
                     StatusCode::OK,
-                    summary(state, &repository, role.as_deref(), true),
+                    summary_viewed(state, &repository, role.as_deref(), true, &user_id),
                 )
             }
             (&Method::GET, ["members"]) => {
@@ -1723,6 +1948,33 @@ fn route(
                 return json(
                     StatusCode::OK,
                     json!({"repository_id": repository.id, "revision": repository.revision, "members": members, "invitation": invitation}),
+                );
+            }
+            (&Method::PUT, ["catalog-addition"]) => {
+                // Puts a public item on the caller's Catalog (library.ts):
+                // a collaborator's is listed already, and only a released
+                // Catalog item can be added.
+                if repository.class != "catalog" {
+                    return error(
+                        "invalid_request",
+                        "Only a skill, plugin intent or pet can be added to a Catalog.",
+                    );
+                }
+                if role.is_some() {
+                    return error(
+                        "already_present",
+                        "You collaborate on this item, so your Catalog lists it already.",
+                    );
+                }
+                if !repository.open() {
+                    return error("not_found", "Only a public item can be added.");
+                }
+                state
+                    .catalog_additions
+                    .insert((user_id.clone(), repository.id.clone()));
+                return json(
+                    StatusCode::OK,
+                    json!({"repository_id": repository.id, "added": true}),
                 );
             }
             (&Method::PUT, ["invitation"]) => {

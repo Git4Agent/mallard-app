@@ -9,7 +9,8 @@ use super::service::repository;
 use mallard_domain::{sha256_hex, LocalProjectId, StorageId};
 use mallard_infrastructure::managed_cloud::address::{parse_repository_address, AddressError};
 use mallard_infrastructure::managed_cloud::client::{
-    DiscardedDraft, ManagedCloudClient, RepositorySummary,
+    DiscardedDraft, ManagedCloudClient, PublicFilter, PublicSort, RepositoryListing,
+    RepositorySummary,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
@@ -60,6 +61,10 @@ pub struct ManagedCloudRepository {
     pub updated_at: u64,
     pub resources: u64,
     pub registration_only: bool,
+    /// The Owner's line, else GitHub's.
+    pub description: Option<String>,
+    pub star_count: u64,
+    pub viewer_starred: bool,
 }
 
 /// What one pasted address resolves to.
@@ -145,7 +150,36 @@ fn describe_repository(
             .unwrap_or(0),
         resources: tag.map(|tag| tag.resources).unwrap_or(0),
         registration_only: tag.map(|tag| tag.registration_only).unwrap_or(true),
+        description: summary.blurb(),
+        star_count: summary.star_count,
+        viewer_starred: summary.viewer_starred,
     }
+}
+
+/// The project repositories the account starred on the website, one page
+/// of its Starred list, the Catalog items left out.
+async fn list_starred_projects(
+    client: &ManagedCloudClient,
+    cursor: Option<&str>,
+) -> Result<RepositoryListing, String> {
+    let mut page = client.list_starred(cursor).await?;
+    page.rows.retain(|row| row.repository_class != "catalog");
+    Ok(page)
+}
+
+/// The released projects, newest first or by stars, one page at a time.
+async fn list_public_projects(
+    client: &ManagedCloudClient,
+    sort: PublicSort,
+    cursor: Option<&str>,
+) -> Result<RepositoryListing, String> {
+    let filter = PublicFilter {
+        class: "project",
+        provider: None,
+        kind: None,
+        sort,
+    };
+    Ok(client.list_public(&filter, cursor).await?)
 }
 
 /// The project repositories the account belongs to, newest first.
@@ -265,6 +299,29 @@ pub async fn list_managed_cloud_repositories(
     let local = valid_local_fingerprint(&local_repository_fingerprint)?;
     let (client, origin) = storage_client(&storage_id)?;
     list_repositories(&client, &origin, local).await
+}
+
+/// Starred: the project repositories the account starred on the website.
+/// A row is picked by resolving its address, which compares the remote.
+#[tauri::command]
+pub async fn list_managed_cloud_starred(
+    storage_id: StorageId,
+    cursor: Option<String>,
+) -> Result<RepositoryListing, String> {
+    let (client, _) = storage_client(&storage_id)?;
+    list_starred_projects(&client, cursor.as_deref()).await
+}
+
+/// Public: the released projects on the service, `newest` or by `stars`.
+#[tauri::command]
+pub async fn list_managed_cloud_public(
+    storage_id: StorageId,
+    sort: String,
+    cursor: Option<String>,
+) -> Result<RepositoryListing, String> {
+    let sort = PublicSort::parse(&sort).ok_or("sort must be newest or stars")?;
+    let (client, _) = storage_client(&storage_id)?;
+    list_public_projects(&client, sort, cursor.as_deref()).await
 }
 
 /// One pasted address, resolved against a Mallard Cloud storage: what is
@@ -484,7 +541,10 @@ mod tests {
             Some(checkout.as_str())
         );
         assert_eq!(public.role, None);
-        assert!(!public.can_push, "the anonymous public face is not a writer");
+        assert!(
+            !public.can_push,
+            "the anonymous public face is not a writer"
+        );
         assert_eq!(public.updated_at, 900);
         let other = describe_repository(origin, &public_summary(Some(url)), Some(&local));
         assert_eq!(other.git_remote, GitRemoteMatch::Differs);
@@ -711,9 +771,10 @@ mod tests {
                 address: "Tom/B".into()
             }
         );
-        let refused = accept_repository_invitation(&guest, &origin, "AAAAA-AAAAA-AAAAA-AAAAB", None)
-            .await
-            .unwrap_err();
+        let refused =
+            accept_repository_invitation(&guest, &origin, "AAAAA-AAAAA-AAAAA-AAAAB", None)
+                .await
+                .unwrap_err();
         assert!(refused.contains("unknown or was revoked"), "{refused}");
         assert!(accept_repository_invitation(&guest, &origin, "  ", None)
             .await
@@ -751,6 +812,128 @@ mod tests {
                 .unwrap(),
             ManagedCloudRepositoryResolution::Collaborator { .. }
         ));
-        assert_eq!(list_repositories(&guest, &origin, None).await.unwrap().len(), 1);
+        assert_eq!(
+            list_repositories(&guest, &origin, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn starred_and_public_projects_list_as_rows_that_a_pick_resolves() {
+        use mallard_infrastructure::managed_cloud::client::{CreateRepository, PublicSort};
+        use mallard_infrastructure::managed_cloud::stub::{Publication, StubManagedCloud};
+        let stub = StubManagedCloud::start().await;
+        let (owner, owner_token) = stub.state.lock().unwrap().add_user("Rika321");
+        let (guest, guest_token) = stub.state.lock().unwrap().add_user("guest");
+        let client = |token: &str| {
+            ManagedCloudClient::new(
+                &stub.endpoint,
+                Some(mallard_domain::SecretValue::parse(token).unwrap()),
+            )
+            .unwrap()
+        };
+        let origin = stub.endpoint.clone();
+        let github = "https://github.com/Rika321/Portal";
+        let created = client(&owner_token)
+            .create_repository(&CreateRepository {
+                repository_class: "git_project",
+                github_url: None,
+                name: "Portal".into(),
+                bundle_id: Some("b".repeat(32)),
+                repository_fingerprint: Some(sha256_hex(github.as_bytes())),
+                catalog: None,
+            })
+            .await
+            .unwrap();
+        // Nothing public yet: the guest's listings are empty.
+        let guest_client = client(&guest_token);
+        assert!(list_starred_projects(&guest_client, None)
+            .await
+            .unwrap()
+            .rows
+            .is_empty());
+        assert!(
+            list_public_projects(&guest_client, PublicSort::Newest, None)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        // Released, described, and starred by the guest.
+        {
+            let mut state = stub.state.lock().unwrap();
+            let manifest = b"{}";
+            let record_name = format!(
+                "0000000001.commit-{}-{}.root.0000000000700.json",
+                "1".repeat(24),
+                "2".repeat(64)
+            );
+            let publication = Publication {
+                record_name: record_name.clone(),
+                commit_id: format!("commit-{}", "1".repeat(24)),
+                manifest_revision: 1,
+                manifest_key: format!("_manifests/1-commit-{}.json", "1".repeat(24)),
+                manifest_sha256: sha256_hex(manifest),
+                manifest_size: manifest.len() as u64,
+                summary: serde_json::json!({"display_name": "Portal", "kind": "project", "revision": 1, "updated_at": 700, "resources": 2, "files": 2, "registration_only": false, "providers": ["codex"]}),
+                created_by: owner.id.clone(),
+                created_at: 700,
+                state: "available".into(),
+            };
+            let repository = state.repositories.get_mut(&created.id).unwrap();
+            repository.publications.push(publication);
+            repository.private_head = Some(record_name);
+            repository.private_revision = 1;
+            state.release(&created.id, Some(github));
+            state.describe(&created.id, "Customer portal.");
+            state.star(&guest.id, &created.id);
+        }
+        let starred = list_starred_projects(&guest_client, None).await.unwrap();
+        assert_eq!(starred.rows.len(), 1);
+        let row = &starred.rows[0];
+        assert_eq!(row.address, "Rika321/Portal");
+        assert_eq!(row.website_url, format!("{origin}/Rika321/Portal"));
+        assert_eq!(row.repository_class, "git_project");
+        assert_eq!(row.visibility, "public");
+        assert_eq!(row.role, None, "a star is not a membership");
+        assert_eq!(row.github_url.as_deref(), Some(github));
+        assert_eq!(row.description.as_deref(), Some("Customer portal."));
+        assert_eq!((row.star_count, row.viewer_starred), (1, true));
+        assert_eq!((row.revision, row.updated_at), (1, 700));
+        assert_eq!(starred.next_cursor, None);
+        let public = list_public_projects(&guest_client, PublicSort::Stars, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            public
+                .rows
+                .iter()
+                .map(|row| row.address.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Rika321/Portal"]
+        );
+        assert_eq!(public.rows[0].role, None);
+        // The owner's own row carries the line and the count, not the star.
+        let mine = list_repositories(&client(&owner_token), &origin, None)
+            .await
+            .unwrap();
+        assert_eq!(mine[0].description.as_deref(), Some("Customer portal."));
+        assert_eq!((mine[0].star_count, mine[0].viewer_starred), (1, false));
+        // A listed row is picked by resolving its address: the public face.
+        let picked = resolve_repository(&guest_client, &origin, &row.address, None)
+            .await
+            .unwrap();
+        let ManagedCloudRepositoryResolution::Public { repository } = picked else {
+            panic!("a public row resolves to its public face: {picked:?}");
+        };
+        assert_eq!(
+            repository.bundle_id.as_deref(),
+            Some("b".repeat(32).as_str())
+        );
+        assert_eq!(repository.description.as_deref(), Some("Customer portal."));
+        assert!(repository.viewer_starred);
     }
 }

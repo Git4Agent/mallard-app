@@ -1,6 +1,22 @@
-import RepositoryLookupField, { isInvitationCodeShaped } from "../managed-cloud/RepositoryLookupField";
+import RepositoryLookupField, { entryKind, isInvitationCodeShaped } from "../managed-cloud/RepositoryLookupField";
 import { predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
+import {
+  CloudScopeTabs,
+  ListingFoot,
+  ListingRows,
+  ListingStatus,
+  RepoRowCopy,
+  RepoRowMeta,
+  RepoRowTile,
+  ScopeEmpty,
+  matchesFilter,
+  rowAge,
+  useCloudListings,
+  type ScopeId,
+  type ScopeTab,
+} from "../managed-cloud/CloudScopes";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ManagedCloudListingRow } from "../managed-cloud/types";
 import type {
   ManagedCloudRepository,
   ManagedCloudRepositoryResolution,
@@ -12,7 +28,6 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { openExternalUrl } from "./externalLink";
 import { repositoryFingerprintsRequireAcknowledgement } from "./model";
-import { formatRelativeTime } from "../../clock";
 
 /**
  * Deciding which Mallard Cloud repository a project connects to, by the
@@ -21,16 +36,18 @@ import { formatRelativeTime } from "../../clock";
  * setup once a Mallard Cloud storage is chosen, and — in `clone` mode, for
  * a project with no folder yet — New project's From Mallard Cloud.
  *
- * Top to bottom: one field in the Folder field's shape that takes an
- * address or a private repository's invitation code, its verb beside it
- * (Look up, or Join once the text is a code); what that answered, in the
- * storage discovery's own rows (a found row, the empty state, a field
- * error), or one line when the repository is already a row; then "Your
- * repositories": the account's repositories as the host's option rows,
- * named by address, New repository first when offered, or one quiet line
- * when there are none. Picking a row fills the field; resolving an address
- * selects the repository; joining with a code selects the repository it
- * belongs to. Nothing here prints a bundle id.
+ * Top to bottom: one field in the Folder field's shape. Words in it filter
+ * the rows; an address, the page's link, or a private repository's
+ * invitation code lights its verb (Look up, or Join). Under the field,
+ * what a lookup answered — the storage discovery's found row for an
+ * address beyond the rows, the empty state, a field error, or one line
+ * when the repository is one of the rows. Then three scopes as tabs:
+ * Yours (the account's repositories, New repository first when offered),
+ * Starred (the website's Starred list), Public (the released projects,
+ * newest first or by stars, a page at a time). Picking a Yours row
+ * selects it; picking a Starred or Public row resolves its address, as a
+ * typed address does, so the Git remote is compared the same way. Nothing
+ * here prints a bundle id.
  */
 
 export const MANAGED_CLOUD_PROVIDER = "managed_cloud";
@@ -125,6 +142,11 @@ export function repositoryMark(repository: Pick<ManagedCloudRepository, "reposit
   return repository.repository_class === "git_project" ? "git-folder" : "folder";
 }
 
+/** The class in two words, after the name on the setup page. */
+function classWord(repositoryClass: string): string {
+  return repositoryClass === "git_project" ? "git project" : "project";
+}
+
 /** What the found row says about the repository the address named. A
  *  public repository takes pushes from anyone signed in, so a
  *  non-collaborator's row is a plain finding, not a caution. */
@@ -190,6 +212,8 @@ export function inListing(
   return !!repository.bundle_id && repositories.some((row) => row.bundle_id === repository.bundle_id);
 }
 
+const SCOPE_LABEL: Record<ScopeId, string> = { yours: "Yours", shared: "Shared with you", starred: "Starred", public: "Public" };
+
 interface Props {
   storage: StorageSummary;
   /** The requested name for a new repository: the project's name. */
@@ -227,30 +251,58 @@ export default function RepositoryAddressPicker({
   onSelect,
 }: Props) {
   const cloning = mode === "clone";
+  const skin = rows === "choice" ? "choice" : "match";
   const account = managedCloudAccount(storage);
-  /** An address or an invitation code; the verb follows what it holds. */
+  /** Words to filter by, an address or a link to look up, or an
+   *  invitation code; the verb follows what it holds. */
   const [entry, setEntry] = useState("");
   const [lookup, setLookup] = useState<Lookup>({ kind: "idle" });
   const [join, setJoin] = useState<Join>({ kind: "idle" });
   /** The repository a code joined here: a row from then on, before the
    *  listing is read again. */
   const [joined, setJoined] = useState<ManagedCloudRepository | null>(null);
+  /** The repository the selection names, so a listed row can wear it. */
+  const [chosen, setChosen] = useState<ManagedCloudRepository | null>(null);
+  const [tab, setTab] = useState<ScopeId>("yours");
+  /** A Starred or Public row whose address is being resolved. */
+  const [resolvingRow, setResolvingRow] = useState<string | null>(null);
   const requestRef = useRef(0);
   useEffect(() => () => { requestRef.current += 1; }, []);
 
+  const storageId = storage.storage_id;
+  const listings = useCloudListings({
+    key: storageId,
+    starred: () => projectSyncApi.listManagedCloudStarred(storageId, null),
+    publicPage: (sort, cursor) => projectSyncApi.listManagedCloudPublic(storageId, sort, cursor),
+    publicOpen: tab === "public",
+  });
+
   const listed = listing.state === "ready" ? listing.repositories : [];
   const repositories = joined && !inListing(joined, listed) ? [joined, ...listed] : listed;
-  const resolved = lookup.kind === "resolved"
-    && (lookup.resolution.kind === "collaborator" || lookup.resolution.kind === "public")
-    ? lookup.resolution.repository
-    : null;
-  const chosen = selection?.kind === "existing"
-    ? repositories.find((repository) => repository.bundle_id === selection.bundle_id)
-      ?? (resolved?.bundle_id === selection.bundle_id ? resolved : null)
-    : null;
+  const kind = entryKind(entry);
+  const needle = kind === "filter" ? entry.trim() : "";
+  const filtering = needle.length > 0;
+  const fits = (address: string, description: string | null) => matchesFilter(needle, address, description);
+  const yoursRows = repositories.filter((repository) => fits(repository.address, repository.description));
+  const starredAll = listings.starred.state === "ready" ? listings.starred.rows : [];
+  const publicAll = listings.public.state === "ready" ? listings.public.rows : [];
+  const starredRows = starredAll.filter((row) => fits(row.address, row.description));
+  const publicRows = publicAll.filter((row) => fits(row.address, row.description));
 
-  const runLookup = async () => {
-    const typed = entry.trim();
+  /** The scope whose rows hold the repository, if one does. */
+  const scopeHolding = (repositoryId: string): ScopeId | null => (
+    repositories.some((row) => row.repository_id === repositoryId) ? "yours"
+      : starredAll.some((row) => row.repository_id === repositoryId) ? "starred"
+        : publicAll.some((row) => row.repository_id === repositoryId) ? "public"
+          : null
+  );
+
+  const select = (next: RepositorySelection | null, repository: ManagedCloudRepository | null) => {
+    setChosen(repository);
+    onSelect(next, repository);
+  };
+
+  const runLookupFor = async (typed: string) => {
     if (!typed || disabled) return;
     const requestId = ++requestRef.current;
     setJoin({ kind: "idle" });
@@ -264,23 +316,30 @@ export default function RepositoryAddressPicker({
       if (requestId !== requestRef.current) return;
       setLookup({ kind: "resolved", resolution });
       if ((resolution.kind === "collaborator" || resolution.kind === "public") && resolution.repository.bundle_id) {
+        const holder = scopeHolding(resolution.repository.repository_id);
+        if (holder) setTab(holder);
         // The same repository again keeps its acknowledgement.
-        if (selection?.kind === "existing" && selection.bundle_id === resolution.repository.bundle_id) return;
-        onSelect(selectionFor(resolution.repository), resolution.repository);
+        if (selection?.kind === "existing" && selection.bundle_id === resolution.repository.bundle_id) {
+          setChosen(resolution.repository);
+          return;
+        }
+        select(selectionFor(resolution.repository), resolution.repository);
       } else if (selection?.kind === "existing") {
-        onSelect(null, null);
+        select(null, null);
       }
     } catch (reason) {
       if (requestId !== requestRef.current) return;
       setLookup({ kind: "failed", message: errorMessage(reason) });
-      if (selection?.kind === "existing") onSelect(null, null);
+      if (selection?.kind === "existing") select(null, null);
+    } finally {
+      if (requestId === requestRef.current) setResolvingRow(null);
     }
   };
+  const runLookup = () => runLookupFor(entry.trim());
 
   /* Another account on the same page keeps the typed address and asks
      again with that account: an answer belongs to the account it came from.
      A code is not entered again: joining is the person's own click. */
-  const storageId = storage.storage_id;
   const answeredFor = useRef(storageId);
   useEffect(() => {
     if (answeredFor.current === storageId) return;
@@ -289,7 +348,8 @@ export default function RepositoryAddressPicker({
     setJoin({ kind: "idle" });
     setJoined(null);
     setLookup({ kind: "idle" });
-    if (entry.trim() && !isInvitationCodeShaped(entry)) void runLookup();
+    setResolvingRow(null);
+    if (entryKind(entry) === "address") void runLookup();
   }, [storageId]);
 
   /** Enter an invitation code: the account joins the private repository it
@@ -307,9 +367,10 @@ export default function RepositoryAddressPicker({
       if ((resolution.kind === "collaborator" || resolution.kind === "public") && resolution.repository.bundle_id) {
         if (resolution.kind === "collaborator") setJoined(resolution.repository);
         setEntry(resolution.repository.address);
-        onSelect(selectionFor(resolution.repository), resolution.repository);
+        setTab("yours");
+        select(selectionFor(resolution.repository), resolution.repository);
       } else if (selection?.kind === "existing") {
-        onSelect(null, null);
+        select(null, null);
       }
     } catch (reason) {
       if (requestId !== requestRef.current) return;
@@ -322,14 +383,36 @@ export default function RepositoryAddressPicker({
     setEntry(repository.address);
     setJoin({ kind: "idle" });
     setLookup({ kind: "idle" });
-    onSelect(selectionFor(repository), repository);
+    setResolvingRow(null);
+    select(selectionFor(repository), repository);
+  };
+
+  /** A Starred or Public row: one of the account's own when it is, else
+   *  its address resolved, so the remote is compared as for a typed one. */
+  const pickListed = (row: ManagedCloudListingRow) => {
+    const twin = repositories.find((candidate) => candidate.repository_id === row.repository_id);
+    if (twin) {
+      chooseRow(twin);
+      return;
+    }
+    setEntry(row.address);
+    setResolvingRow(row.repository_id);
+    void runLookupFor(row.address);
   };
 
   const chooseNew = () => {
     requestRef.current += 1;
     setJoin({ kind: "idle" });
     setLookup({ kind: "idle" });
-    onSelect({ kind: "new" }, null);
+    select({ kind: "new" }, null);
+  };
+
+  const changeEntry = (value: string) => {
+    setEntry(value);
+    if (join.kind === "failed") setJoin({ kind: "idle" });
+    // Words that filter clear an answer about an address; the selection stays.
+    const next = entryKind(value);
+    if ((next === "filter" || next === "idle") && lookup.kind !== "idle") setLookup({ kind: "idle" });
   };
 
   const code = isInvitationCodeShaped(entry);
@@ -342,7 +425,7 @@ export default function RepositoryAddressPicker({
   const fieldError = (text: ReactNode) => <FieldMessage blocking>{text}</FieldMessage>;
 
   let answer: ReactNode = null;
-  if (lookup.kind === "resolving") {
+  if (lookup.kind === "resolving" && !resolvingRow) {
     answer = (
       <small className="sync-setup-inline-status" role="status">
         <span className="status-loader" /> Looking up {lookup.address} on {account.host}…
@@ -365,8 +448,8 @@ export default function RepositoryAddressPicker({
         break;
       case "invalid":
         answer = fieldError(cloning
-          ? "Paste a page address, owner/name, or an invitation code."
-          : <>Paste the address from the repository’s page on {account.host}, type owner/name, or paste an invitation code.</>);
+          ? "Paste a link, owner/name, or an invitation code."
+          : <>Paste the link from the repository’s page on {account.host}, type owner/name, or paste an invitation code.</>);
         break;
       case "not_a_project":
         answer = fieldError(cloning
@@ -399,10 +482,11 @@ export default function RepositoryAddressPicker({
       case "public": {
         const repository = resolution.repository;
         // One of the rows already: the row is the selection; say so once.
-        if (inListing(repository, repositories)) {
+        const holder = scopeHolding(repository.repository_id);
+        if (holder) {
           answer = (
             <small className="repo-answer-line" role="status">
-              <Icon name="check-circle" size={13} /> In your repositories. Selected below.
+              <Icon name="check-circle" size={13} /> In {SCOPE_LABEL[holder]}. Selected below.
             </small>
           );
           break;
@@ -421,7 +505,7 @@ export default function RepositoryAddressPicker({
                 <span className="storage-found-text">
                   <span className="storage-found-name">
                     {repository.address}
-                    <code>{repository.repository_class === "git_project" ? "git project" : "project"}</code>
+                    <code>{classWord(repository.repository_class)}</code>
                   </span>
                   <span className={`storage-found-verdict ${verdict.tone}`}>
                     <Icon name={verdict.icon} size={12} /> {verdict.text}
@@ -451,7 +535,7 @@ export default function RepositoryAddressPicker({
                       type="button"
                       className="btn btn-primary"
                       disabled={disabled || !repository.bundle_id}
-                      onClick={() => onSelect(selectionFor(repository), repository)}
+                      onClick={() => select(selectionFor(repository), repository)}
                     >
                       Use this
                     </button>
@@ -487,31 +571,66 @@ export default function RepositoryAddressPicker({
   const listClass = rows === "choice" ? "sync-bundle-choice-list" : "sync-bundle-match-options";
   const prediction = predictRepositoryAddress(account.login, projectName, repositories);
   const newSelected = selection?.kind === "new";
+  const offeringNew = offerNew && !filtering;
 
-  return (
-    <>
-      <RepositoryLookupField value={entry} onChange={(value) => {
-        setEntry(value); if (join.kind === "failed") setJoin({ kind: "idle" });
-      }} onSubmit={submit} disabled={disabled} looking={looking} joining={joining}
-        invalid={invalidAddress || join.kind === "failed"} describedBy={describedBy}
-        error={join.kind === "failed" ? fieldError(join.message) : undefined} />
+  const ownRow = (repository: ManagedCloudRepository) => {
+    const active = selection?.kind === "existing" && selection.bundle_id === repository.bundle_id;
+    const gitMatch = !cloning && repository.git_remote === "matches" && !!repository.repository_fingerprint;
+    const role = cloning ? roleWord(repository) : `${capitalize(repository.visibility)} · ${capitalize(repository.role ?? "collaborator")}`;
+    return (
+      <button
+        key={repository.repository_id}
+        type="button"
+        role="radio"
+        aria-checked={active}
+        className={`${rowClass} repo-row${active ? " active" : ""}${repository.viewer_starred ? " starred" : ""}`}
+        onClick={() => chooseRow(repository)}
+        disabled={disabled || !repository.bundle_id}
+      >
+        <span className="sync-bundle-radio"><span /></span>
+        <RepoRowTile mark={repositoryMark(repository)} pet={false} skin={skin} />
+        <RepoRowCopy
+          address={repository.address}
+          github={repository.github_url}
+          kind={skin === "match" ? classWord(repository.repository_class) : undefined}
+          badge={gitMatch ? <small className="sync-bundle-recommended">Git match</small> : undefined}
+          blurb={repository.description ?? (skin === "match" ? role : null)}
+          skin={skin}
+        />
+        <RepoRowMeta role={role} stars={repository.star_count} starred={repository.viewer_starred} age={rowAge(repository)} skin={skin} />
+      </button>
+    );
+  };
 
-      {answer}
-      {acknowledgement}
+  const tabs: ScopeTab[] = [
+    { id: "yours", label: "Yours", icon: "user", count: listing.state === "ready" ? yoursRows.length : null },
+    { id: "starred", label: "Starred", icon: "star", count: listings.starred.state === "ready" ? starredRows.length : null },
+    { id: "public", label: "Public", icon: "cloud", count: filtering && listings.public.state === "ready" ? publicRows.length : null },
+  ];
+  const elsewhere = (except: ScopeId) => tabs
+    .filter((candidate) => candidate.id !== except && (candidate.count ?? 0) > 0)
+    .map((candidate) => ({ id: candidate.id, label: candidate.label, count: candidate.count ?? 0 }));
+  const noMatch = (where: ScopeId) => `No match for “${needle}” in ${SCOPE_LABEL[where]}.`;
+  const selectedListedId = selection?.kind === "existing" && chosen && chosen.bundle_id === selection.bundle_id ? chosen.repository_id : null;
+  const listedMark = (row: ManagedCloudListingRow): IconName => repositoryMark(row);
+  const listedKind = skin === "match" ? (row: ManagedCloudListingRow) => classWord(row.repository_class) : undefined;
 
-      <div className="repo-list-head">
-        Repositories{listing.state === "ready" && repositories.length > 0 && <small>{repositories.length}</small>}
-      </div>
-      {listing.state === "loading" ? (
-        <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> Loading repositories…</small>
-      ) : listing.state === "error" ? (
-        <Notice severity="danger" timing="blocking">{listing.message}</Notice>
-      ) : !offerNew && repositories.length === 0 ? (
-        /* No rows, no box: an empty bordered list reads as a text field. */
-        <p className="repo-list-empty">No repositories yet.</p>
-      ) : (
+  let panel: ReactNode;
+  if (tab === "yours") {
+    if (listing.state === "loading") {
+      panel = <ListingStatus listing={{ state: "loading" }} />;
+    } else if (listing.state === "error") {
+      panel = <Notice severity="danger" timing="blocking">{listing.message}</Notice>;
+    } else if (yoursRows.length === 0 && !offeringNew) {
+      panel = (
+        <ScopeEmpty skin={skin} icon={filtering ? "search" : "user"} words={filtering ? noMatch("yours") : "No repositories yet."}
+          elsewhere={filtering ? elsewhere("yours") : undefined} onJump={setTab}
+          onBrowsePublic={filtering ? undefined : () => setTab("public")} disabled={disabled} />
+      );
+    } else {
+      panel = (
         <div className={`${listClass} repo-rows`} role="radiogroup" aria-label="Repositories you belong to" aria-describedby={describedBy}>
-          {offerNew && (
+          {offeringNew && (
             <button
               type="button"
               role="radio"
@@ -530,41 +649,54 @@ export default function RepositoryAddressPicker({
               <span className={metaClass}><small>Private</small></span>
             </button>
           )}
-          {repositories.map((repository) => {
-            const active = selection?.kind === "existing" && selection.bundle_id === repository.bundle_id;
-            const gitMatch = !cloning && repository.git_remote === "matches" && !!repository.repository_fingerprint;
-            return (
-              <button
-                key={repository.repository_id}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                className={`${rowClass}${active ? " active" : ""}`}
-                onClick={() => chooseRow(repository)}
-                disabled={disabled || !repository.bundle_id}
-              >
-                <span className="sync-bundle-radio"><span /></span>
-                {rows === "match-option" && (
-                  <span className="setup-choice-mark" aria-hidden="true"><Icon name={repositoryMark(repository)} size={24} /></span>
-                )}
-                <span className={copyClass}>
-                  <strong>{repository.address}{gitMatch && <small className="sync-bundle-recommended">Git match</small>}</strong>
-                  <span>{cloning ? roleWord(repository) : `${capitalize(repository.visibility)} · ${capitalize(repository.role ?? "collaborator")}`}</span>
-                </span>
-                {rows === "choice" ? (
-                  <span className={metaClass}>
-                    <strong>Version {repository.revision}</strong>
-                    <span>{repository.resources} resources</span>
-                    <small>{repository.registration_only ? "not pushed yet" : formatRelativeTime(repository.updated_at)}</small>
-                  </span>
-                ) : (
-                  <span className={metaClass}>{repository.registration_only ? "not pushed yet" : formatRelativeTime(repository.updated_at)}</span>
-                )}
-              </button>
-            );
-          })}
+          {yoursRows.map(ownRow)}
         </div>
-      )}
+      );
+    }
+  } else if (tab === "starred") {
+    if (listings.starred.state !== "ready") {
+      panel = <ListingStatus listing={listings.starred} />;
+    } else if (starredRows.length === 0) {
+      panel = (
+        <ScopeEmpty skin={skin} icon={filtering ? "search" : "star"} words={filtering ? noMatch("starred") : "Nothing starred yet."}
+          elsewhere={filtering ? elsewhere("starred") : undefined} onJump={setTab}
+          onBrowsePublic={filtering ? undefined : () => setTab("public")} disabled={disabled} />
+      );
+    } else {
+      panel = (
+        <ListingRows rows={starredRows} skin={skin} selectedId={selectedListedId} resolvingId={resolvingRow} disabled={disabled}
+          ariaLabel="Starred repositories" markFor={listedMark} kindFor={listedKind} onPick={pickListed} />
+      );
+    }
+  } else if (listings.public.state !== "ready") {
+    panel = <ListingStatus listing={listings.public} onRetry={listings.retryPublic} />;
+  } else if (publicRows.length === 0) {
+    panel = (
+      <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud"} words={filtering ? noMatch("public") : "No public projects yet."}
+        elsewhere={filtering ? elsewhere("public") : undefined} onJump={setTab} disabled={disabled} />
+    );
+  } else {
+    panel = (
+      <>
+        <ListingRows rows={publicRows} skin={skin} selectedId={selectedListedId} resolvingId={resolvingRow} disabled={disabled}
+          ariaLabel="Public repositories" markFor={listedMark} kindFor={listedKind} onPick={pickListed} />
+        {!filtering && <ListingFoot listing={listings.public} onMore={listings.loadMore} disabled={disabled} />}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <RepositoryLookupField value={entry} onChange={changeEntry} onSubmit={submit} disabled={disabled} looking={looking} joining={joining}
+        invalid={invalidAddress || join.kind === "failed"} describedBy={describedBy}
+        error={join.kind === "failed" ? fieldError(join.message) : undefined} />
+
+      {answer}
+      {acknowledgement}
+
+      <CloudScopeTabs tabs={tabs} active={tab} disabled={disabled} onChange={setTab}
+        sort={listings.sort} onSort={listings.changeSort} />
+      {panel}
     </>
   );
 }

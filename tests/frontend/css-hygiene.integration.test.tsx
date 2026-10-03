@@ -467,3 +467,19 @@ test("no container query styles its own container", () => {
   }
   assert.deepEqual(offenders, [], "a container cannot match its own query");
 });
+
+test("a tab strip's rules reach only its own tabs", () => {
+  // The cloud picker's Newest/Most stars pill rides inside the review strip.
+  // `.sync-sync-review-tabs button { border-radius: 3px }` came later than the
+  // pill's own radius at the same specificity and squared its segments.
+  const css = stripComments(appCss);
+  const offenders: string[] = [];
+  for (const rule of css.matchAll(/([^{}]+)\{/g)) {
+    for (const selector of rule[1].split(",").map((part) => part.trim())) {
+      if (/\.(sync-project-tabs|sync-sync-review-tabs|repo-scope-tabs)(:[a-z-]+)?\s+(?!>)[^\s>+~]*\bbutton\b/.test(selector)) {
+        offenders.push(selector);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], "a strip's rule must use `> button` so it skips controls nested in the strip");
+});

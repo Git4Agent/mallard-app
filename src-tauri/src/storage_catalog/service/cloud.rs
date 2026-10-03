@@ -7,8 +7,9 @@
 use super::*;
 use mallard_infrastructure::managed_cloud::address::{parse_repository_address, AddressError};
 use mallard_infrastructure::managed_cloud::client::{
-    CreateCatalogItem, CreateRepository, DiscardedDraft, ErrorKind, ManagedCloudClient,
-    ManagedCloudStatus, RepositorySummary,
+    CreateCatalogItem, CreateRepository, DiscardedDraft, ErrorKind, ListingCatalog,
+    ManagedCloudClient, ManagedCloudStatus, PublicFilter, PublicSort, RepositoryListing,
+    RepositorySummary,
 };
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
 
@@ -38,6 +39,10 @@ pub struct CatalogCloudRepository {
     pub updated_at: u64,
     /// Created, nothing pushed yet.
     pub registration_only: bool,
+    /// The Owner's line, else GitHub's.
+    pub description: Option<String>,
+    pub star_count: u64,
+    pub viewer_starred: bool,
     pub resource_id: CatalogResourceId,
     pub display_name: String,
     #[serde(flatten)]
@@ -137,6 +142,9 @@ fn repository_row(
             .or(tag.map(|tag| tag.updated_at))
             .unwrap_or(0),
         registration_only: tag.map(|tag| tag.registration_only).unwrap_or(true),
+        description: summary.blurb(),
+        star_count: summary.star_count,
+        viewer_starred: summary.viewer_starred,
         resource_id,
         display_name: tag
             .map(|tag| tag.display_name.clone())
@@ -146,6 +154,14 @@ fn repository_row(
         available: registry.capability(&coordinate).is_some(),
         coordinate,
     })
+}
+
+/// Whether a listed repository's coordinate is this row's.
+fn same_coordinate(listed: &ListingCatalog, coordinate: &CatalogCoordinate) -> bool {
+    listed.provider == coordinate.provider.as_str()
+        && listed.resource_kind == coordinate.resource_kind.as_str()
+        && listed.format == coordinate.format.as_str()
+        && listed.format_version == coordinate.format_version
 }
 
 fn newest_first(rows: &mut [CatalogCloudRepository]) {
@@ -287,6 +303,88 @@ impl StorageCatalogService {
         Ok(rows)
     }
 
+    /// The coordinate a listing is narrowed to — a row's — and the client.
+    /// Add Catalog resource's door names no row: every coordinate this
+    /// build opens is kept.
+    fn listing_scope(
+        &self,
+        scope_id: Option<&CatalogScopeId>,
+        storage_id: &StorageId,
+    ) -> Result<(Option<CatalogCoordinate>, ManagedCloudClient), String> {
+        match scope_id {
+            Some(scope_id) => {
+                let (coordinate, client) = self.cloud_context(scope_id, storage_id)?;
+                Ok((Some(coordinate), client))
+            }
+            None => {
+                let (client, _) = self.cloud_client(storage_id)?;
+                Ok((None, client))
+            }
+        }
+    }
+
+    /// Whether a listed Catalog repository belongs in the listing: the
+    /// row's coordinate, or any coordinate this build registers.
+    fn listed_here(&self, listed: &ListingCatalog, coordinate: Option<&CatalogCoordinate>) -> bool {
+        match coordinate {
+            Some(coordinate) => same_coordinate(listed, coordinate),
+            None => CatalogCoordinate::new(
+                listed.provider.clone(),
+                listed.resource_kind.clone(),
+                listed.format.clone(),
+                listed.format_version,
+            )
+            .ok()
+            .is_some_and(|coordinate| self.registry.capability(&coordinate).is_some()),
+        }
+    }
+
+    /// Starred: the Catalog items the account starred on the website, one
+    /// page of its Starred list, the projects and the other kinds left out.
+    pub async fn list_cloud_starred(
+        &self,
+        scope_id: Option<&CatalogScopeId>,
+        storage_id: &StorageId,
+        cursor: Option<&str>,
+    ) -> Result<RepositoryListing, String> {
+        let (coordinate, client) = self.listing_scope(scope_id, storage_id)?;
+        let mut page = client.list_starred(cursor).await?;
+        page.rows.retain(|row| {
+            row.repository_class == "catalog"
+                && row
+                    .catalog
+                    .as_ref()
+                    .is_some_and(|listed| self.listed_here(listed, coordinate.as_ref()))
+        });
+        Ok(page)
+    }
+
+    /// Public: the released Catalog items, newest first or by stars, one
+    /// page at a time. The service narrows by a row's provider and kind;
+    /// the format is checked here.
+    pub async fn list_cloud_public(
+        &self,
+        scope_id: Option<&CatalogScopeId>,
+        storage_id: &StorageId,
+        sort: PublicSort,
+        cursor: Option<&str>,
+    ) -> Result<RepositoryListing, String> {
+        let (coordinate, client) = self.listing_scope(scope_id, storage_id)?;
+        let filter = PublicFilter {
+            class: "catalog",
+            provider: coordinate.as_ref().map(|c| c.provider.as_str()),
+            kind: coordinate.as_ref().map(|c| c.resource_kind.as_str()),
+            sort,
+        };
+        let mut page = client.list_public(&filter, cursor).await?;
+        page.rows.retain(|row| {
+            row.catalog
+                .as_ref()
+                .is_some_and(|listed| self.listed_here(listed, coordinate.as_ref()))
+        });
+        Ok(page)
+    }
+
     fn resolution(
         &self,
         client: &ManagedCloudClient,
@@ -394,6 +492,12 @@ impl StorageCatalogService {
         let summary = client.get_repository(repository_id).await?;
         if &item_of(&coordinate, &summary)? != resource_id {
             return Err("The repository names another item.".to_string());
+        }
+        // Someone else's public item: put it on the account's Catalog on
+        // the service, so the Library listing carries it on every computer,
+        // not only this machine's binding.
+        if summary.role.is_none() {
+            client.add_catalog_item(repository_id).await?;
         }
         self.save_cloud_binding(
             scope_id,

@@ -1,6 +1,7 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import type { ManagedCloudListingRow } from "./components/managed-cloud/types";
 import NewProjectFolderStep from "./components/project-sync/NewProjectFolderStep";
 import { projectSyncApi } from "./components/project-sync/api";
 import type {
@@ -53,7 +54,7 @@ const STORAGES: StorageSummary[] = knob("accounts", "several") === "none"
 
 const now = Math.floor(Date.now() / 1000);
 const repo = (overrides: Partial<ManagedCloudRepository>): ManagedCloudRepository => ({
-  repository_id: "repo_portal", owner_login: "maya", name: "portal", address: "maya/portal",
+  repository_id: "repo_portal", owner_login: "maya", name: "portal", address: "maya/portal", description: null, star_count: 0, viewer_starred: false,
   website_url: "https://mallard-ai.com/maya/portal", bundle_id: "b".repeat(32), repository_class: "git_project",
   visibility: "private", role: "member", can_push: true, repository_fingerprint: "f".repeat(64), git_remote: "differs",
   github_url: "https://github.com/acme/portal", revision: 12, updated_at: now - 7_200, resources: 9, registration_only: false,
@@ -92,6 +93,24 @@ if (!runtime.isTauri) {
 projectSyncApi.listManagedCloudRepositories = async (storageId) => {
   await wait(300);
   return storageId === "storage-work" ? REPOS : [];
+};
+const listed = (overrides: Partial<ManagedCloudListingRow>): ManagedCloudListingRow => ({
+  repository_id: "repo_agent_kit", owner_login: "lin", name: "agent-kit", address: "lin/agent-kit",
+  website_url: "https://mallard-ai.com/lin/agent-kit", repository_class: "git_project", catalog: null, visibility: "public",
+  role: null, github_url: "https://github.com/lin/agent-kit", description: "Sessions from building a small agent harness.",
+  star_count: 48, viewer_starred: true, revision: 22, updated_at: now - 2 * 86_400, ...overrides,
+});
+const STARRED = [listed({}), listed({ repository_id: "repo_maya_portal", owner_login: "maya", name: "portal", address: "maya/portal", website_url: "https://mallard-ai.com/maya/portal", github_url: "https://github.com/maya/portal", description: "A portal, a different one.", star_count: 7, revision: 6, updated_at: now - 9 * 86_400 })];
+const PUBLIC = [
+  listed({ repository_id: "repo_dotfiles", owner_login: "ada", name: "dotfiles", address: "ada/dotfiles", website_url: "https://mallard-ai.com/ada/dotfiles", github_url: "https://github.com/ada/dotfiles", description: "How Ada sets up a Mac.", star_count: 15, viewer_starred: false, revision: 30, updated_at: now - 86_400 }),
+  ...STARRED,
+  listed({ repository_id: "repo_handbook", owner_login: "leo", name: "handbook", address: "leo/handbook", website_url: "https://mallard-ai.com/leo/handbook", repository_class: "non_git_project", github_url: null, description: "Team handbook, folder only.", star_count: 3, viewer_starred: false, revision: 2, updated_at: now - 4 * 86_400 }),
+];
+projectSyncApi.listManagedCloudStarred = async () => { await wait(300); return { rows: STARRED, next_cursor: null }; };
+projectSyncApi.listManagedCloudPublic = async (_storageId, sort) => {
+  await wait(400);
+  const rows = sort === "stars" ? [...PUBLIC].sort((a, b) => b.star_count - a.star_count) : PUBLIC;
+  return { rows, next_cursor: null };
 };
 projectSyncApi.resolveManagedCloudRepository = async (storageId, address): Promise<ManagedCloudRepositoryResolution> => {
   note(`resolve_managed_cloud_repository ${storageId} ${address}`);

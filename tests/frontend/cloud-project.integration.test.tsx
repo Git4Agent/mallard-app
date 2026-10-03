@@ -81,6 +81,7 @@ const repository = (overrides: Partial<ManagedCloudRepository> = {}): ManagedClo
   updated_at: 1_787_298_240,
   resources: 9,
   registration_only: false,
+  description: null, star_count: 0, viewer_starred: false,
   ...overrides,
 });
 
@@ -128,7 +129,7 @@ test("the account comes first: the only one is checked, several wait for a pick,
   assert.match(one, /class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud Rika321/);
   assert.doesNotMatch(one, /Team R2/, "only Mallard Cloud accounts are offered");
   assert.match(one, /<strong>Repository<\/strong>/);
-  assert.match(one, /Address or invite code/);
+  assert.match(one, /address or invite code/i);
   // No repository yet: no Project or Agent band, and nothing to do.
   assert.doesNotMatch(one, /<strong>Project<\/strong>/);
   assert.match(one, /<button type="button" class="btn btn-primary" disabled="">Connect<\/button>/);
@@ -136,7 +137,7 @@ test("the account comes first: the only one is checked, several wait for a pick,
   const several = renderSource([personal, work]);
   assert.doesNotMatch(several, /setup-pill active/);
   assert.match(several, /Choose an account first\./);
-  assert.doesNotMatch(several, /Address or invite code/, "the Repository band waits for the account");
+  assert.doesNotMatch(several, /address or invite code/i, "the Repository band waits for the account");
 
   const landed = renderSource([personal, work], "storage-work");
   assert.match(landed, /class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud rika-acme/);
@@ -166,10 +167,13 @@ test("the picker in clone mode compares no remote, offers no new repository, and
   assert.doesNotMatch(html, /Git match|Git remote|different Git remote/);
   assert.doesNotMatch(html, /Paste the page address|No repository address is needed/);
   // One field for an address or a code; the verb is Look up until a code is typed.
-  assert.match(html, /Address or invite code[\s\S]*?Look up<\/button>/);
+  assert.match(html, /address or invite code[\s\S]*?Look up<\/button>/i);
+  // The scopes are tabs, Yours first; the field says a link is taken.
+  assert.match(html, /role="tablist"[\s\S]*?Yours<small>2<\/small>[\s\S]*?Starred[\s\S]*?Public/);
+  assert.match(html, /placeholder="Search, or paste a link, owner\/name or an invite code"/);
   assert.doesNotMatch(html, /Join<\/button>/);
-  assert.match(html, /maya\/portal[\s\S]*?<span>Member<\/span>/);
-  assert.match(html, /Rika321\/notes[\s\S]*?<span>Owner<\/span>/);
+  assert.match(html, /maya\/portal[\s\S]*?Member/);
+  assert.match(html, /Rika321\/notes[\s\S]*?Owner/);
 
   assert.equal(cloneSourceWord(repository()), "github.com/acme/portal");
   assert.equal(cloneSourceWord(repository({ github_url: null })), "GitHub URL missing");

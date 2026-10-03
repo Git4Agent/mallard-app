@@ -1,4 +1,4 @@
-import type { ManagedCloudDiscardedDraft, ManagedCloudLink } from "../managed-cloud/types";
+import type { ManagedCloudDiscardedDraft, ManagedCloudLink, ManagedCloudListingPage, ManagedCloudPublicSort } from "../managed-cloud/types";
 import { listen } from "@tauri-apps/api/event";
 import { Channel, invoke } from "../../ipc";
 import type {
@@ -63,6 +63,7 @@ import type {
   ProviderProfileSummary,
   PushDestinationStatus,
   PushReviewContext,
+  PushScope,
   ResourceInventory,
   PullReview,
   RestoreResult,
@@ -350,6 +351,13 @@ export const projectSyncApi = {
    *  storage, each compared with the local project's Git remote. */
   listManagedCloudRepositories: (storageId: string, localRepositoryFingerprint: string | null) =>
     invoke<ManagedCloudRepository[]>("list_managed_cloud_repositories", { storageId, localRepositoryFingerprint }),
+  /** Starred: the project repositories the account starred on the
+   *  website, one page. A row is picked by resolving its address. */
+  listManagedCloudStarred: (storageId: string, cursor: string | null) =>
+    invoke<ManagedCloudListingPage>("list_managed_cloud_starred", { storageId, cursor }),
+  /** Public: the released projects, newest first or by stars, one page. */
+  listManagedCloudPublic: (storageId: string, sort: ManagedCloudPublicSort, cursor: string | null) =>
+    invoke<ManagedCloudListingPage>("list_managed_cloud_public", { storageId, sort, cursor }),
   /** One pasted address resolved against a Mallard Cloud storage. */
   resolveManagedCloudRepository: (storageId: string, address: string, localRepositoryFingerprint: string | null) =>
     invoke<ManagedCloudRepositoryResolution>("resolve_managed_cloud_repository", { storageId, address, localRepositoryFingerprint }),
@@ -391,8 +399,8 @@ export const projectSyncApi = {
   getInventory: (localProjectId: string) =>
     invoke<ResourceInventory>("get_bundle_inventory", { localProjectId }),
 
-  preparePushReview: (localProjectId: string, storageId: string) =>
-    invoke<PushReviewContext>("prepare_push_review", { localProjectId, storageId }),
+  preparePushReview: (localProjectId: string, storageId: string, scope: PushScope) =>
+    invoke<PushReviewContext>("prepare_push_review", { localProjectId, storageId, scope }),
 
   getPushDestinationStatus: (localProjectId: string, storageId: string) =>
     invoke<PushDestinationStatus>("get_push_destination_status", { localProjectId, storageId }),
@@ -408,6 +416,7 @@ export const projectSyncApi = {
   pushBundle: (
     localProjectId: string,
     storageId: string,
+    scope: PushScope,
     recipe: BundleRecipe,
     credentialRedactionEnabled: boolean,
     projectContentReviewToken?: string | null,
@@ -418,6 +427,7 @@ export const projectSyncApi = {
   ) => invoke<ProjectOperationResult>("push_bundle", {
     localProjectId,
     storageId,
+    scope,
     recipe,
     credentialRedactionEnabled,
     projectContentReviewToken: projectContentReviewToken ?? null,

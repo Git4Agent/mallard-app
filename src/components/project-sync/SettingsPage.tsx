@@ -700,9 +700,9 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                   />
                 )}
               >
-                Check GitHub at startup and every {AUTO_CHECK_INTERVAL_HOURS} hours. A new release
-                downloads in the background and installs when you restart or quit Mallard.
-                Sends nothing about you or your projects.
+                Checks GitHub at startup and every {AUTO_CHECK_INTERVAL_HOURS} hours. Downloads new
+                releases in the background and installs on restart or quit. Sends no personal or
+                project data.
               </SettingsRow>
               <SettingsRow
                 label="App version"

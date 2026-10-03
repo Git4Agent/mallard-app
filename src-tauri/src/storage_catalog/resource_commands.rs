@@ -318,6 +318,29 @@ pub async fn list_catalog_cloud_shared(
         .await
 }
 #[tauri::command]
+pub async fn list_catalog_cloud_starred(
+    scope_id: Option<CatalogScopeId>,
+    storage_id: StorageId,
+    cursor: Option<String>,
+) -> Result<mallard_infrastructure::managed_cloud::client::RepositoryListing, String> {
+    StorageCatalogService::from_user_home()?
+        .list_cloud_starred(scope_id.as_ref(), &storage_id, cursor.as_deref())
+        .await
+}
+#[tauri::command]
+pub async fn list_catalog_cloud_public(
+    scope_id: Option<CatalogScopeId>,
+    storage_id: StorageId,
+    sort: String,
+    cursor: Option<String>,
+) -> Result<mallard_infrastructure::managed_cloud::client::RepositoryListing, String> {
+    let sort = mallard_infrastructure::managed_cloud::client::PublicSort::parse(&sort)
+        .ok_or("sort must be newest or stars")?;
+    StorageCatalogService::from_user_home()?
+        .list_cloud_public(scope_id.as_ref(), &storage_id, sort, cursor.as_deref())
+        .await
+}
+#[tauri::command]
 pub async fn resolve_catalog_cloud_repository(
     storage_id: StorageId,
     address: String,

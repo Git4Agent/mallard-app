@@ -571,7 +571,7 @@ const repositoryOf = (status: ManagedCloudStatus, id: ItemId, role?: string | nu
   const kind = ITEMS[id].kind;
   return {
     ...COORDINATES[kind], repository_id: of.repository_id, owner_login: of.owner_login, name: of.name,
-    address: `${of.owner_login}/${of.name}`, website_url: of.website_url, visibility: of.visibility,
+    address: `${of.owner_login}/${of.name}`, website_url: of.website_url, visibility: of.visibility, description: null, star_count: 0, viewer_starred: false,
     role: role === undefined ? of.role : role, can_push: of.can_push,
     revision: status.publication?.private_revision ?? status.publication?.public_revision ?? 0,
     updated_at: ITEMS[id].edited - 600, registration_only: of.release.kind === "not_pushed",

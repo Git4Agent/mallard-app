@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -15,9 +16,12 @@ test("a reviewed Git-only change can be pushed without a session selection", () 
   assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, gitHistoryChanged: true, listState: "loading" }), "Loading sessions…");
 });
 import { recipeWithSelection } from "../../src/components/project-sync/model";
+import { sessionPushDisabledReason } from "../../src/components/project-sync/session-detail/sessionDetailModel";
 import {
   ProjectChatHistoryContent,
+  type PushSessionFacts,
 } from "../../src/components/project-sync/ProjectActivityPage";
+import SessionPushReview from "../../src/components/project-sync/SessionPushReview";
 import type {
   InventoryResource,
   LocalProjectSummary,
@@ -76,7 +80,7 @@ function entry(threadId: string, overrides: Partial<ThreadSyncEntry> = {}): Thre
     access: "bound_ready",
     thread_id: threadId,
     conversation_resource_id: `codex:conversation:${threadId}`,
-    resource_id: `codex:conversation:${threadId}`,
+    resource_id: `codex:session:${threadId}`,
     display_name: threadId,
     state: "local_only",
     local_present: true,
@@ -96,6 +100,184 @@ const waits = entry(WAITS_ID, {
   display_name: "Catalog profile launch buttons",
   capture_bytes: 118 * MB,
   local_updated_at: NOW - 5 * 86_400,
+});
+
+test("session Push follows the publish decision, including changed export settings", () => {
+  assert.equal(sessionPushDisabledReason(fits), null);
+  assert.equal(sessionPushDisabledReason(entry("mode-change", {
+    state: "synced",
+    push_decision: { action: "publish", selectable: true },
+  })), null);
+  assert.equal(sessionPushDisabledReason(entry("synced", {
+    state: "synced",
+    push_decision: { action: "no_changes", selectable: false },
+  })), "This session is up to date.");
+  for (const state of ["storage_ahead", "diverged"] as const) {
+    assert.match(sessionPushDisabledReason(entry(state, {
+      state,
+      push_decision: { action: "require_pull", selectable: false },
+    }))!, /Review Pull/);
+  }
+  assert.match(sessionPushDisabledReason(entry("metadata", {
+    state: "synced",
+    push_decision: { action: "require_pull_metadata", selectable: false },
+  }))!, /metadata in Pull/);
+  assert.equal(sessionPushDisabledReason(entry("remote", { local_present: false })), "No local session to push.");
+  assert.equal(sessionPushDisabledReason(undefined), "This session cannot be pushed independently.");
+  for (const state of ["unknown", "unavailable"] as const) {
+    assert.equal(sessionPushDisabledReason(entry(state, {
+      state,
+      push_decision: { action: "blocked", selectable: false, blocked_reason: "Cannot read this session." },
+    })), "Cannot read this session.");
+  }
+});
+
+/* What the session's page reports for its row: 2 prompts, 3 replies, 4 tool
+   calls, a total with no input/output split, an hour long. */
+const fitsFacts: PushSessionFacts = {
+  title: "Refine sync review UX",
+  metrics: {
+    started_at: NOW - 7_200,
+    ended_at: NOW - 3_600,
+    is_active: false,
+    user_round_count: 2,
+    agent_message_count: 3,
+    tool_call_count: 4,
+    total_tokens: 1_200,
+    metrics_complete: true,
+  },
+};
+
+function sessionReview(
+  target: ThreadSyncEntry,
+  overrides: Partial<ComponentProps<typeof SessionPushReview>> = {},
+): string {
+  return renderToStaticMarkup(
+    <SessionPushReview
+      credentialRedactionEnabled={true}
+      entry={target}
+      facts={fitsFacts}
+      storageName="Attic R2"
+      selected={new Set([target.resource_id])}
+      threadComparison={comparison({ capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } })}
+      busy={false}
+      onClose={() => undefined}
+      onPush={() => undefined}
+      {...overrides}
+    />,
+  );
+}
+
+test("a session's own review draws that session's row and nothing to select", () => {
+  const reviewed = comparison({ capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  // The scoped inventory holds the target alone, so nothing else can travel.
+  const selected = sanitizePushSelection(
+    new Set([fits.resource_id, waits.resource_id]),
+    [conversationResource(fits)],
+    reviewed,
+  );
+  assert.deepEqual([...selected], [fits.resource_id]);
+  assert.equal(pushBudgetTotal(selected, reviewed)?.total, fits.capture_bytes);
+
+  const html = sessionReview(fits);
+  assert.match(html, /<h2 id="sync-push-resource-title">Push review<\/h2>/);
+  assert.match(html, /Credential redaction: On/);
+  assert.match(html, /Refine sync review UX/);
+  assert.doesNotMatch(html, /Catalog profile launch buttons|Scan project files|Git history/);
+  // Every control that acts on a list is gone: search, count, recommended
+  // selection, clear, the group header, the checkbox, and the header glance.
+  assert.doesNotMatch(html, /type="checkbox"|type="search"|selected"|Unselect|Clear|Conversations|sync-review-budget-glance/);
+  // The row prints what the page reported, then the size the push weighs.
+  assert.match(html, /data-tooltip="Prompts · 2\nReplies · 3"[^>]*>[\s\S]*?<b>5<\/b>/);
+  assert.match(html, /data-tooltip="Tool calls · 4"/);
+  assert.match(html, /data-tooltip="Total tokens · 1,200"/, "a total without its split prints alone");
+  assert.doesNotMatch(html, /Not reported/);
+  assert.match(html, /data-tooltip="Ran for 1h"/);
+  assert.match(html, /data-tooltip="Push size · 96 MB"/);
+  // Close and the commit are the two controls left; the size prints once more,
+  // at the button.
+  assert.match(html, /aria-label="Close push review"/);
+  const footer = html.slice(html.indexOf("<footer"));
+  assert.match(footer, /sync-review-budget-gauge push/);
+  assert.match(footer, /<b>96 MB<\/b> \/ 512 MB/);
+  assert.match(footer, /class="btn btn-primary sync-pull-apply-button"(?![^>]*disabled)[^>]*>[\s\S]*?Push<\/button>/);
+});
+
+test("a session's own review names its row from the comparison when the page had not loaded", () => {
+  const html = sessionReview(fits, { facts: null });
+  assert.match(html, /<strong>Refine sync review UX<\/strong>/);
+  assert.match(html, /data-tooltip="Push size · 96 MB"/);
+  assert.doesNotMatch(html, /Prompts ·|Total tokens/);
+  assert.match(sessionReview(entry("019f7798-5437-7632-9dbc-5b589cf68b12"), { facts: null }), /<strong>Untitled session<\/strong>/);
+});
+
+test("a session's own review says which subagents travel", () => {
+  const withAgents = entry(FITS_ID, {
+    display_name: "Refine sync review UX",
+    capture_bytes: 96 * MB,
+    subagent_selection: { wire_children: "on", keys: ["a", "b", "c"], omitted: false, estimated_bytes: 12 * MB },
+  });
+  assert.match(sessionReview(withAgents), /data-tooltip="Subagents · 3\nPush size · 12 MB"[^>]*>[\s\S]*?<b>3<\/b>/);
+  assert.doesNotMatch(sessionReview(fits), /Subagents ·/);
+  const omitted = entry(FITS_ID, {
+    display_name: "Refine sync review UX",
+    subagent_selection: { wire_children: "off", keys: [], omitted: true, estimated_bytes: 0 },
+  });
+  assert.match(sessionReview(omitted), /aria-label="Child rollouts excluded"/);
+  assert.doesNotMatch(sessionReview(omitted), /Subagents ·/);
+});
+
+test("a session past the limit is refused in its own words: it has nothing to exclude", () => {
+  const huge = entry(FITS_ID, { display_name: "Refine sync review UX", capture_bytes: 540 * MB });
+  const reviewed = comparison({ entries: [huge], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  const selected = new Set([huge.resource_id]);
+  const refusal = "28 MB over the 512 MB push limit.";
+  // The path bar's Push reads the same rule, so both buttons word it alike.
+  assert.equal(
+    pushReviewDisabledReason({ selected, threadComparison: reviewed, deletionApproved: true, sessionScope: true }),
+    refusal,
+  );
+  assert.equal(
+    pushReviewDisabledReason({ selected, threadComparison: reviewed, deletionApproved: true }),
+    "28 MB over the 512 MB push limit — exclude sessions or files to push.",
+  );
+  const html = sessionReview(huge, { threadComparison: reviewed });
+  const footer = html.slice(html.indexOf("<footer"));
+  assert.match(footer, new RegExp(`<p class="sync-review-budget-sentence">${refusal}</p>`));
+  assert.match(footer, /sync-review-budget-gauge push over/);
+  assert.match(footer, new RegExp(`sync-pull-apply-button" disabled="" title="${refusal}"`));
+});
+
+test("a running session push seals its exits and narrates the transfer", () => {
+  const html = sessionReview(fits, {
+    busy: true,
+    fetchProgress: {
+      phase: "push",
+      storage_id: "storage-1",
+      bundle_id: project.bundle_id,
+      index: 3,
+      total_objects: 7,
+      fetched_bytes: 800_000,
+      total_bytes: 96 * MB,
+    },
+  });
+  assert.match(html, /aria-label="Close push review"[^>]*disabled=""|disabled=""[^>]*aria-label="Close push review"/);
+  assert.match(html, /A running push finishes or fails whole/);
+  assert.match(html, /<span class="sync-btn-readout">3\/7 · 0\.8 MB…<\/span>/);
+});
+
+test("the shell opens a session's own review on that session alone", () => {
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  // No budget-fitted default: the one session is the selection, so one past
+  // the limit is refused in the review instead of opening unticked.
+  assert.match(shell, /setPushSelected\(scope\.kind === "session" \? new Set\(\[scope\.resource_id\]\) : new Set\(projectDefaults\)\)/);
+  // The row's review is mounted in the project review's place, on the
+  // selection the push carries, and both buttons read the session's rule.
+  assert.match(shell, /content: pushSessionEntry && pendingPush\.threadComparison \? \(\s*<SessionPushReview[\s\S]*?selected=\{safePushSelection\}/);
+  assert.match(shell, /sessionScope: pushSessionScope !== null,/);
+  // The session's page reports the row's readouts with the Push it starts.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /sessionHeader\?\.state === "ready" \? sessionHeader\.pushFacts : undefined/);
 });
 
 function comparison(overrides: Partial<ThreadSyncComparison> = {}): ThreadSyncComparison {
@@ -603,13 +785,14 @@ test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () =
 });
 
 
-test("Push review shows the selected redaction mode and the Off warning", () => {
+test("Push review shows the selected redaction mode without an export warning", () => {
   for (const enabled of [true, false]) {
     const html = renderToStaticMarkup(
       <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
     );
     assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
-    assert.equal(html.includes("Exported content can include API keys, tokens, and passwords."), !enabled);
+    assert.doesNotMatch(html, /Exported content can include API keys, tokens, and passwords\./);
+    assert.doesNotMatch(html, /sync-review-banners/);
   }
 });
 

@@ -1,4 +1,4 @@
-import type { ManagedCloudStatus, ManagedCloudDiscardedDraft } from "../managed-cloud/types";
+import type { ManagedCloudStatus, ManagedCloudDiscardedDraft, ManagedCloudListingPage, ManagedCloudPublicSort } from "../managed-cloud/types";
 import type { CatalogSyncProgress, CatalogCloudRepository, CatalogCloudResolution } from "./types";
 import { Channel, invoke } from "../../ipc";
 import type {
@@ -33,6 +33,14 @@ export const storageCatalogApi = {
    *  has saved, of every coordinate this build opens. */
   listCloudShared: (storageId: string) =>
     invoke<CatalogCloudRepository[]>("list_catalog_cloud_shared", { storageId }),
+  /** Starred: the Catalog items the account starred on the website, of
+   *  the row's coordinate, or of every coordinate this build opens when
+   *  no row is named. One page. */
+  listCloudStarred: (scopeId: string | null, storageId: string, cursor: string | null) =>
+    invoke<ManagedCloudListingPage>("list_catalog_cloud_starred", { scopeId, storageId, cursor }),
+  /** Public: the released items, newest first or by stars, one page. */
+  listCloudPublic: (scopeId: string | null, storageId: string, sort: ManagedCloudPublicSort, cursor: string | null) =>
+    invoke<ManagedCloudListingPage>("list_catalog_cloud_public", { scopeId, storageId, sort, cursor }),
   resolveCloudRepository: (storageId: string, address: string) =>
     invoke<CatalogCloudResolution>("resolve_catalog_cloud_repository", { storageId, address }),
   joinCloudRepository: (storageId: string, code: string) =>

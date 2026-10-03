@@ -366,3 +366,64 @@ final result: passed
 - `git diff --check`: passed.
 - Native Tauri was not exercised. Browser evidence covers the production Icon
   component and stylesheet.
+
+
+# Solid status circles and loading motion — 2026-10-02
+
+final result: passed
+
+Scope: the shared ThreadStatusIcon component and its status styles. Option 5 is
+the selected visual target. The later request adds more visible loading motion.
+
+## Evidence
+
+- Selected source: `output/status-icons-2026-10-02/design-source.png`.
+- Production component preview: `output/status-icons-2026-10-02/index.html`.
+- Full capture: `output/status-icons-2026-10-02/implementation.png`.
+- Raw browser capture: `output/status-icons-2026-10-02/implementation-raw.png`.
+- Focused detail: `output/status-icons-2026-10-02/details.png`.
+- Contrast results: `output/status-icons-2026-10-02/contrast.json`.
+- Source: 1487 x 1058 px. Browser viewport: 1440 x 1024 CSS px.
+- The browser reported a 2.29 pixel ratio. The raw capture is 3298 x 2345 px.
+  It was reduced to 1440 x 1024 for comparison.
+- Both themes show all ten states at 16, 18, and 24 CSS px. Enlarged samples
+  use 40 CSS px. Sample session rows use the existing 18 CSS px icon slot.
+- The source and final full capture were viewed in the same comparison input.
+  The detail crop was checked for spacing, clear symbols, and clipping.
+
+## Findings and corrections
+
+- The first fork symbol was too close to the circle edge. Reduced composite
+  glyph size from two thirds to 60 percent of the icon size. The final capture
+  shows a clear gap at both branch tips. No P0, P1, or P2 finding remains.
+- The initial loading fade was too subtle for the user. Replaced it with a
+  0.9-second dot bounce. Dot delays are 0, 0.15, and 0.3 seconds.
+- Browser checks found different vertical transforms on all three dots, with
+  full opacity. The circle and row keep their size and position.
+- With reduced motion enabled, all three computed animations and transforms
+  are `none`. The browser preference override was cleared after the check.
+
+## Required fidelity surfaces
+
+- Typography: application fonts, labels, and text sizes are unchanged. The
+  preview headings and size labels are review content.
+- Layout: existing icon slots and tooltips are retained. No row layout changes.
+- Colors: existing status colors are retained. Composite symbols use cream
+  ink in the light theme and dark ink in the dark theme. All 86 measured
+  color pairs exceed 3:1. The lowest ratios are 4.01:1 light and 4.40:1 dark.
+- Assets: existing Tabler vector icons supply the circles and symbols.
+  Untracked is a dashed empty circle. No package was added.
+- Content: all ten status meanings and existing accessible labels are retained.
+- Interaction: keyboard focus shows the status tooltip and a solid focus ring.
+  The final browser preview has no console error or warning.
+- P3: the library fork has more defined arrow tips than the raster mock.
+  The approved split direction, solid circle, and spacing are retained.
+
+## Validation
+
+- `npm run build`: passed after the final motion and spacing edits. The existing
+  bundle-size warning remains.
+- `npm run test:frontend-integration`: 523 passed, 0 failed.
+- `git diff --check`: passed.
+- Native Tauri was not exercised. This check covers the production React
+  component, CSS, and synthetic browser rows. No native command changed.

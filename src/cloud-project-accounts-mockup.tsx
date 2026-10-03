@@ -197,7 +197,7 @@ const INSPECTION: SetupDraftInspection = {
   can_finalize: true,
 };
 const cloudRepo = (overrides: Partial<ManagedCloudRepository>): ManagedCloudRepository => ({
-  repository_id: "repo_portal", owner_login: "maya", name: "portal", address: "maya/portal",
+  repository_id: "repo_portal", owner_login: "maya", name: "portal", address: "maya/portal", description: null, star_count: 0, viewer_starred: false,
   website_url: `https://${HOST}/maya/portal`, bundle_id: "b".repeat(32), repository_class: "git_project",
   visibility: "private", role: "member", can_push: true, repository_fingerprint: FINGERPRINT, git_remote: "matches",
   github_url: "https://github.com/acme/portal",

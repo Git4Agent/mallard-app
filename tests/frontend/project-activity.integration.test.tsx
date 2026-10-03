@@ -323,10 +323,9 @@ test("a non-Git project's Pull and Push badges count its files and hold on both 
   assert.equal(projectSyncCountPhrase(3, 2), "3 newer threads and 2 changed files");
 
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  // Pull and Push act on the whole project: the scanned files add to the
-  // comparison's threads, whichever face is on screen.
+  // On the overview, scanned files add to the project action counts.
   assert.match(workspace, /const pullCount = pullThreadCount \+ projectFileCounts\.pull;/);
-  assert.match(workspace, /const pushCount = pushThreadCount \+ projectFileCounts\.push;/);
+  assert.match(workspace, /const pushCount = pushThreadCount \+ pushFileCount;/);
   assert.match(workspace, /projectFileSyncCounts\(projectFilesScan\.inventory\)/);
 
   // The Sessions face stays mounted under the Files face, so the header it
@@ -345,19 +344,16 @@ test("a non-Git project's Pull and Push badges count its files and hold on both 
   assert.equal((workspace.match(/\?\? workspaceProfileIssue\s*\?\? projectFilesScanIssue/g) ?? []).length, 2);
 });
 
-test("the path bar hangs the branch on the section crumb and keeps one overflow", () => {
+test("the path bar hangs the branch on the project crumb and keeps one overflow", () => {
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const bar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
   const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
 
-  // The branch scopes the section, so it rides that crumb rather than standing
-  // as a fourth one — and a session replaces the crumb, taking the chip with it.
-  assert.match(workspace, /id: "section",[\s\S]*?scope: activityHeader && activityHeader\.branches\.length > 0 \? \(\s*<BranchPicker/);
+  // The branch follows the Git project and is hidden inside a session.
+  assert.match(workspace, /id: "project",[\s\S]*?scope: !sessionDetailSubview && workspaceProject\.is_git_repository\s*&& activityHeader && activityHeader\.branches\.length > 0 \? \(\s*<>\s*<span className="sync-path-separator" aria-hidden="true">\/<\/span>\s*<BranchPicker/);
   assert.match(bar, /\{crumb\.scope\}/);
-  // Only a Git project has a section crumb. A non-Git project's trail ends at
-  // the project: one control holds the Sessions/Files view, and it sits on
-  // the page it changes rather than behind a crumb's chevron as well.
-  assert.match(workspace, /else if \(workspaceProject\.is_git_repository\) \{/);
+  // Neither project type has a section crumb.
+  assert.doesNotMatch(workspace, /id: "section"/);
   assert.doesNotMatch(workspace, /menuLabel: "Switch view"|setActivityView\(otherView\)/);
   assert.doesNotMatch(workspace, /sync-path-view-switch|activityViewSwitch/);
   // The switch is the app's segmented pill as a tablist, arrows moving between
@@ -403,7 +399,7 @@ test("the path bar hangs the branch on the section crumb and keeps one overflow"
   // The number is decorative only because the button's own name already says
   // it — never let the badge become the only place the count is spoken.
   assert.match(workspace, /`Pull \$\{projectSyncCountPhrase\(pullThreadCount, projectFileCounts\.pull\)\} from /);
-  assert.match(workspace, /`Push \$\{projectSyncCountPhrase\(pushThreadCount, projectFileCounts\.push\)\} to /);
+  assert.match(workspace, /`Push \$\{projectSyncCountPhrase\(pushThreadCount, pushFileCount\)\} to /);
 
   // One overflow, at the end of the row. Two `⋯` in one bar was the reason a
   // command could only be found by opening both.
@@ -529,43 +525,46 @@ test("Catalog resource icons use standalone outlines while Skill stays unchanged
   assert.doesNotMatch(skill, /catalog-orbit/);
 });
 
-test("thread status badges use the colored rounded vector family", () => {
+test("thread status badges use solid circles with an empty dashed untracked state", () => {
   const expected: Record<
     ThreadStatusIconName,
     { iconClass: string; token: string; light: string; dark: string; composite?: true; filled?: true }
   > = {
     synced: {
-      iconClass: "tabler-icon-circle-check",
+      iconClass: "tabler-icon-circle-check-filled",
       token: "synced",
       light: "#006b32",
       dark: "#4dbf7e",
+      filled: true,
     },
     "cloud-outstanding": {
-      iconClass: "tabler-icon-cloud-download",
+      iconClass: "tabler-icon-circle-arrow-down-filled",
       token: "cloud",
       light: "#885e06",
       dark: "#f2c369",
-      composite: true,
+      filled: true,
     },
     "local-outstanding": {
-      iconClass: "tabler-icon-upload",
+      iconClass: "tabler-icon-circle-arrow-up-filled",
       token: "local",
       light: "#256c90",
       dark: "#8ccff3",
-      composite: true,
+      filled: true,
     },
     divergent: {
-      iconClass: "tabler-icon-git-merge",
+      iconClass: "tabler-icon-arrow-fork",
       token: "divergent",
       light: "#6d529d",
       dark: "#cbb4f3",
       composite: true,
+      filled: true,
     },
     pending: {
-      iconClass: "tabler-icon-clock",
+      iconClass: "tabler-icon-clock-filled",
       token: "pending",
       light: "#725f48",
       dark: "#c8b998",
+      filled: true,
     },
     conflict: {
       iconClass: "tabler-icon-exclamation-circle-filled",
@@ -575,17 +574,18 @@ test("thread status badges use the colored rounded vector family", () => {
       filled: true,
     },
     unavailable: {
-      iconClass: "tabler-icon-circle-minus",
+      iconClass: "tabler-icon-minus",
       token: "unavailable",
       light: "#5f6978",
       dark: "#b7c0cc",
+      composite: true,
+      filled: true,
     },
     untracked: {
-      iconClass: "tabler-icon-square-rounded",
+      iconClass: "tabler-icon-circle-dashed",
       token: "untracked",
       light: "#6b7280",
       dark: "#aaa69d",
-      composite: true,
     },
     checking: {
       iconClass: "tabler-icon-dots",
@@ -593,12 +593,14 @@ test("thread status badges use the colored rounded vector family", () => {
       light: "#00758a",
       dark: "#62d0e8",
       composite: true,
+      filled: true,
     },
     unknown: {
-      iconClass: "tabler-icon-help-circle",
+      iconClass: "tabler-icon-help-circle-filled",
       token: "unknown",
       light: "#6d529d",
       dark: "#d4b7ff",
+      filled: true,
     },
   };
   const statuses = Object.keys(expected) as ThreadStatusIconName[];
@@ -617,6 +619,7 @@ test("thread status badges use the colored rounded vector family", () => {
     }
     assert.doesNotMatch(html, /crispEdges|icon-pixel/);
     if (spec.composite) {
+      assert.match(html, /tabler-icon-circle-filled/);
       assert.match(html, /thread-status-icon-badge/);
       assert.match(html, /thread-status-icon-glyph/);
     } else {
@@ -637,8 +640,8 @@ test("thread status badges use the colored rounded vector family", () => {
     assert.ok(css.includes(spec.light), `light value ${spec.light} missing from the palette`);
     assert.ok(css.includes(spec.dark), `dark value ${spec.dark} missing from the palette`);
   }
-  assert.match(css, /\.thread-status-icon-dots \{[^}]*animation: thread-status-pulse/s);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots \{ animation: none;/s);
+  assert.match(css, /\.thread-status-icon-dots > path:not\(\[stroke="none"\]\) \{[^}]*animation: thread-status-dot-bounce/s);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.thread-status-icon-dots > path:not\(\[stroke="none"\]\) \{ animation: none; transform: none;/s);
 });
 
 test("a row with no comparison entry names why, instead of drawing nothing", () => {

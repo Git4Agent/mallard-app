@@ -130,9 +130,30 @@ pub(super) static HISTORY_SCAN_LOGGED_AT: std::sync::Mutex<BTreeMap<String, u64>
 const AGENT_HOME_LOCKED_MESSAGE: &str =
     "agent home is fixed after project setup; remove and set up the project again to use a different agent home";
 
+/// The content a single Push may change. This is not persisted.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PushScope {
+    #[default]
+    Project,
+    Session {
+        resource_id: ResourceId,
+    },
+}
+
+impl PushScope {
+    fn session_id(&self) -> Option<&ResourceId> {
+        match self {
+            Self::Project => None,
+            Self::Session { resource_id } => Some(resource_id),
+        }
+    }
+}
+
 /// The complete approval captured by a reviewed Push.
 #[derive(Clone, Debug)]
 pub struct PushApproval {
+    pub scope: PushScope,
     pub credential_redaction_enabled: bool,
     pub subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
     pub recipe: BundleRecipe,
@@ -146,6 +167,7 @@ impl PushApproval {
     pub fn recommended(review: &PushReviewContext, storage_id: &StorageId) -> Self {
         let recipe = recommended_review_recipe(review, storage_id);
         Self {
+            scope: review.scope.clone(),
             credential_redaction_enabled: review.credential_redaction_enabled,
             subagent_selections: review
                 .thread_comparison
@@ -211,16 +233,28 @@ impl<'a> ProjectSyncService<'a> {
         local_project_id: &LocalProjectId,
         storage_id: &StorageId,
     ) -> Result<PushReviewContext, String> {
-        self.prepare_push_review_with_phases(local_project_id, storage_id, &mut |_, _| {})
+        self.prepare_push_review_with_phases(
+            local_project_id,
+            storage_id,
+            PushScope::Project,
+            &mut |_, _| {},
+        )
     }
 
     pub fn prepare_push_review_with_phases(
         &self,
         local_project_id: &LocalProjectId,
         storage_id: &StorageId,
+        scope: PushScope,
         on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<PushReviewContext, String> {
-        prepare_push_review_with_progress(self.repository, local_project_id, storage_id, on_phase)
+        prepare_push_review_with_progress(
+            self.repository,
+            local_project_id,
+            storage_id,
+            scope,
+            on_phase,
+        )
     }
 
     pub fn push_reviewed(
@@ -262,6 +296,7 @@ impl<'a> ProjectSyncService<'a> {
             storage_id,
             approval.recipe,
             ProjectContentPushReview {
+                scope: approval.scope,
                 credential_redaction_enabled: approval.credential_redaction_enabled,
                 subagent_selections: approval.subagent_selections,
                 review_token: approval.project_content_review_token,
@@ -648,6 +683,7 @@ pub struct ProjectContentInventory {
 
 #[derive(Clone, Debug)]
 pub(super) struct ProjectContentPushReview {
+    pub(super) scope: PushScope,
     pub(super) credential_redaction_enabled: bool,
     pub(super) subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
     pub(super) review_token: Option<String>,
@@ -659,6 +695,7 @@ pub(super) struct ProjectContentPushReview {
 impl Default for ProjectContentPushReview {
     fn default() -> Self {
         Self {
+            scope: PushScope::Project,
             credential_redaction_enabled: true,
             subagent_selections: BTreeMap::new(),
             review_token: None,
@@ -8223,6 +8260,7 @@ fn push_destination_error(status: &PushDestinationStatus) -> Option<String> {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct PushReviewContext {
+    pub scope: PushScope,
     pub credential_redaction_enabled: bool,
     pub project: ProjectDetail,
     pub inventory: ResourceInventory,
@@ -8277,13 +8315,20 @@ fn prepare_push_review_with_repository(
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<PushReviewContext, String> {
-    prepare_push_review_with_progress(repository, local_project_id, storage_id, &mut |_, _| {})
+    prepare_push_review_with_progress(
+        repository,
+        local_project_id,
+        storage_id,
+        PushScope::Project,
+        &mut |_, _| {},
+    )
 }
 
 pub(super) fn prepare_push_review_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
+    scope: PushScope,
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<PushReviewContext, String> {
     let phase_started = Instant::now();
@@ -8335,7 +8380,18 @@ pub(super) fn prepare_push_review_with_progress(
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
 
-    let inventory = build_resource_inventory(config, local_project_id, &binding, &discovery)?;
+    let mut inventory = build_resource_inventory(config, local_project_id, &binding, &discovery)?;
+    if let Some(resource_id) = scope.session_id() {
+        inventory.resources.retain(|resource| {
+            resource.descriptor.resource_id == *resource_id && resource.category == "conversations"
+        });
+        if inventory.resources.is_empty() {
+            return Err(
+                "This session is not available as an independent local Push resource.".into(),
+            );
+        }
+        inventory.recipe.entries.retain(|id, _| id == resource_id);
+    }
 
     on_phase("build resource inventory", phase_started.elapsed());
     let phase_started = Instant::now();
@@ -8370,7 +8426,8 @@ pub(super) fn prepare_push_review_with_progress(
     // Only Git-managed projects surface a stored project-files inventory here
     // (remote/base entries, no local walk). Eligible projects use the explicit
     // Scan button instead.
-    let wants_project_files = eligibility.state == ProjectFileSyncEligibilityState::GitManaged;
+    let wants_project_files = scope == PushScope::Project
+        && eligibility.state == ProjectFileSyncEligibilityState::GitManaged;
     let mut thread_comparison = None;
     let mut thread_comparison_error = None;
     let mut project_files = None;
@@ -8437,7 +8494,24 @@ pub(super) fn prepare_push_review_with_progress(
     let detail = get_project_with_repository(repository, local_project_id)?
         .ok_or_else(|| format!("unknown local project '{}'", local_project_id))?;
 
-    let git_history = capture_binding_git_history(config, storage_id, &project, &binding)?;
+    if let (Some(resource_id), Some(comparison)) = (scope.session_id(), thread_comparison.as_mut())
+    {
+        comparison
+            .entries
+            .retain(|entry| entry.resource_id == *resource_id);
+        comparison.counts = ThreadSyncCounts::default();
+        for entry in &comparison.entries {
+            count_thread_sync_state(&mut comparison.counts, entry.state);
+        }
+        if let Some(budget) = &mut comparison.capture_budget {
+            budget.reserved_bytes = 0;
+        }
+    }
+    let git_history = if scope == PushScope::Project {
+        capture_binding_git_history(config, storage_id, &project, &binding)?
+    } else {
+        None
+    };
     let git_history_review_token = git_history
         .as_ref()
         .map(project_activity::git_history_review_token)
@@ -8462,6 +8536,7 @@ pub(super) fn prepare_push_review_with_progress(
         .and_then(|(history, stored)| history.outgoing_since(stored));
 
     Ok(PushReviewContext {
+        scope,
         credential_redaction_enabled,
         project: detail,
         inventory,
@@ -8534,6 +8609,9 @@ pub(super) fn recommended_review_recipe(
         .find(|link| link.storage_id == *storage_id)
         .and_then(|link| link.recipe.clone())
         .unwrap_or_else(|| review.inventory.recipe.clone());
+    if review.scope.session_id().is_some() {
+        recipe.entries.clear();
+    }
     let Some(comparison) = &review.thread_comparison else {
         return recipe;
     };
@@ -10040,6 +10118,7 @@ fn build_publish_request(
     binding: &ProjectBinding,
     homes: &BTreeMap<ProviderKey, String>,
     recipe: &BundleRecipe,
+    push_scope: &PushScope,
     mut captured: provider_capture::CapturedResources,
     previous: Option<&BundleSnapshot>,
     expected_head: PublishExpectation,
@@ -10105,6 +10184,13 @@ fn build_publish_request(
     let mut writable_scopes: BTreeMap<SyncScopeKey, ScopePublishInput> = BTreeMap::new();
     let mut reviewed_scope_pins: BTreeMap<SyncScopeKey, (u64, String)> = BTreeMap::new();
     for scope_key in writable_scopes_for_binding(binding) {
+        if push_scope.session_id().is_some()
+            && !actions
+                .iter()
+                .any(|action| scope_key == SyncScopeKey::Provider(action.provider.clone()))
+        {
+            continue;
+        }
         let previous_scope =
             previous_manifest.and_then(|manifest| manifest.scope(&scope_key).cloned());
         reviewed_scope_pins.insert(
@@ -10114,6 +10200,33 @@ fn build_publish_request(
                 .map(|scope| (scope.revision, scope.content_sha256.clone()))
                 .unwrap_or_else(absent_scope_pin),
         );
+        if push_scope.session_id().is_some() {
+            // A session changes only its own conversation. Generic resources
+            // in the same provider scope also retain their stored bytes.
+            let input = match previous_scope {
+                Some(previous) => ScopePublishInput {
+                    recipe: previous.recipe,
+                    captured_with: previous.captured_with,
+                    conversations: previous.conversations,
+                    resources: previous.resources,
+                    retained_files: previous.files,
+                    directories: previous.directories,
+                    tombstones: previous.tombstones,
+                    captured_files: BTreeMap::new(),
+                },
+                None => ScopePublishInput {
+                    captured_with: match &scope_key {
+                        SyncScopeKey::Provider(provider) => captured_with_for_provider(provider),
+                        SyncScopeKey::Project => {
+                            unreachable!("session actions name provider scopes")
+                        }
+                    },
+                    ..ScopePublishInput::default()
+                },
+            };
+            writable_scopes.insert(scope_key, input);
+            continue;
+        }
         let mut scope_recipe = recipes_by_scope
             .get(&scope_key)
             .cloned()
@@ -10622,6 +10735,7 @@ fn publish_reviewed(
     project: &LocalProjectRegistration,
     binding: &ProjectBinding,
     recipe: &BundleRecipe,
+    push_scope: &PushScope,
     captured: provider_capture::CapturedResources,
     observed: Option<(
         BundleSnapshot,
@@ -10636,7 +10750,9 @@ fn publish_reviewed(
     git_history: Option<mallard_domain::GitHistorySnapshot>,
 ) -> Result<ReviewedPublishOutcome, String> {
     let phase_started = Instant::now();
-    set_cloud_project_origin(engine, project, binding)?;
+    if *push_scope == PushScope::Project {
+        set_cloud_project_origin(engine, project, binding)?;
+    }
     let previous = observed.as_ref().map(|(snapshot, _)| snapshot);
     let expected_head = observed
         .as_ref()
@@ -10656,6 +10772,7 @@ fn publish_reviewed(
         binding,
         &resolved_binding.homes,
         recipe,
+        push_scope,
         captured,
         previous,
         expected_head,
@@ -10664,11 +10781,19 @@ fn publish_reviewed(
         updated_at,
         credential_redaction_enabled,
     )?;
-    let git_history_review_token = git_history
-        .as_ref()
-        .map(project_activity::git_history_review_token)
-        .transpose()?;
-    request.git_history = git_history;
+    let git_history_review_token = if *push_scope == PushScope::Project {
+        git_history
+            .as_ref()
+            .map(project_activity::git_history_review_token)
+            .transpose()?
+    } else {
+        None
+    };
+    request.git_history = if push_scope.session_id().is_some() {
+        previous.and_then(|snapshot| snapshot.manifest.git_history.clone())
+    } else {
+        git_history
+    };
     let verify_git = || -> Result<(), String> {
         if let Some(token) = &git_history_review_token {
             project_activity::verify_git_history_review(Path::new(&binding.project_root), token)?;
@@ -10682,6 +10807,12 @@ fn publish_reviewed(
     on_phase("build publish request", phase_started.elapsed());
     let phase_started = Instant::now();
     if operations.is_empty() {
+        if push_scope.session_id().is_some() {
+            return Ok(ReviewedPublishOutcome {
+                publication: None,
+                failures,
+            });
+        }
         // A failed conversation selection must not create an empty first revision.
         // Ordinary resource captures still use the normal publication path.
         if previous.is_none()
@@ -10742,7 +10873,9 @@ fn push_bundle_reviewed_with_repository(
 ) -> Result<ProjectOperationResult, String> {
     // Older content-review fixtures do not exercise the Git review. Supply
     // that new approval from their temporary repository, as the UI now does.
-    if project_content_review.git_history_review_token.is_none() {
+    if project_content_review.scope == PushScope::Project
+        && project_content_review.git_history_review_token.is_none()
+    {
         let state = repository.load_project_state_snapshot()?;
         if let (Some(project), Some(binding)) = (
             state.config.project(local_project_id),
@@ -10925,6 +11058,24 @@ pub(super) fn push_bundle_reviewed_with_progress(
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ProjectOperationResult, String> {
     requested_recipe.validate_machine_local()?;
+    let push_scope = &project_content_review.scope;
+    if let Some(resource_id) = push_scope.session_id() {
+        if requested_recipe.entries.len() != 1
+            || !requested_recipe.entries.contains_key(resource_id)
+            || project_content_review
+                .subagent_selections
+                .keys()
+                .any(|id| id != resource_id)
+            || project_content_review.review_token.is_some()
+            || project_content_review.git_history_review_token.is_some()
+            || !project_content_review.removal_ids.is_empty()
+            || !project_content_review
+                .acknowledged_warning_digests
+                .is_empty()
+        {
+            return Err("A session Push can include only the selected session.".into());
+        }
+    }
     let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
     let settings = mallard_infrastructure::app_settings::load_app_settings(repository)?;
@@ -10961,7 +11112,11 @@ pub(super) fn push_bundle_reviewed_with_progress(
         return Err(eligibility.reason);
     }
     let resolved = resolve_project_binding_from_state(&state.bindings, &binding)?;
-    let git_history = capture_binding_git_history(config, storage_id, &project, &binding)?;
+    let git_history = if *push_scope == PushScope::Project {
+        capture_binding_git_history(config, storage_id, &project, &binding)?
+    } else {
+        None
+    };
     let actual_git_token = git_history
         .as_ref()
         .map(project_activity::git_history_review_token)
@@ -10979,6 +11134,19 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let (discovery, views) =
         provider_capture::discover_sessions(provider_registry(), &capture_request)?;
     let discovered = discovery.project_inventory();
+    if let Some(resource_id) = push_scope.session_id() {
+        if !discovered.resources.iter().any(|resource| {
+            resource.resource_id == resource_id.as_str()
+                && kind_primitive(&resource.kind) == Some(ResourceKindPrimitive::Conversation)
+                && !discovery
+                    .excluded_subagent_resource_ids()
+                    .contains(resource_id.as_str())
+        }) {
+            return Err(
+                "This session is not available as an independent local Push resource.".into(),
+            );
+        }
+    }
     on_phase("discover local state", phase_started.elapsed());
     let phase_started = Instant::now();
     let (storage, engine) =
@@ -11003,6 +11171,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
     );
     let saved_project_content_entries = stored_destination_recipe
         .as_ref()
+        .filter(|_| *push_scope == PushScope::Project)
         .map(|recipe| {
             recipe
                 .entries
@@ -11285,6 +11454,36 @@ pub(super) fn push_bundle_reviewed_with_progress(
         .iter()
         .filter_map(|action| action.source_resource_id.clone())
         .collect::<BTreeSet<_>>();
+    if let Some(resource_id) = push_scope.session_id() {
+        if !actioned_resources.contains(resource_id) {
+            let reason = stale_children
+                .first()
+                .map(|failure| failure.message.clone())
+                .or_else(|| {
+                    reviewed_entries
+                        .iter()
+                        .find(|entry| entry.resource_id == *resource_id)
+                        .map(|entry| {
+                            entry
+                                .push_decision
+                                .blocked_reason
+                                .clone()
+                                .or_else(|| entry.status_detail.clone())
+                                .unwrap_or_else(|| "This session has no changes to push.".into())
+                        })
+                })
+                .unwrap_or_else(|| "This session is no longer available to push.".into());
+            return Err(reason);
+        }
+    }
+    let writable_scopes = if push_scope.session_id().is_some() {
+        selected_actions
+            .iter()
+            .map(|action| SyncScopeKey::Provider(action.provider.clone()))
+            .collect()
+    } else {
+        writable_scopes_for_binding(&binding)
+    };
     let mut publish_outcome = publish_reviewed(
         repository,
         &engine,
@@ -11292,6 +11491,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
         &project,
         &binding,
         &push_recipe,
+        push_scope,
         capture,
         observed,
         selected_actions,
@@ -11341,7 +11541,6 @@ pub(super) fn push_bundle_reviewed_with_progress(
     // Advance a base for every writable scope that published — and only for
     // those. Viewed, unbound, and unknown scopes never move.
     let published_scope_coordinates = published_snapshot.manifest.scope_coordinates();
-    let writable_scopes = writable_scopes_for_binding(&binding);
     let published_repository_base = RepositoryBase {
         revision,
         commit_id: commit_id.clone(),
@@ -11420,7 +11619,9 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     .to_string(),
             );
         }
-        current_link.recipe = Some(push_recipe.clone());
+        if *push_scope == PushScope::Project {
+            current_link.recipe = Some(push_recipe.clone());
+        }
         if let Some(inventory) = &reviewed_inventory {
             let previous_exclusions = current_link
                 .project_content_preferences
@@ -11461,12 +11662,20 @@ pub(super) fn push_bundle_reviewed_with_progress(
     let mut results = published_snapshot
         .manifest
         .all_resources()
+        .filter(|_| push_scope.session_id().is_none())
         .map(|(resource_id, _)| OperationResourceResult {
             resource_id: resource_id.clone(),
             state: state.to_string(),
             message: None,
         })
         .collect::<Vec<_>>();
+    if let Some(resource_id) = push_scope.session_id() {
+        results.push(OperationResourceResult {
+            resource_id: resource_id.clone(),
+            state: state.to_string(),
+            message: None,
+        });
+    }
     let resources_changed = Some(if was_published { results.len() } else { 0 });
     let failed = thread_results
         .iter()
@@ -17457,6 +17666,7 @@ fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     include!("git_history_tests.rs");
+    include!("session_push_tests.rs");
     include!("session_refresh_regression_tests.rs");
     include!("owned_subagent_tests.rs");
     include!("claude_owned_subagent_tests.rs");
@@ -18881,6 +19091,7 @@ mod tests {
 
     fn empty_project_content_review() -> ProjectContentPushReview {
         ProjectContentPushReview {
+            scope: PushScope::Project,
             git_history_review_token: None,
             credential_redaction_enabled: true,
             subagent_selections: BTreeMap::new(),
@@ -19546,6 +19757,7 @@ mod tests {
             &storage_id,
             recipe,
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -19761,6 +19973,7 @@ mod tests {
             &storage_id,
             removal_recipe,
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -19905,6 +20118,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&scanned),
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -19952,6 +20166,7 @@ mod tests {
             &storage_id,
             recipe.clone(),
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -19971,6 +20186,7 @@ mod tests {
             &storage_id,
             recipe,
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -19994,6 +20210,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&refreshed),
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -20040,6 +20257,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&scanned),
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
@@ -20093,6 +20311,7 @@ mod tests {
             &storage_id,
             reviewed_project_content_recipe(&rescanned),
             ProjectContentPushReview {
+                scope: PushScope::Project,
                 git_history_review_token: None,
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),

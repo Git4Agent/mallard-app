@@ -490,6 +490,10 @@ export interface CatalogCloudRepository extends CatalogCoordinate, CatalogCoordi
   updated_at: number;
   /** Created, nothing pushed yet. */
   registration_only: boolean;
+  /** The Owner's line, else GitHub's. */
+  description: string | null;
+  star_count: number;
+  viewer_starred: boolean;
   resource_id: string;
   display_name: string;
   /** Whether this build registers the coordinate. */

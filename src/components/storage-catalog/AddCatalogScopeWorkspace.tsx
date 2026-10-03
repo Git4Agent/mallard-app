@@ -126,6 +126,7 @@ function CloudRepositoryBands({ account, scopes, profiles, capabilities, working
 }) {
   const choice = useCloudRepositoryChoice({
     storageId: account.id,
+    scopeId: null,
     accountLogin: account.account_login,
     target: { kind: "door" },
     working,

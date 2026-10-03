@@ -28,7 +28,7 @@ import { type SyncReviewStep, historyStepLabel, projectReviewTabs, syncReviewSte
 import { STORAGE_BLOCKING_STATES, projectLabel, sessionNoun } from "./model";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
-import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../sync-review/ReviewBudgetMeter";
+import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence, type ReviewBudget } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
 
 export interface PushReviewBlocker {
@@ -414,6 +414,7 @@ export function pushReviewDisabledReason({
   projectContentLoading = false,
   listState = "ready",
   gitHistoryChanged = false,
+  sessionScope = false,
 }: {
   /** Sanitized: `sanitizePushSelection`, which is what the push carries. */
   selected: ReadonlySet<string>;
@@ -427,6 +428,8 @@ export function pushReviewDisabledReason({
    *  so nothing ticked by default travels unseen. */
   listState?: ReviewListState;
   gitHistoryChanged?: boolean;
+  /** One session's own review: over the limit, it has nothing to exclude. */
+  sessionScope?: boolean;
 }): string | null {
   /* First: until the rows are on screen, or while the scan is running,
      every judgement below is provisional, including the size of the push. */
@@ -434,7 +437,9 @@ export function pushReviewDisabledReason({
   if (listState === "failed") return REVIEW_LIST_FAILED_REASON;
   if (projectContentLoading) return "Project files are still being scanned";
   const budget = pushBudgetTotal(selected, threadComparison, projectContentInventory);
-  if (budget && budget.total > budget.limit) return reviewBudgetSentence(budget, "push");
+  if (budget && budget.total > budget.limit) {
+    return sessionScope ? sessionOverLimitSentence(budget) : reviewBudgetSentence(budget, "push");
+  }
   const blockers = pushReviewBlockers(
     selected,
     threadComparison,
@@ -458,6 +463,12 @@ export function pushReviewDisabledReason({
   return null;
 }
 
+/** The meter's refusal without its way out: a session's own review cannot
+ *  exclude anything, so the sentence stops at the overshoot. */
+function sessionOverLimitSentence(budget: ReviewBudget): string {
+  return `${formatBytes(budget.total - budget.limit)} over the ${formatBytes(budget.limit)} push limit.`;
+}
+
 type PushBudget = NonNullable<ReturnType<typeof pushBudgetTotal>>;
 
 /** The meter's title on both instances: the sources the total is made of.
@@ -465,6 +476,41 @@ type PushBudget = NonNullable<ReturnType<typeof pushBudgetTotal>>;
  *  Push's, because only Push carries requirements. */
 function pushBudgetBreakdown(total: PushBudget): string {
   return `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
+}
+
+/** Every exit is sealed while the transfer runs, on purpose: the backend has
+ *  no safe mid-write abort. Saying so beats leaving the user hunting for a
+ *  cancel that does not exist. */
+export const PUSH_RUNNING_NOTE = "A running push finishes or fails whole — it can’t be cancelled midway.";
+
+/** The commit of both reviews that push. It wears the wait while the rows
+ *  load and the transfer's own readout while it runs. */
+export function PushApplyButton({ busy, listPending = false, fetchProgress = null, disabledReason, onPush }: {
+  busy: boolean;
+  listPending?: boolean;
+  fetchProgress?: BundleFetchProgress | null;
+  /** `pushReviewDisabledReason`, which is also the button's title. */
+  disabledReason: string | null;
+  onPush: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="btn btn-primary sync-pull-apply-button"
+      onClick={onPush}
+      disabled={busy || disabledReason !== null}
+      title={disabledReason ?? undefined}
+    >
+      {busy || listPending
+        ? <Icon name="refresh" size={16} className="icon-spin" />
+        : <ThreadStatusIcon status="local-outstanding" size={16} />}
+      {busy
+        ? (fetchProgress && fetchProgress.phase === "push"
+          ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
+          : "Pushing…")
+        : listPending ? "Loading sessions…" : "Push"}
+    </button>
+  );
 }
 
 export default function PushResourceWorkspace({
@@ -669,13 +715,6 @@ export default function PushResourceWorkspace({
      error is recognised stale sync metadata; an unreachable storage never
      reaches this review (it stops at the storage card), and any other
      failure must not tempt a repair that forgets sync bases. */
-  if (!credentialRedactionEnabled) {
-    banners.push({
-      key: "credential-redaction",
-      severity: "warning",
-      message: "Exported content can include API keys, tokens, and passwords.",
-    });
-  }
   if (threadComparisonError) {
     banners.push({
       key: "comparison-failed",
@@ -1011,15 +1050,13 @@ export default function PushResourceWorkspace({
           <span role="status"><small>{localBlockerSentence}</small></span>
         )}
         {busy && (
-          /* Every exit is sealed while the transfer runs, on purpose: the
-             backend has no safe mid-write abort. Saying so beats leaving the
-             user hunting for a cancel that does not exist. The sentence states
-             a standing contract rather than reporting an event — the event is
-             the push, which the button beside it is already narrating. It
-             still announces: it appears only once `busy` flips, and it is the
-             only thing that explains why Escape has stopped closing the review
-             and the button under the reader's focus has gone dead. */
-          <span role="status"><small>A running push finishes or fails whole — it can’t be cancelled midway.</small></span>
+          /* The sentence states a standing contract rather than reporting an
+             event — the event is the push, which the button beside it is
+             already narrating. It still announces: it appears only once
+             `busy` flips, and it is the only thing that explains why Escape
+             has stopped closing the review and the button under the reader's
+             focus has gone dead. */
+          <span role="status"><small>{PUSH_RUNNING_NOTE}</small></span>
         )}
         {emptyReview ? (
           /* Nothing to commit, so the commit's slot holds the way out — the
@@ -1058,22 +1095,13 @@ export default function PushResourceWorkspace({
             {budgetTotal && !listPending && (
               <ReviewBudgetGauge budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
             )}
-            <button
-              type="button"
-              className="btn btn-primary sync-pull-apply-button"
-              onClick={onPush}
-              disabled={busy || pushDisabledReason !== null}
-              title={pushDisabledReason ?? undefined}
-            >
-              {busy || listPending
-                ? <Icon name="refresh" size={16} className="icon-spin" />
-                : <ThreadStatusIcon status="local-outstanding" size={16} />}
-              {busy
-                ? (fetchProgress && fetchProgress.phase === "push"
-                  ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
-                  : "Pushing…")
-                : listPending ? "Loading sessions…" : "Push"}
-            </button>
+            <PushApplyButton
+              busy={busy}
+              listPending={listPending}
+              fetchProgress={fetchProgress}
+              disabledReason={pushDisabledReason}
+              onPush={onPush}
+            />
           </>
         )}
       </footer>

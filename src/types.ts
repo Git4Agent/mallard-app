@@ -1157,12 +1157,15 @@ export type RemoteContinuity =
   | { state: "displaced"; base_revision: number; remote_revision: number; saved_by: "push" | "pull" }
   | { state: "unknown"; message: string };
 
+export type PushScope = { kind: "project" } | { kind: "session"; resource_id: string };
+
 /**
  * Composite payload of `prepare_push_review`: one discovery pass and one
  * remote snapshot feed every push-dialog section. Degradable sections carry
  * per-section errors instead of failing the dialog.
  */
 export interface PushReviewContext {
+  scope: PushScope;
   credential_redaction_enabled: boolean;
   project: ProjectDetail;
   inventory: ResourceInventory;
@@ -1865,6 +1868,10 @@ export interface ManagedCloudRepository {
   updated_at: number;
   resources: number;
   registration_only: boolean;
+  /** The Owner's line, else GitHub's. */
+  description: string | null;
+  star_count: number;
+  viewer_starred: boolean;
 }
 
 /** Where a project got from Mallard Cloud may put its folder. A folder that
