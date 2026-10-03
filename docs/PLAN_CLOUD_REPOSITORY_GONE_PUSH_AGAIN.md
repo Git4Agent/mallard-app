@@ -316,7 +316,7 @@ draft… · back to public version N"):
 > While a release request is open on the draft, one more sentence: The open
 > release request is withdrawn.
 
-Both were reviewed as specimens first (`cloud-discard-mockup.html` here,
+Both were reviewed as specimens first (`mockups/cloud-discard-mockup.html` here,
 `web/discard-mockup.html` in the service tree), each with three places for
 the control and two ways to ask. The owner left the pick to the author (O18).
 

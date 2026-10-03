@@ -50,6 +50,9 @@ interface Props {
   /** Storages as the shell orders them for setup pages. */
   storages: readonly CatalogStorageOption[];
   cloudAccounts: readonly CatalogCloudAccount[];
+  /** A repository the page was opened for (a link from the website): From
+   *  Mallard Cloud opens on that account with the address looked up. */
+  initialCloud?: CatalogCloudStart | null;
   onSetUpCloud: () => void;
   onClose: () => void;
   /** Finish on this computer: the row, the storage it was linked to, and the
@@ -59,20 +62,23 @@ interface Props {
 }
 
 /** From Mallard Cloud, as New project's door is: the account, then the
- *  repository (shared with you, or by address or invite code, its kind
+ *  repository (shared with you, or by address or invitation code, its kind
  *  coming with it), then the Catalog row it lands in. Add saves the
  *  repository, makes the row and links it when either is missing, and opens
  *  the item's page. Nothing is pulled. */
-function CloudSource({ accounts, scopes, profiles, capabilities, working, onSetUpCloud, onChosen }: {
+function CloudSource({ accounts, scopes, profiles, capabilities, working, initial, onSetUpCloud, onChosen }: {
   accounts: readonly CatalogCloudAccount[];
   scopes: readonly CatalogScopeDto[];
   profiles: readonly CatalogProfile[];
   capabilities: readonly CatalogCapabilityDescriptor[];
   working: boolean;
+  initial: CatalogCloudStart | null;
   onSetUpCloud: () => void;
   onChosen: (choice: CloudChoice | null) => void;
 }) {
-  const [accountId, setAccountId] = useState<string | null>(accounts[0]?.id ?? null);
+  const [accountId, setAccountId] = useState<string | null>(() => (
+    initial && accounts.some((candidate) => candidate.id === initial.accountId) ? initial.accountId : accounts[0]?.id ?? null
+  ));
   const account = accounts.find((candidate) => candidate.id === accountId) ?? null;
   return (
     <>
@@ -102,10 +108,17 @@ function CloudSource({ accounts, scopes, profiles, capabilities, working, onSetU
       </section>
       {account && (
         <CloudRepositoryBands key={account.id} account={account} scopes={scopes} profiles={profiles}
-          capabilities={capabilities} working={working} onChosen={onChosen} />
+          capabilities={capabilities} working={working} initialAddress={initial?.address ?? null} onChosen={onChosen} />
       )}
     </>
   );
+}
+
+/** Where From Mallard Cloud starts when the page was opened for one
+ *  repository: the account that sees it, and its address. */
+export interface CatalogCloudStart {
+  accountId: string;
+  address: string;
 }
 
 /** What the door's Add acts on. */
@@ -116,12 +129,13 @@ export interface CloudChoice {
   landing: { kind: "row"; scope: CatalogScopeDto } | { kind: "new"; capability: CatalogCapabilityDescriptor; profileId: string };
 }
 
-function CloudRepositoryBands({ account, scopes, profiles, capabilities, working, onChosen }: {
+function CloudRepositoryBands({ account, scopes, profiles, capabilities, working, initialAddress, onChosen }: {
   account: CatalogCloudAccount;
   scopes: readonly CatalogScopeDto[];
   profiles: readonly CatalogProfile[];
   capabilities: readonly CatalogCapabilityDescriptor[];
   working: boolean;
+  initialAddress: string | null;
   onChosen: (choice: CloudChoice | null) => void;
 }) {
   const choice = useCloudRepositoryChoice({
@@ -133,6 +147,7 @@ function CloudRepositoryBands({ account, scopes, profiles, capabilities, working
     capabilities,
     list: () => storageCatalogApi.listCloudShared(account.id),
     listKey: account.id,
+    initialAddress,
   });
   const chosen = choice.chosen;
   const capability = chosen ? catalogCapabilityFor(capabilities, chosen) : null;
@@ -215,12 +230,13 @@ export default function AddCatalogScopeWorkspace({
   scopes,
   storages,
   cloudAccounts,
+  initialCloud = null,
   onSetUpCloud,
   onClose,
   onCreated,
   onAdded,
 }: Props) {
-  const [source, setSource] = useState<"local" | "cloud">("local");
+  const [source, setSource] = useState<"local" | "cloud">(initialCloud ? "cloud" : "local");
   const [stage, setStage] = useState<Stage>({ kind: "home" });
   const [cloudChoice, setCloudChoice] = useState<CloudChoice | null>(null);
   /* A row Add made before its repository could be saved: a retry uses it. */
@@ -376,7 +392,7 @@ export default function AddCatalogScopeWorkspace({
               <div className="sync-modal-body">
                 {doors}
                 <CloudSource accounts={cloudAccounts} scopes={[...scopes, ...madeScopes]} profiles={profiles}
-                  capabilities={capabilities} working={working} onSetUpCloud={onSetUpCloud} onChosen={setCloudChoice} />
+                  capabilities={capabilities} working={working} initial={initialCloud} onSetUpCloud={onSetUpCloud} onChosen={setCloudChoice} />
                 {errorNotice}
               </div>
               <footer className="sync-modal-footer sync-setup-footer">

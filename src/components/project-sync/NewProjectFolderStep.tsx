@@ -39,9 +39,11 @@ interface Props {
   profiles: ProviderProfileSummary[];
   storages: StorageSummary[];
   busy: boolean;
-  /** The door open at first, and for From Mallard Cloud the account. */
+  /** The door open at first, and for From Mallard Cloud the account and
+   *  the repository the page was opened for. */
   initialSource?: NewProjectSource;
   initialStorageId?: string | null;
+  initialAddress?: string | null;
   onCancel: () => void;
   /** Make the draft for this folder, or resume the one already there. */
   onChoose: (projectRoot: string) => void;
@@ -100,6 +102,7 @@ export default function NewProjectFolderStep({
   busy,
   initialSource = "folder",
   initialStorageId = null,
+  initialAddress = null,
   onCancel,
   onChoose,
   onOpenProject,
@@ -214,6 +217,7 @@ export default function NewProjectFolderStep({
           doors={doors}
           storages={storages}
           initialStorageId={initialStorageId}
+          initialAddress={initialAddress}
           providers={providers}
           profiles={profiles}
           projects={projects}

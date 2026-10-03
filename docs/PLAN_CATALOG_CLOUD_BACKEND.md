@@ -2,7 +2,7 @@
 
 What the backend needs for
 [PLAN_CATALOG_CLOUD_LIKE_PROJECTS.md](PLAN_CATALOG_CLOUD_LIKE_PROJECTS.md)
-(specimen: `cloud-pet-mockup.html`). Mallard Cloud (`managed_cloud`) only:
+(specimen: `mockups/cloud-pet-mockup.html`). Mallard Cloud (`managed_cloud`) only:
 every other storage's Library path stays as it is. Checked against the
 working tree on 2026-10-01.
 

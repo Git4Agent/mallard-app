@@ -1,5 +1,5 @@
 import type { ManagedCloudStatus, ManagedCloudDiscardedDraft, ManagedCloudListingPage, ManagedCloudPublicSort } from "../managed-cloud/types";
-import type { CatalogSyncProgress, CatalogCloudRepository, CatalogCloudResolution } from "./types";
+import type { CatalogSyncProgress, CatalogCloudPlace, CatalogCloudRepository, CatalogCloudResolution } from "./types";
 import { Channel, invoke } from "../../ipc";
 import type {
   CatalogActionResult,
@@ -43,6 +43,10 @@ export const storageCatalogApi = {
     invoke<ManagedCloudListingPage>("list_catalog_cloud_public", { scopeId, storageId, sort, cursor }),
   resolveCloudRepository: (storageId: string, address: string) =>
     invoke<CatalogCloudResolution>("resolve_catalog_cloud_repository", { storageId, address }),
+  /** The row on a storage that saved a repository, and its item; null when
+   *  no row has. Reads this computer only. */
+  findCloudRepository: (storageId: string, repositoryId: string) =>
+    invoke<CatalogCloudPlace | null>("find_catalog_cloud_repository", { storageId, repositoryId }),
   joinCloudRepository: (storageId: string, code: string) =>
     invoke<CatalogCloudResolution>("join_catalog_cloud_repository", { storageId, code }),
   /** Saves an item's repository; an item that has one keeps it. Nothing is

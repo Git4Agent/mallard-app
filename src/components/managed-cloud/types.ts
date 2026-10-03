@@ -81,6 +81,10 @@ export interface ManagedCloudListingRow {
   updated_at: number;
 }
 
+/** The kinds the website's listing filters by, in its own `?type=` words:
+ *  what a link from the listing carries when one of its chips was on. */
+export type ManagedCloudListingKind = "project" | "agent_skill" | "plugin_install_intent" | "desktop_pet";
+
 /** One page of a listing: its rows, and the cursor of the next page. */
 export interface ManagedCloudListingPage {
   rows: ManagedCloudListingRow[];

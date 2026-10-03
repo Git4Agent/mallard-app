@@ -21,6 +21,7 @@ import {
   IconCloudPlus,
   IconCloudX,
   IconCode,
+  IconClipboardList,
   IconCopy,
   IconDatabase,
   IconDeviceDesktopCog,
@@ -92,6 +93,7 @@ export type IconName =
   | "code"
   | "computer"
   | "copy"
+  | "clipboard-list"
   | "check-circle"
   | "download"
   | "drive"
@@ -204,6 +206,7 @@ const LIBRARY_ICONS: Record<LibraryIconName, TablerIcon> = {
   code: IconCode,
   computer: IconDeviceDesktopCog,
   copy: IconCopy,
+  "clipboard-list": IconClipboardList,
   "check-circle": IconCircleCheck,
   download: IconDownload,
   drive: IconDatabase,

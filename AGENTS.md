@@ -58,6 +58,11 @@ The integration tests intentionally enforce this cutover.
   and Claude skills, plugin intent, and Codex v1/v2 pets) with its own
   `api.ts`, `model.ts`, and `types.ts`; it never imports project-sync
   components, models, or DTOs.
+- `src/components/app-link/` answers the website's `mallard://` link: the
+  pure routing model, the hook that holds the newest link, and its sheet. A
+  link only reads; the shell navigates when the sheet's verb is pressed. The
+  backend half is `src-tauri/src/project_sync/app_link.rs`, and the link is
+  parsed in `managed_cloud/app_link.rs`.
 - `src/components/project-sync/api.ts` is the typed Tauri `invoke` boundary.
 - `src/components/project-sync/model.ts`, `pullReviewModel.ts`, and
   `pullReviewFlow.ts` contain reusable frontend behavior.

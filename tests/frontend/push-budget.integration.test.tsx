@@ -4,6 +4,8 @@ import test from "node:test";
 import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
+  pushBlockerPillLabel,
+  pushBlockerSentence,
   pushBudgetTotal,
   pushReviewDisabledReason,
   recommendedPushSelection,
@@ -16,7 +18,7 @@ test("a reviewed Git-only change can be pushed without a session selection", () 
   assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, gitHistoryChanged: true, listState: "loading" }), "Loading sessions…");
 });
 import { recipeWithSelection } from "../../src/components/project-sync/model";
-import { sessionPushDisabledReason } from "../../src/components/project-sync/session-detail/sessionDetailModel";
+import { sessionPushDisabledReason, sessionPushGate } from "../../src/components/project-sync/session-detail/sessionDetailModel";
 import {
   ProjectChatHistoryContent,
   type PushSessionFacts,
@@ -132,6 +134,40 @@ test("session Push follows the publish decision, including changed export settin
   }
 });
 
+// The session page repeats only a hold the user clears. Up to date, ready and
+// a hold nobody can clear from here stay Push's own tooltip.
+test("a session page names a Push hold only when Pull clears it or the comparison failed", () => {
+  const upToDate = entry("synced", { state: "synced", push_decision: { action: "no_changes", selectable: false } });
+  assert.equal(sessionPushGate(upToDate, null), null);
+  assert.equal(sessionPushGate(fits, null), null);
+  assert.equal(sessionPushGate(undefined, null), null);
+  assert.equal(sessionPushGate(entry("remote", { local_present: false }), null), null);
+  assert.equal(sessionPushGate(entry("unreadable", {
+    state: "unknown",
+    push_decision: { action: "blocked", selectable: false, blocker: "observation_failed", blocked_reason: "Cannot read this session." },
+  }), null), null);
+
+  assert.deepEqual(sessionPushGate(entry("ahead", {
+    state: "storage_ahead",
+    push_decision: { action: "require_pull", selectable: false },
+  }), null), { tone: "info", label: "Pull first", detail: "Storage has changes. Review Pull before pushing this session." });
+  assert.equal(sessionPushGate(entry("metadata", {
+    state: "synced",
+    push_decision: { action: "require_pull_metadata", selectable: false },
+  }), null)?.label, "Pull first");
+  assert.deepEqual(sessionPushGate(entry("detached", {
+    state: "diverged",
+    push_decision: { action: "blocked", selectable: false, blocker: "detached_requires_pull", blocked_reason: "Pull this session's storage copy first." },
+  }), null), { tone: "info", label: "Pull first", detail: "Pull this session's storage copy first." });
+
+  // A failed comparison outranks the entry it could not produce.
+  assert.deepEqual(sessionPushGate(upToDate, "Mallard couldn't read the storage."), {
+    tone: "danger",
+    label: "Can't compare",
+    detail: "Mallard couldn't read the storage.",
+  });
+});
+
 /* What the session's page reports for its row: 2 prompts, 3 replies, 4 tool
    calls, a total with no input/output split, an hour long. */
 const fitsFacts: PushSessionFacts = {
@@ -203,6 +239,14 @@ test("a session's own review draws that session's row and nothing to select", ()
   assert.match(footer, /class="btn btn-primary sync-pull-apply-button"(?![^>]*disabled)[^>]*>[\s\S]*?Push<\/button>/);
 });
 
+test("a session's own review warns while credential redaction is off", () => {
+  const warning = "Exported content can include API keys, tokens, and passwords.";
+  assert.doesNotMatch(sessionReview(fits), /Exported content can include/);
+  const off = sessionReview(fits, { credentialRedactionEnabled: false });
+  assert.match(off, /Credential redaction: Off/);
+  assert.ok(off.includes(warning));
+});
+
 test("a session's own review names its row from the comparison when the page had not loaded", () => {
   const html = sessionReview(fits, { facts: null });
   assert.match(html, /<strong>Refine sync review UX<\/strong>/);
@@ -243,7 +287,7 @@ test("a session past the limit is refused in its own words: it has nothing to ex
   );
   const html = sessionReview(huge, { threadComparison: reviewed });
   const footer = html.slice(html.indexOf("<footer"));
-  assert.match(footer, new RegExp(`<p class="sync-review-budget-sentence">${refusal}</p>`));
+  assert.match(footer, new RegExp(`<p class="sync-review-footer-note danger">${refusal}</p>`));
   assert.match(footer, /sync-review-budget-gauge push over/);
   assert.match(footer, new RegExp(`sync-pull-apply-button" disabled="" title="${refusal}"`));
 });
@@ -262,7 +306,8 @@ test("a running session push seals its exits and narrates the transfer", () => {
     },
   });
   assert.match(html, /aria-label="Close push review"[^>]*disabled=""|disabled=""[^>]*aria-label="Close push review"/);
-  assert.match(html, /A running push finishes or fails whole/);
+  // The note takes the footer's note row, announced, never a squeezed column.
+  assert.match(html, /<p class="sync-review-footer-note" role="status">A running push finishes or fails whole/);
   assert.match(html, /<span class="sync-btn-readout">3\/7 · 0\.8 MB…<\/span>/);
 });
 
@@ -449,7 +494,7 @@ const projectFiles: ProjectContentInventory = {
     base_present: false,
     selected_in_recipe: false,
     newly_discovered: true,
-    selected_after_scan: true,
+    undecided: true,
     blocked_reason: null,
     warning_code: null,
     warning_digest: null,
@@ -613,7 +658,7 @@ test("the meter is drawn in both pinned zones and sums sessions, requirements, a
   // The header shares its row with the redaction flag and the Select pill:
   // the glance is its figure alone, and the footer gauge does the filling.
   assert.doesNotMatch(within, /sync-review-budget-track/);
-  assert.doesNotMatch(within, /sync-review-budget-sentence/);
+  assert.doesNotMatch(within, /sync-review-footer-note/);
   const pushWithin = within.slice(within.lastIndexOf("<button", within.indexOf("sync-pull-apply-button")));
   assert.doesNotMatch(pushWithin.slice(0, pushWithin.indexOf(">")), /disabled=""/);
 
@@ -631,7 +676,7 @@ test("the meter is drawn in both pinned zones and sums sessions, requirements, a
     // each figure's aria-valuetext.
     4,
   );
-  assert.match(over, /class="sync-review-budget-sentence">87 MB over the 512 MB push limit/);
+  assert.match(over, /class="sync-review-footer-note danger">87 MB over the 512 MB push limit/);
   const pushOver = over.slice(over.lastIndexOf("<button", over.indexOf("sync-pull-apply-button")));
   const pushOverTag = pushOver.slice(0, pushOver.indexOf(">"));
   assert.match(pushOverTag, /disabled=""/);
@@ -785,14 +830,13 @@ test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () =
 });
 
 
-test("Push review shows the selected redaction mode without an export warning", () => {
+test("Push review shows the selected redaction mode and the Off warning", () => {
   for (const enabled of [true, false]) {
     const html = renderToStaticMarkup(
       <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
     );
     assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
-    assert.doesNotMatch(html, /Exported content can include API keys, tokens, and passwords\./);
-    assert.doesNotMatch(html, /sync-review-banners/);
+    assert.equal(html.includes("Exported content can include API keys, tokens, and passwords."), !enabled);
   }
 });
 
@@ -807,4 +851,140 @@ test("current sessions remain selectable for a reviewed mode change", () => {
   );
   assert.match(html, /1 of 1 selected/);
   assert.doesNotMatch(html, /Nothing to push/);
+});
+
+/* A selected item that stops the push. A scanner finding is cleared by Mark
+   reviewed on its card, an item the capture cannot read only by excluding
+   it, and the footer used to say "can't be captured — exclude it" for both. */
+
+function flaggedFile(path: string, warningCode: string, digest: string) {
+  const descriptor: InventoryResource = {
+    ...projectFile,
+    resource_id: `project:file:${path}`,
+    display_name: path.split("/").pop()!,
+    logical_paths: [`project/${path}`],
+  };
+  const inventoryEntry = {
+    ...projectFiles.entries[0],
+    descriptor,
+    relative_path: path,
+    logical_path: `project/${path}`,
+    size: 1024,
+    mode: 0o755,
+    warning_code: warningCode,
+    warning_digest: digest,
+  };
+  return { descriptor, inventoryEntry };
+}
+
+test("the blocker sentence words each cause by its fix, naming one item and counting several", () => {
+  const run = flaggedFile("scripts/run.sh", "executable", "e".repeat(64));
+  const env = flaggedFile(".env.local", "possible_secret", "s".repeat(64));
+  const unknown = flaggedFile("notes/plan.md", "", "");
+  const inventory: ProjectContentInventory = {
+    ...projectFiles,
+    entries: [run.inventoryEntry, env.inventoryEntry, { ...unknown.inventoryEntry, state: "unknown", warning_code: null, warning_digest: null }],
+  };
+  const lost = entry("lost", { display_name: "Fix login redirect", state: "unavailable" });
+  const sessions = comparison({ entries: [lost] });
+  const flagged = (resourceId: string) => ({ kind: "local" as const, step: "project_files" as const, resourceId, state: "warning_unacknowledged" });
+
+  assert.equal(
+    pushBlockerSentence([flagged(run.descriptor.resource_id)], sessions, inventory),
+    "run.sh is executable — mark it reviewed or exclude it.",
+  );
+  assert.equal(
+    pushBlockerSentence([flagged(env.descriptor.resource_id)], sessions, inventory),
+    ".env.local may hold a secret — mark it reviewed or exclude it.",
+  );
+  assert.equal(
+    pushBlockerSentence([flagged(run.descriptor.resource_id), flagged(env.descriptor.resource_id)], sessions, inventory),
+    "2 files need review — mark them reviewed or exclude them.",
+  );
+  const unreadableFile = { kind: "local" as const, step: "project_files" as const, resourceId: unknown.descriptor.resource_id, state: "unknown" };
+  const unreadableSession = { kind: "local" as const, step: "history" as const, resourceId: lost.resource_id, state: "unavailable" };
+  assert.equal(pushBlockerSentence([unreadableFile], sessions, inventory), "plan.md can’t be captured — exclude it to push.");
+  assert.equal(pushBlockerSentence([unreadableSession], sessions, inventory), "“Fix login redirect” can’t be captured — exclude it to push.");
+  assert.equal(
+    pushBlockerSentence([unreadableSession, flagged(run.descriptor.resource_id)], sessions, inventory),
+    "run.sh is executable — mark it reviewed or exclude it. “Fix login redirect” can’t be captured — exclude it to push.",
+  );
+  // Storage holds are the banner's, not the footer's.
+  const held = { kind: "storage" as const, step: "history" as const, resourceId: lost.resource_id, state: "storage_ahead" };
+  assert.equal(pushBlockerSentence([held], sessions, inventory), null);
+
+  // The pill's short form: a count and what it needs.
+  assert.equal(pushBlockerPillLabel([flagged(run.descriptor.resource_id)]), "1 needs review");
+  assert.equal(pushBlockerPillLabel([flagged(run.descriptor.resource_id), flagged(env.descriptor.resource_id)]), "2 need review");
+  assert.equal(pushBlockerPillLabel([unreadableFile]), "1 unavailable");
+  assert.equal(pushBlockerPillLabel([unreadableFile, flagged(run.descriptor.resource_id)]), "2 need attention");
+  assert.equal(pushBlockerPillLabel([held]), null);
+});
+
+test("a flagged file stops Push with a pill at the button, and both Push buttons read its sentence", () => {
+  const run = flaggedFile("scripts/run.sh", "executable", "e".repeat(64));
+  const inventory: ProjectContentInventory = { ...projectFiles, entries: [run.inventoryEntry] };
+  const selected = new Set([fits.resource_id, run.descriptor.resource_id]);
+  const sentence = "run.sh is executable — mark it reviewed or exclude it.";
+  // The path bar's Push reads the same rule as the footer's.
+  assert.equal(
+    pushReviewDisabledReason({ selected, threadComparison: comparison(), projectContentInventory: inventory, deletionApproved: true }),
+    sentence,
+  );
+
+  const render = (acknowledged: ReadonlySet<string>) => renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true}
+      resources={[conversationResource(fits), conversationResource(waits), run.descriptor]}
+      selected={selected}
+      projectDefaults={new Set([fits.resource_id, run.descriptor.resource_id])}
+      busy={false}
+      threadComparison={comparison()}
+      projectContentInventory={inventory}
+      projectContentScanned
+      acknowledgedWarningDigests={acknowledged}
+      showProjectFiles
+      activeStep="project_files"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  const html = render(new Set());
+  const footer = html.slice(html.indexOf("<footer"));
+  assert.match(footer, new RegExp(`<button type="button" class="sync-review-blocker-pill" title="${sentence}"><svg[^>]*data-icon="alert-triangle"[\\s\\S]*?</svg>1 needs review</button>`));
+  // In the cluster: after the step navigator, before the gauge and Push.
+  assert.ok(footer.indexOf("Back to session selection") < footer.indexOf("sync-review-blocker-pill"));
+  assert.ok(footer.indexOf("sync-review-blocker-pill") < footer.indexOf("sync-review-budget-gauge"));
+  // The whole sentence is the region a screen reader hears, and Push's title.
+  assert.match(footer, new RegExp(`<span class="sync-visually-hidden" role="status">${sentence}</span>`));
+  assert.match(footer, new RegExp(`sync-pull-apply-button" disabled="" title="${sentence}"`));
+  // No footer sentence is a squeezed column any more.
+  assert.doesNotMatch(footer, /<small>/);
+  assert.doesNotMatch(footer, /can.t be captured/);
+  // The counts print only what the commit does, sized to share the row.
+  assert.match(footer, /<div class="sync-project-file-commit-impact" aria-label="Selected project file impact"><div class="sync-project-file-impact-counts"><span><strong>1<\/strong> Add<\/span><\/div>/);
+  // The card the pill opens carries its id.
+  assert.match(html, /data-resource-id="project:file:scripts\/run\.sh"/);
+
+  // Marked reviewed: the pill goes, the region empties, and Push is live.
+  const reviewed = render(new Set(["e".repeat(64)]));
+  const reviewedFooter = reviewed.slice(reviewed.indexOf("<footer"));
+  assert.doesNotMatch(reviewedFooter, /sync-review-blocker-pill/);
+  assert.match(reviewedFooter, /<span class="sync-visually-hidden" role="status"><\/span>/);
+  const push = reviewedFooter.slice(reviewedFooter.lastIndexOf("<button", reviewedFooter.indexOf("sync-pull-apply-button")));
+  assert.doesNotMatch(push.slice(0, push.indexOf(">")), /disabled=""/);
+});
+
+test("the blocker pill opens its card: the step switches and the files page scrolls to it and hands it focus", () => {
+  const workspace = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");
+  assert.match(workspace, /onClick=\{revealFirstBlocker\}/);
+  assert.match(workspace, /selectStep\(target\.step\);/);
+  assert.match(workspace, /reveal=\{projectFileReveal\}/);
+  const page = readFileSync("src/components/project-sync/ProjectFilesReviewPage.tsx", "utf8");
+  // A card the search hides, or one past the render limit, is searched for.
+  assert.match(page, /if \(!shownCards\.includes\(row\)\) setSearch\(row\.relativePath\);/);
+  assert.match(page, /scrollIntoView\(\{ block: "nearest" \}\)/);
+  // Focus goes to Mark reviewed first, the row's tick only without one.
+  assert.match(page, /querySelector<HTMLInputElement>\(".notice-ack input"\)\s*\?\? card\.querySelector<HTMLInputElement>\("\.sync-sync-row-choice input"\)/);
 });

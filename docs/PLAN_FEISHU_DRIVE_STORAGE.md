@@ -327,7 +327,7 @@ answer.
 | Infrastructure | `feishu_auth.rs` (authorize URL with PKCE and state, exchange, refresh with rotation and settlement, `user_info`, evidence, health); `feishu_connections.rs` (the connection document store); `storage_core/feishu_store.rs` with `mock.rs` (Feishu Drive and OAuth loopback), `probe.rs`, `upload.rs`, `tests.rs`; `storage_providers/feishu.rs` | `storage_providers/traits.rs` (`StorageLocalSetup::Feishu`), `registry.rs` |
 | Application | `feishu_setup.rs` (write the connection document, then prepare the exact draft: settings and the App Secret) | `storage_setup.rs` tests; storage removal deletes the document |
 | Tauri | `project_sync/feishu_setup.rs`: `authorize_feishu_setup`, `propose_feishu_folder_name`, `prepare_feishu_storage`, `cancel_feishu_setup` | `lib.rs` (register; install the connection store with the local state root at startup), `project_sync/mod.rs` |
-| Frontend | `FeishuSetup.tsx` (`useFeishuSetup`, `FeishuSetupLane`); `src/feishu-lane-mockup.tsx` specimen | `types.ts`, `api.ts`, `ProjectLinksWorkspace.tsx`, `StorageSettings.tsx` (`setupRouteIcon`, `setupRouteLabel`, the reauthorization date line) |
+| Frontend | `FeishuSetup.tsx` (`useFeishuSetup`, `FeishuSetupLane`); `mockups/feishu-lane-mockup.tsx` specimen | `types.ts`, `api.ts`, `ProjectLinksWorkspace.tsx`, `StorageSettings.tsx` (`setupRouteIcon`, `setupRouteLabel`, the reauthorization date line) |
 | Docs | `DESIGN_FEISHU_DRIVE_STORAGE.md`; the admin's app setup guide | `README.md`, `LIVE_TWO_MACHINE_PASS.md` (Feishu part), `AGENTS.md` source map, POC and feasibility status lines |
 
 The adapter contract does not change. Nothing is added to

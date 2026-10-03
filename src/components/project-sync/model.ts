@@ -143,7 +143,7 @@ export function projectContentReviewRow(
     apply_policy_label: known?.apply_policy_label ?? "Explicit review",
     selectable: known?.selectable ?? true,
     logical_paths: [entry.logical_path],
-    default_selected: entry.selected_in_recipe || entry.selected_after_scan,
+    default_selected: entry.selected_in_recipe,
     blocked_reason: entry.blocked_reason,
     description: entry.relative_path,
   };

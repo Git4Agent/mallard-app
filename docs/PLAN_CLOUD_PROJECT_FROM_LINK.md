@@ -1,11 +1,11 @@
 # A project from a Mallard Cloud link
 
 Status: implemented 2026-09-26, uncommitted. Specimens, kept as the record:
-`cloud-project-mockup.html` (round 1, directions A/B/C),
-`cloud-project-accounts-mockup.html` (round 2, several accounts),
-`cloud-project-m1-mockup.html` (the chosen design, one frame per state).
+`mockups/cloud-project-mockup.html` (round 1, directions A/B/C),
+`mockups/cloud-project-accounts-mockup.html` (round 2, several accounts),
+`mockups/cloud-project-m1-mockup.html` (the chosen design, one frame per state).
 Live harness of the shipped component on a stand-in backend:
-`cloud-project-live.html` (`?accounts=one|several|none&git=yes|no&clone=works|fails`).
+`mockups/cloud-project-live.html` (`?accounts=one|several|none&git=yes|no&clone=works|fails`).
 
 ## Decisions (owner)
 

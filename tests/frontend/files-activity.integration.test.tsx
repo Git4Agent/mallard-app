@@ -58,7 +58,7 @@ function entry(
     review_digest: "a".repeat(64),
     selected_in_recipe: false,
     newly_discovered: true,
-    selected_after_scan: false,
+    undecided: false,
     blocked_reason: null,
     warning_code: null,
     warning_digest: null,

@@ -699,7 +699,7 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
     return (
       <>
         <span className="storage-setup-guide-copy">
-          {mode === "create" ? "Creates a bucket and a key for it only."
+          {mode === "create" ? null
             : mode === "existing" ? "Lists your buckets, read-only, then issues a key."
             : "Issues a new key for this bucket."}
         </span>

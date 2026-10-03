@@ -2,9 +2,9 @@
 
 Status: implemented 2026-09-27 (B, pills, the tick kept), uncommitted.
 Builds on `docs/PLAN_CLOUD_PROJECT_FROM_LINK.md` (implemented, uncommitted).
-Specimen, kept as the record: `cloud-project-existing-mockup.html`
+Specimen, kept as the record: `mockups/cloud-project-existing-mockup.html`
 (`?show=all|today|a|b|c|<frame>&switch=pills|segmented&theme=dark`). The
-shipped component runs on a stand-in backend in `cloud-project-live.html`
+shipped component runs on a stand-in backend in `mockups/cloud-project-live.html`
 (folders `…/taken`, `…/fork`, `…/project`, `…/empty`, `…/checkout`).
 
 ## Problem
@@ -171,7 +171,7 @@ Bars at landing: Tauri lib 420 passed (0 failed), frontend 450/450,
     with it and for an empty folder, false for its checkout, and nothing
     written when the folder changed;
   - `ProjectFolderField` with a heading and two ways on.
-- **By hand**, the shipped component on `cloud-project-live.html`: Use it as
+- **By hand**, the shipped component on `mockups/cloud-project-live.html`: Use it as
   it is switches the mode and keeps the text; Open it opens the project; the
   New folder path still sends `ack=false` for a clone and `ack=true` for the
   empty fallback.

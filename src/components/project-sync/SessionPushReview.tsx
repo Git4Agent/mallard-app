@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import type { BundleFetchProgress, ThreadSyncComparison, ThreadSyncEntry } from "../../types";
 import Icon from "../Icons";
+import { NoticeZone } from "../notice/Notice";
 import { ReviewBudgetGauge } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
 import { SessionPushRow, type PushSessionFacts } from "./ProjectActivityPage";
 import {
+  CREDENTIAL_REDACTION_OFF_NOTICE,
   PUSH_RUNNING_NOTE,
   PushApplyButton,
   pushBudgetTotal,
@@ -97,6 +99,16 @@ export default function SessionPushReview({
 
       <div className="sync-inline-action-content sync-push-resource-content sync-sync-review-content">
         <div className="sync-inline-action-scroll sync-sync-review-scroll">
+          {!credentialRedactionEnabled && (
+            <div className="sync-review-banners">
+              <NoticeZone
+                items={[CREDENTIAL_REDACTION_OFF_NOTICE]}
+                subject="notes about this Push review"
+                timing="standing"
+                label="Notes about this Push review"
+              />
+            </div>
+          )}
           <div className="sync-history-page sync-history-embedded sync-history-selection-review">
             <section className="sync-history-content" aria-label="Session">
               <div className="sync-history-thread-list flat">
@@ -112,9 +124,9 @@ export default function SessionPushReview({
           /* The refusal takes a row of its own above the gauge that caused it
              and the button it stops. It does not announce: the gauge is the
              status region. */
-          <p className="sync-review-budget-sentence">{disabledReason}</p>
+          <p className="sync-review-footer-note danger">{disabledReason}</p>
         )}
-        {busy && <span role="status"><small>{PUSH_RUNNING_NOTE}</small></span>}
+        {busy && <p className="sync-review-footer-note" role="status">{PUSH_RUNNING_NOTE}</p>}
         {budget && (
           <ReviewBudgetGauge
             budget={budget}

@@ -32,14 +32,21 @@ export interface ProjectFileReviewRow {
   sourceMtime?: number | null;
   localPresent: boolean;
   storagePresent: boolean;
-  newlyDiscovered?: boolean;
-  selectedAfterScan?: boolean;
+  /** Push: new to this storage and never left out. A review does not tick
+   *  it; its row says New, and the Sessions step counts it while unticked. */
+  undecided?: boolean;
   blockedReason?: string | null;
   warningCode?: string | null;
   warningDigest?: string | null;
   operation?: "add" | "replace" | "create_directory" | "delete_file" | "delete_directory";
   /** A diverged replace copies the local version here first (Pull only). */
   preservedCopyPath?: string;
+}
+
+/** A request to open one card. Each request is a new object, so asking for
+ *  the same card again opens it again. */
+export interface ProjectFileReveal {
+  resourceId: string;
 }
 
 interface Props {
@@ -63,6 +70,9 @@ interface Props {
   onToggleRemoval?: (resourceId: string) => void;
   onToggleWarning?: (warningDigest: string) => void;
   onReviewPull?: () => void;
+  /** The Push footer's blocker pill: scroll this card into view and hand it
+   *  focus. */
+  reveal?: ProjectFileReveal | null;
 }
 
 function parentPath(path: string): string {
@@ -213,6 +223,28 @@ export function searchProjectFileReviewCards(
   return { matchingCards, hiddenSelected: selectedIn(cardRows) - selectedIn(matchingCards) };
 }
 
+/** Which rows draw a card. Files always do. A directory does only when
+ *  nothing else speaks for it — no descendant rows at all (an empty folder
+ *  still has to be pushable) — or when its own deletion is the decision on
+ *  the table, or when its state is unknown: a selected unknown folder stops
+ *  the Push until it is excluded, and its band's tick counts only files.
+ *  Every other directory is represented by its band and rides the
+ *  required-ancestor rule. */
+export function projectFileReviewCards(rows: ProjectFileReviewRow[]): ProjectFileReviewRow[] {
+  const hasDescendants = new Set<string>();
+  for (const row of rows) {
+    for (let parent = parentPath(row.relativePath); parent !== ""; parent = parentPath(parent)) {
+      hasDescendants.add(parent);
+    }
+  }
+  return rows.filter((row) => (
+    row.entryType !== "directory"
+    || row.operation === "delete_directory"
+    || row.state === "unknown"
+    || !hasDescendants.has(row.relativePath)
+  ));
+}
+
 /** One directory band's worth of cards: the file rows directly inside it. */
 interface ReviewFileGroup {
   directory: string;
@@ -240,28 +272,14 @@ export default function ProjectFilesReviewPage({
   onToggleRemoval,
   onToggleWarning,
   onReviewPull,
+  reveal = null,
 }: Props) {
   const [search, setSearch] = useState("");
+  const pageRef = useRef<HTMLElement>(null);
+  const [revealed, setRevealed] = useState<ProjectFileReveal | null>(null);
   const eligible = eligibility.state === "eligible";
 
-  /* Which rows draw a card. Files always do. A directory does only when
-     nothing else speaks for it — no descendant rows at all (an empty folder
-     still has to be pushable) — or when its own deletion is the decision on
-     the table. Every other directory is represented by its band and rides
-     the required-ancestor rule. */
-  const cardRows = useMemo(() => {
-    const hasDescendants = new Set<string>();
-    for (const row of rows) {
-      for (let parent = parentPath(row.relativePath); parent !== ""; parent = parentPath(parent)) {
-        hasDescendants.add(parent);
-      }
-    }
-    return rows.filter((row) => (
-      row.entryType !== "directory"
-      || row.operation === "delete_directory"
-      || !hasDescendants.has(row.relativePath)
-    ));
-  }, [rows]);
+  const cardRows = useMemo(() => projectFileReviewCards(rows), [rows]);
 
   const { matchingCards, hiddenSelected } = useMemo(
     () => searchProjectFileReviewCards(
@@ -287,6 +305,41 @@ export default function ProjectFilesReviewPage({
       .sort((a, b) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)))
       .map((directory) => ({ directory, cards: byDirectory.get(directory)! }));
   }, [shownCards]);
+
+  /* The blocker pill names a card. One the search hides, or one past the
+     render limit, is brought into the list by searching for its own path. */
+  useEffect(() => {
+    if (!reveal) return;
+    const row = cardRows.find((candidate) => candidate.resourceId === reveal.resourceId);
+    if (!row) return;
+    if (!shownCards.includes(row)) setSearch(row.relativePath);
+    setRevealed(reveal);
+    // Each request opens its card once; later list changes must not re-run it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal]);
+
+  /* Once the card is drawn: bring it into view and hand focus to the control
+     the blocker is waiting on — Mark reviewed, else the row's tick. Once per
+     request: the rows are rebuilt on every parent render, and a later render
+     must not pull focus back. */
+  const landedReveal = useRef<ProjectFileReveal | null>(null);
+  useEffect(() => {
+    if (!revealed || landedReveal.current === revealed) return;
+    const card = pageRef.current?.querySelector<HTMLElement>(`[data-resource-id="${CSS.escape(revealed.resourceId)}"]`);
+    if (!card) return;
+    landedReveal.current = revealed;
+    card.scrollIntoView({ block: "nearest" });
+    const control = card.querySelector<HTMLInputElement>(".notice-ack input")
+      ?? card.querySelector<HTMLInputElement>(".sync-sync-row-choice input");
+    control?.focus({ preventScroll: true });
+  }, [revealed, shownCards]);
+
+  // The card wears the pill's wash briefly, so the eye lands with the focus.
+  useEffect(() => {
+    if (!revealed) return;
+    const timer = window.setTimeout(() => setRevealed(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [revealed]);
 
   /* A folder tile's control covers its whole subtree — files and the
      directory resources riding along — the way the review header's controls
@@ -329,18 +382,6 @@ export default function ProjectFilesReviewPage({
     return bytes > 0 ? `${count} · ${formatBytes(bytes)}` : count;
   };
 
-  /* Opening the step is the opt-in: the scan starts itself, once per mount.
-     A failed scan leaves `scanned` false with the parent's error notice on
-     screen, and the search row's Rescan is the retry — the guard is what keeps
-     a failing walk from re-launching in a loop. */
-  const autoScanRequested = useRef(false);
-  useEffect(() => {
-    if (mode !== "push" || scanned || loading || disabled || !eligible || !onScan) return;
-    if (autoScanRequested.current) return;
-    autoScanRequested.current = true;
-    onScan();
-  }, [mode, scanned, loading, disabled, eligible, onScan]);
-
   const renderCard = (row: ProjectFileReviewRow) => {
     const isDirectory = row.entryType === "directory";
     const selected = selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId);
@@ -354,7 +395,8 @@ export default function ProjectFilesReviewPage({
     return (
       <article
         key={row.resourceId}
-        className={`sync-history-thread-card catalog-card${removed ? " removal" : ""}`}
+        data-resource-id={row.resourceId}
+        className={`sync-history-thread-card catalog-card${removed ? " removal" : ""}${revealed?.resourceId === row.resourceId ? " revealed" : ""}`}
       >
         <div className="sync-history-thread-topline">
           <div className="sync-history-thread-title">
@@ -384,8 +426,8 @@ export default function ProjectFilesReviewPage({
             <strong title={row.relativePath}>{fileName(row.relativePath)}</strong>
             {/* Pull rows name their operation; push rows say nothing here —
                 the tick and the status mark already carry the state, so a
-                chip would just restate them. Blockers and required folders
-                are the two facts neither control speaks for. */}
+                chip would just restate them. Blockers, required folders and
+                new files are the facts neither control speaks for. */}
             {(row.blockedReason || mode === "pull" || (mode === "push" && required)) && (
               <span className="sync-history-branch-state history-only" title={presentation.sentence}>
                 {row.blockedReason
@@ -397,6 +439,15 @@ export default function ProjectFilesReviewPage({
             )}
             {removed && (
               <span className="sync-history-branch-state history-only">Removes from storage</span>
+            )}
+            {/* Why the row opened unticked: nobody has chosen for it yet. */}
+            {mode === "push" && row.undecided && (
+              <span
+                className="sync-history-branch-state current"
+                title="New to this storage. It travels once you tick it."
+              >
+                New
+              </span>
             )}
             {row.warningCode && (
               <NoticeChip severity="warning">{projectFileWarningLabel(row.warningCode)}</NoticeChip>
@@ -542,7 +593,7 @@ export default function ProjectFilesReviewPage({
   };
 
   return (
-    <section className="sync-project-files-page" aria-label="Project files">
+    <section ref={pageRef} className="sync-project-files-page" aria-label="Project files">
       {!eligible && <ProjectFilesLockedNotice eligibility={eligibility} withDetectedRoot />}
 
       {/* The shared search row. The review has no path bar, so the step's
@@ -568,7 +619,11 @@ export default function ProjectFilesReviewPage({
 
       {rows.length === 0 ? (
         mode === "push" && !scanned && eligible ? (
-          <LoadingScaffold shape="rows" label="Scanning project files" />
+          /* The folder walk starts with the review. One that failed leaves
+             the parent's error notice on screen; Rescan is the retry. */
+          loading
+            ? <LoadingScaffold shape="rows" label="Scanning project files" />
+            : <div className="sync-history-state">Project files were not scanned.</div>
         ) : (
           <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
         )

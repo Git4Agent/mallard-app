@@ -5,6 +5,75 @@ mod session_refresh_regressions {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn metadata_only_codex_session_is_absent_from_activity_and_push_until_started() {
+        let fixture = Fixture::new("codex");
+        let empty_id = "019fb019-0000-7000-8000-000000000003";
+        let path = fixture.path_for(empty_id);
+        let empty = command_test_transcript(empty_id, &fixture.root, &[]);
+        std::fs::write(&path, &empty).unwrap();
+        let activity = || {
+            get_project_activity_with_repository(
+                &fixture.repo,
+                &fixture.project.local_project_id,
+                Some(&fixture.storage),
+                None,
+                None,
+                None,
+                true,
+            )
+            .unwrap()
+        };
+        assert!(activity()
+            .sessions
+            .iter()
+            .all(|session| session.provider_session_id.as_deref() != Some(empty_id)));
+        assert!(fixture
+            .refresh()
+            .entries
+            .iter()
+            .all(|entry| { entry.provider_thread_id.as_deref() != Some(empty_id) }));
+        let review = prepare_push_review_with_repository(
+            &fixture.repo,
+            &fixture.project.local_project_id,
+            &fixture.storage,
+        )
+        .unwrap();
+        assert!(review.inventory.resources.iter().all(|resource| {
+            resource.descriptor.resource_id.as_str() != format!("codex:session:{empty_id}")
+        }));
+        assert!(fixture.push().success);
+        let (_, engine) = storage_engine(&fixture.repo, &fixture.storage).unwrap();
+        let snapshot = engine.inspect(&fixture.project.bundle_id).unwrap();
+        assert!(snapshot
+            .manifest
+            .all_conversations()
+            .all(|(_, _, thread)| { thread.source_thread_id.as_deref() != Some(empty_id) }));
+        assert_eq!(std::fs::read(&path).unwrap(), empty);
+
+        let started = command_test_transcript(
+            empty_id,
+            &fixture.root,
+            &[("first-message", "user", "Hello")],
+        );
+        assert!(started.starts_with(&empty));
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writer.write_all(&started[empty.len()..]).unwrap();
+        writer.flush().unwrap();
+        assert!(activity()
+            .sessions
+            .iter()
+            .any(|session| session.provider_session_id.as_deref() == Some(empty_id)));
+        let refreshed = fixture.refresh();
+        let entry = fixture.entry(&refreshed, empty_id);
+        assert_eq!(entry.state, ThreadSyncState::LocalOnly);
+        assert!(entry.push_decision.selectable);
+        drop(writer);
+    }
+
     struct Fixture {
         temp: tempfile::TempDir,
         repo: LocalStateRepository,

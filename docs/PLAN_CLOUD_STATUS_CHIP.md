@@ -1,7 +1,7 @@
 # Plan: the Mallard Cloud status chip
 
-Owner decisions, 2026-09-27, made on the specimens `cloud-status-mockup.html`
-(the choices) and `cloud-status-b-mockup.html` (the picks):
+Owner decisions, 2026-09-27, made on the specimens `mockups/cloud-status-mockup.html`
+(the choices) and `mockups/cloud-status-b-mockup.html` (the picks):
 
 - **B**: the path bar's Cloud chip shows a composite mark (the cloud with a
   badge) and the state's word, and above a 960px bar content width a chevron.

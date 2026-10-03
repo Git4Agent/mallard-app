@@ -14,7 +14,11 @@ import type {
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type PushGitHistory, type ReviewListState } from "./ProjectActivityPage";
-import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
+import ProjectFilesReviewPage, {
+  projectFileReviewCards,
+  type ProjectFileReveal,
+  type ProjectFileReviewRow,
+} from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
   projectFileDeletionCount,
   type ProjectFileCommitImpactCounts,
@@ -37,6 +41,9 @@ export interface PushReviewBlocker {
   resourceId: string;
   state: string;
 }
+
+/** A selected file whose scanner finding has not been marked reviewed. */
+const WARNING_UNACKNOWLEDGED = "warning_unacknowledged";
 
 interface Props {
   credentialRedactionEnabled: boolean;
@@ -62,6 +69,9 @@ interface Props {
   projectContentInventory?: ProjectContentInventory | null;
   projectContentScanned?: boolean;
   projectContentLoading?: boolean;
+  /** The Files step was on screen with its scanned rows: a new file left
+   *  unticked from then on is one the push remembers as left out. */
+  projectFilesShown?: boolean;
   projectContentRemovals?: ReadonlySet<string>;
   acknowledgedWarningDigests?: ReadonlySet<string>;
   /** Owned above the panel: the path bar's Push publishes this same review,
@@ -97,8 +107,15 @@ function groupForStep(step: SyncReviewStep, resources: InventoryResource[]): Inv
   return resources.filter((resource) => resource.category !== "project_files");
 }
 
-function isLocalOutstandingProjectContent(entry: ProjectContentEntry): boolean {
-  return entry.local_present && (entry.state === "local_only" || entry.state === "local_ahead");
+/** The files the Push review lists: the ones this computer would publish, and
+ *  an unresolved one only this computer holds. A selected `unknown` file stops
+ *  the push and excluding it is the only way past, so its row has to be on
+ *  screen to untick. One that storage also holds waits on a Pull whatever the
+ *  selection, and the banner speaks for it. */
+function isPushReviewProjectContent(entry: ProjectContentEntry): boolean {
+  if (!entry.local_present) return false;
+  if (entry.state === "unknown") return !entry.storage_present;
+  return entry.state === "local_only" || entry.state === "local_ahead";
 }
 
 function pushBlockerKind(
@@ -221,11 +238,92 @@ export function pushReviewBlockers(
         kind: "local",
         step: "project_files",
         resourceId: entry.descriptor.resource_id,
-        state: "warning_unacknowledged",
+        state: WARNING_UNACKNOWLEDGED,
       });
     }
   }
   return blockers;
+}
+
+/** The scanner's finding as the rest of a sentence about the file. */
+function projectFileWarningClause(code: string | null | undefined): string {
+  if (code === "executable") return "is executable";
+  if (code === "possible_secret") return "may hold a secret";
+  return "has a scan warning";
+}
+
+/** One blocking item by the name its row shows: a file by its file name, a
+ *  session by its title. */
+function blockerName(
+  blocker: PushReviewBlocker,
+  threadComparison?: ThreadSyncComparison | null,
+  projectContentInventory?: ProjectContentInventory | null,
+): string {
+  if (blocker.step === "history") {
+    const entry = threadComparison?.entries.find((candidate) => candidate.resource_id === blocker.resourceId);
+    return entry ? `“${entry.display_name}”` : "A selected session";
+  }
+  const entry = projectContentInventory?.entries.find((candidate) => candidate.descriptor.resource_id === blocker.resourceId);
+  return entry ? entry.relative_path.split("/").pop()! : "A selected file";
+}
+
+/**
+ * Why the selected items stop the push, worded by the fix. A scanner finding
+ * is cleared by Mark reviewed on its card; an item the capture cannot read
+ * only by excluding it. One item is named, several are counted. The footer's
+ * pill, its status line and both Push buttons' titles read this one sentence,
+ * so they cannot disagree. Storage holds are not here: they are the banner's.
+ */
+export function pushBlockerSentence(
+  blockers: readonly PushReviewBlocker[],
+  threadComparison?: ThreadSyncComparison | null,
+  projectContentInventory?: ProjectContentInventory | null,
+): string | null {
+  const local = blockers.filter((blocker) => blocker.kind !== "storage");
+  const flagged = local.filter((blocker) => blocker.state === WARNING_UNACKNOWLEDGED);
+  const unreadable = local.filter((blocker) => blocker.state !== WARNING_UNACKNOWLEDGED);
+  const sentences: string[] = [];
+  if (flagged.length === 1) {
+    const entry = projectContentInventory?.entries.find((candidate) => (
+      candidate.descriptor.resource_id === flagged[0].resourceId
+    ));
+    sentences.push(`${blockerName(flagged[0], threadComparison, projectContentInventory)} ${projectFileWarningClause(entry?.warning_code)} — mark it reviewed or exclude it.`);
+  } else if (flagged.length > 1) {
+    sentences.push(`${flagged.length} files need review — mark them reviewed or exclude them.`);
+  }
+  if (unreadable.length === 1) {
+    sentences.push(`${blockerName(unreadable[0], threadComparison, projectContentInventory)} can’t be captured — exclude it to push.`);
+  } else if (unreadable.length > 1) {
+    sentences.push(`${unreadable.length} selected items can’t be captured — exclude them to push.`);
+  }
+  return sentences.length > 0 ? sentences.join(" ") : null;
+}
+
+/** The blocking row the footer's pill opens. A blocker whose row the review
+ *  lists wins over one it does not, and a folder its selected files require
+ *  waits behind them: its card has no tick until they are excluded. */
+export function pushBlockerRevealTarget(
+  blockers: readonly PushReviewBlocker[],
+  listedSessionIds: ReadonlySet<string>,
+  listedProjectFileIds: ReadonlySet<string>,
+  requiredProjectDirectoryIds: ReadonlySet<string>,
+): PushReviewBlocker | null {
+  const local = blockers.filter((blocker) => blocker.kind !== "storage");
+  return local.find((blocker) => (
+    blocker.step === "history"
+      ? listedSessionIds.has(blocker.resourceId)
+      : listedProjectFileIds.has(blocker.resourceId) && !requiredProjectDirectoryIds.has(blocker.resourceId)
+  )) ?? local[0] ?? null;
+}
+
+/** The pill's short form of the same blockers: a count and what it needs. */
+export function pushBlockerPillLabel(blockers: readonly PushReviewBlocker[]): string | null {
+  const local = blockers.filter((blocker) => blocker.kind !== "storage");
+  if (local.length === 0) return null;
+  const flagged = local.filter((blocker) => blocker.state === WARNING_UNACKNOWLEDGED).length;
+  if (flagged === local.length) return `${flagged} need${flagged === 1 ? "s" : ""} review`;
+  if (flagged === 0) return `${local.length} unavailable`;
+  return `${local.length} need attention`;
 }
 
 export function pushSelectableResourceIds(
@@ -374,23 +472,89 @@ export function pushProjectFileCommitImpact(
   return counts;
 }
 
+/** What Select applies on the Files step: what the recipe holds, and every
+ *  new entry the scan found nothing against. A new folder is offered by
+ *  itself only when it is empty; one that holds entries rides the
+ *  required-ancestor rule of whatever is ticked inside it, so a folder whose
+ *  only file is flagged does not travel empty. */
+export function projectFileSelectOffer(inventory: ProjectContentInventory): Set<string> {
+  const holdsEntries = new Set<string>();
+  for (const entry of inventory.entries) {
+    const parts = entry.relative_path.split("/");
+    for (let end = 1; end < parts.length; end += 1) holdsEntries.add(parts.slice(0, end).join("/"));
+  }
+  return new Set(inventory.entries
+    .filter((entry) => entry.selected_in_recipe || (
+      entry.undecided
+      && !entry.warning_code
+      && (entry.entry_type !== "directory" || !holdsEntries.has(entry.relative_path))
+    ))
+    .map((entry) => entry.descriptor.resource_id));
+}
+
+/** What a Push has to do with the project folder.
+ *
+ *  `send`: it changes what storage or the recipe holds — a removal, a tick
+ *  that changes the recipe, or a selected file that differs here from the
+ *  stored one. `remember`: nothing to send, but a new file was left unticked
+ *  on a list the user saw, and the push records it as left out. Null: no
+ *  file work.
+ *
+ *  Only a push with file work sends the scan's review token. Without it the
+ *  backend keeps the stored files as they are and does not walk the folder,
+ *  so a file an agent is still writing cannot refuse a push of sessions; with
+ *  it the backend captures every selected file, changed or not. */
+export function pushProjectFileWork(
+  inventory: ProjectContentInventory,
+  selected: ReadonlySet<string>,
+  removals: ReadonlySet<string>,
+  filesShown: boolean,
+): "send" | "remember" | null {
+  if (inventory.eligibility.state !== "eligible") return null;
+  if (removals.size > 0) return "send";
+  let remembers = false;
+  for (const entry of inventory.entries) {
+    const picked = selected.has(entry.descriptor.resource_id);
+    // The backend re-adds a recipe file storage still holds, so leaving one
+    // unticked changes nothing; every other difference changes the recipe.
+    if (picked !== entry.selected_in_recipe && !(entry.selected_in_recipe && entry.storage_present)) return "send";
+    if (picked && entry.local_present && entry.state !== "synced") return "send";
+    if (filesShown && entry.undecided && !picked) remembers = true;
+  }
+  return remembers ? "remember" : null;
+}
+
+/** The file decisions a push carries beside its selection. */
+export interface PushFileReview {
+  removals?: ReadonlySet<string>;
+  /** The Files step was on screen with its scanned rows. */
+  filesShown?: boolean;
+}
+
 /** What the current selection would put into one push: the selected sessions
  *  by their capture bytes, the requirements the push always carries, and the
- *  selected project files by size. Null when the review carries no budget
- *  (a review prepared without a comparison, or a Pull). */
+ *  selected project files by size — every one of them when the push has file
+ *  work, since the backend then captures them all, and none when it has not.
+ *  Null when the review carries no budget (a review prepared without a
+ *  comparison, or a Pull). */
 export function pushBudgetTotal(
   selected: ReadonlySet<string>,
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
+  { removals = new Set<string>(), filesShown = false }: PushFileReview = {},
 ): { sessions: number; reserved: number; projectFiles: number; total: number; limit: number } | null {
   const budget = threadComparison?.capture_budget;
   if (!budget) return null;
   const sessions = (threadComparison?.entries ?? [])
     .filter((entry) => entry.local_present && selected.has(entry.resource_id))
     .reduce((sum, entry) => sum + (entry.capture_bytes ?? 0), 0);
-  const projectFiles = (projectContentInventory?.entries ?? [])
-    .filter((entry) => entry.local_present && selected.has(entry.descriptor.resource_id))
-    .reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  const capturesFiles = !!projectContentInventory
+    && pushProjectFileWork(projectContentInventory, selected, removals, filesShown) !== null;
+  const projectFiles = capturesFiles
+    ? projectContentInventory.entries
+      .filter((entry) => entry.local_present && selected.has(entry.descriptor.resource_id))
+      .reduce((sum, entry) => sum + (entry.size ?? 0), 0)
+    : 0;
   const total = sessions + budget.reserved_bytes + projectFiles;
   return { sessions, reserved: budget.reserved_bytes, projectFiles, total, limit: budget.limit_bytes };
 }
@@ -412,6 +576,7 @@ export function pushReviewDisabledReason({
   projectContentRemovals = new Set<string>(),
   deletionApproved,
   projectContentLoading = false,
+  projectFilesShown = false,
   listState = "ready",
   gitHistoryChanged = false,
   sessionScope = false,
@@ -424,6 +589,8 @@ export function pushReviewDisabledReason({
   projectContentRemovals?: ReadonlySet<string>;
   deletionApproved: boolean;
   projectContentLoading?: boolean;
+  /** The Files step was on screen with its scanned rows. */
+  projectFilesShown?: boolean;
   /** The session list's state: a Push waits until its rows are on screen,
    *  so nothing ticked by default travels unseen. */
   listState?: ReviewListState;
@@ -436,7 +603,10 @@ export function pushReviewDisabledReason({
   if (listState === "loading") return "Loading sessions…";
   if (listState === "failed") return REVIEW_LIST_FAILED_REASON;
   if (projectContentLoading) return "Project files are still being scanned";
-  const budget = pushBudgetTotal(selected, threadComparison, projectContentInventory);
+  const budget = pushBudgetTotal(selected, threadComparison, projectContentInventory, {
+    removals: projectContentRemovals,
+    filesShown: projectFilesShown,
+  });
   if (budget && budget.total > budget.limit) {
     return sessionScope ? sessionOverLimitSentence(budget) : reviewBudgetSentence(budget, "push");
   }
@@ -447,9 +617,8 @@ export function pushReviewDisabledReason({
     acknowledgedWarningDigests,
     projectContentRemovals,
   );
-  if (blockers.some((blocker) => blocker.kind !== "storage")) {
-    return "Exclude the items that can't be captured";
-  }
+  const blockerSentence = pushBlockerSentence(blockers, threadComparison, projectContentInventory);
+  if (blockerSentence) return blockerSentence;
   if (blockers.length > 0) return "Resolve the held items above before pushing";
   const impact = pushProjectFileCommitImpact(
     projectContentInventory,
@@ -459,7 +628,17 @@ export function pushReviewDisabledReason({
   if (projectFileDeletionCount(impact) > 0 && !deletionApproved) {
     return "Approve the selected project file deletions";
   }
-  if (selected.size === 0 && projectContentRemovals.size === 0 && !gitHistoryChanged) return "Nothing is selected";
+  /* A scan ticks the files the recipe already holds, so a selection can be
+     full of files storage has as they are. Those send nothing. */
+  const fileIds = new Set((projectContentInventory?.entries ?? []).map((entry) => entry.descriptor.resource_id));
+  const sendsFiles = !!projectContentInventory
+    && pushProjectFileWork(projectContentInventory, selected, projectContentRemovals, projectFilesShown) === "send";
+  if (
+    ![...selected].some((resourceId) => !fileIds.has(resourceId))
+    && !sendsFiles
+    && projectContentRemovals.size === 0
+    && !gitHistoryChanged
+  ) return "Nothing is selected";
   return null;
 }
 
@@ -483,11 +662,22 @@ function pushBudgetBreakdown(total: PushBudget): string {
  *  cancel that does not exist. */
 export const PUSH_RUNNING_NOTE = "A running push finishes or fails whole — it can’t be cancelled midway.";
 
+/** Both reviews that push say this while Settings › Privacy › Credential
+ *  redaction is off. It comes from the setting, never the selection. */
+export const CREDENTIAL_REDACTION_OFF_NOTICE: NoticeItem = {
+  key: "credential-redaction",
+  severity: "warning",
+  message: "Exported content can include API keys, tokens, and passwords.",
+};
+
 /** The commit of both reviews that push. It wears the wait while the rows
- *  load and the transfer's own readout while it runs. */
-export function PushApplyButton({ busy, listPending = false, fetchProgress = null, disabledReason, onPush }: {
+ *  load and the folder is walked, and the transfer's own readout while it
+ *  runs. */
+export function PushApplyButton({ busy, listPending = false, filesPending = false, fetchProgress = null, disabledReason, onPush }: {
   busy: boolean;
   listPending?: boolean;
+  /** The project folder is still being walked. */
+  filesPending?: boolean;
   fetchProgress?: BundleFetchProgress | null;
   /** `pushReviewDisabledReason`, which is also the button's title. */
   disabledReason: string | null;
@@ -501,14 +691,14 @@ export function PushApplyButton({ busy, listPending = false, fetchProgress = nul
       disabled={busy || disabledReason !== null}
       title={disabledReason ?? undefined}
     >
-      {busy || listPending
+      {busy || listPending || filesPending
         ? <Icon name="refresh" size={16} className="icon-spin" />
         : <ThreadStatusIcon status="local-outstanding" size={16} />}
       {busy
         ? (fetchProgress && fetchProgress.phase === "push"
           ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
           : "Pushing…")
-        : listPending ? "Loading sessions…" : "Push"}
+        : listPending ? "Loading sessions…" : filesPending ? "Scanning files…" : "Push"}
     </button>
   );
 }
@@ -533,6 +723,7 @@ export default function PushResourceWorkspace({
   projectContentInventory = null,
   projectContentScanned = false,
   projectContentLoading = false,
+  projectFilesShown = false,
   projectContentRemovals = new Set(),
   acknowledgedWarningDigests = new Set(),
   deletionApproved = false,
@@ -558,8 +749,12 @@ export default function PushResourceWorkspace({
   const [uncontrolledActiveStep, setUncontrolledActiveStep] = useState<SyncReviewStep>("history");
   const requestedActiveStep = controlledActiveStep ?? uncontrolledActiveStep;
   const activeStep = steps.includes(requestedActiveStep) ? requestedActiveStep : "history";
+  /* A card the blocker pill asked the files page to open. Switching steps by
+     hand drops it, so coming back to the files tab does not open it again. */
+  const [projectFileReveal, setProjectFileReveal] = useState<ProjectFileReveal | null>(null);
   const selectStep = (step: SyncReviewStep) => {
     if (controlledActiveStep === undefined) setUncontrolledActiveStep(step);
+    setProjectFileReveal(null);
     onStepChange?.(step);
   };
 
@@ -604,7 +799,7 @@ export default function PushResourceWorkspace({
     [conversations, visibleConversationResourceIds],
   );
   const visibleProjectContentEntries = useMemo(
-    () => (projectContentInventory?.entries ?? []).filter(isLocalOutstandingProjectContent),
+    () => (projectContentInventory?.entries ?? []).filter(isPushReviewProjectContent),
     [projectContentInventory],
   );
   const visibleProjectFileResourceIds = useMemo(
@@ -651,10 +846,7 @@ export default function PushResourceWorkspace({
     acknowledgedWarningDigests,
     projectContentRemovals,
   );
-  const blockingCount = blockers.length;
   const pullHolds = pushReviewPullHolds(threadComparison);
-  const storageBlockingCount = blockers.filter((blocker) => blocker.kind === "storage").length;
-  const localBlockingCount = blockingCount - storageBlockingCount;
   const warningSteps = new Set<SyncReviewStep>();
   blockers.forEach((blocker) => warningSteps.add(blocker.step));
   const heldConversationCount = new Set([
@@ -709,6 +901,7 @@ export default function PushResourceWorkspace({
         : undefined,
     });
   }
+  if (!credentialRedactionEnabled) banners.push(CREDENTIAL_REDACTION_OFF_NOTICE);
   /* No comparison means no row can be selected: every session shows its
      fallback status and the counts read 0/0. That is a broken review, not an
      empty one, so it says why at the top. Reset is offered only when the
@@ -733,12 +926,29 @@ export default function PushResourceWorkspace({
     : { timing: "progress" };
   // Selection-driven, so it reports in the footer rather than the banner zone
   // above the list — see the banner comment.
-  const localBlockerSentence = localBlockingCount > 0
-    ? `${localBlockingCount} selected item${localBlockingCount === 1 ? "" : "s"} can't be captured — exclude ${localBlockingCount === 1 ? "it" : "them"} to push.`
-    : null;
+  const blockerSentence = pushBlockerSentence(blockers, threadComparison, projectContentInventory);
+  const blockerPillLabel = pushBlockerPillLabel(blockers);
+  /* The pill opens the first blocking row: its tab, and on the files step the
+     card itself, which the page scrolls to and hands focus. */
+  const revealFirstBlocker = () => {
+    const target = pushBlockerRevealTarget(
+      blockers,
+      visibleConversationResourceIds,
+      visibleProjectFileResourceIds,
+      requiredProjectContentDirectoryIds(projectContentInventory, effectiveSelected),
+    );
+    if (!target) return;
+    selectStep(target.step);
+    if (target.step === "project_files") {
+      setProjectFileReveal({ resourceId: target.resourceId });
+    }
+  };
   // Every eligible session remains selectable. Only the aggregate byte
   // ceiling can refuse Apply.
-  const budgetTotal = pushBudgetTotal(effectiveSelected, threadComparison, projectContentInventory);
+  const budgetTotal = pushBudgetTotal(effectiveSelected, threadComparison, projectContentInventory, {
+    removals: projectContentRemovals,
+    filesShown: projectFilesShown,
+  });
   const overLimitSentence = budgetTotal && budgetTotal.total > budgetTotal.limit
     ? reviewBudgetSentence(budgetTotal, "push")
     : null;
@@ -752,6 +962,7 @@ export default function PushResourceWorkspace({
     projectContentRemovals,
     deletionApproved,
     projectContentLoading,
+    projectFilesShown,
     listState,
     gitHistoryChanged,
   });
@@ -760,9 +971,8 @@ export default function PushResourceWorkspace({
   const listPending = listState === "loading";
   /* Nothing to push, so the footer's one button leaves instead. Not while a
      file scan runs: its files may still land, and the footer is the loading
-     one until they do. An unscanned files step does not hold it back — the
-     scan only starts when that step is opened, so a review waiting on it
-     would never offer the way out. */
+     one until they do. A scan that failed does not hold it back — it lands
+     nothing, so a review waiting on it would never offer the way out. */
   const emptyReview = listState === "ready"
     && !projectContentLoading
     && visibleResources.length === 0
@@ -844,12 +1054,17 @@ export default function PushResourceWorkspace({
     sourceMtime: entry.source_mtime,
     localPresent: entry.local_present,
     storagePresent: entry.storage_present,
-    newlyDiscovered: entry.newly_discovered,
-    selectedAfterScan: entry.selected_after_scan,
+    undecided: entry.undecided,
     blockedReason: entry.blocked_reason,
     warningCode: entry.warning_code,
     warningDigest: entry.warning_digest,
   }));
+  /* The files that wait: new to this storage, never left out, and not
+     ticked. A Push leaves them here, so the Sessions step counts them on the
+     button that opens their list. */
+  const waitingProjectFiles = projectFileReviewCards(projectFileRows)
+    .filter((row) => row.undecided && !effectiveSelected.has(row.resourceId))
+    .length;
   const currentGroup = groupForStep(activeStep, visibleResources);
   const searchActive = activeStep === "history" && searchQuery.trim().length > 0;
   const matchingConversations = visibleConversations.filter((resource) => nameMatchesSearch(resource.display_name, searchQuery));
@@ -1019,6 +1234,7 @@ export default function PushResourceWorkspace({
               }}
               onToggleWarning={onToggleProjectContentWarning}
               onReviewPull={onPull}
+              reveal={projectFileReveal}
             />
           )}
 
@@ -1031,7 +1247,7 @@ export default function PushResourceWorkspace({
              the gauge that caused it and the button it stops both sit. It does
              not announce: the gauge beside it is the status region, and its
              own text already changed to the overshoot. */
-          <p className="sync-review-budget-sentence">{overLimitSentence}</p>
+          <p className="sync-review-footer-note danger">{overLimitSentence}</p>
         )}
         <ProjectFileCommitImpact
           counts={projectFileImpact}
@@ -1040,15 +1256,12 @@ export default function PushResourceWorkspace({
           disabled={busy}
           onDeletionApprovedChange={(approved) => onDeletionApprovedChange?.(approved)}
         />
-        {localBlockerSentence && (
-          /* Selection-driven: ticking a row that carries an uncaptured warning
-             is what makes this appear, and it appears at the same moment the
-             Push button silently goes disabled — so it announces, or the
-             button's refusal has no explanation. Harmless in the case where
-             the recommended selection already holds one, because a polite
-             region does not announce what is present at first render. */
-          <span role="status"><small>{localBlockerSentence}</small></span>
-        )}
+        {/* Selection-driven: ticking a row that carries an unreviewed finding
+            is what makes the blocker pill appear, at the same moment Push goes
+            disabled — so its sentence announces here, or the button's refusal
+            has no explanation. The region stays mounted, so the change is what
+            it reads; a blocker present at first render is not announced. */}
+        <span className="sync-visually-hidden" role="status">{blockerSentence ?? ""}</span>
         {busy && (
           /* The sentence states a standing contract rather than reporting an
              event — the event is the push, which the button beside it is
@@ -1056,7 +1269,7 @@ export default function PushResourceWorkspace({
              `busy` flips, and it is the only thing that explains why Escape
              has stopped closing the review and the button under the reader's
              focus has gone dead. */
-          <span role="status"><small>{PUSH_RUNNING_NOTE}</small></span>
+          <p className="sync-review-footer-note" role="status">{PUSH_RUNNING_NOTE}</p>
         )}
         {emptyReview ? (
           /* Nothing to commit, so the commit's slot holds the way out — the
@@ -1084,12 +1297,34 @@ export default function PushResourceWorkspace({
                 type="button"
                 className="btn btn-ghost"
                 disabled={busy}
-                title={activeStep === "history" ? "Review project files next" : "Back to session selection"}
+                title={activeStep !== "history"
+                  ? "Back to session selection"
+                  : waitingProjectFiles > 0
+                    ? `${waitingProjectFiles} new project file${waitingProjectFiles === 1 ? " is" : "s are"} not in this push`
+                    : "Review project files next"}
                 onClick={() => selectStep(activeStep === "history" ? "project_files" : "history")}
               >
                 {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
                 {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
+                {activeStep === "history" && waitingProjectFiles > 0 && (
+                  <span className="sync-path-count">{waitingProjectFiles} new</span>
+                )}
                 {activeStep === "history" && <Icon name="chevron-right" size={14} />}
+              </button>
+            )}
+            {blockerPillLabel && (
+              /* What stops Push, beside the gauge and the button it disables:
+                 a count and what it needs. The title carries the sentence,
+                 and pressing it opens the first blocking row. */
+              <button
+                type="button"
+                className="sync-review-blocker-pill"
+                disabled={busy}
+                title={blockerSentence ?? undefined}
+                onClick={revealFirstBlocker}
+              >
+                <Icon name="alert-triangle" size={13} />
+                {blockerPillLabel}
               </button>
             )}
             {budgetTotal && !listPending && (
@@ -1098,6 +1333,7 @@ export default function PushResourceWorkspace({
             <PushApplyButton
               busy={busy}
               listPending={listPending}
+              filesPending={projectContentLoading}
               fetchProgress={fetchProgress}
               disabledReason={pushDisabledReason}
               onPush={onPush}

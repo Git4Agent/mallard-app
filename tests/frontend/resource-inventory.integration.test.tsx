@@ -648,7 +648,7 @@ test("blocked destinations gate before review and publish failures recheck the d
   const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const openPushChooser = source.slice(
     source.indexOf("const openPushChooser = async"),
-    source.indexOf("const scanPendingProjectFiles = async"),
+    source.indexOf("const scanProjectFiles = async"),
   );
   const destinationGate = openPushChooser.indexOf('destination.state === "requires_pull"');
   const pendingPushCreation = openPushChooser.indexOf("setPendingPush({");
@@ -767,10 +767,11 @@ test("held threads and storage blockers share one banner with one way forward", 
   // named region and not a status message (WCAG 2.2 SC 4.1.3).
   assert.match(html, /class="notice warning" role="region" aria-label="Notes about this Push review"/);
   assert.doesNotMatch(bannerZone(html) ?? "", /role="status"|role="alert"/);
-  // The one live region is the review's own "ready" line, empty at first
-  // paint so it speaks only when the rows land.
-  assert.equal(html.match(/role="status"|role="alert"/g)?.length, 1);
-  assert.match(html, /<span class="sync-visually-hidden" role="status"><\/span>/);
+  // Two live regions, both empty at first paint: the review's own "ready"
+  // line, which speaks when the rows land, and the footer's blocker line,
+  // which speaks when a ticked row stops Push.
+  assert.equal(html.match(/role="status"|role="alert"/g)?.length, 2);
+  assert.equal(html.match(/<span class="sync-visually-hidden" role="status"><\/span>/g)?.length, 2);
   assert.match(bannerZone(html) ?? "", /data-thread-status="divergent"/);
   assert.doesNotMatch(bannerZone(html) ?? "", /data-icon="git-compare-arrows"/);
   assert.doesNotMatch(html, />Requirements</);
@@ -922,12 +923,13 @@ test("a selected item that cannot be captured reports in the footer, not above t
   const selected = render(new Set([broken.resource_id]));
   assert.doesNotMatch(unselected, /sync-review-banners/);
   assert.doesNotMatch(selected, /sync-review-banners/, "selection must not add a banner above the list");
-  const CANNOT_CAPTURE = /1 selected item can&#x27;t be captured — exclude it to push\./;
+  const CANNOT_CAPTURE = /“Broken” can’t be captured — exclude it to push\./;
   assert.doesNotMatch(unselected, CANNOT_CAPTURE);
   assert.match(selected, CANNOT_CAPTURE);
-  // The footer is outside the scroll, so its note cannot move the rows.
+  // The footer is outside the scroll, so its pill cannot move the rows.
   const footer = selected.match(/<footer class="sync-inline-action-footer[^"]*">[\s\S]*?<\/footer>/)?.[0] ?? "";
-  assert.match(footer, CANNOT_CAPTURE);
+  assert.match(footer, /class="sync-review-blocker-pill" title="“Broken” can’t be captured — exclude it to push\."[\s\S]*?1 unavailable<\/button>/);
+  assert.match(footer, /<span class="sync-visually-hidden" role="status">“Broken” can’t be captured — exclude it to push\.<\/span>/);
   assert.match(footer, /disabled=""/, "Push stays blocked while the item is selected");
 });
 

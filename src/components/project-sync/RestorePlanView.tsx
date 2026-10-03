@@ -637,7 +637,7 @@ export default function RestorePlanView({
              the gauge that caused it and the button it stops both sit. It does
              not announce: the gauge beside it is the status region, and its
              own text already changed to the overshoot. */
-          <p className="sync-review-budget-sentence">{overLimitSentence}</p>
+          <p className="sync-review-footer-note danger">{overLimitSentence}</p>
         )}
         <ProjectFileCommitImpact
           counts={projectFileImpact}
@@ -652,7 +652,7 @@ export default function RestorePlanView({
              And as on Push it announces, because it appears only once `busy`
              flips — the one explanation for the button going dead under the
              reader's focus and Escape no longer closing the review. */
-          <span role="status"><small>Pull cannot be cancelled while changes are being applied.</small></span>
+          <p className="sync-review-footer-note" role="status">Pull cannot be cancelled while changes are being applied.</p>
         )}
         {showProjectFiles && (
           /* The step navigator, not a gate: Pull stays live on both steps —

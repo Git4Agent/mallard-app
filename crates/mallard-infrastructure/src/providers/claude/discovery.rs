@@ -431,6 +431,7 @@ mod tests {
                     session_id: path.file_stem().unwrap().to_str().unwrap().to_string(),
                     authorized_home: project.clone(),
                     is_internal_subagent: false,
+                    is_empty: false,
                 })
             },
         )

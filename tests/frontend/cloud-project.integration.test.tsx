@@ -129,7 +129,7 @@ test("the account comes first: the only one is checked, several wait for a pick,
   assert.match(one, /class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud Rika321/);
   assert.doesNotMatch(one, /Team R2/, "only Mallard Cloud accounts are offered");
   assert.match(one, /<strong>Repository<\/strong>/);
-  assert.match(one, /address or invite code/i);
+  assert.match(one, /address or invitation code/i);
   // No repository yet: no Project or Agent band, and nothing to do.
   assert.doesNotMatch(one, /<strong>Project<\/strong>/);
   assert.match(one, /<button type="button" class="btn btn-primary" disabled="">Connect<\/button>/);
@@ -137,7 +137,7 @@ test("the account comes first: the only one is checked, several wait for a pick,
   const several = renderSource([personal, work]);
   assert.doesNotMatch(several, /setup-pill active/);
   assert.match(several, /Choose an account first\./);
-  assert.doesNotMatch(several, /address or invite code/i, "the Repository band waits for the account");
+  assert.doesNotMatch(several, /address or invitation code/i, "the Repository band waits for the account");
 
   const landed = renderSource([personal, work], "storage-work");
   assert.match(landed, /class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud rika-acme/);
@@ -167,10 +167,10 @@ test("the picker in clone mode compares no remote, offers no new repository, and
   assert.doesNotMatch(html, /Git match|Git remote|different Git remote/);
   assert.doesNotMatch(html, /Paste the page address|No repository address is needed/);
   // One field for an address or a code; the verb is Look up until a code is typed.
-  assert.match(html, /address or invite code[\s\S]*?Look up<\/button>/i);
+  assert.match(html, /address or invitation code[\s\S]*?Look up<\/button>/i);
   // The scopes are tabs, Yours first; the field says a link is taken.
   assert.match(html, /role="tablist"[\s\S]*?Yours<small>2<\/small>[\s\S]*?Starred[\s\S]*?Public/);
-  assert.match(html, /placeholder="Search, or paste a link, owner\/name or an invite code"/);
+  assert.match(html, /placeholder="Search, or paste a link, owner\/name or an invitation code"/);
   assert.doesNotMatch(html, /Join<\/button>/);
   assert.match(html, /maya\/portal[\s\S]*?Member/);
   assert.match(html, /Rika321\/notes[\s\S]*?Owner/);
@@ -435,7 +435,11 @@ test("New project opens on From Mallard Cloud when asked, on the account it name
   assert.match(html, /class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud rika-acme/);
 });
 
-for (const scenario of ["Storages", "New project", "another storage", "reconnect", "reset", "R2", "Catalog", "Catalog reset"] as const) {
+for (const scenario of [
+  "Storages", "New project", "another storage", "reconnect", "reset", "R2", "Catalog", "Catalog reset",
+  // A `mallard://` link set aside while Mallard Cloud is signed in to.
+  "a waiting listing link", "a waiting repository link", "a waiting link, reconnect",
+] as const) {
   test(`storage setup returns to its source: ${scenario}`, async () => {
     const source = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
     const body = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -451,7 +455,15 @@ for (const scenario of ["Storages", "New project", "another storage", "reconnect
     let draftStorage = scenario === "R2" ? r2 : personal;
     const committed = scenario === "another storage" || scenario === "reset" || scenario === "Catalog reset" ? work : scenario === "R2" ? r2 : personal;
     const cloudProjectSetupStorageRef = { current: null as string | null };
+    const waitingLink = scenario === "a waiting repository link" ? "repository" : scenario.startsWith("a waiting") ? "listing" : null;
+    let linksResumed = 0;
     const context = {
+      appLink: {
+        awaitsAccount: () => waitingLink !== null,
+        // The listing's link goes straight to its page; a repository's opens its sheet.
+        resume: () => { linksResumed += 1; return waitingLink === "listing"; },
+      },
+      appLinkLandingRef: { current: null as string | null },
       hostWorkflowEpoch: { current: 1 }, cloudProjectSetupStorageRef,
       cloudLandingRef: { current: null as string | null },
       catalogStorageSetupRef: { current: null as { scopeId: string; draftId: string | null } | null },
@@ -463,7 +475,7 @@ for (const scenario of ["Storages", "New project", "another storage", "reconnect
       storageDraftSaveQueue: { enqueue: (action: () => Promise<unknown>) => action() },
       projectSyncApi: {
         createStorageSetupDraft: async () => ({ draft_id: `draft-${draftStorage.storage_id}`, storage_id: draftStorage.storage_id }),
-        commitStorageSetupDraft: async () => ({ storage_id: committed.storage_id, config_revision: 7, replaced: scenario === "reconnect" }),
+        commitStorageSetupDraft: async () => ({ storage_id: committed.storage_id, config_revision: 7, replaced: scenario.endsWith("reconnect") }),
         getConfig: async () => ({ schema: 1, revision: 7, storages: [personal, work, r2] }),
       },
       refreshStorageSetupDrafts: async () => {}, openStorageDraftForm: noop,
@@ -484,7 +496,7 @@ for (const scenario of ["Storages", "New project", "another storage", "reconnect
       openStorageWorkspace: (storageId: string) => Promise<void>;
     };
     if (scenario.startsWith("Catalog")) context.catalogStorageSetupRef.current = { scopeId: "pets", draftId: null };
-    if (scenario === "Storages" || scenario.startsWith("Catalog")) await flow.createStorageDraft("managed_cloud");
+    if (scenario === "Storages" || scenario.startsWith("Catalog") || waitingLink) await flow.createStorageDraft("managed_cloud");
     else await flow.createStorageDraft(draftStorage.provider, undefined, true);
     if (scenario === "reset" || scenario === "Catalog reset") {
       const activeStorageSettingsId = draftStorage.storage_id;
@@ -497,12 +509,17 @@ for (const scenario of ["Storages", "New project", "another storage", "reconnect
     await flow.openStorageWorkspace(committed.storage_id);
     assert.deepEqual(errors, []);
     const returnsToProject = scenario === "New project" || scenario === "reset";
-    assert.deepEqual(destinations, [scenario.startsWith("Catalog") ? { scopeId: "pets" } : returnsToProject
+    // The listing's link went on to its own page: this storage's does not open.
+    assert.deepEqual(destinations, scenario === "a waiting listing link" ? [] : [scenario.startsWith("Catalog") ? { scopeId: "pets" } : returnsToProject
       ? { source: "cloud", storageId: committed.storage_id }
       : { mode: "open", storageId: committed.storage_id, requestId: 1 }]);
     // The redirect is consumed. Opening this storage again opens its own page.
     destinations.length = 0;
     await flow.openStorageWorkspace(committed.storage_id);
     assert.deepEqual(destinations, [{ mode: "open", storageId: committed.storage_id, requestId: 1 }]);
+    // A link set aside for a Mallard Cloud account is let through once, when
+    // the new account's storage opens: not on a reconnect, and never when no
+    // link is waiting.
+    assert.equal(linksResumed, scenario === "a waiting listing link" || scenario === "a waiting repository link" ? 1 : 0);
   });
 }

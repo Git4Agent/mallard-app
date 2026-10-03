@@ -1,7 +1,9 @@
 import type { ReactNode, RefObject } from "react";
-import type { ProjectSessionDetail, SessionActionDescriptor } from "../../../types";
+import type { ProjectSessionDetail, SessionActionDescriptor, SessionDetailWarning } from "../../../types";
 import Icon, { type IconName } from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
+import SessionDetailBack, { type SessionBackTarget } from "./SessionDetailBack";
+import SessionDetailNotes from "./SessionDetailNotes";
 import {
   formatCompactCount,
   formatSessionCount,
@@ -9,6 +11,7 @@ import {
   formatSessionLengthDetail,
   formatSessionStart,
   sessionDetailDateTime,
+  type SessionPushGate,
 } from "./sessionDetailModel";
 
 // The activity rows' vocabulary, reused verbatim: opening the provider wears
@@ -24,14 +27,24 @@ function FactChip({ children, title }: { children: ReactNode; title?: string }) 
 
 export default function SessionDetailHeader({
   detail,
+  back,
   headingRef,
   actionBusyId,
   onAction,
+  pushGate,
+  notes,
+  onShowToolCalls,
 }: {
   detail: ProjectSessionDetail;
+  back: SessionBackTarget;
   headingRef: RefObject<HTMLHeadingElement | null>;
   actionBusyId: string | null;
   onAction: (action: SessionActionDescriptor) => void;
+  /** A hold on Push the user clears; null when Push says all there is. */
+  pushGate: SessionPushGate | null;
+  /** How the transcript was read. */
+  notes: SessionDetailWarning[];
+  onShowToolCalls: (() => void) | null;
 }) {
   // The page's visible title is the path bar's leaf crumb — stated once, and
   // sticky, so it survives scrolling in a way an in-page poster never did. The
@@ -55,61 +68,76 @@ export default function SessionDetailHeader({
       >{title}</h1>
 
       <div className="session-detail-strip">
-        {/* Facts state themselves: a branch after the branch glyph and a
-            7-char sha need no caption. Only the token count keeps a word. */}
-        <div className="session-detail-chips" aria-label="Session facts">
-          {detail.branch && (
-            <FactChip title={`Recorded branch ${detail.branch}`}>
-              <Icon name="git-branch" size={12} />
-              <code>{detail.branch}</code>
+        {/* The way back leads the row, and the facts wrap beside it. */}
+        <div className="session-detail-lead">
+          <SessionDetailBack target={back} />
+          {/* Facts state themselves: a branch after the branch glyph and a
+              7-char sha need no caption. Only the token count keeps a word. */}
+          <div className="session-detail-chips" aria-label="Session facts">
+            {detail.branch && (
+              <FactChip title={`Recorded branch ${detail.branch}`}>
+                <Icon name="git-branch" size={12} />
+                <code>{detail.branch}</code>
+              </FactChip>
+            )}
+            {detail.recorded_sha && (
+              <FactChip title={detail.recorded_sha}>
+                <Icon name="git-commit" size={12} />
+                <code>{detail.recorded_sha.slice(0, 7)}</code>
+              </FactChip>
+            )}
+            {/* Each chip carries one fact: start or duration. The duration
+                tooltip includes the end time; the full start needs no tooltip. */}
+            {start && (
+              <FactChip>
+                <time dateTime={sessionDetailDateTime(detail.started_at)}>{start}</time>
+              </FactChip>
+            )}
+            {/* A live session has no end, so label it running. */}
+            {(detail.is_active || length) && (
+              <FactChip title={formatSessionLengthDetail(detail.started_at, detail.ended_at, detail.is_active) ?? undefined}>
+                <Icon name={detail.is_active ? "activity" : "clock"} size={12} />
+                <b>{detail.is_active ? "running" : length}</b>
+              </FactChip>
+            )}
+            <FactChip title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}>
+              {tokensKnown
+                ? <><code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code> tokens</>
+                : "Tokens unavailable"}
             </FactChip>
-          )}
-          {detail.recorded_sha && (
-            <FactChip title={detail.recorded_sha}>
-              <Icon name="git-commit" size={12} />
-              <code>{detail.recorded_sha.slice(0, 7)}</code>
-            </FactChip>
-          )}
-          {/* Each chip carries one fact: start or duration. The duration
-              tooltip includes the end time; the full start needs no tooltip. */}
-          {start && (
-            <FactChip>
-              <time dateTime={sessionDetailDateTime(detail.started_at)}>{start}</time>
-            </FactChip>
-          )}
-          {/* A live session has no end, so label it running. */}
-          {(detail.is_active || length) && (
-            <FactChip title={formatSessionLengthDetail(detail.started_at, detail.ended_at, detail.is_active) ?? undefined}>
-              <Icon name={detail.is_active ? "activity" : "clock"} size={12} />
-              <b>{detail.is_active ? "running" : length}</b>
-            </FactChip>
-          )}
-          <FactChip title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}>
-            {tokensKnown
-              ? <><code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code> tokens</>
-              : "Tokens unavailable"}
-          </FactChip>
-          {/* How many agents this session delegated to; the rows say which. */}
-          {agentsKnown && (
-            <FactChip title={agents.explanation ?? `${formatSessionCount(agents)} agents spawned in this session`}>
-              <Icon name="git-fork" size={12} />
-              <code className={`quality-${agents.quality}`}>{formatSessionCount(agents)}</code>
-              {agents.value === 1 ? "agent" : "agents"}
-            </FactChip>
-          )}
-          {/* A child page states what it was: its role, model, and how the
-              parent ran it. The parent itself is the crumb before the title. */}
-          {agent?.role && (
-            <FactChip title={`Agent role ${agent.role}`}>
-              <Icon name="git-fork" size={12} />
-              <code>{agent.role}</code>
-            </FactChip>
-          )}
-          {agent?.model && <FactChip title={`Model ${agent.model}`}><code>{agent.model}</code></FactChip>}
-          {agent && <FactChip title={`Run ${agent.mode}`}>{agent.mode}</FactChip>}
+            {/* How many agents this session delegated to; the rows say which. */}
+            {agentsKnown && (
+              <FactChip title={agents.explanation ?? `${formatSessionCount(agents)} agents spawned in this session`}>
+                <Icon name="git-fork" size={12} />
+                <code className={`quality-${agents.quality}`}>{formatSessionCount(agents)}</code>
+                {agents.value === 1 ? "agent" : "agents"}
+              </FactChip>
+            )}
+            {/* A child page states what it was: its role, model, and how the
+                parent ran it. The parent itself is the crumb before the title. */}
+            {agent?.role && (
+              <FactChip title={`Agent role ${agent.role}`}>
+                <Icon name="git-fork" size={12} />
+                <code>{agent.role}</code>
+              </FactChip>
+            )}
+            {agent?.model && <FactChip title={`Model ${agent.model}`}><code>{agent.model}</code></FactChip>}
+            {agent && <FactChip title={`Run ${agent.mode}`}>{agent.mode}</FactChip>}
+            <SessionDetailNotes notes={notes} onShowToolCalls={onShowToolCalls} />
+          </div>
         </div>
 
         <div className="session-detail-header-actions" aria-label="Session actions">
+          {/* Right under Push in the bar: why it is held, when the user can
+              clear it. The sentence is the tooltip, and printed for a screen
+              reader. */}
+          {pushGate && (
+            <span className={`session-detail-chip session-detail-push-gate ${pushGate.tone}`} title={pushGate.detail}>
+              <Icon name={pushGate.tone === "danger" ? "octagon-x" : "download"} size={12} />
+              {pushGate.label}
+              <span className="sync-visually-hidden"> {pushGate.detail}</span>
+            </span>
+          )}
           {detail.actions.map((action) => {
             const pending = actionBusyId === action.action_id;
             return (

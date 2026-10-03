@@ -3,6 +3,7 @@
 //! Current state is isolated below `~/.mallard`. This module supports only the
 //! current schema.
 
+pub mod app_link;
 pub mod cloud_project;
 pub mod codex_maintenance;
 pub mod commands;

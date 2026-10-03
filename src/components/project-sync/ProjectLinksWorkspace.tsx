@@ -40,10 +40,11 @@ import type {
   ActiveProjectSubview,
   OpenSessionDetailRequest,
 } from "./session-detail/sessionDetailModel";
-import { sessionPushDisabledReason } from "./session-detail/sessionDetailModel";
+import { sessionPushDisabledReason, sessionPushGate } from "./session-detail/sessionDetailModel";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
+import SessionDetailBack, { type SessionBackTarget } from "./session-detail/SessionDetailBack";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
@@ -145,6 +146,8 @@ interface Props {
   projects: LocalProjectSummary[];
   activeProjectId: string | null;
   activeStorageId: string | null;
+  /** The storage each project last opened on, for the Projects landing. */
+  rememberedStorageByProject: Record<string, string>;
   activeProjectSubview: ActiveProjectSubview;
   bindings: ProjectBinding[];
   profiles: ProviderProfileSummary[];
@@ -516,6 +519,7 @@ export default function ProjectLinksWorkspace({
   projects,
   activeProjectId,
   activeStorageId,
+  rememberedStorageByProject,
   activeProjectSubview,
   bindings,
   profiles,
@@ -2097,6 +2101,7 @@ export default function ProjectLinksWorkspace({
           projects={projects}
           profiles={profiles}
           storages={storages}
+          rememberedStorageByProject={rememberedStorageByProject}
           onAddProject={onAddProject}
           onAddCloudProject={onAddCloudProject}
           onSelectProject={onSelectProject}
@@ -2376,6 +2381,27 @@ export default function ProjectLinksWorkspace({
   // crumb of its own — Mallard itself.
   const pathOverflow: PathBarMenuGroup[] = workspaceProject ? appActions : [];
 
+  // The session page's own back button walks one level up the trail, as the
+  // crumbs do: an agent's page returns to the session that delegated to it,
+  // and a session returns to the project's page, waiting where its crumb waits.
+  const sessionParent = sessionHeader?.state === "ready" ? sessionHeader.parent ?? null : null;
+  const sessionBack: SessionBackTarget | null = !sessionDetailSubview ? null
+    : sessionParent
+      ? {
+        kind: "session",
+        label: sessionParent.title,
+        onActivate: () => onOpenSessionDetail(sessionDetailSubview.localProjectId, {
+          resourceId: sessionParent.resourceId,
+          occurrenceKey: sessionParent.resourceId,
+        }),
+      }
+      : {
+        kind: "section",
+        label: workspaceSectionLabel,
+        onActivate: closeSessionDetail,
+        disabled: busy || !!inlineStorageReview,
+      };
+
   // A badge on the button that clears it, rather than a tally beside it: "3 to
   // push" is what Push does, said once. The counts stand down while that
   // button is mid-review or mid-transfer, where its own label is the readout.
@@ -2384,13 +2410,26 @@ export default function ProjectLinksWorkspace({
       (entry) => entry.conversation_resource_id === sessionDetailSubview.resourceId,
     )
     : undefined;
+  // The comparison this session's Push reads, once it is current for this
+  // project and storage.
+  const sessionComparison = sessionDetailSubview
+    && activityHeader
+    && activityHeader.projectId === workspaceProject?.local_project_id
+    && activityHeader.storageId === workspaceStorage?.storage_id
+    && !activityHeader.refreshing
+    ? activityHeader
+    : null;
   const sessionPushIssue = !sessionDetailSubview ? null
-    : activityHeader?.projectId !== workspaceProject?.local_project_id
-      || activityHeader?.storageId !== workspaceStorage?.storage_id
-      || activityHeader.refreshing
+    : !sessionComparison
       ? "Checking session…"
-      : activityHeader.comparisonError
+      : sessionComparison.comparisonError
         ?? sessionPushDisabledReason(sessionPushEntry);
+  // What the page says under Push: only a hold the user clears. Up to date,
+  // checking and ready are Push's own state, tooltip and count; a failed
+  // comparison the Cloud chip already reports is not said twice.
+  const sessionPushHold = sessionComparison
+    ? sessionPushGate(sessionPushEntry, managedCloudKey ? null : sessionComparison.comparisonError)
+    : null;
   const pullThreadCount = activityHeader?.counts.pull ?? 0;
   const pushThreadCount = sessionDetailSubview
     ? sessionPushIssue === null ? 1 : 0
@@ -2437,7 +2476,7 @@ export default function ProjectLinksWorkspace({
           className={`sync-path-attention ${activityHeader?.counts.severity ?? "warning"}`}
           tabIndex={0}
           data-tooltip={activityHeader?.counts.detail}
-          aria-label={`${attention} thread${attention === 1 ? "" : "s"} need attention: ${activityHeader?.counts.detail}`}
+          aria-label={activityHeader?.counts.detail}
         >
           <Icon name={activityHeader?.counts.severity === "danger" ? "octagon-x" : "alert-triangle"} size={13} />
           <b>{attention}</b>
@@ -3134,21 +3173,14 @@ export default function ProjectLinksWorkspace({
         )}
       </section>
 
-      {sessionDetailSubview && sessionPushIssue && !workspaceReviewOpen && (
-        <NoticeZone
-          items={[{ key: "session-push", severity: "info", message: sessionPushIssue }]}
-          subject="session Push status"
-          timing="standing"
-          label="Session Push status"
-        />
-      )}
-      {sessionDetailSubview && workspaceProject && (
+      {sessionDetailSubview && sessionBack && workspaceProject && (
         <Suspense fallback={(
           /* Not role="status": the region and its sentence mount in the same
              commit, so there is no change for a live region to announce — the
              text is simply what this view renders with while the chunk
              loads. */
           <section className="session-detail-page session-detail-entry-state">
+            <SessionDetailBack target={sessionBack} />
             <span className="status-loader" />
             <strong>Opening session detail…</strong>
           </section>
@@ -3161,7 +3193,9 @@ export default function ProjectLinksWorkspace({
               ?? ""}
             resourceId={sessionDetailSubview.resourceId}
             occurrenceKey={sessionDetailSubview.occurrenceKey}
+            back={sessionBack}
             onHeaderChange={handleSessionHeaderChange}
+            pushGate={workspaceReviewOpen ? null : sessionPushHold}
             onOpenSession={(resourceId) => onOpenSessionDetail(sessionDetailSubview.localProjectId, {
               resourceId,
               occurrenceKey: resourceId,

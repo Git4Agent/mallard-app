@@ -44,10 +44,10 @@ export default function RepositoryLookupField({ value, onChange, onSubmit, disab
   const actionable = kind === "address" || kind === "code";
   return (
     <label className="sync-folder-field compact">
-      <span className={labelHidden ? "sync-visually-hidden" : undefined}>Search, address or invite code</span>
+      <span className={labelHidden ? "sync-visually-hidden" : undefined}>Search, address or invitation code</span>
       <div>
         <input value={value} disabled={disabled || joining} spellCheck={false} autoComplete="off"
-          placeholder="Search, or paste a link, owner/name or an invite code" aria-invalid={invalid || undefined} aria-describedby={describedBy}
+          placeholder="Search, or paste a link, owner/name or an invitation code" aria-invalid={invalid || undefined} aria-describedby={describedBy}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && actionable) { event.preventDefault(); onSubmit(); } }} />
         <button type="button" className="btn repo-verb" disabled={disabled || looking || joining || !actionable} onClick={onSubmit}>

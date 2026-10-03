@@ -2252,7 +2252,7 @@ svg[data-icon="lightbulb"] path:last-child {
 .sync-storage-card > .storage-destination-conflict { margin: 0 14px 12px; flex-wrap: wrap; }
 .storage-destination-conflict-verbs { flex: 1 0 100%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .storage-setup-guide-copy { min-width: 0; flex: 1 1 300px; }
-.storage-setup-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; white-space: nowrap; }
+.storage-setup-guide > .btn-link { min-height: 24px; padding: 2px 0; flex: none; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 /* The agent action at the guide row's tail: a compact button in the accent's
    soft tint — the storage icon's pair — so the route is the loudest thing in
    the row while the commit bar keeps the page's one primary. */
@@ -2737,18 +2737,16 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
 .sync-secret-reveal:disabled { cursor: default; opacity: 0.58; }
 
 /* ── The settled storage's page: the setup form, locked ──
-   Every destination field is read-only for the life of the storage and says
-   so with a lock beside its name. Readonly, never disabled: the value keeps
-   its ink and stays selectable. The secret is masked until Show fetches it,
-   Copy fetches without showing, and the countdown in the label row says when
-   the field masks itself again. */
+   Every destination field is read-only for the life of the storage; the
+   footer says so once. Readonly, never disabled: the value keeps its ink,
+   stays selectable, and has its own Copy. The secret is masked until Show
+   fetches it, Copy fetches without showing, and the countdown in the label
+   row says when the field masks itself again. */
 .sync-storage-locked input[readonly] {
   color: var(--text-1);
   background: var(--surface-muted);
   cursor: default;
 }
-.sync-storage-locked .sync-folder-field.compact > div > input { flex: 1; }
-.sync-storage-lock { display: inline-flex; color: var(--text-3); }
 .sync-storage-field-help {
   color: var(--text-3);
   font-size: var(--type-2xs);
@@ -2756,8 +2754,10 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
 }
 .sync-storage-field-help.error { color: var(--danger-text); }
 .sync-storage-field-help.error > svg { vertical-align: -1px; }
-/* The Copy and Show verbs share the input's right edge, Copy first. */
+/* The Copy and Show verbs share the input's right edge, Copy first; a
+   plain value's box carries Copy alone. */
 .sync-secret-input.has-copy > input { padding-right: 92px; }
+.sync-secret-input.has-copy-one > input { padding-right: 40px; }
 .sync-secret-verbs {
   position: absolute;
   top: 1px;
@@ -2792,6 +2792,11 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
   white-space: nowrap;
 }
 .sync-secret-cap.copied { color: var(--success-text); }
+.sync-secret-cap.failed { color: var(--danger-text); }
+/* Copy all, at the tail of the status or Manual setup row, says how it went
+   in its own label. */
+.btn.storage-copy-all.copied { color: var(--success-text); }
+.btn.storage-copy-all.failed { color: var(--danger-text); }
 .sync-secret-cap > .status-loader { width: 10px; height: 10px; }
 .sync-storage-refused-chip {
   display: inline-flex;
@@ -4474,6 +4479,76 @@ span.sync-path-crumb {
   gap: 8px;
 }
 
+/* A project card's storages, on one line whatever the count: the linked
+   storages' marks overlapping, the storage the project opens on by name, and
+   a count for the rest. */
+.landing-picker-storages {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.landing-picker-storages-tiles {
+  flex: none;
+  display: inline-flex;
+}
+
+/* Each mark stands on the rail's tile. Scoped to the stack: a bare
+   svg[data-storage-provider] rule would double-tile the settings plate and
+   the storage cards' title tile. */
+.landing-picker-storages-tiles > svg {
+  flex: none;
+  box-sizing: content-box;
+  width: 14px;
+  height: 14px;
+  padding: 2px;
+  border: var(--box-border);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+.landing-picker-storages-tiles > svg[data-storage-provider] {
+  background: var(--storage-icon-tile);
+}
+
+.landing-picker-storages-tiles > svg + svg {
+  margin-left: -8px;
+}
+
+/* Nothing linked: the same tile, dashed and empty. */
+.landing-picker-storages.none > svg {
+  flex: none;
+  box-sizing: content-box;
+  width: 12px;
+  height: 12px;
+  padding: 3px;
+  border: 2px dashed var(--border-mid);
+  border-radius: 6px;
+}
+
+.landing-picker-storages-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.landing-picker-storages-more {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Nothing listed: the filled landing, ghosted. One dashed card per way Add
    can start, in the card's own grid and anatomy — glyph, name, and a bar of
    nothing where the location would go — so the first real card lands in a
@@ -4614,13 +4689,17 @@ span.sync-path-crumb {
 
 /* The art draws its own ink frame (rx 26 of 1200 × 560); the plate adds the
    card's offset shadow, and in dark the ring that frame loses on the paper.
-   The ride is drawn over the still, so ending it never blanks the plate. */
+   The ride is drawn over the still, so ending it never blanks the plate. Only
+   the still clips itself: the ride GIFs are opaque with square, near-white
+   corners, so the plate clips its images to the frame's radius. The shadow
+   and ring paint outside the box, where the clip does not reach. */
 .projects-welcome-art {
   position: relative;
   width: min(420px, 100%);
   aspect-ratio: 1200 / 560;
   margin-bottom: 28px;
   border-radius: 2.2% / 4.6%;
+  overflow: hidden;
   box-shadow: var(--shadow-card);
 }
 
@@ -7255,8 +7334,8 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   min-height: 44px;
   padding: 4px 20px;
   gap: 8px;
-  /* Wraps for the meter's refusal row and for nothing else: while the
-     selection fits, that row is not rendered at all. */
+  /* Wraps for the footer-note row above the cluster, and when the cluster
+     outgrows a narrow review. */
   flex-wrap: wrap;
 }
 
@@ -7265,6 +7344,14 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* The step navigator counts the project files that wait for a tick: the
+   path bar's count chip, wide enough for its word. */
+.sync-sync-review-footer > .btn .sync-path-count {
+  margin: 0 -1px 0 2px;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 /* An empty review's one button is the way out, in the apply button's
@@ -7422,16 +7509,56 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   background: linear-gradient(var(--danger-soft), var(--danger-soft)), var(--surface-card);
 }
 
-/* The refusal takes a row of its own above the cluster, so it sits with the
-   gauge and the button rather than squeezing them; the footer rule above
-   wraps for it. */
-.sync-review-budget-sentence {
+/* A footer sentence — the over-limit refusal, or the note that a running
+   apply cannot be cancelled — takes a row of its own above the cluster,
+   ending over the button it explains. Beside the cluster it was a flex: 1
+   column that got the leftovers: ~70px and five lines at a 970px review. The
+   footer rule above wraps for it. */
+.sync-review-footer-note {
   flex: 1 0 100%;
   order: -1;
   margin: 0;
-  color: var(--danger-text);
-  font-size: var(--type-2xs);
+  color: var(--text-2);
+  font-size: var(--type-xs);
   text-align: right;
+}
+
+.sync-review-footer-note.danger { color: var(--danger-text); }
+
+/* What stops Push among the selected rows: the gauge pill's shape in the
+   warning ink, beside the gauge and the button it disables. It reads a
+   count and what it needs; its title carries the sentence, and pressing it
+   opens the first blocking row. --warning-soft is a tint, so it is laid over
+   the pill's own surface like the over gauge. */
+.sync-sync-review-footer > .sync-review-blocker-pill {
+  height: 34px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 13px 0 11px;
+  border: var(--box-border);
+  border-color: var(--warning-text);
+  border-radius: 999px;
+  background: linear-gradient(var(--warning-soft), var(--warning-soft)), var(--surface-card);
+  color: var(--warning-text);
+  font: inherit;
+  font-size: var(--type-xs);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sync-sync-review-footer > .sync-review-blocker-pill:hover:not(:disabled) {
+  background:
+    linear-gradient(var(--warning-soft), var(--warning-soft)),
+    linear-gradient(var(--warning-soft), var(--warning-soft)),
+    var(--surface-card);
+}
+
+.sync-sync-review-footer > .sync-review-blocker-pill:disabled {
+  opacity: var(--button-disabled-opacity);
+  cursor: not-allowed;
 }
 
 /* No max-width: the rows are a table that meets the panel edge like the tab
@@ -7686,16 +7813,22 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 /* Footers are buttons only; the actions pin to the right edge. */
 .sync-inline-action-footer.sync-sync-review-footer { justify-content: flex-end; }
 
+/* Sized to its counts, so they share the row with the cluster. With the
+   deletion approval it is a sentence again: it keeps a 360px slot, and a
+   row of its own on narrow reviews, or it would pull the step button away
+   from the gauge and the apply button. */
 .sync-project-file-commit-impact {
   min-width: 0;
   margin-right: auto;
   display: flex;
-  flex: 1 1 360px;
+  flex: 0 1 auto;
   align-items: center;
   gap: 10px;
   color: var(--text-2);
   font-size: var(--type-2xs);
 }
+
+.sync-project-file-commit-impact.with-approval { flex: 1 1 360px; }
 
 .sync-project-file-impact-counts {
   display: flex;
@@ -7727,11 +7860,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 @container sync-review-layout (max-width: 720px) {
-  .sync-sync-review-footer:has(.sync-project-file-commit-impact) {
-    flex-wrap: wrap;
-  }
-
-  .sync-project-file-commit-impact {
+  .sync-project-file-commit-impact.with-approval {
     flex-basis: 100%;
   }
 }
@@ -7956,10 +8085,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-name-search-count b { color: var(--text-0); font-weight: var(--weight-medium); }
 .sync-name-search-hidden { color: var(--warning-text); }
 
-/* A card marked for removal wears the same red wash the old row wore, mixed
-   into its own surface so the border and radius stay the card's. */
-.catalog-card.removal { background: color-mix(in srgb, var(--red) 7%, var(--surface-row)); }
-
 /* The blocked row's marker is a strip of the file card (`.notice-strip`),
    inset to the card's text column. */
 .sync-project-file-conflict {
@@ -8041,6 +8166,20 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 .sync-list-tile .sync-history-thread-card + .sync-history-thread-card {
   border-top: 1px solid var(--border-mid);
+}
+/* A file marked for removal from storage wears a red wash over the tile's
+   paper. It outranks the plain row's hover tint on purpose: the wash holds
+   on hover, because any darker hover under it takes the light theme's
+   "Removes from storage" chip below 4.5:1. */
+.sync-list-tile .sync-history-thread-card.removal {
+  background: color-mix(in srgb, var(--red) 7%, var(--surface-row));
+}
+/* The card the Push footer's blocker pill opened wears the pill's warning
+   wash for a moment, so the eye lands where focus went. A wash, not an
+   outline: the card sits flush inside its tile, which clips anything drawn
+   outside it. */
+.sync-list-tile .sync-history-thread-card.revealed {
+  background: color-mix(in srgb, var(--yellow) 14%, var(--surface-row));
 }
 
 /* The merged cloud tile keeps each row's directory as a quiet prefix. */
@@ -8329,8 +8468,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 
 /* The page's visible title lives in the path bar's leaf crumb — sticky, so it
    survives scrolling — and the h1 stays screen-reader-only as the section's
-   name and the focus landing. What remains here is one slim row: the facts on
-   the left, the two verbs on the right. */
+   name and the focus landing. What remains here is one slim row: the way back
+   and the facts on the left, the two verbs on the right. */
 .session-detail-header {
   display: grid;
   gap: 10px;
@@ -8343,6 +8482,42 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px 14px;
+}
+
+/* The way back, then the facts. The facts wrap beside the button rather than
+   under it, so a narrow page still reads as a control and its block of
+   facts. */
+.session-detail-lead {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+/* The page's way back is a `.btn` at the strip's scale: 26px, above the 24px
+   minimum target (WCAG 2.2 AA 2.5.8). The 2px it stands past a 22px chip on
+   each side come off its margins, so the row keeps the chips' height and the
+   button centres on their first line when they wrap. */
+.btn.session-detail-back {
+  min-height: 26px;
+  flex: 0 0 auto;
+  gap: 3px;
+  margin: -2px 0;
+  padding: 0 11px 0 6px;
+}
+
+.session-detail-back > span {
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* From an agent's page the label is the parent session's title: the user's
+   data, so it speaks in the sans face the title's own crumb uses. */
+.btn.session-detail-back.to-session {
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
 }
 
 /* Facts state themselves — a branch after the branch glyph, a bare sha — so
@@ -8385,6 +8560,100 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 .session-detail-chip b {
   color: var(--text-0);
   font-weight: var(--weight-semibold);
+}
+
+/* Two chips speak in a rung's ink. Under Push, a hold the user clears: Pull
+   first, or a comparison that failed. At the end of the facts, how the
+   transcript was read: the loudest note's glyph and a count, opening the
+   notes. Up to date, checking and ready are Push's own to say. */
+.session-detail-chip.session-detail-push-gate > svg,
+.session-detail-chip.session-detail-notes-chip > svg {
+  color: inherit;
+}
+
+.session-detail-push-gate.info,
+.session-detail-notes-chip.info {
+  border-color: color-mix(in srgb, var(--blue) 45%, var(--border));
+  color: var(--info-text);
+}
+
+.session-detail-notes-chip.warning {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+  color: var(--warning-text);
+}
+
+.session-detail-push-gate.danger,
+.session-detail-notes-chip.danger {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  color: var(--danger-text);
+}
+
+.session-detail-notes-chip {
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.session-detail-notes-chip:hover,
+.session-detail-notes-chip[aria-expanded="true"] {
+  background: var(--bg-hover);
+}
+
+/* The notes panel: one line a note, the rung named in its ink. */
+.session-detail-notes {
+  display: grid;
+  gap: 6px;
+  padding: 2px 4px;
+  color: var(--text-1);
+  font-size: var(--type-xs);
+  line-height: 1.45;
+}
+
+.session-detail-notes-title {
+  margin: 0;
+  color: var(--text-0);
+  font-weight: var(--weight-semibold);
+}
+
+.session-detail-note {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.session-detail-note > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.session-detail-note b {
+  font-weight: var(--weight-semibold);
+}
+
+.session-detail-note.info > svg,
+.session-detail-note.info b {
+  color: var(--info-text);
+}
+
+.session-detail-note.warning > svg,
+.session-detail-note.warning b {
+  color: var(--warning-text);
+}
+
+.session-detail-note.danger > svg,
+.session-detail-note.danger b {
+  color: var(--danger-text);
+}
+
+.btn-link.session-detail-note-action {
+  margin-left: 6px;
+  color: var(--text-0);
+  font-size: inherit;
+  font-weight: var(--weight-semibold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
 }
 
 .session-detail-header-actions {
@@ -9516,6 +9785,14 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   display: grid;
   align-content: start;
   gap: 18px;
+}
+
+/* While the page opens, or fails to, the way back is the grid's first row,
+   where the loaded strip will seat it: a 24px row, the height the launch
+   verbs give the strip, so the button does not move when the page lands. */
+.session-detail-entry-state > .btn.session-detail-back {
+  justify-self: start;
+  margin: -1px 0;
 }
 
 /* Failed actions, moved snapshots, and backend notes share one notice box. */
@@ -12353,8 +12630,11 @@ span.sync-update-pill {
   transform: none;
 }
 
-.sync-history-thread-card:hover .sync-history-launch-action,
-.sync-history-thread-card:hover .sync-history-debug-trigger {
+/* A hovered row raises its quiet clickables one step, readout ink to
+   `--text-1`; their own hover and an open menu are the top step, `--text-0`.
+   Launch actions stay out: they rest at full ink (`--accent`) already, so a
+   row step would dim them. */
+.sync-history-thread-card:hover .sync-history-debug-trigger:not(:hover):not([aria-expanded="true"]) {
   color: var(--text-1);
 }
 
@@ -13066,7 +13346,7 @@ span.sync-update-pill {
   margin-left: 0;
 }
 
-.sync-history-thread-card:hover .sync-history-session-detail-action {
+.sync-history-thread-card:hover .sync-history-session-detail-action:not(:hover) {
   color: var(--text-1);
 }
 

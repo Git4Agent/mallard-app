@@ -45,6 +45,31 @@ export function sessionPushDisabledReason(entry: ThreadSyncEntry | undefined): s
   }
 }
 
+/** A hold on Push that the session page says, as a chip under Push: storage
+ *  the user must pull first, or a comparison that failed. Up to date,
+ *  checking and ready are not holds the page repeats — Push's own state,
+ *  tooltip and count already say them. */
+export interface SessionPushGate {
+  tone: "info" | "danger";
+  label: string;
+  /** The full sentence: the chip's tooltip and its accessible text. */
+  detail: string;
+}
+
+export function sessionPushGate(
+  entry: ThreadSyncEntry | undefined,
+  comparisonError: string | null,
+): SessionPushGate | null {
+  if (comparisonError) return { tone: "danger", label: "Can't compare", detail: comparisonError };
+  if (!entry?.local_present) return null;
+  const { action, blocker } = entry.push_decision;
+  if (action !== "require_pull" && action !== "require_pull_metadata" && blocker !== "detached_requires_pull") {
+    return null;
+  }
+  const detail = sessionPushDisabledReason(entry);
+  return detail ? { tone: "info", label: "Pull first", detail } : null;
+}
+
 /** What the session's page reports for the row of its own Push review: the
  *  page's counts, in the fields the row prints. A count the transcript does
  *  not give prints as zero, and a lower bound marks the readouts partial. */

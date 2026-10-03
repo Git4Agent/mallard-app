@@ -2684,6 +2684,7 @@ mod activity_only_tests {
                 session_id: "session-1".to_string(),
                 authorized_home: self.project_root.clone(),
                 is_internal_subagent: false,
+                is_empty: false,
             })
         }
 

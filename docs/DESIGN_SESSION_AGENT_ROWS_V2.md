@@ -1,7 +1,7 @@
 # Session detail: agent rows v2 — a delegation is an exchange
 
 Date: 2026-09-17. Status: **proposed**. Mock first: pick a direction in
-`subagent-exchange-mockup.html` before any code moves. Clean cutover when it
+`mockups/subagent-exchange-mockup.html` before any code moves. Clean cutover when it
 lands: no migration, local state and cloud schemas stay at 1; the timeline
 parser versions bump (Claude 1 → 2, Codex 6 → 7), so cached indexes rebuild
 on first open.
@@ -31,7 +31,7 @@ Three things follow, and they are what this design fixes.
 2. **The fact chips are empty in the common case.** Codex hands the row
    `model: None, tokens: None, tool_calls: None` unconditionally; Claude
    fills counts only from a synchronous result, which is 31% of its calls.
-   So the row in `subagent-detail-mockup.html` — role · model · mode · span ·
+   So the row in `mockups/subagent-detail-mockup.html` — role · model · mode · span ·
    calls · tokens — is a shape the shipped code can rarely fill.
 3. **A burst reads as unrelated rows.** Codex issues three spawns in one
    parent turn; Claude never puts two `Agent` blocks in one assistant
@@ -95,7 +95,7 @@ idiom for "this number is not what you think" — rather than a bare integer.
 
 ## The directions (pick one)
 
-`subagent-exchange-mockup.html`, Claude and Codex samples in each, degraded
+`mockups/subagent-exchange-mockup.html`, Claude and Codex samples in each, degraded
 states drawn as first-class rows. Direction A of the shipped row (the head
 band) is not re-litigated; this is about the structure under it.
 

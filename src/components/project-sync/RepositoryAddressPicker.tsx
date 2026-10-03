@@ -231,6 +231,9 @@ interface Props {
   mode?: "connect" | "clone";
   disabled: boolean;
   describedBy?: string;
+  /** An address the page was opened for (a link from the website): the
+   *  field starts holding it, and it is looked up as a pasted one is. */
+  initialAddress?: string | null;
   /** `null` when a lookup of a new address found no repository to choose:
    *  the field and the rows are one choice, so an existing selection does
    *  not outlive an address that names nothing. */
@@ -248,6 +251,7 @@ export default function RepositoryAddressPicker({
   mode = "connect",
   disabled,
   describedBy,
+  initialAddress = null,
   onSelect,
 }: Props) {
   const cloning = mode === "clone";
@@ -255,7 +259,7 @@ export default function RepositoryAddressPicker({
   const account = managedCloudAccount(storage);
   /** Words to filter by, an address or a link to look up, or an
    *  invitation code; the verb follows what it holds. */
-  const [entry, setEntry] = useState("");
+  const [entry, setEntry] = useState(initialAddress ?? "");
   const [lookup, setLookup] = useState<Lookup>({ kind: "idle" });
   const [join, setJoin] = useState<Join>({ kind: "idle" });
   /** The repository a code joined here: a row from then on, before the
@@ -351,6 +355,12 @@ export default function RepositoryAddressPicker({
     setResolvingRow(null);
     if (entryKind(entry) === "address") void runLookup();
   }, [storageId]);
+
+  /* The address the page was opened for is looked up once, with the
+     account the picker opens on. Selecting it is still all that happens. */
+  useEffect(() => {
+    if (initialAddress) void runLookupFor(initialAddress);
+  }, []);
 
   /** Enter an invitation code: the account joins the private repository it
    *  belongs to; the field shows its address and its row is selected. */

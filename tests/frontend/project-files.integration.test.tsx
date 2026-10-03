@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
@@ -7,15 +8,22 @@ import type {
   ProjectContentInventory,
   ProjectResourceDescriptor,
   PullReview,
+  ThreadSyncComparison,
 } from "../../src/types";
 import ProjectFilesReviewPage, {
   searchProjectFileReviewCards,
   type ProjectFileReviewRow,
 } from "../../src/components/project-sync/ProjectFilesReviewPage";
 import PushResourceWorkspace, {
+  PushApplyButton,
   includeRequiredProjectContentDirectories,
+  projectFileSelectOffer,
+  pushBlockerRevealTarget,
+  pushBudgetTotal,
+  pushProjectFileWork,
   pushProjectFileCommitImpact,
   pushReviewBlockers,
+  pushReviewDisabledReason,
   requiredProjectContentDirectoryIds,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import RestorePlanView, { pullProjectFileCommitImpact } from "../../src/components/project-sync/RestorePlanView";
@@ -52,7 +60,7 @@ function entry(
   resourceId: string,
   type: "file" | "directory",
   path: string,
-  selectedAfterScan = true,
+  undecided = true,
 ): ProjectContentEntry {
   return {
     descriptor: descriptor(resourceId, type, path),
@@ -72,7 +80,7 @@ function entry(
     review_digest: "a".repeat(64),
     selected_in_recipe: false,
     newly_discovered: true,
-    selected_after_scan: selectedAfterScan,
+    undecided,
     blocked_reason: null,
     warning_code: null,
     warning_digest: null,
@@ -132,10 +140,8 @@ test("eligible reviews put Project files directly after Git & sessions with no R
   assert.equal(git, "", "a single-step review renders no tab strip at all");
 });
 
-test("an explicit Push scan presents new entries selected and locks both directory ancestors", () => {
-  const selected = new Set(inventory.entries
-    .filter((candidate) => candidate.selected_after_scan)
-    .map((candidate) => candidate.descriptor.resource_id));
+test("a ticked new file locks both directory ancestors and still reads New", () => {
+  const selected = includeRequiredProjectContentDirectories(inventory, new Set(["file-a"]));
   const required = requiredProjectContentDirectoryIds(inventory, new Set(["file-a"]));
   assert.deepEqual([...required].sort(), ["dir-docs", "dir-specs"]);
   assert.deepEqual(
@@ -163,6 +169,8 @@ test("an explicit Push scan presents new entries selected and locks both directo
   // everything the old "New · selected after scan" caption said.
   assert.doesNotMatch(html, /New · selected after scan|SELECTED AFTER SCAN/i);
   assert.match(html, /sync-thread-sync-indicator local/);
+  // Being new is a fact of the file, not of its tick: the chip stays.
+  assert.match(html, /class="sync-history-branch-state current"[^>]*>New</);
   // The directories draw no cards of their own: the folder's framed tile
   // speaks for them and the required-ancestor rule keeps them riding their
   // files. The tile head's control is the rows' own checkbox — here ticked,
@@ -179,6 +187,201 @@ test("an explicit Push scan presents new entries selected and locks both directo
   assert.match(html, /2 ignored · 1 blocked/);
   assert.doesNotMatch(html, /sync-project-file-selection-placeholder/);
   assert.doesNotMatch(html, /Exact entries selected|Scanning cannot prove/);
+});
+
+test("the scan ticks no new file: it opens unticked and New, and the Sessions step counts it", () => {
+  // What Select applies is not what opens ticked: the scan offers the new
+  // file, and leaves the tick to the user.
+  const offered = new Set(inventory.entries.map((candidate) => candidate.descriptor.resource_id));
+  const render = (
+    activeStep: "history" | "project_files",
+    selected: Set<string>,
+    reviewed: ProjectContentInventory = inventory,
+  ) => renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true}
+      resources={reviewed.entries.map((candidate) => projectContentReviewRow(candidate))}
+      selected={selected}
+      projectDefaults={offered}
+      busy={false}
+      projectContentInventory={reviewed}
+      projectContentScanned
+      showProjectFiles
+      activeStep={activeStep}
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  assert.equal(projectContentReviewRow(inventory.entries[2]).default_selected, false);
+
+  const onFiles = render("project_files", new Set());
+  assert.doesNotMatch(onFiles, /aria-label="Include docs\/specs\/a\.md"[^>]*checked/);
+  assert.match(onFiles, /aria-label="0 of 1 selected in docs\/specs"/);
+  assert.match(onFiles, /class="sync-history-branch-state current"[^>]*>New</);
+  // Select is live: it is how the new files without a finding get their tick.
+  const select = onFiles.match(/<button type="button" class="btn sync-sync-review-select"[^>]*>/)?.[0] ?? "";
+  assert.doesNotMatch(select, /disabled/);
+
+  // The file that waits is counted on the button that opens its list, and
+  // Push stays live: nothing here needs the file to travel.
+  const onSessions = render("history", new Set());
+  assert.match(onSessions, /title="1 new project file is not in this push"/);
+  assert.match(onSessions, /<span class="sync-path-count">1 new<\/span>/);
+
+  // Ticked, it no longer waits.
+  const ticked = render("history", includeRequiredProjectContentDirectories(inventory, new Set(["file-a"])));
+  assert.match(ticked, /title="Review project files next"/);
+  assert.doesNotMatch(ticked, /sync-path-count">\d+ new/);
+
+  // Left out at an earlier push, it is not counted and not New.
+  const leftOut: ProjectContentInventory = {
+    ...inventory,
+    entries: inventory.entries.map((candidate) => ({ ...candidate, undecided: false })),
+  };
+  assert.match(render("history", new Set(), leftOut), /title="Review project files next"/);
+  assert.doesNotMatch(render("project_files", new Set(), leftOut), />New</);
+});
+
+test("Select offers the new files without a finding, and no folder for a file it leaves out", () => {
+  const flagged = entry("file-run", "file", "scripts/run.sh");
+  flagged.warning_code = "executable";
+  flagged.warning_digest = "w".repeat(64);
+  const stored = entry("file-s", "file", "notes/plan.md", false);
+  stored.selected_in_recipe = true;
+  stored.storage_present = true;
+  const leftOut = entry("file-l", "file", "notes/draft.md", false);
+  const scanned: ProjectContentInventory = {
+    ...inventory,
+    entries: [
+      ...inventory.entries,
+      entry("dir-scripts", "directory", "scripts"),
+      flagged,
+      entry("dir-empty", "directory", "assets"),
+      entry("dir-notes", "directory", "notes", false),
+      stored,
+      leftOut,
+    ],
+  };
+  const offer = projectFileSelectOffer(scanned);
+  // The new file, the recipe's file, and the folder nothing else speaks for.
+  assert.deepEqual([...offer].sort(), ["dir-empty", "file-a", "file-s"]);
+  // Ticking the offer brings the folders of its files, and only those: the
+  // flagged script stays, and its folder does not travel empty.
+  assert.deepEqual(
+    [...includeRequiredProjectContentDirectories(scanned, offer)].sort(),
+    ["dir-docs", "dir-empty", "dir-notes", "dir-specs", "file-a", "file-s"],
+  );
+});
+
+test("a push sends the scan's review token only when it has file work", () => {
+  const stored = entry("file-s", "file", "notes/plan.md", false);
+  stored.selected_in_recipe = true;
+  stored.storage_present = true;
+  stored.state = "synced";
+  const fresh = entry("file-n", "file", "notes/ideas.md");
+  const scanned = (...entries: ProjectContentEntry[]): ProjectContentInventory => ({ ...inventory, entries });
+  const none = new Set<string>();
+
+  // Sessions only: the stored file is as storage holds it, the new one waits
+  // on a list nobody opened.
+  assert.equal(pushProjectFileWork(scanned(stored, fresh), new Set(["file-s"]), none, false), null);
+  // The backend re-adds a recipe file storage holds, so unticking it is no change.
+  assert.equal(pushProjectFileWork(scanned(stored), none, none, false), null);
+  // On a list the user saw, the new file left unticked is remembered; with
+  // nothing new to remember, seeing the list is no work at all.
+  assert.equal(pushProjectFileWork(scanned(stored, fresh), new Set(["file-s"]), none, true), "remember");
+  assert.equal(pushProjectFileWork(scanned(stored), new Set(["file-s"]), none, true), null);
+  assert.equal(pushProjectFileWork(scanned(stored), new Set(["file-s"]), new Set(["file-s"]), false), "send");
+  // A new tick changes the recipe.
+  assert.equal(pushProjectFileWork(scanned(stored, fresh), new Set(["file-s", "file-n"]), none, false), "send");
+  // A stored file edited here travels without a visit to the Files step.
+  const edited: ProjectContentEntry = { ...stored, state: "local_ahead" };
+  assert.equal(pushProjectFileWork(scanned(edited), new Set(["file-s"]), none, false), "send");
+  // A recipe file storage no longer holds: ticked it is pushed again, and
+  // unticked the recipe loses it. Either way the backend has to review it.
+  const cleared: ProjectContentEntry = { ...stored, storage_present: false, state: "local_only" };
+  assert.equal(pushProjectFileWork(scanned(cleared), new Set(["file-s"]), none, false), "send");
+  assert.equal(pushProjectFileWork(scanned(cleared), none, none, false), "send");
+  // A stored file missing here is not captured: nothing to review.
+  const missing: ProjectContentEntry = { ...stored, local_present: false, state: "missing" };
+  assert.equal(pushProjectFileWork(scanned(missing), new Set(["file-s"]), none, false), null);
+  // A Git-managed folder's files never travel.
+  const gitManaged: ProjectContentInventory = { ...scanned(edited), eligibility: { state: "git_managed", reason: "Git manages files." } };
+  assert.equal(pushProjectFileWork(gitManaged, new Set(["file-s"]), none, true), null);
+});
+
+test("the meter and the refusal count only the files a push would capture", () => {
+  const stored = entry("file-s", "file", "notes/plan.md", false);
+  stored.selected_in_recipe = true;
+  stored.storage_present = true;
+  stored.state = "synced";
+  stored.size = 4_000;
+  const fresh = entry("file-n", "file", "notes/ideas.md");
+  fresh.size = 1_000;
+  const scanned: ProjectContentInventory = { ...inventory, entries: [stored, fresh] };
+  const compared = { capture_budget: { limit_bytes: 10_000, reserved_bytes: 0 }, entries: [] } as unknown as ThreadSyncComparison;
+  const files = (selected: string[], filesShown = false) => (
+    pushBudgetTotal(new Set(selected), compared, scanned, { filesShown })?.projectFiles
+  );
+
+  // The scan ticks the stored file. Storage holds it as it is, so a push
+  // without file work captures nothing and the meter counts nothing.
+  assert.equal(files(["file-s"]), 0);
+  // With file work the backend captures every selected file, changed or not.
+  assert.equal(files(["file-s", "file-n"]), 5_000);
+  assert.equal(files(["file-s"], true), 4_000);
+
+  // A selection of files storage already holds sends nothing.
+  const refusal = (selected: string[], projectFilesShown = false) => pushReviewDisabledReason({
+    selected: new Set(selected),
+    projectContentInventory: scanned,
+    deletionApproved: true,
+    projectFilesShown,
+  });
+  assert.equal(refusal(["file-s"]), "Nothing is selected");
+  // Remembering a file left out is not a push of its own.
+  assert.equal(refusal(["file-s"], true), "Nothing is selected");
+  assert.equal(refusal(["file-s", "file-n"]), null);
+  assert.equal(refusal(["file-s", "session-a"]), null);
+});
+
+test("the folder walk is the review's own wait: Push wears it, and a failed walk says so", () => {
+  const button = (filesPending: boolean) => renderToStaticMarkup(
+    <PushApplyButton busy={false} filesPending={filesPending} disabledReason={filesPending ? "Project files are still being scanned" : null} onPush={() => undefined} />,
+  );
+  assert.match(button(true), /icon-spin[\s\S]*Scanning files…<\/button>/);
+  assert.match(button(true), /disabled=""[^>]*title="Project files are still being scanned"/);
+  assert.match(button(false), />Push<\/button>/);
+
+  const page = (loading: boolean) => renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="push"
+      eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+      rows={[]}
+      selectedIds={new Set()}
+      scanned={false}
+      loading={loading}
+      onScan={() => undefined}
+      onToggle={() => undefined}
+    />,
+  );
+  assert.match(page(false), /Project files were not scanned\./);
+  assert.match(page(false), /Rescan<\/button>/);
+  assert.doesNotMatch(page(true), /were not scanned|No changes/);
+
+  // The walk starts with the review, in one place: the Files step no longer
+  // launches it, and the review stays usable while it runs.
+  const sync = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const open = sync.slice(sync.indexOf("const openPushChooser = async"), sync.indexOf("const scanProjectFiles = async"));
+  assert.match(open, /if \(scope\.kind === "project" && !isGitRepository\) \{\s*void scanProjectFiles\(projectId, storageId, new Set\(\)\);/);
+  assert.doesNotMatch(sync, /busy \|\| projectContentLoading/);
+  // The scan's token rides only a push that has file work.
+  const publish = sync.slice(sync.indexOf("const publishPendingPush = async"), sync.indexOf("const saveRemap = async"));
+  assert.match(publish, /pushProjectFileWork\([\s\S]*\) !== null;/);
+  assert.match(publish, /reviewsFiles \? filesInventory\.review_token \?\? null : null,\s*reviewsFiles && pendingPush\.projectFilesShown,/);
+  const filesPage = readFileSync("src/components/project-sync/ProjectFilesReviewPage.tsx", "utf8");
+  assert.doesNotMatch(filesPage, /autoScanRequested|onScan\(\);/);
 });
 
 test("Project file controls stay on the dedicated page", () => {
@@ -246,7 +449,7 @@ test("warnings acknowledge through the catalog chip, and removal is the card's t
     sourceMtime: candidate.source_mtime,
     localPresent: candidate.local_present,
     storagePresent: candidate.storage_present,
-    selectedAfterScan: candidate.selected_after_scan,
+    undecided: candidate.undecided,
     warningCode: candidate.warning_code,
     warningDigest: candidate.warning_digest,
   }));
@@ -291,7 +494,7 @@ test("warnings acknowledge through the catalog chip, and removal is the card's t
   assert.match(removing, /aria-label="Keep notes\/old_draft\.md in storage"/);
 });
 
-test("Push review shows only local-outstanding project files", () => {
+test("Push review lists local-outstanding and unresolved local project files", () => {
   const cases = [
     { id: "local-only", state: "local_only" as const, local: true, storage: false, visible: true },
     { id: "local-ahead", state: "local_ahead" as const, local: true, storage: true, visible: true },
@@ -301,7 +504,8 @@ test("Push review shows only local-outstanding project files", () => {
     { id: "diverged", state: "diverged" as const, local: true, storage: true, visible: false },
     { id: "missing", state: "missing" as const, local: false, storage: true, visible: false },
     { id: "blocked", state: "blocked" as const, local: true, storage: false, visible: false },
-    { id: "unknown", state: "unknown" as const, local: true, storage: false, visible: false },
+    { id: "unknown", state: "unknown" as const, local: true, storage: false, visible: true },
+    { id: "unknown-stored", state: "unknown" as const, local: true, storage: true, visible: false },
   ];
   const mixedInventory: ProjectContentInventory = {
     ...inventory,
@@ -332,15 +536,91 @@ test("Push review shows only local-outstanding project files", () => {
   );
 
   assert.equal((html.match(/class="sync-thread-sync-indicator local"/g) ?? []).length, 2);
-  assert.match(html, /aria-label="2 of 2 selected"/);
-  assert.match(html, />2 files</);
+  assert.equal((html.match(/class="sync-thread-sync-indicator unknown"/g) ?? []).length, 1);
+  assert.match(html, /aria-label="3 of 3 selected"/);
+  assert.match(html, />3 files</);
   assert.doesNotMatch(html, /aria-label="Remove .* from storage"/);
+  const list = html.slice(html.indexOf('<section class="sync-project-files-page"'), html.indexOf('<footer class="sync-inline-action-footer'));
   for (const candidate of cases) {
-    const pattern = new RegExp(`${candidate.id}\\.md`);
-    if (candidate.visible) assert.match(html, pattern);
-    else assert.doesNotMatch(html, pattern);
+    const pattern = new RegExp(`doc/${candidate.id}\\.md`);
+    if (candidate.visible) assert.match(list, pattern);
+    else assert.doesNotMatch(list, pattern);
   }
-  assert.match(html, />3 project files require Pull</);
+  // The unresolved local file stops the push, and its own tick is the way out.
+  assert.match(list, /<input type="checkbox" aria-label="Include doc\/unknown\.md" checked=""\/>/);
+  assert.match(html, />4 project files require Pull</);
+});
+
+test("Excluding an unresolved local file and its folder clears the Push refusal", () => {
+  const unresolved = (resourceId: string, type: "file" | "directory", path: string) => ({
+    ...entry(resourceId, type, path, false),
+    state: "unknown" as const,
+    selected_in_recipe: true,
+    newly_discovered: false,
+  });
+  const unresolvedInventory: ProjectContentInventory = {
+    ...inventory,
+    entries: [
+      unresolved("dir-doc", "directory", "doc"),
+      unresolved("file-plan", "file", "doc/plan.md"),
+      entry("file-notes", "file", "notes.md"),
+    ],
+  };
+  const selected = new Set(["dir-doc", "file-plan", "file-notes"]);
+  const refusal = pushReviewDisabledReason({
+    selected,
+    projectContentInventory: unresolvedInventory,
+    deletionApproved: true,
+  });
+  assert.equal(refusal, "2 selected items can’t be captured — exclude them to push.");
+
+  // The pill passes over the folder the file requires and opens the file,
+  // then opens the folder once the file is out.
+  const listed = new Set(unresolvedInventory.entries.map((candidate) => candidate.descriptor.resource_id));
+  const revealTarget = (picked: Set<string>) => pushBlockerRevealTarget(
+    pushReviewBlockers(picked, undefined, unresolvedInventory),
+    new Set(),
+    listed,
+    requiredProjectContentDirectoryIds(unresolvedInventory, picked),
+  )?.resourceId;
+  assert.equal(revealTarget(selected), "file-plan");
+  assert.equal(revealTarget(new Set(["dir-doc", "file-notes"])), "dir-doc");
+
+  const render = (picked: Set<string>) => renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true}
+      resources={unresolvedInventory.entries.map((candidate) => projectContentReviewRow(candidate))}
+      selected={picked}
+      projectDefaults={selected}
+      busy={false}
+      projectContentInventory={unresolvedInventory}
+      projectContentScanned
+      showProjectFiles
+      activeStep="project_files"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  // The unknown folder draws a card beside its file. While the file is
+  // selected the folder is required; once the file is unticked, the folder's
+  // card carries a tick of its own.
+  const bothSelected = render(selected);
+  assert.match(bothSelected, /data-resource-id="dir-doc"/);
+  assert.match(bothSelected, />Required folder</);
+  assert.doesNotMatch(bothSelected, /aria-label="Include doc"/);
+  const fileExcluded = render(new Set(["dir-doc", "file-notes"]));
+  assert.match(fileExcluded, /<input type="checkbox" aria-label="Include doc\/plan\.md"\/>/);
+  assert.match(fileExcluded, /<input type="checkbox" aria-label="Include doc" checked=""\/>/);
+
+  assert.equal(
+    pushReviewDisabledReason({
+      selected: new Set(["file-notes"]),
+      projectContentInventory: unresolvedInventory,
+      deletionApproved: true,
+    }),
+    null,
+  );
 });
 
 test("Push gates storage deletions and Pull omits conflict deletions", () => {
@@ -387,8 +667,9 @@ test("Push gates storage deletions and Pull omits conflict deletions", () => {
       onPush={() => undefined}
     />,
   );
-  assert.match(html, /<strong>0<\/strong> Add/);
-  assert.match(html, /<strong>0<\/strong> Replace/);
+  // Only the operations the commit performs: no zero counts.
+  assert.doesNotMatch(html, /<strong>0<\/strong>/);
+  assert.match(html, /class="sync-project-file-commit-impact with-approval"/);
   assert.match(html, /<strong>1<\/strong> Delete files/);
   assert.match(html, /<strong>1<\/strong> Delete folders/);
   assert.match(html, /Approve removal of 1 file and 1 folder from storage\./);

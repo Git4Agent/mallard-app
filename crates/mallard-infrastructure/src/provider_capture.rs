@@ -642,6 +642,7 @@ fn capture_from_discovery_with_workers(
                 &approved_roots,
                 resource_id,
                 file_limit,
+                is_project_content_kind(&discovered.descriptor.kind),
             )?;
             let content_len = meta.len();
             total_bytes = total_bytes
@@ -1291,23 +1292,6 @@ fn discover_generic_project_content(
             )?;
             continue;
         }
-        if relative.split('/').any(denied_file_name) {
-            add_blocked_project_content_candidate(
-                discovery,
-                &relative,
-                "Known credential and private-key paths cannot be synced",
-            )?;
-            continue;
-        }
-        if crate::persistence::hard_link_count(&meta, entry.path()).is_some_and(|links| links > 1)
-        {
-            add_blocked_project_content_candidate(
-                discovery,
-                &relative,
-                "Hard-linked files are not portable project content",
-            )?;
-            continue;
-        }
         if meta.len() > MAX_FILE_BYTES {
             add_blocked_project_content_candidate(
                 discovery,
@@ -1396,20 +1380,13 @@ fn add_project_content_file(
         ));
     }
     let detected_secret = detect_secret_material(&bytes);
-    if detected_secret == Some("private key material") {
-        return add_blocked_project_content_candidate(
-            discovery,
-            relative,
-            "Private-key material cannot be synced",
-        );
-    }
     let logical_path = format!("project/{}", relative);
     let resource_id = project_content_resource_id("file", relative);
     let mode = safe_mode(&after);
     let source_mtime = modified_secs(&after);
     let content_sha256 = sha256_hex(&bytes);
-    let warning = detected_secret
-        .map(|_| ProjectContentWarning::PossibleSecret)
+    let warning = (detected_secret.is_some() || relative.split('/').any(denied_file_name))
+        .then_some(ProjectContentWarning::PossibleSecret)
         .or_else(|| is_executable_path(path).then_some(ProjectContentWarning::Executable));
     let review_digest = project_content_review_digest("file", relative, &content_sha256, mode);
     insert_resource(
@@ -1665,6 +1642,7 @@ pub(crate) struct ParsedSessionMetadata {
     pub session_id: String,
     pub authorized_home: String,
     pub is_internal_subagent: bool,
+    pub can_be_empty: bool,
 }
 
 pub(crate) fn scan_session_metadata_with(
@@ -1691,11 +1669,19 @@ pub(crate) fn scan_session_metadata_with(
             continue;
         }
         if let Some(metadata) = parse_record(&line) {
-            return validated_session_metadata(
+            let mut validated = validated_session_metadata(
                 metadata.session_id,
                 metadata.authorized_home,
                 metadata.is_internal_subagent,
-            );
+            )?;
+            validated.is_empty = metadata.can_be_empty
+                && total == read
+                && line.ends_with(b"\n")
+                && reader
+                    .get_ref()
+                    .metadata()
+                    .is_ok_and(|file| file.len() == read as u64);
+            return Ok(validated);
         }
     }
     Err(ScanFailure::Rejected(
@@ -1729,6 +1715,7 @@ pub(crate) fn validated_session_metadata(
         session_id: id,
         authorized_home,
         is_internal_subagent,
+        is_empty: false,
     })
 }
 
@@ -1829,6 +1816,7 @@ pub(crate) fn inspect_candidate_files_with_limit(
             file,
             &canonical_path,
             max_file_bytes,
+            false,
         )?;
     }
     Ok(())
@@ -1839,6 +1827,7 @@ fn inspect_candidate_file_with_limit(
     file: &Path,
     canonical_path: &Path,
     max_file_bytes: u64,
+    project_content: bool,
 ) -> Result<fs::Metadata, String> {
     reject_unsafe_canonical_ancestors(file, canonical_path, canonical_approved_root)?;
     let meta =
@@ -1855,6 +1844,11 @@ fn inspect_candidate_file_with_limit(
             file.display(),
             max_file_bytes
         ));
+    }
+    // Ordinary project files use explicit review. Provider-home resources keep
+    // their structural credential and hard-link exclusions.
+    if project_content {
+        return Ok(meta);
     }
     if crate::persistence::hard_link_count(&meta, file).is_some_and(|links| links > 1) {
         return Err(format!(
@@ -1886,6 +1880,7 @@ fn validate_source_file(
     approved_roots: &[PathBuf],
     resource_id: &str,
     max_file_bytes: u64,
+    project_content: bool,
 ) -> Result<fs::Metadata, String> {
     let canonical_path = fs::canonicalize(path)
         .map_err(|e| format!("resolve source '{}': {}", path.display(), e))?;
@@ -1900,7 +1895,13 @@ fn validate_source_file(
             path.display()
         ));
     };
-    inspect_candidate_file_with_limit(approved_root, path, &canonical_path, max_file_bytes)
+    inspect_candidate_file_with_limit(
+        approved_root,
+        path,
+        &canonical_path,
+        max_file_bytes,
+        project_content,
+    )
 }
 
 fn validate_source_directory(
@@ -2432,13 +2433,10 @@ mod tests {
         let codex = temp.path().join("codex");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&codex).unwrap();
-        write(
+        codex_rollout(
             &codex.join("sessions/2026/07/17/rollout-shared.jsonl"),
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-shared\",\"cwd\":{}}}}}\n",
-                serde_json::to_string(project.to_str().unwrap()).unwrap()
-            )
-            .as_bytes(),
+            "thread-shared",
+            &project,
         );
         write(&project.join("notes.md"), b"project notes");
 
@@ -2504,13 +2502,10 @@ mod tests {
         fs::create_dir_all(&codex).unwrap();
         fs::create_dir_all(&claude).unwrap();
         write(&project.join("notes.md"), b"project notes");
-        write(
+        codex_rollout(
             &codex.join("sessions/2026/08/30/rollout-project.jsonl"),
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-a\",\"cwd\":{}}}}}\n",
-                serde_json::to_string(project.to_str().unwrap()).unwrap()
-            )
-            .as_bytes(),
+            "thread-a",
+            &project,
         );
         write(
             &claude.join("projects/source/wrong-session.jsonl"),
@@ -2571,31 +2566,22 @@ mod tests {
         fs::create_dir_all(&other).unwrap();
         fs::create_dir_all(&codex).unwrap();
         fs::create_dir_all(&claude).unwrap();
-        write(
+        codex_rollout(
             &codex.join("sessions/2026/07/17/rollout-project.jsonl"),
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-a\",\"cwd\":{}}}}}\n",
-                serde_json::to_string(project.to_str().unwrap()).unwrap()
-            )
-            .as_bytes(),
+            "thread-a",
+            &project,
         );
-        write(
+        codex_rollout(
             &codex.join("sessions/2026/07/17/rollout-other.jsonl"),
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-b\",\"cwd\":{}}}}}\n",
-                serde_json::to_string(other.to_str().unwrap()).unwrap()
-            )
-            .as_bytes(),
+            "thread-b",
+            &other,
         );
         // A subdirectory is a different project: its sessions are never
         // owned here, with no exclusion list involved.
-        write(
+        codex_rollout(
             &codex.join("sessions/2026/07/17/rollout-child.jsonl"),
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-c\",\"cwd\":{}}}}}\n",
-                serde_json::to_string(child.to_str().unwrap()).unwrap()
-            )
-            .as_bytes(),
+            "thread-c",
+            &child,
         );
         write(
             &claude.join("projects/source/session-a.jsonl"),
@@ -2796,12 +2782,10 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&codex).unwrap();
         let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
-        write(
+        codex_rollout(
             &codex.join("sessions/2026/07/17/rollout-parent.jsonl"),
-            format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"parent-thread\",\"cwd\":{cwd}}}}}\n"
-            )
-            .as_bytes(),
+            "parent-thread",
+            &project,
         );
         write(
             &codex.join("sessions/2026/07/17/rollout-child-source.jsonl"),
@@ -2920,8 +2904,9 @@ mod tests {
         let reverted = codex.join("sessions/rollout-2026-09-13T00-19-15-thread_revert1.jsonl");
         let transcript = |cwd: &Path| {
             format!(
-                "{}\n",
-                serde_json::json!({"type":"session_meta","payload":{"id":"thread","cwd":cwd}})
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":"thread","cwd":cwd}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"Hello"}})
             )
         };
         write(&reverted, transcript(&project).as_bytes());
@@ -2948,7 +2933,7 @@ mod tests {
         write(
             path,
             format!(
-                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":{}}}}}\n",
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":{}}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"Hello\"}}}}\n",
                 serde_json::to_string(cwd.to_str().unwrap()).unwrap()
             )
             .as_bytes(),
@@ -3200,7 +3185,7 @@ mod tests {
     }
 
     #[test]
-    fn project_content_scan_honors_ignores_exclusions_and_credentials() {
+    fn project_content_scan_honors_ignores_and_allows_credentials_with_warnings() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         write(&project.join("keep.txt"), b"keep");
@@ -3209,7 +3194,7 @@ mod tests {
         write(&project.join("cache.tmp"), b"ignored");
         write(&project.join("node_modules/package/index.js"), b"ignored");
         write(&project.join(".git/config"), b"ignored");
-        write(&project.join(".env.production"), b"TOKEN=blocked");
+        write(&project.join(".env.feishu"), b"TOKEN=blocked");
         write(
             &project.join("secret.txt"),
             b"-----BEGIN PRIVATE KEY-----\nblocked",
@@ -3217,6 +3202,11 @@ mod tests {
         write(
             &project.join("child-project/child.txt"),
             b"separate project",
+        );
+
+        write(
+            &project.join("AuthKey_TEST.p8"),
+            b"-----BEGIN PRIVATE KEY-----\nfixture",
         );
 
         let mut request = CaptureRequest::for_project(&project);
@@ -3242,21 +3232,39 @@ mod tests {
         assert!(!paths
             .iter()
             .any(|path| path.contains("child-project/child.txt")));
-        for blocked in [".env.production", "secret.txt"] {
-            let resource = generic
+        let mut selected = BTreeSet::new();
+        for path in [".env.feishu", "secret.txt", "AuthKey_TEST.p8"] {
+            let resource = inventory
+                .resources
                 .iter()
-                .find(|resource| resource.display_name == blocked)
+                .find(|resource| resource.display_name == path)
                 .unwrap();
-            assert!(resource.blocked_reason.is_some());
-            assert!(!resource.selected_by_default);
+            assert!(resource.blocked_reason.is_none(), "{path}");
+            assert!(resource.selected_by_default);
+            assert!(matches!(
+                resource.project_content,
+                Some(ProjectContentCandidate::File {
+                    warning: Some(ProjectContentWarning::PossibleSecret),
+                    ..
+                })
+            ));
+            selected.insert(resource.resource_id.clone());
+        }
+        let captured = capture_selected(registry(), &request, &selected).unwrap();
+        assert!(captured.unavailable_resource_ids.is_empty());
+        for path in [".env.feishu", "secret.txt", "AuthKey_TEST.p8"] {
+            assert_eq!(
+                captured.files[&format!("project/{path}")].bytes.as_bytes(),
+                fs::read(project.join(path)).unwrap()
+            );
         }
         assert!(inventory.ignored_count >= 4);
-        assert!(inventory.blocked_count >= 2);
+        assert_eq!(inventory.blocked_count, 0);
     }
 
     #[cfg(unix)]
     #[test]
-    fn project_content_links_are_blocked_and_never_followed() {
+    fn project_content_allows_hard_links_but_never_follows_symlinks() {
         use std::fs::hard_link;
         use std::os::unix::fs::symlink;
 
@@ -3278,8 +3286,8 @@ mod tests {
                 .find(|resource| resource.display_name == path)
                 .unwrap();
             assert!(
-                resource.blocked_reason.is_some(),
-                "{path} was unexpectedly selectable"
+                resource.blocked_reason.is_some() == (path == "outside-link.txt"),
+                "unexpected selection policy for {path}"
             );
         }
         assert!(!inventory.resources.iter().any(|resource| {
@@ -3288,6 +3296,27 @@ mod tests {
                 .iter()
                 .any(|path| path.contains("outside.txt"))
         }));
+        let selected = inventory
+            .resources
+            .iter()
+            .filter(|resource| resource.blocked_reason.is_none())
+            .map(|resource| resource.resource_id.clone())
+            .collect();
+        let captured = capture_selected(registry(), &request, &selected).unwrap();
+        assert_eq!(captured.files.len(), 2);
+        for path in ["original.txt", "hard-link.txt"] {
+            assert_eq!(
+                captured.files[&format!("project/{path}")].bytes.as_bytes(),
+                b"linked"
+            );
+        }
+        // A regular file changed to a symlink after Scan still fails preflight.
+        let discovery = discover_full(registry(), &request).unwrap();
+        fs::remove_file(project.join("hard-link.txt")).unwrap();
+        symlink(project.join("original.txt"), project.join("hard-link.txt")).unwrap();
+        let error =
+            capture_from_discovery(registry(), &request, &discovery, &selected, true).unwrap_err();
+        assert!(error.contains("not a regular no-follow file"), "{error}");
     }
 
     #[test]
@@ -3412,12 +3441,11 @@ mod tests {
         let codex = temp.path().join("codex");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&codex).unwrap();
-        let cwd = serde_json::to_string(project.to_str().unwrap()).unwrap();
         for thread in ["thread-alpha", "thread-beta"] {
-            write(
+            codex_rollout(
                 &codex.join(format!("sessions/2026/07/17/rollout-{thread}.jsonl")),
-                format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\",\"cwd\":{cwd}}}}}\n")
-                    .as_bytes(),
+                thread,
+                &project,
             );
         }
         write(&project.join("notes.md"), b"project notes");
@@ -3514,10 +3542,12 @@ mod tests {
         let file = home.join("notes.txt");
         write(&file, b"notes");
         assert_eq!(
-            validate_source_file(&file, &roots, "r0", 5).unwrap().len(),
+            validate_source_file(&file, &roots, "r0", 5, false)
+                .unwrap()
+                .len(),
             5
         );
-        let error = validate_source_file(&file, &roots, "r0", 4).unwrap_err();
+        let error = validate_source_file(&file, &roots, "r0", 4, false).unwrap_err();
         assert!(error.contains("exceeds 4 bytes"), "{error}");
 
         let outside = request.project_root.join("outside.txt");
@@ -3529,18 +3559,19 @@ mod tests {
             (&home, "not a regular no-follow file"),
             (&credential, "structurally excluded"),
         ] {
-            let error = validate_source_file(path, &roots, "r0", MAX_FILE_BYTES).unwrap_err();
+            let error =
+                validate_source_file(path, &roots, "r0", MAX_FILE_BYTES, false).unwrap_err();
             assert!(error.contains(reason), "{error}");
         }
 
         let nested_root = home.join("cache");
         let nested_file = nested_root.join("notes.txt");
         write(&nested_file, b"nested");
-        let error = validate_source_file(&nested_file, &roots, "r0", 6).unwrap_err();
+        let error = validate_source_file(&nested_file, &roots, "r0", 6, false).unwrap_err();
         assert!(error.contains("structurally excluded"), "{error}");
         let roots = vec![home, nested_root];
         assert_eq!(
-            validate_source_file(&nested_file, &roots, "r0", 6)
+            validate_source_file(&nested_file, &roots, "r0", 6, false)
                 .unwrap()
                 .len(),
             6
@@ -3559,7 +3590,8 @@ mod tests {
         write(&target, b"target");
         let leaf_link = home.join("leaf-link.txt");
         symlink(&target, &leaf_link).unwrap();
-        let error = validate_source_file(&leaf_link, &roots, "r0", MAX_FILE_BYTES).unwrap_err();
+        let error =
+            validate_source_file(&leaf_link, &roots, "r0", MAX_FILE_BYTES, false).unwrap_err();
         assert!(error.contains("not a regular no-follow file"), "{error}");
 
         write(&request.project_root.join("outside.txt"), b"outside");
@@ -3570,13 +3602,15 @@ mod tests {
             &roots,
             "r0",
             MAX_FILE_BYTES,
+            false,
         )
         .unwrap_err();
         assert!(error.contains("outside approved roots"), "{error}");
 
         let hard_link = home.join("hard-link.txt");
         fs::hard_link(&target, &hard_link).unwrap();
-        let error = validate_source_file(&hard_link, &roots, "r0", MAX_FILE_BYTES).unwrap_err();
+        let error =
+            validate_source_file(&hard_link, &roots, "r0", MAX_FILE_BYTES, false).unwrap_err();
         assert!(error.contains("hard-linked file"), "{error}");
 
         let nested_file = home.join("nested/notes.txt");
@@ -3584,9 +3618,14 @@ mod tests {
         let canonical_file = fs::canonicalize(&nested_file).unwrap();
         fs::rename(home.join("nested"), home.join("moved")).unwrap();
         symlink(home.join("moved"), home.join("nested")).unwrap();
-        let error =
-            inspect_candidate_file_with_limit(&home, &nested_file, &canonical_file, MAX_FILE_BYTES)
-                .unwrap_err();
+        let error = inspect_candidate_file_with_limit(
+            &home,
+            &nested_file,
+            &canonical_file,
+            MAX_FILE_BYTES,
+            false,
+        )
+        .unwrap_err();
         assert!(error.contains("symlink traversal"), "{error}");
     }
 

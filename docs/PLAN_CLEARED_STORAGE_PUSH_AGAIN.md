@@ -618,7 +618,7 @@ them on September 22.
 | Library row states without acceptance | `src-tauri/src/storage_catalog/resource_planning.rs:236-282` |
 | The row labels of section 2.1 | `src/components/project-sync/ProjectActivityPage.tsx:1102-1140` |
 | The standing notice and where it is shown | `src/components/project-sync/clearedStorageNotice.ts`, `src/components/project-sync/ProjectActivityPage.tsx:1840` |
-| The static specimen of the notices | `src/push-notices-live.tsx`, `push-notices-live.html` |
+| The static specimen of the notices | `mockups/push-notices-live.tsx`, `mockups/push-notices-live.html` |
 | `canAcceptPullMetadata` | `src/components/project-sync/pullReviewFlow.ts:52` |
 | Type mirrors: `ScopeContinuity`, `PushDestinationStatus`, `RemoteContinuity` with `displaced` | `src/types.ts:275`, `:1066`, `:1089` |
 | Frontend tests of the notice, the Pull review and the Push states | `tests/frontend/project-activity.integration.test.tsx`, `tests/frontend/pull-review.integration.test.tsx`, `tests/frontend/resource-inventory.integration.test.tsx` |

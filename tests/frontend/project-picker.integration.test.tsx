@@ -42,7 +42,7 @@ const projects: LocalProjectSummary[] = [
 
 test("the projects landing lists every registered project as a door built from the registry alone", () => {
   const html = renderToStaticMarkup(
-    <ProjectPicker projects={projects} profiles={profiles} storages={storages} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
+    <ProjectPicker projects={projects} profiles={profiles} storages={storages} rememberedStorageByProject={{}} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
   );
   // Heading, count, and the one action.
   assert.match(html, /<h1 id="landing-picker-title" class="settings-section-title">Projects<\/h1>/);
@@ -52,22 +52,70 @@ test("the projects landing lists every registered project as a door built from t
   assert.equal((html.match(/class="landing-picker-card"/g) ?? []).length, 2);
   assert.match(html, /<strong>mallard-app \(Claude\)<\/strong>/);
   assert.match(html, /~\/Desktop\/project\/mallard-app/);
-  assert.match(html, /aria-label="mallard-app \(Claude\), Git repository"/);
+  assert.match(html, /aria-label="mallard-app \(Claude\), Git repository\. Storage: Local storage 1"/);
+  assert.match(html, /aria-label="testProjectNonGit\. No storage linked"/);
   // Provider marks come from the binding's profile ids, not from a scan.
   assert.match(html, /sync-provider-mark claude/);
   assert.match(html, /sync-provider-mark codex/);
-  // The linked storage is named; an unlinked project says so, quietly.
-  assert.match(html, /Local storage 1/);
-  assert.match(html, /landing-picker-card-detail muted"[^>]*>.*No storage linked/);
+  // The linked storage is named beside its provider's mark; an unlinked
+  // project says so, quietly, behind an empty dashed tile.
+  assert.match(html, /class="landing-picker-storages-tiles"><svg[^>]*data-storage-provider="local"/);
+  assert.match(html, /class="landing-picker-storages-name">Local storage 1</);
+  assert.match(html, /landing-picker-card-detail muted"><span class="landing-picker-storages none"><svg[^>]*data-icon="link-off"[^>]*>.*No storage linked/);
+  assert.doesNotMatch(html, /data-icon="storage"/);
   // Nothing on the page reads sessions, counts, or stamps.
   assert.doesNotMatch(html, /sessions|to push|Synced|\d{4} at \d{2}:\d{2}/);
   // And nothing of the empty shelf survives once a card exists.
   assert.doesNotMatch(html, /landing-picker-door|landing-picker-caption/);
 });
 
+test("a project card stacks its storages: the one it opens on by name, a count for the rest", () => {
+  const stacked = [
+    ...storages,
+    { storage_id: "storage-r2", name: "R2 team", provider: "r2", provider_label: "Cloudflare R2", icon: "cloud", available: true, summary: [],
+      connection: { state: "reconnect_required", code: "reconnect_required", message: "", observed_at: 0 } },
+    { storage_id: "storage-gone", name: "Old share", provider: "webdav", provider_label: "WebDAV", icon: "drive", available: false, summary: [] },
+  ] as unknown as StorageSummary[];
+  const project = (linked_storage_ids: string[]): LocalProjectSummary[] => [
+    { ...projects[0], linked_storage_ids },
+  ];
+  const render = (linked: string[], remembered: Record<string, string>) => renderToStaticMarkup(
+    <ProjectPicker projects={project(linked)} profiles={profiles} storages={stacked} rememberedStorageByProject={remembered} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
+  );
+
+  // The remembered storage leads, the rest keep link order; one name, every mark.
+  const html = render(["storage-local", "storage-cloud", "storage-r2"], { "project-a": "storage-cloud" });
+  assert.equal((html.match(/class="landing-picker-storages-tiles">(?:<svg[^>]*>.*?<\/svg>)+<\/span>/g) ?? []).length, 1);
+  assert.match(html, /class="landing-picker-storages-tiles"><svg[^>]*data-icon="cloud"[^>]*>.*?<\/svg><svg[^>]*data-storage-provider="local"[^>]*>.*?<\/svg><svg[^>]*data-storage-provider="r2"/);
+  assert.match(html, /class="landing-picker-storages-name">Cloud storage 2<\/span><span class="landing-picker-storages-more">\+2<\/span>/);
+  // A hidden storage's trouble is counted, never pinned to the name shown.
+  assert.match(html, /\+2<\/span><span class="notice-chip warning">.*1 to reconnect<\/span>/);
+  assert.match(html, /title="Cloud storage 2\nLocal storage 1\nR2 team"/);
+  // The door's name carries every storage.
+  assert.match(html, /aria-label="mallard-app \(Claude\), Git repository\. Storages: Cloud storage 2, opens here; Local storage 1; R2 team, Reconnect"/);
+
+  // A remembered storage that is no longer linked falls back to the first link.
+  assert.match(render(["storage-local", "storage-cloud"], { "project-a": "storage-r2" }), /class="landing-picker-storages-name">Local storage 1</);
+
+  // The shown storage's own trouble is its word; unavailable outranks reconnect in the count.
+  const troubled = render(["storage-gone", "storage-r2", "storage-gone"], {});
+  assert.match(troubled, /class="landing-picker-storages-name">Old share<\/span><span class="notice-chip warning">.*Unavailable<\/span>/);
+  assert.match(troubled, /\+2<\/span><span class="notice-chip warning">.*1 unavailable<\/span>/);
+});
+
+test("the storage stack draws its marks on the rail's tile, scoped to the stack", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const tile = css.match(/\n\.landing-picker-storages-tiles > svg \{[^}]*\}/)?.[0] ?? "";
+  assert.match(tile, /border: var\(--box-border\);/);
+  assert.match(css, /\n\.landing-picker-storages-tiles > svg\[data-storage-provider\] \{\s*background: var\(--storage-icon-tile\);/);
+  assert.match(css, /\n\.landing-picker-storages-tiles > svg \+ svg \{\s*margin-left: -8px;/);
+  // One line whatever the count: the name gives way, never the row.
+  assert.match(css, /\n\.landing-picker-storages-name \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
+});
+
 test("with no projects the landing welcomes: a mallard ride, the heading, and the two ways Add starts", () => {
   const html = renderToStaticMarkup(
-    <ProjectPicker projects={[]} profiles={profiles} storages={storages} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
+    <ProjectPicker projects={[]} profiles={profiles} storages={storages} rememberedStorageByProject={{}} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
   );
   assert.match(html, /<section class="projects-welcome" aria-labelledby="projects-welcome-title">/);
   assert.match(html, /<h1 id="projects-welcome-title">Add your first project<\/h1>/);
@@ -81,6 +129,16 @@ test("with no projects the landing welcomes: a mallard ride, the heading, and th
   assert.equal((html.match(/<button/g) ?? []).length, 2);
   // The filled page's head, doors and caption are not drawn.
   assert.doesNotMatch(html, /landing-picker|on this machine/);
+});
+
+test("the welcome plate clips its ride to the frame's rounded corners", () => {
+  // The ride GIFs are opaque with square, near-white corners, and only the
+  // still clips itself: while a ride played, its corners poked past the
+  // plate's radius, plain on the dark sepia. The plate clips its images; its
+  // shadow and dark ring paint outside the box, so the clip leaves them.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /(?:^|\n)\.projects-welcome-art \{[^}]*border-radius: 2\.2% \/ 4\.6%;[^}]*overflow: hidden;/);
+  assert.match(css, /:root\[data-theme="dark"\] \.projects-welcome-art \{\s*box-shadow: 0 0 0 2px var\(--ink-line\), var\(--shadow-card\);/);
 });
 
 test("the welcome never shows the same ride twice in a row, and one ride ends inside five seconds", () => {

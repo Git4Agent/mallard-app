@@ -75,6 +75,15 @@ pub enum CatalogCloudResolution {
     Invalid,
 }
 
+/// Where a repository is saved on this computer: the row that connected or
+/// added it, and the item it is there.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogCloudPlace {
+    pub scope_id: CatalogScopeId,
+    pub storage_id: StorageId,
+    pub resource_id: CatalogResourceId,
+}
+
 /// The item a repository holds, when it is one of this coordinate's.
 fn item_of(
     coordinate: &CatalogCoordinate,
@@ -441,6 +450,31 @@ impl StorageCatalogService {
         }
         let summary = client.accept_invitation(code).await?;
         Ok(self.resolution(&client, &summary))
+    }
+
+    /// The row on this storage that saved a repository, and its item: where
+    /// a link that names the repository opens. `None` when no row has. It
+    /// reads this computer's saved connections and asks the service nothing.
+    pub fn find_cloud_repository(
+        &self,
+        storage_id: &StorageId,
+        repository_id: &str,
+    ) -> Result<Option<CatalogCloudPlace>, String> {
+        let links = self.catalog.load_scope_links()?;
+        Ok(links
+            .links
+            .iter()
+            .filter(|link| &link.storage_id == storage_id)
+            .find_map(|link| {
+                link.cloud_repositories
+                    .iter()
+                    .find(|(_, saved)| saved.as_str() == repository_id)
+                    .map(|(resource_id, _)| CatalogCloudPlace {
+                        scope_id: link.scope_id.clone(),
+                        storage_id: link.storage_id.clone(),
+                        resource_id: resource_id.clone(),
+                    })
+            }))
     }
 
     /// Save the repository an item syncs with. Saving what is saved already

@@ -20,6 +20,39 @@ const MAX_PROFILE_SESSION_ENTRIES: usize = 80_000;
 /// folder in recent use.
 const RECENT_SESSION_FILES: usize = 500;
 
+/// A valid standalone header can represent an empty session. The metadata
+/// scanner also proves it is the file's only complete record before hiding it.
+pub(super) fn is_standalone_session_header(line: &[u8], session_id: &str) -> bool {
+    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+        return false;
+    };
+    if record.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+        return false;
+    }
+    let mut structure = crate::codex_rollout::CodexStructureAccumulator::new(Some(session_id));
+    if structure.feed(&record).is_err() {
+        return false;
+    }
+    let Ok(structure) = structure.finalize() else {
+        return false;
+    };
+    let meta = structure.current;
+    meta.history_base.is_none()
+        && meta.forked_from_id.is_none()
+        && ["parent_thread_id", "parentThreadId"].iter().all(|key| {
+            record["payload"]
+                .get(*key)
+                .is_none_or(serde_json::Value::is_null)
+        })
+        && match meta.history_mode.as_deref() {
+            None | Some("legacy") => true,
+            Some("paginated") => {
+                record.get("ordinal").and_then(serde_json::Value::as_u64) == Some(0)
+            }
+            _ => false,
+        }
+}
+
 /// The folders the newest rollouts ran in. Rollouts are ordered by
 /// modification time from one walk — a stat each — and only the newest
 /// [`RECENT_SESSION_FILES`] are opened. A walk past its entry bound stops
@@ -66,7 +99,7 @@ pub(super) fn recent_session_homes(
             continue;
         };
         // A subagent runs where its parent does; the parent names the folder.
-        if metadata.is_internal_subagent {
+        if metadata.is_internal_subagent || metadata.is_empty {
             continue;
         }
         let last_active = homes.entry(metadata.authorized_home).or_insert(0);
@@ -159,8 +192,6 @@ pub(super) fn discover(
             discovery.excluded_subagent_session_ids.insert(session_id);
             continue;
         }
-        selected_thread_ids.insert(session_id.clone());
-        by_session.insert(session_id.clone(), discovery.sessions.len());
         let blocked_reason = selection_error.or_else(|| {
             inspect_candidate_files_with_limit(
                 &canonical_home,
@@ -169,6 +200,11 @@ pub(super) fn discover(
             )
             .err()
         });
+        if blocked_reason.is_none() && meta.is_empty {
+            continue;
+        }
+        selected_thread_ids.insert(session_id.clone());
+        by_session.insert(session_id.clone(), discovery.sessions.len());
         discovery.sessions.push(DiscoveredSession {
             display_name: session_id.clone(),
             session_id,
@@ -213,7 +249,10 @@ mod tests {
         }
         let record = serde_json::json!({ "type": "session_meta", "payload": payload });
         let path = directory.join(format!("rollout-{name}.jsonl"));
-        std::fs::write(&path, format!("{record}\n")).unwrap();
+        let message = serde_json::json!({
+            "type": "event_msg", "payload": {"type": "user_message", "message": "Hello"}
+        });
+        std::fs::write(&path, format!("{record}\n{message}\n")).unwrap();
         std::fs::File::options()
             .write(true)
             .open(&path)
@@ -273,5 +312,103 @@ mod tests {
             .recent_session_homes(&home)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn metadata_only_sessions_are_ignored_until_content_is_appended() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let home = home.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let path = home.join("sessions/rollout-empty.jsonl");
+        let header = serde_json::json!({
+            "type": "session_meta", "ordinal": 0,
+            "payload": {"id": "empty", "cwd": project, "history_mode": "paginated"}
+        });
+        std::fs::write(&path, format!("{header}\n")).unwrap();
+        let adapter = CodexAdapter::new();
+        let context = SessionDiscoveryContext {
+            provider_home: &home,
+            project_root: &project,
+        };
+        let metrics = crate::sync_metrics::register_root(&path);
+        assert!(adapter.discover(&context).unwrap().sessions.is_empty());
+        assert!(adapter.recent_session_homes(&home).unwrap().is_empty());
+        let before = metrics.snapshot();
+        let empty = adapter.discover(&context).unwrap();
+        assert!(empty.sessions.is_empty());
+        assert!(empty.warnings.is_empty());
+        assert_eq!(metrics.snapshot().delta_since(&before).files_head_read, 0);
+        assert_eq!(metrics.snapshot().delta_since(&before).append_bytes_read, 0);
+
+        let message = serde_json::json!({
+            "type": "event_msg", "ordinal": 1,
+            "payload": {"type": "user_message", "message": "Hello"}
+        });
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(writer, "{message}").unwrap();
+        writer.flush().unwrap();
+        let discovered = adapter.discover(&context).unwrap();
+        assert_eq!(discovered.sessions.len(), 1);
+        assert_eq!(discovered.sessions[0].session_id, "empty");
+        assert!(discovered.sessions[0].blocked_reason.is_none());
+        assert_eq!(adapter.recent_session_homes(&home).unwrap().len(), 1);
+        drop(writer);
+    }
+
+    #[test]
+    fn empty_filter_preserves_inherited_and_unproven_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout-session.jsonl");
+        let header = serde_json::json!({
+            "type": "session_meta", "ordinal": 0,
+            "payload": {"id": "session", "cwd": temp.path(), "history_mode": "paginated"}
+        });
+        for (name, field, value) in [
+            (
+                "history",
+                "history_base",
+                serde_json::json!({
+                    "thread_id": "base", "end_ordinal_exclusive": 2, "end_byte_offset": 100
+                }),
+            ),
+            ("fork", "forked_from_id", serde_json::json!("base")),
+            ("parent", "parent_thread_id", serde_json::json!("base")),
+            (
+                "malformed history",
+                "history_base",
+                serde_json::json!("broken"),
+            ),
+        ] {
+            let mut record = header.clone();
+            record["payload"][field] = value;
+            std::fs::write(&path, format!("{record}\n")).unwrap();
+            assert!(
+                !CodexAdapter::new().scan_metadata(&path).unwrap().is_empty,
+                "{name}"
+            );
+        }
+        let mut bad_ordinal = header.clone();
+        bad_ordinal["ordinal"] = serde_json::json!(4);
+        for bytes in [
+            format!("{header}"),
+            format!("{header}\n{{broken\n"),
+            format!("{header}\n{{\"type\":\"event_msg\"}}\n"),
+            format!("{bad_ordinal}\n"),
+            format!("{}\n", serde_json::to_string_pretty(&header).unwrap()),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!CodexAdapter::new()
+                .scan_metadata(&path)
+                .is_ok_and(|metadata| metadata.is_empty));
+        }
     }
 }

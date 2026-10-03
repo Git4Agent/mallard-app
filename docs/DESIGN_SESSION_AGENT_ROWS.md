@@ -9,7 +9,7 @@ timeline indexes rebuild on first open.
 
 A delegation to a subagent is its own timeline kind, `agent_call`, shown
 by default beside prompts and replies (tool calls stay behind their
-toggle). The row follows direction A of `session-agents-mockup.html`:
+toggle). The row follows direction A of `mockups/session-agents-mockup.html`:
 
 - A 24px fork tile in the node column, in the tool column's `other`
   purple; the tile takes the danger colour for a refused or failed run and

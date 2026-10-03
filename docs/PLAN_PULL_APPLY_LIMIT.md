@@ -375,7 +375,7 @@ strict in both, D4 the cloud ink. Deltas from the plan above:
   `--thread-status-cloud`, declared before the over hatch so the hatch wins
   at equal specificity. `flex-wrap: wrap` moved from `.sync-push-resource-footer`
   into the existing `.sync-sync-review-footer` rule. The specimen
-  `src/push-limit-mockup.tsx` was pointed at the renamed classes so its
+  `mockups/push-limit-mockup.tsx` was pointed at the renamed classes so its
   shipped frame still renders them.
 - **Tests.** Domain: `a_pull_of_a_thread_weighs_every_file_the_manifest_lists_for_it`
   (transcript + sidecar, an unresolved reference counts nothing, the four

@@ -14,6 +14,7 @@ import { openExternalUrl } from "./externalLink";
 import { compactProjectPath } from "./model";
 import { formatRelativeTime } from "../../clock";
 import { rowReceipt, useSettingsReceipts } from "./settingsReceipts";
+import { writeClipboardText, writeClipboardTextOf } from "../sync-review/clipboard";
 
 /**
  * The storage form, drawn from a provider descriptor: every field, secret,
@@ -244,6 +245,147 @@ function HelpMark({ text, url }: { text: string; url?: string | null }) {
   );
 }
 
+/* ── Copy ──
+   Every value a storage form shows can be copied from its own box, and the
+   whole connection at once by Copy all, as `Label: value` lines in the
+   form's order. A copy of a value the page holds touches nothing else; a
+   saved secret is fetched by that click, never before. */
+
+/** One line Copy all may write: a value the page holds, or a saved secret
+ *  the click fetches. A secret the storage does not hold is left out. */
+export type StorageCopyLine =
+  | { label: string; value: string }
+  | { label: string; secretId: string; present: boolean };
+
+export function storageCopyText(lines: readonly { label: string; value: string }[]): string {
+  return lines.map((line) => `${line.label}: ${line.value}`).join("\n");
+}
+
+/** What a settled storage's card shows that the fields grid draws: the
+ *  adapter's facts beyond its typed fields, less a path (the folder field's
+ *  own) and what the lead band already states. */
+function extraFactsOf(
+  descriptor: Pick<StorageProviderDescriptor, "fields">,
+  storage: Pick<StorageSummary, "summary">,
+  leadFacts: readonly string[],
+) {
+  return storage.summary.filter((fact) => (
+    !fact.is_path
+    && !descriptor.fields.some((field) => field.field_id === fact.field_id)
+    && !leadFacts.includes(fact.field_id)
+  ));
+}
+
+/** A settled storage's Copy all, in the card's order: folder, fields,
+ *  facts, then the secrets. */
+export function lockedCopyLines(
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  storage: Pick<StorageSummary, "settings" | "summary" | "secrets">,
+  leadFacts: readonly string[] = [],
+): StorageCopyLine[] {
+  const value = (field: { label: string; field_id: string }) => ({ label: field.label, value: settingString(storage.settings[field.field_id]) });
+  return [
+    ...descriptor.fields.filter((field) => field.kind === "directory").map(value),
+    ...descriptor.fields.filter((field) => field.kind !== "directory").map(value),
+    ...extraFactsOf(descriptor, storage, leadFacts).map((fact) => ({ label: fact.label, value: fact.value })),
+    ...descriptor.secrets.map((secret) => ({
+      label: secret.label,
+      secretId: secret.secret_id,
+      present: storage.secrets.some((held) => held.secret_id === secret.secret_id && held.present),
+    })),
+  ];
+}
+
+/** A New-storage form's Copy all: what its boxes hold, typed or filled by a
+ *  setup lane. An empty box, or a stored secret the form never saw, is not
+ *  a line. */
+export function editorCopyLines(
+  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  form: Pick<StorageEditorForm, "settings" | "typedSecrets">,
+): { label: string; value: string }[] {
+  return [
+    ...descriptor.fields.map((field) => ({ label: field.label, value: form.settings[field.field_id] ?? "" })),
+    ...descriptor.secrets.map((secret) => ({ label: secret.label, value: form.typedSecrets[secret.secret_id] ?? "" })),
+  ].filter((line) => line.value.trim().length > 0);
+}
+
+type CopyReceipt = { ok: boolean; text: string };
+
+/** Copy receipts by key, each standing for COPIED_MS. */
+function useCopyReceipts() {
+  const [receipts, setReceipts] = useState<Record<string, CopyReceipt>>({});
+  const timers = useRef(new Map<string, number>());
+  useEffect(() => {
+    const standing = timers.current;
+    return () => { for (const timer of standing.values()) window.clearTimeout(timer); };
+  }, []);
+  const settle = (key: string, ok: boolean, text = ok ? "Copied" : "Not copied") => {
+    window.clearTimeout(timers.current.get(key));
+    setReceipts((current) => ({ ...current, [key]: { ok, text } }));
+    timers.current.set(key, window.setTimeout(() => {
+      timers.current.delete(key);
+      setReceipts((current) => { const { [key]: _gone, ...rest } = current; return rest; });
+    }, COPIED_MS));
+  };
+  /** Writes a value the page holds and says so beside its label. */
+  const copyValue = (key: string, value: string) => {
+    writeClipboardText(value).then(() => settle(key, true), () => settle(key, false));
+  };
+  return { receipts, settle, copyValue };
+}
+
+/** A box's own Copy, at its right edge. */
+function CopyButton({ label, disabled, receipt, onCopy }: {
+  label: string;
+  disabled: boolean;
+  receipt?: CopyReceipt;
+  onCopy: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="sync-secret-copy"
+      onClick={onCopy}
+      disabled={disabled}
+      title={`Copy ${label}`}
+      aria-label={`Copy ${label}`}
+    >
+      <Icon name={receipt?.ok ? "check" : "copy"} size={13} />
+    </button>
+  );
+}
+
+/** The receipt in a field's label row. */
+function CopyCap({ receipt }: { receipt?: CopyReceipt }) {
+  if (!receipt) return null;
+  return (
+    <span className={`sync-secret-cap ${receipt.ok ? "copied" : "failed"}`} role="status">
+      <Icon name={receipt.ok ? "check" : "alert-triangle"} size={11} /> {receipt.text}
+    </span>
+  );
+}
+
+/** Copy all fields: the form's whole connection, as `Label: value` lines.
+ *  Named for what it copies so it never reads as the guide beside it. */
+function CopyAllButton({ disabled, busy, receipt, onCopy }: {
+  disabled: boolean;
+  busy: boolean;
+  receipt?: CopyReceipt;
+  onCopy: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`btn storage-setup-guide-button storage-copy-all${receipt ? (receipt.ok ? " copied" : " failed") : ""}`}
+      disabled={disabled || busy}
+      onClick={onCopy}
+    >
+      <Icon name={receipt ? (receipt.ok ? "check" : "alert-triangle") : "clipboard-list"} size={12} />
+      {busy ? "Copying…" : receipt ? receipt.text : "Copy all fields"}
+    </button>
+  );
+}
+
 /** The lane row's glyph and label per direct-setup route. The Dropbox,
  *  Feishu and Mallard Cloud routes are browser sign-ins; Wrangler is a
  *  terminal. */
@@ -254,7 +396,7 @@ export function setupRouteLabel(route: StorageProviderDescriptor["local_setup"],
   if (route === "managed_cloud") return `Mallard Cloud ${verb}`;
   if (route === "dropbox") return `Dropbox ${verb}`;
   if (route === "feishu") return `Feishu ${verb}`;
-  return "Wrangler setup";
+  return "Wrangler automatic setup";
 }
 
 /** A draft's settings as the naming rule reads them: every value as text,
@@ -471,7 +613,12 @@ export function StorageEditor({
 }) {
   const fieldIdPrefix = useId();
   const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
-  const [manualExpanded, setManualExpanded] = useState(false);
+  const [manualExpanded, setManualExpanded] = useState(descriptor.local_setup === "wrangler");
+  const copies = useCopyReceipts();
+  const copyLines = editorCopyLines(descriptor, form);
+  const copyAll = () => {
+    writeClipboardText(storageCopyText(copyLines)).then(() => copies.settle("all", true), () => copies.settle("all", false));
+  };
   const setName = (name: string) => onChange({ ...form, name });
   const setSetting = (fieldId: string, value: string) => {
     const settings = applyFieldDerivations(descriptor, { ...form.settings, [fieldId]: value }, fieldId);
@@ -510,7 +657,7 @@ export function StorageEditor({
     || (descriptor.secrets.length === 0 && descriptor.fields.length > 0
       && descriptor.fields.every((field) => !field.required || (form.settings[field.field_id] ?? "").trim().length > 0));
   const showFields = wranglerLane
-    ? wranglerReviewReady || manualExpanded
+    ? wranglerReviewReady || (manualExpanded && (showLanes || usingExisting))
     : showLanes || (usingExisting && !!manualEntry);
   return (
     <article className="sync-storage-card">
@@ -636,12 +783,16 @@ export function StorageEditor({
             <span className="storage-setup-guide-copy">
               {wranglerLane && !showFields
                 ? "Use your own connection credentials."
+                : descriptor.local_setup === "wrangler" ? null
                 : descriptor.manual_setup_hint ?? `Enter an existing ${descriptor.display_name} connection in the fields below.`}
             </span>
             {descriptor.setup_guide_url && (
               <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>
                 Setup guide <Icon name="external-link" size={11} />
               </button>
+            )}
+            {showFields && descriptor.key === "r2" && (
+              <CopyAllButton disabled={copyLines.length === 0} busy={false} receipt={copies.receipts.all} onCopy={copyAll} />
             )}
             {wranglerLane && !wranglerReviewReady && (
               <button
@@ -675,32 +826,44 @@ export function StorageEditor({
 
       {showFields && (gridFields.length > 0 || descriptor.secrets.length > 0) && (
         <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
-          {gridFields.map((field) => (
-            <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
-              <span className="form-label-row">
-                <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
-                {(field.help || field.help_url) && (
-                  <HelpMark text={field.help ?? field.label} url={field.help_url} />
-                )}
-              </span>
-              <input
-                type={field.kind === "url" ? "url" : "text"}
-                id={`${fieldIdPrefix}-field-${field.field_id}`}
-                value={form.settings[field.field_id] ?? ""}
-                onChange={(event) => setSetting(field.field_id, event.target.value)}
-                placeholder={field.placeholder ?? undefined}
-                disabled={disabled}
-                required={field.required}
-                spellCheck={false}
-                autoCapitalize="none"
-                autoCorrect="off"
-                autoComplete="off"
-              />
-            </div>
-          ))}
+          {gridFields.map((field) => {
+            const value = form.settings[field.field_id] ?? "";
+            const receipt = copies.receipts[`field:${field.field_id}`];
+            return (
+              <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
+                <span className="form-label-row">
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
+                  {(field.help || field.help_url) && (
+                    <HelpMark text={field.help ?? field.label} url={field.help_url} />
+                  )}
+                  <CopyCap receipt={receipt} />
+                </span>
+                <span className="sync-secret-input has-copy-one">
+                  <input
+                    type={field.kind === "url" ? "url" : "text"}
+                    id={`${fieldIdPrefix}-field-${field.field_id}`}
+                    value={value}
+                    onChange={(event) => setSetting(field.field_id, event.target.value)}
+                    placeholder={field.placeholder ?? undefined}
+                    disabled={disabled}
+                    required={field.required}
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoComplete="off"
+                  />
+                  <span className="sync-secret-verbs">
+                    <CopyButton label={field.label} disabled={!value.trim()} receipt={receipt} onCopy={() => copies.copyValue(`field:${field.field_id}`, value)} />
+                  </span>
+                </span>
+              </div>
+            );
+          })}
           {activeSecrets(descriptor, secretPresence).map((secret) => {
             const present = !!secretPresence[secret.secret_id];
             const visible = !!secretVisible[secret.secret_id];
+            const value = form.typedSecrets[secret.secret_id] ?? "";
+            const receipt = copies.receipts[`secret:${secret.secret_id}`];
             return (
               <div key={secret.secret_id} className="storage-provider-field">
                 <span className="form-label-row">
@@ -708,30 +871,37 @@ export function StorageEditor({
                   {(secret.help || secret.help_url) && (
                     <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />
                   )}
+                  <CopyCap receipt={receipt} />
                 </span>
                 {/* Backend updates return presence only. A value known by the
-                    open editor remains here for stable masking and review;
-                    otherwise the field accepts a replacement. */}
-                <span className="sync-secret-input">
+                    open editor remains here for stable masking and review,
+                    and Copy takes it; otherwise the field accepts a
+                    replacement and there is nothing to copy. */}
+                <span className="sync-secret-input has-copy">
                   <input
                     type={visible ? "text" : "password"}
                     id={`${fieldIdPrefix}-secret-${secret.secret_id}`}
-                    value={form.typedSecrets[secret.secret_id] ?? ""}
+                    value={value}
                     onChange={(event) => setSecret(secret.secret_id, event.target.value)}
                     placeholder={present ? "Stored — type to replace" : (secret.placeholder ?? undefined)}
                     disabled={disabled}
                     required={secret.required && !present}
                     autoComplete="new-password"
                   />
-                  <button
-                    type="button"
-                    className="sync-secret-reveal"
-                    onClick={() => setSecretVisible((current) => ({ ...current, [secret.secret_id]: !visible }))}
-                    aria-pressed={visible}
-                    disabled={disabled}
-                  >
-                    {visible ? "Hide" : "Show"}
-                  </button>
+                  <span className="sync-secret-verbs">
+                    {!(descriptor.key === "dropbox" && secret.secret_id === "refresh_token") && (
+                      <CopyButton label={secret.label} disabled={!value} receipt={receipt} onCopy={() => copies.copyValue(`secret:${secret.secret_id}`, value)} />
+                    )}
+                    <button
+                      type="button"
+                      className="sync-secret-reveal"
+                      onClick={() => setSecretVisible((current) => ({ ...current, [secret.secret_id]: !visible }))}
+                      aria-pressed={visible}
+                      disabled={disabled}
+                    >
+                      {visible ? "Hide" : "Show"}
+                    </button>
+                  </span>
                 </span>
               </div>
             );
@@ -829,17 +999,9 @@ export function StorageLockedForm({
   const [revealed, setRevealed] = useState<Record<string, Revealed>>({});
   const [revealing, setRevealing] = useState<Record<string, boolean>>({});
   const [revealError, setRevealError] = useState<Record<string, string>>({});
-  const [copied, setCopied] = useState<Record<string, boolean>>({});
+  const copies = useCopyReceipts();
+  const [copyingAll, setCopyingAll] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  const timers = useRef(new Set<number>());
-  useEffect(() => {
-    const standing = timers.current;
-    return () => { for (const timer of standing) window.clearTimeout(timer); };
-  }, []);
-  const later = (ms: number, run: () => void) => {
-    const timer = window.setTimeout(() => { timers.current.delete(timer); run(); }, ms);
-    timers.current.add(timer);
-  };
   // One clock for every countdown; it runs only while something is shown.
   const anyRevealed = Object.keys(revealed).length > 0;
   useEffect(() => {
@@ -872,15 +1034,16 @@ export function StorageLockedForm({
       setRevealing((current) => { const { [secretId]: _gone, ...rest } = current; return rest; });
     }
   };
+  /* The clipboard write starts inside the click and takes the secret as it
+     arrives (see writeClipboardTextOf). */
   const copy = async (secretId: string) => {
     if (revealing[secretId]) return;
     setRevealing((current) => ({ ...current, [secretId]: true }));
     setRevealError((current) => { const { [secretId]: _gone, ...rest } = current; return rest; });
+    const shown = revealed[secretId];
     try {
-      const value = revealed[secretId]?.value ?? await onRevealSecret(secretId);
-      await navigator.clipboard.writeText(value);
-      setCopied((current) => ({ ...current, [secretId]: true }));
-      later(COPIED_MS, () => setCopied((current) => { const { [secretId]: _gone, ...rest } = current; return rest; }));
+      await writeClipboardTextOf(shown ? Promise.resolve(shown.value) : onRevealSecret(secretId));
+      copies.settle(`secret:${secretId}`, true);
     } catch (reason) {
       setRevealError((current) => ({ ...current, [secretId]: reason instanceof Error ? reason.message : String(reason) }));
     } finally {
@@ -899,19 +1062,52 @@ export function StorageLockedForm({
      folder's name, the signed-in account, the date a sign-in runs out.
      Read-only facts in the fields' grammar; a path fact is the folder
      field's own, and a fact the lead band states is the band's. */
-  const extraFacts = storage.summary.filter((fact) => (
-    !fact.is_path
-    && !descriptor.fields.some((field) => field.field_id === fact.field_id)
-    && !lead?.facts.includes(fact.field_id)
-  ));
+  const extraFacts = extraFactsOf(descriptor, storage, lead?.facts ?? []);
+  /* Copy all fetches each saved secret in turn on the click, and writes
+     nothing unless every fetch landed. The write starts inside the click
+     with the text still pending. */
+  const copyAll = async () => {
+    if (copyingAll) return;
+    setCopyingAll(true);
+    let missing = 0;
+    const text = (async () => {
+      const lines: { label: string; value: string }[] = [];
+      for (const line of lockedCopyLines(descriptor, storage, lead?.facts ?? [])) {
+        if (!("secretId" in line)) {
+          if (line.value) lines.push(line);
+        } else if (!line.present) {
+          missing += 1;
+        } else {
+          lines.push({ label: line.label, value: revealed[line.secretId]?.value ?? await onRevealSecret(line.secretId) });
+        }
+      }
+      return storageCopyText(lines);
+    })();
+    try {
+      await writeClipboardTextOf(text);
+      copies.settle("all", true, missing ? `Copied · ${missing} not stored` : "Copied");
+    } catch {
+      copies.settle("all", false);
+    } finally {
+      setCopyingAll(false);
+    }
+  };
+  /** A read-only box with its own Copy at the right edge. */
+  const valueBox = (key: string, label: string, value: string, input: ReactNode) => (
+    <span className="sync-secret-input has-copy-one">
+      {input}
+      <span className="sync-secret-verbs">
+        <CopyButton label={label} disabled={!value} receipt={copies.receipts[key]} onCopy={() => copies.copyValue(key, value)} />
+      </span>
+    </span>
+  );
   const managed = hasManagedCredentials(descriptor, presence);
   const suspended = connectionSuspends(storage.connection);
-  const lock = <span className="sync-storage-lock" title="Fixed for this storage"><Icon name="lock" size={11} /></span>;
   /* "Connected" is said only after this visit saw a probe succeed; a stored
      credential proves nothing, and a refused one says so in the row. */
   const guideCopy = verifiedAt !== null
     ? `Connected · verified ${formatRelativeTime(Math.floor(verifiedAt / 1000))}.${managed ? " Access renews automatically." : ""}`
-    : `Configured. Test the connection to verify it.${managed ? " Access renews automatically." : ""}`;
+    : `Not tested yet.${managed ? " Access renews automatically." : ""}`;
   const showGuide = suspended || descriptor.secrets.length > 0 || !!descriptor.local_setup;
 
   return (
@@ -966,7 +1162,12 @@ export function StorageLockedForm({
             {suspended ? storage.connection!.message : guideCopy}
           </span>
           {descriptor.setup_guide_url && (
-            <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
+            <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>
+              Setup guide <Icon name="external-link" size={11} />
+            </button>
+          )}
+          {descriptor.key === "r2" && (
+            <CopyAllButton disabled={disabled} busy={copyingAll} receipt={copies.receipts.all} onCopy={() => void copyAll()} />
           )}
           {suspended && !reconnect.open && (
             <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={reconnect.onOpen}>
@@ -978,42 +1179,61 @@ export function StorageLockedForm({
       {reconnect.open && reconnect.band}
       {lead?.band}
 
-      {folderFields.map((field) => (
-        <label key={field.field_id} className="sync-folder-field compact">
-          <span className="sync-field-name">{field.label} {lock}</span>
-          <div>
-            <input type="text" value={settingString(field.field_id)} readOnly spellCheck={false} />
+      {folderFields.map((field) => {
+        const key = `field:${field.field_id}`;
+        const inputId = `${fieldIdPrefix}-field-${field.field_id}`;
+        return (
+          <div key={field.field_id} className="sync-folder-field compact">
+            <span className="form-label-row">
+              <label className="sync-field-name" htmlFor={inputId}>{field.label}</label>
+              {(field.help || field.help_url) && <HelpMark text={field.help ?? field.label} url={field.help_url} />}
+              <CopyCap receipt={copies.receipts[key]} />
+            </span>
+            {valueBox(key, field.label, settingString(field.field_id), (
+              <input type="text" id={inputId} value={settingString(field.field_id)} readOnly spellCheck={false} />
+            ))}
           </div>
-          {field.help && <small>{field.help}</small>}
-        </label>
-      ))}
+        );
+      })}
 
       {(gridFields.length > 0 || extraFacts.length > 0 || descriptor.secrets.length > 0) && (
         <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
-          {gridFields.map((field) => (
-            <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
-              <span className="form-label-row">
-                <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
-                {lock}
-              </span>
-              <input
-                type={field.kind === "url" ? "url" : "text"}
-                id={`${fieldIdPrefix}-field-${field.field_id}`}
-                value={settingString(field.field_id)}
-                readOnly
-                spellCheck={false}
-              />
-              {field.help && <small className="sync-storage-field-help">{field.help}</small>}
-            </div>
-          ))}
-          {extraFacts.map((fact) => (
-            <div key={fact.field_id} className="storage-provider-field storage-provider-fact">
-              <span className="form-label-row">
-                <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-fact-${fact.field_id}`}>{fact.label}</label>
-              </span>
-              <input type="text" id={`${fieldIdPrefix}-fact-${fact.field_id}`} value={fact.value} readOnly spellCheck={false} />
-            </div>
-          ))}
+          {gridFields.map((field) => {
+            const key = `field:${field.field_id}`;
+            const value = settingString(field.field_id);
+            return (
+              <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
+                <span className="form-label-row">
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
+                  {(field.help || field.help_url) && <HelpMark text={field.help ?? field.label} url={field.help_url} />}
+                  <CopyCap receipt={copies.receipts[key]} />
+                </span>
+                {valueBox(key, field.label, value, (
+                  <input
+                    type={field.kind === "url" ? "url" : "text"}
+                    id={`${fieldIdPrefix}-field-${field.field_id}`}
+                    value={value}
+                    readOnly
+                    spellCheck={false}
+                  />
+                ))}
+              </div>
+            );
+          })}
+          {extraFacts.map((fact) => {
+            const key = `fact:${fact.field_id}`;
+            return (
+              <div key={fact.field_id} className="storage-provider-field storage-provider-fact">
+                <span className="form-label-row">
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-fact-${fact.field_id}`}>{fact.label}</label>
+                  <CopyCap receipt={copies.receipts[key]} />
+                </span>
+                {valueBox(key, fact.label, fact.value, (
+                  <input type="text" id={`${fieldIdPrefix}-fact-${fact.field_id}`} value={fact.value} readOnly spellCheck={false} />
+                ))}
+              </div>
+            );
+          })}
           {descriptor.secrets.map((secret) => {
             const present = !!presence[secret.secret_id];
             const shown = revealed[secret.secret_id];
@@ -1025,12 +1245,12 @@ export function StorageLockedForm({
               <div key={secret.secret_id} className="storage-provider-field">
                 <span className="form-label-row">
                   <label className="sync-field-name" htmlFor={inputId}>{secret.label}</label>
+                  {(secret.help || secret.help_url) && <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />}
                   {suspended && present && (
                     <span className="sync-storage-refused-chip"><Icon name="alert-triangle" size={10} /> Refused</span>
                   )}
-                  {lock}
-                  {copied[secret.secret_id]
-                    ? <span className="sync-secret-cap copied" role="status"><Icon name="check" size={11} /> Copied</span>
+                  {copies.receipts[`secret:${secret.secret_id}`]
+                    ? <CopyCap receipt={copies.receipts[`secret:${secret.secret_id}`]} />
                     : busy
                       ? <span className="sync-secret-cap"><span className="status-loader" /> Reading…</span>
                       : shown
@@ -1049,16 +1269,14 @@ export function StorageLockedForm({
                   />
                   {present && (
                     <span className="sync-secret-verbs">
-                      <button
-                        type="button"
-                        className="sync-secret-copy"
-                        onClick={() => void copy(secret.secret_id)}
-                        disabled={disabled || busy}
-                        title={`Copy ${secret.label}`}
-                        aria-label={`Copy ${secret.label}`}
-                      >
-                        <Icon name="copy" size={13} />
-                      </button>
+                      {!(descriptor.key === "dropbox" && secret.secret_id === "refresh_token") && (
+                        <CopyButton
+                          label={secret.label}
+                          disabled={disabled || busy}
+                          receipt={copies.receipts[`secret:${secret.secret_id}`]}
+                          onCopy={() => void copy(secret.secret_id)}
+                        />
+                      )}
                       <button
                         type="button"
                         className="sync-secret-reveal"
@@ -1073,9 +1291,7 @@ export function StorageLockedForm({
                 </span>
                 {/* A refused read is said under the field, where there is
                     room for a sentence; the label row keeps its one word. */}
-                {error
-                  ? <small className="sync-storage-field-help error" role="alert"><Icon name="alert-triangle" size={11} /> {error}</small>
-                  : secret.help && <small className="sync-storage-field-help">{secret.help}</small>}
+                {error && <small className="sync-storage-field-help error" role="alert"><Icon name="alert-triangle" size={11} /> {error}</small>}
               </div>
             );
           })}
@@ -1085,7 +1301,7 @@ export function StorageLockedForm({
       <footer className="sync-storage-editor-footer">
         <span className="sync-storage-fixed">
           <Icon name="lock" size={12} />
-          This storage’s destination and credentials are fixed. To sync somewhere else, add a new storage.
+          Fixed after setup. To sync elsewhere, add a new storage.
         </span>
         {verifiedAt !== null && !testing && (
           <span className="storage-setup-verified" role="status">

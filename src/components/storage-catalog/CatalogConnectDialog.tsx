@@ -14,7 +14,7 @@ import type { CatalogCapabilityDescriptor, CatalogCoordinate } from "./types";
  *   first, and Connect on it creates it now, as a project's Link does.
  * - `several`: two repositories the account can see hold the item.
  * - `add`: someone else's repository of this row's kind, shared with you or
- *   by address or invite code.
+ *   by address or invitation code.
  *
  * Whichever it is, the repository is fixed once saved, and the footer says
  * so before anything is. Nothing is pulled.

@@ -1,10 +1,10 @@
 # Plan: Add Catalog resource, the way New project is
 
-Proposal, 2026-10-02. Specimen: `catalog-add-home-mockup.html` (`npm run dev`,
-then `/catalog-add-home-mockup.html`; `?stock=some|none&profiles=one|two&
+Proposal, 2026-10-02. Specimen: `mockups/catalog-add-home-mockup.html` (`npm run dev`,
+then `/mockups/catalog-add-home-mockup.html`; `?stock=some|none&profiles=one|two&
 storages=none|one|many&catalog=empty|some&door=any|skill|pet-v1&
 resource=cards|rows|pills&theme=dark`). Earlier specimen, kept for the
-record: `catalog-add-step-mockup.html` (kind first against home first).
+record: `mockups/catalog-add-step-mockup.html` (kind first against home first).
 
 **Status (2026-10-02): implemented**, steps 1–5, with the four items under
 *To confirm* taken as written (owner, 2026-10-02: "Sounds good, go and
@@ -234,7 +234,7 @@ Each step leaves a working product; each lands with its tests.
    get their counts, stamps, Added chips and tooltips; the storage default
    gains the last-used rule.
 5. **README** paragraph on the Catalog menu and Add, and the memory of
-   `catalog-add-home-mockup.html` in this plan's status line.
+   `mockups/catalog-add-home-mockup.html` in this plan's status line.
 
 ## Tests
 

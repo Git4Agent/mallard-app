@@ -1,4 +1,4 @@
-import type { ManagedCloudStatus } from "./components/managed-cloud/types";
+import type { ManagedCloudListingKind, ManagedCloudStatus } from "./components/managed-cloud/types";
 export type AppTheme = "light" | "dark";
 
 export type ActivityLogLevel = "info" | "success" | "warning" | "error";
@@ -1055,7 +1055,9 @@ export interface ProjectContentEntry {
   review_digest?: string | null;
   selected_in_recipe: boolean;
   newly_discovered: boolean;
-  selected_after_scan: boolean;
+  /** A local file nobody has decided on: not in storage, not in the recipe,
+   *  not blocked, not left out at an earlier push. Never ticked for the user. */
+  undecided: boolean;
   blocked_reason?: string | null;
   warning_code?: string | null;
   warning_digest?: string | null;
@@ -1929,6 +1931,68 @@ export type ManagedCloudRepositoryResolution =
   | { kind: "wrong_service"; host: string; expected: string }
   | { kind: "github" }
   | { kind: "invalid" };
+
+/** A `mallard://` link once read: the page it names — a repository's, or the
+ *  website's listing — or that it is not one. The link's own text never
+ *  reaches the window. */
+export type AppLinkArrival =
+  | { kind: "repository"; host: string; address: string }
+  | {
+    kind: "listing";
+    host: string;
+    /** The kind the listing's chips were filtered to, when one was on. */
+    listing_kind: ManagedCloudListingKind | null;
+    /** The host is the service a new storage here signs in to. */
+    can_set_up: boolean;
+  }
+  | { kind: "invalid" };
+
+/** The Catalog coordinate and item a repository holds, in the service's words. */
+export interface AppLinkCatalogItem {
+  provider: string;
+  resource_kind: string;
+  format: string;
+  format_version: number;
+  resource_id: string;
+}
+
+export interface AppLinkRepository {
+  repository_id: string;
+  /** `owner/name`, the service's spelling. */
+  address: string;
+  /** `git_project`, `non_git_project`, or `catalog`. */
+  repository_class: string;
+  /** A project's bundle; null for a Catalog item. */
+  bundle_id: string | null;
+  /** A Catalog item's coordinate; null for a project. */
+  catalog: AppLinkCatalogItem | null;
+  visibility: string;
+  /** The account's role; null when it is not a collaborator. */
+  role: string | null;
+}
+
+/** What one account sees at a link's address. */
+export type AppLinkSight =
+  | { kind: "found"; repository: AppLinkRepository }
+  | { kind: "not_found" }
+  | { kind: "failed"; message: string };
+
+/** One Mallard Cloud storage on the link's host, and what it sees. */
+export interface AppLinkAccount {
+  storage_id: string;
+  storage_name: string;
+  account_login: string;
+  sight: AppLinkSight;
+}
+
+export interface AppLinkAnswer {
+  host: string;
+  address: string;
+  /** Empty when no storage signs in to the host: nothing was asked. */
+  accounts: AppLinkAccount[];
+  /** The host is the service a new storage here signs in to. */
+  can_set_up: boolean;
+}
 
 /** Results from one local discovery and one remote observation. */
 export type ProjectActivityRefreshEvent =

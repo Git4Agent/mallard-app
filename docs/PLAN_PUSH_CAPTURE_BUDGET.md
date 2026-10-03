@@ -10,8 +10,8 @@ user is prompted to push again. The footer limit bar stays, and so does the
 commit rail in the review; what goes is the 30-day paging and the separate
 "Older activity" box. Compatibility is a clean cutover with schemas at 1
 (see 5). The UI renders on the real stylesheet in
-`push-budget-mockup.html` (dev server: `/push-budget-mockup.html`, entry
-`src/push-budget-mockup.tsx`).
+`mockups/push-budget-mockup.html` (dev server: `/mockups/push-budget-mockup.html`, entry
+`mockups/push-budget-mockup.tsx`).
 
 ## 1. What is wrong today
 
@@ -355,7 +355,7 @@ Both phases, in one cutover. Deltas from the plan above:
   `-sentence`; the track is scaled to max(total, limit) with the limit as a
   tick past it, the refusal takes its own footer row, and only the footer
   instance is a live region. `PushBudgetMeter`, `.sync-push-budget` and
-  `.sync-push-budget-bar` are deleted. Specimen: `push-limit-mockup.html`); the outcome banner adds a
+  `.sync-push-budget-bar` are deleted. Specimen: `mockups/push-limit-mockup.html`); the outcome banner adds a
   "didn't fit — push again to continue" stat and a `push_again` action that
   calls `openPushChooser`.
 - **Tests.** Rust: the three fit tests plus `format_bytes`,
@@ -384,4 +384,4 @@ Both phases, in one cutover. Deltas from the plan above:
   admits 54 rows where the greedy slip-in admitted 67; the backlog takes about
   four more pushes. Each reopen re-captures the admitted rows (~13 s) until the
   watcher's pins cover them, after which a quiet reopen serves the pins.
-- The specimen `push-budget-mockup.html` stays as the reference for the look.
+- The specimen `mockups/push-budget-mockup.html` stays as the reference for the look.

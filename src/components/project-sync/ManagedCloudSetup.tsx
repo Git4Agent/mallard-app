@@ -206,7 +206,7 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
       <>
         <span className="storage-setup-guide-copy">
           {mode === "create"
-            ? "Sign in with GitHub in your preferred browser for 90-day access. Pushes stay private to you and invited collaborators. Public snapshots require a release request on the website."
+            ? "Sign in with GitHub to share snapshots privately with invited collaborators, and request a release on the website to make them public."
             : "Renews this storage’s session with the same GitHub account. Sign-in happens in a browser you choose."}
         </span>
         <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={() => flow.start()}>

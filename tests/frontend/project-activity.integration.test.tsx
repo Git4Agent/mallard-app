@@ -295,7 +295,7 @@ test("path bar counts tally the whole comparison, split by the button that clear
   assert.match(counts.detail, /1 thread changed on both sides/);
   assert.match(counts.detail, /1 thread waiting to sync/);
   assert.match(counts.detail, /1 thread Mallard could not match/);
-  assert.match(counts.detail, /1 thread that can't be synced/);
+  assert.match(counts.detail, /Cannot sync “unavailable”: Mallard could not safely read this session\./);
 
   // A blocked push is not pushable, however the state reads on its own.
   const blocked = activityHeaderCounts({
@@ -413,7 +413,7 @@ test("the path bar hangs the branch on the project crumb and keeps one overflow"
 
 test("session indicators use the quiet desktop sync vocabulary", () => {
   const presentation = (state: Parameters<typeof sessionSyncPresentation>[0]["state"]) => (
-    sessionSyncPresentation({ state } as Parameters<typeof sessionSyncPresentation>[0], "Storage")
+    sessionSyncPresentation({ state, display_name: "Example thread" } as Parameters<typeof sessionSyncPresentation>[0], "Storage")
   );
 
   assert.deepEqual(
@@ -1265,6 +1265,13 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   ]) {
     assert.match(pressExempt, new RegExp(selector), `${selector} must be exempt from the press displacement`);
   }
+
+  // A hovered row raises its quiet clickables one step and leaves the top
+  // step to their own hover and an open menu. Launch actions already rest at
+  // full ink, so the row step must not reach them: it dimmed them.
+  assert.doesNotMatch(css, /\.sync-history-thread-card:hover \.sync-history-launch-action/);
+  assert.match(css, /\.sync-history-thread-card:hover \.sync-history-debug-trigger:not\(:hover\):not\(\[aria-expanded="true"\]\)\s*\{[^}]*color: var\(--text-1\);/s);
+  assert.match(css, /\.sync-history-thread-card:hover \.sync-history-session-detail-action:not\(:hover\)\s*\{[^}]*color: var\(--text-1\);/s);
 
   // It is pinned to the row's right edge, so its tooltip must open inward.
   // The stamp is a direct child of the summary row now (it trails the
@@ -2417,14 +2424,14 @@ test("unavailable sessions explain why they cannot be synced", () => {
       thread_id: CODEX_SESSION_ID,
       conversation_resource_id: codexResourceId,
       resource_id: `codex:conversation:${CODEX_SESSION_ID}`,
-      display_name: CODEX_SESSION_ID,
+      display_name: "Mock improved icons",
       state: "unavailable",
       local_present: true,
       storage_present: false,
       compared_against_storage: true,
       subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
       provider_thread_id: CODEX_SESSION_ID,
-      status_detail: "Session file exceeds the 100 MiB per-file sync limit.",
+      status_detail: "size limit exceeded.",
       local_updated_at: codexSession.ended_at,
       push_decision: reviewDecision("not_pushable"),
       pull_decision: reviewDecision("report_local_only"),
@@ -2439,7 +2446,11 @@ test("unavailable sessions explain why they cannot be synced", () => {
     />,
   );
 
-  assert.match(html, /aria-label="Unavailable for sync\. Session file exceeds the 100 MiB per-file sync limit\."/);
+  assert.match(html, /aria-label="Cannot sync “Mock improved icons”: size limit exceeded\."/);
+  assert.equal(
+    activityHeaderCounts(comparison, "Local storage 1").detail,
+    "Cannot sync “Mock improved icons”: size limit exceeded.",
+  );
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 

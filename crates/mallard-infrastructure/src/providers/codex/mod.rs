@@ -75,10 +75,12 @@ fn parse_codex_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
                     .as_ref()
                     .and_then(Value::as_object)
                     .is_some_and(|source| source.contains_key("subagent"));
+            let can_be_empty = discovery::is_standalone_session_header(line, &payload.id);
             Some(ParsedSessionMetadata {
                 session_id: payload.id,
                 authorized_home: payload.cwd,
                 is_internal_subagent,
+                can_be_empty,
             })
         }
     }

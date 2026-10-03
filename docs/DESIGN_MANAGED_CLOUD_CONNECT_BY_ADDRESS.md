@@ -1,11 +1,11 @@
 # Managed Cloud: connect a project by address
 
 Status: implemented 2026-09-15 (proposed and mocked the same day; section
-8 lists what was built). Frozen mock: `cloud-connect-mockup.html`
-(`src/cloud-connect-mockup.tsx`; `npm run dev`, then
-`/cloud-connect-mockup.html?scene=member`). Live harness of the shipped
-components against a stand-in backend: `/cloud-connect-live-mockup.html`
-(`src/cloud-connect-live-mockup.tsx`, `?view=dialog|setup`). Section
+8 lists what was built). Frozen mock: `mockups/cloud-connect-mockup.html`
+(`mockups/cloud-connect-mockup.tsx`; `npm run dev`, then
+`/mockups/cloud-connect-mockup.html?scene=member`). Live harness of the shipped
+components against a stand-in backend: `/mockups/cloud-connect-live-mockup.html`
+(`mockups/cloud-connect-live-mockup.tsx`, `?view=dialog|setup`). Section
 numbers refer to `CLOUDFLARE_R2_MANAGED_CLOUD_ARCHITECTURE.md`.
 
 This is a desktop change. The service already resolves an address

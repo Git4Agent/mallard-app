@@ -21,6 +21,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
+# The `mallard://` scheme the website's Open in Mallard hands over. Held to
+# the 2.4 line: 2.5 and later need Tauri 2.12, and the app and
+# `@tauri-apps/api` are on 2.11. Raise it when Tauri is.
+tauri-plugin-deep-link = "~2.4.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Already used transitively; parse provider config without executing its CLI.
@@ -41,6 +45,12 @@ libc = "0.2"
 tempfile = "3"
 chrono = "0.4"
 notify = "8.2"
+
+# Windows and Linux start another process for a link; this hands its
+# arguments to the running app and ends it. macOS delivers a link to the
+# running app itself. Same 2.4 line as the deep-link plugin.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "~2.4.5", features = ["deep-link"] }
 
 [dev-dependencies]
 # Test-only domain and infrastructure helpers (compiled out of production

@@ -21,6 +21,9 @@ import {
   StorageEditor,
   StorageLockedForm,
   StorageReconnectBand,
+  editorCopyLines,
+  lockedCopyLines,
+  storageCopyText,
   type StorageEditorForm,
   applyFieldDerivations,
   settingStrings,
@@ -31,6 +34,7 @@ import {
 } from "../../src/components/project-sync/StorageSettings";
 import type { StorageSetupMode } from "../../src/components/project-sync/StorageSettings";
 import { StorageDiscoveryPanel, type DiscoveryState } from "../../src/components/project-sync/StorageDiscovery";
+import { writeClipboardTextOf } from "../../src/components/sync-review/clipboard";
 import {
   CatalogStorageRepositoryRow,
   createStorageSetupMarker,
@@ -298,11 +302,18 @@ test("a settled storage opens as the locked form: read-only fields, a masked sec
   assert.match(form, /\{nameDirty && \(\s*<span className="sync-storage-name-verbs">\s*<button type="submit" className="btn btn-primary"[\s\S]*?Save[\s\S]*?<button type="button" className="btn btn-ghost"[^>]*onClick=\{cancelName\}>\s*Cancel/);
   assert.doesNotMatch(form, /onBlur=\{\(\) => void commitName\(\)\}/);
   assert.doesNotMatch(html, /sync-segmented|Save storage|Remove storage|storage-setup-route-row/);
-  // Every declared field is readonly with its saved value and a lock; never disabled.
+  // Every declared field is readonly with its saved value; never disabled.
+  // The footer says the storage is fixed, once; no label wears a lock.
   assert.match(html, /<input type="url"[^>]*readOnly=""[^>]*value="https:\/\/example\.test\/team"/);
   assert.match(html, /<input type="text"[^>]*readOnly=""[^>]*value="key-id"/);
-  assert.equal((html.match(/class="sync-storage-lock"/g) ?? []).length, 4, "three fields and the secret each wear the lock");
-  assert.doesNotMatch(html, /disabled=""/);
+  assert.doesNotMatch(html, /class="sync-storage-lock"/);
+  // Every value has its own Copy: a filled field, each fact, the secret. The
+  // empty optional field has nothing to copy.
+  for (const label of ["API URL", "Access Key ID", "Bucket", "Account ID", "API Secret"]) {
+    assert.match(html, new RegExp(`<button type="button" class="sync-secret-copy" title="Copy ${label}"`), label);
+  }
+  assert.match(html, /<button type="button" class="sync-secret-copy" disabled="" title="Copy Region hint"/);
+  assert.equal((html.match(/disabled=""/g) ?? []).length, 1, "only the empty field's Copy is disabled");
   // The secret is a masked readonly field: the saved value is not in the page.
   const secretInput = html.match(/<input type="password"[^>]*>/)?.[0] ?? "";
   assert.match(secretInput, /readOnly=""/);
@@ -312,8 +323,9 @@ test("a settled storage opens as the locked form: read-only fields, a masked sec
   assert.match(html, /class="sync-secret-copy"[^>]*aria-label="Copy API Secret"/);
   assert.match(html, /sync-secret-reveal" aria-pressed="false">Show</);
   // The guide row says what this visit knows; the footer states the rule and keeps Test.
-  assert.match(html, /role="note"[\s\S]*?Configured\. Test the connection to verify it\./);
-  assert.match(html, /sync-storage-fixed">[\s\S]*?destination and credentials are fixed\. To sync somewhere else, add a new storage\./);
+  assert.match(html, /role="note"[\s\S]*?Not tested yet\./);
+  assert.doesNotMatch(html, /Copy all fields/);
+  assert.match(html, /sync-storage-fixed">[\s\S]*?Fixed after setup\. To sync elsewhere, add a new storage\.<\/span>/);
   assert.match(html, /<button type="button" class="btn">Test connection<\/button>/);
   assert.doesNotMatch(html, /Reconnect…|sync-storage-refused-chip/);
 
@@ -332,7 +344,7 @@ test("a settled storage opens as the locked form: read-only fields, a masked sec
     />,
   );
   assert.match(missing, /placeholder="Not stored"/);
-  assert.doesNotMatch(missing, /sync-secret-copy|>Show</);
+  assert.doesNotMatch(missing, /title="Copy API Secret"|>Show</);
 
   // Verified this visit: the row says so and the footer wears the chip.
   const verified = renderToStaticMarkup(
@@ -1032,6 +1044,119 @@ test("help marks are buttons that carry the descriptor's documentation link and 
   assert.doesNotMatch(html, /docs\.example\.test/, "the link is opened by the mark, never rendered as navigation");
 });
 
+test("a settled storage's help is the ? mark the setup form shows, and Copy all lists the card in order", () => {
+  const documented: StorageProviderDescriptor = {
+    ...cloudProvider,
+    fields: [
+      { ...cloudProvider.fields[0], help: "How to find the API URL", help_url: "https://docs.example.test/api-url" },
+      ...cloudProvider.fields.slice(1),
+    ],
+    secrets: [{ ...cloudProvider.secrets[0], help: "How to create a secret", help_url: "https://docs.example.test/secret" }],
+  };
+  const html = renderToStaticMarkup(
+    <StorageLockedForm
+      storage={cloudSummary()}
+      descriptor={documented}
+      disabled={false}
+      onRename={async () => true}
+      onRevealSecret={async () => ""}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={null}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
+    />,
+  );
+  assert.match(html, /<button type="button" class="field-help" title="How to find the API URL"/);
+  assert.match(html, /<button type="button" class="field-help" title="How to create a secret"/);
+  assert.doesNotMatch(html, /docs\.example\.test|sync-storage-field-help/, "the mark opens the doc; no help line is printed");
+
+  // Fields, then facts, then the secrets; a secret the storage does not
+  // hold is a line Copy all leaves out.
+  assert.deepEqual(lockedCopyLines(documented, cloudSummary()), [
+    { label: "API URL", value: "https://example.test/team" },
+    { label: "Access Key ID", value: "key-id" },
+    { label: "Region hint", value: "" },
+    { label: "Bucket", value: "mallard-team" },
+    { label: "Account ID", value: "0123456789abcdef0123456789abcdef" },
+    { label: "API Secret", secretId: "api_secret", present: true },
+  ]);
+  assert.deepEqual(
+    lockedCopyLines(documented, cloudSummary({ secrets: [{ secret_id: "api_secret", present: false }] }), ["account_id"]).slice(3),
+    [{ label: "Bucket", value: "mallard-team" }, { label: "API Secret", secretId: "api_secret", present: false }],
+    "a fact the lead band states is the band's",
+  );
+  assert.equal(storageCopyText([{ label: "API URL", value: "https://example.test/team" }, { label: "API Secret", value: "s3cret" }]),
+    "API URL: https://example.test/team\nAPI Secret: s3cret");
+  // A saved secret is fetched by the click, in turn, and nothing is written
+  // unless every fetch landed.
+  const form = readFileSync("src/components/project-sync/StorageSettings.tsx", "utf8");
+  // The write starts inside the click with the text pending: WebKit
+  // refuses a clipboard write that comes after an await.
+  assert.match(form, /const copyAll = async \(\) => \{[\s\S]*?const text = \(async \(\) => \{[\s\S]*?revealed\[line\.secretId\]\?\.value \?\? await onRevealSecret\(line\.secretId\)[\s\S]*?return storageCopyText\(lines\);\s*\}\)\(\);\s*try \{\s*await writeClipboardTextOf\(text\);[\s\S]*?\} catch \{\s*copies\.settle\("all", false\);/);
+  assert.match(form, /await writeClipboardTextOf\(shown \? Promise\.resolve\(shown\.value\) : onRevealSecret\(secretId\)\);/);
+  assert.doesNotMatch(form, /navigator\.clipboard/, "one clipboard path: writeClipboardText");
+});
+
+test("a pending copy starts its clipboard write at once and writes nothing when the fetch fails", async () => {
+  const globals = globalThis as unknown as { navigator?: unknown; ClipboardItem?: unknown };
+  const saved = { navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"), ClipboardItem: globals.ClipboardItem };
+  const written: string[] = [];
+  let started = 0;
+  class FakeItem { constructor(readonly parts: Record<string, Promise<Blob>>) {} }
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { clipboard: {
+      write: async (items: FakeItem[]) => { started += 1; written.push(await (await items[0].parts["text/plain"]).text()); },
+      writeText: async (text: string) => { written.push(`plain:${text}`); },
+    } },
+  });
+  globals.ClipboardItem = FakeItem;
+  try {
+    let land!: (text: string) => void;
+    const pending = writeClipboardTextOf(new Promise<string>((resolve) => { land = resolve; }));
+    assert.equal(started, 1, "the write starts before the text arrives");
+    land("Secret: s3cret");
+    await pending;
+    assert.deepEqual(written, ["Secret: s3cret"]);
+    await assert.rejects(writeClipboardTextOf(Promise.reject(new Error("refused"))), /refused/);
+    assert.deepEqual(written, ["Secret: s3cret"], "a failed fetch writes nothing, by either path");
+  } finally {
+    if (saved.navigator) Object.defineProperty(globalThis, "navigator", saved.navigator);
+    else delete globals.navigator;
+    globals.ClipboardItem = saved.ClipboardItem;
+  }
+});
+
+test("the setup form puts Copy in every box and Copy all on the Manual setup row", () => {
+  const filled = { name: "Team", settings: { api_url: "https://acct42.example.test/team", bucket: "team", account_id: "acct42", access_key_id: "" }, typedSecrets: { api_secret: "minted" } };
+  const html = renderToStaticMarkup(
+    <StorageEditor descriptor={derivingProvider} form={filled} secretPresence={{}} disabled={false} onChange={() => {}} />,
+  );
+  assert.match(html, /<button type="button" class="sync-secret-copy" title="Copy API URL"/);
+  assert.match(html, /<button type="button" class="sync-secret-copy" disabled="" title="Copy Access Key ID"/, "an empty box has nothing to copy");
+  assert.match(html, /class="sync-secret-input has-copy"><input type="password"[^>]*value="minted"[\s\S]*?title="Copy API Secret"[\s\S]*?>Show</);
+  assert.deepEqual(editorCopyLines(derivingProvider, filled), [
+    { label: "API URL", value: "https://acct42.example.test/team" },
+    { label: "Bucket name", value: "team" },
+    { label: "Account ID", value: "acct42" },
+    { label: "API Secret", value: "minted" },
+  ]);
+  // A stored secret the form never saw has no value to copy.
+  const stored = renderToStaticMarkup(
+    <StorageEditor descriptor={derivingProvider} form={{ ...filled, typedSecrets: {} }} secretPresence={{ api_secret: true }} disabled={false} onChange={() => {}} />,
+  );
+  assert.match(stored, /placeholder="Stored — type to replace"[\s\S]*?<button type="button" class="sync-secret-copy" disabled="" title="Copy API Secret"/);
+
+  // Copy all sits on the Manual setup row beside Setup guide, and waits for
+  // a box to hold something.
+  const lane = <button type="button">Set up with Wrangler</button>;
+  const manual = (form: StorageEditorForm) => renderToStaticMarkup(
+    <StorageEditor descriptor={{ ...wranglerProvider, key: "r2", setup_guide_url: "https://docs.example.test/guide" }} form={form} secretPresence={{}} disabled={false} onChange={() => {}} setupSlot={lane} />,
+  );
+  assert.match(manual(filled), /storage-setup-route-label">Manual setup<[\s\S]*?Setup guide[\s\S]*?<button type="button" class="btn storage-setup-guide-button storage-copy-all">[\s\S]*?Copy all fields<\/button>/);
+  assert.match(manual({ name: "Team", settings: {}, typedSecrets: {} }), /class="btn storage-setup-guide-button storage-copy-all" disabled=""/);
+});
+
 
 /* A suggested name follows the declared source field while the name is still
    Mallard's own, and never overwrites one the user typed. */
@@ -1236,7 +1361,9 @@ test("Dropbox declares direct setup and keeps the manual connection fields", () 
     />,
   );
   assert.match(locked, /readOnly=""[^>]*value="shared-42"/);
-  assert.match(locked, /Access token[\s\S]*?aria-label="Copy Access token"[\s\S]*?Refresh token[\s\S]*?aria-label="Copy Refresh token"/);
+  assert.match(locked, /Access token[\s\S]*?aria-label="Copy Access token"[\s\S]*?Refresh token/);
+  assert.doesNotMatch(locked, /Copy Refresh token|Copy all fields/);
+  assert.doesNotMatch(fresh, /Copy all fields/);
   assert.equal((locked.match(/type="password"[^>]*readOnly=""/g) ?? []).length, 2);
   assert.equal((locked.match(/>Show</g) ?? []).length, 2);
   assert.match(locked, /Access renews automatically\./);
@@ -1268,6 +1395,7 @@ test("Dropbox OAuth credentials use the same review and replacement field as R2"
     assert.doesNotMatch(html, /readOnly/);
     assert.match(html, /Connect Dropbox/);
     assert.match(html, /Refresh token/);
+    assert.doesNotMatch(html, /Copy Refresh token|Copy all fields/);
     assert.doesNotMatch(html, /Access token/);
     const credentialInput = html.match(/<input type="password"[^>]*>/)?.[0] ?? "";
     assert.match(credentialInput, /placeholder="Stored — type to replace"/);
@@ -1306,7 +1434,7 @@ test("the guide row and the reconnect band say what the transport last observed"
   );
   const unknown = render(null);
   assert.match(unknown, /role="note"/);
-  assert.match(unknown, /Configured\. Test the connection to verify it\. Access renews automatically\./);
+  assert.match(unknown, /Not tested yet\. Access renews automatically\./);
   assert.doesNotMatch(unknown, /Connected\.|Reconnect…|sync-storage-reconnect/);
 
   const refusal: StorageConnectionHealth = {
@@ -1650,7 +1778,7 @@ function renderLane(mode: R2SetupMode, state: Partial<R2SetupState>, disabled = 
 }
 const r2Scan = (patch: Partial<StorageDiscoveryResult> = {}) => scanResult({ scope: "Default, EU, US and FedRAMP", ...patch });
 
-test("local Wrangler setup offers collapsed manual entry and opens details at final review", () => {
+test("local Wrangler setup opens manual entry by default and keeps details at final review", () => {
   const lane = (mode: "create" | "reconnect") => (
     <R2SetupLane
       mode={mode} flow={r2Flow({})} disabled={false} descriptor={wranglerProvider}
@@ -1663,10 +1791,10 @@ test("local Wrangler setup offers collapsed manual entry and opens details at fi
     setupSlot={lane("create")}
   />);
   const creating = render();
-  assert.match(creating, /class="storage-setup-route-row agent r2-lane"[^>]*>[\s\S]*?Wrangler setup[\s\S]*?Set up with Wrangler/);
-  assert.match(creating, /Creates a bucket and a key for it only\./);
-  assert.match(creating, /Manual setup[\s\S]*aria-expanded="false" aria-label="Enter by hand"[^>]*><svg[^>]*data-icon="chevron-down"/);
-  assert.doesNotMatch(creating, /API URL/);
+  assert.match(creating, /class="storage-setup-route-row agent r2-lane"[^>]*>[\s\S]*?Wrangler automatic setup[\s\S]*?Set up with Wrangler/);
+  assert.doesNotMatch(creating, /Creates a bucket and a key for it only\.|Enter an existing R2 connection in the fields below\./);
+  assert.match(creating, /Manual setup[\s\S]*aria-expanded="true" aria-label="Hide fields"[^>]*><svg[^>]*data-icon="chevron-up"/);
+  assert.match(creating, /API URL/);
   assert.doesNotMatch(creating, /Set up with an agent|Connect Dropbox|Run with Claude|Listening for your agent|Reset setup/);
   assert.match(render(true), /Manual setup[\s\S]*API URL/);
   // Settled, the lane rides the reconnect band: a new key for the same
@@ -1676,16 +1804,16 @@ test("local Wrangler setup offers collapsed manual entry and opens details at fi
     secretPresence={{}} disabled={false} onChange={() => {}} setupSlot={lane("reconnect")}
     verbs={<button type="button">Save credential</button>}
   />);
-  assert.match(existing, /Wrangler setup[\s\S]*?Reconnect with Wrangler/);
+  assert.match(existing, /Wrangler automatic setup[\s\S]*?Reconnect with Wrangler/);
   assert.match(existing, /Issues a new key for this bucket\./);
   assert.doesNotMatch(existing, /Manual setup|Set up with Wrangler|API URL/);
   assert.match(existing, /type="password"/);
   assert.match(existing, /Save credential/);
 });
 
-test("the Use-existing Wrangler route offers manual expansion and preserves prepared drafts", () => {
+test("the Use-existing Wrangler route opens manual fields by default and preserves prepared drafts", () => {
   const render = (setupDone = false, secretPresence = {}) => renderToStaticMarkup(<StorageEditor
-    descriptor={{ ...wranglerProvider, setup_guide_url: "https://example.test/r2-setup" }} form={emptyForm} secretPresence={secretPresence} disabled={false} onChange={() => {}}
+    descriptor={{ ...wranglerProvider, key: "r2", setup_guide_url: "https://example.test/r2-setup" }} form={emptyForm} secretPresence={secretPresence} disabled={false} onChange={() => {}}
     setupMode={{ mode: "existing", onChoose: noop }} manualEntry={false}
     setupDone={setupDone}
     setupSlot={<R2SetupLane
@@ -1695,8 +1823,8 @@ test("the Use-existing Wrangler route offers manual expansion and preserves prep
   />);
   const initial = render();
   assert.match(initial, /Find in my account/);
-  assert.match(initial, /Manual setup[\s\S]*Setup guide[\s\S]*aria-expanded="false" aria-label="Enter by hand"[^>]*><svg[^>]*data-icon="chevron-down"/);
-  assert.doesNotMatch(initial, /API URL|Access Key ID|API Secret/);
+  assert.match(initial, /Manual setup[\s\S]*Setup guide[\s\S]*aria-expanded="true" aria-label="Hide fields"[^>]*><svg[^>]*data-icon="chevron-up"/);
+  assert.match(initial, /API URL[\s\S]*Access Key ID[\s\S]*API Secret/);
   const html = render(true);
   assert.match(html, /r2-lane[\s\S]*?Lists your buckets, read-only[\s\S]*?Find in my account[\s\S]*?Manual setup[\s\S]*?Setup guide <svg[\s\S]*?API URL/);
   assert.match(html, /Access Key ID/);
@@ -2546,7 +2674,7 @@ test("Mallard Cloud declares a sign-in lane, no manual fields, and one managed s
   assert.equal(setupRouteIcon("managed_cloud"), "cloud");
   assert.equal(setupRouteLabel("managed_cloud", "sign-in"), "Mallard Cloud sign-in");
   assert.equal(setupRouteLabel("dropbox", "setup"), "Dropbox setup");
-  assert.equal(setupRouteLabel("wrangler", "sign-in"), "Wrangler setup");
+  assert.equal(setupRouteLabel("wrangler", "sign-in"), "Wrangler automatic setup");
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /<ManagedCloudSetupLane/);
   assert.match(workspace, /local_setup === "managed_cloud"/);
@@ -2554,8 +2682,7 @@ test("Mallard Cloud declares a sign-in lane, no manual fields, and one managed s
 test("Mallard Cloud before start says what the lane does and who can read a push", () => {
   const html = renderManagedCloud({ phase: "idle" });
   assert.match(html, /storage-setup-agent-cta[^>]*>(?:<svg[^]*?<\/svg>)? Sign in with GitHub</);
-  assert.match(html, /private to you and invited collaborators/);
-  assert.match(html, /Public snapshots require a release request on the website/);
+  assert.match(html, /Sign in with GitHub to share snapshots privately with invited collaborators, and request a release on the website to make them public\./);
   assert.match(renderManagedCloud({ phase: "idle" }, "reconnect"), /Reconnect Mallard Cloud/);
 });
 test("Mallard Cloud sign-in offers the link to copy or open with Cancel on the line, never printed", () => {
@@ -3002,5 +3129,25 @@ test("Feishu PKCE diagnostics show and copy only check results and bounded lengt
   } }), null);
   for (const value of ["64", NaN, Infinity, 1.5]) {
     assert.equal(feishuSetupDiagnostics({ pkce: { verifier_length: value, challenge_length: value } }), null);
+  }
+});
+
+
+test("only R2 offers Copy all fields in setup and saved details", () => {
+  for (const key of ["r2", "feishu", "dropbox", "managed_cloud", "local"]) {
+    const descriptor = { ...cloudProvider, key, manual_setup_hint: "Enter connection fields." };
+    const editor = renderToStaticMarkup(
+      <StorageEditor descriptor={descriptor} form={{ name: "Storage", settings: { api_url: "https://example.test" }, typedSecrets: {} }}
+        secretPresence={{}} disabled={false} onChange={() => {}} />,
+    );
+    const locked = renderToStaticMarkup(
+      <StorageLockedForm storage={cloudSummary({ provider: key })} descriptor={descriptor} disabled={false}
+        onRename={async () => true} onRevealSecret={async () => "fixture-secret"}
+        onTest={() => undefined} testing={false} verifiedAt={null}
+        reconnect={{ open: false, onOpen: () => undefined, band: null }} />,
+    );
+    for (const html of [editor, locked]) {
+      assert.equal(html.includes("Copy all fields"), key === "r2", key);
+    }
   }
 });

@@ -297,7 +297,7 @@ desktop frontend integration cases, and the Rust stub-backed tests in
 
 ## 8. The code stays readable (2026-09-17)
 
-Decided after the round-three mock (`mallard-app/cloud-invite-reread-mockup.html`):
+Decided after the round-three mock (`mallard-app/mockups/cloud-invite-reread-mockup.html`):
 the Owner and Admins read a standing code again instead of seeing it once, and
 the code need not be stored hashed. This supersedes the hash and "shown once"
 in section 2.2 and the freshly-issued-code bullet in section 7.

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Add a project — video harness</title>
+    <style>
+      /* App.css locks html, body and #root for the app shell. The frame is the
+         Tauri window's default size (1100 × 720), nothing else on the page. */
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; margin: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; }
+      .harness-frame { width: 1100px; height: 720px; overflow: hidden; }
+      .harness-frame > .sync-app { height: 100%; }
+      /* Stills only: no motion, no caret. */
+      html.still *, html.still *::before, html.still *::after { transition: none !important; animation: none !important; caret-color: transparent !important; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/mockups/project-video-live.tsx"></script>
+  </body>
+</html>

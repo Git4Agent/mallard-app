@@ -32,6 +32,17 @@ resources portable across teammates and machines.
   Library items), a local folder, Cloudflare R2, Dropbox, or Feishu Drive.
   Every storage holds the same immutable layout, and Mallard Cloud runs the
   same publication protocol as R2, with claims.
+- Answers the website's links (`mallard://open?address=<a page's address>`).
+  A repository page's **Open in Mallard** opens one sheet that says what it
+  found — asking each Mallard Cloud account on the page's host — and where
+  that stands on this computer, with one verb: the project or Catalog item
+  when it is here, otherwise New project or Add Catalog resource on From
+  Mallard Cloud, filled in. The listing's **Open Mallard** (Share yours) asks
+  nothing and goes straight to Projects, or to the Catalog when a Skills,
+  Plugins or Pets chip was on; the sheet appears only when no storage signs
+  in to that service. A link only reads; nothing is connected, cloned, added,
+  pulled or pushed until the page's own verb is pressed. While an operation,
+  a review or a dialog is open, the link waits under the bar instead.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.
 - Publishes immutable, SHA-256-verified bundle revisions after an explicit
@@ -416,10 +427,10 @@ This flow works with a new or existing Git project, or with a non-Git folder.
    projects show summaries, conversation previews, and session metrics.
 4. Choose **Push** and review **Git & sessions** and the final **Review**
    step.
-5. For a non-Git project, optionally open **Project files**, run
-   **Scan files**, and select the ordinary files and folders that
-   should travel with the bundle. This step is unavailable for Git-managed
-   content.
+5. For a non-Git project, the review scans the folder as it opens. A file
+   already in storage travels when it changed here. A new file waits: open
+   **Project files** and tick the ordinary files and folders that should
+   travel with the bundle. This step is unavailable for Git-managed content.
 6. Complete the Push to publish the reviewed bundle to R2.
 7. On another machine, configure the same R2 storage, clone the Git repository
    or create an appropriate local folder, add it to Mallard, select the
@@ -430,6 +441,9 @@ This flow works with a new or existing Git project, or with a non-Git folder.
 1. Choose **Add project** › **From Mallard Cloud**. Select a connected
    account, or add one and choose **Finish setup** to return here with it
    selected. Setup started from **Storages** opens the new storage's page.
+   Or, in an installed build, choose **Open in Mallard** on the repository's
+   page on the website and then **Set up project…** on the sheet: this page
+   opens with the account ticked and step 2 done.
 2. Paste the repository's page address, such as `mallard-ai.com/owner/name`,
    and choose **Look up**, or pick it from the list. A private repository you
    have not joined takes its invitation code.
@@ -513,10 +527,12 @@ checked-out branch unless another branch was picked in the branch menu. See
   content travels with Git.
 - Non-Git project-file scans are explicit and read-only. `.gitignore`,
   `.ignore`, and `.mallardignore` are honored.
-- VCS data, build output, Codex and Mallard metadata, credential filenames,
-  links, special files, and private-key material are excluded or blocked.
-- Credential-shaped or executable content requires an explicit warning
-  acknowledgement.
+- VCS data, build output, Codex and Mallard metadata, symlinks, and special
+  files are excluded or blocked. Size and path limits still apply.
+- Non-Git project files can include credential files, private keys, and
+  hard-linked regular files. Credential filenames, detected secrets, and
+  executable content require an explicit warning acknowledgement.
+- Provider-home capture keeps its credential-file and hard-link exclusions.
 - Pull deletions begin unselected. Approved file deletion verifies the local
   digest and creates a backup; approved directory deletion removes only an
   exact empty directory and is never recursive.
@@ -1109,6 +1125,9 @@ implementation notes, and safety contract.
 
 ## Code map
 
+- `mockups/` — standalone mock pages, browser fixtures, and their source files.
+  Run `npm run dev`, then open `/mockups/<page>.html`. These files use the
+  shared app components and styles, but are not app entry points.
 - `src/components/project-sync/` — project setup, Activity, storage, Push/Pull
   review, project files, and status UI.
 - `src/components/project-sync/api.ts` and `src/types.ts` — Tauri command and

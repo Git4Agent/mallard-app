@@ -28,10 +28,15 @@ pub enum AddressError {
     Invalid,
 }
 
-/// The website's own top-level paths, which are never an owner login.
-const RESERVED_OWNERS: [&str; 6] = [
+/// The website's own top-level paths, which are never an owner login. The
+/// first six are the static routes in its `App.tsx`.
+const RESERVED_OWNERS: [&str; 10] = [
+    "repositories",
     "invitations",
+    "reviews",
     "super-admin",
+    "docs",
+    "privacy",
     "v1",
     "auth",
     "login",
@@ -60,7 +65,7 @@ fn name_shaped(value: &str) -> bool {
 
 /// The host (with its port when the origin carries one) an address must
 /// name to be the storage's, lower-cased; `www.` is dropped on both sides.
-fn origin_host(service_origin: &str) -> Option<String> {
+pub fn origin_host(service_origin: &str) -> Option<String> {
     let url = url::Url::parse(service_origin).ok()?;
     let host = url.host_str()?.to_ascii_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host).to_owned();
@@ -76,48 +81,91 @@ fn looks_like_host(segment: &str) -> bool {
     segment.contains('.') || segment.contains(':') || segment.eq_ignore_ascii_case("localhost")
 }
 
-/// Parse `input` against the storage's `service_origin`.
-pub fn parse_repository_address(
-    input: &str,
-    service_origin: &str,
-) -> Result<RepositoryAddress, AddressError> {
+/// An address taken apart: the host it names, as `origin_host` spells one,
+/// when it names one; whether it led with `http(s)://`; and the path.
+struct Parts<'a> {
+    host: Option<String>,
+    schemed: bool,
+    path: &'a str,
+}
+
+fn parts(input: &str) -> Result<Parts<'_>, AddressError> {
     let text = input.trim();
     if text.is_empty() || text.len() > 2048 || text.chars().any(char::is_whitespace) {
         return Err(AddressError::Invalid);
     }
     // Drop a query or fragment: the website's session page carries `?commit=`.
     let text = text.split(['?', '#']).next().unwrap_or_default();
-    let (host, path) = match text.split_once("://") {
+    let (authority, schemed, path) = match text.split_once("://") {
         Some((scheme, rest)) => {
             if !(scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")) {
                 return Err(AddressError::Invalid);
             }
             let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-            (Some(authority), path)
+            (Some(authority), true, path)
         }
         None => {
             let (first, rest) = text.split_once('/').unwrap_or((text, ""));
             if looks_like_host(first) {
-                (Some(first), rest)
+                (Some(first), false, rest)
             } else {
-                (None, text)
+                (None, false, text)
             }
         }
     };
-    if let Some(authority) = host {
-        if authority.contains('@') {
-            return Err(AddressError::Invalid);
+    let host = match authority {
+        Some(authority) => {
+            if authority.contains('@') {
+                return Err(AddressError::Invalid);
+            }
+            let host = authority.to_ascii_lowercase();
+            let host = host.strip_prefix("www.").unwrap_or(&host).to_owned();
+            if host == "github.com" {
+                return Err(AddressError::GitHub);
+            }
+            Some(host)
         }
-        let host = authority.to_ascii_lowercase();
-        let host = host.strip_prefix("www.").unwrap_or(&host).to_owned();
-        if host == "github.com" {
-            return Err(AddressError::GitHub);
-        }
+        None => None,
+    };
+    Ok(Parts {
+        host,
+        schemed,
+        path,
+    })
+}
+
+/// Parse `input` against the storage's `service_origin`.
+pub fn parse_repository_address(
+    input: &str,
+    service_origin: &str,
+) -> Result<RepositoryAddress, AddressError> {
+    let Parts { host, path, .. } = parts(input)?;
+    if let Some(host) = host {
         let expected = origin_host(service_origin).ok_or(AddressError::Invalid)?;
         if host != expected {
             return Err(AddressError::WrongService { host, expected });
         }
     }
+    repository_in(path)
+}
+
+/// A repository page's whole address, `http(s)://{host}/{owner}/{name}…`:
+/// the host it names and the repository. What an app link carries, where no
+/// storage has been chosen yet to check the host against.
+pub fn parse_page_address(input: &str) -> Result<(String, RepositoryAddress), AddressError> {
+    let Parts {
+        host,
+        schemed,
+        path,
+    } = parts(input)?;
+    match host {
+        Some(host) if schemed && !host.is_empty() => Ok((host, repository_in(path)?)),
+        _ => Err(AddressError::Invalid),
+    }
+}
+
+/// `{owner}/{name}` at the head of a page's path.
+fn repository_in(path: &str) -> Result<RepositoryAddress, AddressError> {
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
     let (Some(owner), Some(name)) = (segments.next(), segments.next()) else {
         return Err(AddressError::Invalid);
@@ -232,6 +280,11 @@ mod tests {
             "https://mallard-ai.com/Rika321",
             "https://mallard-ai.com/invitations/abc",
             "super-admin/HorrorGame",
+            "https://mallard-ai.com/docs/push-and-pull",
+            "docs/push-and-pull",
+            "https://mallard-ai.com/repositories/HorrorGame",
+            "mallard-ai.com/reviews/HorrorGame",
+            "Privacy/HorrorGame",
             "ftp://mallard-ai.com/Rika321/HorrorGame",
             "https://user@mallard-ai.com/Rika321/HorrorGame",
             "Rika321/Horror Game",

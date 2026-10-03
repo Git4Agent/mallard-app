@@ -63,6 +63,7 @@ fn parse_test_session_metadata(line: &[u8]) -> Option<ParsedSessionMetadata> {
         session_id: record.session_id,
         authorized_home: record.cwd,
         is_internal_subagent: false,
+        can_be_empty: false,
     })
 }
 

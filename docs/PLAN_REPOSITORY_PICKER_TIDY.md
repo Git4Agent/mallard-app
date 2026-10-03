@@ -122,7 +122,7 @@ Docs
   - `web/landing-mock/cloud-docs-mock.tsx`: around lines 284 and 300–302.
   Both are mocks still awaiting a pick, so update them when they are ported.
 
-Verify: open `cloud-project-live.html` and `cloud-connect-live-mockup.html` in
+Verify: open `mockups/cloud-project-live.html` and `mockups/cloud-connect-live-mockup.html` in
 the Browser pane, light and dark, and go through empty, list, found, not found,
 code and join.
 
@@ -154,8 +154,8 @@ Built as section 3 describes, with these specifics:
   - `cloud-project.integration.test.tsx`: the field label, and Look up (no
     Join) before a code is typed.
   - `npm run test:frontend-integration`: 460/460. `tsc --noEmit` is clean.
-- Checked in the live harnesses (`cloud-project-live.html`,
-  `cloud-connect-live-mockup.html`), light and dark:
+- Checked in the live harnesses (`mockups/cloud-project-live.html`,
+  `mockups/cloud-connect-live-mockup.html`), light and dark:
   - no repositories;
   - a listed repository looked up (row selected, one line, no card);
   - an account switch re-looking up to not found;

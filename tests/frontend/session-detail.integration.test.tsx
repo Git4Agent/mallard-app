@@ -9,7 +9,9 @@ import type {
 } from "../../src/types";
 import { SessionDetailMarkdown } from "../../src/components/project-sync/session-detail/SessionDetailEvent";
 import { mermaidSourceProblem, readMermaidResult } from "../../src/components/mermaid/mermaidModel";
+import type { SessionBackTarget } from "../../src/components/project-sync/session-detail/SessionDetailBack";
 import SessionDetailHeader from "../../src/components/project-sync/session-detail/SessionDetailHeader";
+import SessionDetailPage from "../../src/components/project-sync/session-detail/SessionDetailPage";
 import SessionDetailTimeline from "../../src/components/project-sync/session-detail/SessionDetailTimeline";
 import SessionDetailToolbar from "../../src/components/project-sync/session-detail/SessionDetailToolbar";
 import SessionDetailToolCall from "../../src/components/project-sync/session-detail/SessionDetailToolCall";
@@ -188,6 +190,9 @@ test("Mermaid source bounds use UTF-8 bytes and parser replies must keep the iso
 // 2026-08-06T07:06:40Z and onward, so the day divider and the card clock have
 // a real day boundary to work with.
 const START = 1_786_000_000;
+
+// Where a session's page returns to: the project's page, in the trail's word.
+const back: SessionBackTarget = { kind: "section", label: "Git history", onActivate: () => undefined };
 
 const detail: ProjectSessionDetail = {
   resource_id: "codex:conversation:session-1",
@@ -412,17 +417,21 @@ test("the toolbar states one count, with the denominator the page never had", ()
   assert.doesNotMatch(html, /Checkpoints|No checkpoints|Expand loaded tool calls|<fieldset|<select/);
 });
 
-test("the header is one strip: hidden h1, facts as chips, verbs on the right", () => {
+test("the header is one strip: hidden h1, the way back, facts as chips, verbs on the right", () => {
   const html = renderToStaticMarkup(
     <SessionDetailHeader
       detail={{ ...detail, summary: detail.title }}
+      back={back}
       headingRef={{ current: null }}
       actionBusyId={null}
       onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
     />,
   );
 
-  assert.doesNotMatch(html, /Back to Activity|session-detail-breadcrumbs/);
+  assert.doesNotMatch(html, /session-detail-breadcrumbs/);
   // The visible title is the path bar's leaf crumb; the h1 stays for structure
   // and as the focus landing, screen-reader-only.
   assert.match(html, /<h1 id="session-detail-heading" class="sync-visually-hidden" tabindex="-1">Build provider-neutral session detail<\/h1>/);
@@ -450,9 +459,13 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
   const active = renderToStaticMarkup(
     <SessionDetailHeader
       detail={{ ...detail, is_active: true }}
+      back={back}
       headingRef={{ current: null }}
       actionBusyId={null}
       onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
     />,
   );
   assert.match(active, /title="Still running · 11m so far"><svg[^>]*data-icon="activity"[\s\S]*?<b>running<\/b>/);
@@ -471,13 +484,167 @@ test("the header is one strip: hidden h1, facts as chips, verbs on the right", (
   const distinct = renderToStaticMarkup(
     <SessionDetailHeader
       detail={detail}
+      back={back}
       headingRef={{ current: null }}
       actionBusyId={null}
       onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
     />,
   );
   // Transcript-derived summaries belong in the timeline, not above it.
   assert.doesNotMatch(distinct, /session-detail-summary|Expose the durable conversation/);
+});
+
+// What Push cannot do and how the transcript was read are labels on the
+// strip, not boxes: a hold the user clears leads the verbs, under Push, and
+// the transcript's notes are one chip at the end of the facts.
+test("a Push hold and the transcript notes are chips, never boxes", () => {
+  const html = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={detail}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={{ tone: "info", label: "Pull first", detail: "Storage has changes. Review Pull before pushing this session." }}
+      notes={[
+        { code: "incomplete_tool_call", severity: "info", message: "Tool calls marked incomplete never recorded a result. They were most likely interrupted." },
+        { code: "malformed_record", severity: "warning", message: "Some lines of the session file couldn't be read and are left out." },
+      ]}
+      onShowToolCalls={() => undefined}
+    />,
+  );
+  assert.doesNotMatch(html, /class="notice/);
+  assert.doesNotMatch(html, /Dismiss/);
+  assert.match(
+    html,
+    /<div class="session-detail-header-actions" aria-label="Session actions"><span class="session-detail-chip session-detail-push-gate info" title="Storage has changes\. Review Pull before pushing this session\."><svg[^>]*data-icon="download"[\s\S]*?<\/svg>Pull first<span class="sync-visually-hidden"> Storage has changes\. Review Pull before pushing this session\.<\/span><\/span>/,
+  );
+  // The loudest note sets the chip's rung; the count is the face, and the
+  // panel is a dialog that is not in the page until it opens.
+  assert.match(
+    html,
+    /<span class="sync-path-popover"><button type="button" class="session-detail-chip session-detail-notes-chip warning" aria-haspopup="dialog" aria-expanded="false" aria-label="2 notes on this session"><svg[^>]*data-icon="alert-triangle"[\s\S]*?<\/svg>2 notes<\/button><\/span>/,
+  );
+  assert.doesNotMatch(html, /session-detail-notes"|Show tool calls/);
+  // Closed, the sentences still stand beside the chip for a screen reader.
+  assert.match(html, /<span class="sync-visually-hidden">Note: Tool calls marked incomplete never recorded a result\.[^<]*Warning: Some lines of the session file/);
+  // The notes end the facts.
+  assert.match(html, /2 notes<\/button><\/span><span class="sync-visually-hidden">[^<]*<\/span><\/div><\/div><div class="session-detail-header-actions"/);
+
+  const quiet = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={detail}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+  assert.doesNotMatch(quiet, /session-detail-push-gate|session-detail-notes-chip|sync-path-popover/);
+
+  // Up to date, checking and ready draw nothing on the page: the workspace's
+  // Push status box is gone, and the page's own box holds only events.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.doesNotMatch(workspace, /Session Push status/);
+  assert.match(workspace, /pushGate=\{workspaceReviewOpen \? null : sessionPushHold\}/);
+  assert.match(workspace, /sessionPushGate\(sessionPushEntry, managedCloudKey \? null : sessionComparison\.comparisonError\)/);
+  const page = readFileSync("src/components/project-sync/session-detail/SessionDetailPage.tsx", "utf8");
+  assert.match(page, /className="session-detail-notices"\s*timing="blocking"/);
+  // A running session's last call has no result yet; its row says so.
+  assert.match(page, /\.filter\(\(warning\) => !\(detail\.is_active && warning\.code === "incomplete_tool_call"\)\)/);
+});
+
+// The crumb that walks back reads as a place, so the page carries a button
+// that reads as one: ahead of the facts, and in the two states that have no
+// strip yet. It names where it lands, and the workspace decides where that is.
+test("the page's way back leads the strip and both entry states, one level up the trail", () => {
+  const header = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={detail}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+  assert.match(
+    header,
+    /<div class="session-detail-strip"><div class="session-detail-lead"><button type="button" class="btn session-detail-back" title="Back to Git history" aria-label="Back to Git history"><svg[^>]*data-icon="chevron-left"[\s\S]*?<\/svg><span>Git history<\/span><\/button><div class="session-detail-chips" aria-label="Session facts">/,
+  );
+  assert.doesNotMatch(header, /session-detail-back[^>]*disabled/);
+
+  // It waits where the project crumb waits, and from an agent's page it names
+  // the parent session: a title, so it leaves the app's display face.
+  const waiting = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={detail}
+      back={{ ...back, disabled: true }}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+  assert.match(waiting, /class="btn session-detail-back" disabled=""/);
+  const child = renderToStaticMarkup(
+    <SessionDetailHeader
+      detail={detail}
+      back={{ kind: "session", label: "Plan the release", onActivate: () => undefined }}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+  assert.match(child, /class="btn session-detail-back to-session" title="Back to Plan the release" aria-label="Back to Plan the release"/);
+
+  // A page that is still opening renders the button and nothing else yet: the
+  // scaffold holds back for its first 150ms.
+  const opening = renderToStaticMarkup(
+    <SessionDetailPage
+      localProjectId="project-1"
+      projectRoot="/tmp/project"
+      resourceId={detail.resource_id}
+      occurrenceKey={detail.resource_id}
+      back={back}
+      onHeaderChange={() => undefined}
+      pushGate={null}
+    />,
+  );
+  assert.match(
+    opening,
+    /^<section class="session-detail-page session-detail-entry-state" aria-label="Loading session detail"><button type="button" class="btn session-detail-back" title="Back to Git history"/,
+  );
+  const pageSource = readFileSync("src/components/project-sync/session-detail/SessionDetailPage.tsx", "utf8");
+  assert.equal(pageSource.split("<SessionDetailBack target={props.back} />").length - 1, 2);
+
+  // The workspace hands the page one target: the parent session from an
+  // agent's page, otherwise the project's page through the close that restores
+  // the list's scroll position and focus. The chunk's own fallback has it too.
+  const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspaceSource, /kind: "session",\s*label: sessionParent\.title,\s*onActivate: \(\) => onOpenSessionDetail\(/);
+  assert.match(workspaceSource, /kind: "section",\s*label: workspaceSectionLabel,\s*onActivate: closeSessionDetail,\s*disabled: busy \|\| !!inlineStorageReview,/);
+  assert.match(workspaceSource, /<section className="session-detail-page session-detail-entry-state">\s*<SessionDetailBack target=\{sessionBack\} \/>/);
+  assert.match(workspaceSource, /back=\{sessionBack\}/);
+
+  // 26px clears the 24px minimum target; the margins give the 4px back, so
+  // the strip keeps the chips' height.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.btn\.session-detail-back \{\s*min-height: 26px;\s*flex: 0 0 auto;\s*gap: 3px;\s*margin: -2px 0;/);
+  assert.match(css, /\.session-detail-entry-state > \.btn\.session-detail-back \{\s*justify-self: start;\s*margin: -1px 0;/);
 });
 
 const agentEvent: SessionTimelineEvent = {
@@ -576,9 +743,13 @@ test("agents open with the conversation and count on the header", () => {
   const header = renderToStaticMarkup(
     <SessionDetailHeader
       detail={detail}
+      back={back}
       headingRef={{ current: null }}
       actionBusyId={null}
       onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
     />,
   );
   assert.match(header, /data-icon="git-fork"[^]*?<code class="quality-exact">1<\/code>agent<\/span>/);
@@ -597,9 +768,13 @@ test("agents open with the conversation and count on the header", () => {
           preview: agentEvent.agent!,
         },
       }}
+      back={back}
       headingRef={{ current: null }}
       actionBusyId={null}
       onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
     />,
   );
   assert.match(childHeader, /<code>general-purpose<\/code>/);

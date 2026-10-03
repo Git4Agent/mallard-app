@@ -584,7 +584,7 @@ implementation.
 | The object cache and its test-only `clear` | `crates/mallard-infrastructure/src/bundle_engine.rs:222` |
 | Library: `LIBRARY_REVIEW_SUPERSEDED`; the lookup on the chain; the stop at a missing payload; the payload fetch's text | `src-tauri/src/storage_catalog/service.rs:270`, `:2078`, `:2139`; `src-tauri/src/storage_catalog/resource_engine.rs:285` |
 | Frontend: the texts and `compareAgainOffered`; the banner's button; the stopped outcome; the `nothing_to_pull` notice; the Library stop | `src/components/project-sync/pullReviewFlow.ts:55-60`; `RestorePlanView.tsx:386`; `syncOutcome.ts:230`; `ProjectLinksWorkspace.tsx:125`, `ProjectSync.tsx:2401`; `src/components/storage-catalog/StorageCatalogPage.tsx:1157` |
-| The static specimen of every Pull text | `src/push-notices-live.tsx` |
+| The static specimen of every Pull text | `mockups/push-notices-live.tsx` |
 | Tests: the two-computer fixture with files; a planted publication with an edited manifest | `src-tauri/src/project_sync/service.rs:21685`, `:21836`; `:20906` |
 | Tests: T2 and N1; T3; T4 and T5; T11; T6; D1; D2; D3 and N2; N7; D4; D6; Q4; O2 and O1 | `src-tauri/src/project_sync/service.rs:21954`, `:22002`, `:22030`, `:22063`, `:22092`, `:22112`, `:22160`, `:22232`, `:22298`, `:22346`, `:22380`, `:22430`, `:22478` |
 | Tests: G1; G2; G3; the engine test of a newer publication after planning | `src-tauri/src/storage_catalog/service.rs:4188`, `:4230`, `:4282`; `crates/mallard-infrastructure/src/bundle_engine.rs:4620` |

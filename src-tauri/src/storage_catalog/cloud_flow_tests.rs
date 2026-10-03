@@ -107,6 +107,40 @@ async fn cloud_batch_failure_reports_completed_and_unattempted_items_and_pins_on
     assert!(!link
         .accepted_items
         .contains_key(&result.results[1].resource_id));
+
+    // A link that names the saved repository finds its row and item; another
+    // repository, or another storage, finds nothing.
+    let (resource, repository) = link
+        .cloud_repositories
+        .iter()
+        .next()
+        .map(|(resource, repository)| (resource.clone(), repository.clone()))
+        .unwrap();
+    let (found, unknown, elsewhere) = blocking(&machine, move |fixture| {
+        let service = cloud_service(fixture);
+        (
+            service
+                .find_cloud_repository(&fixture.storage.id, &repository)
+                .unwrap(),
+            service
+                .find_cloud_repository(&fixture.storage.id, "repo_unknown")
+                .unwrap(),
+            service
+                .find_cloud_repository(&StorageId::parse("storage-elsewhere").unwrap(), &repository)
+                .unwrap(),
+        )
+    })
+    .await;
+    assert_eq!(
+        found,
+        Some(super::cloud::CatalogCloudPlace {
+            scope_id: scope,
+            storage_id: machine.storage.id.clone(),
+            resource_id: resource,
+        })
+    );
+    assert_eq!(unknown, None);
+    assert_eq!(elsewhere, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

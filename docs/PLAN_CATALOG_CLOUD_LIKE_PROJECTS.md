@@ -1,7 +1,7 @@
 # Plan: pets on Mallard Cloud, the way projects are
 
-Proposal, 2026-10-01. Specimen: `cloud-pet-mockup.html` (`npm run dev`, then
-`/cloud-pet-mockup.html`; `?scene=` jumps to a step, `?theme=dark`).
+Proposal, 2026-10-01. Specimen: `mockups/cloud-pet-mockup.html` (`npm run dev`, then
+`/mockups/cloud-pet-mockup.html`; `?scene=` jumps to a step, `?theme=dark`).
 
 **Status (2026-10-01): implemented**, steps 1–3. Scene 0 ("Live") runs the
 built page on a stand-in backend. On Mallard Cloud, outcomes, reviews and

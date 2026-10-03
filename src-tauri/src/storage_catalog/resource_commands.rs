@@ -12,7 +12,7 @@ use super::domain::{
     CatalogScopePullPlan, CatalogScopePushPlan, LocalCatalogProfileId, ProviderKey,
 };
 use super::registry::CatalogCapabilityDescriptor;
-use super::service::cloud::{CatalogCloudRepository, CatalogCloudResolution};
+use super::service::cloud::{CatalogCloudPlace, CatalogCloudRepository, CatalogCloudResolution};
 use super::service::{
     CatalogProfileDto, CatalogProfileInspectionDto, CatalogProfileProbeDto, CatalogPullApproval,
     CatalogPushApproval, CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
@@ -348,6 +348,17 @@ pub async fn resolve_catalog_cloud_repository(
     StorageCatalogService::from_user_home()?
         .resolve_cloud_repository(&storage_id, &address)
         .await
+}
+/// The row on a storage that saved a repository, for a link that names it.
+#[tauri::command]
+pub async fn find_catalog_cloud_repository(
+    storage_id: StorageId,
+    repository_id: String,
+) -> Result<Option<CatalogCloudPlace>, String> {
+    run_blocking(move || {
+        StorageCatalogService::from_user_home()?.find_cloud_repository(&storage_id, &repository_id)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn join_catalog_cloud_repository(

@@ -43,6 +43,7 @@ import type {
 
 const commandNames = [
   "list_catalog_cloud_repositories", "list_catalog_cloud_shared", "list_catalog_cloud_starred", "list_catalog_cloud_public", "resolve_catalog_cloud_repository", "join_catalog_cloud_repository",
+  "find_catalog_cloud_repository",
   "connect_catalog_cloud_repository", "create_catalog_cloud_repository", "get_catalog_cloud_status", "request_catalog_cloud_release", "discard_catalog_cloud_draft",
   "apply_catalog_resource_fork",
   "apply_catalog_scope_pull",
@@ -1523,7 +1524,7 @@ test("the connect dialog is the project's, with fewer words, and opens no review
   );
   assert.match(html, /<h1[^>]*>Connect Duck<\/h1>/);
   assert.match(html, /class="sync-modal sync-bundle-connection-dialog"/);
-  assert.match(html, /<span class="sync-visually-hidden">Search, address or invite code<\/span>/, "the placeholder says it; the label is for screen readers");
+  assert.match(html, /<span class="sync-visually-hidden">Search, address or invitation code<\/span>/, "the placeholder says it; the label is for screen readers");
   assert.match(html, /Loading repositories…/);
   assert.doesNotMatch(html, /sync-bundle-context|repo-list-head/, "no context row, no list heading");
   assert.doesNotMatch(html, /Can’t be changed later/, "said once the choice can be made");

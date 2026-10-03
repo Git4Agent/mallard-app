@@ -1,0 +1,42 @@
+{
+  "checked_on": "2026-10-03",
+  "overall_result": "BLOCKED_AT_OAUTH_SCOPE",
+  "client": "Mallard R2 browser POC",
+  "client_visibility": "private",
+  "registered_scopes": ["account-settings.read", "workers-r2.read"],
+  "provisioning_authorization_test": {
+    "extra_requested_scope": "account_api_tokens:create",
+    "provider_callback_error": "invalid_scope",
+    "poc_code": "authorization_invalid_scope",
+    "token_exchange_requests": 0,
+    "api_token_create_requests": 0
+  },
+  "separate_scope_catalog_test": {
+    "http_status": 200,
+    "scope_count": 392,
+    "pagination_indicated": false,
+    "api_token_scope_ids": [],
+    "other_provisioning_name_matches": ["scim-provisioning.write"],
+    "r2_scope_ids": [
+      "workers-r2-bucket-item.read",
+      "workers-r2-bucket-item.write",
+      "workers-r2.metadata_read",
+      "workers-r2.read",
+      "workers-r2.write"
+    ],
+    "documented_provisioning_scope_available": false,
+    "account_count": 1,
+    "account_confirmed": true,
+    "oauth_token_received": true,
+    "api_token_create_requests": 0
+  },
+  "wrangler_used": false,
+  "credentials_saved": false,
+  "connection_saved": false,
+  "s3_credentials_received": false,
+  "s3_probe_passed": false,
+  "buckets_created": 0,
+  "api_tokens_created": 0,
+  "new_oauth_permissions_granted": false,
+  "proof_limit": "The token-creation endpoint was not reached in the live key test. Mock creation and conversion do not prove live S3 access."
+}

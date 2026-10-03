@@ -158,6 +158,8 @@ pub struct PushApproval {
     pub subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
     pub recipe: BundleRecipe,
     pub project_content_review_token: Option<String>,
+    /// The Files step was on screen with its scanned rows.
+    pub project_files_shown: bool,
     pub git_history_review_token: Option<String>,
     pub project_content_removal_ids: Vec<ResourceId>,
     pub acknowledged_warning_digests: Vec<String>,
@@ -178,6 +180,7 @@ impl PushApproval {
                 .collect(),
             recipe,
             project_content_review_token: None,
+            project_files_shown: false,
             git_history_review_token: review.git_history_review_token.clone(),
             project_content_removal_ids: Vec::new(),
             acknowledged_warning_digests: Vec::new(),
@@ -300,6 +303,7 @@ impl<'a> ProjectSyncService<'a> {
                 credential_redaction_enabled: approval.credential_redaction_enabled,
                 subagent_selections: approval.subagent_selections,
                 review_token: approval.project_content_review_token,
+                files_shown: approval.project_files_shown,
                 git_history_review_token: approval.git_history_review_token,
                 removal_ids: approval.project_content_removal_ids.into_iter().collect(),
                 acknowledged_warning_digests: approval
@@ -650,7 +654,10 @@ pub struct ProjectContentEntry {
     pub review_digest: Option<String>,
     pub selected_in_recipe: bool,
     pub newly_discovered: bool,
-    pub selected_after_scan: bool,
+    /// A local file nobody has decided on: not in storage, not in the recipe,
+    /// not blocked, and not left out at an earlier push. A review never
+    /// selects it by itself; it counts it, and waits for the tick.
+    pub undecided: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -687,6 +694,10 @@ pub(super) struct ProjectContentPushReview {
     pub(super) credential_redaction_enabled: bool,
     pub(super) subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
     pub(super) review_token: Option<String>,
+    /// The Files step was on screen with its scanned rows. A local file left
+    /// unticked there is a choice, and is remembered as left out; without it
+    /// an unticked file is one nobody saw, and stays undecided.
+    pub(super) files_shown: bool,
     pub(super) git_history_review_token: Option<String>,
     pub(super) removal_ids: BTreeSet<ResourceId>,
     pub(super) acknowledged_warning_digests: BTreeSet<String>,
@@ -699,6 +710,7 @@ impl Default for ProjectContentPushReview {
             credential_redaction_enabled: true,
             subagent_selections: BTreeMap::new(),
             review_token: None,
+            files_shown: false,
             git_history_review_token: None,
             removal_ids: BTreeSet::new(),
             acknowledged_warning_digests: BTreeSet::new(),
@@ -2673,7 +2685,7 @@ fn build_project_files_inventory(
         };
         let selected_in_recipe = selected_ids.contains(&resource_id);
         let newly_discovered = local.is_some() && remote_version.is_none() && !selected_in_recipe;
-        let selected_after_scan = newly_discovered
+        let undecided = newly_discovered
             && blocked_reason.is_none()
             && !preferences.excluded_resource_ids.contains(&resource_id);
         let warning_code = local_warnings.get(&resource_id).cloned();
@@ -2713,7 +2725,7 @@ fn build_project_files_inventory(
             review_digest: local_digest,
             selected_in_recipe,
             newly_discovered,
-            selected_after_scan,
+            undecided,
             blocked_reason,
             warning_code,
             warning_digest,
@@ -3559,10 +3571,7 @@ fn thread_capture_unavailable_detail(blocked_reason: Option<&str>) -> String {
         "exceeds {} bytes",
         conversation_file_limit_bytes()
     )) {
-        return format!(
-            "Session file exceeds the {} MiB per-file sync limit.",
-            conversation_file_limit_bytes() / (1024 * 1024)
-        );
+        return "size limit exceeded.".to_string();
     }
     if reason.contains("hard-linked") {
         return "Session file is hard-linked and cannot be synced safely.".to_string();
@@ -8424,8 +8433,8 @@ pub(super) fn prepare_push_review_with_progress(
     // Every bound provider participates in the typed thread comparison.
     let wants_thread_comparison = !binding.profile_ids.is_empty();
     // Only Git-managed projects surface a stored project-files inventory here
-    // (remote/base entries, no local walk). Eligible projects use the explicit
-    // Scan button instead.
+    // (remote/base entries, no local walk). An eligible folder is walked by
+    // its own scan, which the review starts once it is open.
     let wants_project_files = scope == PushScope::Project
         && eligibility.state == ProjectFileSyncEligibilityState::GitManaged;
     let mut thread_comparison = None;
@@ -11067,6 +11076,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                 .keys()
                 .any(|id| id != resource_id)
             || project_content_review.review_token.is_some()
+            || project_content_review.files_shown
             || project_content_review.git_history_review_token.is_some()
             || !project_content_review.removal_ids.is_empty()
             || !project_content_review
@@ -11637,7 +11647,9 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     .contains_key(&entry.descriptor.resource_id)
                 {
                     exclusions.remove(&entry.descriptor.resource_id);
-                } else {
+                } else if project_content_review.files_shown {
+                    // Left unticked on a list the user saw. A scan nobody
+                    // looked at decides nothing: its files stay undecided.
                     exclusions.insert(entry.descriptor.resource_id.clone());
                 }
             }
@@ -16654,6 +16666,21 @@ fn suggested_project_name(project_root: &Path) -> String {
         })
 }
 
+fn preferred_setup_profile<'a>(
+    candidates: &[&'a ProviderProfile],
+    default_path: Option<&Path>,
+) -> Option<&'a ProviderProfile> {
+    let default_path = default_path.and_then(|path| fs_canonicalize(path).ok());
+    candidates
+        .iter()
+        .copied()
+        .find(|profile| default_path.as_deref() == Some(Path::new(&profile.canonical_path)))
+        .or_else(|| match candidates {
+            [only] => Some(*only),
+            _ => None,
+        })
+}
+
 pub(super) fn create_setup_draft_with_repository(
     repository: &LocalStateRepository,
     project_root: &str,
@@ -16687,26 +16714,35 @@ pub(super) fn create_setup_draft_with_repository(
         })
         .flat_map(|binding| binding.profile_ids.values())
         .collect();
-    // Preselect every provider the registry marks a setup default, each from
-    // its own single unambiguous unclaimed profile. Registration-driven: a
-    // provider with no profile on this machine, or with more than one to
-    // choose between, stays unselected rather than guessing, and any
-    // preselection can be turned off before finishing.
+    // Prefer the provider's default home among usable, unclaimed profiles.
+    // Without that home, select only a single unambiguous profile.
+    let home = mallard_infrastructure::persistence::user_home_dir();
     let mut profiles = BTreeMap::new();
     for descriptor in provider_registry().descriptors() {
         if !descriptor.setup_default {
             continue;
         }
-        let mut candidates = machine
+        let candidates: Vec<_> = machine
             .profiles
             .iter()
             .filter(|profile| profile.provider == descriptor.key)
-            .filter(|profile| !claimed_profiles.contains(&profile.profile_id));
-        if let (Some(only), None) = (candidates.next(), candidates.next()) {
+            .filter(|profile| !claimed_profiles.contains(&profile.profile_id))
+            .filter(|profile| {
+                let (available, readable, _, _) = inspect_provider_profile(profile);
+                available && readable
+            })
+            .collect();
+        let default_path = home.as_ref().and_then(|home| {
+            descriptor
+                .default_profile_directory
+                .as_ref()
+                .map(|directory| home.join(directory))
+        });
+        if let Some(selected) = preferred_setup_profile(&candidates, default_path.as_deref()) {
             profiles.insert(
                 descriptor.key.clone(),
                 DraftProfileSelection::Existing {
-                    profile_id: only.profile_id.clone(),
+                    profile_id: selected.profile_id.clone(),
                 },
             );
         }
@@ -18401,14 +18437,14 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_thread_state_reports_the_capture_limit() {
+    fn unavailable_thread_state_reports_the_capture_size_error() {
         let reason = format!(
             "'/tmp/session.jsonl' exceeds {} bytes",
             conversation_file_limit_bytes()
         );
         assert_eq!(
             thread_capture_unavailable_detail(Some(&reason)),
-            "Session file exceeds the 100 MiB per-file sync limit."
+            "size limit exceeded."
         );
 
         let mut counts = ThreadSyncCounts::default();
@@ -19096,6 +19132,7 @@ mod tests {
             credential_redaction_enabled: true,
             subagent_selections: BTreeMap::new(),
             review_token: None,
+            files_shown: false,
             removal_ids: BTreeSet::new(),
             acknowledged_warning_digests: BTreeSet::new(),
         }
@@ -19471,7 +19508,7 @@ mod tests {
     fn reviewed_project_content_recipe(inventory: &ProjectContentInventory) -> BundleRecipe {
         let mut recipe = BundleRecipe::default();
         for entry in &inventory.entries {
-            if entry.local_present && entry.blocked_reason.is_none() && entry.selected_after_scan {
+            if entry.local_present && entry.blocked_reason.is_none() && entry.undecided {
                 let resource_id = entry.descriptor.resource_id.clone();
                 recipe.entries.insert(
                     resource_id.clone(),
@@ -19708,6 +19745,127 @@ mod tests {
     }
 
     #[test]
+    fn new_project_files_wait_and_only_a_shown_list_remembers_the_ones_left_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("project-files-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let source = register(&repo);
+        let source_root = temp.path().join("machine-a/project");
+        std::fs::create_dir_all(source_root.join("notes")).unwrap();
+        std::fs::write(source_root.join("notes/plan.md"), b"first plan\n").unwrap();
+        std::fs::write(source_root.join("notes/ideas.md"), b"ideas\n").unwrap();
+        bind_and_link_test_replica(
+            &repo,
+            &source,
+            &storage_id,
+            &source_root,
+            &temp.path().join("machine-a/codex"),
+        );
+        let scan = || {
+            inspect_project_files_with_repository(&repo, &source.local_project_id, &storage_id)
+                .unwrap()
+        };
+        let entry = |inventory: &ProjectContentInventory, path: &str| {
+            inventory
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == path)
+                .unwrap()
+                .clone()
+        };
+        let push = |recipe: BundleRecipe, review_token: Option<String>, files_shown: bool| {
+            let pushed = push_bundle_reviewed_with_repository(
+                &repo,
+                &source.local_project_id,
+                &storage_id,
+                recipe,
+                ProjectContentPushReview {
+                    review_token,
+                    files_shown,
+                    ..empty_project_content_review()
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(pushed.success, "{}", pushed.message);
+        };
+        let saved_recipe = || {
+            let config = repo.load_config().unwrap();
+            project_link(&config, &source.local_project_id, &storage_id)
+                .unwrap()
+                .recipe
+                .clone()
+                .unwrap()
+        };
+        let left_out = |resource_id: &ResourceId| {
+            let config = repo.load_config().unwrap();
+            project_link(&config, &source.local_project_id, &storage_id)
+                .unwrap()
+                .project_content_preferences
+                .excluded_resource_ids
+                .contains(resource_id)
+        };
+        let stored_plan = || {
+            let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+            engine
+                .inspect(&source.bundle_id)
+                .unwrap()
+                .manifest
+                .scope(&SyncScopeKey::Project)
+                .unwrap()
+                .files
+                .get(&mallard_domain::LogicalPath::parse("project/notes/plan.md").unwrap())
+                .unwrap()
+                .sha256
+                .clone()
+        };
+
+        // The scan offers every new file and puts none of them in a recipe.
+        let first = scan();
+        assert!(first
+            .entries
+            .iter()
+            .all(|entry| entry.undecided && !entry.selected_in_recipe));
+        let ideas_id = entry(&first, "notes/ideas.md").descriptor.resource_id;
+
+        // plan.md is ticked; ideas.md is not, on a list nobody opened. It was
+        // not seen, so it is not left out: the next scan still offers it.
+        let mut recipe = reviewed_project_content_recipe(&first);
+        recipe.entries.remove(&ideas_id);
+        push(recipe, first.review_token.clone(), false);
+        assert!(!left_out(&ideas_id));
+        let second = scan();
+        assert!(entry(&second, "notes/ideas.md").undecided);
+        let plan = entry(&second, "notes/plan.md");
+        assert!(plan.selected_in_recipe && !plan.undecided);
+        let first_plan = stored_plan();
+
+        // An edit to the stored file does not travel without the scan's
+        // token: the push never walks the folder, and storage keeps its copy.
+        std::fs::write(source_root.join("notes/plan.md"), b"second plan\n").unwrap();
+        push(saved_recipe(), None, false);
+        assert_eq!(stored_plan(), first_plan);
+
+        // With the token it travels, still without the list being shown.
+        let third = scan();
+        assert_eq!(entry(&third, "notes/plan.md").state, "local_ahead");
+        push(saved_recipe(), third.review_token.clone(), false);
+        let second_plan = stored_plan();
+        assert_ne!(second_plan, first_plan);
+        assert!(!left_out(&ideas_id));
+
+        // Shown and left unticked is a choice: it is remembered, and the
+        // file is no longer offered.
+        std::fs::write(source_root.join("notes/plan.md"), b"third plan\n").unwrap();
+        let fourth = scan();
+        push(saved_recipe(), fourth.review_token.clone(), true);
+        assert_ne!(stored_plan(), second_plan);
+        assert!(left_out(&ideas_id));
+        assert!(!entry(&scan(), "notes/ideas.md").undecided);
+    }
+
+    #[test]
     fn project_content_nested_tree_and_empty_directory_round_trip_then_delete_safely() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -19736,10 +19894,7 @@ mod tests {
             scanned.eligibility.state,
             ProjectFileSyncEligibilityState::Eligible
         );
-        assert!(scanned
-            .entries
-            .iter()
-            .all(|entry| entry.selected_after_scan));
+        assert!(scanned.entries.iter().all(|entry| entry.undecided));
         let excluded_id = scanned
             .entries
             .iter()
@@ -19762,6 +19917,7 @@ mod tests {
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: scanned.review_token.clone(),
+                files_shown: true,
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
@@ -19820,7 +19976,7 @@ mod tests {
             .iter()
             .find(|entry| entry.descriptor.resource_id == excluded_id)
             .unwrap();
-        assert!(!excluded.selected_after_scan);
+        assert!(!excluded.undecided);
         assert!(!excluded.selected_in_recipe);
         let other_storage_id = StorageId::parse("project-files-other-store").unwrap();
         add_local_storage(&repo, &other_storage_id, &temp.path().join("other-store"));
@@ -19845,7 +20001,7 @@ mod tests {
                 .iter()
                 .find(|entry| entry.descriptor.resource_id == excluded_id)
                 .unwrap()
-                .selected_after_scan
+                .undecided
         );
 
         let git_race_target = register(&repo);
@@ -19978,6 +20134,7 @@ mod tests {
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: removal_scan.review_token.clone(),
+                files_shown: true,
                 removal_ids: selected_ids.clone(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
@@ -20123,6 +20280,7 @@ mod tests {
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: scanned.review_token,
+                files_shown: true,
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
@@ -20139,93 +20297,117 @@ mod tests {
 
     #[test]
     fn project_content_warning_and_review_tokens_are_bound_to_exact_bytes() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = repository(&temp);
-        let storage_id = StorageId::parse("warning-review-store").unwrap();
-        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
-        let project = register(&repo);
-        let project_root = temp.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        std::fs::write(project_root.join("notes.txt"), b"sample ghp_test_value_one").unwrap();
-        bind_and_link_test_replica(
-            &repo,
-            &project,
-            &storage_id,
-            &project_root,
-            &temp.path().join("codex"),
-        );
+        for (path, first_bytes, next_bytes) in [
+            (
+                "notes.txt",
+                "sample ghp_test_value_one",
+                "sample ghp_test_value_two",
+            ),
+            (".env.feishu", "EXAMPLE=one", "EXAMPLE=two"),
+            (
+                "AuthKey_TEST.p8",
+                "-----BEGIN PRIVATE KEY-----\nfixture-one",
+                "-----BEGIN PRIVATE KEY-----\nfixture-two",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = repository(&temp);
+            let storage_id = StorageId::parse("warning-review-store").unwrap();
+            add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+            let project = register(&repo);
+            let project_root = temp.path().join("project");
+            std::fs::create_dir_all(&project_root).unwrap();
+            std::fs::write(project_root.join(path), first_bytes).unwrap();
+            bind_and_link_test_replica(
+                &repo,
+                &project,
+                &storage_id,
+                &project_root,
+                &temp.path().join("codex"),
+            );
 
-        let first =
-            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
-                .unwrap();
-        let first_warning = first.entries[0].warning_digest.clone().unwrap();
-        let recipe = reviewed_project_content_recipe(&first);
-        let missing_ack = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            recipe.clone(),
-            ProjectContentPushReview {
-                scope: PushScope::Project,
-                git_history_review_token: None,
-                credential_redaction_enabled: true,
-                subagent_selections: BTreeMap::new(),
-                review_token: first.review_token.clone(),
-                removal_ids: BTreeSet::new(),
-                acknowledged_warning_digests: BTreeSet::new(),
-            },
-            &mut |_| {},
-        )
-        .unwrap_err();
-        assert!(missing_ack.contains("acknowledgement"));
+            let first = inspect_project_files_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap();
+            assert!(first.entries[0].blocked_reason.is_none(), "{path}");
+            let first_warning = first.entries[0].warning_digest.clone().unwrap();
+            let recipe = reviewed_project_content_recipe(&first);
+            let missing_ack = push_bundle_reviewed_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+                recipe.clone(),
+                ProjectContentPushReview {
+                    scope: PushScope::Project,
+                    git_history_review_token: None,
+                    credential_redaction_enabled: true,
+                    subagent_selections: BTreeMap::new(),
+                    review_token: first.review_token.clone(),
+                    files_shown: true,
+                    removal_ids: BTreeSet::new(),
+                    acknowledged_warning_digests: BTreeSet::new(),
+                },
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert!(missing_ack.contains("acknowledgement"));
 
-        std::fs::write(project_root.join("notes.txt"), b"sample ghp_test_value_two").unwrap();
-        let stale = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            recipe,
-            ProjectContentPushReview {
-                scope: PushScope::Project,
-                git_history_review_token: None,
-                credential_redaction_enabled: true,
-                subagent_selections: BTreeMap::new(),
-                review_token: first.review_token,
-                removal_ids: BTreeSet::new(),
-                acknowledged_warning_digests: BTreeSet::from([first_warning.clone()]),
-            },
-            &mut |_| {},
-        )
-        .unwrap_err();
-        assert!(stale.contains("changed after Scan"), "{stale}");
+            std::fs::write(project_root.join(path), next_bytes).unwrap();
+            let stale = push_bundle_reviewed_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+                recipe,
+                ProjectContentPushReview {
+                    scope: PushScope::Project,
+                    git_history_review_token: None,
+                    credential_redaction_enabled: true,
+                    subagent_selections: BTreeMap::new(),
+                    review_token: first.review_token,
+                    files_shown: true,
+                    removal_ids: BTreeSet::new(),
+                    acknowledged_warning_digests: BTreeSet::from([first_warning.clone()]),
+                },
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert!(stale.contains("changed after Scan"), "{stale}");
 
-        let refreshed =
-            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
-                .unwrap();
-        let refreshed_warning = refreshed.entries[0].warning_digest.clone().unwrap();
-        assert_ne!(first_warning, refreshed_warning);
-        let published = push_bundle_reviewed_with_repository(
-            &repo,
-            &project.local_project_id,
-            &storage_id,
-            reviewed_project_content_recipe(&refreshed),
-            ProjectContentPushReview {
-                scope: PushScope::Project,
-                git_history_review_token: None,
-                credential_redaction_enabled: true,
-                subagent_selections: BTreeMap::new(),
-                review_token: refreshed.review_token,
-                removal_ids: BTreeSet::new(),
-                acknowledged_warning_digests: BTreeSet::from([refreshed_warning]),
-            },
-            &mut |_| {},
-        )
-        .unwrap();
-        assert!(published.success);
-        assert_eq!(
-            published.message,
-            format!("Published version {}", published.revision.unwrap())
-        );
+            let refreshed = inspect_project_files_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap();
+            let refreshed_warning = refreshed.entries[0].warning_digest.clone().unwrap();
+            assert_ne!(first_warning, refreshed_warning);
+            let published = push_bundle_reviewed_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+                reviewed_project_content_recipe(&refreshed),
+                ProjectContentPushReview {
+                    scope: PushScope::Project,
+                    git_history_review_token: None,
+                    credential_redaction_enabled: true,
+                    subagent_selections: BTreeMap::new(),
+                    review_token: refreshed.review_token,
+                    files_shown: true,
+                    removal_ids: BTreeSet::new(),
+                    acknowledged_warning_digests: BTreeSet::from([refreshed_warning]),
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(published.success);
+            assert_eq!(
+                published.message,
+                format!("Published version {}", published.revision.unwrap())
+            );
+        }
     }
 
     #[test]
@@ -20262,6 +20444,7 @@ mod tests {
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: scanned.review_token.clone(),
+                files_shown: true,
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
@@ -20316,6 +20499,7 @@ mod tests {
                 credential_redaction_enabled: true,
                 subagent_selections: BTreeMap::new(),
                 review_token: rescanned.review_token.clone(),
+                files_shown: true,
                 removal_ids: BTreeSet::new(),
                 acknowledged_warning_digests: BTreeSet::new(),
             },
@@ -20379,7 +20563,7 @@ mod tests {
             .find(|entry| entry.relative_path == "draft-local-copy.md")
             .expect("copy appears in the next scan");
         assert_eq!(copy_entry.state, "local_only");
-        assert!(copy_entry.selected_after_scan);
+        assert!(copy_entry.undecided);
         let draft_entry = target_scan
             .entries
             .iter()
@@ -20438,7 +20622,10 @@ mod tests {
         // App discovery can omit the launch command. If present, it must
         // pin the same profile and checkout, whatever the install location.
         #[cfg(target_os = "macos")]
-        if let Some((_, command)) = commands.iter().find(|(label, _)| label == "Codex app — new") {
+        if let Some((_, command)) = commands
+            .iter()
+            .find(|(label, _)| label == "Codex app — new")
+        {
             assert!(command.starts_with("'/usr/bin/open' -n -a '"));
             assert!(command.ends_with(
                 " --env 'CODEX_HOME=/tmp/custom codex/.codex' 'codex://threads/new?path=%2Ftmp%2Fclient%27s%20project'"
@@ -20506,7 +20693,7 @@ mod tests {
         let project_root_json = serde_json::to_string(project_root.to_str().unwrap()).unwrap();
         let foreign_root_json = serde_json::to_string(foreign_root.to_str().unwrap()).unwrap();
         let matching_source = format!(
-            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n",
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{}\",\"cwd\":{}}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"Hello\"}}}}\n",
             matching_thread, project_root_json
         );
         std::fs::write(&matching_path, matching_source.as_bytes()).unwrap();
@@ -25755,7 +25942,7 @@ mod tests {
             row.status_detail
                 .as_deref()
                 .unwrap_or_default()
-                .contains("exceeds the 100 MiB per-file sync limit"),
+                .contains("size limit exceeded"),
             "blocked detail comes from the discovery mapping: {:?}",
             row.status_detail
         );
@@ -32091,12 +32278,14 @@ mod tests {
             let record = records
                 .records
                 .iter()
-                .find(|record| record.receipts.iter().any(|receipt| {
-                    receipt.conversation.as_ref().is_some_and(|conversation| {
-                        conversation.preserved_display_title.as_deref()
-                            == Some(expected_marker.as_str())
+                .find(|record| {
+                    record.receipts.iter().any(|receipt| {
+                        receipt.conversation.as_ref().is_some_and(|conversation| {
+                            conversation.preserved_display_title.as_deref()
+                                == Some(expected_marker.as_str())
+                        })
                     })
-                }))
+                })
                 .unwrap();
             assert_eq!(record.status, MaterializationStatus::Complete);
             calls
@@ -33287,7 +33476,10 @@ mod tests {
         fs::create_dir_all(&rollouts).unwrap();
         let rollout = |name: &str, payload: serde_json::Value| {
             let record = serde_json::json!({ "type": "session_meta", "payload": payload });
-            fs::write(rollouts.join(name), format!("{record}\n")).unwrap();
+            let message = serde_json::json!({
+                "type": "event_msg", "payload": {"type": "user_message", "message": "Hello"}
+            });
+            fs::write(rollouts.join(name), format!("{record}\n{message}\n")).unwrap();
         };
         rollout(
             "rollout-app.jsonl",
@@ -33365,6 +33557,46 @@ mod tests {
         );
         assert_eq!(list.folders.len(), 3, "a subagent's folder is not offered");
         assert!(fixture.repo.list_setup_drafts().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn setup_prefers_default_agent_homes_with_multiple_profiles() {
+        let fixture = setup_fixture();
+        for provider in ["codex", "claude"] {
+            let key = ProviderKey::parse(provider).unwrap();
+            let default_path = fixture._temp.path().join(format!("home/.{provider}"));
+            let custom_path = fixture._temp.path().join(format!("custom/.{provider}"));
+            std::fs::create_dir_all(&default_path).unwrap();
+            std::fs::create_dir_all(&custom_path).unwrap();
+            // The path defines the default, even when its label was changed.
+            let default = create_provider_profile_with_repository(
+                &fixture.repo,
+                &key,
+                "Renamed profile",
+                default_path.to_str().unwrap(),
+            )
+            .unwrap();
+            let custom = create_provider_profile_with_repository(
+                &fixture.repo,
+                &key,
+                &format!("Default {}", provider_name(&key)),
+                custom_path.to_str().unwrap(),
+            )
+            .unwrap();
+            for candidates in [[&custom, &default], [&default, &custom]] {
+                assert_eq!(
+                    preferred_setup_profile(&candidates, Some(&default_path)),
+                    Some(&default),
+                );
+                assert_eq!(preferred_setup_profile(&candidates, None), None);
+            }
+            // An excluded default cannot be selected; one other profile can.
+            assert_eq!(
+                preferred_setup_profile(&[&custom], Some(&default_path)),
+                Some(&custom),
+            );
+            assert_eq!(preferred_setup_profile(&[], Some(&default_path)), None);
+        }
     }
 
     #[test]

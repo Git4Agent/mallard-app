@@ -132,7 +132,7 @@ function resolutionMessage(resolution: Exclude<CatalogCloudResolution, { kind: "
     case "github":
       return "That’s a GitHub address.";
     case "invalid":
-      return "Paste a link, owner/name, or an invite code.";
+      return "Paste a link, owner/name, or an invitation code.";
     case "not_catalog":
       return `${resolution.address} is a project, not a ${target.kind === "door" ? "Catalog resource" : target.noun}.`;
   }
@@ -141,7 +141,10 @@ function resolutionMessage(resolution: Exclude<CatalogCloudResolution, { kind: "
 const SCOPE_LABEL: Record<ScopeId, string> = { yours: "Yours", shared: "Shared with you", starred: "Starred", public: "Public" };
 const EMPTY_PAGE = { rows: [], next_cursor: null };
 
-export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, target, working, capabilities = [], list: read, listKey }: {
+export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, target, working, capabilities = [], list: read, listKey, initialAddress = null }: {
+  /** An address the chooser was opened for (a link from the website): the
+   *  field starts holding it, and it is looked up as a pasted one is. */
+  initialAddress?: string | null;
   storageId: string;
   /** The Catalog row whose coordinate the Starred and Public listings are
    *  narrowed to; null at the door, which takes every kind. */
@@ -159,7 +162,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
 }) {
   const adding = target.kind !== "item";
   const [listing, setListing] = useState<Listing>({ state: "loading" });
-  const [entry, setEntry] = useState("");
+  const [entry, setEntry] = useState(initialAddress ?? "");
   const [lookup, setLookup] = useState<Lookup>({ kind: "idle" });
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
@@ -283,6 +286,12 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
     if (fill !== undefined) setEntry(fill);
     setSelection(next);
   };
+
+  /* The address the chooser was opened for is looked up once. Selecting it
+     is all that happens: the host's verb is still the person's. */
+  useEffect(() => {
+    if (initialAddress) void submit(initialAddress);
+  }, []);
 
   /** A Starred or Public row: one of the rows when it is, else its
    *  address resolved, so the misfit check runs as for a typed one. */

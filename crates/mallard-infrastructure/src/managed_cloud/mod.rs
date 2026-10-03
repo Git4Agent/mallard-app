@@ -3,6 +3,7 @@
 //! store, the session-view builder, and the desktop sign-in; the adapter
 //! lives with the other storage providers.
 pub mod address;
+pub mod app_link;
 pub mod client;
 pub mod store;
 #[cfg(any(test, feature = "test-support"))]

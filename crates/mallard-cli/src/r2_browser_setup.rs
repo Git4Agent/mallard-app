@@ -1302,11 +1302,16 @@ mod tests {
         })
     }
 
-    fn send_http(address: SocketAddr, request: &[u8]) -> String {
-        let mut stream = TcpStream::connect(address).unwrap();
-        stream.write_all(request).unwrap();
+    fn send_http(address: SocketAddr, request: &[u8], stage: &'static str) -> String {
+        let mut stream = TcpStream::connect(address)
+            .unwrap_or_else(|error| panic!("{stage}: connect failed: {error}"));
+        stream
+            .write_all(request)
+            .unwrap_or_else(|error| panic!("{stage}: request write failed: {error}"));
         let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        stream
+            .read_to_string(&mut response)
+            .unwrap_or_else(|error| panic!("{stage}: response read failed: {error}"));
         response
     }
 
@@ -1739,11 +1744,12 @@ mod tests {
                     let start_request = format!(
                         "GET {start_path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
                     );
-                    let start_response = send_http(address, start_request.as_bytes());
+                    let start_response = send_http(address, start_request.as_bytes(), "start");
                     let credential_request = format!(
                         "GET /?access-key-id=access-canary&secret-access-key=secret-canary HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
                     );
-                    let credential_response = send_http(address, credential_request.as_bytes());
+                    let credential_response =
+                        send_http(address, credential_request.as_bytes(), "credentials");
                     let handle = between(
                         &credential_response,
                         "body.set(\"handle\", \"",
@@ -1755,7 +1761,8 @@ mod tests {
                         "POST {COMPLETION_PATH} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{completion_body}",
                         completion_body.len()
                     );
-                    let completion_response = send_http(address, completion_request.as_bytes());
+                    let completion_response =
+                        send_http(address, completion_request.as_bytes(), "completion");
                     response_sender
                         .send((
                             start_response,
@@ -1766,7 +1773,9 @@ mod tests {
                 });
                 Ok(())
             },
-            Duration::from_secs(2),
+            // Allow slow CI scheduling across 17 idle connections and three
+            // HTTP requests, each of which can wait for the 25 ms accept poll.
+            Duration::from_secs(10),
         )
         .unwrap();
         assert_eq!(credentials.access_key_id.as_str(), "access-canary");
@@ -1810,7 +1819,7 @@ mod tests {
                         address.port()
                     );
                     response_sender
-                        .send(send_http(address, request.as_bytes()))
+                        .send(send_http(address, request.as_bytes(), "injected callback"))
                         .unwrap();
                 });
                 Ok(())

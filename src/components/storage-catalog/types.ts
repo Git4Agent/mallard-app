@@ -500,6 +500,14 @@ export interface CatalogCloudRepository extends CatalogCoordinate, CatalogCoordi
   available: boolean;
 }
 
+/** Where a repository is saved on this computer: the row that connected or
+ *  added it, and the item it is there. */
+export interface CatalogCloudPlace {
+  scope_id: string;
+  storage_id: string;
+  resource_id: string;
+}
+
 /** What one typed address or invitation code answered. Whether the item
  *  fits is the chooser's to say. */
 export type CatalogCloudResolution =

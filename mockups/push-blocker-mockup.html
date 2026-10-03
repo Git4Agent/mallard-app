@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Push footer refusal — directions</title>
+    <style>
+      /* App.css locks html, body and #root for the app shell; #root scrolls. */
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+
+      /* ——— specimen chrome (not app CSS) ——————————————————————— */
+      .spec { max-width: 1240px; margin: 0 auto; padding: 16px 20px 80px; display: grid; gap: 18px; font: 13px/1.45 system-ui, sans-serif; }
+      .spec-title { font: 700 20px/1.2 system-ui; }
+      .spec-sub { margin-top: -10px; color: var(--text-2); max-width: 1040px; }
+      .spec-controls { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .spec-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+      .spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+      .spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+      .spec-panel { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); max-width: 1180px; }
+      .spec-panel > strong { display: block; margin-bottom: 2px; }
+      .spec-panel ul, .spec-panel ol { margin: 4px 0 0 18px; display: grid; gap: 3px; }
+      .spec-panel code { font-family: var(--font-mono); font-size: 11.5px; }
+      .spec-col-title { margin: 0 0 4px; font: 700 14px/1.3 system-ui; }
+      .spec-col-title em { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); font: 600 11px/1.4 system-ui; font-style: normal; }
+      .spec-col-note { margin: 0 0 8px; color: var(--text-2); font-size: 12px; max-width: 980px; }
+      .spec-measure { margin: 6px 0 0; color: var(--text-2); font: 600 11.5px/1.3 var(--font-mono); }
+      .spec-measure b { color: var(--text-0); }
+      .spec-frame { position: relative; border: 1px dashed var(--border-strong); border-radius: 12px; overflow: hidden; background: var(--bg-0); font-family: var(--font-sans); }
+      .spec-frame .sync-sync-review-scroll { height: 230px; overflow-y: auto; }
+      .spec-stack { display: grid; gap: 30px; }
+      .spec-shot .spec-controls, .spec-shot .spec-panel, .spec-shot .spec-title, .spec-shot .spec-sub { display: none; }
+      .spec-footers .spec-col-note, .spec-footers .spec-frame section > :not(footer) { display: none; }
+      .spec-footers .spec-stack { gap: 14px; }
+
+      /* The Sessions tab is out of scope: a stand-in list, drawn with the
+         file cards' own classes so the selection still works. */
+      .mk-session-list { display: grid; gap: 6px; }
+
+      /* Where Show lands: the card the refusal named, flashed once. */
+      .mk-flash { outline: 2px solid var(--warning-text); outline-offset: 2px; transition: outline-color 0.6s; }
+
+      /* ——— proposed app CSS (mock-only) ——————————————————————————— */
+
+      /* A · B · C — the footer's one note row. The over-limit refusal already
+         takes a row of its own above the button cluster
+         (.sync-review-budget-sentence: flex 1 0 100%, order -1); the blocker
+         refusal and the running-push note join that slot instead of being a
+         flex: 1 column squeezed between the counts and the buttons. Right-
+         aligned so the sentence ends over the button it explains. */
+      .sync-sync-review-footer > .mk-note {
+        flex: 1 0 100%;
+        order: -1;
+        min-width: 0;
+        margin: 0;
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 5px;
+        color: var(--text-2);
+        font-size: var(--type-xs);
+        text-align: right;
+      }
+      .sync-sync-review-footer > .mk-note.warning { color: var(--warning-text); }
+      .mk-note > svg { flex: 0 0 auto; }
+      .mk-note > .mk-note-text { min-width: 0; }
+      .mk-note > .btn-link {
+        flex: 0 0 auto;
+        color: inherit;
+        font-size: inherit;
+        font-weight: var(--weight-semibold, 600);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+
+      /* Counts knob, compact: only the operations this push performs, sized
+         to their content. The shipped block reserves 360px (and a whole row
+         at ≤720px) for four counts, zeros included, so dropping the zeros
+         alone frees nothing. */
+      .sync-sync-review-footer > .sync-project-file-commit-impact.mk-compact { flex: 0 1 auto; }
+      @container sync-review-layout (max-width: 720px) {
+        .sync-sync-review-footer > .sync-project-file-commit-impact.mk-compact { flex-basis: auto; }
+      }
+      /* With the deletion approval it is a sentence again: it keeps the
+         shipped slot (and its own row at ≤720px), so it never pulls the
+         step button away from the gauge and Push. */
+      .sync-sync-review-footer > .sync-project-file-commit-impact.mk-compact:has(.sync-project-file-deletion-ack) { flex: 1 1 360px; }
+      @container sync-review-layout (max-width: 720px) {
+        .sync-sync-review-footer > .sync-project-file-commit-impact.mk-compact:has(.sync-project-file-deletion-ack) { flex-basis: 100%; }
+      }
+
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/mockups/push-blocker-mockup.tsx"></script>
+  </body>
+</html>

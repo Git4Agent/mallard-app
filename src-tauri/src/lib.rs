@@ -121,7 +121,19 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[cfg(not(test))]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First, so a second launch ends before it builds anything. Windows and
+    // Linux start another process for a `mallard://` link; this hands its
+    // arguments to the running app, which reads the link (the plugin's
+    // deep-link feature) and comes forward. macOS delivers a link to the
+    // running app itself.
+    #[cfg(any(windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        project_sync::app_link::show_window(app);
+    }));
+    builder
+        .plugin(tauri_plugin_deep_link::init())
+        .manage(project_sync::app_link::AppLinkInbox::default())
         .manage(project_sync::r2_setup::R2SetupControl::default())
         .manage(project_sync::dropbox_setup::DropboxSetupControl::default())
         .manage(project_sync::feishu_setup::FeishuSetupControl::default())
@@ -176,6 +188,7 @@ pub fn run() {
             {
                 let _ = mallard_infrastructure::feishu_connections::install(&repository);
             }
+            project_sync::app_link::listen(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -217,6 +230,8 @@ pub fn run() {
             project_sync::managed_cloud_link::list_managed_cloud_public,
             project_sync::managed_cloud_link::resolve_managed_cloud_repository,
             project_sync::managed_cloud_link::accept_managed_cloud_invitation,
+            project_sync::app_link::take_app_link,
+            project_sync::app_link::resolve_app_link,
             project_sync::cloud_project::probe_cloud_project_folder,
             project_sync::cloud_project::get_cloud_project_folder,
             project_sync::cloud_project::cancel_cloud_project_folder,
@@ -293,6 +308,7 @@ pub fn run() {
             storage_catalog::resource_commands::list_catalog_cloud_starred,
             storage_catalog::resource_commands::list_catalog_cloud_public,
             storage_catalog::resource_commands::resolve_catalog_cloud_repository,
+            storage_catalog::resource_commands::find_catalog_cloud_repository,
             storage_catalog::resource_commands::join_catalog_cloud_repository,
             storage_catalog::resource_commands::connect_catalog_cloud_repository,
             storage_catalog::resource_commands::create_catalog_cloud_repository,

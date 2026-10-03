@@ -104,6 +104,48 @@ test("application ships the signed in-app updater", async () => {
   assert.match(releaseGuide, /latest\.json/);
 });
 
+// The website's Open in Mallard hands the browser `mallard://open?address=…`
+// (docs/PLAN_DEEP_LINK_DESTINATIONS.md). The bundle claims the scheme; the
+// backend reads the link and hands the window only what it read.
+test("application answers the mallard:// link", async () => {
+  const [tauriConfigSource, cargoSource, libSource, capabilitySource, packageSource] = await Promise.all([
+    read("src-tauri/tauri.conf.json"),
+    read("src-tauri/Cargo.toml"),
+    read("src-tauri/src/lib.rs"),
+    read("src-tauri/capabilities/default.json"),
+    read("package.json"),
+  ]);
+  const tauriConfig = JSON.parse(tauriConfigSource);
+  const capability = JSON.parse(capabilitySource);
+  const packageConfig = JSON.parse(packageSource);
+
+  // One scheme, and no https association: a link never comes from a web address.
+  assert.deepEqual(tauriConfig.plugins["deep-link"], { desktop: { schemes: ["mallard"] } });
+
+  // Held to the line that builds against the Tauri the app is on.
+  assert.match(cargoSource, /^tauri-plugin-deep-link = "~2\.4\.10"$/m);
+  assert.match(
+    cargoSource,
+    /\[target\.'cfg\(any\(windows, target_os = "linux"\)\)'\.dependencies\]\ntauri-plugin-single-instance = \{ version = "~2\.4\.5", features = \["deep-link"\] \}/,
+    "a second launch hands its link over only where the system starts one",
+  );
+  assert.match(libSource, /\.plugin\(tauri_plugin_deep_link::init\(\)\)/);
+  // Single-instance is registered before anything else is built.
+  assert.match(
+    libSource,
+    /let builder = tauri::Builder::default\(\);[\s\S]{0,600}#\[cfg\(any\(windows, target_os = "linux"\)\)\]\s*let builder = builder\.plugin\(tauri_plugin_single_instance::init\(/,
+  );
+  assert.match(libSource, /project_sync::app_link::listen\(app\.handle\(\)\);/);
+  assert.match(libSource, /project_sync::app_link::take_app_link,/);
+  assert.match(libSource, /project_sync::app_link::resolve_app_link,/);
+
+  // The window cannot read, register or unregister a link itself.
+  assert.deepEqual(capability.permissions.filter((permission) => (
+    typeof permission === "string" && /^deep-link:/.test(permission)
+  )), []);
+  assert.equal(packageConfig.dependencies["@tauri-apps/plugin-deep-link"], undefined);
+});
+
 test("release packaging contains no legacy Codex fork executor", async () => {
   const [tauriConfigSource, infrastructureCargo, tauriCargo, infrastructureLib] = await Promise.all([
     read("src-tauri/tauri.conf.json"),

@@ -167,6 +167,8 @@ pub struct SessionFileMetadata {
     /// context — activity metadata that never moves the session.
     pub authorized_home: PathBuf,
     pub is_internal_subagent: bool,
+    /// Proven to contain only session metadata, with no inherited history.
+    pub is_empty: bool,
 }
 
 /// Why a metadata scan named no session. The two are kept apart because

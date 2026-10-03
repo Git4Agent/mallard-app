@@ -834,7 +834,7 @@ impl TimelineBuilder {
         if self.events.len() >= MAX_TIMELINE_EVENTS {
             self.mark_all_lower_bound(
                 "timeline_event_limit",
-                "The Codex transcript contains more timeline events than Mallard can index.",
+                "This session has more events than Mallard can show. The rest are left out.",
             );
             return;
         }
@@ -844,7 +844,7 @@ impl TimelineBuilder {
         let quality = if text.len() > timeline_message_preview_bytes() {
             self.warning(
                 "message_preview_truncated",
-                "At least one Codex message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
+                "Messages over 1 MiB are cut short here. The session file keeps the full text.",
                 NoticeSeverity::Warning,
             );
             SessionCountQuality::LowerBound
@@ -922,7 +922,7 @@ impl TimelineBuilder {
             if paths_truncated {
                 self.mark_tools_lower_bound(
                     "affected_path_limit",
-                    "At least one Codex tool call changed more paths than Mallard can display.",
+                    "A tool call changed more files than Mallard can list.",
                 );
             }
             return;
@@ -930,7 +930,7 @@ impl TimelineBuilder {
         if self.events.len() >= MAX_TIMELINE_EVENTS {
             self.mark_tools_lower_bound(
                 "timeline_event_limit",
-                "The Codex transcript contains more tool calls than Mallard can index.",
+                "This session has more events than Mallard can show. The rest are left out.",
             );
             self.truncated = true;
             return;
@@ -940,7 +940,7 @@ impl TimelineBuilder {
         if paths_truncated {
             self.mark_tools_lower_bound(
                 "affected_path_limit",
-                "At least one Codex tool call changed more paths than Mallard can display.",
+                "A tool call changed more files than Mallard can list.",
             );
         }
         let position = self.events.len();
@@ -1015,7 +1015,7 @@ impl TimelineBuilder {
                         if self.events.len() >= MAX_TIMELINE_EVENTS {
                             self.mark_tools_lower_bound(
                                 "timeline_event_limit",
-                                "The Codex transcript contains more agent calls than Mallard can index.",
+                                "This session has more events than Mallard can show. The rest are left out.",
                             );
                             self.truncated = true;
                             return;
@@ -1138,14 +1138,14 @@ impl TimelineBuilder {
                 if paths_truncated {
                     self.mark_tools_lower_bound(
                         "affected_path_limit",
-                        "At least one Codex tool call changed more paths than Mallard can display.",
+                        "A tool call changed more files than Mallard can list.",
                     );
                 }
                 return;
             }
             self.mark_tools_lower_bound(
                 "orphan_tool_result",
-                "A Codex tool result had no durable matching call start.",
+                "A tool result had no matching call and is left out.",
             );
             return;
         };
@@ -1167,7 +1167,7 @@ impl TimelineBuilder {
         if paths_truncated {
             self.mark_tools_lower_bound(
                 "affected_path_limit",
-                "At least one Codex tool call changed more paths than Mallard can display.",
+                "A tool call changed more files than Mallard can list.",
             );
         }
     }
@@ -1218,7 +1218,7 @@ impl TimelineBuilder {
         if self.inferred_intermediate || self.inferred_responses {
             self.warning(
                 "legacy_message_phase_inferred",
-                "This Codex rollout predates authoritative message phases; final and progress placement was inferred from nearby tool calls.",
+                "This session predates Codex's reply markers, so Mallard guessed which are final replies and which are steps.",
                 NoticeSeverity::Info,
             );
         }
@@ -1246,9 +1246,14 @@ impl TimelineBuilder {
             }
         }
         if has_incomplete {
-            self.mark_tools_lower_bound(
+            // The transcript holds no result for these calls, most often
+            // because a turn was interrupted. The tool counts become a floor,
+            // but nothing the transcript recorded is missing: `Info`.
+            self.degraded_tools = true;
+            self.warning(
                 "incomplete_tool_call",
-                "At least one Codex tool call has no durable completion record.",
+                "Tool calls marked incomplete never recorded a result. They were most likely interrupted.",
+                NoticeSeverity::Info,
             );
         }
 
@@ -1656,7 +1661,7 @@ fn consume_canonical_item(
     let Some(item) = payload.get("item") else {
         builder.mark_all_lower_bound(
             "malformed_canonical_item",
-            "A canonical Codex timeline item had no item payload.",
+            "Some entries of the session file couldn't be read and are left out.",
         );
         return;
     };
@@ -1670,7 +1675,7 @@ fn consume_canonical_item(
             if paths_truncated {
                 builder.mark_tools_lower_bound(
                     "affected_path_limit",
-                    "At least one Codex tool call changed more paths than Mallard can display.",
+                    "A tool call changed more files than Mallard can list.",
                 );
             }
             let parent = builder.latest_assistant_event_id(&turn_id);
@@ -1780,7 +1785,7 @@ fn consume_canonical_item(
                 if paths_truncated {
                     builder.mark_tools_lower_bound(
                         "affected_path_limit",
-                        "At least one Codex tool call changed more paths than Mallard can display.",
+                        "A tool call changed more files than Mallard can list.",
                     );
                 }
                 let parent = builder.latest_assistant_event_id(&turn_id);
@@ -1799,7 +1804,7 @@ fn consume_canonical_item(
             } else {
                 builder.mark_all_lower_bound(
                     "unknown_canonical_item",
-                    "The Codex rollout contains a canonical item type this Mallard version does not recognize.",
+                    "This session has entries this version of Mallard doesn't know. They are left out.",
                 );
             }
         }
@@ -1862,7 +1867,7 @@ fn consume_legacy_response_item(
             if paths_truncated {
                 builder.mark_tools_lower_bound(
                     "affected_path_limit",
-                    "At least one Codex tool call changed more paths than Mallard can display.",
+                    "A tool call changed more files than Mallard can list.",
                 );
             }
             let parent = builder.latest_assistant_event_id(&turn_id);
@@ -1937,11 +1942,11 @@ fn consume_legacy_response_item(
         | "additionaltools" => {}
         "" => builder.mark_all_lower_bound(
             "malformed_response_item",
-            "A Codex response item had no discriminator.",
+            "Some entries of the session file couldn't be read and are left out.",
         ),
         _ => builder.mark_all_lower_bound(
             "unknown_response_item",
-            "The Codex rollout contains a response item type this Mallard version does not recognize.",
+            "This session has entries this version of Mallard doesn't know. They are left out.",
         ),
     }
 }
@@ -2068,7 +2073,7 @@ fn consume_legacy_event(
             if paths_truncated {
                 builder.mark_tools_lower_bound(
                     "affected_path_limit",
-                    "At least one Codex tool call changed more paths than Mallard can display.",
+                    "A tool call changed more files than Mallard can list.",
                 );
             }
             let turn_id = legacy_turn(builder);
@@ -2110,7 +2115,7 @@ fn consume_legacy_event(
             if paths_truncated {
                 builder.mark_tools_lower_bound(
                     "affected_path_limit",
-                    "At least one Codex tool call changed more paths than Mallard can display.",
+                    "A tool call changed more files than Mallard can list.",
                 );
             }
             builder.complete_tool(&call_id, status, source, true, affected_paths);
@@ -2184,9 +2189,10 @@ fn consume_legacy_event(
         | "modelverification"
         | "turnmoderationmetadata"
         | "safetybuffering" => {}
-        "" => {
-            builder.mark_all_lower_bound("malformed_event", "A Codex event had no discriminator.")
-        }
+        "" => builder.mark_all_lower_bound(
+            "malformed_event",
+            "Some entries of the session file couldn't be read and are left out.",
+        ),
         other => {
             if other.contains("tool")
                 || other.contains("command")
@@ -2195,7 +2201,7 @@ fn consume_legacy_event(
             {
                 builder.mark_tools_lower_bound(
                     "unknown_tool_event",
-                    "The Codex rollout contains a tool lifecycle event this Mallard version does not recognize.",
+                    "This session has entries this version of Mallard doesn't know. They are left out.",
                 );
             }
         }
@@ -2245,22 +2251,22 @@ pub(crate) fn build_timeline_index(
             if record_count > crate::codex_rollout::MAX_CODEX_RECORDS {
                 canonical.mark_all_lower_bound(
                     "record_limit",
-                    "The Codex transcript contains more records than Mallard can index.",
+                    "The session file is longer than Mallard can read. The rest is left out.",
                 );
                 legacy.mark_all_lower_bound(
                     "record_limit",
-                    "The Codex transcript contains more records than Mallard can index.",
+                    "The session file is longer than Mallard can read. The rest is left out.",
                 );
                 break 'segments;
             }
             if line == BoundedLine::Oversized {
                 canonical.mark_all_lower_bound(
                     "oversized_record",
-                    "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
+                    "A record in the session file is too large to read and is left out.",
                 );
                 legacy.mark_all_lower_bound(
                     "oversized_record",
-                    "At least one Codex record exceeded the 100-MiB timeline parsing limit.",
+                    "A record in the session file is too large to read and is left out.",
                 );
                 continue;
             }
@@ -2272,11 +2278,11 @@ pub(crate) fn build_timeline_index(
                 Err(_) => {
                     canonical.mark_all_lower_bound(
                         "malformed_record",
-                        "At least one Codex record was malformed and could not be indexed.",
+                        "Some lines of the session file couldn't be read and are left out.",
                     );
                     legacy.mark_all_lower_bound(
                         "malformed_record",
-                        "At least one Codex record was malformed and could not be indexed.",
+                        "Some lines of the session file couldn't be read and are left out.",
                     );
                     continue;
                 }
@@ -3792,6 +3798,38 @@ mod tests {
     }
 
     #[test]
+    fn a_call_without_output_is_an_incomplete_note_not_a_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                json!({"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"{\"cmd\":\"npm test\"}"}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(
+            index.counts.tool_calls.quality,
+            SessionCountQuality::LowerBound
+        );
+        let incomplete = index
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "incomplete_tool_call")
+            .unwrap();
+        // No output is in the rollout, so nothing it recorded is missing.
+        assert_eq!(incomplete.severity, NoticeSeverity::Info);
+        assert_eq!(
+            incomplete.message,
+            "Tool calls marked incomplete never recorded a result. They were most likely interrupted."
+        );
+    }
+
+    #[test]
     fn completed_web_search_extensions_are_not_reported_as_incomplete() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().join("project");
@@ -3857,7 +3895,7 @@ mod tests {
         assert_eq!(prompt.quality, SessionCountQuality::Exact);
         assert_eq!(response.quality, SessionCountQuality::LowerBound);
         assert!(index.warnings.iter().any(|warning| {
-            warning.code == "message_preview_truncated" && warning.message.contains("1-MiB")
+            warning.code == "message_preview_truncated" && warning.message.contains("1 MiB")
         }));
 
         let query = SessionTimelineQuery {

@@ -2430,14 +2430,14 @@ export default function StorageCatalogPage({
   );
 
   /* Add from Mallard Cloud: someone else's item, shared with you or by
-     address or invite code. The list's own verb, beside the list it adds
+     address or invitation code. The list's own verb, beside the list it adds
      to, with the sidebar's + for adding a row. Mallard Cloud only. */
   const addFromCloud = managedCloud && (
     <button
       type="button"
       className="btn"
       aria-haspopup="dialog"
-      title={`Someone else’s ${noun(1)}: shared with you, or by address or invite code`}
+      title={`Someone else’s ${noun(1)}: shared with you, or by address or invitation code`}
       disabled={busy || loading || mode.kind !== "list" || !storageId || !!pageCloud}
       onClick={() => setConnectReason({ kind: "add" })}
     >

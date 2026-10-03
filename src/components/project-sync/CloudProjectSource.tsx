@@ -61,6 +61,9 @@ interface Props {
   storages: StorageSummary[];
   /** The account to start on, such as the one Finish setup just added. */
   initialStorageId: string | null;
+  /** The repository the page was opened for (a link from the website),
+   *  looked up as a pasted address is once an account is chosen. */
+  initialAddress?: string | null;
   providers: ProviderDescriptor[];
   profiles: ProviderProfileSummary[];
   projects: LocalProjectSummary[];
@@ -326,6 +329,7 @@ export default function CloudProjectSource({
   doors,
   storages,
   initialStorageId,
+  initialAddress = null,
   providers,
   profiles,
   projects,
@@ -597,7 +601,11 @@ export default function CloudProjectSource({
                   );
                 })}
               </div>
-              {!storage && <small className="sync-setup-hint">Choose an account first.</small>}
+              {!storage && (
+                <small className="sync-setup-hint">
+                  {initialAddress ? `Choose an account for ${initialAddress}.` : "Choose an account first."}
+                </small>
+              )}
             </>
           )}
         </section>
@@ -615,6 +623,7 @@ export default function CloudProjectSource({
               offerNew={false}
               mode="clone"
               disabled={working}
+              initialAddress={initialAddress}
               onSelect={chooseRepository}
             />
           </section>

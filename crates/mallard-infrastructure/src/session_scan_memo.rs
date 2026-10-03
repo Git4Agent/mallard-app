@@ -91,6 +91,7 @@ mod tests {
             session_id: session_id.to_string(),
             authorized_home: PathBuf::from("/work/project"),
             is_internal_subagent: false,
+            is_empty: false,
         }
     }
 

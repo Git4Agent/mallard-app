@@ -518,14 +518,14 @@ impl ClaudeTimelineBuilder {
         if self.events.len() >= MAX_TIMELINE_EVENTS {
             self.mark_all_lower_bound(
                 "timeline_event_limit",
-                "The Claude transcript contains more timeline events than Mallard can index.",
+                "This session has more events than Mallard can show. The rest are left out.",
             );
             return;
         }
         let quality = if text_len > timeline_message_preview_bytes() {
             self.warning(
                 "message_preview_truncated",
-                "At least one Claude message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
+                "Messages over 1 MiB are cut short here. The session file keeps the full text.",
                 NoticeSeverity::Warning,
             );
             SessionCountQuality::LowerBound
@@ -638,7 +638,7 @@ impl ClaudeTimelineBuilder {
         if self.events.len() >= MAX_TIMELINE_EVENTS {
             self.mark_tools_lower_bound(
                 "timeline_event_limit",
-                "The Claude transcript contains more tool calls than Mallard can index.",
+                "This session has more events than Mallard can show. The rest are left out.",
             );
             self.truncated = true;
             return;
@@ -698,7 +698,7 @@ impl ClaudeTimelineBuilder {
         let Some(position) = position else {
             self.mark_tools_lower_bound(
                 "orphan_tool_result",
-                "A Claude tool result had no durable matching tool-use block.",
+                "A tool result had no matching call and is left out.",
             );
             return;
         };
@@ -744,7 +744,7 @@ impl ClaudeTimelineBuilder {
             if self.events.len() >= MAX_TIMELINE_EVENTS {
                 self.mark_all_lower_bound(
                     "timeline_event_limit",
-                    "The Claude transcript contains more visible events than Mallard can index.",
+                    "This session has more events than Mallard can show. The rest are left out.",
                 );
                 break;
             }
@@ -769,7 +769,7 @@ impl ClaudeTimelineBuilder {
                 quality = SessionCountQuality::LowerBound;
                 self.warning(
                     "message_preview_truncated",
-                    "At least one Claude message exceeds the 1-MiB timeline display limit and is shown as a truncated preview.",
+                    "Messages over 1 MiB are cut short here. The session file keeps the full text.",
                     NoticeSeverity::Warning,
                 );
             }
@@ -793,7 +793,7 @@ impl ClaudeTimelineBuilder {
         if self.inferred_responses {
             self.warning(
                 "message_phase_inferred",
-                "At least one Claude assistant message lacked a terminal stop reason, so its final-response placement was inferred.",
+                "Some replies had no end marker, so Mallard guessed which are final replies and which are steps.",
                 NoticeSeverity::Info,
             );
         }
@@ -808,9 +808,14 @@ impl ClaudeTimelineBuilder {
             }
         }
         if incomplete {
-            self.mark_tools_lower_bound(
+            // The transcript holds no result for these calls, most often
+            // because a turn was interrupted. The tool counts become a floor,
+            // but nothing the transcript recorded is missing: `Info`.
+            self.degraded_tools = true;
+            self.warning(
                 "incomplete_tool_call",
-                "At least one Claude tool-use block has no durable matching result.",
+                "Tool calls marked incomplete never recorded a result. They were most likely interrupted.",
+                NoticeSeverity::Info,
             );
         }
 
@@ -1226,7 +1231,7 @@ fn consume_claude_record(
                     else {
                         builder.mark_tools_lower_bound(
                             "tool_result_missing_id",
-                            "A Claude tool result had no tool-use ID.",
+                            "Some tool calls couldn't be paired with their results.",
                         );
                         continue;
                     };
@@ -1244,14 +1249,14 @@ fn consume_claude_record(
             let Some(message) = value.get("message") else {
                 builder.mark_all_lower_bound(
                     "malformed_assistant_record",
-                    "A Claude assistant record had no message payload.",
+                    "Some entries of the session file couldn't be read and are left out.",
                 );
                 return;
             };
             let Some(blocks) = message.get("content").and_then(Value::as_array) else {
                 builder.mark_all_lower_bound(
                     "malformed_assistant_content",
-                    "A Claude assistant record had no content block array.",
+                    "Some entries of the session file couldn't be read and are left out.",
                 );
                 return;
             };
@@ -1302,7 +1307,7 @@ fn consume_claude_record(
                             .unwrap_or_else(|| {
                                 builder.mark_tools_lower_bound(
                                     "tool_use_missing_id",
-                                    "A Claude tool-use block had no provider call ID.",
+                                    "Some tool calls couldn't be paired with their results.",
                                 );
                                 format!("offset-{}-{block_index}", source.offset)
                             });
@@ -1347,7 +1352,7 @@ fn consume_claude_record(
                         } else {
                             builder.mark_tools_lower_bound(
                                 "tool_result_missing_id",
-                                "A Claude tool result had no tool-use ID.",
+                                "Some tool calls couldn't be paired with their results.",
                             );
                         }
                     }
@@ -1355,7 +1360,7 @@ fn consume_claude_record(
                     | "searchresult" => {}
                     other if other.contains("tool") => builder.mark_tools_lower_bound(
                         "unknown_tool_block",
-                        "The Claude transcript contains a tool content block this Mallard version does not recognize.",
+                        "This session has entries this version of Mallard doesn't know. They are left out.",
                     ),
                     _ => {}
                 }
@@ -1447,14 +1452,14 @@ pub(crate) fn build_timeline_index(
         if record_count > MAX_CLAUDE_RECORDS {
             builder.mark_all_lower_bound(
                 "record_limit",
-                "The Claude transcript contains more records than Mallard can index.",
+                "The session file is longer than Mallard can read. The rest is left out.",
             );
             break;
         }
         if line == BoundedLine::Oversized {
             builder.mark_all_lower_bound(
                 "oversized_record",
-                "At least one Claude record exceeded the bounded session timeline parsing limit.",
+                "A record in the session file is too large to read and is left out.",
             );
             continue;
         }
@@ -1466,7 +1471,7 @@ pub(crate) fn build_timeline_index(
             Err(_) => {
                 builder.mark_all_lower_bound(
                     "malformed_record",
-                    "At least one Claude record was malformed and could not be indexed.",
+                    "Some lines of the session file couldn't be read and are left out.",
                 );
                 continue;
             }
@@ -2752,6 +2757,8 @@ mod tests {
         assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::LowerBound);
         assert_eq!(index.warnings.len(), 1);
         assert_eq!(index.warnings[0].code, "incomplete_tool_call");
+        // No result is in the transcript, so nothing it recorded is missing.
+        assert_eq!(index.warnings[0].severity, NoticeSeverity::Info);
         let tool = index.events[0].tool.as_ref().unwrap();
         assert_eq!(tool.status, SessionToolCallStatus::Incomplete);
         assert!(tool.result_source.is_none());

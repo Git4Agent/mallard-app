@@ -35,14 +35,14 @@ const SEVERITY_RANK: Record<NoticeSeverity, number> = {
   success: 0,
 };
 
-const SEVERITY_LABEL: Record<NoticeSeverity, string> = {
+export const SEVERITY_LABEL: Record<NoticeSeverity, string> = {
   danger: "Error",
   warning: "Warning",
   info: "Note",
   success: "Done",
 };
 
-const SEVERITY_ICON: Record<NoticeSeverity, IconName> = {
+export const SEVERITY_ICON: Record<NoticeSeverity, IconName> = {
   danger: "octagon-x",
   warning: "alert-triangle",
   info: "info",

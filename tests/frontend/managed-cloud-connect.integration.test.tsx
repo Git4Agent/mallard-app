@@ -136,8 +136,8 @@ test("the picker names repositories by address and never by bundle id", () => {
       onSelect={() => undefined}
     />,
   );
-  assert.match(html, /address or invite code<\/span>/i, "the code has a place before any lookup");
-  assert.match(html, /placeholder="Search, or paste a link, owner\/name or an invite code"/, "words filter; a link, an address or a code is looked up");
+  assert.match(html, /address or invitation code<\/span>/i, "the code has a place before any lookup");
+  assert.match(html, /placeholder="Search, or paste a link, owner\/name or an invitation code"/, "words filter; a link, an address or a code is looked up");
   assert.equal(html.match(/<input/g)?.length, 1, "one field takes the address or the code");
   assert.match(html, /Look up/);
   assert.doesNotMatch(html, /Invitation code \(optional\)|Join repository/);
@@ -232,7 +232,7 @@ test("the connect dialog for a Mallard Cloud storage takes an address, empty acc
   assert.doesNotMatch(html, /Repo identity|Paste a repository address|Connecting keeps/);
   assert.match(html, /<strong>Mallard Cloud · Rika321<\/strong>/);
   assert.doesNotMatch(html, /Mallard Cloud Rika321 · Rika321/);
-  assert.match(html, /address or invite code/i);
+  assert.match(html, /address or invitation code/i);
   assert.match(html, /Loading…/);
   assert.doesNotMatch(html, /Paste an address or a code/);
   assert.doesNotMatch(html, /Current local repo/, "no bundle id in the context line");

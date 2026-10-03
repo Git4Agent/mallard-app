@@ -949,7 +949,7 @@ test("the Pull review meters what it would install in both pinned zones, and eac
   assert.match(html, /role="meter"[^>]*aria-label="Pull size"[^>]*aria-valuemax="536870912"[^>]*aria-valuenow="0"/);
   assert.match(html, /aria-valuetext="This pull · 0 B of 512 MB"/);
   // Nothing is ticked at open, so nothing refuses and the meter is empty.
-  assert.doesNotMatch(html, /sync-review-budget-sentence|class="sync-review-budget-track over"/);
+  assert.doesNotMatch(html, /sync-review-footer-note|class="sync-review-budget-track over"/);
   // The list row prints what a pull of it installs.
   assert.match(html, /Conversation · Codex · 96 MB/);
 });

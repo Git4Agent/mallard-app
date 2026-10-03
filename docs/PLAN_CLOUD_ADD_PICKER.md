@@ -1,14 +1,14 @@
 # Plan: one Mallard Cloud picker for pets and projects (S1 · Tabs + rows)
 
-Picked by the owner, 2026-10-02, on `cloud-add-mockup.html` (`?style=rows`).
+Picked by the owner, 2026-10-02, on `mockups/cloud-add-mockup.html` (`?style=rows`).
 Round 1 settled the flow; round 2 the style. This is the cutover.
 
 **Status (2026-10-02): implemented**, uncommitted. Bars: Rust lib
 managed-cloud tests 27/27, frontend integration 524/524, `npm run build`
 green, clippy clean on the touched files. Live checks: the real
 `CatalogConnectDialog` and New project › From Mallard Cloud on the stubbed
-harness pages (`/catalog-cloud-add-mockup.html?scene=head`, click Add from
-Mallard Cloud…; `/cloud-project-live.html?accounts=one`, the second door).
+harness pages (`/mockups/catalog-cloud-add-mockup.html?scene=head`, click Add from
+Mallard Cloud…; `/mockups/cloud-project-live.html?accounts=one`, the second door).
 Open: a pass in the packaged app against the real service.
 
 ## What changes for the person

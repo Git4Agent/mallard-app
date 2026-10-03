@@ -22,6 +22,8 @@ import type {
   R2SetupProgress,
   ActivityLogCleanupRequest,
   AgentFolderList,
+  AppLinkAnswer,
+  AppLinkArrival,
   AppSettings,
   AppUpdateStatus,
   ActivityLogCleanupResult,
@@ -366,6 +368,15 @@ export const projectSyncApi = {
    *  a resolved address does. */
   acceptManagedCloudInvitation: (storageId: string, code: string, localRepositoryFingerprint: string | null) =>
     invoke<ManagedCloudRepositoryResolution>("accept_managed_cloud_invitation", { storageId, code, localRepositoryFingerprint }),
+  /** The `mallard://` link that is waiting, once: at startup and whenever
+   *  `onAppLink` fires. Null when none is. */
+  takeAppLink: () => invoke<AppLinkArrival | null>("take_app_link"),
+  /** A link arrived; the handler takes it. */
+  onAppLink: (handler: () => void) => listen("app-link", () => handler()),
+  /** What each Mallard Cloud storage on the link's host sees at its
+   *  address. Reads only. */
+  resolveAppLink: (host: string, address: string) =>
+    invoke<AppLinkAnswer>("resolve_app_link", { host, address }),
   /** Where a project got from Mallard Cloud may put its folder. Reads only. */
   probeCloudProjectFolder: (destination: string, repositoryFingerprint: string | null) =>
     invoke<CloudProjectFolderProbe>("probe_cloud_project_folder", { destination, repositoryFingerprint }),
@@ -420,6 +431,9 @@ export const projectSyncApi = {
     recipe: BundleRecipe,
     credentialRedactionEnabled: boolean,
     projectContentReviewToken?: string | null,
+    /** The Files step was on screen with its scanned rows: a file left
+     *  unticked there is remembered as left out. */
+    projectFilesShown = false,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
     subagentSelections: Record<string, import("../../types").SubagentSelection> = {},
@@ -431,6 +445,7 @@ export const projectSyncApi = {
     recipe,
     credentialRedactionEnabled,
     projectContentReviewToken: projectContentReviewToken ?? null,
+    projectFilesShown,
     projectContentRemovalIds,
     acknowledgedWarningDigests,
     subagentSelections,

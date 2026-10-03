@@ -68,7 +68,9 @@ import { PathBarBelow, PathBarMenu, type PathBarMenuGroup } from "../sync-review
 import { focusMenuEdge } from "../sync-review/menuKeyboard";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
+  projectFileSelectOffer,
   pullRequiredCopy,
+  pushProjectFileWork,
   pushReviewDisabledReason,
   recommendedPushSelection,
   sanitizePushSelection,
@@ -87,7 +89,10 @@ import StorageCatalogPage, {
   type CatalogStorageOption,
 } from "../storage-catalog/StorageCatalogPage";
 import CatalogIndexPage from "../storage-catalog/CatalogIndexPage";
-import AddCatalogScopeWorkspace, { type CatalogCloudLanding } from "../storage-catalog/AddCatalogScopeWorkspace";
+import AddCatalogScopeWorkspace, { type CatalogCloudLanding, type CatalogCloudStart } from "../storage-catalog/AddCatalogScopeWorkspace";
+import AppLinkSheet from "../app-link/AppLinkSheet";
+import { INVALID_LINK, linkWaits, listingPage, serviceHost, type LinkDestination, type LinkVerdict } from "../app-link/appLink";
+import { useAppLink } from "../app-link/useAppLink";
 import { storageCatalogApi } from "../storage-catalog/api";
 import type { CatalogCapabilityDescriptor, CatalogScopeDto, CatalogScopeView } from "../storage-catalog/types";
 import {
@@ -275,6 +280,9 @@ interface PendingPush {
   threadComparisonError: string | null;
   projectContentInventory: ProjectContentInventory | null;
   projectContentScanned: boolean;
+  /** The Files step was on screen with its scanned rows. From then on a
+   *  file left unticked is a choice, and the push remembers it as left out. */
+  projectFilesShown: boolean;
   showProjectFiles: boolean;
 }
 
@@ -349,6 +357,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [catalogCapabilities, setCatalogCapabilities] = useState<CatalogCapabilityDescriptor[]>([]);
   /* The Kind a door chose on the way into Add; null when the verb was bare. */
   const [catalogAddChoiceKey, setCatalogAddChoiceKey] = useState<string | null>(null);
+  /* The repository a link opened Add for: From Mallard Cloud, on its account. */
+  const [catalogAddCloud, setCatalogAddCloud] = useState<CatalogCloudStart | null>(null);
   const [catalogScopeId, setCatalogScopeId] = useState<string | null>(null);
   /* An item Add from Mallard Cloud just brought in: its row opens on its page. */
   const [catalogLandingItem, setCatalogLandingItem] = useState<{ scopeId: string; resourceId: string } | null>(null);
@@ -416,6 +426,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
      review list. The list page reports it and clears it when it goes. */
   const [sessionActionError, setSessionActionError] = useState<string | null>(null);
   const [pushReviewStep, setPushReviewStep] = useState<SyncReviewStep>("history");
+  const pushFilesScanned = pendingPush?.projectContentScanned ?? false;
+  useEffect(() => {
+    if (pushReviewStep !== "project_files" || !pushFilesScanned || projectContentLoading) return;
+    setPendingPush((current) => (
+      current && !current.projectFilesShown ? { ...current, projectFilesShown: true } : current
+    ));
+  }, [pushReviewStep, pushFilesScanned, projectContentLoading]);
   // A gate the push (or a pull plan) cannot get past never opens a review;
   // it lands as a banner on the storage card with the way forward on it.
   const [storageNotice, setStorageNotice] = useState<StorageNotice | null>(null);
@@ -458,9 +475,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [storageSetupDrafts, setStorageSetupDrafts] = useState<StorageSetupDraft[]>([]);
   /* Setup is two views: the folder, before any draft exists, then the
      draft's page. Every way out clears both at once. The folder view opens
-     on one of New project's doors, and From Mallard Cloud on an account. */
+     on one of New project's doors, and From Mallard Cloud on an account and,
+     from a link, on the repository it named. */
   const [setupView, setSetupView] = useState<
-    | { kind: "folder"; source?: NewProjectSource; storageId?: string | null }
+    | { kind: "folder"; source?: NewProjectSource; storageId?: string | null; address?: string | null }
     | { kind: "draft"; draftId: string }
     | null
   >(null);
@@ -470,6 +488,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // Only storage setup started from New project returns there after saving.
   const cloudProjectSetupStorageRef = useRef<string | null>(null);
   const cloudLandingRef = useRef<string | null>(null);
+  // A link set aside for a Mallard Cloud account is let through when the
+  // storage that setup just saved is opened.
+  const appLinkLandingRef = useRef<string | null>(null);
   const catalogStorageSetupRef = useRef<{ scopeId: string; draftId: string | null; storageId?: string } | null>(null);
   const catalogStorageLandingRef = useRef<{ scopeId: string; storageId: string } | null>(null);
   const [catalogPreferredStorage, setCatalogPreferredStorage] = useState<Record<string, string>>({});
@@ -861,6 +882,31 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const catalogCloudAccounts = catalogStorages
     .filter((storage) => storage.provider === "managed_cloud" && storage.account_login)
     .map((storage) => ({ id: storage.id, name: storage.name, account_login: storage.account_login ?? "" }));
+  /* Open in Mallard: the link the website handed over. A repository's
+     opens its sheet, and following it is the sheet's verb; the listing's
+     goes straight to Projects or the Catalog. Either waits under the bar
+     while the shell is in the middle of something. A link only reads, and
+     where it goes is navigation a sidebar click does. */
+  const appLink = useAppLink({
+    ready: hostIdentityShellReady,
+    waits: () => linkWaits({
+      busy: busyRef.current,
+      reviewOpen: Boolean(pendingPush || restorePlan || preparingReview),
+      dialogOpen: document.querySelector("dialog[open]:not(.app-link-sheet)") !== null,
+    }),
+    context: () => ({
+      links: config.links,
+      projects,
+      scopes: catalogScopes,
+      capabilities: catalogCapabilities,
+      // The saved config, not this render's: a storage that setup has just
+      // added counts at once.
+      cloudHosts: configRef.current.storages
+        .filter(isManagedCloudStorage)
+        .flatMap((storage) => serviceHost(managedCloudAccount(storage).origin) ?? []),
+    }),
+    go: (destination) => void goToLinkDestination(destination),
+  });
   // The project workspace names itself in its path bar, so the titlebar stays
   // silent there and speaks only for the screens that carry no trail.
   const workspaceTitle = activeDraftSummary?.display_name
@@ -1555,6 +1601,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await beginAddProject({ source: "cloud", storageId });
       return;
     }
+    // A link that waited for this account: the listing's goes to its own
+    // page instead; a repository's opens its sheet over this storage's.
+    const linkLanding = appLinkLandingRef.current;
+    appLinkLandingRef.current = null;
+    if (linkLanding === storageId && appLink.resume()) return;
     if (!(await saveStorageDraftBeforeNavigation())) return;
     closeProjectSubview();
     setSetupView(null);
@@ -1610,7 +1661,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   /** Add project opens the setup page at its Folder field. Nothing is
       written until a folder is chosen there. */
-  const beginAddProject = async (open?: { source: NewProjectSource; storageId?: string | null }) => {
+  const beginAddProject = async (open?: { source: NewProjectSource; storageId?: string | null; address?: string | null }) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
     setSetupView({ kind: "folder", ...open });
@@ -1664,13 +1715,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   /** Opens the Add-row workspace: Kind, then provider home, and nothing else.
-      A door arrives with Kind already chosen. */
-  const beginAddCatalogScope = async (choiceKey?: string) => {
+      A door arrives with Kind already chosen; a link, with the repository
+      it named on From Mallard Cloud. */
+  const beginAddCatalogScope = async (choiceKey?: string, cloud?: CatalogCloudStart) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
     setSetupView(null);
     setCatalogIndexOpen(false);
     setCatalogAddChoiceKey(choiceKey ?? null);
+    setCatalogAddCloud(cloud ?? null);
     setAddingCatalogScope(true);
   };
 
@@ -2061,11 +2114,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           : null,
         projectContentInventory: lockedProjectContentInventory,
         projectContentScanned: lockedProjectContentInventory !== null,
+        projectFilesShown: false,
         showProjectFiles: scope.kind === "project" && (!isGitRepository || lockedProjectContentInventory !== null),
       });
       // A session's own review has nothing to select: its session travels
       // whole, and one past the limit is refused there instead of unticked.
       setPushSelected(scope.kind === "session" ? new Set([scope.resource_id]) : new Set(projectDefaults));
+      // A non-Git folder is walked with its review, so the Sessions step
+      // already knows which stored files changed and how many new ones wait.
+      if (scope.kind === "project" && !isGitRepository) {
+        void scanProjectFiles(projectId, storageId, new Set());
+      }
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
     } catch (reason) {
@@ -2111,17 +2170,26 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const scanPendingProjectFiles = async () => {
-    const pending = pendingPush;
-    if (!pending || pending.scope.kind === "session" || projectContentLoading) return;
+  /* The folder walk behind the Files step. It ticks what the recipe already
+     holds — a stored file that changed here travels — and nothing else: a new
+     file waits for its own tick. Only the latest walk clears the wait, so one
+     left over from a closed review cannot end a newer one's early. */
+  const projectScanRun = useRef(0);
+  const scanProjectFiles = async (
+    projectId: string,
+    storageId: string,
+    removals: ReadonlySet<string>,
+  ) => {
     const workflowEpoch = hostWorkflowEpoch.current;
+    projectScanRun.current += 1;
+    const run = projectScanRun.current;
     setProjectContentLoading(true);
     setPushError(null);
     try {
-      const inspected = await projectSyncApi.inspectProjectFiles(pending.projectId, pending.storageId);
+      const inspected = await projectSyncApi.inspectProjectFiles(projectId, storageId);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingPush((current) => {
-        if (!current || current.projectId !== pending.projectId || current.storageId !== pending.storageId) {
+        if (!current || current.projectId !== projectId || current.storageId !== storageId) {
           return current;
         }
         const previousGenericIds = new Set((current.projectContentInventory?.entries ?? [])
@@ -2135,9 +2203,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           for (const entry of inspected.entries) {
             const resourceId = entry.descriptor.resource_id;
             const wasSelected = currentSelection.has(resourceId);
-            const shouldSelect = !pushProjectContentRemovals.has(resourceId) && (
-              wasSelected || entry.selected_in_recipe || entry.selected_after_scan
-            );
+            const shouldSelect = !removals.has(resourceId) && (wasSelected || entry.selected_in_recipe);
             if (shouldSelect) next.add(resourceId);
             else next.delete(resourceId);
           }
@@ -2149,12 +2215,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             .filter((digest): digest is string => Boolean(digest)));
           return new Set([...currentAcknowledgements].filter((digest) => currentWarningDigests.has(digest)));
         });
-        const nextDefaults = new Set(current.projectDefaults);
-        inspected.entries.forEach((entry) => {
-          if (entry.selected_in_recipe || entry.selected_after_scan) {
-            nextDefaults.add(entry.descriptor.resource_id);
-          }
-        });
+        const nextDefaults = new Set([...current.projectDefaults, ...projectFileSelectOffer(inspected)]);
         return {
           ...current,
           projectContentInventory: inspected,
@@ -2166,8 +2227,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setPushError(errorMessage(reason));
     } finally {
-      if (hostWorkflowEpoch.current === workflowEpoch) setProjectContentLoading(false);
+      if (hostWorkflowEpoch.current === workflowEpoch && projectScanRun.current === run) {
+        setProjectContentLoading(false);
+      }
     }
+  };
+
+  // The Files step's Rescan.
+  const scanPendingProjectFiles = () => {
+    if (!pendingPush || pendingPush.scope.kind === "session" || projectContentLoading) return;
+    void scanProjectFiles(pendingPush.projectId, pendingPush.storageId, pushProjectContentRemovals);
   };
 
   // Narrow post-push reconcile, modeled on reconcileExternalChanges: the push
@@ -2211,6 +2280,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     storageId: string,
     recipe: BundleRecipe,
     projectContentReviewToken: string | null = null,
+    projectFilesShown = false,
     projectContentRemovalIds: string[] = [],
     acknowledgedWarningDigests: string[] = [],
   ) => {
@@ -2228,6 +2298,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         recipe,
         pendingPush.credentialRedactionEnabled,
         projectContentReviewToken,
+        projectFilesShown,
         projectContentRemovalIds,
         acknowledgedWarningDigests,
         Object.fromEntries((pendingPush?.threadComparison?.entries ?? []).map((entry) => [entry.resource_id, entry.subagent_selection])),
@@ -2343,13 +2414,21 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     // Capture only the visible selection. The backend retains stored conversations.
     const recipe = recipeWithSelection(baseRecipe, resources, safeSelection);
     for (const resourceId of pushProjectContentRemovals) delete recipe.entries[resourceId];
+    const filesInventory = pendingPush.projectContentInventory;
+    // The scan's token makes the push walk the folder again and refuse a
+    // folder that changed since. A push with no file work skips both.
+    const reviewsFiles = filesInventory !== null && pushProjectFileWork(
+      filesInventory,
+      safeSelection,
+      pushProjectContentRemovals,
+      pendingPush.projectFilesShown,
+    ) !== null;
     await publishProject(
       pendingPush.projectId,
       pendingPush.storageId,
       recipe,
-      pendingPush.projectContentInventory?.eligibility.state === "eligible"
-        ? pendingPush.projectContentInventory.review_token ?? null
-        : null,
+      reviewsFiles ? filesInventory.review_token ?? null : null,
+      reviewsFiles && pendingPush.projectFilesShown,
       [...pushProjectContentRemovals],
       [...pushWarningAcknowledgements],
     );
@@ -2988,11 +3067,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   );
 
   // One way into a project, shared by the sidebar and the path bar's repo crumb.
-  const openProject = async (projectId: string) => {
+  const openProject = async (projectId: string, preferredStorage?: string | null) => {
     if (!(await closeWorkspaceSettings())) return;
     setSetupView(null);
     if (restorePlan) closePullReview();
-    await selectProject(projectId);
+    await selectProject(projectId, preferredStorage);
   };
 
   const configureProjectBinding = (projectId: string) => {
@@ -3201,6 +3280,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const committed = saved.storages.find((candidate) => candidate.storage_id === result.storage_id);
       const storageName = committed?.name || "Storage";
       notify(`${result.replaced ? "Updated" : "Connected"} ${storageName}.`);
+      // A link set aside for a Mallard Cloud account has one now.
+      if (!result.replaced && isManagedCloudStorage(committed) && appLink.awaitsAccount()) {
+        appLinkLandingRef.current = result.storage_id;
+      }
       if (cloudProjectSetupStorageRef.current === result.storage_id) {
         cloudProjectSetupStorageRef.current = null;
         if (!result.replaced && isManagedCloudStorage(committed)) cloudLandingRef.current = result.storage_id;
@@ -3451,6 +3534,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       projectContentRemovals: pushProjectContentRemovals,
       deletionApproved: pushDeletionApproved,
       projectContentLoading,
+      projectFilesShown: pendingPush.projectFilesShown,
       listState: pendingPushListState,
       gitHistoryChanged: pendingPush.gitHistoryChanged,
       sessionScope: pushSessionScope !== null,
@@ -3474,9 +3558,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     /* Pull already said why its button was withheld; Push said nothing, so a
        refusal in the bar had no explanation anywhere near it. */
     continueTitle: pendingPushDisabledReason,
-    /* Until the rows land, both buttons wear the wait itself. */
-    continueLabel: pendingPushListState === "loading" ? "Loading sessions…" : null,
-    continuePending: pendingPushListState === "loading",
+    /* Until the rows land and the folder is walked, both buttons wear the
+       wait itself. */
+    continueLabel: pendingPushListState === "loading"
+      ? "Loading sessions…"
+      : projectContentLoading ? "Scanning files…" : null,
+    continuePending: pendingPushListState === "loading" || projectContentLoading,
     onClose: closePushReview,
     content: pushSessionEntry && pendingPush.threadComparison ? (
       <SessionPushReview
@@ -3501,7 +3588,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         resources={pushResources(pendingPush)}
         selected={pushSelected}
         projectDefaults={pendingPush.projectDefaults}
-        busy={busy || projectContentLoading}
+        busy={busy}
         threadComparisonError={pendingPush.threadComparisonError}
         project={pendingPush.project}
         binding={pushActivityBinding}
@@ -3512,6 +3599,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         projectContentInventory={pendingPush.projectContentInventory}
         projectContentScanned={pendingPush.projectContentScanned}
         projectContentLoading={projectContentLoading}
+        projectFilesShown={pendingPush.projectFilesShown}
         projectContentRemovals={pushProjectContentRemovals}
         acknowledgedWarningDigests={pushWarningAcknowledgements}
         deletionApproved={pushDeletionApproved}
@@ -3529,7 +3617,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           return next;
         })}
         onSelectionChange={setPushSelected}
-        onScanProjectFiles={() => void scanPendingProjectFiles()}
+        onScanProjectFiles={scanPendingProjectFiles}
         onToggleProjectContentWarning={(warningDigest) => setPushWarningAcknowledgements((current) => {
           const next = new Set(current);
           if (next.has(warningDigest)) next.delete(warningDigest);
@@ -3617,6 +3705,55 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       ),
     };
   })() : null;
+
+  /** Where a link goes, by the routes the sidebar uses. Nothing here
+      writes: every page it opens still waits for its own verb. */
+  const goToLinkDestination = async (to: LinkDestination) => {
+    switch (to.kind) {
+      case "projects":
+        await openProjectsIndex();
+        return;
+      case "catalog":
+        await openCatalogIndex();
+        return;
+      case "project":
+        await openProject(to.projectId, to.storageId);
+        return;
+      case "new_project":
+        await beginAddProject({ source: "cloud", storageId: to.storageId, address: to.address });
+        return;
+      case "catalog_item":
+        setError(null);
+        if (!(await closeWorkspaceSettings())) return;
+        setSetupView(null);
+        setCatalogPreferredStorage((current) => ({ ...current, [to.scopeId]: to.storageId }));
+        setCatalogLandingItem({ scopeId: to.scopeId, resourceId: to.resourceId });
+        setCatalogScopeId(to.scopeId);
+        return;
+      case "add_catalog_item":
+        await beginAddCatalogScope(undefined, { accountId: to.storageId, address: to.address });
+        return;
+      case "add_catalog_row":
+        await beginAddCatalogScope(to.choiceKey);
+        return;
+    }
+  };
+
+  /** The sheet's verb: go where the link's verdict says. A stop's verb asks
+      again, or sets Mallard Cloud up and leaves the link waiting for the
+      account. */
+  const followAppLink = async (verdict: LinkVerdict) => {
+    if (verdict.kind === "stop") {
+      if (verdict.action === "retry") appLink.retry();
+      if (verdict.action === "set_up") {
+        appLink.setAside();
+        await createStorageDraft("managed_cloud");
+      }
+      return;
+    }
+    appLink.drop();
+    await goToLinkDestination(verdict.destination);
+  };
 
   if (!hostIdentityStatus && hostIdentityError) {
     return (
@@ -3730,6 +3867,39 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       severity: notice.tone === "attention" ? "warning" : "success",
       message: notice.message,
       onDismiss: () => setNotice(null),
+    });
+  }
+  /* A link that arrived while the shell was in the middle of something, or
+     that waits for a Mallard Cloud account: it sits here until it is opened
+     or closed. A link that cannot be read has nothing to open. */
+  const heldLink = appLink.held;
+  if (heldLink?.phase === "waiting") {
+    const { link, id } = heldLink;
+    shellNotices.push(link.kind === "invalid" ? {
+      key: "app-link-waiting",
+      severity: INVALID_LINK.severity,
+      title: "Link",
+      message: INVALID_LINK.message,
+      dismissalId: String(id),
+      onDismiss: () => appLink.drop(id),
+    } : {
+      key: "app-link-waiting",
+      severity: "info",
+      title: "Link",
+      message: `${link.kind === "listing" ? listingPage(link) : link.address} is waiting.`,
+      dismissalId: String(id),
+      action: (
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          title={busy ? "Available when the current operation finishes" : undefined}
+          onClick={appLink.open}
+        >
+          Open
+        </button>
+      ),
+      onDismiss: () => appLink.drop(id),
     });
   }
   /* A project from Mallard Cloud whose GitHub repository could not be
@@ -3908,11 +4078,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         <PathBarBelow.Provider value={showsPathBar ? shellNoticeZone : null}>
         {addingCatalogScope ? (
           <AddCatalogScopeWorkspace
-            key={catalogAddChoiceKey ?? "any"}
+            key={`${catalogAddChoiceKey ?? "any"}:${catalogAddCloud ? `${catalogAddCloud.accountId}:${catalogAddCloud.address}` : ""}`}
             workflowEpoch={hostWorkflowEpoch.current}
             isWorkflowCurrent={(epoch) => hostWorkflowEpoch.current === epoch}
             busy={busy}
             initialChoiceKey={catalogAddChoiceKey}
+            initialCloud={catalogAddCloud}
             scopes={catalogScopes}
             storages={catalogStorages}
             cloudAccounts={catalogCloudAccounts}
@@ -3997,6 +4168,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             projects={projects}
             activeProjectId={activeProjectId}
             activeStorageId={activeStorageId}
+            rememberedStorageByProject={activeStorageByProject}
             activeProjectSubview={activeProjectSubview}
             bindings={bindings}
             profiles={profiles}
@@ -4073,7 +4245,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               />
             ) : choosingProjectFolder ? (
               <NewProjectFolderStep
-                key={`${setupFolderView?.source ?? "folder"}:${setupFolderView?.storageId ?? ""}`}
+                key={`${setupFolderView?.source ?? "folder"}:${setupFolderView?.storageId ?? ""}:${setupFolderView?.address ?? ""}`}
                 workflowEpoch={hostWorkflowEpoch.current}
                 isWorkflowCurrent={(workflowEpoch) => (
                   hostWorkflowEpoch.current === workflowEpoch
@@ -4085,6 +4257,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 busy={busy}
                 initialSource={setupFolderView?.source}
                 initialStorageId={setupFolderView?.storageId ?? null}
+                initialAddress={setupFolderView?.address ?? null}
                 onCancel={() => setSetupView(null)}
                 onChoose={(projectRoot) => void chooseProjectFolder(projectRoot)}
                 onOpenProject={openProject}
@@ -4147,6 +4320,18 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           actionLabel="Save project setup"
           onCancel={() => setEditingBinding(null)}
           onSubmit={(next) => void saveRemap(next)}
+        />
+      )}
+
+      {heldLink?.phase === "open" && (
+        /* One sheet per arrival: a newer link gets its own, and an older
+           sheet's late close lets go of nothing but its own link. */
+        <AppLinkSheet
+          key={heldLink.id}
+          subject={heldLink.link.kind === "repository" ? heldLink.link.address : null}
+          state={appLink.sheet}
+          onVerb={(verdict) => void followAppLink(verdict)}
+          onClose={() => appLink.drop(heldLink.id)}
         />
       )}
     </div>

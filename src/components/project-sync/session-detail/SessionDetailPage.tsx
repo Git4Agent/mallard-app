@@ -11,9 +11,10 @@ import type {
   SessionTimelineEvent,
 } from "../../../types";
 import Icon from "../../Icons";
-import { NoticeZone, type NoticeItem, type NoticeTiming } from "../../notice/Notice";
+import { NoticeZone, type NoticeItem } from "../../notice/Notice";
 import { projectSyncApi } from "../api";
 import LoadingScaffold from "../../LoadingScaffold";
+import SessionDetailBack, { type SessionBackTarget } from "./SessionDetailBack";
 import SessionDetailHeader from "./SessionDetailHeader";
 import SessionDetailTimeline from "./SessionDetailTimeline";
 import SessionDetailToolbar from "./SessionDetailToolbar";
@@ -28,6 +29,7 @@ import {
   sessionDetailFilterFingerprint,
   sessionDetailFilterToggles,
   type SessionDetailFilters,
+  type SessionPushGate,
   sessionPushFacts,
 } from "./sessionDetailModel";
 import type { PushSessionFacts } from "../ProjectActivityPage";
@@ -64,6 +66,8 @@ interface Props {
   projectRoot: string;
   resourceId: string;
   occurrenceKey: string;
+  /** The page's back button, in every state the page has. */
+  back: SessionBackTarget;
   /**
    * Reports the loaded session's identity and refresh handle for the path bar.
    * Called with null while the detail is still loading or has failed, and once
@@ -73,6 +77,9 @@ interface Props {
   /** Opens another session page in this workspace — an agent's transcript,
    *  or the parent an agent page came from. */
   onOpenSession?: (resourceId: string) => void;
+  /** A hold on this session's Push that the user clears, from the workspace's
+   *  comparison. */
+  pushGate: SessionPushGate | null;
 }
 
 function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarning[] {
@@ -82,8 +89,8 @@ function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarnin
 }
 
 type SessionDetailEntryStateProps =
-  | { state: "loading" }
-  | { state: "failed"; error: string; onRetry: () => void };
+  | { state: "loading"; back: SessionBackTarget }
+  | { state: "failed"; back: SessionBackTarget; error: string; onRetry: () => void };
 
 function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
   if (props.state === "loading") {
@@ -91,12 +98,14 @@ function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
     // scaffold is a quiet named region.
     return (
       <section className="session-detail-page session-detail-entry-state" aria-label="Loading session detail">
+        <SessionDetailBack target={props.back} />
         <LoadingScaffold shape="detail" label="Loading session detail" />
       </section>
     );
   }
   return (
     <section className="session-detail-page session-detail-entry-state" aria-labelledby="session-detail-entry-heading">
+      <SessionDetailBack target={props.back} />
       <div className="session-detail-state error" role="alert">
         <Icon name="alert-triangle" size={24} />
         <h1 id="session-detail-entry-heading">Session detail unavailable</h1>
@@ -112,8 +121,10 @@ export default function SessionDetailPage({
   projectRoot,
   resourceId,
   occurrenceKey,
+  back,
   onHeaderChange,
   onOpenSession,
+  pushGate,
 }: Props) {
   const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
@@ -408,15 +419,24 @@ export default function SessionDetailPage({
     return detailError ? (
       <SessionDetailEntryState
         state="failed"
+        back={back}
         error={detailError}
         onRetry={() => void loadDetail(false)}
       />
-    ) : <SessionDetailEntryState state="loading" />;
+    ) : <SessionDetailEntryState state="loading" back={back} />;
   }
 
-  const warnings = mergeWarnings(detail.warnings, timelineWarnings);
+  /* How the transcript was read: the chip at the end of the facts. A running
+     session's last call is in flight, so it has no result yet and its row
+     already says so — the note about calls without one waits for the end. */
+  const notes = mergeWarnings(detail.warnings, timelineWarnings)
+    .filter((warning) => !(detail.is_active && warning.code === "incomplete_tool_call"));
 
-  /* One box takes the loudest action, snapshot, or backend notice. */
+  /* The box holds only what happened while the page was open: a failed
+     action, or a snapshot that moved under a page request. Both arrive after
+     the page has painted, so the box announces — the snapshot banner
+     especially, since its Refresh button is the only way out of a session
+     whose pages would otherwise mix across snapshots. */
   const notices: NoticeItem[] = [];
   if (actionError) {
     notices.push({ key: "action-failed", severity: "danger", message: actionError });
@@ -432,24 +452,6 @@ export default function SessionDetailPage({
       ),
     });
   }
-  for (const warning of warnings) {
-    notices.push({
-      key: `${warning.code}:${warning.message}`,
-      severity: warning.severity,
-      message: warning.message,
-    });
-  }
-  /* `detail.warnings` come with the page, so a box holding only those is a
-   * named region and never announces. The other three rungs all arrive after
-   * the page has painted: a failed action, a snapshot that moved under a page
-   * request, and the timeline's own warnings, which land with the first page
-   * of events rather than with the detail. Any of them re-times the whole box
-   * — the snapshot banner especially, since its Refresh button is the only way
-   * out of a session whose pages would otherwise mix across snapshots. */
-  const settled = actionError !== null || snapshotChanged || timelineWarnings.length > 0;
-  const noticeTiming: NoticeTiming = settled
-    ? { timing: "blocking" }
-    : { timing: "standing", label: "Notes about this session" };
 
   return (
     <section
@@ -460,16 +462,22 @@ export default function SessionDetailPage({
     >
       <SessionDetailHeader
         detail={detail}
+        back={back}
         headingRef={headingRef}
         actionBusyId={actionBusyId}
         onAction={(action) => void runAction(action)}
+        pushGate={pushGate}
+        notes={notes}
+        onShowToolCalls={filters && !filters.toolCalls
+          ? () => setFilters((current) => current && { ...current, toolCalls: true })
+          : null}
       />
 
       <NoticeZone
         items={notices}
         subject="notes about this session"
         className="session-detail-notices"
-        {...noticeTiming}
+        timing="blocking"
       />
 
       {filters && (

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mallard Cloud storage page — directions</title>
+    <style>
+      /* App.css locks html, body and #root for the app shell; #root scrolls. */
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--retro-frame-gutter, var(--bg-0)) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+
+      /* ——— specimen chrome (not app CSS) ——————————————————————— */
+      .spec { max-width: 1240px; margin: 0 auto; padding: 16px 20px 96px; display: grid; gap: 18px; font: 13px/1.45 system-ui, sans-serif; }
+      .spec-title { margin: 0; font: 700 20px/1.2 system-ui; }
+      .spec-sub { margin: -10px 0 0; color: var(--text-2); max-width: 900px; }
+      .spec-controls { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .spec-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+      .spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+      .spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+      .spec-panel { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); color: var(--text-1); }
+      .spec-panel ul, .spec-panel ol { margin: 6px 0 0 18px; padding: 0; display: grid; gap: 4px; }
+      .spec-panel code { font-family: var(--font-mono); font-size: 11.5px; }
+      .spec-pick { border-color: var(--text-0); border-width: 2px; }
+      .spec-direction { display: grid; gap: 6px; }
+      .spec-col-title { margin: 8px 0 0; font: 700 15px/1.3 system-ui; }
+      .spec-col-note { margin: 0; color: var(--text-2); font-size: 12.5px; max-width: 900px; }
+      .spec-frame { position: relative; width: var(--spec-frame-width, 980px); max-width: 100%; border: 1px dashed var(--border-strong); border-radius: 12px; overflow: hidden; background: var(--bg-0); }
+      .spec-frame .sync-main { height: auto !important; overflow: visible !important; padding-bottom: 20px; }
+      .spec-toast { position: fixed; left: 50%; bottom: 22px; z-index: 60; transform: translateX(-50%); padding: 8px 14px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font: 600 12.5px/1.3 system-ui; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+      .spec-h2 { margin: 6px 0 0; font: 700 16px/1.3 system-ui; }
+
+      /* ——— proposed app CSS ————————————————————————————————————— */
+
+      /* Every direction: the token's help speaks plainly and the card keeps
+         its header, guide row and footer as shipped. */
+
+      /* A · the Service field as a live link: the token field's in-field
+         verbs (Copy | Open) on a full-width row, a link mark at its start,
+         and the value in the page ink rather than the read-only grey. */
+      .csm-link-input { position: relative; display: block; }
+      .csm-link-input > .csm-link-mark { position: absolute; top: 0; bottom: 0; left: 10px; display: flex; align-items: center; color: var(--text-2); pointer-events: none; }
+      .sync-storage-locked .csm-link-input > input[readonly] {
+        width: 100%;
+        height: 38px;
+        padding-left: 34px;
+        padding-right: 116px;
+        color: var(--text-0);
+        background: var(--surface-row);
+        font-size: var(--type-md);
+        font-weight: var(--weight-semibold);
+        cursor: text;
+      }
+      .csm-link-input .sync-secret-reveal { display: inline-flex; align-items: center; gap: 5px; font-weight: var(--weight-semibold); color: var(--text-1); }
+      .csm-link-input .sync-secret-copy.copied { color: var(--success-text); }
+
+      /* B · the address banner: the storage's web address is the card's lead
+         fact, in the display face on a box of its own, with Copy and Open as
+         real buttons; the account and renewal ride under it as one quiet
+         line, and the token keeps its field below. */
+      .csm-service { padding: 14px 14px 13px; display: grid; gap: 9px; border-bottom: 1px solid var(--border); }
+      .csm-address {
+        min-height: 52px;
+        padding: 7px 8px 7px 9px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border: var(--box-border);
+        border-radius: 12px;
+        background: var(--surface-row);
+        box-shadow: var(--shadow-control);
+      }
+      .csm-address-mark { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: var(--accent-soft); }
+      .csm-address-url {
+        min-width: 0;
+        flex: 1 1 auto;
+        padding: 2px 0;
+        overflow: hidden;
+        border: 0;
+        background: none;
+        color: var(--text-0);
+        font-family: var(--font-display);
+        font-size: var(--type-xl);
+        font-weight: var(--weight-bold);
+        line-height: 1.2;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .csm-address-url .csm-scheme { color: var(--text-3); font-weight: var(--weight-medium); }
+      .csm-address-url:hover .csm-host,
+      .csm-address-url:focus-visible .csm-host { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+      .csm-address-url:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+      .csm-address-verbs { flex: none; display: inline-flex; align-items: center; gap: 7px; }
+      .csm-address-verbs > .btn { min-height: 32px; padding: 0 12px; }
+      .csm-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding: 0 2px; color: var(--text-2); font-size: var(--type-xs); }
+      .csm-identity > span { display: inline-flex; align-items: center; gap: 5px; }
+      .csm-identity b { color: var(--text-0); font-weight: var(--weight-semibold); }
+      .csm-b-fields { grid-template-columns: minmax(0, 460px); }
+
+      /* C · the facts sheet: label · value · verbs, one hairline per fact.
+         Values are text, not boxes; each copies, and the address opens. */
+      .csm-sheet { margin: 0; padding: 2px 14px 4px; display: grid; grid-template-columns: 130px minmax(0, 1fr) auto; }
+      .csm-sheet-row { display: contents; }
+      .csm-sheet-row > dt,
+      .csm-sheet-row > dd { min-height: 50px; margin: 0; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--border); }
+      .csm-sheet-row:last-child > dt,
+      .csm-sheet-row:last-child > dd { border-bottom: 0; }
+      .csm-sheet-row > dt { color: var(--text-1); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+      .csm-sheet-value { min-width: 0; color: var(--text-0); font-size: var(--type-md); }
+      .csm-sheet-value > svg { flex: none; color: var(--text-2); }
+      .csm-sheet-value small { color: var(--text-3); font-size: var(--type-2xs); }
+      .csm-sheet-mask { font-family: var(--font-mono); font-size: var(--type-sm); letter-spacing: .04em; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .csm-sheet-link { min-width: 0; padding: 0; display: inline-flex; align-items: center; gap: 7px; border: 0; background: none; color: var(--text-0); font: inherit; font-family: var(--font-display); font-size: var(--type-lg); font-weight: var(--weight-bold); cursor: pointer; }
+      .csm-sheet-link .csm-scheme { color: var(--text-3); font-weight: var(--weight-medium); }
+      .csm-sheet-link:hover .csm-host { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+      .csm-sheet-link > svg { flex: none; color: var(--text-2); }
+      .csm-sheet-verbs { justify-content: flex-end; padding-left: 12px; }
+      .csm-icon-verb {
+        min-width: 30px;
+        height: 30px;
+        padding: 0 8px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        border: 2px solid transparent;
+        border-radius: var(--r-pill);
+        background: transparent;
+        color: var(--text-2);
+        font: inherit;
+        font-size: var(--type-xs);
+        font-weight: var(--weight-semibold);
+        cursor: pointer;
+      }
+      .csm-icon-verb:hover:not(:disabled) { color: var(--text-0); background: var(--surface-row-hover); }
+      .csm-icon-verb:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+      .csm-icon-verb.copied { color: var(--success-text); }
+
+      /* Repository rows may carry the repository's page on the website: an
+         icon verb in the fold button's own grammar, before the fold. */
+      .sync-storage-repository-row.csm-repo-web { grid-template-columns: 26px minmax(0, 1fr) auto var(--sync-history-commit-actions-column) var(--sync-history-commit-actions-column); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/mockups/cloud-storage-mockup.tsx"></script>
+  </body>
+</html>

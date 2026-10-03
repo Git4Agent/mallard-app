@@ -7,7 +7,7 @@
   for the project Push and Pull reviews. Frontend only; no Rust, no IPC, no
   schema change. The transfer after the click on Push / Pull / Mark as
   reviewed (uploading, applying) is out of scope.
-- Visual contract: `review-loading-mockup.html?verb=pull&dir=a&progress=caption`
+- Visual contract: `mockups/review-loading-mockup.html?verb=pull&dir=a&progress=caption`
   (and `verb=push`), served by the Vite dev server. The Before frames there
   are the shipped behaviour this plan replaces.
 

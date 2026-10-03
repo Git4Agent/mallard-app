@@ -576,12 +576,14 @@ export function sessionSyncPresentation(
       return { status: "cloud-outstanding", className: "storage", label: entry.status_detail ?? `Newer in ${storageName}. Pull to update this computer.` };
     case "diverged":
       return { status: "divergent", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
-    case "unavailable":
+    case "unavailable": {
+      const name = entry.display_name.trim() || entry.provider_thread_id || entry.thread_id;
       return {
         status: "unavailable",
         className: "unavailable",
-        label: `Unavailable for sync. ${entry.status_detail ?? "Mallard could not safely read this session."}`,
+        label: `Cannot sync “${name}”: ${entry.status_detail ?? "Mallard could not safely read this session."}`,
       };
+    }
     case "unknown":
     default:
       return {
@@ -626,28 +628,37 @@ export function activityHeaderCounts(
   let waiting = 0;
   let conflict = 0;
   let unsyncable = 0;
+  const unsyncableDetails: string[] = [];
 
   for (const entry of comparison?.entries ?? []) {
     // An entry present on neither side is a ghost of a thread that has been
     // removed from both; it is nobody's work.
     if (!entry.local_present && !entry.storage_present) continue;
-    switch (sessionSyncPresentation(entry, storageName).status) {
+    const presentation = sessionSyncPresentation(entry, storageName);
+    switch (presentation.status) {
       case "local-outstanding": push += 1; break;
       case "cloud-outstanding": pull += 1; break;
       case "divergent": review += 1; break;
       case "pending": waiting += 1; break;
       case "conflict": conflict += 1; break;
-      case "unavailable": unsyncable += 1; break;
+      case "unavailable":
+        unsyncable += 1;
+        if (unsyncableDetails.length < 3) unsyncableDetails.push(presentation.label);
+        break;
       default: break;
     }
   }
 
-  const detail = [
+  const summary = [
     countPhrase(review, "thread changed on both sides", "threads changed on both sides"),
     countPhrase(waiting, "thread waiting to sync", "threads waiting to sync"),
     countPhrase(conflict, "thread Mallard could not match", "threads Mallard could not match"),
-    countPhrase(unsyncable, "thread that can't be synced", "threads that can't be synced"),
   ].filter((phrase): phrase is string => phrase !== null).join(", ");
+  const detail = [
+    summary ? `${summary}.` : null,
+    ...unsyncableDetails,
+    unsyncable > unsyncableDetails.length ? `And ${unsyncable - unsyncableDetails.length} more.` : null,
+  ].filter((phrase): phrase is string => phrase !== null).join(" ");
 
   return {
     push,
