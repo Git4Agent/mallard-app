@@ -11,7 +11,9 @@ parts (`npm run dev`, then `/mockups/session-pull-mockup.html`; `?scene=`,
 bar, connect-dialog frame, Pull review, session page, New project and Add
 Catalog resource on a stand-in backend, with the plan's additions dotted.
 `mockups/session-pull-link-mockup.html` is the flow and the choices on one
-static page (no build step).
+static page (no build step). Screens of the specimen, one scene per panel:
+`docs/images/session-pull-link/` (a: the session flow, b: non-Git and
+setup, c: skills and pets, d: the stops and the waiting line).
 
 ## Where things stand
 
