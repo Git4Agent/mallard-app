@@ -12,6 +12,7 @@ import SessionDetailPage from "../src/components/project-sync/session-detail/Ses
 import { projectSyncApi, type ActivityRefreshRequest } from "../src/components/project-sync/api";
 import AddCatalogScopeWorkspace from "../src/components/storage-catalog/AddCatalogScopeWorkspace";
 import { storageCatalogApi } from "../src/components/storage-catalog/api";
+import { catalogPresentation } from "../src/components/storage-catalog/model";
 import type {
   CatalogCapabilityDescriptor,
   CatalogCloudRepository,
@@ -134,7 +135,8 @@ const SKILLS: CatalogCapabilityDescriptor = {
   provider: "codex", resource_kind: "agent_skill", format: "agentskills.io.skill", format_version: 1, provider_label: "Codex", label: "Skills", singular_label: "Skill",
   presentation: { icon: "skill", kind_label: "Skills", format_label: "Agent Skill" }, capture: "directory_tree", apply: "automatic", targets: [],
 };
-const SKILL_MARK = SKILLS.presentation.icon as IconName;
+const SKILL_MARK: IconName = catalogPresentation(SKILLS).icon;
+const PET_MARK: IconName = catalogPresentation(PETS).icon;
 const CATALOG_PROFILE: CatalogProfile = {
   profile_id: "profile-codex", provider: "codex", provider_label: "Codex", display_name: "Default Codex", configured_home: "~/.codex", revision: 1, created_at: 0, updated_at: 0,
 };
@@ -678,7 +680,7 @@ const SCENES: Scene[] = [
   {
     id: "pet-saved", n: "8", label: "Pet, in the Catalog", group: "catalog",
     link: appLink(`${ORIGIN}/maya/Mochi`), subject: "maya/Mochi", page: "pet page (the repository page)", storages: [PERSONAL], project: HORROR, session: HORROR_SESSION, reviewOpen: false,
-    found: { mark: "catalog-pet-v2", verdict: "Public · Contributor · v5", sub: null, here: "In your Catalog: Pets v2 · Default Codex", verb: "Pull pet…" }, stop: null,
+    found: { mark: PET_MARK, verdict: "Public · Contributor · v5", sub: null, here: "In your Catalog: Pets v2 · Default Codex", verb: "Pull pet…" }, stop: null,
     review: { kind: "catalog" },
     shows: "A pet's page is its repository page, so the link is the repository link. The pet is saved in a Catalog row; the sheet's verb is Pull pet…, which opens the pet's page with its own one-item Pull review — the review its Pull button opens today.",
     fresh: "The sheet's verb. The review opening on arrival. The pet page's body is a stand-in.",
@@ -1033,7 +1035,7 @@ function CatalogItemPage({ zone, item, reviewOpen, pulling, onApply, onBack }: {
   onBack: () => void;
 }) {
   const pet = item.resource_kind === "desktop_pet";
-  const row: PathBarCrumb = { id: "row", label: pet ? "Pets v2 · Default Codex" : "Skills · Default Codex", icon: pet ? "catalog-pet-v2" : SKILL_MARK };
+  const row: PathBarCrumb = { id: "row", label: pet ? "Pets v2 · Default Codex" : "Skills · Default Codex", icon: pet ? PET_MARK : SKILL_MARK };
   const leaf: PathBarCrumb = { id: "item", label: item.display_name };
   const actions = (
     <>
@@ -1073,7 +1075,7 @@ function CatalogItemPage({ zone, item, reviewOpen, pulling, onApply, onBack }: {
                                     </label>
                                     <button type="button" className="sync-pull-item-main" aria-expanded={false}>
                                       <span className="sync-pull-item-toggle"><Icon name="chevron-right" size={12} /></span>
-                                      <span className="sync-pull-item-icon"><Icon name={pet ? "catalog-pet-v2" : SKILL_MARK} size={14} /></span>
+                                      <span className="sync-pull-item-icon"><Icon name={pet ? PET_MARK : SKILL_MARK} size={14} /></span>
                                       <span className="sync-pull-item-copy">
                                         <strong>{item.display_name}</strong>
                                         <span>{pet ? "Pet v2 · Codex · 2.1 MB" : "Skill · Codex · 48 KB"} · from {item.address} (public version)</span>
