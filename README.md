@@ -35,13 +35,20 @@ resources portable across teammates and machines.
 - Answers the website's links (`mallard://open?address=<a page's address>`).
   A repository page's **Open in Mallard** opens one sheet that says what it
   found — asking each Mallard Cloud account on the page's host — and where
-  that stands on this computer, with one verb: the project or Catalog item
-  when it is here, otherwise New project or Add Catalog resource on From
-  Mallard Cloud, filled in. The listing's **Open Mallard** (Share yours) asks
+  that stands on this computer, with one verb: the project when it is here,
+  otherwise New project on From Mallard Cloud, filled in. A session page's
+  **Pull in Mallard** opens the same sheet for its repository with *Pull
+  session…*: a Pull review of that session alone, whose **Pull 1** brings it
+  here, opens its page, and leaves the project's reviewed base, Pull badge
+  and Push gate where they were. A skill, plugin or pet page's **Pull in
+  Mallard** opens the item's page on its own Pull review, after Add Catalog
+  resource when the item is not in the Catalog yet. The listing's **Open
+  Mallard** (Share yours) asks
   nothing and goes straight to Projects, or to the Catalog when a Skills,
   Plugins or Pets chip was on; the sheet appears only when no storage signs
-  in to that service. A link only reads; nothing is connected, cloned, added,
-  pulled or pushed until the page's own verb is pressed. While an operation,
+  in to that service. A link only reads, and its verb only opens a page or a
+  review; nothing is connected, cloned, added, pulled or pushed until that
+  page's own verb is pressed. While an operation,
   a review or a dialog is open, the link waits under the bar instead.
 - Compares local and stored resources before Push or Pull, including
   local-only, storage-only, ahead, synchronized, and conflict states.

@@ -65,6 +65,7 @@ import type {
   ProviderProfileSummary,
   PushDestinationStatus,
   PushReviewContext,
+  PullScope,
   PushScope,
   ResourceInventory,
   PullReview,
@@ -463,8 +464,13 @@ export const projectSyncApi = {
   saveBinding: (request: SaveProjectBindingRequest) =>
     invoke<ProjectBinding>("save_project_binding", { request }),
 
-  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) =>
-    invoke<PullReview>("plan_bundle_restore", { storageId, bundleId, binding }),
+  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding, scope: PullScope) =>
+    invoke<PullReview>("plan_bundle_restore", { storageId, bundleId, binding, scope }),
+
+  /** Where the session a stored row names is in a project: the id its page
+   *  is opened by, or null when the project does not hold it. Reads only. */
+  findProjectSession: (localProjectId: string, resourceId: string) =>
+    invoke<string | null>("find_project_session", { localProjectId, resourceId }),
 
   applyRestore: (
     review: PullReview,

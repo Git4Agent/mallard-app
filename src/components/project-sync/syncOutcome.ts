@@ -315,6 +315,13 @@ export function buildPullOutcome({
         ? [{ kind: "open_pull", label: "Open Pull review" }]
         : [];
 
+  // A session's Pull names the session. Its reviewed baseline never moves,
+  // so it says nothing about Push: the project's badge already says what
+  // else is in storage.
+  const pulledSession = plan.scope.kind === "session" && restored.length + preserved.length > 0
+    ? plan.conversation_review[0]
+    : undefined;
+
   return {
     projectId,
     storageId: plan.storage_id,
@@ -326,6 +333,8 @@ export function buildPullOutcome({
       ? `${problemCount} ${plural(problemCount, "change")} ${problemCount === 1 ? "needs" : "need"} attention`
       : baselineStalled
         ? "Pull complete — Push still blocked"
+        : pulledSession
+          ? `Pulled “${displayThreadTitle(nameFor(pulledSession.resource_id))}”`
         : restored.length + preserved.length === 0
           // The acknowledge-only apply: nothing was taken, the reviewed
           // baseline moved. "Pull complete · 0 restored" would claim a Pull

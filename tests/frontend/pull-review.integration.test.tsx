@@ -36,6 +36,8 @@ import {
   beginPullReview,
   canAcceptPullMetadata,
   acceptPullMetadata,
+  PROJECT_PULL,
+  sessionPullAnswer,
   type PullReviewApi,
 } from "../../src/components/project-sync/pullReviewFlow";
 
@@ -80,6 +82,7 @@ const LIMIT = 512 * MB;
 
 const restorePlan: PullReview = {
   apply_limit_bytes: LIMIT,
+  scope: { kind: "project" },
   schema_version: 1,
   plan_id: "plan-restore",
   storage_id: "storage-local",
@@ -672,6 +675,7 @@ test("a Pull review renders before readiness support resolves", async () => {
     storageId: restorePlan.storage_id,
     bundleId: restorePlan.bundle_id,
     binding,
+    scope: PROJECT_PULL,
   });
   assert.equal(review.restorePlan, restorePlan);
 
@@ -694,6 +698,7 @@ test("readiness failure does not hide a valid mutation review", async () => {
     storageId: restorePlan.storage_id,
     bundleId: restorePlan.bundle_id,
     binding,
+    scope: PROJECT_PULL,
   });
 
   assert.equal(review.restorePlan, restorePlan);
@@ -930,6 +935,144 @@ test("automatic acceptance rejects stale pins and incomplete acknowledgement", a
   for (const update of [{ success: false }, { reviewed_base_advanced: false }, { reviewed_base_advanced: undefined }]) {
     await assert.rejects(acceptPullMetadata({ applyRestore: async () => result({ ...update, message: "Check again" }) }, plan), /Check again/);
   }
+});
+
+/* ——— a session's own Pull (docs/PLAN_DEEP_LINK_SESSION_PULL.md) ——————————— */
+
+const sessionRow = storedSession("a", 2 * MB, 100);
+const sessionPlan: PullReview = {
+  ...restorePlan,
+  scope: { kind: "session", resource_id: sessionRow.resource_id },
+  actions: [],
+  conversation_review: [sessionRow],
+};
+
+test("a session's review opens on its one row, ticked and named, with no steps and no empty apply", () => {
+  const html = renderReview(sessionPlan);
+  assert.match(html, /<h2 id="sync-pull-review-title">Pull session · Stored a<\/h2>/);
+  assert.doesNotMatch(html, /role="tablist"/, "one row has no steps to move between");
+  assert.doesNotMatch(html, /sync-sync-review-other|Review project files next/, "a session's Pull holds no file action");
+  assert.match(html, /<input type="checkbox" aria-label="Select Conversation" checked=""/, "the row its link named opens ticked");
+  assert.match(html, /aria-label="1 of 1 selected"/);
+  const footer = html.slice(html.indexOf("sync-pull-apply-button"));
+  assert.match(footer, /Pull 1<\/button>/);
+  assert.doesNotMatch(html, /Mark as reviewed/);
+  assert.doesNotMatch(html.slice(html.indexOf("sync-pull-apply-bar")), /disabled=""/, "Pull is the one press left");
+
+  // An untitled session reads untitled; the id never stands in for a name.
+  const untitled = renderReview({ ...sessionPlan, conversation_review: [{ ...sessionRow, display_title: null }] });
+  assert.match(untitled, /Pull session · Untitled session<\/h2>/);
+
+  // A row that cannot be pulled has nothing to tick: a session's review
+  // never marks the storage as reviewed, so its primary has nothing to do.
+  const blocked = renderReview({
+    ...sessionPlan,
+    conversation_review: [{ ...sessionRow, action: "blocked", action_id: null, blocker: "busy" }],
+  });
+  const blockedFooter = blocked.slice(blocked.indexOf("sync-pull-apply-bar"));
+  assert.match(blockedFooter, /<button[^>]*sync-pull-apply-button[^>]*disabled=""[^>]*title="Nothing is selected"[^>]*>.*?Pull<\/button>/s);
+  assert.doesNotMatch(blocked, /Mark as reviewed/);
+
+  // The project's own review is as it was.
+  const project = renderReview({ ...sessionPlan, scope: { kind: "project" } });
+  assert.match(project, /<h2 id="sync-pull-review-title">Pull review<\/h2>/);
+  assert.doesNotMatch(project, /<input type="checkbox"[^>]*checked=""/, "nothing ticked at open");
+  assert.match(project.slice(project.indexOf("sync-pull-apply-button")), /Mark as reviewed<\/button>/);
+
+  // The list the review hosts holds that row alone.
+  const view = readFileSync("src/components/project-sync/RestorePlanView.tsx", "utf8");
+  assert.match(view, /reviewResourceIds=\{reviewResourceIds\}/);
+  const list = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  assert.match(list, /if \(!entry \|\| reviewResourceIds\?\.has\(entry\.resource_id\) === false\) return false;/);
+  assert.match(list, /&& reviewResourceIds\?\.has\(entry\.resource_id\) !== false/);
+});
+
+test("a session's Pull ends on the session's page, and its failure retries the same scope", () => {
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  // The page is found by the stored row the Pull was scoped to: one read.
+  assert.match(shell, /const page = await projectSyncApi\.findProjectSession\(projectId, resourceId\)\.catch\(\(\) => null\);\s*if \(page\) openSessionDetail\(projectId, \{ resourceId: page, occurrenceKey: page \}\);/);
+  // Closing the review retires the apply's request, so what lands after it
+  // is checked against the request the close left: comparing against the
+  // apply's own would skip the landing every time.
+  const apply = shell.slice(shell.indexOf("const applyReview = async"), shell.indexOf("/** Verify a draft against its provider"));
+  assert.ok(apply.length > 0 && apply.length < 4_500, "applyReview was found");
+  assert.match(apply, /closePullReview\(\);[\s\S]{0,260}const landing = restoreRequest\.current;\s*const stillHere = \(\) => hostWorkflowEpoch\.current === workflowEpoch && restoreRequest\.current === landing;/);
+  assert.match(apply, /if \(pulledSession && stillHere\(\)\) \{\s*await openPulledSession\(restoreBinding\.local_project_id, pulledSession\);\s*if \(stillHere\(\)\) notify\(`\$\{outcome\.title\}\.`\);\s*\}/);
+  const afterClose = apply.slice(apply.indexOf("closePullReview();"), apply.indexOf("} catch (reason)"));
+  assert.doesNotMatch(afterClose, /restoreRequest\.current === requestId/);
+  // The card keeps a session's outcome only when it holds something to act on.
+  assert.match(apply, /setStorageNotice\(pulledSession && outcome\.actions\.length === 0 \? null : \{/);
+  // Nothing to review: no apply is sent for a session that is here, and the
+  // line says which of the two it is.
+  assert.match(shell, /if \(!here\) notify\("Nothing to pull for that session\.", "attention"\);\s*else notify\(answer === "up_to_date" \? "Already here and up to date\." : "Already here — nothing to pull\.", "note"\);/);
+  // A Pull that could not start is retried as what it was: a session's
+  // Retry must not open the project's review.
+  assert.match(shell, /onPull=\{\(projectId, storageId, scope\) => beginProjectRestore\(projectId, storageId, scope\)\}/);
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /\| \{ kind: "action_failed"; action: "pull"; scope: PullScope; message: string \}/);
+  assert.match(workspace, /: onPull\(project\.local_project_id, storage\.storage_id, activeNotice\.scope\),/);
+  // A session comes alone: its page says when the folder's files are still
+  // only in storage, with the project's own Pull one press away.
+  assert.match(workspace, /onProjectFilesToPullChange\?\.\(projectFileCounts\.pull\);/);
+  assert.match(shell, /activeProjectSubview\.kind === "session_detail" && projectFilesToPull > 0 && activeProjectId && activeStorageId/);
+  assert.match(shell, /message: `Project files for this folder are still in \$\{storageName\}\.`,/);
+  assert.match(shell, /onClick=\{\(\) => void beginProjectRestore\(projectId, storageId\)\}\s*>\s*Pull project\s*<\/button>/);
+});
+
+test("a session's outcome names the session and never speaks of Push", () => {
+  const outcomeFor = (overrides: Partial<RestoreResult>, completed: string[]) => buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: sessionPlan,
+    // A session's Pull moves no reviewed base: the field is absent.
+    result: result({ reviewed_base_advanced: undefined, ...overrides }),
+    readiness: { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+    items: buildPullReviewItems(sessionPlan),
+    completedResourceIds: new Set(completed),
+  });
+  const pulled = outcomeFor({ applied_action_ids: [sessionRow.action_id!] }, [sessionRow.resource_id]);
+  assert.equal(pulled.title, "Pulled “Stored a”");
+  assert.equal(pulled.tone, "success");
+  assert.deepEqual(pulled.actions, []);
+  assert.equal(pulled.rows.some((row) => row.status === "held"), false, "no Push-hold row");
+
+  const failed = outcomeFor({
+    success: false,
+    failed_actions: [{ action_id: sessionRow.action_id!, message: "This conversation changed after the comparison. Compare again." }],
+  }, []);
+  assert.equal(failed.tone, "warning");
+  assert.equal(failed.title, "1 change needs attention");
+  assert.doesNotMatch(JSON.stringify(failed), /Push/);
+});
+
+test("a session's acceptance sends its metadata alone, needs no reviewed base, and says where the session stands", async () => {
+  const plan = (rows: ConversationReviewRow[]): PullReview => ({ ...sessionPlan, conversation_review: rows });
+  const adopt = { ...sessionRow, thread_id: localThreadId, action: "adopt_cloud_metadata" as const, action_id: "accept-metadata" };
+  const ahead = { ...sessionRow, thread_id: localThreadId, action: "report_push_eligible" as const, action_id: null };
+
+  assert.equal(canAcceptPullMetadata(sessionPlan), false, "a session only in storage is reviewed, never accepted");
+  for (const rows of [[], [adopt], [ahead]]) assert.equal(canAcceptPullMetadata(plan(rows)), true);
+  assert.equal(sessionPullAnswer(plan([])), "up_to_date");
+  assert.equal(sessionPullAnswer(plan([adopt])), "up_to_date");
+  assert.equal(sessionPullAnswer(plan([ahead])), "nothing_to_pull", "here, and newer here");
+
+  let sent: string[] | null = null;
+  await acceptPullMetadata({ applyRestore: async (actual, ids) => {
+    assert.equal(actual.scope.kind, "session", "the scope rides the review back");
+    sent = ids;
+    return result({ reviewed_base_advanced: undefined });
+  } }, plan([adopt]));
+  assert.deepEqual(sent, ["accept-metadata"]);
+  await assert.rejects(acceptPullMetadata({ applyRestore: async () => result({ success: false, message: "Check again" }) }, plan([adopt])), /Check again/);
+  // Nothing to accept is nothing to send: a session's empty apply would mark
+  // nothing as reviewed.
+  for (const rows of [[], [ahead]]) {
+    await acceptPullMetadata({ applyRestore: async () => assert.fail("nothing is applied") }, plan(rows));
+  }
+  // The project's acceptance still requires its reviewed base.
+  await assert.rejects(acceptPullMetadata(
+    { applyRestore: async () => result({ reviewed_base_advanced: undefined, message: "Check again" }) },
+    { ...plan([adopt]), scope: { kind: "project" } },
+  ), /Check again/);
 });
 
 test("the Pull review meters what it would install in both pinned zones, and each row prints its size", () => {

@@ -29,6 +29,7 @@ import type {
   ProviderProfileSummary,
   ResourceInventory as ResourceInventoryModel,
   PullReview,
+  PullScope,
   PushScope,
   SetupDraftSummary,
   SiblingBundleStatus,
@@ -130,6 +131,8 @@ import {
   beginPullReview,
   canAcceptPullMetadata,
   acceptPullMetadata,
+  PROJECT_PULL,
+  sessionPullAnswer,
   type PullApplyPhase,
   type PullReviewSelection,
 } from "./pullReviewFlow";
@@ -234,9 +237,10 @@ function storedActiveStorages(): Record<string, string> {
   }
 }
 
-/** Toast outcome. `ok` confirms completion; `attention` reports a stop that
- *  needs action. Hard failures use `error`. */
-type SyncNoticeTone = "ok" | "attention";
+/** Toast outcome. `ok` confirms completion; `note` states a fact when nothing
+ *  was done; `attention` reports a stop that needs action. Hard failures use
+ *  `error`. */
+type SyncNoticeTone = "ok" | "note" | "attention";
 
 interface SyncNotice {
   message: string;
@@ -361,7 +365,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const [catalogAddCloud, setCatalogAddCloud] = useState<CatalogCloudStart | null>(null);
   const [catalogScopeId, setCatalogScopeId] = useState<string | null>(null);
   /* An item Add from Mallard Cloud just brought in: its row opens on its page. */
-  const [catalogLandingItem, setCatalogLandingItem] = useState<{ scopeId: string; resourceId: string } | null>(null);
+  /* The item a Catalog page opens on. `pull`: a link named it, so its Pull
+     review opens with it. */
+  const [catalogLandingItem, setCatalogLandingItem] = useState<{ scopeId: string; resourceId: string; pull?: boolean } | null>(null);
+  /* Add Catalog resource was opened by a link: what Add lands on pulls. With
+     the Kind chosen for the account's own item, the item and its storage. */
+  const catalogAddPullRef = useRef<{ resourceId: string; storageId: string } | true | null>(null);
   const [addingCatalogScope, setAddingCatalogScope] = useState(false);
   const [catalogIndexOpen, setCatalogIndexOpen] = useState(false);
   const [storageIssues, setStorageIssues] = useState<Record<string, string>>({});
@@ -436,6 +445,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // A gate the push (or a pull plan) cannot get past never opens a review;
   // it lands as a banner on the storage card with the way forward on it.
   const [storageNotice, setStorageNotice] = useState<StorageNotice | null>(null);
+  // The open non-Git project's files that are still only in its storage, as
+  // its workspace counts them for the Pull badge.
+  const [projectFilesToPull, setProjectFilesToPull] = useState(0);
   // What produced the current Pull outcome, so Recheck can rebuild the banner
   // against fresh readiness instead of replanning the whole Pull.
   const pullOutcomeInputs = useRef<Parameters<typeof buildPullOutcome>[0] | null>(null);
@@ -1717,9 +1729,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   /** Opens the Add-row workspace: Kind, then provider home, and nothing else.
       A door arrives with Kind already chosen; a link, with the repository
       it named on From Mallard Cloud. */
-  const beginAddCatalogScope = async (choiceKey?: string, cloud?: CatalogCloudStart) => {
+  const beginAddCatalogScope = async (
+    choiceKey?: string,
+    cloud?: CatalogCloudStart,
+    pull: { resourceId: string; storageId: string } | true | null = null,
+  ) => {
     setError(null);
     if (!(await closeWorkspaceSettings())) return;
+    catalogAddPullRef.current = pull;
     setSetupView(null);
     setCatalogIndexOpen(false);
     setCatalogAddChoiceKey(choiceKey ?? null);
@@ -1737,14 +1754,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   };
 
   /** Add from Mallard Cloud lands on the item's page, in the row it went
-      to, with the storage it came from; nothing is pulled. */
+      to, with the storage it came from; nothing is pulled. From a link the
+      page opens with the item's Pull review: Pull there is the second press. */
   const completeAddCatalogCloudItem = async (landing: CatalogCloudLanding, workflowEpoch: number) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     const scopeId = landing.scope.scope.scope_id;
+    const pull = catalogAddPullRef.current !== null;
+    catalogAddPullRef.current = null;
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     setCatalogPreferredStorage((current) => ({ ...current, [scopeId]: landing.storageId }));
-    setCatalogLandingItem({ scopeId, resourceId: landing.resourceId });
+    setCatalogLandingItem({ scopeId, resourceId: landing.resourceId, pull });
     setCatalogScopeId(scopeId);
     notify(landing.note);
     await refreshCatalogScopes(undefined, workflowEpoch);
@@ -1760,9 +1780,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     workflowEpoch: number,
   ) => {
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
+    // A link named the account's own item: the new row lists it once it is
+    // linked to that account's storage, and its page opens on its Pull review.
+    const linked = catalogAddPullRef.current;
+    catalogAddPullRef.current = null;
     setAddingCatalogScope(false);
     setCatalogIndexOpen(false);
     if (storageId) setCatalogPreferredStorage((current) => ({ ...current, [scope.scope.scope_id]: storageId }));
+    setCatalogLandingItem(linked && linked !== true && !linkError && linked.storageId === storageId
+      ? { scopeId: scope.scope.scope_id, resourceId: linked.resourceId, pull: true }
+      : null);
     setCatalogScopeId(scope.scope.scope_id);
     const label = catalogScopeLabel(scope);
     notify(linkError
@@ -2504,6 +2531,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
+  /** A session's Pull ends on the session's own page: found by the stored
+      row the Pull was scoped to. False when the project does not hold it. */
+  const openPulledSession = async (projectId: string, resourceId: string): Promise<boolean> => {
+    const page = await projectSyncApi.findProjectSession(projectId, resourceId).catch(() => null);
+    if (page) openSessionDetail(projectId, { resourceId: page, occurrenceKey: page });
+    return page !== null;
+  };
+
   const planRestore = async (
     storageId: string,
     bundleId: string,
@@ -2511,6 +2546,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     displayName: string,
     /** The Pull's card, when this plan is what the card is waiting for. */
     preparing?: PreparingHandle,
+    scope: PullScope = PROJECT_PULL,
   ) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const requestId = ++restoreRequest.current;
@@ -2530,7 +2566,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // The project-data review is the primary Pull surface. Render it as soon as it
       // is ready; optional dependency/readiness checks must never hide a valid
       // restore plan or its Apply button.
-      const request = { storageId, bundleId, binding: targetBinding };
+      const request = { storageId, bundleId, binding: targetBinding, scope };
       const planning = beginPullReview(projectSyncApi, request);
       const review = preparing ? await preparing.race(planning) : await planning;
       if (review === PREPARING_CANCELLED) {
@@ -2557,7 +2593,16 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         await loadProjectData(targetBinding.local_project_id, configRef.current, storageId, workflowEpoch);
         if (restoreRequest.current !== requestId) return null;
         setHistoryRefreshEpoch((epoch) => epoch + 1);
-        notify(`Storage reviewed for ${displayName} — files unchanged.`);
+        if (scope.kind === "session") {
+          // Nothing to review: the session is here. Its page opens instead.
+          const answer = sessionPullAnswer(review.restorePlan);
+          const here = await openPulledSession(targetBinding.local_project_id, scope.resource_id);
+          if (restoreRequest.current !== requestId) return null;
+          if (!here) notify("Nothing to pull for that session.", "attention");
+          else notify(answer === "up_to_date" ? "Already here and up to date." : "Already here — nothing to pull.", "note");
+        } else {
+          notify(`Storage reviewed for ${displayName} — files unchanged.`);
+        }
         preparing?.finish();
         return null;
       }
@@ -2637,6 +2682,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           storageId: outcome.storageId,
           kind: "action_failed",
           action: "pull",
+          scope: PROJECT_PULL,
           message: errorMessage(reason),
         });
       } finally {
@@ -2691,7 +2737,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  const beginProjectRestore = async (projectId: string, storageId: string) => {
+  /** Opens a Pull review of the project, or, with a session's scope, of that
+      session alone: the same path, and the plan holds one row. */
+  const beginProjectRestore = async (projectId: string, storageId: string, scope: PullScope = PROJECT_PULL) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const preparing = beginPreparing("pull", projectId, storageId);
     setBusy(true);
@@ -2730,6 +2778,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         nextDetail.binding,
         projectLabel(nextDetail.project),
         preparing,
+        scope,
       );
       if (!failure) return;
       if (failure.startsWith("There is nothing to pull from")) {
@@ -2771,6 +2820,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         storageId,
         kind: "action_failed",
         action: "pull",
+        scope,
         message: failure,
       });
     } catch (reason) {
@@ -2780,6 +2830,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           storageId,
           kind: "action_failed",
           action: "pull",
+          scope,
           message: errorMessage(reason),
         });
       }
@@ -2791,21 +2842,28 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  /* Compare again, from inside a Pull review: the same wait in the same card.
-     A plan that fails here has no review left to show its error in, so it
-     lands on the card as any Pull that could not start does. */
+  /** The Pull review of one session, named by its stored row's id: what a
+      session link's verb opens. */
+  const beginSessionRestore = (projectId: string, storageId: string, resourceId: string) => (
+    beginProjectRestore(projectId, storageId, { kind: "session", resource_id: resourceId })
+  );
+
+  /* Compare again, from inside a Pull review: the same wait in the same card,
+     for the same scope. A plan that fails here has no review left to show its
+     error in, so it lands on the card as any Pull that could not start does. */
   const replanPull = async (
     storageId: string,
     bundleId: string,
     targetBinding: ProjectBinding,
     displayName: string,
+    scope: PullScope,
   ) => {
     const projectId = targetBinding.local_project_id;
     const preparing = beginPreparing("pull", projectId, storageId);
     try {
-      const failure = await planRestore(storageId, bundleId, targetBinding, displayName, preparing);
+      const failure = await planRestore(storageId, bundleId, targetBinding, displayName, preparing, scope);
       if (failure) {
-        setStorageNotice({ projectId, storageId, kind: "action_failed", action: "pull", message: failure });
+        setStorageNotice({ projectId, storageId, kind: "action_failed", action: "pull", scope, message: failure });
       }
     } finally {
       preparing.finish();
@@ -3067,11 +3125,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   );
 
   // One way into a project, shared by the sidebar and the path bar's repo crumb.
-  const openProject = async (projectId: string, preferredStorage?: string | null) => {
-    if (!(await closeWorkspaceSettings())) return;
+  /** False when the page that was open kept the person. */
+  const openProject = async (projectId: string, preferredStorage?: string | null): Promise<boolean> => {
+    if (!(await closeWorkspaceSettings())) return false;
     setSetupView(null);
     if (restorePlan) closePullReview();
     await selectProject(projectId, preferredStorage);
+    return true;
   };
 
   const configureProjectBinding = (projectId: string) => {
@@ -3199,15 +3259,29 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         completedResourceIds: successfulResources,
         error: result.error,
       };
-      setStorageNotice({
+      const outcome = buildPullOutcome(pullOutcomeInputs.current);
+      // A session's Pull that went through says so on the session's page; the
+      // card keeps the outcome only when it holds something to act on.
+      const pulledSession = currentRestorePlan.scope.kind === "session" && outcome.tone === "success"
+        ? currentRestorePlan.scope.resource_id
+        : null;
+      setStorageNotice(pulledSession && outcome.actions.length === 0 ? null : {
         projectId: restoreBinding.local_project_id,
         storageId: currentRestorePlan.storage_id,
         kind: "outcome",
-        outcome: buildPullOutcome(pullOutcomeInputs.current),
+        outcome,
       });
       closePullReview();
+      // Closing the review retired this request: what follows belongs to the
+      // closed review until another Pull is planned or closed.
+      const landing = restoreRequest.current;
+      const stillHere = () => hostWorkflowEpoch.current === workflowEpoch && restoreRequest.current === landing;
       if (activeProjectId) {
         await loadProjectData(activeProjectId, config, activeStorageId, workflowEpoch);
+      }
+      if (pulledSession && stillHere()) {
+        await openPulledSession(restoreBinding.local_project_id, pulledSession);
+        if (stillHere()) notify(`${outcome.title}.`);
       }
     } catch (reason) {
       if (restoreRequest.current === requestId) setRestoreError(errorMessage(reason));
@@ -3671,6 +3745,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           restoreBinding.bundle_id,
           restoreBinding,
           restoreProjectName,
+          restorePlan.scope,
         )}
         onPrimaryChange={setPullReviewPrimary}
       />
@@ -3707,7 +3782,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   })() : null;
 
   /** Where a link goes, by the routes the sidebar uses. Nothing here
-      writes: every page it opens still waits for its own verb. */
+      writes: every page it opens still waits for its own verb, and a Pull
+      review it opens waits for Pull. */
   const goToLinkDestination = async (to: LinkDestination) => {
     switch (to.kind) {
       case "projects":
@@ -3719,6 +3795,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       case "project":
         await openProject(to.projectId, to.storageId);
         return;
+      case "pull_session":
+        // The project's page, then the shipped Pull path with a scope.
+        if (!(await openProject(to.projectId, to.storageId))) return;
+        await beginSessionRestore(to.projectId, to.storageId, to.resourceId);
+        return;
       case "new_project":
         await beginAddProject({ source: "cloud", storageId: to.storageId, address: to.address });
         return;
@@ -3727,14 +3808,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         if (!(await closeWorkspaceSettings())) return;
         setSetupView(null);
         setCatalogPreferredStorage((current) => ({ ...current, [to.scopeId]: to.storageId }));
-        setCatalogLandingItem({ scopeId: to.scopeId, resourceId: to.resourceId });
+        setCatalogLandingItem({ scopeId: to.scopeId, resourceId: to.resourceId, pull: true });
         setCatalogScopeId(to.scopeId);
         return;
       case "add_catalog_item":
-        await beginAddCatalogScope(undefined, { accountId: to.storageId, address: to.address });
+        await beginAddCatalogScope(undefined, { accountId: to.storageId, address: to.address }, true);
         return;
       case "add_catalog_row":
-        await beginAddCatalogScope(to.choiceKey);
+        await beginAddCatalogScope(to.choiceKey, undefined, { resourceId: to.resourceId, storageId: to.storageId });
         return;
     }
   };
@@ -3864,9 +3945,33 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     shellNotices.push({
       key: "shell-notice",
       /* "attention" requires user action; "ok" is a successful receipt. */
-      severity: notice.tone === "attention" ? "warning" : "success",
+      severity: notice.tone === "attention" ? "warning" : notice.tone === "note" ? "info" : "success",
       message: notice.message,
       onDismiss: () => setNotice(null),
+    });
+  }
+  /* A session comes alone: on its page, a folder whose files are still only
+     in storage says so, with the project's own Pull one press away. */
+  if (activeProjectSubview.kind === "session_detail" && projectFilesToPull > 0 && activeProjectId && activeStorageId) {
+    const projectId = activeProjectId;
+    const storageId = activeStorageId;
+    const storageName = config.storages.find((storage) => storage.storage_id === storageId)?.name || "storage";
+    shellNotices.push({
+      key: "session-project-files-pending",
+      severity: "info",
+      message: `Project files for this folder are still in ${storageName}.`,
+      dismissalId: projectId,
+      action: (
+        <button
+          type="button"
+          className="btn"
+          disabled={busy}
+          title={busy ? "Available when the current operation finishes" : undefined}
+          onClick={() => void beginProjectRestore(projectId, storageId)}
+        >
+          Pull project
+        </button>
+      ),
     });
   }
   /* A link that arrived while the shell was in the middle of something, or
@@ -4100,6 +4205,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             initialResourceId={catalogLandingItem?.scopeId === activeCatalogScope.scope.scope_id
               ? catalogLandingItem.resourceId
               : undefined}
+            initialPull={catalogLandingItem?.scopeId === activeCatalogScope.scope.scope_id && catalogLandingItem.pull === true}
             scopes={catalogScopes}
             storages={catalogStorages}
             capabilities={catalogCapabilities}
@@ -4113,7 +4219,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             openStorageMenuRequestId={catalogStorageMenuRequest?.scopeId === activeCatalogScope.scope.scope_id
               ? catalogStorageMenuRequest.requestId
               : null}
-            notify={(message) => notify(message)}
+            notify={(message, tone) => notify(message, tone)}
             onScopeGone={() => {
               setCatalogScopeId(null);
               setCatalogIndexOpen(true);
@@ -4182,11 +4288,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onSelectStorage={(projectId, storageId) => selectStorage(projectId, storageId)}
             onOpenSessionDetail={openSessionDetail}
             onSessionActionError={setSessionActionError}
+            onProjectFilesToPullChange={setProjectFilesToPull}
             onCloseSessionDetail={closeProjectSubview}
             onLinkStorage={(projectId, storageId) => linkStorage(projectId, storageId)}
             onUnlinkStorage={(projectId, storageId) => unlinkStorage(projectId, storageId)}
             onPush={(projectId, storageId, scope, session) => openPushChooser(projectId, storageId, scope, session)}
-            onPull={(projectId, storageId) => beginProjectRestore(projectId, storageId)}
+            onPull={(projectId, storageId, scope) => beginProjectRestore(projectId, storageId, scope)}
             siblingNotice={siblingNotice}
             onConnectSibling={(projectId, storageId, matches) => {
               setPendingBundleConnection({ projectId, storageId, matches, reason: "sibling" });
@@ -4328,7 +4435,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
            sheet's late close lets go of nothing but its own link. */
         <AppLinkSheet
           key={heldLink.id}
-          subject={heldLink.link.kind === "repository" ? heldLink.link.address : null}
+          subject={heldLink.link.kind === "repository" || heldLink.link.kind === "session" ? heldLink.link.address : null}
           state={appLink.sheet}
           onVerb={(verdict) => void followAppLink(verdict)}
           onClose={() => appLink.drop(heldLink.id)}

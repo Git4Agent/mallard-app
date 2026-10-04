@@ -1,13 +1,19 @@
 //! Open in Mallard: the `mallard://` link the website hands the desktop
-//! (docs/PLAN_DEEP_LINK_DESTINATIONS.md, PLAN_DEEP_LINK_SHARE_YOURS.md). A
-//! link names a page: a repository's, or the listing. Here it is read and
-//! kept for the window to take, and a repository's is answered: what each
-//! account on the page's host sees at that address. The listing's asks the
-//! service nothing. It only ever reads. The window decides where it lands,
-//! and every write stays behind a verb the person presses.
+//! (docs/PLAN_DEEP_LINK_DESTINATIONS.md, PLAN_DEEP_LINK_SHARE_YOURS.md,
+//! PLAN_DEEP_LINK_SESSION_PULL.md). A link names a page: a repository's, one
+//! session's of a repository, or the listing. Here it is read and kept for
+//! the window to take, and a repository's is answered: what each account on
+//! the page's host sees at that address. A session's is answered as its
+//! repository's; the session rides the arrival, and the service is not asked
+//! about it. The listing's asks the service nothing. It only ever reads. The
+//! window decides where it lands, and every write stays behind a verb the
+//! person presses.
 use super::service::repository;
 use crate::activity_log::ActivityLogScope;
-use mallard_domain::{StorageConfig, StorageId};
+use mallard_domain::{
+    cloud_conversation_resource_id, CloudThreadId, ProviderKey, ResourceId, StorageConfig,
+    StorageId,
+};
 use mallard_infrastructure::activity_log::ActivityLogType;
 use mallard_infrastructure::managed_cloud::address::{
     origin_host, parse_page_address, RepositoryAddress,
@@ -33,6 +39,17 @@ pub enum AppLinkArrival {
         host: String,
         /// `owner/name`, as the link spelled it.
         address: String,
+    },
+    /// One session's page (Pull in Mallard): its repository, answered as a
+    /// repository link's is, and the session a Pull is then scoped to.
+    Session {
+        host: String,
+        /// `owner/name`, as the link spelled it.
+        address: String,
+        provider: ProviderKey,
+        cloud_thread_id: CloudThreadId,
+        /// The manifest row's id: the scope of the session's Pull.
+        resource_id: ResourceId,
     },
     /// The website's listing (Share yours). Nothing is asked of the
     /// service: the window opens its own list of what could be shared.
@@ -78,6 +95,21 @@ fn read_link(link: &str) -> AppLinkArrival {
             host,
             address: address.to_string(),
         },
+        Some(AppLink::Session {
+            host,
+            address,
+            provider,
+            cloud_thread_id,
+        }) => match cloud_conversation_resource_id(&provider, &cloud_thread_id) {
+            Ok(resource_id) => AppLinkArrival::Session {
+                host,
+                address: address.to_string(),
+                provider,
+                cloud_thread_id,
+                resource_id,
+            },
+            Err(_) => AppLinkArrival::Invalid,
+        },
         Some(AppLink::Listing { host, kind }) => AppLinkArrival::Listing {
             can_set_up: is_this_builds_service(&host),
             host,
@@ -97,7 +129,8 @@ pub fn show_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 }
 
 /// A link the system handed over: read it, keep it for the window, and say
-/// one is waiting. Only the host and `owner/name` are logged.
+/// one is waiting. Only the host and `owner/name` are logged, and that a
+/// link names a session.
 pub fn receive<R: tauri::Runtime>(app: &tauri::AppHandle<R>, link: &str) {
     let arrival = read_link(link);
     let scope = ActivityLogScope::new(ActivityLogType::System);
@@ -107,6 +140,12 @@ pub fn receive<R: tauri::Runtime>(app: &tauri::AppHandle<R>, link: &str) {
             "info",
             "system.app_link_received",
             &format!("Link received: {address} on {host}"),
+        ),
+        AppLinkArrival::Session { host, address, .. } => scope.emit(
+            app,
+            "info",
+            "system.app_link_received",
+            &format!("Link received: a session of {address} on {host}"),
         ),
         AppLinkArrival::Listing { host, .. } => scope.emit(
             app,
@@ -320,11 +359,33 @@ mod tests {
     #[test]
     fn a_link_is_read_once_and_the_newest_waits() {
         assert_eq!(
-            read_link("mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fx%3Fcommit%3D1"),
+            read_link("mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Frelease%3Fcommit%3D1"),
             AppLinkArrival::Repository {
                 host: "mallard-ai.com".into(),
                 address: "Rika321/HorrorGame".into()
             }
+        );
+        // A session's page: its repository, and the session as the window
+        // reads it. The page's query does not ride along.
+        assert_eq!(
+            serde_json::to_value(read_link(
+                "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%253Aconversation%253Acloudthread-0a1b2c3d%3Fcommit%3D9f3c2d1%26scope%3Dprivate"
+            ))
+            .unwrap(),
+            serde_json::json!({
+                "kind": "session",
+                "host": "mallard-ai.com",
+                "address": "Rika321/HorrorGame",
+                "provider": "codex",
+                "cloud_thread_id": "cloudthread-0a1b2c3d",
+                "resource_id": "codex:conversation:cloudthread-0a1b2c3d",
+            })
+        );
+        // A session id the website never writes is not a link, and never
+        // falls back to the repository.
+        assert_eq!(
+            read_link("mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fx%3Fcommit%3D1"),
+            AppLinkArrival::Invalid
         );
         assert_eq!(
             read_link("mallard://pull?address=https%3A%2F%2Fmallard-ai.com%2Fa%2Fb"),

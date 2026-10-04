@@ -2,12 +2,13 @@ import type {
   BundleReadiness,
   ProjectBinding,
   PullReview,
+  PullScope,
   RestoreResult,
 } from "../../types";
 import { errorMessage } from "../../storageError";
 
 export interface PullReviewApi {
-  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding) => Promise<PullReview>;
+  planRestore: (storageId: string, bundleId: string, binding: ProjectBinding, scope: PullScope) => Promise<PullReview>;
   getRestoreReadiness: (localProjectId: string, storageId: string) => Promise<BundleReadiness>;
 }
 
@@ -15,7 +16,10 @@ export interface PullReviewRequest {
   storageId: string;
   bundleId: string;
   binding: ProjectBinding;
+  scope: PullScope;
 }
+
+export const PROJECT_PULL: PullScope = { kind: "project" };
 
 export interface PullReviewSupport {
   readiness: BundleReadiness | null;
@@ -90,10 +94,23 @@ export async function acceptPullMetadata(api: PullReviewApplyApi, plan: PullRevi
   const metadataIds = plan.conversation_review.flatMap((row) => (
     row.action === "adopt_cloud_metadata" && row.action_id ? [row.action_id] : []
   ));
+  // A session's acceptance moves no reviewed base and has nothing to send
+  // when its row only reports: its own success is the whole answer.
+  const session = plan.scope.kind === "session";
+  if (session && metadataIds.length === 0) return;
   const result = await api.applyRestore(plan, metadataIds);
-  if (!result.success || result.reviewed_base_advanced !== true) {
+  if (!result.success || (!session && result.reviewed_base_advanced !== true)) {
     throw new Error(result.message || "The storage version could not be accepted. Try again.");
   }
+}
+
+/** What a session's review answered when it holds nothing to review: the
+ *  session is here and matches storage, or is here with nothing newer in
+ *  storage. Only for a plan `canAcceptPullMetadata` accepts. */
+export function sessionPullAnswer(plan: PullReview): "up_to_date" | "nothing_to_pull" {
+  return plan.conversation_review.every((row) => row.action === "adopt_cloud_metadata" || row.action === "no_changes")
+    ? "up_to_date"
+    : "nothing_to_pull";
 }
 
 /**
@@ -161,7 +178,7 @@ export async function beginPullReview(
   api: PullReviewApi,
   request: PullReviewRequest,
 ): Promise<StartedPullReview> {
-  const restorePlan = await api.planRestore(request.storageId, request.bundleId, request.binding);
+  const restorePlan = await api.planRestore(request.storageId, request.bundleId, request.binding, request.scope);
   return {
     restorePlan,
     support: loadPullReviewSupport(api, request.binding.local_project_id, request.storageId),

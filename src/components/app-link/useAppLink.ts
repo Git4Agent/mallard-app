@@ -37,9 +37,11 @@ export type ShellLinkContext = Omit<LinkContext, "places"> & {
 
 /**
  * Takes `mallard://` links from the backend once the shell has loaded and
- * holds the newest. A repository's link opens a sheet and is answered: what
- * each account on its host sees, joined with what is on this computer; the
- * shell follows the verdict when the sheet's verb is pressed. The listing's
+ * holds the newest. A repository's link, and a session's, opens a sheet and
+ * is answered: what each account on its host sees at the repository, joined
+ * with what is on this computer; the shell follows the verdict when the
+ * sheet's verb is pressed. The service is not asked about a session: its
+ * Pull review is what reads the storage. The listing's
  * link asks nothing: with an account on its host it goes straight to its
  * page through `go`, and only without one does it open the sheet. Either
  * kind waits under the bar while the shell is in the middle of something.
@@ -108,11 +110,13 @@ export function useAppLink({ ready, waits, context, go }: {
     };
   }, [ready]);
 
-  const open = held?.phase === "open" && held.link.kind === "repository" ? { round: held.round, ...held.link } : null;
+  const open = held?.phase === "open" && (held.link.kind === "repository" || held.link.kind === "session")
+    ? { round: held.round, host: held.link.host, address: held.link.address, session: held.link.kind === "session" ? held.link.resource_id : null }
+    : null;
   useEffect(() => {
     if (!open) return;
     let live = true;
-    const { host, address, round } = open;
+    const { host, address, round, session } = open;
     void (async () => {
       let verdict: LinkVerdict;
       try {
@@ -121,7 +125,7 @@ export function useAppLink({ ready, waits, context, go }: {
         for (const seer of catalogSeers(answer)) {
           places[seer.storageId] = await storageCatalogApi.findCloudRepository(seer.storageId, seer.repositoryId);
         }
-        verdict = linkVerdict(answer, { ...contextRef.current(), places });
+        verdict = linkVerdict(answer, { ...contextRef.current(), places }, session);
       } catch (reason) {
         verdict = { kind: "stop", severity: "danger", message: errorMessage(reason), action: "retry" };
       }

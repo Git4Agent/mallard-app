@@ -8,6 +8,7 @@ import {
   INVALID_LINK,
   linkVerdict,
   linkWaits,
+  ONE_SESSION,
   listingPage,
   listingVerdict,
   serviceHost,
@@ -28,9 +29,11 @@ import type {
 } from "../../src/types";
 
 /* Open in Mallard: a `mallard://` link from the website names a repository's
-   page. The backend reads it and asks each account on its host; this side
-   joins the answer with what is on this computer, shows one sheet, and goes
-   nowhere until the sheet's verb is pressed. A link never presses a verb. */
+   page, or one session's of it. The backend reads it and asks each account
+   on its host; this side joins the answer with what is on this computer,
+   shows one sheet, and goes nowhere until the sheet's verb is pressed. A
+   link never presses a verb: a session's opens its Pull review, and Pull
+   there is the press that writes. */
 
 const HOST = "mallard-ai.com";
 
@@ -109,7 +112,7 @@ test("a project that is not here lands on New project, the one account that sees
   const one = landing(linkVerdict(answer([account("s-personal", "Rika321", found(project()))]), context()));
   assert.deepEqual(one.destination, { kind: "new_project", storageId: "s-personal", address: "maya/portal" });
   assert.equal(one.verb, "Set up project…");
-  assert.deepEqual(one.found, { address: "maya/portal", mark: "git-folder", standing: "Public", here: "Not on this computer." });
+  assert.deepEqual(one.found, { address: "maya/portal", mark: "git-folder", standing: "Public", sub: null, here: "Not on this computer." });
 
   // Two accounts on the host, one of which sees it: that one is ticked.
   const oneOfTwo = landing(linkVerdict(answer([
@@ -177,7 +180,51 @@ test("a project connected here opens, by the saved repository or by its bundle",
   assert.deepEqual(throughAnother.destination, { kind: "project", projectId: "p-portal", storageId: "s-personal" });
 });
 
-test("a Catalog item opens where it is saved, or lands on the page that adds it", () => {
+test("a session's link opens that session's Pull review in the project that holds its repository", () => {
+  const SESSION = "codex:conversation:cloudthread-0a1b2c3d";
+  const projects = [{ local_project_id: "p-portal", display_name: "portal", local_alias: null }];
+  const links = [{ local_project_id: "p-portal", storage_id: "s-personal", bundle_id: "b".repeat(32), managed_cloud_repository_id: "repo_portal" }];
+  const seen = answer([account("s-personal", "Rika321", found(project({ role: "owner", visibility: "private" })))]);
+
+  // The project is here: the sheet names the repository and that the link
+  // names one session of it. No storage is read for the session's own name.
+  const here = landing(linkVerdict(seen, context({ projects, links }), SESSION));
+  assert.equal(here.verb, "Pull session…");
+  assert.deepEqual(here.destination, { kind: "pull_session", projectId: "p-portal", storageId: "s-personal", resourceId: SESSION });
+  assert.equal(here.found.sub, ONE_SESSION);
+  assert.equal(here.found.here, "On this computer: portal");
+  assert.equal(here.found.standing, "Owner");
+
+  // The same repository without a session is the repository link it was.
+  const repository = landing(linkVerdict(seen, context({ projects, links })));
+  assert.equal(repository.verb, "Open project");
+  assert.equal(repository.found.sub, null);
+
+  // The project is not here: setup, as a repository link; the session is
+  // not carried through it, and the sheet says to use the link again.
+  const away = landing(linkVerdict(seen, context(), SESSION));
+  assert.equal(away.verb, "Set up project…");
+  assert.deepEqual(away.destination, { kind: "new_project", storageId: "s-personal", address: "maya/portal" });
+  assert.equal(away.found.sub, ONE_SESSION);
+  assert.equal(away.found.here, "Not on this computer. Set up the project, then use the link again.");
+
+  // The stops are the repository link's.
+  assert.equal(stop(linkVerdict(answer([]), context(), SESSION)).action, "set_up");
+  assert.equal(stop(linkVerdict(answer([account("s", "guest", { kind: "not_found" })]), context(), SESSION)).message, "guest can’t see maya/portal.");
+  // A Catalog item has no session pages: the website writes no such link.
+  assert.equal(linkVerdict(answer([account("s-personal", "Rika321", found(item()))]), context({ scopes: [PETS_ROW] }), SESSION), INVALID_LINK);
+
+  // The sheet's row gains one line, and its verb is the review's opener.
+  const sheet = renderToStaticMarkup(
+    <AppLinkSheet subject="maya/portal" state={{ phase: "answered", verdict: here }} onVerb={() => undefined} onClose={() => undefined} />,
+  );
+  assert.match(sheet, /storage-found-verdict ok[^>]*>.*?Owner<\/span><span class="storage-found-verdict">.*?One session of this repository<\/span>/s);
+  assert.match(sheet, /class="repo-answer-line"[^>]*>.*On this computer: portal/s);
+  assert.match(sheet, /<button[^>]*btn-primary[^>]*>Pull session…<\/button>/);
+  assert.doesNotMatch(sheet, /cloudthread/, "the session's id is never shown");
+});
+
+test("a Catalog item's link pulls it where it is saved, or lands on the page that adds it", () => {
   const seenPet = (role: string | null = null) => answer(
     [account("s-personal", "Rika321", found(item({ role })))],
     { address: "maya/Mochi" },
@@ -191,7 +238,10 @@ test("a Catalog item opens where it is saved, or lands on the page that adds it"
     places: { "s-personal": { scope_id: "scope-pets", storage_id: "s-personal", resource_id: "mochi-local" } },
   })));
   assert.deepEqual(saved.destination, { kind: "catalog_item", scopeId: "scope-pets", storageId: "s-personal", resourceId: "mochi-local" });
-  assert.equal(saved.verb, "Open in Catalog");
+  // The item's page is its repository's, so its link pulls it: the verb
+  // opens the page on the review its Pull button opens.
+  assert.equal(saved.verb, "Pull pet v2…");
+  assert.equal(saved.found.sub, null);
   assert.equal(saved.found.here, "In your Catalog: Pets v2 · Default Codex");
   assert.equal(saved.found.mark, "catalog-pet-v2");
 
@@ -205,8 +255,11 @@ test("a Catalog item opens where it is saved, or lands on the page that adds it"
   // from Mallard Cloud is for someone else's.
   const ownListed = landing(linkVerdict(seenPet("owner"), context({ scopes: [PETS_ROW] })));
   assert.deepEqual(ownListed.destination, { kind: "catalog_item", scopeId: "scope-pets", storageId: "s-personal", resourceId: "mochi" });
+  assert.equal(ownListed.verb, "Pull pet v2…");
+  // No row of its kind: Add makes one, and the row then opens on the item.
   const ownNoRow = landing(linkVerdict(seenPet("owner"), context()));
-  assert.deepEqual(ownNoRow.destination, { kind: "add_catalog_row", choiceKey: "desktop_pet/openai.codex-pet@2" });
+  assert.deepEqual(ownNoRow.destination, { kind: "add_catalog_row", choiceKey: "desktop_pet/openai.codex-pet@2", storageId: "s-personal", resourceId: "mochi" });
+  assert.equal(ownNoRow.verb, "Add to Catalog…");
   assert.equal(ownNoRow.found.here, "No Pets v2 row on this computer.");
 
   // A kind this build does not register goes nowhere.
@@ -472,6 +525,7 @@ test("a link reads and navigates; every write stays behind a verb the person pre
     "appLink.setAside",
     "beginAddCatalogScope",
     "beginAddProject",
+    "beginSessionRestore",
     "closeWorkspaceSettings",
     "createStorageDraft",
     "goToLinkDestination",
@@ -490,6 +544,22 @@ test("a link reads and navigates; every write stays behind a verb the person pre
   assert.match(hook, /if \(heldRef\.current\?\.phase !== "open" && waitsRef\.current\(\)\) \{\s*setHeld\(\{ link, phase: "waiting"/, "it waits like any link");
   assert.match(shell, /cloudHosts: configRef\.current\.storages\s*\.filter\(isManagedCloudStorage\)/, "the saved config, so a storage setup just added counts");
   assert.doesNotMatch(follow, /projectSyncApi|storageCatalogApi/, "no backend call follows a link");
+  // The one route a session's link adds is the shipped Pull path with a
+  // scope: it opens a review, and Pull there is the press that writes.
+  assert.match(follow, /case "pull_session":[\s\S]{0,120}if \(!\(await openProject\(to\.projectId, to\.storageId\)\)\) return;\s*await beginSessionRestore\(to\.projectId, to\.storageId, to\.resourceId\);/);
+  assert.match(shell, /const beginSessionRestore = \(projectId: string, storageId: string, resourceId: string\) => \(\s*beginProjectRestore\(projectId, storageId, \{ kind: "session", resource_id: resourceId \}\)\s*\);/);
+  assert.match(shell, /const request = \{ storageId, bundleId, binding: targetBinding, scope \};/);
+  // A session's link is answered as its repository's: the service is not
+  // asked about the session, and the hook reads nothing more for it.
+  assert.match(hook, /held\.link\.kind === "repository" \|\| held\.link\.kind === "session"/);
+  assert.match(hook, /verdict = linkVerdict\(answer, \{ \.\.\.contextRef\.current\(\), places \}, session\);/);
+  // A Catalog item's link lands on its page with the review its Pull button
+  // opens; from Add, only when a link opened Add.
+  assert.match(follow, /setCatalogLandingItem\(\{ scopeId: to\.scopeId, resourceId: to\.resourceId, pull: true \}\);/);
+  assert.match(shell, /const pull = catalogAddPullRef\.current !== null;\s*catalogAddPullRef\.current = null;/);
+  assert.match(shell, /initialPull=\{catalogLandingItem\?\.scopeId === activeCatalogScope\.scope\.scope_id && catalogLandingItem\.pull === true\}/);
+  const catalogPage = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(catalogPage, /if \(pullRows\.length > 0\) void openPull\(\);\s*else notify\("Already here and up to date\.", "note"\);/);
 
   // The sheet opens by itself only when the shell is free; otherwise the link waits under the bar.
   assert.match(shell, /waits: \(\) => linkWaits\(\{\s*busy: busyRef\.current,\s*reviewOpen: Boolean\(pendingPush \|\| restorePlan \|\| preparingReview\),\s*dialogOpen: document\.querySelector\("dialog\[open\]:not\(\.app-link-sheet\)"\) !== null,\s*\}\)/);
@@ -510,6 +580,7 @@ test("a link reads and navigates; every write stays behind a verb the person pre
   // Both commands and the scheme are registered; the webview holds no deep-link permission.
   const lib = readFileSync("src-tauri/src/lib.rs", "utf8");
   assert.match(lib, /project_sync::app_link::take_app_link,\s*project_sync::app_link::resolve_app_link,/);
+  assert.match(lib, /project_sync::commands::find_project_session,/, "where a pulled session's page is: a read");
   assert.match(lib, /storage_catalog::resource_commands::find_catalog_cloud_repository,/);
   assert.match(lib, /\.plugin\(tauri_plugin_deep_link::init\(\)\)/);
   const capability = readFileSync("src-tauri/capabilities/default.json", "utf8");

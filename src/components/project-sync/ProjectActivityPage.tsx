@@ -86,6 +86,9 @@ interface PageProps extends SessionSearchProps {
   pushGitHistory?: PushGitHistory;
   selectedResourceIds?: ReadonlySet<string>;
   selectableResourceIds?: ReadonlySet<string>;
+  /** A review of these rows alone (a session's own Pull): every other row
+   *  the comparison holds is left out of the list. */
+  reviewResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   /** Drop selected rows hidden by Show less because they cannot be reviewed. */
@@ -151,6 +154,7 @@ interface ContentProps extends SessionSearchProps {
   pushGitHistory?: PushGitHistory;
   selectedResourceIds?: ReadonlySet<string>;
   selectableResourceIds?: ReadonlySet<string>;
+  reviewResourceIds?: ReadonlySet<string>;
   selectionDisabled?: boolean;
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
@@ -1810,7 +1814,7 @@ export function ProjectChatHistoryContent({
   onLoadMore,
   onSessionAction, onDeleteSession, onOpenSessionDetail, comparison = null,
   storageLoading = false, comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
-  selectionMode, pushGitHistory, selectedResourceIds = new Set(), selectableResourceIds,
+  selectionMode, pushGitHistory, selectedResourceIds = new Set(), selectableResourceIds, reviewResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull,
   onChooseAgentProfile,
   continuityActionBusy = false,
@@ -1852,13 +1856,13 @@ export function ProjectChatHistoryContent({
     if (!selectionMode) return allSessions;
     return allSessions.filter((session) => {
       const entry = syncEntryForSession(session, syncIndex);
-      if (!entry) return false;
+      if (!entry || reviewResourceIds?.has(entry.resource_id) === false) return false;
       const status = sessionSyncPresentation(entry, "storage").status;
       return selectionMode === "pull"
         ? isPullReviewRow(status, entry.pull_decision)
         : isPushReviewRow(status, entry.push_decision);
     });
-  }, [allSessions, selectionMode, syncIndex]);
+  }, [allSessions, reviewResourceIds, selectionMode, syncIndex]);
   const sessions = useMemo(
     () => reviewSessions.filter((session) => nameMatchesSearch(session.title || "Untitled session", query)),
     [reviewSessions, query],
@@ -1925,12 +1929,13 @@ export function ProjectChatHistoryContent({
     if (!selectionMode) return [];
     return (comparison?.entries ?? []).filter((entry) => (
       (entry.local_present || entry.storage_present)
+      && reviewResourceIds?.has(entry.resource_id) !== false
       && (selectionMode === "pull"
         ? isPullReviewRow(sessionSyncPresentation(entry, "storage").status, entry.pull_decision)
         : isPushReviewRow(sessionSyncPresentation(entry, "storage").status, entry.push_decision))
       && !renderedSyncEntryIds.has(entry.resource_id)
     ));
-  }, [comparison?.entries, selectionMode, renderedSyncEntryIds]);
+  }, [comparison?.entries, reviewResourceIds, selectionMode, renderedSyncEntryIds]);
   const unlistedEntries = useMemo(() => allUnlistedEntries.filter((entry) => (
     nameMatchesSearch(entry.display_name.trim() && entry.display_name !== entry.thread_id
       ? entry.display_name : "Untitled thread", query)
@@ -2524,6 +2529,7 @@ export default function ProjectActivityPage({
   pushGitHistory,
   selectedResourceIds,
   selectableResourceIds,
+  reviewResourceIds,
   selectionDisabled = false,
   onToggleResource,
   onDropSelection,
@@ -2857,5 +2863,5 @@ export default function ProjectActivityPage({
       actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} reviewResourceIds={reviewResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} />;
 }

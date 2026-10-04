@@ -6,7 +6,7 @@
 //! turn untrusted JSON into an unchecked path or identifier.
 
 mod pull_review;
-pub use pull_review::PullReview;
+pub use pull_review::{PullReview, PullScope};
 mod git_history;
 pub use git_history::{
     closest_commit_index, GitHistoryCommit, GitHistoryOutgoing, GitHistorySnapshot,
@@ -5428,6 +5428,10 @@ pub struct RestorePlan {
     pub binding_revision: u64,
     pub created_at: u64,
     pub expires_at: u64,
+    /// What this Pull may change; the whole project unless a plan was asked
+    /// for one session.
+    #[serde(default)]
+    pub scope: PullScope,
     #[serde(default)]
     pub actions: Vec<RestoreAction>,
     #[serde(default)]
@@ -5469,6 +5473,27 @@ impl ProjectFileSyncEligibility {
 }
 
 impl RestorePlan {
+    /// A session Pull holds its own session and nothing else: no file
+    /// action, no project-file step, no other session's row or action. This
+    /// is the boundary Apply reads before it reads anything else.
+    fn validate_scope(&self) -> Result<(), String> {
+        let Some((provider, cloud_thread_id)) = self.scope.session()? else {
+            return Ok(());
+        };
+        if !self.actions.is_empty() || self.project_content_eligibility.is_some() {
+            return Err("a session Pull carries no file actions".to_string());
+        }
+        let outside = self.conversation_review.iter().any(|row| {
+            row.provider != provider || row.cloud_thread_id.as_ref() != Some(&cloud_thread_id)
+        }) || self.conversation_actions.iter().any(|action| {
+            action.provider != provider || action.cloud_thread_id.as_ref() != Some(&cloud_thread_id)
+        });
+        if outside {
+            return Err("a session Pull reviews only its own session".to_string());
+        }
+        Ok(())
+    }
+
     /// Validate the non-executable comparison returned before Pull Apply.
     /// Conversation rows carry selection IDs but no action pins.
     pub fn validate_review(&self) -> Result<(), String> {
@@ -5487,6 +5512,7 @@ impl RestorePlan {
         {
             return Err("invalid restore review lifetime or action count".to_string());
         }
+        self.validate_scope()?;
         if let Some(eligibility) = &self.project_content_eligibility {
             eligibility.validate()?;
         }
@@ -5532,6 +5558,7 @@ impl RestorePlan {
         {
             return Err("invalid restore plan lifetime or action count".to_string());
         }
+        self.validate_scope()?;
         let mut action_ids = HashSet::new();
         if let Some(eligibility) = &self.project_content_eligibility {
             eligibility.validate()?;

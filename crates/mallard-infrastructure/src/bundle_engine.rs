@@ -27,9 +27,9 @@ use mallard_domain::{
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
     CapturedWith, CloudThreadId, ConversationThread, LogicalPath, Mainline, PlanId,
     PortableContractResolver, PortableOrigin, ProjectBinding, ProjectFilePreservationPin,
-    ProviderKey, PublicationToken, RecordName, ResolvedScope, ResourceDescriptor, ResourceId,
-    ResourceKindPrimitive, RestoreAction, RestoreActionKind, RestorePlan, StorageId, SyncScopeKey,
-    Tombstone, TombstoneTargetPrimitive, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
+    ProviderKey, PublicationToken, PullScope, RecordName, ResolvedScope, ResourceDescriptor,
+    ResourceId, ResourceKindPrimitive, RestoreAction, RestoreActionKind, RestorePlan, StorageId,
+    SyncScopeKey, Tombstone, TombstoneTargetPrimitive, BUNDLE_SCHEMA, RESTORE_PLAN_SCHEMA,
 };
 
 use crate::storage_core::publication::{
@@ -1525,18 +1525,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         created_at: u64,
         expected_host_identity_revision: u64,
     ) -> Result<RestorePlan, String> {
-        snapshot.validate()?;
-        self.validate_binding(binding, provider_homes, None)?;
-        if binding.state != BindingState::Active {
-            return Err("restore requires an active project binding".to_string());
-        }
-        if binding.bundle_id != snapshot.head.bundle_id {
-            return Err("binding and fetched bundle IDs differ".to_string());
-        }
-        if snapshot.storage_id != self.storage_id {
-            return Err("fetched bundle belongs to another storage".to_string());
-        }
-        let plan_id = PlanId::parse(random_named_id("plan")?)?;
+        self.validate_restore_inputs(snapshot, binding, provider_homes)?;
         let mut actions = Vec::new();
         let mut target_owners = BTreeMap::<String, LogicalPath>::new();
         let mut copy_claims = BTreeSet::<LogicalPath>::new();
@@ -1855,9 +1844,72 @@ impl<S: ObjectStore> BundleEngine<S> {
             }
         }
         actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
+        self.restore_plan(
+            snapshot,
+            binding,
+            PullScope::Project,
+            actions,
+            created_at,
+            expected_host_identity_revision,
+        )
+    }
+
+    /// Build the restore plan of a Pull narrowed to one session: the same
+    /// pins as the file-level plan, and no file-level action. Nothing on
+    /// this computer is inspected; the typed conversation planner adds the
+    /// session's row.
+    pub fn build_session_restore_plan_from_snapshot(
+        &self,
+        snapshot: &BundleSnapshot,
+        binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
+        scope: PullScope,
+        created_at: u64,
+        expected_host_identity_revision: u64,
+    ) -> Result<RestorePlan, String> {
+        self.validate_restore_inputs(snapshot, binding, provider_homes)?;
+        self.restore_plan(
+            snapshot,
+            binding,
+            scope,
+            Vec::new(),
+            created_at,
+            expected_host_identity_revision,
+        )
+    }
+
+    fn validate_restore_inputs(
+        &self,
+        snapshot: &BundleSnapshot,
+        binding: &ProjectBinding,
+        provider_homes: &BTreeMap<ProviderKey, String>,
+    ) -> Result<(), String> {
+        snapshot.validate()?;
+        self.validate_binding(binding, provider_homes, None)?;
+        if binding.state != BindingState::Active {
+            return Err("restore requires an active project binding".to_string());
+        }
+        if binding.bundle_id != snapshot.head.bundle_id {
+            return Err("binding and fetched bundle IDs differ".to_string());
+        }
+        if snapshot.storage_id != self.storage_id {
+            return Err("fetched bundle belongs to another storage".to_string());
+        }
+        Ok(())
+    }
+
+    fn restore_plan(
+        &self,
+        snapshot: &BundleSnapshot,
+        binding: &ProjectBinding,
+        scope: PullScope,
+        actions: Vec<RestoreAction>,
+        created_at: u64,
+        expected_host_identity_revision: u64,
+    ) -> Result<RestorePlan, String> {
         let plan = RestorePlan {
             schema_version: RESTORE_PLAN_SCHEMA,
-            plan_id,
+            plan_id: PlanId::parse(random_named_id("plan")?)?,
             storage_id: self.storage_id.clone(),
             bundle_id: snapshot.head.bundle_id.clone(),
             host_id: binding.host_id.clone(),
@@ -1869,6 +1921,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             binding_revision: binding.revision,
             created_at,
             expires_at: created_at.saturating_add(DEFAULT_PLAN_LIFETIME_SECS),
+            scope,
             actions,
             conversation_actions: Vec::new(),
             conversation_review: Vec::new(),

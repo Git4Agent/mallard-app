@@ -76,6 +76,11 @@ export default function AppLinkSheet({ subject, state, onVerb, onClose }: {
                     <span className="storage-found-verdict ok">
                       <Icon name="check-circle" size={12} /> {verdict.found.standing}
                     </span>
+                    {verdict.found.sub && (
+                      <span className="storage-found-verdict">
+                        <Icon name="message" size={12} /> {verdict.found.sub}
+                      </span>
+                    )}
                   </span>
                 </div>
               </div>

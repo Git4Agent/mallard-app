@@ -3129,6 +3129,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "mallard-domain",
+ "percent-encoding",
  "petname",
  "plist",
  "regex",

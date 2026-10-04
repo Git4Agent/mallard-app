@@ -36,14 +36,14 @@ use mallard_domain::{
     MaterializationRecord, MaterializationStatus, Materializations, PhysicalMappingState, PlanId,
     PortableConversationTail, PortableOrigin, PreservedProvenance, ProjectBinding,
     ProjectFileSyncEligibility, ProjectFileSyncEligibilityState, ProjectSetupDraft,
-    ProjectStorageLink, ProviderKey, ProviderProfile, ProviderStateExpectation, RawRangePin,
-    RecipeEntry, RemoteContinuity, ReplicaId, RepositoryBase, ResourceDescriptor, ResourceId,
-    ResourceKindPrimitive, RestoreActionKind, RestoreActionType, RestorePlan, ReviewPurpose,
-    RootTailLayout, SavedBy, ScopeBase, ScopeContinuity, SecretKey, SecretOperation, SetupDraftId,
-    SetupTransaction, StorageConfig, StorageId, StorageProviderKey, StorageSetupDraftId,
-    SyncConfig, SyncScopeKey, TailClassification, TailEvidenceBlocker, TailPartitionKind,
-    TailSideEvidence, TargetExpectation, ThreadId, TombstoneTargetPrimitive, VerifiedTailEvidence,
-    SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
+    ProjectStorageLink, ProviderKey, ProviderProfile, ProviderStateExpectation, PullScope,
+    RawRangePin, RecipeEntry, RemoteContinuity, ReplicaId, RepositoryBase, ResourceDescriptor,
+    ResourceId, ResourceKindPrimitive, RestoreActionKind, RestoreActionType, RestorePlan,
+    ReviewPurpose, RootTailLayout, SavedBy, ScopeBase, ScopeContinuity, SecretKey, SecretOperation,
+    SetupDraftId, SetupTransaction, StorageConfig, StorageId, StorageProviderKey,
+    StorageSetupDraftId, SyncConfig, SyncScopeKey, TailClassification, TailEvidenceBlocker,
+    TailPartitionKind, TailSideEvidence, TargetExpectation, ThreadId, TombstoneTargetPrimitive,
+    VerifiedTailEvidence, SETUP_DRAFT_SCHEMA, SETUP_TRANSACTION_SCHEMA,
 };
 use mallard_domain::{
     AcceptedSubagentState, SubagentContentState, SubagentKey, SubagentSelection, SubagentTailPins,
@@ -326,6 +326,7 @@ impl<'a> ProjectSyncService<'a> {
             storage_id,
             bundle_id,
             binding,
+            &PullScope::Project,
             &mut |_| {},
             &mut |_, _| {},
         )
@@ -336,6 +337,7 @@ impl<'a> ProjectSyncService<'a> {
         storage_id: &StorageId,
         bundle_id: &BundleId,
         binding: &ProjectBinding,
+        scope: &PullScope,
         on_progress: &mut dyn FnMut(FetchProgress),
         on_phase: &mut dyn FnMut(&str, Duration),
     ) -> Result<RestorePlan, String> {
@@ -344,6 +346,7 @@ impl<'a> ProjectSyncService<'a> {
             storage_id,
             bundle_id,
             binding,
+            scope,
             on_progress,
             on_phase,
         )
@@ -11718,16 +11721,90 @@ pub(super) fn push_bundle_reviewed_with_progress(
     })
 }
 
+/// The refusal of a session Pull whose session the storage's current version
+/// does not hold: removed, a draft discarded, or a public reader after a
+/// release without it.
+fn session_not_in_storage(storage_name: &str) -> String {
+    format!("That session isn't in {storage_name} any more.")
+}
+
+/// The local session a project pairs with a cloud thread, when it holds one.
+fn session_binding(
+    repository: &LocalStateRepository,
+    binding: &ProjectBinding,
+    provider: &ProviderKey,
+    cloud_thread_id: &CloudThreadId,
+) -> Result<Option<LocalConversationBinding>, String> {
+    let Some(profile_id) = binding.profile_ids.get(provider) else {
+        return Ok(None);
+    };
+    Ok(repository
+        .load_conversation_bindings()?
+        .bindings
+        .into_iter()
+        .find(|row| {
+            row.host_id == binding.host_id
+                && row.replica_id == binding.replica_id
+                && row.local_project_id == binding.local_project_id
+                && &row.provider_profile_id == profile_id
+                && row.cloud_thread_id.as_ref() == Some(cloud_thread_id)
+        }))
+}
+
+/// Where the session of a stored row is in this project: the id its page is
+/// opened by, or none when the project does not hold the session. Reads the
+/// bindings and nothing else.
+pub(super) fn find_project_session_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    resource_id: &ResourceId,
+) -> Result<Option<ResourceId>, String> {
+    let (provider, cloud_thread_id) =
+        mallard_domain::parse_cloud_conversation_resource_id(resource_id.as_str())?;
+    let bindings = repository.load_bindings()?;
+    let Some(binding) = bindings.active_for(local_project_id) else {
+        return Ok(None);
+    };
+    session_binding(repository, binding, &provider, &cloud_thread_id)?
+        .map(|row| conversation_resource_id(&provider, &row.thread_id))
+        .transpose()
+}
+
+/// What a session Pull's review reads: the stored row, and the local twin
+/// when this project already holds the session, found through the binding
+/// that names the cloud thread. No other session is opened.
+fn session_pull_resources(
+    repository: &LocalStateRepository,
+    resolved: &ResolvedBinding,
+    views: &[provider_capture::LocalSessionView],
+    provider: &ProviderKey,
+    stored: &ConversationThread,
+) -> Result<BTreeSet<ResourceId>, String> {
+    let mut selected = BTreeSet::from([stored.resource_id.clone()]);
+    let twin = session_binding(repository, &resolved.binding, provider, &stored.thread_id)?
+        .and_then(|row| row.provider_thread_id);
+    if let Some(provider_thread_id) = twin {
+        for view in views.iter().filter(|view| {
+            &view.provider == provider && view.provider_thread_id == provider_thread_id.as_str()
+        }) {
+            selected.insert(ResourceId::parse(view.descriptor.resource_id.clone())?);
+        }
+    }
+    Ok(selected)
+}
+
 pub(super) fn plan_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     bundle_id: &BundleId,
     binding: &ProjectBinding,
+    scope: &PullScope,
     _on_progress: &mut dyn FnMut(FetchProgress),
     on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<RestorePlan, String> {
     let phase_started = Instant::now();
     let _host_operation = repository.acquire_host_operation()?;
+    let session = scope.session()?;
     let state = repository.load_project_state_snapshot()?;
     let resolved = require_current_binding_from_state(&state.bindings, binding)?;
     let binding = resolved.binding.clone();
@@ -11760,31 +11837,63 @@ pub(super) fn plan_bundle_restore_with_progress(
         }
         return Err(format!("bundle '{}' does not exist", bundle_id));
     };
+    // A session Pull is refused here, before anything else is read, when the
+    // version it would pin does not hold the session.
+    let stored_session = match &session {
+        Some((provider, cloud_thread_id)) => Some(
+            snapshot
+                .manifest
+                .provider_scope(provider)
+                .and_then(|scope| scope.conversations.get(cloud_thread_id))
+                .ok_or_else(|| {
+                    let (_, storage_name, _) = project_storage_log_context(
+                        repository,
+                        &binding.local_project_id,
+                        storage_id,
+                    );
+                    session_not_in_storage(&storage_name)
+                })?,
+        ),
+        None => None,
+    };
     on_phase("inspect remote head and manifest", phase_started.elapsed());
     let phase_started = Instant::now();
     let identity = &state.host_identity;
     if identity.host_id != binding.host_id {
         return Err("host identity changed while preparing the Pull review".to_string());
     }
-    // Reviewed-base content digests decide which diverged project files must
-    // preserve their local bytes as a visible copy. A stale or unavailable
-    // base yields an empty map, which fails closed to preservation.
-    let project_content_bases = project_content_base_content_digests(
-        &engine,
-        bundle_id,
-        &link,
-        &mainline,
-        &snapshot.manifest,
-    );
-    let mut plan = engine.build_restore_plan_from_snapshot(
-        provider_registry(),
-        &snapshot,
-        &binding,
-        &resolved.homes,
-        &project_content_bases,
-        now_secs(),
-        identity.revision,
-    )?;
+    let mut plan = if session.is_some() {
+        // One session: no provider state, no tool, no project file.
+        engine.build_session_restore_plan_from_snapshot(
+            &snapshot,
+            &binding,
+            &resolved.homes,
+            scope.clone(),
+            now_secs(),
+            identity.revision,
+        )?
+    } else {
+        // Reviewed-base content digests decide which diverged project files
+        // must preserve their local bytes as a visible copy. A stale or
+        // unavailable base yields an empty map, which fails closed to
+        // preservation.
+        let project_content_bases = project_content_base_content_digests(
+            &engine,
+            bundle_id,
+            &link,
+            &mainline,
+            &snapshot.manifest,
+        );
+        engine.build_restore_plan_from_snapshot(
+            provider_registry(),
+            &snapshot,
+            &binding,
+            &resolved.homes,
+            &project_content_bases,
+            now_secs(),
+            identity.revision,
+        )?
+    };
     plan.remote_continuity = Some(remote_continuity);
     on_phase("build file restore plan", phase_started.elapsed());
     if !resolved.homes.is_empty() {
@@ -11798,6 +11907,12 @@ pub(super) fn plan_bundle_restore_with_progress(
         )?;
         let (_discovery, views) =
             provider_capture::discover_sessions(provider_registry(), &capture_request)?;
+        let session_resources = match (&session, stored_session) {
+            (Some((provider, _)), Some(stored)) => Some(session_pull_resources(
+                repository, &resolved, &views, provider, stored,
+            )?),
+            _ => None,
+        };
         let review = thread_review(
             repository,
             Some(&snapshot),
@@ -11811,7 +11926,7 @@ pub(super) fn plan_bundle_restore_with_progress(
             plan.created_at,
             plan.created_at,
             ReviewPurpose::Observe,
-            None,
+            session_resources.as_ref(),
             &AppSettings::default(),
         )?;
         plan.conversation_actions.clear();
@@ -11819,6 +11934,12 @@ pub(super) fn plan_bundle_restore_with_progress(
             .entries
             .into_iter()
             .filter(|entry| entry.pull_decision.action != ConversationReviewAction::NoChanges)
+            .filter(|entry| {
+                session.as_ref().is_none_or(|(provider, cloud_thread_id)| {
+                    &entry.provider == provider
+                        && entry.cloud_thread_id.as_ref() == Some(cloud_thread_id)
+                })
+            })
             .map(|entry| {
                 let local_thread_id = entry
                     .local_present
@@ -11869,7 +11990,11 @@ pub(super) fn plan_bundle_restore_with_progress(
         on_phase("compare conversations", phase_started.elapsed());
     }
     let phase_started = Instant::now();
-    plan.project_content_eligibility = Some(project_file_sync_eligibility(&binding));
+    // A session Pull has no Files step: the eligibility that offers one is
+    // absent.
+    if session.is_none() {
+        plan.project_content_eligibility = Some(project_file_sync_eligibility(&binding));
+    }
     plan.validate_review()?;
     on_phase("finalize review", phase_started.elapsed());
     Ok(plan)
@@ -11906,24 +12031,38 @@ fn build_restore_plan_for_apply(
     }
 
     let phase_started = Instant::now();
-    let project_content_bases = project_content_base_content_digests(
-        engine,
-        &review.bundle_id,
-        &link,
-        mainline,
-        &snapshot.manifest,
-    );
-    let mut plan = engine.build_restore_plan_from_snapshot(
-        provider_registry(),
-        snapshot,
-        binding,
-        &resolved.homes,
-        &project_content_bases,
-        now_secs(),
-        identity.revision,
-    )?;
+    let mut plan = if review.scope == PullScope::Project {
+        let project_content_bases = project_content_base_content_digests(
+            engine,
+            &review.bundle_id,
+            &link,
+            mainline,
+            &snapshot.manifest,
+        );
+        let mut plan = engine.build_restore_plan_from_snapshot(
+            provider_registry(),
+            snapshot,
+            binding,
+            &resolved.homes,
+            &project_content_bases,
+            now_secs(),
+            identity.revision,
+        )?;
+        plan.project_content_eligibility = Some(project_file_sync_eligibility(binding));
+        plan
+    } else {
+        // The reviewed scope is the executed one: a session Pull's apply
+        // plan holds no file action to approve.
+        engine.build_session_restore_plan_from_snapshot(
+            snapshot,
+            binding,
+            &resolved.homes,
+            review.scope.clone(),
+            now_secs(),
+            identity.revision,
+        )?
+    };
     plan.remote_continuity = review.remote_continuity.clone();
-    plan.project_content_eligibility = Some(project_file_sync_eligibility(binding));
     on_phase("build apply plan", phase_started.elapsed());
 
     if selected_conversations.is_empty() {
@@ -13478,17 +13617,20 @@ fn apply_prepared_pull_conversation(
         threads.insert(local_thread_id.clone(), checkpoint);
         // The base takes the scope coordinates of the reviewed publication.
         // The scope counter is a per-branch number, so nothing orders by it.
-        link.scope_bases.entry(scope.clone()).and_modify(|base| {
-            base.scope_revision = action.pins.revision.scope_revision;
-            base.scope_sha256 = action.pins.revision.scope_sha256.clone();
-            base.reviewed_in = RepositoryBase {
-                revision: action.pins.revision.bundle_revision,
-                commit_id: action.pins.revision.commit_id.clone(),
-                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-                manifest_size: base.reviewed_in.manifest_size.max(1),
-            };
-            base.last_pull_at = Some(applied_at);
-        });
+        // A session Pull reviewed one row of that publication: its base stays.
+        if plan.scope == PullScope::Project {
+            link.scope_bases.entry(scope.clone()).and_modify(|base| {
+                base.scope_revision = action.pins.revision.scope_revision;
+                base.scope_sha256 = action.pins.revision.scope_sha256.clone();
+                base.reviewed_in = RepositoryBase {
+                    revision: action.pins.revision.bundle_revision,
+                    commit_id: action.pins.revision.commit_id.clone(),
+                    manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+                    manifest_size: base.reviewed_in.manifest_size.max(1),
+                };
+                base.last_pull_at = Some(applied_at);
+            });
+        }
     }
     config_after.revision = config_after.revision.saturating_add(1);
     on_phase("build local after-states", phase_started.elapsed());
@@ -14287,7 +14429,13 @@ pub(super) fn apply_bundle_restore_with_progress(
                 .filter(|receipt| !recorded.contains(&receipt.action_id)),
         );
     }
-    let files_complete = reviewed_files_complete(&applied.receipts, &BTreeSet::new());
+    // A session Pull reviewed one row of the storage's version. It is partial
+    // by its scope, whatever its receipts say: the link's reviewed base, the
+    // cloud pin and the saved recipe stay where they were, so the project's
+    // Pull badge and Push gate do not move.
+    let advances_reviewed_base = plan.scope == PullScope::Project;
+    let files_complete =
+        advances_reviewed_base && reviewed_files_complete(&applied.receipts, &BTreeSet::new());
     let status = if files_complete {
         MaterializationStatus::Complete
     } else {
@@ -14528,7 +14676,7 @@ pub(super) fn apply_bundle_restore_with_progress(
         readiness,
         readiness_error,
         plan_id: Some(plan.plan_id),
-        reviewed_base_advanced: Some(files_complete),
+        reviewed_base_advanced: advances_reviewed_base.then_some(files_complete),
         applied_action_ids,
         failed_actions,
         preserved_threads,
@@ -14670,17 +14818,20 @@ fn adopt_cloud_metadata_actions(
                     checkpoint.accepted_local_tail = Some(prepared.accepted_local_tail.clone());
                     checkpoint.observed_tail = prepared.accepted_local_tail.clone();
                     checkpoint.generation = checkpoint.generation.saturating_add(1);
-                    link.scope_bases.entry(scope).and_modify(|base| {
-                        base.scope_revision = action.pins.revision.scope_revision;
-                        base.scope_sha256 = action.pins.revision.scope_sha256.clone();
-                        base.reviewed_in = RepositoryBase {
-                            revision: action.pins.revision.bundle_revision,
-                            commit_id: action.pins.revision.commit_id.clone(),
-                            manifest_sha256: action.pins.revision.manifest_sha256.clone(),
-                            manifest_size: base.reviewed_in.manifest_size.max(1),
-                        };
-                        base.last_pull_at = Some(applied_at);
-                    });
+                    // A session Pull's acceptance leaves the scope's base.
+                    if plan.scope == PullScope::Project {
+                        link.scope_bases.entry(scope).and_modify(|base| {
+                            base.scope_revision = action.pins.revision.scope_revision;
+                            base.scope_sha256 = action.pins.revision.scope_sha256.clone();
+                            base.reviewed_in = RepositoryBase {
+                                revision: action.pins.revision.bundle_revision,
+                                commit_id: action.pins.revision.commit_id.clone(),
+                                manifest_sha256: action.pins.revision.manifest_sha256.clone(),
+                                manifest_size: base.reviewed_in.manifest_size.max(1),
+                            };
+                            base.last_pull_at = Some(applied_at);
+                        });
+                    }
                     Ok(prepared.resource_id.clone())
                 })();
                 changed |= outcome.is_ok();

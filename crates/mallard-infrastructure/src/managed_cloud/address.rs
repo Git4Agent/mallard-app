@@ -3,6 +3,7 @@
 //! with or without the scheme, with or without a `/sessions/…` tail), or
 //! the bare `owner/name`. The storage's own origin is the only host
 //! accepted, so a staging address never reaches the production service.
+use mallard_domain::{parse_cloud_conversation_resource_id, CloudThreadId, ProviderKey};
 use std::fmt;
 
 /// `{owner}/{name}` as the service addresses a repository (section 4.1).
@@ -149,19 +150,57 @@ pub fn parse_repository_address(
     repository_in(path)
 }
 
-/// A repository page's whole address, `http(s)://{host}/{owner}/{name}…`:
-/// the host it names and the repository. What an app link carries, where no
-/// storage has been chosen yet to check the host against.
-pub fn parse_page_address(input: &str) -> Result<(String, RepositoryAddress), AddressError> {
+/// A page's whole address taken apart: the host it names, and its path. The
+/// scheme and the host are required, since no storage has been chosen yet to
+/// check a host against.
+fn page_parts(input: &str) -> Result<(String, &str), AddressError> {
     let Parts {
         host,
         schemed,
         path,
     } = parts(input)?;
     match host {
-        Some(host) if schemed && !host.is_empty() => Ok((host, repository_in(path)?)),
+        Some(host) if schemed && !host.is_empty() => Ok((host, path)),
         _ => Err(AddressError::Invalid),
     }
+}
+
+/// A repository page's whole address, `http(s)://{host}/{owner}/{name}…`:
+/// the host it names and the repository. What an app link carries, where no
+/// storage has been chosen yet to check the host against.
+pub fn parse_page_address(input: &str) -> Result<(String, RepositoryAddress), AddressError> {
+    let (host, path) = page_parts(input)?;
+    Ok((host, repository_in(path)?))
+}
+
+/// The session a session page names: its provider and its cloud thread.
+pub type SessionAddress = (ProviderKey, CloudThreadId);
+
+/// A page's whole address, read for the session it names as well:
+/// `http(s)://{host}/{owner}/{name}/sessions/{id}`, where `{id}` is the
+/// manifest row's id (`<provider>:conversation:cloudthread-…`), spelled raw
+/// or percent-encoded. Any other tail (none, `/release`) names no session
+/// and the page stays its repository's. A `sessions/{id}` whose id is not a
+/// cloud conversation's is not an address: the website never writes one.
+pub fn parse_session_page_address(
+    input: &str,
+) -> Result<(String, RepositoryAddress, Option<SessionAddress>), AddressError> {
+    let (host, path) = page_parts(input)?;
+    let address = repository_in(path)?;
+    let mut tail = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .skip(2);
+    let session = match (tail.next(), tail.next(), tail.next()) {
+        (Some("sessions"), Some(id), None) => {
+            let id = percent_encoding::percent_decode_str(id)
+                .decode_utf8()
+                .map_err(|_| AddressError::Invalid)?;
+            Some(parse_cloud_conversation_resource_id(&id).map_err(|_| AddressError::Invalid)?)
+        }
+        _ => None,
+    };
+    Ok((host, address, session))
 }
 
 /// `{owner}/{name}` at the head of a page's path.

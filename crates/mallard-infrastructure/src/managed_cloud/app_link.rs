@@ -1,10 +1,13 @@
 //! The link the website hands the desktop: `mallard://open?address=<a
-//! page's address>`. Two pages are known: a repository's (Open in Mallard),
-//! and the listing (Share yours). It names a page and nothing else: no verb
-//! beyond `open`, no folder, no account. Any page can fire the scheme, so
-//! whatever is not exactly this form is refused, and only the host and
-//! `owner/name`, or the host and one of four kinds, ever leave this module.
-use super::address::{origin_host, parse_page_address, RepositoryAddress};
+//! page's address>`. Three pages are known: a repository's (Open in
+//! Mallard), one session's of a repository (Pull in Mallard), and the
+//! listing (Share yours). It names a page and nothing else: no verb beyond
+//! `open`, no folder, no account. Any page can fire the scheme, so whatever
+//! is not exactly this form is refused, and only the host and `owner/name`,
+//! with a session's provider and cloud thread, or the host and one of four
+//! kinds, ever leave this module.
+use super::address::{origin_host, parse_session_page_address, RepositoryAddress};
+use mallard_domain::{CloudThreadId, ProviderKey};
 use serde::Serialize;
 
 /// The scheme registered for the app (`tauri.conf.json`).
@@ -49,6 +52,14 @@ pub enum AppLink {
         host: String,
         address: RepositoryAddress,
     },
+    /// One session's page: its repository, and the session's provider and
+    /// cloud thread, as the page's `sessions/{id}` tail names them.
+    Session {
+        host: String,
+        address: RepositoryAddress,
+        provider: ProviderKey,
+        cloud_thread_id: CloudThreadId,
+    },
     /// The listing, and the kind its chips were filtered to.
     Listing {
         host: String,
@@ -82,8 +93,15 @@ pub fn parse_app_link(link: &str) -> Option<AppLink> {
     if let Some(listing) = parse_listing(&page) {
         return Some(listing);
     }
-    let (host, address) = parse_page_address(&page).ok()?;
-    Some(AppLink::Repository { host, address })
+    Some(match parse_session_page_address(&page).ok()? {
+        (host, address, None) => AppLink::Repository { host, address },
+        (host, address, Some((provider, cloud_thread_id))) => AppLink::Session {
+            host,
+            address,
+            provider,
+            cloud_thread_id,
+        },
+    })
 }
 
 /// The website's listing, `http(s)://{host}/repositories`. Its `type` is
@@ -203,8 +221,12 @@ mod tests {
             "mallard://open?address=https://mallard-ai.com/Rika321/HorrorGame",
             "mallard://open/?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame",
             "MALLARD://OPEN?address=https%3A%2F%2Fwww.mallard-ai.com%2FRika321%2FHorrorGame%2F",
-            // A session page's tail and query are dropped: the repository is what opens.
-            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fres-1%3Fcommit%3Dabc%26scope%3Dprivate",
+            // A tail that is not one session's, and the page's query, are
+            // dropped: the repository is what opens.
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Frelease%3Fcommit%3Dabc%26scope%3Dprivate",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2F",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Aconversation%3Acloudthread-0a1b%2Fraw",
         ] {
             assert_eq!(
                 parse_app_link(spelling),
@@ -218,6 +240,62 @@ mod tests {
             ),
             link("localhost:8787", "octocat", "notes")
         );
+    }
+
+    #[test]
+    fn a_session_pages_link_reads_as_the_repository_and_the_session() {
+        let session = |host: &str, owner: &str, name: &str, provider: &str, thread: &str| {
+            Some(AppLink::Session {
+                host: host.into(),
+                address: RepositoryAddress {
+                    owner: owner.into(),
+                    name: name.into(),
+                },
+                provider: ProviderKey::parse(provider).unwrap(),
+                cloud_thread_id: CloudThreadId::parse(thread).unwrap(),
+            })
+        };
+        // `appLink(pageAddress)` in the website's pull.ts, verbatim: the id's
+        // colons raw in the page address, and percent-encoded in it.
+        for spelling in [
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Aconversation%3Acloudthread-0a1b2c3d",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%253Aconversation%253Acloudthread-0a1b2c3d",
+            // The page's query is the page's, and is dropped.
+            "mallard://open?address=https%3A%2F%2Fwww.mallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Aconversation%3Acloudthread-0a1b2c3d%3Fcommit%3D9f3c2d1%26scope%3Dprivate",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%253Aconversation%253Acloudthread-0a1b2c3d%2F%3Fcommit%3D4",
+        ] {
+            assert_eq!(
+                parse_app_link(spelling),
+                session(
+                    "mallard-ai.com",
+                    "Rika321",
+                    "HorrorGame",
+                    "codex",
+                    "cloudthread-0a1b2c3d"
+                ),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            parse_app_link("mallard://open?address=http%3A%2F%2Flocalhost%3A8787%2Foctocat%2Fnotes%2Fsessions%2Fclaude%3Aconversation%3Acloudthread-ff"),
+            session("localhost:8787", "octocat", "notes", "claude", "cloudthread-ff")
+        );
+        // An id the website never writes is a forged or broken link, never
+        // the repository: a local thread's id, another resource class, a
+        // provider alone, an id that is not one, an encoded separator.
+        for refused in [
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fres-1",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Aconversation%3Athread-0a1b",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Asession%3Acloudthread-0a1b",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2FCodex%3Aconversation%3Acloudthread-0a1b",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Aconversation%3Acloudthread-0a1b%252Fraw",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Fsessions%2Fcodex%3Aconversation%3Acloudthread-%25FF",
+            // A session of what is not a repository page.
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2Fdocs%2Fpull%2Fsessions%2Fcodex%3Aconversation%3Acloudthread-0a1b",
+        ] {
+            assert_eq!(parse_app_link(refused), None, "{refused:?}");
+        }
     }
 
     #[test]
