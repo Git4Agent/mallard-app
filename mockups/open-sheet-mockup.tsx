@@ -100,11 +100,10 @@ const SCENES: Scene[] = [
 
 /* ——— one view model every direction draws from ———————————————————————— */
 
-/* The shipped verdict speaks in sentences; every direction here says each
-   thing in an icon and a word or two, the sentence kept as a tooltip. */
+/* The verdict gives each thing as an icon and a word or two, the sentence
+   kept for the tooltip; every direction draws from that. */
 
 const STOP_VERB: Record<NonNullable<LinkStop["action"]>, string> = { set_up: "Set up Mallard Cloud", retry: "Try again" };
-const STOP_ICON: Record<LinkStop["severity"], IconName> = { info: "user", warning: "alert-triangle", danger: "cloud-x" };
 
 interface Fact { icon: IconName; word: string }
 interface Here { present: boolean; icon: IconName; word: string; text: string }
@@ -113,44 +112,20 @@ type View =
   | { kind: "landing"; address: string; mark: IconName; facts: Fact[]; here: Here; verb: string; task: string }
   | { kind: "stop"; subject: string | null; severity: LinkStop["severity"]; icon: IconName; title: string; message: string; verb: string | null };
 
-const FACT_ICON: Record<string, IconName> = { Public: "cloud", Owner: "user", Writer: "edit", Member: "user", Reader: "search" };
-
-function factsOf(standing: string, sub: string | null): Fact[] {
-  const facts = standing.split(" · ").map((word) => ({ icon: FACT_ICON[word] ?? "user", word }));
-  return sub ? [...facts, { icon: "message", word: "1 session" }] : facts;
-}
-
-function hereOf(text: string, catalog: boolean): Here {
-  const place: IconName = catalog ? "catalog" : "computer";
-  const found = /^(?:On this computer|In your Catalog): (.+)$/.exec(text);
-  if (found) return { present: true, icon: place, word: found[1], text };
-  const noRow = /^No (.+) row on this computer\.$/.exec(text);
-  return { present: false, icon: place, word: noRow ? `No ${noRow[1]} row` : catalog ? "Not in Catalog" : "Not here", text };
-}
-
-function stopOf(message: string, severity: LinkStop["severity"]): { icon: IconName; title: string } {
-  if (/^Sign in/.test(message)) return { icon: "user", title: "Sign in first" };
-  const host = /^No account here for (.+)\.$/.exec(message);
-  if (host) return { icon: "user", title: `No account on ${host[1]}` };
-  if (/can’t see/.test(message)) return { icon: "lock", title: "No access" };
-  if (/can’t open that link/.test(message)) return { icon: "link-off", title: "Broken link" };
-  if (/kind this app can’t open/.test(message)) return { icon: "ban", title: "Can’t open this kind" };
-  return { icon: STOP_ICON[severity], title: "Mallard Cloud unreachable" };
-}
-
 function viewOf(scene: Scene): View {
   if (scene.state.phase === "looking") return { kind: "looking", subject: scene.subject };
   const verdict = scene.state.verdict;
   if (verdict.kind === "stop") {
     return {
       kind: "stop", subject: scene.subject, severity: verdict.severity, message: verdict.message,
-      ...stopOf(verdict.message, verdict.severity), verb: verdict.action ? STOP_VERB[verdict.action] : null,
+      icon: verdict.icon, title: verdict.title, verb: verdict.action ? STOP_VERB[verdict.action] : null,
     };
   }
-  const catalog = verdict.destination.kind.startsWith("catalog") || verdict.destination.kind.startsWith("add_catalog");
+  const { here } = verdict.found;
   return {
-    kind: "landing", address: verdict.found.address, mark: verdict.found.mark, facts: factsOf(verdict.found.standing, verdict.found.sub),
-    here: hereOf(verdict.found.here, catalog), verb: verdict.verb, task: verdict.verb.replace(/…$/, ""),
+    kind: "landing", address: verdict.found.address, mark: verdict.found.mark, facts: verdict.found.facts,
+    here: { present: here.present, icon: here.place === "catalog" ? "catalog" : "computer", word: here.word, text: here.sentence },
+    verb: verdict.verb, task: verdict.verb.replace(/…$/, ""),
   };
 }
 
@@ -403,7 +378,7 @@ interface Direction {
 
 const DIRECTIONS: Direction[] = [
   {
-    id: "before", name: "Before · shipped", placement: "center", seenIn: "The real sheet",
+    id: "before", name: "Shipped · A", placement: "center", seenIn: "The real AppLinkSheet, now A",
     draw: (scene) => <AppLinkSheet key={scene.id} subject={scene.subject} state={scene.state} onVerb={() => {}} onClose={() => {}} />,
   },
   { id: "a", name: "A · Confirm", placement: "center", pick: true, seenIn: "Two icon lines", draw: (scene) => <ConfirmSheet view={viewOf(scene)} /> },
@@ -497,7 +472,7 @@ function Specimen() {
     <div className="spec">
       <h1 className="spec-title">Open sheet — directions</h1>
       <p className="spec-sub">
-        What a <code>mallard://</code> link opens. <b>Before</b> is the shipped sheet; A–G say the same in icons and a few words, in the
+        What a <code>mallard://</code> link opens. <b>Shipped</b> is the real sheet, now built as A; A–G say the same in icons and a few words, in the
         app’s own dialog parts. Hover a short line for the full sentence.
       </p>
 

@@ -8,10 +8,10 @@ import {
   INVALID_LINK,
   linkVerdict,
   linkWaits,
-  ONE_SESSION,
   listingPage,
   listingVerdict,
   serviceHost,
+  unanswered,
   type LinkContext,
   type LinkVerdict,
 } from "../../src/components/app-link/appLink";
@@ -112,7 +112,12 @@ test("a project that is not here lands on New project, the one account that sees
   const one = landing(linkVerdict(answer([account("s-personal", "Rika321", found(project()))]), context()));
   assert.deepEqual(one.destination, { kind: "new_project", storageId: "s-personal", address: "maya/portal" });
   assert.equal(one.verb, "Set up project…");
-  assert.deepEqual(one.found, { address: "maya/portal", mark: "git-folder", standing: "Public", sub: null, here: "Not on this computer." });
+  assert.deepEqual(one.found, {
+    address: "maya/portal",
+    mark: "git-folder",
+    facts: [{ icon: "cloud", word: "Public" }],
+    here: { place: "computer", present: false, word: "Not here", sentence: "Not on this computer." },
+  });
 
   // Two accounts on the host, one of which sees it: that one is ticked.
   const oneOfTwo = landing(linkVerdict(answer([
@@ -120,7 +125,7 @@ test("a project that is not here lands on New project, the one account that sees
     account("s-work", "rika-acme", found(project({ role: "member", visibility: "private" }))),
   ]), context()));
   assert.deepEqual(oneOfTwo.destination, { kind: "new_project", storageId: "s-work", address: "maya/portal" });
-  assert.equal(oneOfTwo.found.standing, "Member");
+  assert.deepEqual(oneOfTwo.found.facts, [{ icon: "lock", word: "Private" }, { icon: "user", word: "Member" }]);
 
   // Both see it: none is ticked, the page's own rule for several accounts.
   const both = landing(linkVerdict(answer([
@@ -153,8 +158,8 @@ test("a project connected here opens, by the saved repository or by its bundle",
   })));
   assert.deepEqual(byPin.destination, { kind: "project", projectId: "p-portal", storageId: "s-personal" }, "the first in the project list");
   assert.equal(byPin.verb, "Open project");
-  assert.equal(byPin.found.here, "On this computer: Portal (work)");
-  assert.equal(byPin.found.standing, "Owner");
+  assert.deepEqual(byPin.found.here, { place: "computer", present: true, word: "Portal (work)", sentence: "On this computer: Portal (work)" });
+  assert.deepEqual(byPin.found.facts, [{ icon: "lock", word: "Private" }, { icon: "user", word: "Owner" }]);
 
   const byBundle = landing(linkVerdict(seen, context({
     projects,
@@ -191,22 +196,24 @@ test("a session's link opens that session's Pull review in the project that hold
   const here = landing(linkVerdict(seen, context({ projects, links }), SESSION));
   assert.equal(here.verb, "Pull session…");
   assert.deepEqual(here.destination, { kind: "pull_session", projectId: "p-portal", storageId: "s-personal", resourceId: SESSION });
-  assert.equal(here.found.sub, ONE_SESSION);
-  assert.equal(here.found.here, "On this computer: portal");
-  assert.equal(here.found.standing, "Owner");
+  assert.deepEqual(here.found.facts, [{ icon: "lock", word: "Private" }, { icon: "user", word: "Owner" }, { icon: "message", word: "1 session" }]);
+  assert.equal(here.found.here.word, "portal");
+  assert.equal(here.found.here.present, true);
 
   // The same repository without a session is the repository link it was.
   const repository = landing(linkVerdict(seen, context({ projects, links })));
   assert.equal(repository.verb, "Open project");
-  assert.equal(repository.found.sub, null);
+  assert.equal(repository.found.facts.some((fact) => fact.icon === "message"), false);
 
   // The project is not here: setup, as a repository link; the session is
   // not carried through it, and the sheet says to use the link again.
   const away = landing(linkVerdict(seen, context(), SESSION));
   assert.equal(away.verb, "Set up project…");
   assert.deepEqual(away.destination, { kind: "new_project", storageId: "s-personal", address: "maya/portal" });
-  assert.equal(away.found.sub, ONE_SESSION);
-  assert.equal(away.found.here, "Not on this computer. Set up the project, then use the link again.");
+  assert.equal(away.found.facts.at(-1)?.word, "1 session");
+  assert.deepEqual(away.found.here, {
+    place: "computer", present: false, word: "Not here", sentence: "Not on this computer. Set up the project, then use the link again.",
+  });
 
   // The stops are the repository link's.
   assert.equal(stop(linkVerdict(answer([]), context(), SESSION)).action, "set_up");
@@ -214,12 +221,12 @@ test("a session's link opens that session's Pull review in the project that hold
   // A Catalog item has no session pages: the website writes no such link.
   assert.equal(linkVerdict(answer([account("s-personal", "Rika321", found(item()))]), context({ scopes: [PETS_ROW] }), SESSION), INVALID_LINK);
 
-  // The sheet's row gains one line, and its verb is the review's opener.
+  // The sheet's facts gain the session, and its verb is the review's opener.
   const sheet = renderToStaticMarkup(
     <AppLinkSheet subject="maya/portal" state={{ phase: "answered", verdict: here }} onVerb={() => undefined} onClose={() => undefined} />,
   );
-  assert.match(sheet, /storage-found-verdict ok[^>]*>.*?Owner<\/span><span class="storage-found-verdict">.*?One session of this repository<\/span>/s);
-  assert.match(sheet, /class="repo-answer-line"[^>]*>.*On this computer: portal/s);
+  assert.match(sheet, /<span class="app-link-fact">.*?Owner<\/span><span class="app-link-fact">.*?1 session<\/span>/s);
+  assert.match(sheet, /<span class="app-link-here present" title="On this computer: portal">.*?portal<\/span>/s);
   assert.match(sheet, /<button[^>]*btn-primary[^>]*>Pull session…<\/button>/);
   assert.doesNotMatch(sheet, /cloudthread/, "the session's id is never shown");
 });
@@ -241,15 +248,15 @@ test("a Catalog item's link pulls it where it is saved, or lands on the page tha
   // The item's page is its repository's, so its link pulls it: the verb
   // opens the page on the review its Pull button opens.
   assert.equal(saved.verb, "Pull pet v2…");
-  assert.equal(saved.found.sub, null);
-  assert.equal(saved.found.here, "In your Catalog: Pets v2 · Default Codex");
+  assert.deepEqual(saved.found.facts, [{ icon: "cloud", word: "Public" }]);
+  assert.deepEqual(saved.found.here, { place: "catalog", present: true, word: "Pets v2 · Default Codex", sentence: "In your Catalog: Pets v2 · Default Codex" });
   assert.equal(saved.found.mark, "catalog-pet-v2");
 
   // Someone else's, not saved: Add Catalog resource › From Mallard Cloud.
   const add = landing(linkVerdict(seenPet(), context({ scopes: [PETS_ROW], places: { "s-personal": null } })));
   assert.deepEqual(add.destination, { kind: "add_catalog_item", storageId: "s-personal", address: "maya/Mochi" });
   assert.equal(add.verb, "Add to Catalog…");
-  assert.equal(add.found.here, "Not in your Catalog.");
+  assert.deepEqual(add.found.here, { place: "catalog", present: false, word: "Not in Catalog", sentence: "Not in your Catalog." });
 
   // The account's own, not saved: every row of its kind lists it, and Add
   // from Mallard Cloud is for someone else's.
@@ -260,26 +267,31 @@ test("a Catalog item's link pulls it where it is saved, or lands on the page tha
   const ownNoRow = landing(linkVerdict(seenPet("owner"), context()));
   assert.deepEqual(ownNoRow.destination, { kind: "add_catalog_row", choiceKey: "desktop_pet/openai.codex-pet@2", storageId: "s-personal", resourceId: "mochi" });
   assert.equal(ownNoRow.verb, "Add to Catalog…");
-  assert.equal(ownNoRow.found.here, "No Pets v2 row on this computer.");
+  assert.deepEqual(ownNoRow.found.here, { place: "catalog", present: false, word: "No Pets v2 row", sentence: "No Pets v2 row on this computer." });
 
   // A kind this build does not register goes nowhere.
   const unknown = stop(linkVerdict(seenPet(), context({ capabilities: [] })));
   assert.equal(unknown.message, "maya/Mochi is a kind this app can’t open.");
+  assert.equal(unknown.title, "Can’t open this kind");
   assert.equal(unknown.action, null);
 });
 
 test("a link that cannot land says why, and offers a verb only where there is a way forward", () => {
   // No account on the host. This build's service: setup. Any other host: nothing.
   const signIn = stop(linkVerdict(answer([]), context()));
-  assert.deepEqual(signIn, { kind: "stop", severity: "info", message: "Sign in to Mallard Cloud to open maya/portal.", action: "set_up" });
+  assert.deepEqual(signIn, {
+    kind: "stop", severity: "info", title: "Sign in first", icon: "user", message: "Sign in to Mallard Cloud to open maya/portal.", action: "set_up",
+  });
   const otherHost = stop(linkVerdict(answer([], { host: "staging.mallard-ai.com", can_set_up: false }), context()));
-  assert.deepEqual(otherHost, { kind: "stop", severity: "warning", message: "No account here for staging.mallard-ai.com.", action: null });
+  assert.deepEqual(otherHost, {
+    kind: "stop", severity: "warning", title: "No account on staging.mallard-ai.com", icon: "user",
+    message: "No account here for staging.mallard-ai.com.", action: null,
+  });
 
   // Nobody can see it: the picker's words for one account.
-  assert.equal(
-    stop(linkVerdict(answer([account("s", "Rika321", { kind: "not_found" })]), context())).message,
-    "Rika321 can’t see maya/portal.",
-  );
+  const unseen = stop(linkVerdict(answer([account("s", "Rika321", { kind: "not_found" })]), context()));
+  assert.equal(unseen.title, "No access");
+  assert.equal(unseen.message, "Rika321 can’t see maya/portal.");
   assert.equal(
     stop(linkVerdict(answer([
       account("s", "Rika321", { kind: "not_found" }),
@@ -293,9 +305,10 @@ test("a link that cannot land says why, and offers a verb only where there is a 
     account("s", "Rika321", { kind: "not_found" }),
     account("t", "rika-acme", { kind: "failed", message: "Mallard Cloud rejected the saved sign-in. Reconnect Mallard Cloud in storage settings." }),
   ]), context()));
+  assert.deepEqual(failed, unanswered("Mallard Cloud rejected the saved sign-in. Reconnect Mallard Cloud in storage settings."));
   assert.equal(failed.severity, "danger");
   assert.equal(failed.action, "retry");
-  assert.match(failed.message, /rejected the saved sign-in/);
+  assert.equal(failed.title, "Mallard Cloud didn’t answer");
   // …but not when another account does see it.
   assert.equal(linkVerdict(answer([
     account("s", "Rika321", { kind: "failed", message: "unreachable" }),
@@ -304,6 +317,7 @@ test("a link that cannot land says why, and offers a verb only where there is a 
 
   assert.deepEqual(stop(linkVerdict(answer([account("s", "Rika321", found(project({ bundle_id: null })))]), context())), INVALID_LINK);
   assert.equal(INVALID_LINK.message, "Mallard can’t open that link.");
+  assert.equal(INVALID_LINK.title, "Broken link");
 });
 
 test("the listing's link goes straight to Projects, or to the Catalog for a Catalog kind", () => {
@@ -322,10 +336,11 @@ test("the listing's link goes straight to Projects, or to the Catalog for a Cata
 
   // No storage signs in to the link's host: the sheet, with setup only for this build's service.
   assert.deepEqual(listingVerdict(listing("desktop_pet"), []), {
-    kind: "stop", severity: "info", message: "Sign in to Mallard Cloud to share.", action: "set_up",
+    kind: "stop", severity: "info", title: "Sign in first", icon: "user", message: "Sign in to Mallard Cloud to share.", action: "set_up",
   });
   assert.deepEqual(listingVerdict(listing(null, { host: "staging.mallard-ai.com", can_set_up: false }), [HOST]), {
-    kind: "stop", severity: "warning", message: "No account here for staging.mallard-ai.com.", action: null,
+    kind: "stop", severity: "warning", title: "No account on staging.mallard-ai.com", icon: "user",
+    message: "No account here for staging.mallard-ai.com.", action: null,
   });
 
   // A storage's host, spelled as the backend spells a link's.
@@ -345,38 +360,50 @@ test("a link waits only while the shell is in the middle of something", () => {
   assert.equal(linkWaits({ ...free, dialogOpen: true }), true);
 });
 
-test("the sheet says what was found and offers one verb; closing it is the only other way out", () => {
+test("the sheet titles itself with what the link names, says the rest in two short lines, and offers one verb", () => {
   const sheet = (state: Parameters<typeof AppLinkSheet>[0]["state"], subject: string | null = "maya/portal") => renderToStaticMarkup(
     <AppLinkSheet subject={subject} state={state} onVerb={() => undefined} onClose={() => undefined} />,
   );
   const buttons = (html: string) => [...html.matchAll(/<button[^>]*>(.*?)<\/button>/g)].map((match) => match[1].replace(/<[^>]+>/g, ""));
 
+  // Looking up: titled with the link's subject at once; the lines hold their place.
   const looking = sheet({ phase: "looking" });
-  assert.match(looking, /class="sync-modal sync-bundle-connection-dialog app-link-sheet"/);
-  assert.match(looking, /<h1[^>]*>Open from Mallard Cloud<\/h1>/);
+  assert.match(looking, /class="sync-modal app-link-sheet"/);
+  assert.match(looking, /<h1[^>]*>maya\/portal<\/h1>/);
   assert.match(looking, /Looking up maya\/portal…/);
-  assert.deepEqual(buttons(looking), ["", "Close"], "nothing to press until the service answers");
+  assert.equal((looking.match(/class="app-link-placeholder/g) ?? []).length, 3, "where the answer lands");
+  assert.deepEqual(buttons(looking), ["", "Cancel", "Open…"]);
+  assert.match(looking, /<button[^>]*btn-primary[^>]*disabled=""[^>]*>Open…<\/button>/, "nothing to press until the service answers");
 
   const verdict = linkVerdict(answer([account("s-personal", "Rika321", found(project()))]), context());
   const answered = sheet({ phase: "answered", verdict });
-  assert.match(answered, /<span class="storage-found-name">maya\/portal<\/span>/);
-  assert.match(answered, /storage-found-verdict ok[^>]*>.*Public<\/span>/s);
-  assert.match(answered, /class="repo-answer-line"[^>]*>.*Not on this computer\./s);
+  assert.match(answered, /<h1[^>]*>maya\/portal<\/h1>/);
+  assert.match(answered, /<span class="app-link-fact">.*?Public<\/span>/s);
+  assert.match(answered, /<span class="app-link-here" title="Not on this computer\.">Not here<\/span>/);
   assert.deepEqual(buttons(answered), ["", "Cancel", "Set up project…"]);
   assert.equal((answered.match(/btn btn-primary/g) ?? []).length, 1, "one verb");
 
+  // A stop is the title, its sentence the description; the subject stays in view.
   const signIn = sheet({ phase: "answered", verdict: linkVerdict(answer([]), context()) });
-  assert.match(signIn, /<strong>Sign in to Mallard Cloud to open maya\/portal\.<\/strong>/);
+  assert.match(signIn, /<h1[^>]*title="Sign in to Mallard Cloud to open maya\/portal\."[^>]*>Sign in first<\/h1>/);
+  assert.match(signIn, /aria-describedby="[^"]+"/);
+  assert.match(signIn, /class="sync-visually-hidden">Sign in to Mallard Cloud to open maya\/portal\.<\/span>/);
+  assert.match(signIn, /<code class="app-link-subject">maya\/portal<\/code>/);
   assert.deepEqual(buttons(signIn), ["", "Cancel", "Set up Mallard Cloud"]);
 
   const refused = sheet({ phase: "answered", verdict: INVALID_LINK }, null);
-  assert.match(refused, /<strong>Mallard can’t open that link\.<\/strong>/);
+  assert.match(refused, /<h1[^>]*>Broken link<\/h1>/);
+  assert.doesNotMatch(refused, /app-link-subject/, "a link that cannot be read names nothing");
   assert.deepEqual(buttons(refused), ["", "Close"], "a link that cannot be read offers nothing");
   assert.doesNotMatch(refused, /mallard:\/\//, "none of the link's own text is shown");
 
-  const retry = sheet({ phase: "answered", verdict: { kind: "stop", severity: "danger", message: "Couldn’t reach Mallard Cloud.", action: "retry" } });
-  assert.match(retry, /role="alert"/);
+  const retry = sheet({ phase: "answered", verdict: unanswered("Couldn’t reach Mallard Cloud.") });
+  assert.match(retry, /<h1[^>]*role="alert"[^>]*>Mallard Cloud didn’t answer<\/h1>/);
   assert.deepEqual(buttons(retry), ["", "Cancel", "Try again"]);
+
+  // Return presses the verb: focus moves to it when it appears, never to ×.
+  const source = readFileSync("src/components/app-link/AppLinkSheet.tsx", "utf8");
+  assert.match(source, /useEffect\(\(\) => \{ \(verbRef\.current \?\? exitRef\.current\)\?\.focus\(\); \}, \[verb\]\);/);
 });
 
 /* ——— the landing pages take the address ——————————————————————————————— */

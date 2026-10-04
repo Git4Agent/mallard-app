@@ -1616,6 +1616,52 @@ svg[data-icon="lightbulb"] path:last-child {
    narrowest measure of the three sheets. */
 .sync-storage-link-dialog { width: min(520px, 100vw - 72px); }
 .sync-storage-link-dialog .sync-modal-body { padding: 14px 18px 18px; }
+/* A link's sheet confirms one thing: its title is what the link names, and
+   two lines under it each say one fact in a glyph and a word or two. */
+.app-link-sheet { width: min(400px, 100vw - 32px); }
+.app-link-sheet .sync-modal-header { align-items: center; }
+.app-link-sheet .sync-modal-header h1 { overflow-wrap: anywhere; }
+.app-link-lines {
+  padding: 16px 20px 18px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 12px;
+}
+.app-link-mark {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-1);
+  background: var(--surface-muted);
+}
+.app-link-mark.large { width: 36px; height: 36px; border: var(--box-border); border-radius: 8px; }
+.app-link-mark.ok { color: var(--success-text); background: var(--success-soft); }
+.app-link-mark.info { color: var(--info-text); background: var(--info-soft); }
+.app-link-mark.warning { color: var(--warning-text); background: var(--warning-soft); }
+.app-link-mark.danger { color: var(--danger-text); background: var(--danger-soft); }
+.app-link-facts { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.app-link-fact { display: inline-flex; align-items: center; gap: 4px; color: var(--text-1); font-size: var(--type-xs); }
+.app-link-fact > svg { flex: none; color: var(--text-2); }
+.app-link-here {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-1);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+.app-link-here.present { color: var(--success-text); font-weight: var(--weight-semibold); }
+.app-link-here > svg { flex: none; }
+.app-link-subject { min-width: 0; color: var(--text-1); font-family: var(--font-mono); font-size: var(--type-xs); overflow-wrap: anywhere; }
+/* Where the service's answer will land, so the sheet keeps its size. */
+.app-link-placeholder { width: 70px; height: 12px; border-radius: 6px; background: var(--chip-strong-bg); }
+.app-link-placeholder.short { width: 44px; }
 .sync-modal-header {
   padding: 18px 20px 15px;
   display: flex;

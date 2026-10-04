@@ -30,21 +30,39 @@ import type { CatalogCapabilityDescriptor, CatalogCloudPlace, CatalogScopeView }
 export interface LinkStop {
   kind: "stop";
   severity: "info" | "warning" | "danger";
+  /** Why, in a few words: the sheet's title. */
+  title: string;
+  icon: IconName;
+  /** Why, as a sentence: the title's description. */
   message: string;
   /** `set_up`: Mallard Cloud's sign-in, then the link again. `retry`: ask again. */
   action: "set_up" | "retry" | null;
 }
 
-/** What the service found, as the sheet's row says it. */
+/** One thing the service said about what it found: a glyph and a word. */
+export interface LinkFact {
+  icon: IconName;
+  word: string;
+}
+
+/** Where what was found stands on this computer. */
+export interface LinkHere {
+  place: "computer" | "catalog";
+  /** It is here: `word` is its name here. */
+  present: boolean;
+  /** Its name here, or why it is not, in a few words. */
+  word: string;
+  /** The same, as a sentence. */
+  sentence: string;
+}
+
+/** What the service found, as the sheet says it. */
 export interface LinkFound {
   address: string;
   mark: IconName;
-  /** The account's standing, in the pickers' words. */
-  standing: string;
-  /** What the link names beyond the repository, when it names more. */
-  sub: string | null;
-  /** Where it stands on this computer. */
-  here: string;
+  /** Visibility, the account's role, and the one session a session's link names. */
+  facts: LinkFact[];
+  here: LinkHere;
 }
 
 export type LinkDestination =
@@ -96,6 +114,8 @@ export interface LinkContext {
 export const INVALID_LINK: LinkStop = {
   kind: "stop",
   severity: "warning",
+  title: "Broken link",
+  icon: "link-off",
   message: "Mallard can’t open that link.",
   action: null,
 };
@@ -129,20 +149,36 @@ export function listingPage(link: Pick<ListingLink, "listing_kind">): "Projects"
  */
 export function listingVerdict(link: ListingLink, cloudHosts: readonly string[]): LinkStop | LinkDirect {
   if (!cloudHosts.includes(link.host)) {
-    return link.can_set_up
-      ? { kind: "stop", severity: "info", message: "Sign in to Mallard Cloud to share.", action: "set_up" }
-      : { kind: "stop", severity: "warning", message: `No account here for ${link.host}.`, action: null };
+    return link.can_set_up ? signIn("Sign in to Mallard Cloud to share.") : noAccount(link.host);
   }
   return { kind: "direct", destination: { kind: listingPage(link) === "Catalog" ? "catalog" : "projects" } };
 }
 
+/** The service could not be asked, or could not answer: say why, and ask again. */
+export const unanswered = (message: string): LinkStop => (
+  { kind: "stop", severity: "danger", title: "Mallard Cloud didn’t answer", icon: "cloud-x", message, action: "retry" }
+);
+const signIn = (message: string): LinkStop => (
+  { kind: "stop", severity: "info", title: "Sign in first", icon: "user", message, action: "set_up" }
+);
+const noAccount = (host: string): LinkStop => (
+  { kind: "stop", severity: "warning", title: `No account on ${host}`, icon: "user", message: `No account here for ${host}.`, action: null }
+);
+
 const capitalize = (value: string) => (value ? `${value[0].toUpperCase()}${value.slice(1)}` : value);
 
-/** The account's standing on what it found, as the pickers word a role. */
-function standing(repository: Pick<AppLinkRepository, "role" | "visibility">): string {
-  if (repository.role === null) return "Public";
-  return `${repository.visibility === "public" ? "Public · " : ""}${capitalize(repository.role)}`;
+/** What the service said about it: who can see it, the account's role, and the session a session's link names. */
+function facts(repository: Pick<AppLinkRepository, "role" | "visibility">, session: string | null = null): LinkFact[] {
+  const shown: LinkFact[] = [repository.visibility === "public" ? { icon: "cloud", word: "Public" } : { icon: "lock", word: "Private" }];
+  if (repository.role !== null) shown.push({ icon: "user", word: capitalize(repository.role) });
+  if (session) shown.push({ icon: "message", word: "1 session" });
+  return shown;
 }
+
+const present = (place: LinkHere["place"], name: string): LinkHere => ({
+  place, present: true, word: name, sentence: `${place === "catalog" ? "In your Catalog" : "On this computer"}: ${name}`,
+});
+const absent = (place: LinkHere["place"], word: string, sentence: string): LinkHere => ({ place, present: false, word, sentence });
 
 function projectMark(repository: Pick<AppLinkRepository, "repository_class">): IconName {
   return repository.repository_class === "git_project" ? "git-folder" : "folder";
@@ -159,9 +195,6 @@ export function catalogSeers(answer: AppLinkAnswer): Array<{ storageId: string; 
     .map((account) => ({ storageId: account.storage_id, repositoryId: account.sight.repository.repository_id }));
 }
 
-/** The sheet's line for a link that names one session of its repository. */
-export const ONE_SESSION = "One session of this repository";
-
 /**
  * `session` is the stored row's id a session link named; null for a
  * repository's own link.
@@ -169,19 +202,19 @@ export const ONE_SESSION = "One session of this repository";
 export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session: string | null = null): LinkVerdict {
   const { accounts, address } = answer;
   if (accounts.length === 0) {
-    return answer.can_set_up
-      ? { kind: "stop", severity: "info", message: `Sign in to Mallard Cloud to open ${address}.`, action: "set_up" }
-      : { kind: "stop", severity: "warning", message: `No account here for ${answer.host}.`, action: null };
+    return answer.can_set_up ? signIn(`Sign in to Mallard Cloud to open ${address}.`) : noAccount(answer.host);
   }
   const seers = accounts.filter(sees);
   if (seers.length === 0) {
     const failed = accounts.find((account) => account.sight.kind === "failed");
     if (failed && failed.sight.kind === "failed") {
-      return { kind: "stop", severity: "danger", message: failed.sight.message, action: "retry" };
+      return unanswered(failed.sight.message);
     }
     return {
       kind: "stop",
       severity: "warning",
+      title: "No access",
+      icon: "lock",
       message: accounts.length === 1 ? `${accounts[0].account_login} can’t see ${address}.` : `No account here can see ${address}.`,
       action: null,
     };
@@ -199,13 +232,12 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
       connected.some((link) => link.local_project_id === candidate.local_project_id)
     ));
     const mark = projectMark(repository);
-    const sub = session ? ONE_SESSION : null;
+    const shown = facts(repository, session);
     if (project) {
       const link = connected.find((candidate) => candidate.local_project_id === project.local_project_id)!;
-      const here = `On this computer: ${project.local_alias || project.display_name}`;
       return {
         kind: "landing",
-        found: { address: repository.address, mark, standing: standing(repository), sub, here },
+        found: { address: repository.address, mark, facts: shown, here: present("computer", project.local_alias || project.display_name) },
         ...(session
           ? { verb: "Pull session…", destination: { kind: "pull_session", projectId: project.local_project_id, storageId: link.storage_id, resourceId: session } }
           : { verb: "Open project", destination: { kind: "project", projectId: project.local_project_id, storageId: link.storage_id } }),
@@ -214,7 +246,12 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
     return {
       kind: "landing",
       // The session is not carried through setup: the link is used again.
-      found: { address: repository.address, mark, standing: standing(repository), sub, here: session ? "Not on this computer. Set up the project, then use the link again." : "Not on this computer." },
+      found: {
+        address: repository.address,
+        mark,
+        facts: shown,
+        here: absent("computer", "Not here", session ? "Not on this computer. Set up the project, then use the link again." : "Not on this computer."),
+      },
       verb: "Set up project…",
       // Several accounts see it: none is ticked, as New project does.
       destination: { kind: "new_project", storageId: seers.length === 1 ? seers[0].storage_id : null, address: repository.address },
@@ -226,7 +263,7 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
   const coordinate = repository.catalog;
   const capability = coordinate ? catalogCapabilityFor(context.capabilities, coordinate) : null;
   if (!coordinate || !capability) {
-    return { kind: "stop", severity: "warning", message: `${repository.address} is a kind this app can’t open.`, action: null };
+    return { kind: "stop", severity: "warning", title: "Can’t open this kind", icon: "ban", message: `${repository.address} is a kind this app can’t open.`, action: null };
   }
   const mark = catalogPresentation(capability).icon;
   // The item's page is its repository's, so its link pulls the item.
@@ -239,7 +276,7 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
   if (saved) {
     return {
       kind: "landing",
-      found: { address: repository.address, mark, standing: standing(repository), sub: null, here: `In your Catalog: ${rowLabel(saved.scope_id)}` },
+      found: { address: repository.address, mark, facts: facts(repository), here: present("catalog", rowLabel(saved.scope_id)) },
       verb: pull,
       destination: { kind: "catalog_item", scopeId: saved.scope_id, storageId: saved.storage_id, resourceId: saved.resource_id },
     };
@@ -252,21 +289,26 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
     if (row) {
       return {
         kind: "landing",
-        found: { address: repository.address, mark, standing: standing(owner.sight.repository), sub: null, here: `In your Catalog: ${catalogScopeLabel(row)}` },
+        found: { address: repository.address, mark, facts: facts(owner.sight.repository), here: present("catalog", catalogScopeLabel(row)) },
         verb: pull,
         destination: { kind: "catalog_item", scopeId: row.scope.scope_id, storageId: owner.storage_id, resourceId: coordinate.resource_id },
       };
     }
     return {
       kind: "landing",
-      found: { address: repository.address, mark, standing: standing(owner.sight.repository), sub: null, here: `No ${capability.label} row on this computer.` },
+      found: {
+        address: repository.address,
+        mark,
+        facts: facts(owner.sight.repository),
+        here: absent("catalog", `No ${capability.label} row`, `No ${capability.label} row on this computer.`),
+      },
       verb: "Add to Catalog…",
       destination: { kind: "add_catalog_row", choiceKey: catalogChoiceKey(capability), storageId: owner.storage_id, resourceId: coordinate.resource_id },
     };
   }
   return {
     kind: "landing",
-    found: { address: repository.address, mark, standing: standing(repository), sub: null, here: "Not in your Catalog." },
+    found: { address: repository.address, mark, facts: facts(repository), here: absent("catalog", "Not in Catalog", "Not in your Catalog.") },
     verb: "Add to Catalog…",
     destination: { kind: "add_catalog_item", storageId: seers[0].storage_id, address: repository.address },
   };
