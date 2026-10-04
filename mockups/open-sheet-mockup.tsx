@@ -16,8 +16,8 @@ import "./open-sheet-mockup.css";
  * `linkVerdict` run on a stand-in answer, so the words are the shipped
  * words. *Before* is the shipped `AppLinkSheet` itself, mounted in place
  * (its `showModal()` is turned into `show()` so eight sheets can sit side by
- * side). A–G are drawn here with the app's own box, pill and type tokens;
- * only their structure, placement and exits come from the references.
+ * side). A–G are built only from parts the app already ships (bands, ×,
+ * account line, found rows, notices); they differ in structure only.
  * `npm run dev`, then /mockups/open-sheet-mockup.html
  * (`?view=compare|one&scene=<id>&dir=<id>&theme=light|dark`).
  */
@@ -132,60 +132,99 @@ function viewOf(scene: Scene): View {
   };
 }
 
-/* ——— shared parts ———————————————————————————————————————————————————— */
+/* The link spells its subject, so a sheet can title itself before the
+   service answers; only the facts and the verb wait. */
+const subjectOf = (view: View) => (view.kind === "landing" ? view.address : view.subject ?? "This link");
+/** A title for the task: the verb's own words on a landing. */
+const taskOf = (view: View) => (view.kind === "landing" ? view.task : view.kind === "stop" ? "Can’t open this link" : "Open link");
+const placeName = (here: Here) => (here.place === "catalog" ? "Your Catalog" : "This computer");
+const placeIcon = (here: Here): IconName => (here.place === "catalog" ? "catalog" : "computer");
 
-function Tile({ view, size }: { view: View; size: "md" | "lg" }) {
-  const iconSize = size === "lg" ? 26 : 20;
-  if (view.kind === "looking") return <span className={`os-tile ${size}`}><span className="status-loader" /></span>;
-  if (view.kind === "stop") return <span className={`os-tile ${size} ${view.severity}`}><Icon name={STOP_ICON[view.severity]} size={iconSize} /></span>;
-  return <span className={`os-tile ${size}`}><Icon name={view.mark} size={iconSize} /></span>;
-}
+/* ——— shared parts, all shipped classes ———————————————————————————————— */
 
-function Facts({ view, source = false }: { view: Extract<View, { kind: "landing" }>; source?: boolean }) {
+/** The dialogs' head band: eyebrow, display title, one line under it, ×. */
+function Head({ eyebrow, title, line, lead }: { eyebrow?: ReactNode; title: ReactNode; line?: ReactNode; lead?: ReactNode }) {
   return (
-    <span className="os-facts">
-      {source && <span className="os-chip"><Icon name="storage-mallard" size={12} /> Mallard Cloud</span>}
-      <span className="os-chip ok"><Icon name="check-circle" size={12} /> {view.standing}</span>
-      {view.sub && <span className="os-chip"><Icon name="message" size={12} /> {view.sub}</span>}
-    </span>
+    <header className="sync-modal-header">
+      {lead}
+      <div>
+        {eyebrow && <span className="sync-eyebrow">{eyebrow}</span>}
+        <h1>{title}</h1>
+        {line && <p>{line}</p>}
+      </div>
+      <button type="button" className="btn btn-ghost" aria-label="Close without opening the link"><Icon name="x" size={17} /></button>
+    </header>
   );
 }
 
-function HereLine({ here, className = "" }: { here: Here; className?: string }) {
-  return (
-    <p className={`os-here ${here.present ? "present" : "absent"} ${className}`}>
-      <Icon name={here.place === "catalog" ? "catalog" : "computer"} size={14} />
-      {here.present ? <span>{here.label}: <b>{here.value}</b></span> : <span>{here.text}</span>}
-    </p>
-  );
-}
-
-function Verbs({ view, cancel = "Cancel", wide = false }: { view: View; cancel?: string; wide?: boolean }) {
+/** The dialogs' foot band: Cancel, then the verb on the trailing edge. */
+function Foot({ view, cancel = "Cancel", note }: { view: View; cancel?: string; note?: ReactNode }) {
   const verb = view.kind === "landing" ? view.verb : view.kind === "stop" ? view.verb : null;
   const exit = verb || view.kind === "looking" ? cancel : "Close";
-  const w = wide ? " os-wide" : "";
-  return wide ? (
-    <div className="os-verbs stacked">
-      {verb && <button type="button" className={`btn btn-primary${w}`}>{verb}</button>}
-      <button type="button" className={`btn${verb ? " btn-ghost" : ""}${w}`}>{exit}</button>
-    </div>
-  ) : (
-    <div className="os-verbs">
-      <button type="button" className="btn">{exit}</button>
-      {verb && <button type="button" className="btn btn-primary">{verb}</button>}
-    </div>
-  );
-}
-
-function CloseX() {
   return (
-    <button type="button" className="btn btn-ghost os-x" aria-label="Close without opening the link">
-      <Icon name="x" size={17} />
-    </button>
+    <footer className="sync-modal-footer">
+      {note}
+      <div>
+        <button type="button" className="btn">{exit}</button>
+        {view.kind === "looking"
+          ? <button type="button" className="btn btn-primary" disabled>Open…</button>
+          : verb && <button type="button" className="btn btn-primary">{verb}</button>}
+      </div>
+    </footer>
   );
 }
 
-/** The app's notice recipe, minus Dismiss: in a sheet the sheet's own exit closes it. */
+/** The connect dialog's account line: where the link was answered. */
+function Source({ host = HOST }: { host?: string }) {
+  return (
+    <div className="sync-bundle-context">
+      <Icon name="storage-mallard" size={17} />
+      <span><strong>Mallard Cloud · Rika321</strong><small>{host}</small></span>
+    </div>
+  );
+}
+
+/** The pickers' found row: the subject's glyph, name over its standing. */
+function FoundRow({ view }: { view: View }) {
+  if (view.kind === "looking") {
+    return (
+      <div className="storage-found-row with-verb">
+        <span className="sync-storage-repository-icon"><span className="status-loader" /></span>
+        <span className="storage-found-text">
+          <span className="storage-found-name">{subjectOf(view)}</span>
+          <span className="storage-found-verdict">Looking up on Mallard Cloud…</span>
+        </span>
+      </div>
+    );
+  }
+  if (view.kind !== "landing") return null;
+  return (
+    <div className="storage-found-row with-verb">
+      <span className="sync-storage-repository-icon"><Icon name={view.mark} size={14} /></span>
+      <span className="storage-found-text">
+        <span className="storage-found-name">{view.address}</span>
+        <span className="storage-found-verdict ok"><Icon name="check-circle" size={12} /> {view.standing}</span>
+        {view.sub && <span className="storage-found-verdict"><Icon name="message" size={12} /> {view.sub}</span>}
+      </span>
+    </div>
+  );
+}
+
+/** The same row, for the far end: what is here, at the row's own size. */
+function HereRow({ here }: { here: Here }) {
+  return (
+    <div className={`storage-found-row with-verb${here.present ? "" : " muted"}`}>
+      <span className={`sync-storage-repository-icon os-place${here.present ? " present" : ""}`}><Icon name={placeIcon(here)} size={14} /></span>
+      <span className="storage-found-text">
+        <span className="storage-found-name">{here.present ? here.value : here.text}</span>
+        <span className="storage-found-verdict">{placeName(here)}</span>
+      </span>
+      {here.present && <span className="storage-found-connected"><Icon name="check" size={12} /> Here</span>}
+    </div>
+  );
+}
+
+/** The app's notice recipe; a stop is a notice, never an empty list. */
 function StopNotice({ view }: { view: Extract<View, { kind: "stop" }> }) {
   return (
     <div className={`notice ${view.severity} os-notice`} role={view.severity === "danger" ? "alert" : "status"}>
@@ -197,55 +236,59 @@ function StopNotice({ view }: { view: Extract<View, { kind: "stop" }> }) {
   );
 }
 
-/* The link spells its subject, so a sheet can title itself before the
-   service answers; only the facts and the verb wait (Primer loading: the
-   indicator stands where the content will land, without a jump). */
-const subjectOf = (subject: string | null) => subject ?? "This link";
-/** `chips`: the direction draws its chips in the body, so their row waits too. */
-const Waiting = ({ chips = true }: { chips?: boolean }) => (
-  <>
-    {chips && <span className="os-facts" aria-hidden="true"><span className="os-chip os-skel" /><span className="os-chip os-skel wide" /></span>}
-    <p className="os-wait"><span className="status-loader" /> Looking up on Mallard Cloud…</p>
-  </>
-);
+/** One line of what is here, under a head band, as the dialogs' sub-line. */
+function hereLine(view: View): ReactNode {
+  if (view.kind === "looking") return <><span className="status-loader os-inline-loader" /> Looking up on Mallard Cloud…</>;
+  if (view.kind === "stop") return view.subject ? <code>{view.subject}</code> : "The link could not be read.";
+  return view.here.present ? <>{view.here.label}: <b>{view.here.value}</b></> : view.here.text;
+}
 
-/* ——— A · Alert ———————————————————————————————————————————————————————— */
+/* ——— A · Confirm ——————————————————————————————————————————————————————— */
 
-function AlertSheet({ view }: { view: View }) {
+function ConfirmSheet({ view }: { view: View }) {
   return (
-    <dialog open className="sync-modal os-alert">
-      <Tile view={view} size="lg" />
-      {view.kind === "looking" && <><h1>{subjectOf(view.subject)}</h1><Waiting /></>}
-      {view.kind === "stop" && <h1 className="os-stop-title">{view.message}</h1>}
-      {view.kind === "landing" && (
-        <>
-          <h1>{view.address}</h1>
-          <Facts view={view} source />
-          <HereLine here={view.here} />
-        </>
-      )}
-      <Verbs view={view} />
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-a">
+      <Head eyebrow="Open link" title={view.kind === "stop" ? taskOf(view) : subjectOf(view)} />
+      <div className="sync-modal-body os-a-body">
+        <Source />
+        {view.kind === "stop" ? <StopNotice view={view} /> : (
+          <dl className="os-facts">
+            <dt>Mallard Cloud</dt>
+            <dd>{view.kind === "landing"
+              ? <span className="storage-found-verdict ok"><Icon name="check-circle" size={12} /> {view.standing}{view.sub && <> · {view.sub}</>}</span>
+              : <span className="storage-found-verdict"><span className="status-loader" /> Looking up…</span>}
+            </dd>
+            <dt>{view.kind === "landing" ? placeName(view.here) : "This computer"}</dt>
+            <dd className={view.kind === "landing" && view.here.present ? "present" : ""}>
+              {view.kind === "landing" ? (view.here.present ? view.here.value : view.here.text) : "—"}
+            </dd>
+          </dl>
+        )}
+      </div>
+      <Foot view={view} />
     </dialog>
   );
 }
 
-/* ——— B · Invite card ——————————————————————————————————————————————————— */
+/* ——— B · Found row (the connect dialog's sibling) ————————————————————————— */
 
-function InviteSheet({ view }: { view: View }) {
+function FoundSheet({ view }: { view: View }) {
   return (
-    <dialog open className="sync-modal os-invite">
-      <p className="os-eyebrow"><Icon name="storage-mallard" size={13} /> From Mallard Cloud</p>
-      <Tile view={view} size="lg" />
-      {view.kind === "looking" && <><h1>{subjectOf(view.subject)}</h1><Waiting /></>}
-      {view.kind === "stop" && <h1 className="os-stop-title">{view.message}</h1>}
-      {view.kind === "landing" && (
-        <>
-          <h1>{view.address}</h1>
-          <Facts view={view} />
-          <HereLine here={view.here} className="banded" />
-        </>
-      )}
-      <Verbs view={view} wide />
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-b">
+      <Head title={taskOf(view)} line={`A link from ${HOST} names this ${view.kind === "landing" && view.here.place === "catalog" ? "item" : "repository"}.`} />
+      <div className="sync-modal-body">
+        <Source />
+        {view.kind === "stop" ? <StopNotice view={view} /> : (
+          <div className="r2-step-list os-list">
+            <div className="storage-found-list" aria-label="Repository at this address">
+              <FoundRow view={view} />
+              {view.kind === "landing" && <HereRow here={view.here} />}
+              {view.kind === "looking" && <div className="storage-found-row with-verb muted os-skel-row" aria-hidden="true" />}
+            </div>
+          </div>
+        )}
+      </div>
+      <Foot view={view} />
     </dialog>
   );
 }
@@ -253,90 +296,73 @@ function InviteSheet({ view }: { view: View }) {
 /* ——— C · Subject header ————————————————————————————————————————————————— */
 
 function SubjectSheet({ view }: { view: View }) {
-  const title = view.kind === "landing" ? view.address : view.subject ?? "This link";
+  const lead = (
+    <span className="sync-storage-repository-icon os-lead">
+      {view.kind === "looking" ? <span className="status-loader" />
+        : <Icon name={view.kind === "landing" ? view.mark : STOP_ICON[view.severity]} size={16} />}
+    </span>
+  );
   return (
-    <dialog open className="sync-modal os-subject">
-      <header className="sync-modal-header">
-        {view.kind === "landing"
-          ? <span className="os-tile sm"><Icon name={view.mark} size={16} /></span>
-          : <span className="os-tile sm"><Icon name="storage-mallard" size={16} /></span>}
-        <div>
-          <h1>{title}</h1>
-          <p>
-            {view.kind === "landing" ? <>Mallard Cloud · {view.standing}</> : "Mallard Cloud"}
-          </p>
-        </div>
-        <CloseX />
-      </header>
-      <div className="sync-modal-body os-subject-body">
-        {view.kind === "looking" && <Waiting chips={false} />}
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-c">
+      <Head
+        lead={lead}
+        title={subjectOf(view)}
+        line={view.kind === "landing" ? <>Mallard Cloud · {view.standing}{view.sub && <> · {view.sub}</>}</> : "Mallard Cloud"}
+      />
+      <div className="sync-modal-body os-c-body">
         {view.kind === "stop" && <StopNotice view={view} />}
+        {view.kind === "looking" && <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> Looking up on Mallard Cloud…</small>}
         {view.kind === "landing" && (
-          <>
-            {view.sub && <p className="os-line"><Icon name="message" size={14} /> {view.sub}</p>}
-            <HereLine here={view.here} />
-          </>
+          <div className={`notice ${view.here.present ? "success" : "info"} os-notice`} role="status">
+            <Icon name={placeIcon(view.here)} size={13} className="notice-mark" />
+            <div className="notice-body">
+              <p className="notice-line">
+                <strong className="notice-type">{placeName(view.here)} ·</strong>{" "}
+                {view.here.present ? view.here.value : view.here.text}
+              </p>
+            </div>
+          </div>
         )}
       </div>
-      <footer className="sync-modal-footer"><Verbs view={view} /></footer>
+      <Foot view={view} />
     </dialog>
   );
 }
 
 /* ——— D · From → To ———————————————————————————————————————————————————— */
 
-/* The far end's label already says where; its value says only what is
-   there. Mock copy: the shipped `here` sentences each name the place. */
-function routeValue(here: Here): string {
-  if (here.present) return here.value!;
-  const noRow = /^No (.+) row on this computer\.$/.exec(here.text);
-  return noRow ? `No ${noRow[1]} row yet` : "Not here yet";
+/** A group box as the project page draws "Only in Mallard Cloud". */
+function Group({ icon, title, absent, children }: { icon: IconName; title: ReactNode; absent?: boolean; children: ReactNode }) {
+  return (
+    <section className={`os-group${absent ? " absent" : ""}`}>
+      <div className="sync-history-section-heading os-group-head"><h2><Icon name={icon} size={13} />{title}</h2></div>
+      {children}
+    </section>
+  );
 }
-const routeNote = (here: Here) => here.text.match(/Set up the project, then use the link again\./)?.[0] ?? null;
 
 function RouteSheet({ view }: { view: View }) {
-  const title = view.kind === "landing" ? view.task : "Open from Mallard Cloud";
   return (
-    <dialog open className="sync-modal os-route">
-      <header className="sync-modal-header">
-        <div><h1>{title}</h1></div>
-        <CloseX />
-      </header>
-      <div className="sync-modal-body os-route-body">
-        <div className={`os-end from ${view.kind === "stop" ? view.severity : ""}`}>
-          <span className="os-tile md"><Icon name="storage-mallard" size={18} /></span>
-          <span className="os-end-text">
-            <small>Mallard Cloud</small>
-            {view.kind === "landing" && (
-              <>
-                <b className="os-end-name"><Icon name={view.mark} size={14} /> {view.address}</b>
-                <Facts view={view} />
-              </>
-            )}
-            {view.kind === "looking" && <><b className="os-end-name">{subjectOf(view.subject)}</b><Waiting /></>}
-            {view.kind === "stop" && (
-              <>
-                {view.subject && <b className="os-end-name">{view.subject}</b>}
-                <span className={`os-end-verdict ${view.severity}`}><Icon name={STOP_ICON[view.severity]} size={13} /> {view.message}</span>
-              </>
-            )}
-          </span>
-        </div>
-        {view.kind === "landing" && (
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-d">
+      <Head title={taskOf(view)} line={view.kind === "landing" ? `From Mallard Cloud to ${view.here.place === "catalog" ? "your Catalog" : "this computer"}.` : undefined} />
+      <div className="sync-modal-body os-d-body">
+        <Group icon="storage-mallard" title={<>On <span className="sync-history-storage-name">Mallard Cloud</span></>}>
+          {view.kind === "stop" ? <div className="os-group-notice"><StopNotice view={view} /></div> : <FoundRow view={view} />}
+        </Group>
+        {view.kind !== "stop" && (
           <>
-            <span className="os-route-arrow" aria-hidden="true"><Icon name="chevron-down" size={16} /></span>
-            <div className={`os-end to ${view.here.present ? "present" : "absent"}`}>
-              <span className="os-tile md"><Icon name={view.here.place === "catalog" ? "catalog" : "computer"} size={18} /></span>
-              <span className="os-end-text">
-                <small>{view.here.place === "catalog" ? "Your Catalog" : "This computer"}</small>
-                <b className="os-end-name">{routeValue(view.here)}</b>
-                {routeNote(view.here) && <span className="os-end-note">{routeNote(view.here)}</span>}
-              </span>
-            </div>
+            <span className="os-d-arrow" aria-hidden="true"><Icon name="chevron-down" size={16} /></span>
+            <Group
+              icon={view.kind === "landing" ? placeIcon(view.here) : "computer"}
+              title={view.kind === "landing" ? placeName(view.here) : "This computer"}
+              absent={view.kind !== "landing" || !view.here.present}
+            >
+              {view.kind === "landing" ? <HereRow here={view.here} /> : <div className="storage-found-row with-verb muted os-skel-row" aria-hidden="true" />}
+            </Group>
           </>
         )}
       </div>
-      <footer className="sync-modal-footer"><Verbs view={view} /></footer>
+      <Foot view={view} />
     </dialog>
   );
 }
@@ -345,22 +371,10 @@ function RouteSheet({ view }: { view: View }) {
 
 function WindowSheet({ view }: { view: View }) {
   return (
-    <dialog open className="sync-modal os-window">
-      <div className="os-window-body">
-        <Tile view={view} size="md" />
-        <div className="os-window-text">
-          {view.kind === "looking" && <><h1>{subjectOf(view.subject)}</h1><Waiting /></>}
-          {view.kind === "stop" && <h1 className="os-stop-title">{view.message}</h1>}
-          {view.kind === "landing" && (
-            <>
-              <h1>{view.address}</h1>
-              <Facts view={view} source />
-              <HereLine here={view.here} />
-            </>
-          )}
-        </div>
-      </div>
-      <Verbs view={view} />
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-e">
+      <Head eyebrow="From Mallard Cloud" title={view.kind === "stop" ? taskOf(view) : subjectOf(view)} line={view.kind === "stop" ? undefined : hereLine(view)} />
+      {view.kind === "stop" && <div className="sync-modal-body"><StopNotice view={view} /></div>}
+      <Foot view={view} note={view.kind === "landing" ? <span className="storage-found-verdict ok"><Icon name="check-circle" size={12} /> {view.standing}{view.sub && <> · {view.sub}</>}</span> : undefined} />
     </dialog>
   );
 }
@@ -369,31 +383,20 @@ function WindowSheet({ view }: { view: View }) {
 
 function CleanedSheet({ view }: { view: View }) {
   return (
-    <dialog open className="sync-modal os-cleaned">
-      <header className="sync-modal-header">
-        <div><h1>Open from Mallard Cloud</h1></div>
-        <CloseX />
-      </header>
-      <div className="sync-modal-body os-cleaned-body">
-        {view.kind === "looking" && (
-          <div className="os-found">
-            <span className="sync-storage-repository-icon"><span className="status-loader" /></span>
-            <span className="os-found-text"><b>{subjectOf(view.subject)}</b><Waiting /></span>
-          </div>
-        )}
-        {view.kind === "stop" && <StopNotice view={view} />}
-        {view.kind === "landing" && (
-          <div className="os-found">
-            <span className="sync-storage-repository-icon"><Icon name={view.mark} size={14} /></span>
-            <span className="os-found-text">
-              <b>{view.address}</b>
-              <Facts view={view} />
-              <HereLine here={view.here} />
-            </span>
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-f">
+      <Head title="Open from Mallard Cloud" />
+      <div className="sync-modal-body">
+        {view.kind === "stop" ? <StopNotice view={view} /> : (
+          <div className="r2-step-list os-list">
+            <div className="storage-found-list" aria-label="Repository at this address">
+              <FoundRow view={view} />
+              {view.kind === "landing" && <HereRow here={view.here} />}
+              {view.kind === "looking" && <div className="storage-found-row with-verb muted os-skel-row" aria-hidden="true" />}
+            </div>
           </div>
         )}
       </div>
-      <footer className="sync-modal-footer"><Verbs view={view} /></footer>
+      <Foot view={view} />
     </dialog>
   );
 }
@@ -402,26 +405,18 @@ function CleanedSheet({ view }: { view: View }) {
 
 function AnchoredCard({ view }: { view: View }) {
   return (
-    <dialog open className="sync-modal os-anchored" aria-modal="false">
-      <div className="os-anchored-head">
-        <span><Icon name="storage-mallard" size={13} /> From Mallard Cloud</span>
-        <CloseX />
+    <dialog open className="sync-modal sync-bundle-connection-dialog os-g" aria-modal="false">
+      <Head eyebrow="From Mallard Cloud" title={view.kind === "stop" ? taskOf(view) : subjectOf(view)} />
+      <div className="sync-modal-body os-g-body">
+        {view.kind === "stop" ? <StopNotice view={view} /> : (
+          <div className="r2-step-list os-list">
+            <div className="storage-found-list">
+              {view.kind === "landing" ? <HereRow here={view.here} /> : <FoundRow view={view} />}
+            </div>
+          </div>
+        )}
       </div>
-      <div className="os-anchored-body">
-        <Tile view={view} size="md" />
-        <div className="os-window-text">
-          {view.kind === "looking" && <><h1>{subjectOf(view.subject)}</h1><Waiting /></>}
-          {view.kind === "stop" && <h1 className="os-stop-title">{view.message}</h1>}
-          {view.kind === "landing" && (
-            <>
-              <h1>{view.address}</h1>
-              <Facts view={view} />
-              <HereLine here={view.here} />
-            </>
-          )}
-        </div>
-      </div>
-      <Verbs view={view} cancel="Not now" />
+      <Foot view={view} cancel="Not now" />
     </dialog>
   );
 }
@@ -448,42 +443,41 @@ const DIRECTIONS: Direction[] = [
     draw: (scene) => <AppLinkSheet key={scene.id} subject={scene.subject} state={scene.state} onVerb={() => {}} onClose={() => {}} />,
   },
   {
-    id: "a", name: "A · Alert", placement: "center", pick: true,
-    seenIn: <>{a("https://developers.raycast.com/information/lifecycle/deeplinks", "Raycast deeplink confirm")}, {a("https://github.com/microsoft/vscode/blob/main/src/vs/workbench/services/extensions/browser/extensionUrlHandler.ts", "VS Code URI confirm")}, {a("https://developer.apple.com/design/human-interface-guidelines/alerts", "HIG Alerts")}</>,
-    draw: (scene) => <AlertSheet view={viewOf(scene)} />,
+    id: "a", name: "A · Confirm", placement: "center", pick: true,
+    seenIn: <>Short confirm in the dialog bands · {a("https://developers.raycast.com/information/lifecycle/deeplinks", "Raycast")}, {a("https://developer.apple.com/design/human-interface-guidelines/alerts", "HIG Alerts")}</>,
+    draw: (scene) => <ConfirmSheet view={viewOf(scene)} />,
   },
   {
-    id: "b", name: "B · Invite card", placement: "center",
-    seenIn: <>{a("https://discord.com/invite/discord-developers", "Discord invite")}, {a("https://developers.raycast.com/information/lifecycle/deeplinks", "Raycast (stacked verbs)")}</>,
-    draw: (scene) => <InviteSheet view={viewOf(scene)} />,
+    id: "b", name: "B · Found row", placement: "center",
+    seenIn: <>The Connect dialog’s account line and list, one row each end · {a("https://docs.github.com/en/desktop/adding-and-cloning-repositories/cloning-a-repository-from-github-to-github-desktop", "GitHub Desktop Clone")}</>,
+    draw: (scene) => <FoundSheet view={viewOf(scene)} />,
   },
   {
     id: "c", name: "C · Subject header", placement: "center",
-    seenIn: <>{a("https://primer.style/product/components/dialog/guidelines/", "Primer Dialog")}, {a("https://carbondesignsystem.com/components/modal/usage/", "Carbon Modal")}; the frame (title band, ×, Cancel + verb) as in {a("https://docs.github.com/en/desktop/adding-and-cloning-repositories/cloning-a-repository-from-github-to-github-desktop", "GitHub Desktop’s Clone")}</>,
+    seenIn: <>{a("https://primer.style/product/components/dialog/guidelines/", "Primer Dialog")}, {a("https://carbondesignsystem.com/components/modal/usage/", "Carbon Modal")}; the head band holds the subject</>,
     draw: (scene) => <SubjectSheet view={viewOf(scene)} />,
   },
   {
     id: "d", name: "D · From → To", placement: "center",
-    seenIn: <>{a("https://docs.github.com/en/desktop/adding-and-cloning-repositories/cloning-a-repository-from-github-to-github-desktop", "GitHub Desktop · Clone from link")}, {a("https://source.chromium.org/chromium/chromium/src/+/main:chrome/app/generated_resources.grd", "Chrome “Open app?”")}</>,
+    seenIn: <>The project page’s “Only in Mallard Cloud” group box, twice · {a("https://docs.github.com/en/desktop/adding-and-cloning-repositories/cloning-a-repository-from-github-to-github-desktop", "GitHub Desktop")}</>,
     draw: (scene) => <RouteSheet view={viewOf(scene)} />,
   },
   {
     id: "e", name: "E · Window sheet", placement: "attached",
-    seenIn: <>{a("https://developer.apple.com/design/human-interface-guidelines/sheets", "HIG Sheets (macOS)")} · no shipped product checked</>,
+    seenIn: <>{a("https://developer.apple.com/design/human-interface-guidelines/sheets", "HIG Sheets (macOS)")}; bands only, hung from the bar</>,
     draw: (scene) => <WindowSheet view={viewOf(scene)} />,
   },
   {
     id: "f", name: "F · Current, cleaned", placement: "center",
-    seenIn: <>Mallard’s own found row (New project › From Mallard Cloud)</>,
+    seenIn: <>The shipped sheet: narrower, the here line moved into the list, a stop as a notice</>,
     draw: (scene) => <CleanedSheet view={viewOf(scene)} />,
   },
   {
     id: "g", name: "G · Anchored card", placement: "anchored", change: "behaviour change",
-    seenIn: <>{a("https://www.nngroup.com/articles/modal-nonmodal-dialog/", "NN/g non-modal")}, {a("https://primer.style/product/components/dialog/guidelines/", "Primer (deep links)")} · no shipped product checked</>,
+    seenIn: <>{a("https://www.nngroup.com/articles/modal-nonmodal-dialog/", "NN/g non-modal")}; the same bands at popover size, no backdrop</>,
     draw: (scene) => <AnchoredCard view={viewOf(scene)} />,
   },
 ];
-
 
 /* ——— the references, as rules ———————————————————————————————————————— */
 
@@ -494,19 +488,17 @@ const every = (value: MarkValue, overrides: Record<string, MarkValue> = {}): Rec
 });
 
 const RULES: Rule[] = [
+  { rule: "Built from the app’s dialog parts (bands, ×, account line, rows, notices)", from: "Mallard’s Connect, Setup and Library dialogs", marks: every("yes") },
   { rule: "Title names the subject or the task", from: "HIG Modality · Primer · Carbon · Fluent 2 · NN/g", marks: every("yes", { before: "no", f: "no" }) },
-  { rule: "Narrow enough for one short message", from: "Primer ≤ 480 · Material ≤ 560", marks: { before: "680", a: "400", b: "380", c: "520", d: "520", e: "460", f: "560", g: "360" } },
-  { rule: "One level of box: no frame inside the sheet", from: "Primer Dialog · HIG Modality", marks: every("yes", { before: "no", d: "part" }) },
-  { rule: "What is here, at reading size, beside the subject", from: "NN/g confirmation · Primer ConfirmationDialog", marks: every("yes", { before: "no" }) },
-  { rule: "Says where it came from", from: "Primer Dialog (deep links disorient) · Carbon label", marks: every("yes", { a: "landings only", e: "landings only" }) },
-  { rule: "Exits", from: "HIG · Material · Fluent 2 · NN/g: one; Primer · Carbon · Atlassian: ×", marks: { before: "× + Cancel", a: "Cancel", b: "Cancel", c: "× + Cancel", d: "× + Cancel", e: "Cancel", f: "× + Cancel", g: "× + Not now" } },
-  { rule: "Primary on the trailing edge (top when stacked)", from: "HIG · Material · Primer · Carbon · Atlassian", marks: every("yes") },
-  { rule: "A stop reads as a stop, its way forward in place", from: "Primer degraded · Carbon inline notification · HIG Alerts", marks: every("yes", { before: "part", g: "no" }) },
-  {
-    rule: "Looking up keeps the layout (px the sheet grows when the answer lands)", from: "Primer loading",
-    marks: { before: "+63–77", a: "0 · session +26–43", b: "+56", c: "0 · session +27", d: "+68", e: "0 · session +17", f: "0", g: "0 · session +16" },
-  },
-  { rule: "Where it sits", from: "HIG Sheets · NN/g modal cost · Carbon non-modal", marks: { before: "centre", a: "centre", b: "centre", c: "centre", d: "centre", e: "under the bar", f: "centre", g: "corner, no backdrop" } },
+  { rule: "Narrow enough for one short message", from: "Primer ≤ 480 · Material ≤ 560", marks: { before: "680", a: "440", b: "520", c: "500", d: "500", e: "480", f: "520", g: "380" } },
+  { rule: "One level of box: no frame inside the sheet", from: "Primer Dialog · HIG Modality", marks: every("yes", { before: "no", b: "part", d: "no", f: "part", g: "part" }) },
+  { rule: "What is here, at the subject’s size", from: "NN/g confirmation · Primer ConfirmationDialog", marks: every("yes", { before: "no" }) },
+  { rule: "Says where it came from", from: "Primer Dialog (deep links disorient) · Carbon label", marks: every("yes") },
+  { rule: "Exits", from: "The app: × in the head band and Cancel in the foot", marks: every("× + Cancel", { g: "× + Not now" }) },
+  { rule: "Primary on the trailing edge", from: "HIG · Material · Primer · Carbon · Atlassian · the app", marks: every("yes") },
+  { rule: "A stop reads as a stop (the app’s notice)", from: "Primer degraded · Carbon inline notification", marks: every("yes", { before: "no" }) },
+  { rule: "Looking up keeps the layout", from: "Primer loading", marks: every("yes", { before: "no" }) },
+  { rule: "Where it sits", from: "HIG Sheets · NN/g modal cost", marks: { before: "centre", a: "centre", b: "centre", c: "centre", d: "centre", e: "under the bar", f: "centre", g: "corner, no backdrop" } },
 ];
 
 function Mark({ value }: { value: MarkValue }) {
@@ -586,42 +578,11 @@ function Specimen() {
     <div className="spec">
       <h1 className="spec-title">Open sheet — directions</h1>
       <p className="spec-sub">
-        What a <code>mallard://</code> link from the website opens. <b>Before</b> is the shipped sheet, mounted for real;
-        A–G use the app’s own box, pill and type. Every frame gets the same link state, run through the real <code>linkVerdict</code>,
-        so the words are the shipped words except where a direction rearranges them. The frames are crops of the 1100×720 window.
+        What a <code>mallard://</code> link from the website opens. <b>Before</b> is the shipped sheet, mounted for real.
+        A–G are now built only from parts the app already ships: the dialogs’ head and foot bands (display title, round ×, Cancel and the
+        yellow verb), the Connect dialog’s account line, the pickers’ found rows and uppercase chips, the project page’s group box, and the
+        app’s notices. They differ in structure, not in look. Every frame gets the same link state through the real <code>linkVerdict</code>.
       </p>
-
-
-      <div className="spec-cols">
-        <div className="spec-panel">
-          <strong>What the shipped sheet does, against the references</strong>
-          <ol>
-            <li><b>The title never changes</b> (“Open from Mallard Cloud”), while the button under it does: Open project, Set up project…, Pull session…, Add to Catalog…. HIG (modality), Primer, Carbon and Fluent 2 want a title that names the task or the subject; Carbon and Atlassian want it to match the button.</li>
-            <li><b>680 px for one row and one line.</b> Primer’s large dialog is 480, Material’s widest basic dialog 560; Primer asks whether anything from 640 up should be a page.</li>
-            <li><b>A box inside the box.</b> The pickers’ list frame, built to hold many rows, holds one. Primer asks for a single simple column; HIG warns against an app inside the app.</li>
-            <li><b>The deciding fact is the smallest text.</b> “Not on this computer.” is an 11 px caption outside the frame; the 12 px name sits inside it. NN/g and Primer: a confirmation names the specifics it acts on.</li>
-            <li><b>A stop looks like an empty list:</b> a muted glyph centred in a bordered box. Primer’s degraded-content pattern allows a muted centred message; the frame around it is what makes it read as “nothing here”.</li>
-            <li><b>Two exits that do the same thing</b> (× and Cancel). NN/g: worth it only when they differ. HIG, Material and Windows draw no × on a short dialog; Primer, Carbon and Atlassian always do.</li>
-            <li><b>Focus opens on ×</b> (measured in the live harness), so Return does nothing. Carbon puts it on the primary when there are no fields; the ARIA pattern on the most-used button.</li>
-            <li><b>Looking up is one small line</b>, and the sheet then grows from 181 px to 244–258 px. Primer: the indicator stands where the content will land, without a jump.</li>
-          </ol>
-        </div>
-        <div className="spec-panel">
-          <strong>Products that answer a link from outside (seen first-hand)</strong>
-          <ul>
-            <li>{a("https://source.chromium.org/chromium/chromium/src/+/main:chrome/app/generated_resources.grd", "Chrome")} asks first: “Open <i>app</i>?”, “<i>site</i> wants to open this application”, a checkbox to always allow, Open + Cancel. <b>Mallard’s sheet is the second ask</b>, so it should tell what was found and what the verb will do, not ask “Open?” again.</li>
-            <li>{a("https://developers.raycast.com/information/lifecycle/deeplinks", "Raycast")} (docs screenshot): alert, the command’s icon top-left, title “Request to run <i>command</i>”, a line saying it came from outside, three full-width stacked buttons, no ×.</li>
-            <li>{a("https://github.com/microsoft/vscode/blob/main/src/vs/workbench/services/extensions/browser/extensionUrlHandler.ts", "VS Code")} (source): confirm titled “Allow ‘<i>extension</i>’ extension to open this URI?”, the URI as detail, “do not ask again” checkbox, Open.</li>
-            <li>{a("https://docs.github.com/en/desktop/adding-and-cloning-repositories/cloning-a-repository-from-github-to-github-desktop", "GitHub Desktop")} (docs screenshot): the link opens the task’s own dialog, “Clone a Repository”, with the URL filled in and a local path to choose; × and Cancel, Clone on the right.</li>
-            <li>{a("https://discord.com/invite/discord-developers", "Discord invite")}: a centred card, a small line “You’ve been invited to join”, the server’s icon, its name as the largest text, member counts, one full-width button.</li>
-          </ul>
-          <p className="spec-note">
-            Could not see: Apple Shortcuts’ add sheet (guide page redirects), Postman’s Run-in-Postman import dialog (no screenshot in the docs),
-            Raycast’s manual page (404; the developer docs were used). Not read in the standards: Windows guidance on ellipses, Atlassian’s and
-            ContentDialog’s pixel widths, the Fluent 2 live demo (its button order comes from story code only), Apple’s image-only multi-step sheet examples.
-          </p>
-        </div>
-      </div>
 
       <div className="spec-controls">
         <div className="spec-group"><span>View</span>
@@ -666,41 +627,28 @@ function Specimen() {
           </tbody>
         </table>
         <p className="spec-note">
-          Where the references disagree: <b>×</b> (Primer, Carbon, Atlassian always draw one; HIG, Material and Windows don’t on a short dialog; Fluent 2 only in place of Cancel);
-          <b> button order</b> (Windows puts the action on the left; everyone else on the right, and the app already does); <b>title punctuation</b> (HIG ends a sentence title with a period, Fluent 2 never does).
-          Every direction keeps the shipped verbs, whose ellipses already follow HIG: “…” when the verb opens more to fill in, none on Open project.
+          Where the references disagreed, the app’s own dialogs now decide: every direction keeps the <b>×</b> in the head band beside Cancel,
+          as Connect, Setup and the Library do; the verb stays on the <b>trailing edge</b> on every platform; titles carry <b>no full stop</b>,
+          as every other dialog title in the app. The shipped verbs and their ellipses are unchanged.
         </p>
       </div>
 
       <div className="spec-panel">
-        <strong>Recommendation: A · Alert</strong>
+        <strong>Recommendation: A · Confirm</strong>
         <p>
-          A takes the compact short-ask form most systems share: a specific title, a line or two, two verbs (HIG alert, Material basic dialog,
-          Primer ConfirmationDialog at 320–480 px, Carbon’s small modal). Raycast and VS Code answer an outside link with this form. The shipped words already
-          fit it: subject, standing, what is here, one verb. A drops the bands, the inner frame and the duplicate ×. It puts the deciding line at reading size,
-          makes a stop’s message the title in a tinted tile (Carbon’s “title as message”), and is 400 px wide.
-        </p>
-        <p>
-          <b>Where A breaks with the references:</b> Primer, Carbon and Atlassian require a × (A keeps Cancel and Esc, as HIG, Material and Windows do).
-          Primer, Carbon and ContentDialog put no icon in the head; HIG and Material allow one. A stop’s message as a title can run to two lines, which is HIG’s limit.
-          Its stops don’t say “Mallard Cloud”; the tile and the words carry them.
+          A is the smallest sheet that still looks like every other Mallard dialog: the subject as the display title, the Connect dialog’s
+          account line to say where the answer came from, two labelled lines (what Mallard Cloud has, what is here) at the same size, and the
+          usual foot band. A stop keeps the bands and puts the app’s notice where the two lines were.
         </p>
         <ul>
-          <li><b>B</b> is the same content centred, with the verb full-width: friendlier, louder, and the furthest from the app’s other dialogs.</li>
-          <li><b>C</b> is the pick if this sheet should stay in the app’s dialog family (bands and ×), as Primer, Carbon and Atlassian draw it.</li>
-          <li><b>D</b> earns its space only on Set up / Add, where the far end does not exist yet; on Open project it is two boxes for one fact.</li>
-          <li><b>E</b> is the macOS document sheet; it fits a Mac app, but the Windows build would have to draw the same thing.</li>
-          <li><b>G</b> changes behaviour: no backdrop, the link no longer has to wait while a review or a dialog is open. HIG says never to show a warning in a popover, so the stops argue against it.</li>
+          <li><b>B</b> and <b>F</b> keep the pickers’ list box, so they sit closest to the Connect dialog; the box holds two rows, the subject and its place here.</li>
+          <li><b>C</b> moves the subject into the head band, with its glyph, and leaves the body to one notice.</li>
+          <li><b>D</b> draws both ends as the project page’s group boxes; worth its height on Set up and Add, where the far end does not exist yet.</li>
+          <li><b>E</b> is bands only, hung from the bar; <b>G</b> is the same bands at popover size with no backdrop (behaviour change).</li>
         </ul>
         <p className="spec-note">
-          Whatever is picked, two fixes ride along. Focus opens on the verb, not on × (Carbon, ARIA). The sheet opens titled with the link’s subject while the
-          service is asked, so it barely moves when the answer lands (Primer loading).
-        </p>
-        <p className="spec-note">
-          <b>The references that argue against any sheet on a link:</b> Primer warns that a dialog opened from a link disorients; Carbon wants dialogs
-          opened by the person; Polaris never opens one by itself; HIG avoids alerts at launch, which is what a cold start from a link is.
-          <b> For it:</b> the person pressed Open in Mallard and then the browser’s own “Open Mallard?”, so the sheet continues something they started,
-          which NN/g counts as a fair modal; and every direction says where it came from. Only G avoids the objection, and it changes behaviour.
+          Whatever is picked, two fixes ride along: focus opens on the verb, not on ×; and the sheet opens titled with the link’s subject, with a
+          placeholder where the answer will land, so it does not grow when the answer arrives.
         </p>
       </div>
     </div>
