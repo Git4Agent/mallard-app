@@ -10,6 +10,7 @@ import {
   INVALID_LINK,
   linkVerdict,
   listingVerdict,
+  unanswered,
   type LinkContext,
   type LinkDestination,
   type LinkVerdict,
@@ -127,7 +128,7 @@ export function useAppLink({ ready, waits, context, go }: {
         }
         verdict = linkVerdict(answer, { ...contextRef.current(), places }, session);
       } catch (reason) {
-        verdict = { kind: "stop", severity: "danger", message: errorMessage(reason), action: "retry" };
+        verdict = unanswered(errorMessage(reason));
       }
       if (live) setAnswered({ round, verdict });
     })();
