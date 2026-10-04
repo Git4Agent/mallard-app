@@ -4,9 +4,14 @@
 `docs/PLAN_DEEP_LINK_DESTINATIONS.md` (session links), on the same scheme and
 sheet as repository links and `PLAN_DEEP_LINK_SHARE_YOURS.md`. Sessions are
 the main case; *Non-Git projects* and *Skills, plugins and pets* below say
-what differs for them. The choices are collected at the end; the flow is
-drawn in `mockups/session-pull-link-mockup.html` (no build step: open the
-file; `?scene=`, `?sheet=`, `?label=`, `?theme=dark`).
+what differs for them. The choices are collected at the end. Two mocks:
+`mockups/session-pull-mockup.html` + `.tsx` is the specimen in the app's own
+parts (`npm run dev`, then `/mockups/session-pull-mockup.html`; `?scene=`,
+`?dir=b|a`, `?stage=`, `?theme=dark`, `?shot=on`): the shipped sidebar, path
+bar, connect-dialog frame, Pull review, session page, New project and Add
+Catalog resource on a stand-in backend, with the plan's additions dotted.
+`mockups/session-pull-link-mockup.html` is the flow and the choices on one
+static page (no build step).
 
 ## Where things stand
 
