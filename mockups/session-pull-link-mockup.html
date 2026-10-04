@@ -169,7 +169,7 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
 </head>
 <body>
 <main class="spec">
-  <h1>Pull this session — the flow<small>A link from the website's session page into Mallard, pulling that session alone. docs/PLAN_DEEP_LINK_SESSION_PULL.md</small></h1>
+  <h1>Pull this session — the flow<small>A link from the website into Mallard that pulls one thing: a session, a session of a non-Git project, or a skill, plugin or pet. docs/PLAN_DEEP_LINK_SESSION_PULL.md</small></h1>
 
   <div class="controls" role="toolbar" aria-label="Mock controls">
     <div class="group" id="scenes"><span>Scene</span></div>
@@ -187,15 +187,14 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
   <section class="flow" aria-label="The flow, in four frames">
     <!-- 1 · the website -->
     <div class="frame" id="f1">
-      <div class="step"><b>1</b> Website · session page</div>
+      <div class="step"><b>1</b> <span id="f1Step">Website · session page</span></div>
       <div class="screen web">
         <div class="topbar"><span class="duck"></span>Mallard Cloud<span class="acct" id="webAcct">Rika321</span></div>
-        <div class="pathbar">Repositories <span>/</span> <span id="webRepo">HorrorGame</span> <span>/</span> <span class="leaf" id="webTitle">Improve game interaction and collision</span>
+        <div class="pathbar">Repositories <span>/</span> <span id="webRepo">HorrorGame</span> <span id="webSep">/</span> <span class="leaf" id="webTitle">Improve game interaction and collision</span>
           <span class="end"><span class="pill" id="webPill">private version</span><button type="button" class="btn primary fresh" id="webBtn">Pull in Mallard</button></span></div>
-        <div class="chips"><span class="chip">main</span><span class="chip">9f3c2d1</span><span class="chip">Sep 12, 2026</span><span class="chip">17m</span><span class="chip">48K tokens</span><span class="chip">Codex</span></div>
-        <p class="summary">Sprint tunneling fixed with movement substeps; the interact prompt is gated on the interactable group and fades.</p>
-        <div class="ev"><small>07:00 · you</small>The player clips through the cabin walls when sprinting. Fix the collision so sprinting can't tunnel…</div>
-        <div class="ev"><small>07:09 · Codex</small>Done. Sprinting now moves in four substeps per physics frame…</div>
+        <div class="chips" id="webChips"></div>
+        <p class="summary" id="webSummary"></p>
+        <div id="webBody"></div>
         <div class="band" id="webBand"><b>Didn't open?</b> Get Mallard · How to pull → <span style="color:var(--text-3)">(shown 1.5 s after the click when the page kept focus)</span></div>
       </div>
       <p class="note" id="n1"></p>
@@ -206,14 +205,11 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
       <div class="step"><b>2</b> Mallard · the sheet</div>
       <div class="screen">
         <div class="app">
-          <div class="side"><div class="row">Projects</div><div class="row on">HorrorGame</div><div class="row">api-server</div><div class="row">Catalog</div><div class="row">Settings</div></div>
+          <div class="side"><div class="row">Projects</div><div class="row on side-project">HorrorGame</div><div class="row">api-server</div><div class="row side-catalog">Catalog</div><div class="row">Settings</div></div>
           <div class="page">
-            <div class="bar"><span>Projects</span><span>/</span><span class="leaf">HorrorGame</span><span class="end"><span class="pill">Mallard Cloud</span></span></div>
+            <div class="bar" id="appBar2"><span>Projects</span><span>/</span><span class="leaf">HorrorGame</span><span class="end"><span class="pill">Mallard Cloud</span></span></div>
             <div class="waitline" id="waitline" hidden>Link · <b id="waitSubject">Improve game interaction…</b> is waiting. <span class="btn ghost" style="min-height:20px">Open</span></div>
-            <div class="list">
-              <div class="item"><span class="box"></span><span class="t"><b>Add dash cooldown UI</b><small>Up to date here and in Mallard Cloud.</small></span><span class="sz">Codex</span></div>
-              <div class="item cloud" id="appRowCloud"><span class="box"></span><span class="t"><b>Improve game interaction and collision</b><small>Only in Mallard Cloud. Pull to download it here.</small></span><span class="sz">Codex</span></div>
-            </div>
+            <div class="list" id="appList2"></div>
           </div>
         </div>
         <div class="scrim" id="scrim">
@@ -229,17 +225,17 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
 
     <!-- 3 · the review -->
     <div class="frame" id="f3">
-      <div class="step"><b>3</b> Mallard · Pull review, one session</div>
+      <div class="step"><b>3</b> <span id="f3Step">Mallard · Pull review, one session</span></div>
       <div class="screen">
         <div class="app">
-          <div class="side"><div class="row">Projects</div><div class="row on">HorrorGame</div><div class="row">api-server</div><div class="row">Catalog</div><div class="row">Settings</div></div>
+          <div class="side"><div class="row">Projects</div><div class="row on side-project">HorrorGame</div><div class="row">api-server</div><div class="row side-catalog">Catalog</div><div class="row">Settings</div></div>
           <div class="page" id="reviewPage">
-            <div class="bar"><span>HorrorGame</span><span>/</span><span class="leaf fresh" id="reviewHead">Pull session · Improve game interaction…</span><span class="end"><span class="pill">Mallard Cloud</span></span></div>
+            <div class="bar"><span id="reviewCrumb">HorrorGame</span><span>/</span><span class="leaf fresh" id="reviewHead">Pull session · Improve game interaction…</span><span class="end"><span class="pill">Mallard Cloud</span></span></div>
             <div class="list" id="reviewList">
-              <div class="item cloud" id="reviewRow"><span class="box on"></span><span class="t"><b>Improve game interaction and collision</b><small id="reviewDetail">Creates a local task from the reviewed storage history.</small></span><span class="sz">184 KB</span></div>
-              <div class="item dim" id="reviewOther"><span class="box"></span><span class="t"><b>Other sessions and files</b><small>Not in this review: a session Pull carries nothing else.</small></span><span class="sz"></span></div>
+              <div class="item cloud" id="reviewRow"><span class="box on"></span><span class="t"><b id="reviewTitle">Improve game interaction and collision</b><small id="reviewDetail">Creates a local task from the reviewed storage history.</small></span><span class="sz" id="reviewSize">184 KB</span></div>
+              <div class="item dim" id="reviewOther"><span class="box"></span><span class="t"><b id="reviewOtherTitle">Other sessions and files</b><small id="reviewOtherDetail">Not in this review: a session Pull carries nothing else.</small></span><span class="sz"></span></div>
             </div>
-            <div class="meter"><span>184 KB of 512 MB</span><div class="track"><div class="fill"></div></div></div>
+            <div class="meter"><span id="meterText">184 KB of 512 MB</span><div class="track"><div class="fill"></div></div></div>
             <div class="foot"><span class="btn">Back</span><span class="btn primary" id="reviewVerb">Pull 1</span></div>
           </div>
         </div>
@@ -252,13 +248,12 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
       <div class="step"><b>4</b> Mallard · after Pull</div>
       <div class="screen">
         <div class="app">
-          <div class="side"><div class="row">Projects</div><div class="row on">HorrorGame</div><div class="row">api-server</div><div class="row">Catalog</div><div class="row">Settings</div></div>
+          <div class="side"><div class="row">Projects</div><div class="row on side-project">HorrorGame</div><div class="row">api-server</div><div class="row side-catalog">Catalog</div><div class="row">Settings</div></div>
           <div class="page">
-            <div class="bar"><span>HorrorGame</span><span>/</span><span class="leaf">Improve game interaction…</span><span class="end"><span class="btn" style="min-height:22px">Push</span><span class="btn" style="min-height:22px">Open in Codex</span></span></div>
+            <div class="bar" id="landBar"><span>HorrorGame</span><span>/</span><span class="leaf">Improve game interaction…</span><span class="end"><span class="btn" style="min-height:22px">Push</span><span class="btn" style="min-height:22px">Open in Codex</span></span></div>
             <div class="receipt ok" id="landReceipt">Pulled “Improve game interaction and collision”.</div>
-            <div class="chips"><span class="chip">main · 9f3c2d1</span><span class="chip">Up to date here and in Mallard Cloud</span></div>
-            <div class="ev"><small>07:00 · You</small>The player clips through the cabin walls when sprinting…</div>
-            <div class="ev"><small>07:09 · Codex</small>Done. Sprinting now moves in four substeps per physics frame…</div>
+            <div class="chips" id="landChips"></div>
+            <div id="landBody"></div>
             <div class="receipt info" id="landNote">The project's Pull badge still counts what else is in Mallard Cloud; this Pull reviewed one session only.</div>
           </div>
         </div>
@@ -279,6 +274,10 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
         <tr><td><b>Project not on this computer</b></td><td>Not on this computer.</td><td>Set up project…</td><td>New project › From Mallard Cloud, as today. The link again after setup</td></tr>
         <tr><td><b>Not in the current version</b><small>removed, draft discarded</small></td><td>—</td><td>—</td><td><i>That session isn't in Rika321/HorrorGame any more.</i></td></tr>
         <tr><td><b>No account · another host · can't see it · not a link</b></td><td colspan="3">The repository link's stops, same words.</td></tr>
+        <tr><td><b>Non-Git project, session not here</b><small>same link, same route</small></td><td>Not on this computer.</td><td>Pull session…</td><td>The one-row review. The folder's files stay in storage; the session's page says so, the project's Pull badge counts them</td></tr>
+        <tr><td><b>Non-Git project not on this computer</b></td><td>Not on this computer.</td><td>Set up project…</td><td>New project › From Mallard Cloud: <b>Create folder and connect</b>, nothing cloned, nothing pulled</td></tr>
+        <tr><td><b>A skill, plugin or pet, saved in a Catalog row</b><small>the repository page's own link</small></td><td>In your Catalog: {row}</td><td>Pull pet…</td><td>The item's page with its one-item Pull review open. Up to date → <i>Already here and up to date.</i></td></tr>
+        <tr><td><b>A skill, plugin or pet, not in the Catalog</b></td><td>Not in your Catalog.</td><td>Add to Catalog…</td><td>Add Catalog resource › From Mallard Cloud, as today; after <b>Add</b>, the item's page with its Pull review open (decision 11)</td></tr>
       </tbody>
     </table>
   </div>
@@ -321,6 +320,19 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
     <div class="choice"><strong>8 · Project not on this computer</strong><ul>
       <li class="pick"><b>Set up project…, then the link again</b> (the sheet says so).</li>
       <li>Carry the session through setup and open its review when the project connects (layer 3).</li></ul></div>
+    <div class="choice"><strong>9 · A non-Git project's files</strong><ul>
+      <li class="pick"><b>The session alone</b>; its page says the folder's files are still in Mallard Cloud.</li>
+      <li>The session Pull also shows the Files step, unticked (two scopes in one review, with the files' warning acknowledgements).</li>
+      <li>For a non-Git project set up from the link, the verb opens the project's first Pull with the session ticked.</li></ul></div>
+    <div class="choice"><strong>10 · The item page's button</strong><ul>
+      <li class="pick"><b>Pull in Mallard</b> on a skill, plugin or pet page; the project repository page keeps Open in Mallard.</li>
+      <li>One label everywhere.</li></ul></div>
+    <div class="choice"><strong>11 · After Add from a pull link</strong><ul>
+      <li class="pick"><b>Open the item's Pull review</b> on its page: the button said Pull, and the review is the second press.</li>
+      <li>Land as today, on the page with Pull 1, and leave the press to the person.</li></ul></div>
+    <div class="choice"><strong>12 · The Catalog's scope</strong><ul>
+      <li class="pick"><b>The window narrows the review</b> and sends one choice, as the item's page does today.</li>
+      <li>Later: an <code>only</code> filter on the Catalog's prepare, so one item's Pull reads one repository.</li></ul></div>
   </div>
 </main>
 
@@ -331,6 +343,21 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
   const TITLE = "Improve game interaction and collision";
   const link = (page) => `mallard://open?address=${encodeURIComponent(page)}`;
   const sessionPage = `${ORIGIN}/Rika321/HorrorGame/sessions/${ID}?commit=9f3c2d1&scope=private`;
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+  const SESSION_WEB = {
+    step: "Website · session page", acct: "Rika321", repo: "HorrorGame", leaf: TITLE, pill: "private version",
+    chips: ["main", "9f3c2d1", "Sep 12, 2026", "17m", "48K tokens", "Codex"],
+    summary: "Sprint tunneling fixed with movement substeps; the interact prompt is gated on the interactable group and fades.",
+    body: [["07:00 · you", "The player clips through the cabin walls when sprinting. Fix the collision so sprinting can't tunnel…"], ["07:09 · Codex", "Done. Sprinting now moves in four substeps per physics frame…"]],
+  };
+  const SESSION_LIST = [["Add dash cooldown UI", "Up to date here and in Mallard Cloud.", "Codex", ""], [TITLE, "Only in Mallard Cloud. Pull to download it here.", "Codex", "cloud"]];
+  const SESSION_LAND = {
+    bar: ["HorrorGame", "Improve game interaction…", ["Push", "Open in Codex"]],
+    chips: ["main · 9f3c2d1", "Up to date here and in Mallard Cloud"],
+    body: [["07:00 · You", "The player clips through the cabin walls when sprinting…"], ["07:09 · Codex", "Done. Sprinting now moves in four substeps per physics frame…"]],
+    note: "The project's Pull badge still counts what else is in Mallard Cloud; this Pull reviewed one session only.",
+  };
 
   const SCENES = [
     { id: "not-here", n: "1", label: "Not here", link: link(sessionPage),
@@ -352,7 +379,8 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
     { id: "no-project", n: "5", label: "Project not here", link: link(`${ORIGIN}/maya/portal/sessions/${ID}`),
       shows: "The repository is not connected to any project on this computer. The sheet offers Set up project…, as a repository link does; the session is not carried through setup in this layer — the sheet says to use the link again after.",
       fresh: "The sentence under the row (decision 8).",
-      here: "Not on this computer. Set up the project, then use the link again.", verb: "Set up project…", review: "setup", land: "setup", subject: "maya/portal", repo: "portal", acct: "maya" },
+      here: "Not on this computer. Set up the project, then use the link again.", verb: "Set up project…", review: "setup", land: "setup", subject: "maya/portal", standing: "Public · anyone signed in can push",
+      web: { ...SESSION_WEB, acct: "guest", repo: "portal" }, list: [["Add dash cooldown UI", "Up to date here and in Mallard Cloud.", "Codex", ""]] },
     { id: "gone", n: "6", label: "Not in the version", link: link(sessionPage),
       shows: "The session was removed from storage, or the draft it was in was discarded, or a public reader's version does not hold it. The plan finds no such row and says so; nothing opens and nothing moves.",
       fresh: "The sentence.",
@@ -360,7 +388,7 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
     { id: "accounts", n: "7", label: "Two accounts", link: link(sessionPage),
       shows: "Two Mallard Cloud accounts on the host see the repository. The project it is connected to decides the storage, as for repository links; the sheet says which.",
       fresh: "Nothing.",
-      here: "On this computer: HorrorGame · Mallard Cloud work", verb: "Pull session…", review: "create", land: "pulled" },
+      here: "On this computer: HorrorGame · Mallard Cloud work", verb: "Pull session…", review: "create", land: "pulled", sub: "One session of this repository · seen by Rika321 and rika-acme" },
     { id: "no-account", n: "8", label: "No account", link: link(sessionPage),
       shows: "No storage signs in to the link's host. This build's service → Sign in to Mallard Cloud; the link waits under the bar and a new account opens its sheet again. Any other host → No account here for {host}.",
       fresh: "Nothing: the repository link's stop.",
@@ -373,58 +401,91 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
       shows: "A Push review is open when the link arrives: it waits under the bar as Link · {title} is waiting, with Open. Nothing a link does interrupts an operation, a review or a dialog.",
       fresh: "The waiting line names the session when the title is known; otherwise owner/name.",
       here: "On this computer: HorrorGame", verb: "Pull session…", review: "create", land: "pulled", waiting: true },
+
+    /* Non-Git */
+    { id: "nongit", n: "11", label: "Non-Git project", link: link(`${ORIGIN}/Rika321/Birding.Log/sessions/claude%3Aconversation%3Acloudthread-2c4e6a8b0d1f3a5c7e9b?commit=4`),
+      shows: "A non-Git project: same link, same route. The project is connected to a plain folder here; the session is pulled alone, as in scene 1. The folder's files are not part of a session Pull: the session's page says they are still in Mallard Cloud, and the project's Pull badge counts them.",
+      fresh: "The pending-files line on the session's page (decision 9).",
+      here: "On this computer: Birding.Log (folder)", verb: "Pull session…", review: "create", land: "pulled", subject: "Rika321/Birding.Log", standing: "Yours · Owner", mark: "▭", kind: "folder",
+      web: { step: "Website · session page (non-Git project)", acct: "Rika321", repo: "Birding.Log", leaf: "Tidy the species list", pill: "private version",
+        chips: ["version 4", "Sep 20, 2026", "9m", "12K tokens", "Claude"], summary: "Merged duplicate species rows and normalised the dates in the log.",
+        body: [["18:02 · you", "The species list has duplicates with different capitalisation. Merge them and fix the dates."], ["18:11 · Claude", "Merged 14 duplicate rows into 7 and rewrote 31 dates as ISO."]] },
+      list: [["Plan the autumn trips", "Up to date here and in Mallard Cloud.", "Claude", ""], ["Tidy the species list", "Only in Mallard Cloud. Pull to download it here.", "Claude", "cloud"], ["3 project files", "Only in Mallard Cloud. Pull to download them here.", "Files", "cloud"]],
+      reviewTitle: "Tidy the species list", reviewOther: ["Project files and other sessions", "Not in this review: a session Pull carries nothing else, on a non-Git project too."], reviewSize: "61 KB", meter: "61 KB of 512 MB",
+      landing: { bar: ["Birding.Log", "Tidy the species list", ["Push", "Open in Claude"]], chips: ["version 4", "Up to date here and in Mallard Cloud"],
+        body: [["18:02 · You", "The species list has duplicates with different capitalisation…"], ["18:11 · Claude", "Merged 14 duplicate rows into 7 and rewrote 31 dates as ISO."]],
+        note: "Project files for this folder are still in Mallard Cloud. Pull the project to bring them.", receipt: "Pulled “Tidy the species list”." } },
+
+    /* Catalog items */
+    { id: "pet-saved", n: "12", label: "Pet, in the Catalog", link: link(`${ORIGIN}/maya/Mochi`),
+      shows: "A pet's page is its repository page, so the link is the repository link. The pet is saved in a Catalog row; the sheet's verb is Pull pet…, which opens the pet's page with its own one-item Pull review open — the review its Pull button opens today. Pull 1 installs v5.",
+      fresh: "The website's button word. The sheet's verb. The review opening on arrival.",
+      here: "In your Catalog: Pets v2 · Default Codex", verb: "Pull pet…", review: "catalog", land: "catalog", subject: "maya/Mochi", standing: "Public · Contributor · v5", sub: "A pet v2", mark: "🐾", kind: "catalog",
+      web: { step: "Website · pet page (the repository page)", acct: "Rika321", repo: "maya", leaf: "Mochi", pill: "Pet v2 · Public · v5", noSep: false,
+        chips: ["Codex", "v5", "★ 12", "Sep 28, 2026"], summary: "A round duck that naps on the dock and wakes for new tasks.",
+        body: [["About", "Mochi is a desktop pet for Codex. Version 5 adds a sleeping pose and a quieter idle."]] },
+      bar2: ["Catalog", "Pets v2 · Default Codex"], list: [["Duck", "Up to date here and in Mallard Cloud.", "v3", ""], ["Mochi", "Newer in Mallard Cloud. Pull to update this computer.", "v4 → v5", "cloud"]],
+      reviewHead: "Mochi · Pull", reviewTitle: "Mochi", reviewDetail: "Update to v5 from maya/Mochi (public version). Local v4 is replaced; a changed local copy would be kept beside it.", reviewSize: "2.1 MB", meter: "2.1 MB", reviewOther: ["Other pets in this row", "Not in this review: the page's Pull holds this item alone."], step3: "Mallard · the pet's Pull review",
+      landing: { bar: ["Pets v2 · Default Codex", "Mochi", ["Push", "Open in Codex"]], chips: ["v5", "Up to date here and in Mallard Cloud", "maya/Mochi"],
+        body: [["Mochi", "Installed v5 in the Codex home. The launch row and ⓘ menu are the pet page's own."]], note: null, receipt: "Pulled Mochi · v5." } },
+    { id: "skill-new", n: "13", label: "Skill, not in Catalog", link: link(`${ORIGIN}/kai/pdf-tools`),
+      shows: "A skill not in any Catalog row. The sheet offers Add to Catalog…, as today: Add Catalog resource › From Mallard Cloud, item found, row chosen. Add saves the binding; then, because the button said Pull, the skill's page opens with its Pull review open (decision 11). Add alone still pulls nothing.",
+      fresh: "The review opening after Add. Everything before it is the shipped Add flow.",
+      here: "Not in your Catalog.", verb: "Add to Catalog…", review: "add", land: "catalog", subject: "kai/pdf-tools", standing: "Public · Contributor · v2", sub: "A Claude skill", mark: "✦", kind: "catalog",
+      web: { step: "Website · skill page (the repository page)", acct: "Rika321", repo: "kai", leaf: "pdf-tools", pill: "Skill · Public · v2",
+        chips: ["Claude", "v2", "★ 31", "Oct 1, 2026"], summary: "Split, merge and OCR PDFs from a Claude session.",
+        body: [["About", "Three commands and a prompt file. Version 2 adds OCR with language hints."]] },
+      bar2: ["Catalog", "Skills · Default Claude"], list: [["commit-helper", "Up to date here and in Mallard Cloud.", "v1", ""]],
+      landing: { bar: ["Skills · Default Claude", "pdf-tools", ["Push", "Open folder"]], chips: ["v2", "Up to date here and in Mallard Cloud", "kai/pdf-tools"],
+        body: [["pdf-tools", "Installed v2 in the Claude home."]], note: null, receipt: "pdf-tools added from kai/pdf-tools. Pulled v2." } },
   ];
   const SHEETS = [["b", "B · Sheet first"], ["a", "A · Straight to review"]];
   const LABELS = [["pull", "Pull in Mallard"], ["open", "Open in Mallard"]];
   const THEMES = [["auto", "Auto"], ["light", "Light"], ["dark", "Dark"]];
 
   const q = new URLSearchParams(location.search);
-  const state = {
-    scene: q.get("scene") ?? "not-here",
-    sheet: q.get("sheet") ?? "b",
-    label: q.get("label") ?? "pull",
-    theme: q.get("theme") ?? "auto",
-  };
+  const state = { scene: q.get("scene") ?? "not-here", sheet: q.get("sheet") ?? "b", label: q.get("label") ?? "pull", theme: q.get("theme") ?? "auto" };
   const $ = (id) => document.getElementById(id);
 
-  function segs(host, items, key, render) {
+  const GROUPS = { scenes: ["scene", SCENES.map((s) => [s.id, s.label, s.n])], sheets: ["sheet", SHEETS], labels: ["label", LABELS], themes: ["theme", THEMES] };
+  for (const [host, [key, items]] of Object.entries(GROUPS)) {
     for (const [value, text, n] of items) {
       const b = document.createElement("button");
       b.type = "button"; b.className = "seg";
       b.innerHTML = (n ? `<b>${n}</b>` : "") + text;
-      b.setAttribute("aria-pressed", String(state[key] === value));
+      b.dataset.value = value;
       b.addEventListener("click", () => { state[key] = value; sync(); });
-      host.appendChild(b);
+      $(host).appendChild(b);
     }
   }
-  segs($("scenes"), SCENES.map((s) => [s.id, s.label, s.n]), "scene");
-  segs($("sheets"), SHEETS, "sheet");
-  segs($("labels"), LABELS, "label");
-  segs($("themes"), THEMES, "theme");
+
+  const evs = (rows) => rows.map(([who, text]) => `<div class="ev"><small>${esc(who)}</small>${esc(text)}</div>`).join("");
+  const chips = (list) => list.map((c) => `<span class="chip">${esc(c)}</span>`).join("");
+  const rows = (list) => list.map(([title, detail, end, cls]) => `<div class="item ${cls}"><span class="box"></span><span class="t"><b>${esc(title)}</b><small>${esc(detail)}</small></span><span class="sz">${esc(end)}</span></div>`).join("");
 
   function sync() {
     const s = SCENES.find((c) => c.id === state.scene) ?? SCENES[0];
-    for (const host of ["scenes", "sheets", "labels", "themes"]) {
-      const key = { scenes: "scene", sheets: "sheet", labels: "label", themes: "theme" }[host];
-      [...$(host).querySelectorAll(".seg")].forEach((b, i) => {
-        const value = { scenes: SCENES.map((c) => c.id), sheets: SHEETS.map((x) => x[0]), labels: LABELS.map((x) => x[0]), themes: THEMES.map((x) => x[0]) }[host][i];
-        b.setAttribute("aria-pressed", String(state[key] === value));
-      });
+    for (const [host, [key]] of Object.entries(GROUPS)) {
+      [...$(host).querySelectorAll(".seg")].forEach((b) => b.setAttribute("aria-pressed", String(state[key] === b.dataset.value)));
     }
     if (state.theme === "auto") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", state.theme);
-    const params = new URLSearchParams(state); history.replaceState(null, "", `?${params}`);
+    history.replaceState(null, "", `?${new URLSearchParams(state)}`);
 
     $("shows").textContent = s.shows;
     $("link").textContent = s.link;
     $("fresh").textContent = s.fresh;
 
     // 1 · website
-    $("webBtn").textContent = state.label === "pull" ? "Pull in Mallard" : "Open in Mallard";
-    $("webRepo").textContent = s.repo ?? "HorrorGame";
-    $("webAcct").textContent = s.acct ? "guest" : "Rika321";
-    $("webBand").hidden = s.id !== "bad-link" ? false : false;
-    $("n1").innerHTML = `The page's own address goes into <code>mallard://open?address=…</code>; the query (<code>commit</code>, <code>scope</code>) rides along and the app drops it. On a phone the button is not drawn.`;
+    const web = s.web ?? SESSION_WEB;
+    const catalog = s.kind === "catalog";
+    $("f1Step").textContent = web.step;
+    $("webBtn").textContent = catalog ? (state.label === "pull" ? "Pull in Mallard" : "Open in Mallard") : (state.label === "pull" ? "Pull in Mallard" : "Open in Mallard");
+    $("webAcct").textContent = web.acct; $("webRepo").textContent = web.repo; $("webTitle").textContent = web.leaf; $("webPill").textContent = web.pill;
+    $("webChips").innerHTML = chips(web.chips); $("webSummary").textContent = web.summary; $("webBody").innerHTML = evs(web.body);
+    $("n1").innerHTML = catalog
+      ? `An item's page is its repository page, so the button that is there today changes its word (decision 10). The link is unchanged: <code>mallard://open?address=…/owner/name</code>.`
+      : `The page's own address goes into <code>mallard://open?address=…</code>; the query (<code>commit</code>, <code>scope</code>) rides along and the app drops it. On a phone the button is not drawn.`;
 
     // 2 · sheet
     const subject = s.subject ?? "Rika321/HorrorGame";
@@ -432,15 +493,17 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
     $("scrim").style.display = (straight || s.waiting) ? "none" : "flex";
     $("waitline").hidden = !s.waiting;
     $("waitSubject").textContent = TITLE.length > 28 ? `${TITLE.slice(0, 28)}…` : TITLE;
-    $("appRowCloud").style.display = s.id === "no-project" ? "none" : "";
+    const bar2 = s.bar2 ?? ["Projects", s.web?.repo ?? "HorrorGame"];
+    $("appBar2").innerHTML = `<span>${esc(bar2[0])}</span><span>/</span><span class="leaf">${esc(bar2[1])}</span><span class="end"><span class="pill">Mallard Cloud</span></span>`;
+    $("appList2").innerHTML = rows(s.list ?? SESSION_LIST);
     if (s.stop) {
-      $("sheetBody").innerHTML = `<div class="stop ${s.stop.kind}"><strong>${s.stop.text}</strong></div>`;
+      $("sheetBody").innerHTML = `<div class="stop ${s.stop.kind}"><strong>${esc(s.stop.text)}</strong></div>`;
       $("sheetVerb").textContent = s.stop.verb ?? ""; $("sheetVerb").style.display = s.stop.verb ? "" : "none";
     } else {
       $("sheetBody").innerHTML = `
-        <div class="found"><span class="mk">⌥</span><span><b>${subject}</b><small>✓ ${s.id === "no-project" ? "Public · anyone signed in can push" : "Yours · Owner"}</small>
-          <span class="sub fresh">One session of this repository${s.id === "accounts" ? " · seen by Rika321 and rika-acme" : ""}</span></span></div>
-        <div class="here">💻 ${s.here}</div>`;
+        <div class="found"><span class="mk">${s.mark ?? "⌥"}</span><span><b>${esc(subject)}</b><small>✓ ${esc(s.standing ?? "Yours · Owner")}</small>
+          <span class="sub ${catalog ? "" : "fresh"}">${esc(s.sub ?? "One session of this repository")}</span></span></div>
+        <div class="here">💻 ${esc(s.here)}</div>`;
       $("sheetVerb").textContent = s.verb; $("sheetVerb").style.display = "";
     }
     $("f2").classList.toggle("off", straight);
@@ -448,39 +511,61 @@ td small { display: block; margin-top: 2px; color: var(--text-3); }
       ? "The link waits until the review closes; Open shows the sheet. A newer link replaces the one waiting."
       : straight ? "With A the sheet appears only for the stops; the link goes straight to the review on the right."
       : s.stop ? "Decided before anything is pulled; for the no-account stop, nothing is even asked of the service."
+      : catalog ? "The repository link's sheet with the verb changed: Pull {kind}… when the item is saved in a row, Add to Catalog… when it is not. Whether it is up to date is the review's to say."
       : "Nothing moves until the verb. Cancel, × or Esc lets the link go. The sheet is the repository link's with one more line.";
 
     // 3 · review
     const r = s.review;
     const page = $("reviewPage");
-    page.querySelector(".list").style.display = ["create", "update", "keep"].includes(r) ? "" : "none";
-    page.querySelector(".meter").style.display = ["create", "update", "keep"].includes(r) ? "" : "none";
-    page.querySelector(".foot").style.display = ["create", "update", "keep"].includes(r) ? "" : "none";
+    const listed = ["create", "update", "keep", "catalog"].includes(r);
+    $("f3Step").textContent = s.step3 ?? (r === "add" ? "Mallard · Add Catalog resource, then the review" : "Mallard · Pull review, one session");
+    page.querySelector(".list").style.display = listed ? "" : "none";
+    page.querySelector(".meter").style.display = listed ? "" : "none";
+    page.querySelector(".foot").style.display = listed ? "" : "none";
     let empty = page.querySelector(".empty");
     if (!empty) { empty = document.createElement("div"); empty.className = "empty"; page.insertBefore(empty, page.querySelector(".foot")); }
-    empty.style.display = ["create", "update", "keep"].includes(r) ? "none" : "";
-    $("reviewDetail").textContent = r === "update" ? "Update: brings the reviewed storage history into this task. Existing provider files are retained."
+    empty.style.display = listed ? "none" : "";
+    $("reviewTitle").textContent = s.reviewTitle ?? TITLE;
+    $("reviewSize").textContent = s.reviewSize ?? "184 KB";
+    $("meterText").textContent = s.meter ?? "184 KB of 512 MB";
+    const other = s.reviewOther ?? ["Other sessions and files", "Not in this review: a session Pull carries nothing else."];
+    $("reviewOtherTitle").textContent = other[0]; $("reviewOtherDetail").textContent = other[1];
+    $("reviewDetail").textContent = s.reviewDetail ?? (r === "update" ? "Update: brings the reviewed storage history into this task. Existing provider files are retained."
       : r === "keep" ? "Keep both: keeps the current local history as an independent task and brings the storage history into this task."
-      : "Creates a local task from the reviewed storage history.";
+      : "Creates a local task from the reviewed storage history.");
     empty.innerHTML = r === "none" ? `<strong>Already here and up to date.</strong><span>No review opens; the session's page opens instead (decision 7).</span>`
       : r === "gone" ? `<strong>That session isn't in Rika321/HorrorGame any more.</strong><span>Nothing opened, nothing moved.</span>`
-      : r === "setup" ? `<strong>New project › From Mallard Cloud</strong><span>The shipped page, account ticked, address looked up. Clone and connect are still yours.</span>`
+      : r === "setup" ? `<strong>New project › From Mallard Cloud</strong><span>The shipped page, account ticked, address looked up. Clone and connect are still yours — Create folder and connect for a non-Git project.</span>`
+      : r === "add" ? `<strong>Add Catalog resource › From Mallard Cloud</strong><span>kai/pdf-tools found · row: Skills · Default Claude. <b>Add</b> saves the binding and pulls nothing; the skill's page then opens with its Pull review (decision 11), reading Install v2 · Pull 1.</span>`
       : `<strong>—</strong><span>The link stopped on the sheet.</span>`;
-    $("reviewHead").textContent = r === "setup" ? "New project" : `Pull session · ${TITLE.slice(0, 22)}…`;
+    $("reviewCrumb").textContent = s.bar2?.[1] ?? s.web?.repo ?? "HorrorGame";
+    for (const el of document.querySelectorAll(".side-project")) { el.classList.toggle("on", s.kind !== "catalog"); el.textContent = s.web?.repo && s.kind !== "catalog" ? s.web.repo : "HorrorGame"; }
+    for (const el of document.querySelectorAll(".side-catalog")) el.classList.toggle("on", s.kind === "catalog");
+    $("reviewHead").textContent = s.reviewHead ?? (r === "setup" ? "New project" : r === "add" ? "Add Catalog resource" : `Pull session · ${TITLE.slice(0, 22)}…`);
     $("f3").classList.toggle("off", ["none", "stop", "gone"].includes(r));
     $("n3").textContent = ["create", "update", "keep"].includes(r)
       ? "One row, ticked, no Files step. The scope is enforced in Rust: Apply refuses any other action id, and the project's reviewed base and cloud pin do not move."
-      : r === "setup" ? "As a repository link lands today. After setup, the link again opens scene 1."
+      : r === "catalog" ? "The Catalog's own review, narrowed to the item as its page does today; Apply gets one choice and leaves the row's other items untouched (decision 12)."
+      : r === "add" ? "The shipped Add flow; the only new thing is what happens after Add."
+      : r === "setup" ? "As a repository link lands today. After setup, the link again opens scene 1 (or 11)."
       : "No review in this scene.";
 
     // 4 · landing
     const l = s.land;
-    $("f4").classList.toggle("off", !["pulled", "synced"].includes(l));
-    $("landReceipt").textContent = l === "synced" ? "Already here and up to date." : `Pulled “${TITLE}”.`;
+    const land = s.landing ?? SESSION_LAND;
+    $("f4").classList.toggle("off", !["pulled", "synced", "catalog"].includes(l));
+    $("landBar").innerHTML = `<span>${esc(land.bar[0])}</span><span>/</span><span class="leaf">${esc(land.bar[1])}</span><span class="end">${land.bar[2].map((v) => `<span class="btn" style="min-height:22px">${esc(v)}</span>`).join("")}</span>`;
+    $("landChips").innerHTML = chips(land.chips); $("landBody").innerHTML = evs(land.body);
+    $("landReceipt").textContent = l === "synced" ? "Already here and up to date." : (land.receipt ?? `Pulled “${TITLE}”.`);
     $("landReceipt").className = `receipt ${l === "synced" ? "info" : "ok"}`;
-    $("landNote").style.display = l === "pulled" ? "" : "none";
-    $("n4").textContent = ["pulled", "synced"].includes(l)
-      ? "The session's own page in Mallard, found by its cloud thread id in the refreshed comparison. Push and Open in Codex are the page's own verbs; after-Pull offers appear as after any Pull."
+    $("landNote").style.display = (l === "pulled" && land.note) ? "" : "none";
+    $("landNote").textContent = land.note ?? "";
+    $("landNote").classList.toggle("fresh", s.kind === "folder");
+    $("n4").textContent = l === "catalog"
+      ? "The item's own page in the Catalog row, as Add and Pull land today. Push and the launch row are the page's own verbs."
+      : ["pulled", "synced"].includes(l)
+      ? (s.kind === "folder" ? "The session's page. The dotted line is new: on a non-Git project it says the folder's files are still in storage (decision 9)."
+        : "The session's own page in Mallard, found by its cloud thread id in the refreshed comparison. Push and Open in Codex are the page's own verbs; after-Pull offers appear as after any Pull.")
       : "Nothing lands in this scene.";
   }
   sync();

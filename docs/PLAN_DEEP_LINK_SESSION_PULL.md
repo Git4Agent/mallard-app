@@ -2,10 +2,11 @@
 
 **Status (2026-10-04): proposed**, nothing built. Layer 2 of
 `docs/PLAN_DEEP_LINK_DESTINATIONS.md` (session links), on the same scheme and
-sheet as repository links and `PLAN_DEEP_LINK_SHARE_YOURS.md`. The choices are
-collected at the end; the flow is drawn in
-`mockups/session-pull-link-mockup.html` (no build step: open the file;
-`?scene=`, `?sheet=`, `?label=`, `?theme=dark`).
+sheet as repository links and `PLAN_DEEP_LINK_SHARE_YOURS.md`. Sessions are
+the main case; *Non-Git projects* and *Skills, plugins and pets* below say
+what differs for them. The choices are collected at the end; the flow is
+drawn in `mockups/session-pull-link-mockup.html` (no build step: open the
+file; `?scene=`, `?sheet=`, `?label=`, `?theme=dark`).
 
 ## Where things stand
 
@@ -130,6 +131,82 @@ The mirror of the session Push, with the same boundary in Rust.
 - Pins, digests, the one-day expiry, the apply limit and the stopped-Pull
   rule are unchanged. Nothing is deleted.
 
+## Non-Git projects
+
+The same link, route and session id: a non-Git project's repository has the
+same session pages. What differs is the folder and the files.
+
+- **Setup from the link.** *Set up project…* lands on New project › From
+  Mallard Cloud as for a Git project, but the verb reads **Create folder and
+  connect** (or **Connect** for an existing folder): nothing is cloned, the
+  folder starts empty, and the project's files arrive only through its Pull
+  (`README.md`, Test Flow 3; `CloudProjectSource.tsx`).
+- **The session scope carries no project files.** A session Pull writes the
+  session and nothing else, on a non-Git project too. A session pulled alone
+  into a fresh folder can therefore mention files that are still only in
+  storage. The session's page says so when the project's comparison holds
+  pending project files: *Project files for this folder are still in Mallard
+  Cloud. Pull the project to bring them.* The project's Pull badge already
+  counts them.
+- **Path remap** of a pulled Codex session to the local folder is the
+  project Pull's today and is unchanged.
+- Git-managed source never travels through Mallard; a Git project's files
+  come with the clone. Neither kind of project gets files from a session
+  link.
+
+See decision 9 for the alternative that brings the files along.
+
+## Skills, plugins and pets
+
+On the website a Catalog item is its own repository, and its page is the
+repository page, `/{owner}/{name}` — the page that already has *Open in
+Mallard*. There is no sub-page to link, so the item's pull link **is the
+repository link**, and what changes is the button's word and the sheet's
+verb.
+
+Where things stand (`PLAN_DEEP_LINK_DESTINATIONS.md`,
+`PLAN_CATALOG_CLOUD_LIKE_PROJECTS.md`):
+
+- Saved in a Catalog row → *Open in Catalog*: the item's page, whose own
+  **Pull** opens the row's Pull review narrowed to that item
+  (`StorageCatalogPage.tsx`, `openPull`). The one-item Pull exists; the link
+  does not press it.
+- Not in the Catalog → *Add to Catalog…*: Add Catalog resource › From
+  Mallard Cloud. **Add** saves the binding and lands on the item's page
+  reading *Only in Mallard Cloud. Pull to download it here.* with `Pull 1`;
+  nothing is pulled on its own (owner, 2026-10-01: Connect no longer opens
+  the Pull review).
+- Yours, with no row of its kind → *Add to Catalog…* with the Kind chosen.
+- On Mallard Cloud each item has its own repository, version and source
+  (`item_heads`, `sources`, `reads: draft | public`); Apply takes one choice
+  per item and leaves the rest *Skipped; local content was left unchanged*.
+
+What changes:
+
+| The item, on this computer | The sheet's verb | It opens |
+| --- | --- | --- |
+| Saved in a row | Pull {kind}… | The item's page with its one-item Pull review open, as its Pull button opens it. Up to date → no review: *Already here and up to date.* |
+| Not in the Catalog | Add to Catalog… | Add Catalog resource › From Mallard Cloud, as today. After **Add**, the item's page opens **with its Pull review open** (decision 11) |
+| Yours, no row of its kind | Add to Catalog… | As today; after Add, as above |
+
+- The sheet's row keeps the pickers' words (*Public · Contributor · v5*) and
+  the second line names the row (*In your Catalog: Pets v2 · Default Codex*).
+  Whether the item is up to date is the review's to say, as for a session:
+  the sheet makes no storage read.
+- **Scope.** The item's page narrows the review in the window and sends one
+  choice; that is the shipped pet page and it is enough for layer 1. A
+  backend `only` filter on `prepare_catalog_scope_pull`, so a row of forty
+  pets reads one repository instead of forty, is decision 12.
+- **Version.** The Pull reads the draft for a collaborator and the public
+  version for anyone else, as the Catalog's Pull does; the link does not
+  pin a version.
+- **Public items** a signed-in non-member adds are recorded on Mallard Cloud
+  (`catalog-addition`), as Add does today.
+- Each kind pulls what its Catalog Pull pulls today: a skill's files, a
+  plugin install intent, a pet. Nothing kind-specific is added.
+- **The project repository page** keeps *Open in Mallard*: a project has no
+  one thing to pull, and *Pull this project* by the same scope is layer 3.
+
 ## Safety
 
 - **A link only reads** until the sheet's verb, and the verb only opens a
@@ -156,8 +233,12 @@ The mirror of the session Push, with the same boundary in Rust.
    open?* with *Get Mallard*, as the listing's does.
 3. **A historical view** (`?commit=` behind the head): the button's tooltip
    says *Pulls the current version of this session* (decision 5).
-4. **Tests** (`web/test/pull.test.ts`): the session link; the repository
-   link unchanged; the page's markup on desktop and on a phone.
+4. **A Catalog item's page** (a skill, plugin or pet): the existing button
+   reads **Pull in Mallard**; its link is unchanged. The project repository
+   page keeps *Open in Mallard* (decision 10).
+5. **Tests** (`web/test/pull.test.ts`): the session link; the repository
+   link unchanged; the page's markup on desktop and on a phone; the item
+   page's label.
 
 ## Desktop (`mallard-app`)
 
@@ -174,7 +255,9 @@ The mirror of the session Push, with the same boundary in Rust.
    `projectSyncApi.planRestore(storageId, bundleId, binding, scope)`.
 5. **Routing** (`app-link/appLink.ts`): `LinkDestination` gains
    `{ kind: "pull_session", projectId, storageId, resourceId }`; the verdict
-   for a session link reuses the repository join and names the verb.
+   for a session link reuses the repository join and names the verb. The
+   `catalog_item` landing gains `pull: true` and its verb reads *Pull
+   {kind}…*; `add_catalog_item` and `add_catalog_row` carry `pullAfterAdd`.
 6. **Shell** (`ProjectSync.tsx`): `beginSessionRestore` beside
    `beginProjectRestore`; `planRestore` passes the scope; the synced and
    not-found answers; after Apply, `openSessionDetail` for the row's thread.
@@ -185,6 +268,13 @@ The mirror of the session Push, with the same boundary in Rust.
    for a session scope; the project's badge already says what else is in
    storage.
 9. **Waiting line**: *Link · {title or owner/name} is waiting.*
+10. **Catalog** (`StorageCatalogPage.tsx`): a landing with `pull` opens the
+    item's page and calls its `openPull`; a synced item shows *Already here
+    and up to date.* instead of an empty review. Add Catalog resource's
+    From Mallard Cloud door passes `pullAfterAdd` through to the landing.
+11. **Session page** (`SessionDetailPage.tsx`): the pending-project-files
+    line for a non-Git project, read from the comparison the page already
+    has.
 
 ## Tests
 
@@ -204,6 +294,13 @@ The mirror of the session Push, with the same boundary in Rust.
 - `tests/frontend/pull-review.integration.test.tsx`: the scoped review's
   rows, header, primary and the absent Files step; the synced and not-found
   answers; the landing on the session's page.
+- `sync_tests`, non-Git: a session Pull into a non-Git project writes the
+  session and no project file, and the project's files step still lists
+  them afterwards.
+- Catalog (`cloud_flow_tests.rs`, `tests/frontend/`): a one-item Pull on a
+  Mallard Cloud row leaves the row's other items' heads and content
+  unchanged; the item landing with `pull` opens the review on that item
+  alone; Add with `pullAfterAdd` lands on the review; a synced item says so.
 
 ## Why this shape (what others do)
 
@@ -264,12 +361,34 @@ The mirror of the session Push, with the same boundary in Rust.
    through setup and open its review when the project connects (layer 3;
    the set-aside mechanism exists for the account case).
 
+9. **A non-Git project's files.** Recommended: **the session alone**, and
+   the session's page says the folder's files are still in Mallard Cloud.
+   Alternatives: a session Pull on a non-Git project also shows the Files
+   step with the stored files unticked (two scopes in one review, and the
+   files' own warning acknowledgements come with it); or, for a non-Git
+   project set up from the link, the verb opens the project's first Pull
+   with the session ticked instead of a session Pull.
+10. **The item page's button.** Recommended: **Pull in Mallard** on a
+    skill, plugin or pet page; the project repository page keeps *Open in
+    Mallard*. Alternative: one label everywhere.
+11. **After Add from a pull link.** Recommended: **open the item's Pull
+    review** on its page, since the button said Pull; Add alone still
+    pulls nothing, and the review is the second press. Alternative: land
+    as today, on the page with `Pull 1`, and leave the press to the person
+    (the owner's 2026-10-01 rule for Connect, kept for a link too).
+12. **The Catalog's scope.** Recommended for layer 1: **the window narrows
+    the review and sends one choice**, as the item's page does today.
+    Later: an `only` filter on `prepare_catalog_scope_pull`, so one item's
+    Pull reads one repository.
+
 ## Layers
 
 1. This.
-2. The session's title in the sheet, from the manifest.
+2. The session's title in the sheet, from the manifest; the Catalog's
+   backend `only` filter.
 3. Carry the session through project setup; honor `commit=`; a *Pull this
-   project* link on the repository page by the same scope.
+   project* link on the repository page by the same scope; a non-Git
+   session Pull that offers the files.
 4. Not planned: verified `https` links, sign-in by link, invitation links.
 
 ## Not checked
@@ -281,3 +400,6 @@ The mirror of the session Push, with the same boundary in Rust.
 - The owner's live pass: a real click from the session page into an
   installed build, Safari, Chrome and Firefox, with Mallard closed and open,
   and with a review open.
+- That a one-item Catalog Pull on a Mallard Cloud row leaves the other
+  items' accepted heads where they were (`item_heads` suggests so; the test
+  above proves it).
