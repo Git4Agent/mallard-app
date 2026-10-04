@@ -4717,4 +4717,6 @@ mod session_refresh_regressions {
         #[cfg(unix)]
         provider_cases!("claude"; refresh_does_not_reuse_green_when_a_source_becomes_unreadable);
     }
+
+    include!("session_pull_tests.rs");
 }

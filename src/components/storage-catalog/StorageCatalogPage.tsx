@@ -92,7 +92,7 @@ type Mode = { kind: "list" } | { kind: "push" } | { kind: "pull" };
 
 /** Mirrors the shell's notice tones without importing them: storage-catalog
  *  may not depend on project-sync. */
-type CatalogNoticeTone = "ok" | "attention";
+type CatalogNoticeTone = "ok" | "note" | "attention";
 
 
 /** Client-side mirror of the backend's component-name rule: ASCII alphanumeric
@@ -803,6 +803,7 @@ export default function StorageCatalogPage({
   openStorageMenuRequestId,
   initialStorageId,
   initialResourceId,
+  initialPull = false,
   onScopeGone,
   notify,
 }: {
@@ -827,6 +828,9 @@ export default function StorageCatalogPage({
   initialStorageId?: string;
   /** Open on one item's page (Mallard Cloud), as Add lands. */
   initialResourceId?: string;
+  /** A link named that item: its page opens with its Pull review, as its
+   *  Pull button opens it. Pull there is still the press that writes. */
+  initialPull?: boolean;
   /** The row disappeared underneath the page (deleted elsewhere). */
   onScopeGone: () => void;
   /** Notices for profile and storage changes go to the shell. Sync outcomes
@@ -1584,6 +1588,18 @@ export default function StorageCatalogPage({
     ? unavailableReason
     : cloudClosedReason
       ?? (storageId ? undefined : `Add a storage to these ${plural} before pushing or pulling`);
+  /* The landing of a link that named this item, once: when its row has
+     loaded, the review its Pull button opens; with nothing to pull, one line.
+     A page whose sync is closed says why itself. */
+  const landingPull = useRef(initialPull);
+  useEffect(() => {
+    if (!landingPull.current || !itemRow || loading || busy || mode.kind !== "list") return;
+    landingPull.current = false;
+    if (syncDisabled) return;
+    if (pullRows.length > 0) void openPull();
+    else notify("Already here and up to date.", "note");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemRow, loading, busy, mode.kind]);
   const pushReviewWarnings = pushPlan?.rows
     .filter((row) => pushSelected.has(row.row.resource_id))
     .flatMap((row) => row.row.warnings) ?? [];

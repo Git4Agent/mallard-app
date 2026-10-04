@@ -7,7 +7,8 @@ use super::service::{
     create_storage_setup_draft_with_repository, current_binding_for_restore_plan,
     delete_local_project_sessions_with_repository,
     discard_setup_draft_with_repository, discard_storage_setup_draft_with_repository,
-    execute_project_session_action_with_repository, format_fetch_started_message, format_mb,
+    execute_project_session_action_with_repository, find_project_session_with_repository,
+    format_fetch_started_message, format_mb,
     get_bundle_inventory_with_repository, get_host_identity_status_with_repository,
     get_project_activity_with_repository, get_project_session_detail_with_repository,
     get_project_session_event_detail_with_repository,
@@ -49,7 +50,7 @@ use crate::activity_log::{emit_typed_log, ActivityLogScope};
 use mallard_domain::{
     now_secs, ActionId, BundleId, BundleRecipe, LocalProjectId, LocalProjectRegistration,
     ProjectBinding, ProjectSetupDraft, ProjectStorageLink, ProviderKey, ProviderProfile,
-    PullReview, ResourceId, RestorePlan, SetupDraftId, StorageId, StorageProviderKey,
+    PullReview, PullScope, ResourceId, RestorePlan, SetupDraftId, StorageId, StorageProviderKey,
     StorageSetupDraftId,
 };
 use mallard_infrastructure::activity_log::ActivityLogType;
@@ -1418,6 +1419,7 @@ pub async fn plan_bundle_restore(
     storage_id: StorageId,
     bundle_id: BundleId,
     binding: ProjectBinding,
+    scope: PullScope,
 ) -> Result<PullReview, String> {
     let repository = repository()?;
     let context_repository = repository.clone();
@@ -1456,6 +1458,7 @@ pub async fn plan_bundle_restore(
             &storage_id,
             &bundle_id,
             &binding,
+            &scope,
             &mut |update| progress.observe(update),
             &mut |phase, elapsed| {
                 phase_log.emit(
@@ -1665,6 +1668,20 @@ pub async fn apply_bundle_restore(
         ),
     }
     result
+}
+
+/// Where the session a stored row names is in a project: the id its page is
+/// opened by, or none when the project does not hold it. Reads only.
+#[tauri::command]
+pub async fn find_project_session(
+    local_project_id: LocalProjectId,
+    resource_id: ResourceId,
+) -> Result<Option<ResourceId>, String> {
+    let repository = repository()?;
+    run_blocking(move || {
+        find_project_session_with_repository(&repository, &local_project_id, &resource_id)
+    })
+    .await
 }
 
 #[tauri::command]

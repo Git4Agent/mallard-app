@@ -844,6 +844,7 @@ const binding: ProjectBinding = {
 
 const pullPlan: PullReview = {
   apply_limit_bytes: 512 * 1024 * 1024,
+  scope: { kind: "project" },
   schema_version: 1,
   plan_id: "plan-project-files",
   storage_id: "storage-a",

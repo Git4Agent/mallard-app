@@ -1,19 +1,84 @@
 # Plan: Pull this session — a link from a session page into Mallard
 
-**Status (2026-10-04): proposed**, nothing built. Layer 2 of
+**Status (2026-10-03): implemented on both sides with every recommended
+option, uncommitted, not deployed.** Layer 2 of
 `docs/PLAN_DEEP_LINK_DESTINATIONS.md` (session links), on the same scheme and
-sheet as repository links and `PLAN_DEEP_LINK_SHARE_YOURS.md`. Sessions are
-the main case; *Non-Git projects* and *Skills, plugins and pets* below say
-what differs for them. The choices are collected at the end. Two mocks:
+sheet as repository links and `PLAN_DEEP_LINK_SHARE_YOURS.md`. *What was
+built* below lists where the code differs from this plan; the sections after
+it are the plan as it was proposed. Two mocks:
 `mockups/session-pull-mockup.html` + `.tsx` is the specimen in the app's own
 parts (`npm run dev`, then `/mockups/session-pull-mockup.html`; `?scene=`,
-`?dir=b|a`, `?stage=`, `?theme=dark`, `?shot=on`): the shipped sidebar, path
-bar, connect-dialog frame, Pull review, session page, New project and Add
-Catalog resource on a stand-in backend, with the plan's additions dotted.
+`?dir=b|a`, `?stage=`, `?theme=dark`, `?shot=on`), and
 `mockups/session-pull-link-mockup.html` is the flow and the choices on one
-static page (no build step). Screens of the specimen, one scene per panel:
-`docs/images/session-pull-link/` (a: the session flow, b: non-Git and
-setup, c: skills and pets, d: the stops and the waiting line).
+static page. Screens of the specimen: `docs/images/session-pull-link/`. The
+shipped shell on a stand-in backend: `mockups/session-pull-live.html`
+(`?state=new|synced|newer|diverged|ahead|gone`, `?cold=<link>`).
+
+## What was built
+
+Desktop (`mallard-app`): the link (`AppLink::Session`,
+`parse_session_page_address`), the arrival, `PullScope` through plan and
+apply, the routing, the scoped review, the landing, the Catalog landing and
+the session page's line. Website (`mallardInternal`): `sessionAppLink`, the
+session page's **Pull in Mallard**, the item page's label, the tooltip.
+
+Where it differs from the plan below:
+
+- **`PullScope` is a domain type** (`mallard-domain`, `pull_review.rs`), not
+  in `service.rs`: `RestorePlan` and `PullReview` are the domain's, and the
+  scope is a field of both. `RestorePlan::validate_review` and `validate`
+  refuse a session plan that holds a file action, a Files eligibility, or
+  another session's row or action, which is what Apply reads first.
+- **A conversation's own apply moved the scope's base.** The shipped Pull
+  set the provider scope's base to the reviewed publication for every
+  installed or accepted session, not only at the end. A session Pull skips
+  that too, so the link is byte-identical but for the session's checkpoint.
+- **Push from the pulled session's page** is accepted only when the
+  project's Push was not waiting for a Pull. The gate reads the scope's base
+  against storage, for a session Push as for the project's. When storage is
+  ahead of the project, the session reads synced and Push stays refused
+  until the project's Pull, as it was before the session Pull. Both cases
+  are tests.
+- **The landing reads the bindings, not the comparison.** A read-only
+  command, `find_project_session(local_project_id, resource_id)`, answers
+  the id the session's page is opened by. The shell does not hold the
+  project's comparison, and waiting for its refresh would show the project
+  page first.
+- **The link in Rust** is `AppLink::Session { host, address, provider,
+  cloud_thread_id }`; the arrival adds `resource_id`.
+- **Catalog destinations carry no `pull` flag**: every Catalog item's link
+  pulls now, so `catalog_item` always opens the review, and the shell
+  remembers that Add was opened by a link. `add_catalog_row` carries the
+  item and its storage, and lands on the item only when the new row was
+  linked to that storage. A backend `only` filter stays layer 2.
+- **The sheet's verb for a pet** reads *Pull pet v2…*: the kind's own
+  singular label, as the pickers print it.
+- **Notices are one sentence**, as the shell's rule is: *Project files for
+  this folder are still in {storage}.* with **Pull project**, and *Already
+  here — nothing to pull.* for a session that is newer on this computer.
+- **A failed session Pull's Retry** asks for the same session; the notice
+  carries the scope.
+- **The review's list** is the shipped Activity list with a
+  `reviewResourceIds` filter, so the project's other stored sessions are
+  not drawn. It still reads the project's activity and comparison.
+- **Website:** the session page had no Pull menu. It mounts the repository
+  page's `PullMenu` with a `session` prop. The link's id is encoded twice
+  (`codex%253Aconversation%253A…`); the reader decodes both.
+
+Known and open:
+
+- A session Pull's receipts are a `Partial` materialization record at the
+  storage's revision. `get_restore_readiness` reads the newest record at a
+  revision, so after a session Pull into a project that never pulled that
+  revision it no longer says *Pull has not been applied yet*. The project's
+  Pull badge and Push gate are not read from it.
+- Not run: the installed build's live pass (a real click, closed and open,
+  Safari, Chrome and Firefox), the Catalog landing against a real Catalog
+  page, Windows and Linux, and the website's deploy.
+
+Verified: `cargo test --lib` (535 passed), the frontend suite (572
+passed), `npm run build`, the website's suite (246 passed), and the session
+flows in `mockups/session-pull-live.html`.
 
 ## Where things stand
 

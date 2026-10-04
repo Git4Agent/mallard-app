@@ -374,8 +374,8 @@ test("the shell notice reports its own tone from the shared severity ladder", ()
   // a stop. The tone maps onto the app-wide rung, so those two cannot drift
   // apart again — and the rung decides the glyph, the tint AND the word the
   // box prints before its message.
-  assert.match(workspace, /type SyncNoticeTone = "ok" \| "attention"/);
-  assert.match(workspace, /severity: notice\.tone === "attention" \? "warning" : "success"/);
+  assert.match(workspace, /type SyncNoticeTone = "ok" \| "note" \| "attention"/);
+  assert.match(workspace, /severity: notice\.tone === "attention" \? "warning" : notice\.tone === "note" \? "info" : "success"/);
   // An unconfirmed binding is a stop, not a success.
   assert.match(workspace, /before pulling\.",\s*"attention"\)/);
   // Every other call site stays a one-argument confirmation.

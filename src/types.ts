@@ -1276,10 +1276,17 @@ export interface ConversationReviewRow {
 }
 
 /** Pull comparison DTO. Executable conversation actions stay in the backend. */
+/** The content a single Pull may change: the project, or one session of it,
+ *  named by its stored row's id. Enforced in Rust; never persisted. */
+export type PullScope = { kind: "project" } | { kind: "session"; resource_id: string };
+
 export interface PullReview {
   /** The most bytes one Pull Apply installs; the review meter refuses past
    *  it and Apply rechecks the selection against the pinned manifest. */
   apply_limit_bytes: number;
+  /** What this review may change. A session's holds its one row, no file
+   *  action and no Files step, and its apply moves no reviewed base. */
+  scope: PullScope;
   schema_version: 1;
   plan_id: string;
   storage_id: string;
@@ -1314,9 +1321,10 @@ export interface RestoreResult {
   readiness_error: string | null;
   plan_id?: string | null;
   /**
-   * Present only on restore applies. `false` means the reviewed baseline
-   * could not advance to the plan's revision because required changes
-   * were skipped — Push stays gated until they are pulled.
+   * Present only on a project's restore applies. `false` means the reviewed
+   * baseline could not advance to the plan's revision because required
+   * changes were skipped — Push stays gated until they are pulled. Absent
+   * for a session's Pull, which never moves the baseline.
    */
   reviewed_base_advanced?: boolean;
   applied_action_ids: string[];
@@ -1937,6 +1945,16 @@ export type ManagedCloudRepositoryResolution =
  *  reaches the window. */
 export type AppLinkArrival =
   | { kind: "repository"; host: string; address: string }
+  /** One session's page: its repository, and the session a Pull is scoped
+   *  to. `resource_id` is the stored row's id. */
+  | {
+    kind: "session";
+    host: string;
+    address: string;
+    provider: ProviderKey;
+    cloud_thread_id: string;
+    resource_id: string;
+  }
   | {
     kind: "listing";
     host: string;

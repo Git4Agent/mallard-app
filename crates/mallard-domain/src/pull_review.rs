@@ -1,8 +1,37 @@
 use crate::{
-    BundleId, ConversationReviewRow, HostId, PlanId, ProjectFileSyncEligibility, RemoteContinuity,
-    ReplicaId, RestoreAction, RestorePlan, StorageId,
+    parse_cloud_conversation_resource_id, BundleId, CloudThreadId, ConversationReviewRow, HostId,
+    PlanId, ProjectFileSyncEligibility, ProviderKey, RemoteContinuity, ReplicaId, ResourceId,
+    RestoreAction, RestorePlan, StorageId,
 };
 use serde::{Deserialize, Serialize};
+
+/// The content a single Pull may change: the mirror of a Push's scope. It
+/// lives as long as its plan and is never persisted.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PullScope {
+    /// Everything the storage's version holds for the bound scopes.
+    #[default]
+    Project,
+    /// One session and nothing else: no provider state, no project file, no
+    /// other session. `resource_id` is its manifest row's id, in the cloud id
+    /// space (`<provider>:conversation:cloudthread-…`).
+    Session { resource_id: ResourceId },
+}
+
+impl PullScope {
+    /// The session a Pull is narrowed to, as its provider and cloud thread;
+    /// `None` for the whole project. An id that is not a cloud
+    /// conversation's is refused.
+    pub fn session(&self) -> Result<Option<(ProviderKey, CloudThreadId)>, String> {
+        match self {
+            Self::Project => Ok(None),
+            Self::Session { resource_id } => {
+                parse_cloud_conversation_resource_id(resource_id.as_str()).map(Some)
+            }
+        }
+    }
+}
 
 /// Pull comparison exchanged with the frontend. Conversation rows carry
 /// selection IDs; executable conversation actions stay in the backend.
@@ -26,6 +55,9 @@ pub struct PullReview {
     pub binding_revision: u64,
     pub created_at: u64,
     pub expires_at: u64,
+    /// What this review may change. Apply reads it back and refuses a
+    /// selection outside it.
+    pub scope: PullScope,
     #[serde(default)]
     pub actions: Vec<RestoreAction>,
     #[serde(default)]
@@ -56,6 +88,7 @@ impl PullReview {
             binding_revision: plan.binding_revision,
             created_at: plan.created_at,
             expires_at: plan.expires_at,
+            scope: plan.scope,
             actions: plan.actions,
             conversation_review: plan.conversation_review,
             project_content_eligibility: plan.project_content_eligibility,
@@ -80,6 +113,7 @@ impl From<PullReview> for RestorePlan {
             binding_revision: review.binding_revision,
             created_at: review.created_at,
             expires_at: review.expires_at,
+            scope: review.scope,
             actions: review.actions,
             conversation_review: review.conversation_review,
             project_content_eligibility: review.project_content_eligibility,

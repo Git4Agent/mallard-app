@@ -35,6 +35,7 @@ import type {
   ProviderDescriptor,
   ProviderProfileSummary,
   PullReview,
+  PullScope,
   SessionTimelineEvent,
   StorageSummary,
   ThreadSyncComparison,
@@ -279,10 +280,11 @@ function sessionRow(session: SessionFixture, action: RowAction, key: string): Co
   };
 }
 
-function plan(summary: LocalProjectSummary, rows: ConversationReviewRow[]): PullReview {
+function plan(summary: LocalProjectSummary, rows: ConversationReviewRow[], scope: PullScope = { kind: "project" }): PullReview {
   const bound = binding(summary);
   return {
     apply_limit_bytes: 512 * MB,
+    scope,
     schema_version: 1,
     plan_id: `plan-${summary.local_project_id}-${rows.map((row) => row.action_id).join("-")}`,
     storage_id: PERSONAL.storage_id,
@@ -812,49 +814,11 @@ function ProjectPage({ zone, summary, pull }: { zone: ReactNode; summary: LocalP
   );
 }
 
-/**
- * Does to the shipped review what the scope does: ticks its one row and names
- * the header after the session. Both are the plan's own changes to
- * `RestorePlanView`; here they are done to the shipped component from outside,
- * and the header is dotted.
- */
-function DrivenReview({ title, children }: { title: string; children: ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    let live = true;
-    let ticked = false;
-    void (async () => {
-      while (live) {
-        const root = ref.current;
-        if (root) {
-          const box = root.querySelector<HTMLInputElement>('.sync-sync-row-choice input[type="checkbox"], .sync-pull-item-select input[type="checkbox"]');
-          if (box && !box.checked && !ticked) {
-            ticked = true;
-            box.click();
-          }
-          const heading = root.querySelector<HTMLElement>("#sync-pull-review-title");
-          if (heading && heading.textContent !== `Pull session · ${title}`) {
-            heading.textContent = `Pull session · ${title}`;
-            heading.classList.add("spec-new");
-          }
-        }
-        await wait(120);
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [title]);
-  return <div ref={ref} style={{ display: "contents" }}>{children}</div>;
-}
-
 /** The shipped Pull review in the project's workspace: the storage card opens into it. */
-function ReviewPage({ zone, summary, review, scoped, pulling, onApply, onBack }: {
+function ReviewPage({ zone, summary, review, pulling, onApply, onBack }: {
   zone: ReactNode;
   summary: LocalProjectSummary;
   review: PullReview;
-  /** A session Pull: the row ticked, the header named. */
-  scoped: SessionFixture | null;
   pulling: boolean;
   onApply: () => void;
   onBack: () => void;
@@ -889,7 +853,7 @@ function ReviewPage({ zone, summary, review, scoped, pulling, onApply, onBack }:
                   <div className="project-profile-storage-list">
                     <div className="storage-link-block selected sync-review-open">
                       <div className="sync-storage-inline-review" tabIndex={-1}>
-                        {scoped ? <DrivenReview title={scoped.detail.title}>{body}</DrivenReview> : body}
+                        {body}
                       </div>
                     </div>
                   </div>
@@ -1269,12 +1233,12 @@ function Window({ scene, dir, run, jump, onStage }: { scene: Scene; dir: Dir; ru
   currentReview = over && scene.reviewOpen
     ? { summary: scene.project, rows: projectRows }
     : linkRow ? { summary: scene.project, rows: [linkRow] } : null;
-  const scopedPlan = linkRow ? plan(scene.project, [linkRow.row]) : null;
+  const scopedPlan = linkRow ? plan(scene.project, [linkRow.row], { kind: "session", resource_id: linkRow.row.resource_id }) : null;
   const projectPlan = plan(scene.project, projectRows.map((reviewed) => reviewed.row));
 
   let page: ReactNode;
   if (over && scene.reviewOpen) {
-    page = <ReviewPage zone={zone} summary={scene.project} review={projectPlan} scoped={null} pulling={false} onApply={noop} onBack={noop} />;
+    page = <ReviewPage zone={zone} summary={scene.project} review={projectPlan} pulling={false} onApply={noop} onBack={noop} />;
   } else if (over) {
     page = <ProjectPage zone={zone} summary={scene.project} pull={scene.review.kind === "synced" ? 0 : 1} />;
   } else if (stage === "setup") {
@@ -1299,7 +1263,7 @@ function Window({ scene, dir, run, jump, onStage }: { scene: Scene; dir: Dir; ru
   } else if (stage === "landed") {
     page = <SessionPage zone={zone} summary={scene.project} session={scene.session} />;
   } else if (scopedPlan) {
-    page = <ReviewPage zone={zone} summary={scene.project} review={scopedPlan} scoped={scene.session} pulling={stage === "pulling"} onApply={apply} onBack={() => setStage("before")} />;
+    page = <ReviewPage zone={zone} summary={scene.project} review={scopedPlan} pulling={stage === "pulling"} onApply={apply} onBack={() => setStage("before")} />;
   } else {
     page = <ProjectPage zone={zone} summary={scene.project} pull={1} />;
   }

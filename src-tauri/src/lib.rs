@@ -279,6 +279,7 @@ pub fn run() {
             project_sync::commands::finish_unfinished_push,
             project_sync::commands::plan_bundle_restore,
             project_sync::commands::apply_bundle_restore,
+            project_sync::commands::find_project_session,
             project_sync::commands::get_restore_readiness,
             project_sync::commands::list_setup_drafts,
             project_sync::commands::probe_project_folder,

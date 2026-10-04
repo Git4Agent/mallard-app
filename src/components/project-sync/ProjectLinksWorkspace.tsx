@@ -21,6 +21,7 @@ import type {
   ProjectBinding,
   ProjectStorageLink,
   ProviderProfileSummary,
+  PullScope,
   PushScope,
   RemoteBundleSummary,
   SiblingBundleStatus,
@@ -135,7 +136,8 @@ export type StorageNotice = {
 } & (
   | { kind: "requires_pull"; copy: PullRequiredCopy }
   | { kind: "action_failed"; action: "push"; scope: PushScope; session?: PushSessionFacts; message: string }
-  | { kind: "action_failed"; action: "pull"; message: string }
+  /** `scope`: what the Pull was of, so Retry asks for the same. */
+  | { kind: "action_failed"; action: "pull"; scope: PullScope; message: string }
   /** A cleared storage this computer synced with before: nothing to pull. */
   | { kind: "nothing_to_pull"; message: string }
   /** A finished Push or Pull; the flow has already closed behind it. */
@@ -170,7 +172,7 @@ interface Props {
   onLinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onPush: (projectId: string, storageId: string, scope: PushScope, session?: PushSessionFacts) => Promise<void> | void;
-  onPull: (projectId: string, storageId: string) => Promise<void> | void;
+  onPull: (projectId: string, storageId: string, scope?: PullScope) => Promise<void> | void;
   /** Sibling detection for the active pair: another repo in this storage
       carries the same repository. */
   siblingNotice?: {
@@ -240,6 +242,9 @@ interface Props {
   storageNotice?: StorageNotice | null;
   onStorageNoticeAction?: (outcome: SyncOutcome, action: SyncOutcomeAction) => void;
   onDismissStorageNotice?: () => void;
+  /** How many project files of the open non-Git project are still only in
+   *  its storage: a session's page says so, since a session comes alone. */
+  onProjectFilesToPullChange?: (count: number) => void;
 }
 
 const SessionDetailPage = lazy(() => import("./session-detail/SessionDetailPage"));
@@ -572,6 +577,7 @@ export default function ProjectLinksWorkspace({
   storageNotice,
   onStorageNoticeAction,
   onDismissStorageNotice,
+  onProjectFilesToPullChange,
 }: Props) {
   const [linkingProjectId, setLinkingProjectId] = useState<string | null>(null);
   const [runningAction, setRunningAction] = useState<string | null>(null);
@@ -1238,6 +1244,9 @@ export default function ProjectLinksWorkspace({
     () => projectFileSyncCounts(projectFilesScan.inventory),
     [projectFilesScan.inventory],
   );
+  useEffect(() => {
+    onProjectFilesToPullChange?.(projectFileCounts.pull);
+  }, [onProjectFilesToPullChange, projectFileCounts.pull]);
   const filesFaceShown = activityView === "files" && !!activeProject && !activeProject.is_git_repository;
   const sessionDetailSubview = activeProjectSubview.kind === "session_detail"
     && workspaceProject?.local_project_id === activeProjectSubview.localProjectId
@@ -3035,7 +3044,7 @@ export default function ProjectLinksWorkspace({
                                     `${failedAction}:${actionPrefix}`,
                                     () => activeNotice.action === "push"
                                       ? onPush(project.local_project_id, storage.storage_id, activeNotice.scope, activeNotice.session)
-                                      : onPull(project.local_project_id, storage.storage_id),
+                                      : onPull(project.local_project_id, storage.storage_id, activeNotice.scope),
                                   )}
                                 >
                                   Retry

@@ -6,7 +6,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
+import ProjectActivityPage, { compactThreadTitle, REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
   type ProjectFileCommitImpactCounts,
@@ -256,10 +256,17 @@ export default function RestorePlanView({
     itemKindLabel(item) !== "Conversation"
     && item.category !== "project_content"
   )), [items]);
+  // A session's own Pull: the one row, ticked. Its plan holds no file
+  // eligibility, so it has one step and the step strip is not drawn.
+  const sessionScope = plan.scope.kind === "session";
   const showProjectFiles = plan.project_content_eligibility?.state === "eligible" || projectContentItems.length > 0;
   const reviewSteps = useMemo(() => syncReviewSteps(showProjectFiles), [showProjectFiles]);
   const [activeStep, setActiveStep] = useState<SyncReviewStep>("history");
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  // A project's review opens with nothing ticked. A session's opens on the
+  // row its link named, ticked; Pull is still the press that writes.
+  const [selected, setSelected] = useState<Set<string>>(() => (
+    sessionScope ? pullSelectableResourceIds(items) : new Set()
+  ));
   const projectFileImpact = useMemo(
     () => pullProjectFileCommitImpact(projectContentItems, selected),
     [projectContentItems, selected],
@@ -271,6 +278,19 @@ export default function RestorePlanView({
       return includeRequiredPullProjectDirectories(items, next);
     });
   }, [items]);
+  // Compare again hands the same review a new plan: its row is ticked anew.
+  useEffect(() => {
+    if (!sessionScope) return;
+    setSelected(pullSelectableResourceIds(items));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan.plan_id]);
+  const reviewResourceIds = useMemo(
+    () => (sessionScope ? new Set(plan.conversation_review.map((row) => row.resource_id)) : undefined),
+    [plan.conversation_review, sessionScope],
+  );
+  const sessionTitle = sessionScope && conversationItems[0]
+    ? compactThreadTitle(conversationItems[0].threadTitle ?? "").trim() || "Untitled session"
+    : null;
 
   const selection = useMemo(() => buildPullReviewSelection(items, selected), [items, selected]);
   // What the selection would install against the limit the review carries.
@@ -308,21 +328,23 @@ export default function RestorePlanView({
   // is provisional. Then a list that failed, then the limit, with the
   // meter's own sentence as the reason — the same rules the path bar's Pull
   // reads through the primary.
+  const selectedPendingCount = items.filter((item) => (
+    selected.has(item.resourceId) && restoreActionIds(item).length > 0
+  )).length;
+  // A session's Pull reviews one row of the storage: an empty apply would
+  // mark nothing as reviewed, so with the row unticked there is nothing to do.
   const primaryDisabledReason = !busy && listPending
     ? "Loading sessions…"
     : !busy && listFailed
       ? REVIEW_LIST_FAILED_REASON
-      : overLimitSentence;
-  // An empty apply still runs — it marks the storage as reviewed and
-  // unblocks Push — so the verb must say so instead of promising a Pull
+      : overLimitSentence ?? (sessionScope && selectedPendingCount === 0 ? "Nothing is selected" : null);
+  // A project's empty apply still runs — it marks the storage as reviewed
+  // and unblocks Push — so the verb must say so instead of promising a Pull
   // that restores nothing. With rows ticked the button carries their count.
   // Until the rows land the verb is the wait itself, on both buttons.
-  const selectedPendingCount = items.filter((item) => (
-    selected.has(item.resourceId) && restoreActionIds(item).length > 0
-  )).length;
   const primaryLabel = listPending
     ? "Loading sessions…"
-    : selectedPendingCount > 0 ? `Pull ${selectedPendingCount}` : "Mark as reviewed";
+    : selectedPendingCount > 0 ? `Pull ${selectedPendingCount}` : sessionScope ? "Pull" : "Mark as reviewed";
   const primaryBusyLabel = selectedPendingCount > 0 ? "Pulling…" : "Marking as reviewed…";
   /* The green "ready" message is gone from the shell, so the review says it
      itself, once, when its rows land. Set after mount so a review that is
@@ -484,7 +506,7 @@ export default function RestorePlanView({
       <header className="sync-inline-action-header sync-inline-pull-header sync-sync-review-header">
         <div className="sync-inline-action-heading">
           <div className="sync-sync-review-title">
-            <h2 id="sync-pull-review-title">Pull review</h2>
+            <h2 id="sync-pull-review-title">{sessionTitle ? `Pull session · ${sessionTitle}` : "Pull review"}</h2>
             <span className="sync-pull-review-meta">Version {plan.revision}</span>
           </div>
           <span className="sync-visually-hidden" role="status">
@@ -561,6 +583,7 @@ export default function RestorePlanView({
                   onSearchResultsChange={setSearchResults}
                   selectedResourceIds={selected}
                   selectableResourceIds={conversationIds}
+                  reviewResourceIds={reviewResourceIds}
                   selectionDisabled={busy}
                   onToggleResource={toggle}
                   onActionError={onSessionActionError}
@@ -588,7 +611,7 @@ export default function RestorePlanView({
               ) : (
                 <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
               )}
-              {(otherItems.length > 0 || supportLoading) && (
+              {!sessionScope && (otherItems.length > 0 || supportLoading) && (
                 <details className="sync-sync-review-other">
                   <summary>
                     <span><Icon name="settings" size={15} /><strong>Agent setup &amp; tools</strong></span>

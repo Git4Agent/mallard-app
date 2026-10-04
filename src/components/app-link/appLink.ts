@@ -12,14 +12,18 @@ import type { CatalogCapabilityDescriptor, CatalogCloudPlace, CatalogScopeView }
 
 /**
  * Open in Mallard: where a `mallard://` link lands
- * (docs/PLAN_DEEP_LINK_DESTINATIONS.md, PLAN_DEEP_LINK_SHARE_YOURS.md).
+ * (docs/PLAN_DEEP_LINK_DESTINATIONS.md, PLAN_DEEP_LINK_SHARE_YOURS.md,
+ * PLAN_DEEP_LINK_SESSION_PULL.md).
  *
  * A repository's link: the service said what each account on the link's host
  * sees at the address; this joins that with what is on this computer and
  * names one destination, which the shell follows when the person presses
- * the sheet's verb. The listing's link has nothing to ask and nothing to
- * choose between: with an account on its host it goes straight to Projects
- * or the Catalog. Either way this decides and nothing more.
+ * the sheet's verb. A session's link is its repository's with one session
+ * named: the same join, and a verb that opens that session's Pull review. A
+ * Catalog item's page is its repository's, so its link pulls the item. The
+ * listing's link has nothing to ask and nothing to choose between: with an
+ * account on its host it goes straight to Projects or the Catalog. Either
+ * way this decides and nothing more.
  */
 
 /** A link that goes nowhere: why, and the one way forward when there is one. */
@@ -37,6 +41,8 @@ export interface LinkFound {
   mark: IconName;
   /** The account's standing, in the pickers' words. */
   standing: string;
+  /** What the link names beyond the repository, when it names more. */
+  sub: string | null;
   /** Where it stands on this computer. */
   here: string;
 }
@@ -44,14 +50,18 @@ export interface LinkFound {
 export type LinkDestination =
   /** The project that repository is connected to, on that storage. */
   | { kind: "project"; projectId: string; storageId: string }
+  /** That project's Pull review of one session, named by its stored row's id. */
+  | { kind: "pull_session"; projectId: string; storageId: string; resourceId: string }
   /** New project › From Mallard Cloud. No account ticked when several see it. */
   | { kind: "new_project"; storageId: string | null; address: string }
-  /** The item's page in the Catalog row that holds it. */
+  /** The item's page in the Catalog row that holds it, its Pull review open. */
   | { kind: "catalog_item"; scopeId: string; storageId: string; resourceId: string }
-  /** Add Catalog resource › From Mallard Cloud. */
+  /** Add Catalog resource › From Mallard Cloud; Add then opens the item's Pull review. */
   | { kind: "add_catalog_item"; storageId: string; address: string }
-  /** Add Catalog resource, its Kind chosen: the account's own item, and no row of its kind. */
-  | { kind: "add_catalog_row"; choiceKey: string }
+  /** Add Catalog resource, its Kind chosen: the account's own item, and no
+   *  row of its kind. The row, linked to that account, then opens on the
+   *  item's Pull review. */
+  | { kind: "add_catalog_row"; choiceKey: string; storageId: string; resourceId: string }
   /** The Projects page: where a project is picked to push. */
   | { kind: "projects" }
   /** The Catalog: where a skill, plugin or pet row is picked to push. */
@@ -149,7 +159,14 @@ export function catalogSeers(answer: AppLinkAnswer): Array<{ storageId: string; 
     .map((account) => ({ storageId: account.storage_id, repositoryId: account.sight.repository.repository_id }));
 }
 
-export function linkVerdict(answer: AppLinkAnswer, context: LinkContext): LinkVerdict {
+/** The sheet's line for a link that names one session of its repository. */
+export const ONE_SESSION = "One session of this repository";
+
+/**
+ * `session` is the stored row's id a session link named; null for a
+ * repository's own link.
+ */
+export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session: string | null = null): LinkVerdict {
   const { accounts, address } = answer;
   if (accounts.length === 0) {
     return answer.can_set_up
@@ -182,23 +199,29 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext): LinkVe
       connected.some((link) => link.local_project_id === candidate.local_project_id)
     ));
     const mark = projectMark(repository);
+    const sub = session ? ONE_SESSION : null;
     if (project) {
       const link = connected.find((candidate) => candidate.local_project_id === project.local_project_id)!;
+      const here = `On this computer: ${project.local_alias || project.display_name}`;
       return {
         kind: "landing",
-        found: { address: repository.address, mark, standing: standing(repository), here: `On this computer: ${project.local_alias || project.display_name}` },
-        verb: "Open project",
-        destination: { kind: "project", projectId: project.local_project_id, storageId: link.storage_id },
+        found: { address: repository.address, mark, standing: standing(repository), sub, here },
+        ...(session
+          ? { verb: "Pull session…", destination: { kind: "pull_session", projectId: project.local_project_id, storageId: link.storage_id, resourceId: session } }
+          : { verb: "Open project", destination: { kind: "project", projectId: project.local_project_id, storageId: link.storage_id } }),
       };
     }
     return {
       kind: "landing",
-      found: { address: repository.address, mark, standing: standing(repository), here: "Not on this computer." },
+      // The session is not carried through setup: the link is used again.
+      found: { address: repository.address, mark, standing: standing(repository), sub, here: session ? "Not on this computer. Set up the project, then use the link again." : "Not on this computer." },
       verb: "Set up project…",
       // Several accounts see it: none is ticked, as New project does.
       destination: { kind: "new_project", storageId: seers.length === 1 ? seers[0].storage_id : null, address: repository.address },
     };
   }
+  // A Catalog item has no session pages: the website writes no such link.
+  if (session) return INVALID_LINK;
 
   const coordinate = repository.catalog;
   const capability = coordinate ? catalogCapabilityFor(context.capabilities, coordinate) : null;
@@ -206,6 +229,8 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext): LinkVe
     return { kind: "stop", severity: "warning", message: `${repository.address} is a kind this app can’t open.`, action: null };
   }
   const mark = catalogPresentation(capability).icon;
+  // The item's page is its repository's, so its link pulls the item.
+  const pull = `Pull ${capability.singular_label.toLowerCase()}…`;
   const rowLabel = (scopeId: string) => {
     const row = context.scopes.find((scope) => scope.scope.scope_id === scopeId);
     return row ? catalogScopeLabel(row) : capability.label;
@@ -214,8 +239,8 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext): LinkVe
   if (saved) {
     return {
       kind: "landing",
-      found: { address: repository.address, mark, standing: standing(repository), here: `In your Catalog: ${rowLabel(saved.scope_id)}` },
-      verb: "Open in Catalog",
+      found: { address: repository.address, mark, standing: standing(repository), sub: null, here: `In your Catalog: ${rowLabel(saved.scope_id)}` },
+      verb: pull,
       destination: { kind: "catalog_item", scopeId: saved.scope_id, storageId: saved.storage_id, resourceId: saved.resource_id },
     };
   }
@@ -227,21 +252,21 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext): LinkVe
     if (row) {
       return {
         kind: "landing",
-        found: { address: repository.address, mark, standing: standing(owner.sight.repository), here: `In your Catalog: ${catalogScopeLabel(row)}` },
-        verb: "Open in Catalog",
+        found: { address: repository.address, mark, standing: standing(owner.sight.repository), sub: null, here: `In your Catalog: ${catalogScopeLabel(row)}` },
+        verb: pull,
         destination: { kind: "catalog_item", scopeId: row.scope.scope_id, storageId: owner.storage_id, resourceId: coordinate.resource_id },
       };
     }
     return {
       kind: "landing",
-      found: { address: repository.address, mark, standing: standing(owner.sight.repository), here: `No ${capability.label} row on this computer.` },
+      found: { address: repository.address, mark, standing: standing(owner.sight.repository), sub: null, here: `No ${capability.label} row on this computer.` },
       verb: "Add to Catalog…",
-      destination: { kind: "add_catalog_row", choiceKey: catalogChoiceKey(capability) },
+      destination: { kind: "add_catalog_row", choiceKey: catalogChoiceKey(capability), storageId: owner.storage_id, resourceId: coordinate.resource_id },
     };
   }
   return {
     kind: "landing",
-    found: { address: repository.address, mark, standing: standing(repository), here: "Not in your Catalog." },
+    found: { address: repository.address, mark, standing: standing(repository), sub: null, here: "Not in your Catalog." },
     verb: "Add to Catalog…",
     destination: { kind: "add_catalog_item", storageId: seers[0].storage_id, address: repository.address },
   };

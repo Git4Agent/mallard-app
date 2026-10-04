@@ -3,7 +3,7 @@
 **Status (2026-10-02): implemented**, uncommitted. The owner picked on
 `mockups/deep-link-mockup.html`: **B · Sheet first**; each account on the link's host
 is asked; a link waits while an operation, a review or a dialog is open;
-session links are a later layer.
+session links are a later layer (built since: `PLAN_DEEP_LINK_SESSION_PULL.md`).
 
 Bars: `cargo test --lib` 524/0 (15 ignored), the infrastructure crate's
 address and link tests 6/6, frontend integration 544/544, release-config
