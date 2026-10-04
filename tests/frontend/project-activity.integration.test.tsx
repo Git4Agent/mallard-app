@@ -4098,3 +4098,211 @@ test("local session deletion is before info, works for both providers, and is hi
     }
   }
 });
+
+/* ——— the status scope bar ————————————————————————————————————————— */
+
+type ScopeSeed = {
+  key: string;
+  title: string;
+  /** Null draws a row the comparison holds no entry for. */
+  state: ThreadSyncEntry["state"] | null;
+  blocked?: string;
+};
+
+const SCOPE_SEEDS: ScopeSeed[] = [
+  { key: "alpha", title: "Scope alpha push", state: "local_only" },
+  { key: "beta", title: "Scope beta push", state: "local_ahead" },
+  { key: "gamma", title: "Scope gamma pull", state: "storage_only" },
+  { key: "delta", title: "Scope delta both", state: "diverged" },
+  { key: "epsilon", title: "Scope epsilon settled", state: "synced" },
+  { key: "zeta", title: "Scope zeta blocked", state: "synced", blocked: "Its transcript is open in another process." },
+  { key: "eta", title: "Scope eta unjudged", state: null },
+];
+
+function scopeFixture(seeds: ScopeSeed[] = SCOPE_SEEDS) {
+  const sessions = seeds.map((seed, index) => ({
+    ...codexSession,
+    resource_id: `codex:conversation:scope-${seed.key}`,
+    provider_session_id: `scope-${seed.key}`,
+    logical_thread_id: `scope-${seed.key}`,
+    title: seed.title,
+    source: seed.state === "storage_only" ? "remote_only" as const : "local_and_remote" as const,
+    ended_at: codexSession.ended_at - index * 60,
+    sync_blocked_reason: seed.blocked ?? null,
+  }));
+  const entries = seeds.flatMap((seed, index): ThreadSyncEntry[] => {
+    if (!seed.state) return [];
+    const session = sessions[index];
+    const pushes = seed.state === "local_only" || seed.state === "local_ahead";
+    const pulls = seed.state === "storage_only";
+    return [{
+      provider: "codex",
+      provider_display_name: "Codex",
+      access: "bound_ready",
+      thread_id: session.logical_thread_id,
+      conversation_resource_id: session.resource_id,
+      resource_id: session.resource_id,
+      display_name: session.title,
+      state: seed.state,
+      local_present: seed.state !== "storage_only",
+      storage_present: seed.state !== "local_only",
+      compared_against_storage: true,
+      subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+      provider_thread_id: session.provider_session_id,
+      push_decision: seed.state === "diverged"
+        ? reviewDecision("require_pull")
+        : reviewDecision(pushes ? "publish" : "no_changes", pushes),
+      pull_decision: reviewDecision(pulls ? "create_local" : "no_changes", pulls),
+    }];
+  });
+  const [first, ...rest] = sessions;
+  return {
+    sessions,
+    comparison: emptyComparison({ entries }),
+    activity: {
+      ...activity,
+      sessions,
+      git: {
+        ...activity.git,
+        commits: [
+          { ...activity.git.commits[0], session_refs: first ? [{ resource_id: first.resource_id }] : [] },
+          { sha: "c".repeat(40), short_sha: "ccccccc", committed_at: 1_752_700_000, subject: "Bare commit without a session", session_refs: [] },
+        ],
+        unique_session_count: sessions.length,
+      },
+      unmapped: rest.map((session) => ({ resource_id: session.resource_id, reason: "no_commit" })),
+    },
+  };
+}
+
+function scopeRadios(html: string): string[] {
+  const strip = html.match(/<div class="sync-project-tabs sync-status-scopes"[\s\S]*?<\/div>/)?.[0] ?? "";
+  return [...strip.matchAll(/<button[^>]*role="radio"[^>]*>/g)].map(([radio]) => (
+    `${radio.match(/aria-label="([^"]*)"/)?.[1]}${/aria-checked="true"/.test(radio) ? " *" : ""}`
+  ));
+}
+
+test("the scope bar counts the loaded rows by the badge each one draws", () => {
+  const { activity: scoped, comparison } = scopeFixture();
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={scoped} comparison={comparison} activeStorageName="Local storage 1" />,
+  );
+  assert.match(html, /role="radiogroup" aria-label="Show sessions by status"/);
+  /* A row blocked on this computer wears the can't-sync badge whatever the
+     comparison says of it, and a row the comparison never judged wears the
+     unknown one: each is counted where its badge puts it. */
+  assert.deepEqual(scopeRadios(html), [
+    "All, 7 sessions *",
+    "To push, 2 sessions",
+    "To pull, 1 session",
+    "Attention, 2 sessions",
+    "Up to date, 1 session",
+    "Not compared, 1 session",
+  ]);
+  // Nothing is narrowed yet: the count is the plain total, every row is drawn,
+  // and the bare commit keeps its place on the rail.
+  assert.match(html, /<span class="sync-name-search-count">7 sessions<\/span>/);
+  for (const seed of SCOPE_SEEDS) assert.match(html, new RegExp(seed.title));
+  assert.match(html, /Bare commit without a session/);
+
+  /* The bar's Attention and the path bar's chip sort a comparison entry by
+     the same mapping: with no machine-local block among the rows, the two
+     numbers are one number. */
+  const unblocked = scopeFixture(SCOPE_SEEDS.filter((seed) => !seed.blocked));
+  const unblockedHtml = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={unblocked.activity} comparison={unblocked.comparison} activeStorageName="Local storage 1" />,
+  );
+  const header = activityHeaderCounts(unblocked.comparison, "Local storage 1");
+  assert.deepEqual([header.push, header.pull, header.attention], [2, 1, 1]);
+  assert.deepEqual(scopeRadios(unblockedHtml).slice(1, 4), [
+    `To push, ${header.push} sessions`,
+    `To pull, ${header.pull} session`,
+    `Attention, ${header.attention} session`,
+  ]);
+});
+
+test("a chosen scope narrows the list the way a name search does", () => {
+  const { activity: scoped, comparison } = scopeFixture();
+  const render = (statusScope: ComponentProps<typeof ProjectChatHistoryContent>["statusScope"], searchQuery = "") => renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={scoped} comparison={comparison}
+      activeStorageName="Local storage 1" statusScope={statusScope} searchQuery={searchQuery} />,
+  );
+  const shown = (html: string) => SCOPE_SEEDS.filter((seed) => html.includes(seed.title)).map((seed) => seed.key);
+
+  const push = render("push");
+  assert.deepEqual(shown(push), ["alpha", "beta"]);
+  assert.equal(scopeRadios(push)[1], "To push, 2 sessions *");
+  assert.match(push, /<span class="sync-name-search-count"><b>2<\/b><span> of 7 sessions<\/span><\/span>/);
+  // The rail under a scope is the rail under a search: the commit with no
+  // matching session leaves, folds stop folding, and paging stays.
+  assert.doesNotMatch(push, /Bare commit without a session/);
+  assert.match(push, /Add project-scoped history/);
+  assert.doesNotMatch(push, /sync-history-spine-fold"(?![^>]*disabled)[^>]*aria-expanded/);
+  assert.match(push, /Load earlier/);
+
+  assert.deepEqual(shown(render("attention")), ["delta", "zeta"]);
+  assert.deepEqual(shown(render("unknown")), ["eta"]);
+
+  // A scope and a name both apply.
+  const named = render("push", "beta");
+  assert.deepEqual(shown(named), ["beta"]);
+  assert.match(named, /<b>1<\/b><span> of 7 sessions<\/span>/);
+});
+
+test("a scope with no row left stays at zero and offers the way back", () => {
+  const withoutPull = scopeFixture(SCOPE_SEEDS.filter((seed) => seed.state !== "storage_only"));
+  const render = (searchQuery: string) => renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={withoutPull.activity} comparison={withoutPull.comparison}
+      activeStorageName="Local storage 1" statusScope="pull" searchQuery={searchQuery} />,
+  );
+  const emptied = render("");
+  assert.ok(scopeRadios(emptied).includes("To pull, 0 sessions *"));
+  assert.match(emptied, /No matching loaded sessions\.<button type="button" class="btn btn-ghost">Clear filter<\/button>/);
+  assert.match(emptied, /<b>0<\/b><span> of 6 sessions<\/span>/);
+  // Releasing the scope would not help a name that matches nothing, so the
+  // box makes no such offer.
+  const unnamed = render("nonexistent");
+  assert.match(unnamed, /No matching loaded sessions\./);
+  assert.doesNotMatch(unnamed, /Clear filter/);
+});
+
+test("the scope bar is drawn only where it can narrow something", () => {
+  const { activity: scoped, comparison } = scopeFixture();
+  const props = { ...contentDefaults, activity: scoped, activeStorageName: "Local storage 1" };
+  const drawn = (html: string) => html.includes("sync-status-scopes");
+
+  // One status across the loaded rows: a bar would narrow nothing.
+  const uniform = scopeFixture(SCOPE_SEEDS.slice(0, 2));
+  assert.equal(drawn(renderToStaticMarkup(
+    <ProjectChatHistoryContent {...props} activity={uniform.activity} comparison={uniform.comparison} />,
+  )), false);
+
+  /* No verdicts to narrow by: still comparing, the comparison failed, or no
+     storage is linked. A scope chosen earlier is not applied behind the
+     reader's back. */
+  for (const state of [
+    { comparisonLoading: true },
+    { comparisonError: "offline" },
+    { activeStorageName: null },
+  ]) {
+    const html = renderToStaticMarkup(<ProjectChatHistoryContent {...props} {...state} statusScope="push" />);
+    assert.equal(drawn(html), false, JSON.stringify(state));
+    for (const seed of SCOPE_SEEDS) assert.match(html, new RegExp(seed.title), JSON.stringify(state));
+    assert.match(html, /<span class="sync-name-search-count">7 sessions<\/span>/);
+  }
+
+  // A review's rows are one verb's by construction.
+  for (const selectionMode of ["push", "pull"] as const) {
+    assert.equal(drawn(renderToStaticMarkup(
+      <ProjectChatHistoryContent {...props} comparison={comparison} selectionMode={selectionMode} statusScope="attention" />,
+    )), false, selectionMode);
+  }
+
+  // A non-Git project's bar follows the row its view switch leads.
+  const flat = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...props} activity={{ ...scoped, git: null, unmapped: [] }} comparison={comparison}
+      viewSwitch={<span id="view-switch-probe" />} />,
+  );
+  assert.ok(flat.indexOf("view-switch-probe") < flat.indexOf("sync-status-scopes"));
+  assert.ok(flat.indexOf("sync-status-scopes") < flat.indexOf("sync-history-thread-card"));
+});

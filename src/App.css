@@ -8085,6 +8085,47 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-name-search-count b { color: var(--text-0); font-weight: var(--weight-medium); }
 .sync-name-search-hidden { color: var(--warning-text); }
 
+/* The scope bar: the review's underline strip directly under the search row,
+   one status scope at a time. The strip's rule takes over from the field's,
+   so the two read as one head with one line under it. */
+.sync-name-search:has(+ .sync-status-scopes),
+.sync-list-head:has(+ .sync-status-scopes) > .sync-name-search {
+  margin-bottom: 0;
+  border-bottom-color: transparent;
+}
+
+.sync-list-head:has(+ .sync-status-scopes) { margin-bottom: 0; }
+
+.sync-status-scopes.sync-project-tabs {
+  flex-wrap: wrap;
+  gap: 0 18px;
+  min-height: 36px;
+  margin: 0 0 12px;
+  /* The line it takes over keeps the field's own tone. */
+  border-bottom-color: var(--border);
+}
+
+.sync-status-scopes.sync-project-tabs > button {
+  min-height: 34px;
+  gap: 6px;
+  padding: 0;
+  font-size: var(--type-xs);
+}
+
+/* A scope's name is what the reader chooses by, so it takes the readable ink
+   at rest, not the review strip's faint one. */
+.sync-status-scopes.sync-project-tabs > button:not(.active):not(:hover) { color: var(--text-2); }
+
+.sync-status-scopes.sync-project-tabs > button > small {
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-status-scopes.sync-project-tabs > button:not(.active):not(:hover) .thread-status-icon,
+.sync-status-scopes.sync-project-tabs > button:not(.active):not(:hover) > svg { opacity: 0.6; }
+
 /* The blocked row's marker is a strip of the file card (`.notice-strip`),
    inset to the card's text column. */
 .sync-project-file-conflict {

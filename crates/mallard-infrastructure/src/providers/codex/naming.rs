@@ -84,21 +84,25 @@ printf '%s\n' "$rename" >> requests
 
     #[test]
     fn rename_failures_are_bounded_sanitized_and_not_retried() {
-        for (response, expected) in [
-            ("printf '%s\\n' '{\"id\":2,\"error\":{\"code\":-32601,\"message\":\"private title /private/path\"}}'", "-32601"),
-            ("printf '%s\\n' '{\"id\":2,\"error\":{\"code\":\"private title\"}}'", "failed"),
-            ("printf '%s\\n' 'private title'", "invalid response"),
-            ("printf '%s\\n' '{\"id\":2}'", "did not confirm"),
-            ("exit 0", "stopped"),
-            ("exec sleep 5", "timed out"),
-            ("while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done", "invalid response"),
+        // Response cases must reach their error, including the output limit,
+        // before the deadline. The silent process needs time to initialize,
+        // then waits for input so only the request timeout can stop it.
+        let response_timeout = Duration::from_secs(5);
+        for (case, response, expected, timeout) in [
+            ("numeric error", "printf '%s\\n' '{\"id\":2,\"error\":{\"code\":-32601,\"message\":\"private title /private/path\"}}'", "-32601", response_timeout),
+            ("non-numeric error", "printf '%s\\n' '{\"id\":2,\"error\":{\"code\":\"private title\"}}'", "failed", response_timeout),
+            ("invalid JSON", "printf '%s\\n' 'private title'", "invalid response", response_timeout),
+            ("missing result", "printf '%s\\n' '{\"id\":2}'", "did not confirm", response_timeout),
+            ("stopped process", "exit 0", "stopped", response_timeout),
+            ("silent process", r#"while read -r request; do printf '%s\n' "$request" >> requests; done"#, "timed out", Duration::from_secs(2)),
+            ("endless output", "while :; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; done", "invalid response", response_timeout),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let home = temp.path().canonicalize().unwrap();
             fs::write(home.join("session.jsonl"), "unchanged").unwrap();
             let binary = fake(&home, response);
-            let error = rename_with_binary(&binary, &home, ID, "New", Duration::from_millis(500)).unwrap_err();
-            assert!(error.contains(expected), "{error}");
+            let error = rename_with_binary(&binary, &home, ID, "New", timeout).unwrap_err();
+            assert!(error.contains(expected), "{case}: expected {expected:?}, got {error}");
             assert!(!error.contains("private"));
             assert_eq!(fs::read_to_string(home.join("requests")).unwrap().lines().count(), 3);
             assert_eq!(fs::read_to_string(home.join("session.jsonl")).unwrap(), "unchanged");

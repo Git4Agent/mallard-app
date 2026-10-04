@@ -2,7 +2,7 @@ import { useRef, type ReactNode } from "react";
 import Icon from "../Icons";
 
 export default function NameSearchField({
-  query, onChange, label, matches, total, noun, hiddenSelected = 0, disabled = false, leading, trailing, count = true,
+  query, onChange, label, matches, total, noun, narrowed = false, hiddenSelected = 0, disabled = false, leading, trailing, count = true,
 }: {
   query: string;
   onChange: (query: string) => void;
@@ -11,6 +11,9 @@ export default function NameSearchField({
   total: number;
   /** What the count counts, in the count's number: "1 file", "8 files". */
   noun: (count: number) => string;
+  /** The list is narrowed by something other than the query — a status
+   *  scope — so the count reads "3 of 12" with the field empty. */
+  narrowed?: boolean;
   hiddenSelected?: number;
   disabled?: boolean;
   /** A control that leads the field's row — the project's view switch —
@@ -24,6 +27,7 @@ export default function NameSearchField({
   count?: boolean;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const filtering = narrowed || query.trim().length > 0;
   const field = (
     <div className="sync-name-search">
       <div className="sync-name-search-input">
@@ -55,7 +59,7 @@ export default function NameSearchField({
           {/* The count names what it counts, so its text is its whole
               announcement: "8 files", or "2 of 8 files" while filtering. */}
           <span className="sync-name-search-count">
-            {query.trim()
+            {filtering
               ? <><b>{matches}</b><span> of {total} {noun(total)}</span></>
               : <>{total} {noun(total)}</>}
           </span>
@@ -67,7 +71,7 @@ export default function NameSearchField({
         /* Off the page, not off the air: a filter that hides rows still
            says how many it kept. */
         <span className="sync-visually-hidden" role="status">
-          {query.trim() ? `${matches} of ${total} ${noun(total)}` : ""}
+          {filtering ? `${matches} of ${total} ${noun(total)}` : ""}
         </span>
       )}
     </div>

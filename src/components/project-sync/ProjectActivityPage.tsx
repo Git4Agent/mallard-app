@@ -25,6 +25,7 @@ import { githubCommitUrl, openExternalUrl } from "./externalLink";
 import LoadingScaffold from "../LoadingScaffold";
 import ListTile from "../sync-review/ListTile";
 import NameSearchField from "../sync-review/NameSearchField";
+import StatusScopeBar from "../sync-review/StatusScopeBar";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { projectLabel, sessionNoun } from "./model";
 import { clearedStorageNotice } from "./clearedStorageNotice";
@@ -122,6 +123,10 @@ interface PageProps extends SessionSearchProps {
 }
 
 interface ContentProps extends SessionSearchProps {
+  /** The status scope the standing list is narrowed to; null is All. Like
+   *  the query, the list holds it unless its host does. */
+  statusScope?: SessionStatusScope | null;
+  onStatusScopeChange?: (scope: SessionStatusScope | null) => void;
   comparisonErrorHandled?: boolean;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
@@ -598,6 +603,38 @@ export function sessionSyncPresentation(
   }
 }
 
+/** The parts a status splits the list into, in the path bar's own terms: its
+ *  two verbs, its attention chip, and what is left. */
+export type SessionStatusScope = "push" | "pull" | "attention" | "synced" | "unknown";
+
+/** The one mapping from a row's badge to its scope. The path bar's tallies and
+ *  the list's scope bar both read it, so they cannot sort a row differently. */
+export function sessionStatusScope(status: ThreadStatusIconName): SessionStatusScope {
+  switch (status) {
+    case "local-outstanding": return "push";
+    case "cloud-outstanding": return "pull";
+    case "divergent":
+    case "pending":
+    case "conflict":
+    case "unavailable": return "attention";
+    case "synced": return "synced";
+    case "untracked":
+    case "checking":
+    case "unknown": return "unknown";
+  }
+}
+
+/** The scopes in the order the bar shows them: work first, then what is
+ *  settled, then what was never judged. Each wears the glyph its rows do;
+ *  Attention wears the path bar chip's. */
+const SESSION_STATUS_SCOPES: readonly { id: SessionStatusScope; label: string; mark: ReactNode }[] = [
+  { id: "push", label: "To push", mark: <ThreadStatusIcon status="local-outstanding" size={15} /> },
+  { id: "pull", label: "To pull", mark: <ThreadStatusIcon status="cloud-outstanding" size={15} /> },
+  { id: "attention", label: "Attention", mark: <Icon name="alert-triangle" size={14} /> },
+  { id: "synced", label: "Up to date", mark: <ThreadStatusIcon status="synced" size={15} /> },
+  { id: "unknown", label: "Not compared", mark: <ThreadStatusIcon status="unknown" size={15} /> },
+];
+
 /** What the path bar says on the activity list's behalf: two numbers that ride
  *  the buttons resolving them, and one for everything neither button can.
  *
@@ -628,6 +665,7 @@ export function activityHeaderCounts(
 ): ActivityHeaderCounts {
   let push = 0;
   let pull = 0;
+  let attention = 0;
   let review = 0;
   let waiting = 0;
   let conflict = 0;
@@ -639,17 +677,22 @@ export function activityHeaderCounts(
     // removed from both; it is nobody's work.
     if (!entry.local_present && !entry.storage_present) continue;
     const presentation = sessionSyncPresentation(entry, storageName);
-    switch (presentation.status) {
-      case "local-outstanding": push += 1; break;
-      case "cloud-outstanding": pull += 1; break;
-      case "divergent": review += 1; break;
-      case "pending": waiting += 1; break;
-      case "conflict": conflict += 1; break;
-      case "unavailable":
-        unsyncable += 1;
-        if (unsyncableDetails.length < 3) unsyncableDetails.push(presentation.label);
-        break;
-      default: break;
+    const scope = sessionStatusScope(presentation.status);
+    if (scope === "push") push += 1;
+    else if (scope === "pull") pull += 1;
+    else if (scope === "attention") {
+      attention += 1;
+      // The breakdown the chip's tooltip spells out.
+      switch (presentation.status) {
+        case "divergent": review += 1; break;
+        case "pending": waiting += 1; break;
+        case "conflict": conflict += 1; break;
+        case "unavailable":
+          unsyncable += 1;
+          if (unsyncableDetails.length < 3) unsyncableDetails.push(presentation.label);
+          break;
+        default: break;
+      }
     }
   }
 
@@ -667,7 +710,7 @@ export function activityHeaderCounts(
   return {
     push,
     pull,
-    attention: review + waiting + conflict + unsyncable,
+    attention,
     severity: conflict > 0 || unsyncable > 0 ? "danger" : "warning",
     detail,
   };
@@ -687,6 +730,26 @@ function SessionSyncIndicator({ presentation }: { presentation: SessionSyncPrese
       <ThreadStatusIcon status={presentation.status} size={18} />
     </span>
   );
+}
+
+/** The badge a standing row draws: a machine-local sync block first, then the
+ *  comparison's verdict, then the page's own no-verdict state. The scope bar
+ *  sorts rows through this same function, so a row's scope is the badge it
+ *  wears. */
+function sessionRowPresentation(
+  session: ProjectSessionSummary,
+  entry: ThreadSyncEntry | undefined,
+  storageName: string | null | undefined,
+  fallback: SessionSyncPresentation,
+): SessionSyncPresentation {
+  if (session.sync_blocked_reason) {
+    return {
+      status: "unavailable",
+      className: "unavailable",
+      label: `Unavailable for sync. ${session.sync_blocked_reason}`,
+    };
+  }
+  return entry && storageName ? sessionSyncPresentation(entry, storageName) : fallback;
 }
 
 /** Named badge state for every row without a comparison entry. */
@@ -1353,13 +1416,6 @@ function SessionCard({
   const visibleTitle = compactThreadTitle(fullTitle);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
-  const syncBlockedPresentation: SessionSyncPresentation | null = session.sync_blocked_reason
-    ? {
-        status: "unavailable",
-        className: "unavailable",
-        label: `Unavailable for sync. ${session.sync_blocked_reason}`,
-      }
-    : null;
   // The status badge owns row state; the branch-unmapped heading owns its pencil.
   const accessNote = sessionAccessNote(session);
   const canOpenDetails = !selectionMode
@@ -1396,9 +1452,7 @@ function SessionCard({
               />
             </label>
           )}
-          {syncBlockedPresentation ? (
-            <SessionSyncIndicator presentation={syncBlockedPresentation} />
-          ) : selectionMode && reviewStateLabel && syncEntry ? (
+          {!session.sync_blocked_reason && selectionMode && reviewStateLabel && syncEntry ? (
             <ReviewSyncIndicator
               entry={syncEntry}
               storageName={storageName ?? "storage"}
@@ -1407,9 +1461,7 @@ function SessionCard({
             />
           ) : (
             <SessionSyncIndicator
-              presentation={syncEntry && storageName
-                ? sessionSyncPresentation(syncEntry, storageName)
-                : syncFallback}
+              presentation={sessionRowPresentation(session, syncEntry, storageName, syncFallback)}
             />
           )}
           {accessNote && (
@@ -1819,10 +1871,13 @@ export function ProjectChatHistoryContent({
   onChooseAgentProfile,
   continuityActionBusy = false,
   searchQuery, onSearchQueryChange, onSearchResultsChange,
+  statusScope: hostStatusScope, onStatusScopeChange,
   reviewScaffold,
   viewSwitch,
 }: ContentProps) {
   const [localQuery, setLocalQuery] = useState("");
+  const [localStatusScope, setLocalStatusScope] = useState<SessionStatusScope | null>(null);
+  const listRef = useRef<HTMLElement>(null);
   /* A review's list is keyed on settled reads, not on request flags: every
      flag starts false, so a flag-keyed branch painted nothing on the first
      commit, and the rows are filtered on the comparison, so the list was
@@ -1841,8 +1896,6 @@ export function ProjectChatHistoryContent({
   const [collapsedCommitShas, setCollapsedCommitShas] = useState<Set<string>>(new Set());
   const [branchUnmappedFolded, setBranchUnmappedCollapsed] = useState(false);
   const [storageOnlyFolded, setStorageOnlyCollapsed] = useState(false);
-  const branchUnmappedCollapsed = !searching && branchUnmappedFolded;
-  const storageOnlyCollapsed = !searching && storageOnlyFolded;
   const label = projectLabel(project);
   const allSessions = useMemo(
     () => [...(activity?.sessions ?? [])].sort(compareSessions),
@@ -1863,9 +1916,52 @@ export function ProjectChatHistoryContent({
         : isPushReviewRow(status, entry.push_decision);
     });
   }, [allSessions, reviewResourceIds, selectionMode, syncIndex]);
+  const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
+  /* What every row's badge is resolved against, settled before the list is
+     narrowed: the scope bar sorts rows by the badge they draw. */
+  const rowStorageName = comparison ? comparisonStorageName : activeStorageName;
+  const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
+  // Resolved once for the page: every row without a comparison entry draws this
+  // instead of drawing nothing.
+  const syncFallback = useMemo(() => unresolvedSyncPresentation({
+    comparisonLoaded: comparison != null,
+    comparisonLoading,
+    comparisonError,
+    storageName: comparison?.storage_name ?? activeStorageName,
+    hasBoundProvider,
+  }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider]);
+  const scopeBySession = useMemo(() => new Map(reviewSessions.map((session) => [
+    session.resource_id,
+    sessionStatusScope(sessionRowPresentation(
+      session, syncEntryForSession(session, syncIndex), rowStorageName, syncFallback,
+    ).status),
+  ])), [reviewSessions, syncIndex, rowStorageName, syncFallback]);
+  const scopeCounts = useMemo(() => {
+    const counts = new Map<SessionStatusScope, number>();
+    for (const scope of scopeBySession.values()) counts.set(scope, (counts.get(scope) ?? 0) + 1);
+    return counts;
+  }, [scopeBySession]);
+  const chosenStatusScope = hostStatusScope === undefined ? localStatusScope : hostStatusScope;
+  const chooseStatusScope = onStatusScopeChange ?? setLocalStatusScope;
+  /* The scope bar is drawn when it can narrow something: on the standing
+     list, over a settled comparison, with rows in two scopes — or while a
+     scope is chosen, so it can be released. A review's rows are one verb's by
+     construction. A scope chosen before the bar went away is not applied
+     behind the reader's back. */
+  const scopeBarShown = !selectionMode && comparison != null
+    && (scopeCounts.size > 1 || chosenStatusScope !== null);
+  const statusScope = scopeBarShown ? chosenStatusScope : null;
+  /* A name and a scope narrow the list alike: folds open, a commit without a
+     matching session leaves the rail, and the count reads "3 of 12". */
+  const narrowing = searching || statusScope !== null;
+  const branchUnmappedCollapsed = !narrowing && branchUnmappedFolded;
+  const storageOnlyCollapsed = !narrowing && storageOnlyFolded;
   const sessions = useMemo(
-    () => reviewSessions.filter((session) => nameMatchesSearch(session.title || "Untitled session", query)),
-    [reviewSessions, query],
+    () => reviewSessions.filter((session) => (
+      (statusScope === null || scopeBySession.get(session.resource_id) === statusScope)
+      && nameMatchesSearch(session.title || "Untitled session", query)
+    )),
+    [reviewSessions, query, statusScope, scopeBySession],
   );
   const sessionsByResource = useMemo(
     () => new Map(sessions.map((session) => [session.resource_id, session])),
@@ -1889,10 +1985,9 @@ export function ProjectChatHistoryContent({
       .sort(([left], [right]) => left.localeCompare(right)),
     [comparison?.provider_errors],
   );
-  const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
   // Resolved the same way the rows' status badges resolve it, so the group
   // heading and the tooltips under it can never name two different storages.
-  const storageOnlyName = (comparison ? comparisonStorageName : activeStorageName) ?? "storage";
+  const storageOnlyName = rowStorageName ?? "storage";
   // Unmapped rows split by where the session lives. A storage-only session
   // stays in its storage group; a local session states only that this branch
   // has no matching commit.
@@ -1955,16 +2050,9 @@ export function ProjectChatHistoryContent({
   const hiddenSelected = searching ? [...searchableIds].filter((id) => (
     selectedResourceIds.has(id) && !searchResults.resourceIds.has(id)
   )).length : 0;
-  const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
-  // Resolved once for the page: every row without a comparison entry draws this
-  // instead of drawing nothing.
-  const syncFallback = useMemo(() => unresolvedSyncPresentation({
-    comparisonLoaded: comparison != null,
-    comparisonLoading,
-    comparisonError,
-    storageName: comparison?.storage_name ?? activeStorageName,
-    hasBoundProvider,
-  }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider]);
+  /* Releasing the scope brings rows back only if the name alone matches some. */
+  const scopeEmptiedList = statusScope !== null && searchResults.resourceIds.size === 0
+    && reviewSessions.some((session) => nameMatchesSearch(session.title || "Untitled session", query));
   const sectionTitle = activity?.git ? "Git history" : activity ? "Sessions" : "Activity";
   const windowRange = activity ? formatDayRange(activity.window_start, activity.window_end) : "";
   /* An empty rail either belongs to an unborn branch or to a loaded range
@@ -1999,7 +2087,7 @@ export function ProjectChatHistoryContent({
       busy={actionBusyResourceId === session.resource_id} busyActionId={actionBusyActionId}
       onSessionAction={onSessionAction} onDeleteSession={onDeleteSession} onOpenSessionDetail={onOpenSessionDetail}
       syncEntry={entry} reviewResourceId={reviewResourceId}
-      storageName={comparison ? comparisonStorageName : activeStorageName} syncFallback={syncFallback}
+      storageName={rowStorageName} syncFallback={syncFallback}
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
       selectable={selectable}
       selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
@@ -2022,14 +2110,14 @@ export function ProjectChatHistoryContent({
     : `New since the last Push to ${activeStorageName ?? "storage"}`;
   const commits = useMemo(() => {
     const candidates = activity?.git?.commits ?? [];
-    if (!selectionMode && !searching) return candidates;
+    if (!selectionMode && !narrowing) return candidates;
     /* A commit Push adds stays on the review rail with no session under it;
-       a search narrows to sessions, so it drops the bare ones. */
+       a search or a scope narrows to sessions, so it drops the bare ones. */
     return candidates.filter((commit) => (
       commit.session_refs.some((reference) => sessionsByResource.has(reference.resource_id))
-      || (!searching && outgoingCommits?.has(commit.sha) === true)
+      || (!narrowing && outgoingCommits?.has(commit.sha) === true)
     ));
-  }, [activity?.git?.commits, selectionMode, searching, sessionsByResource, outgoingCommits]);
+  }, [activity?.git?.commits, selectionMode, narrowing, sessionsByResource, outgoingCommits]);
   // A review holds the whole span at once, so an empty one is truly empty.
   const selectionReviewEmpty = !searching && selectionMode != null
     && comparison != null
@@ -2148,12 +2236,34 @@ export function ProjectChatHistoryContent({
       <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
         label={selectionMode ? "Search sessions" : "Search loaded sessions"}
         matches={searchResults.resourceIds.size} total={searchableIds.size} noun={sessionNoun} hiddenSelected={hiddenSelected}
-        leading={viewSwitch} />
+        narrowed={statusScope !== null} leading={viewSwitch} />
     )
     : null;
+  /* The bar rides under the field it narrows with. A scope no loaded row
+     falls in has no place on it — unless it is the one in force, which
+     stays, at zero, so it can be released. */
+  const scopeBar = searchField && scopeBarShown ? (
+    <StatusScopeBar
+      label="Show sessions by status"
+      noun={sessionNoun}
+      total={searchableIds.size}
+      active={statusScope}
+      onChange={chooseStatusScope}
+      scopes={SESSION_STATUS_SCOPES
+        .filter((scope) => (scopeCounts.get(scope.id) ?? 0) > 0 || scope.id === statusScope)
+        .map((scope) => ({ ...scope, count: scopeCounts.get(scope.id) ?? 0 }))}
+    />
+  ) : null;
+  /* The button leaves with the box it sits in, so focus goes to the field
+     first, as the field's own clear does. */
+  const clearStatusScope = () => {
+    listRef.current?.querySelector<HTMLInputElement>(".sync-name-search input")?.focus();
+    chooseStatusScope(null);
+  };
 
   const content = (
       <section
+        ref={listRef}
         className="sync-history-content"
         aria-label={sectionTitle}
       >
@@ -2169,6 +2279,7 @@ export function ProjectChatHistoryContent({
             never push it down; the search rides its row whenever there is
             one. */}
         {viewSwitch && (searchField ?? <div className="sync-project-view-row">{viewSwitch}</div>)}
+        {viewSwitch && scopeBar}
         <NoticeZone
           key={JSON.stringify([project.local_project_id, comparisonStorageId])}
           items={notices}
@@ -2177,6 +2288,7 @@ export function ProjectChatHistoryContent({
           {...noticeTiming}
         />
         {!viewSwitch && searchField}
+        {!viewSwitch && scopeBar}
         {!hasBoundProvider ? (
           <div className="sync-history-state sync-history-profile-state">
             <Icon name="alert-triangle" size={18} />
@@ -2253,8 +2365,13 @@ export function ProjectChatHistoryContent({
           ) : null
         ) : (
           <>
-            {searching && searchResults.resourceIds.size === 0 && (
-              <div className="sync-history-state">{selectionMode ? "No matching sessions." : "No matching loaded sessions."}</div>
+            {narrowing && searchResults.resourceIds.size === 0 && (
+              <div className="sync-history-state">
+                {selectionMode ? "No matching sessions." : "No matching loaded sessions."}
+                {scopeEmptiedList && (
+                  <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>Clear filter</button>
+                )}
+              </div>
             )}
             {selectionReviewEmpty && (selectionMode === "push" ? (
               /* One line: when the Git history still travels, its commits sit
@@ -2284,7 +2401,7 @@ export function ProjectChatHistoryContent({
                 <SectionFold
                   collapsed={storageOnlyCollapsed}
                   controls="storage-only-list"
-                  disabled={searching}
+                  disabled={narrowing}
                   label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} only in ${storageOnlyName}`}
                   onToggle={() => setStorageOnlyCollapsed(!storageOnlyCollapsed)}
                 />
@@ -2306,7 +2423,7 @@ export function ProjectChatHistoryContent({
                     <SectionFold
                       collapsed={branchUnmappedCollapsed}
                       controls="branch-unmapped-list"
-                      disabled={searching}
+                      disabled={narrowing}
                       label={`${branchUnmappedCollapsed ? "Expand" : "Collapse"} ${branchUnmappedReferences.length} uncommitted session${branchUnmappedReferences.length === 1 ? "" : "s"}`}
                       onToggle={() => setBranchUnmappedCollapsed(!branchUnmappedCollapsed)}
                     />
@@ -2318,7 +2435,7 @@ export function ProjectChatHistoryContent({
                     )}
                   </section>
                 )}
-                {((!searching && selectionMode !== "pull") || commits.length > 0) && (
+                {((!narrowing && selectionMode !== "pull") || commits.length > 0) && (
                   <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
                   {commits.length === 0 ? (
                     /* An empty rail is still the rail: the gap draws as a card
@@ -2349,7 +2466,7 @@ export function ProjectChatHistoryContent({
                     <ol className="sync-history-commit-rail">{commits.map((commit) => {
                       const commitUrl = githubCommitUrl(activity.git?.github_repository_url, commit.sha);
                       const references = orderedReferences(commit.session_refs);
-                      const collapsed = !searching && collapsedCommitShas.has(commit.sha);
+                      const collapsed = !narrowing && collapsedCommitShas.has(commit.sha);
                       const displaySha = commit.short_sha.slice(0, 7);
                       const sessionListId = `commit-sessions-${commit.short_sha}`;
                       return (
@@ -2358,7 +2475,7 @@ export function ProjectChatHistoryContent({
                             collapsed={collapsed}
                             controls={sessionListId}
                             label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
-                            disabled={searching || references.length === 0}
+                            disabled={narrowing || references.length === 0}
                             onToggle={() => toggleCommit(commit.sha)}
                           />
                           <div className="sync-history-commit-heading">
@@ -2423,7 +2540,7 @@ export function ProjectChatHistoryContent({
                     here" — and the local half takes a tile headed "Sessions"
                     only while the partition exists. Alone, the switch already
                     names it, so it stays the bare framed list. */}
-                {sessions.length === 0 ? (searching ? null : (
+                {sessions.length === 0 ? (narrowing ? null : (
                   <div className="sync-history-thread-list flat">
                     {/* Same rule as the empty rail: the window is named only
                         when paging past it could still turn something up. A
