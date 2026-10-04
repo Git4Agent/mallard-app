@@ -64,72 +64,70 @@ body { display: block !important; padding: 0 !important; background: var(--retro
 
 /* ——— proposed rules (mock-only) ——————————————————————————————————————— */
 
-/* Every direction is a .sync-modal with its bands; these rules only set a
-   width and the little glue the shipped parts need in a short sheet. */
-.os-notice { margin: 0; }
-.os-list { margin-top: 0; }
-.os-list .storage-found-row { cursor: default; }
-.os-list .storage-found-row:hover { background: var(--surface-row); }
-.os-inline-loader { display: inline-block; vertical-align: -2px; margin-right: 4px; }
-.sync-modal-header p b { color: var(--text-0); font-weight: var(--weight-semibold); }
+/* Every direction is a .sync-modal with its bands. These rules set widths
+   and the few pieces a terse sheet adds: glyph squares, icon facts, the
+   here word, a one-line stop. */
 .sync-modal-header h1 { overflow-wrap: anywhere; }
+.sync-modal-header { align-items: center; }
+.os-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.os-line > svg { color: var(--text-2); }
+.os-sep { width: 1px; height: 12px; background: var(--border-mid); }
 
-/* The place glyph is green once the subject is here. */
-.os-place.present { color: var(--success-text); background: var(--success-soft); }
+.os-glyph { flex: none; }
+.os-glyph.lg { width: 36px; height: 36px; border: var(--box-border); border-radius: 8px; }
+.os-glyph.ok { color: var(--success-text); background: var(--success-soft); }
+.os-glyph.info { color: var(--info-text); background: var(--info-soft); }
+.os-glyph.warning { color: var(--warning-text); background: var(--warning-soft); }
+.os-glyph.danger { color: var(--danger-text); background: var(--danger-soft); }
 
-/* While the service is asked, the far row holds its place. */
-.os-skel-row { min-height: 50px; background: var(--surface-subtle); }
-/* A short sheet has room for the whole sentence: rows wrap, never clip. */
-.os-list .storage-found-name, .os-group .storage-found-name { white-space: normal; overflow-wrap: anywhere; }
+.os-facts { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.os-facts .storage-found-verdict { gap: 4px; color: var(--text-1); font-size: var(--type-xs); }
+.os-facts .storage-found-verdict > svg { color: var(--text-2); }
+.os-here { display: inline-flex; align-items: center; gap: 5px; color: var(--text-1); font-size: var(--type-sm); font-weight: var(--weight-medium); }
+.os-here.present { color: var(--success-text); font-weight: var(--weight-semibold); }
+.os-skel { display: inline-block; width: 70px; height: 12px; border-radius: 6px; background: var(--chip-strong-bg); }
+.os-skel.short { width: 44px; }
+.os-code { color: var(--text-1); font-family: var(--font-mono); font-size: var(--type-xs); overflow-wrap: anywhere; }
 
-/* A · Confirm: two labelled lines under the account line. */
-.sync-modal.os-a { width: 440px; }
-.os-a-body { padding: 4px 18px 18px; }
-.os-a .sync-bundle-context { margin-bottom: 12px; padding: 0; }
-.os-facts { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; align-items: baseline; }
-.os-facts dt { color: var(--text-2); font-family: var(--font-display); font-size: var(--type-3xs); font-weight: var(--weight-medium); letter-spacing: 1px; text-transform: uppercase; }
-.os-facts dd { margin: 0; min-width: 0; color: var(--text-1); font-size: var(--type-sm); overflow-wrap: anywhere; }
-.os-facts dd .storage-found-verdict { font-size: var(--type-sm); }
-.os-facts dd.present { color: var(--text-0); font-weight: var(--weight-semibold); }
+.os-stop { margin: 0; align-items: center; }
+.os-stop .notice-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.os-stop code { color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-xs); }
 
-/* B · Found row: the Connect dialog's anatomy at one subject. */
-.sync-modal.os-b { width: 520px; }
-.os-b .sync-modal-body, .os-f .sync-modal-body { padding: 4px 18px 18px; }
+.os-list { margin-top: 0; }
+.os-row { min-height: 44px; cursor: default; }
+.os-list .os-row:hover { background: var(--surface-row); }
+.os-row .storage-found-name { white-space: normal; overflow-wrap: anywhere; }
 
-/* C · Subject header: the subject's glyph leads the head band. */
-.sync-modal.os-c { width: 500px; }
-.os-c .sync-modal-header { align-items: center; }
-.os-c .os-lead { width: 36px; height: 36px; flex: none; border: var(--box-border); border-radius: 8px; }
-.os-c-body { padding: 16px 18px 18px; }
+/* A · Confirm: two icon lines, glyph then words. */
+.sync-modal.os-a { width: 400px; }
+.os-pairs { display: grid; grid-template-columns: 26px 1fr; align-items: center; gap: 10px 12px; padding: 16px 20px 18px; }
 
-/* D · From → To: two of the project page's group boxes. */
-.sync-modal.os-d { width: 500px; }
-.os-d-body { display: flex; flex-direction: column; padding: 16px 18px 20px; }
-.os-group { flex: none; border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--surface-row); box-shadow: var(--shadow-card); overflow: hidden; }
-.os-group.absent { border-style: dashed; box-shadow: none; }
-.os-group-head { min-height: 34px; margin: 0; padding: 4px 12px; display: flex; align-items: center; border-bottom: 1px solid var(--border-mid); }
-.os-group-head h2 { margin: 0; display: inline-flex; align-items: center; gap: 7px; font-size: var(--type-sm); }
-.os-group-head h2 > svg { color: var(--text-2); }
-.os-group .storage-found-row { padding: 9px 14px 11px; border-bottom: 0; }
-.os-group-notice { padding: 10px; }
-.os-d-arrow { align-self: center; margin: 4px 0; color: var(--text-2); }
+/* B · Found row. F · Current, cleaned. */
+.sync-modal.os-b { width: 440px; }
+.sync-modal.os-f { width: 440px; }
+.os-b .sync-modal-body, .os-f .sync-modal-body { padding: 14px 18px 18px; }
 
-/* E · Window sheet: square where it meets the bar. */
-.sync-modal.os-e { width: 480px; border-top: 0 !important; border-radius: 0 0 var(--retro-panel-radius) var(--retro-panel-radius) !important; }
-.os-e .sync-modal-body { padding: 14px 18px 4px; }
+/* C · Subject header: the facts are the head's line; the body one here line. */
+.sync-modal.os-c { width: 420px; }
+.os-c-body { display: flex; align-items: center; gap: 12px; padding: 14px 20px 16px; }
 
-/* F · Current, cleaned: the shipped frame, narrower. */
-.sync-modal.os-f { width: 520px; }
+/* D · From → To: two ends, the far one dashed while it is not here. */
+.sync-modal.os-d { width: 420px; }
+.os-d-body { display: flex; flex-direction: column; padding: 14px 18px 18px; }
+.os-end { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 12px; border: var(--box-border); border-radius: 10px; background: var(--surface-row); box-shadow: var(--shadow-control); }
+.os-end.absent { border-style: dashed; box-shadow: none; background: transparent; }
+.os-end-name { min-width: 0; flex: 1; color: var(--text-0); font-size: var(--type-sm); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.os-d-arrow { align-self: center; margin: 3px 0; color: var(--text-2); }
+
+/* E · Window sheet: head and foot only, square where it meets the bar. */
+.sync-modal.os-e { width: 440px; border-top: 0 !important; border-radius: 0 0 var(--retro-panel-radius) var(--retro-panel-radius) !important; }
 
 /* G · Anchored card: popover size, no backdrop. */
-.sync-modal.os-g { width: 380px; box-shadow: var(--shadow-popover) !important; }
-.os-g .sync-modal-header { padding: 12px 14px 10px; }
+.sync-modal.os-g { width: 340px; box-shadow: var(--shadow-popover) !important; }
+.os-g .sync-modal-header { padding: 12px 12px 12px 14px; gap: 10px; }
 .os-g .sync-modal-header h1 { font-size: var(--type-xl); }
-.os-g-body { padding: 12px 14px 14px; }
 .os-g .sync-modal-footer { min-height: 50px; }
 
-/* Specimen panels. */
+/* Specimen. */
+.os-count { margin-left: auto; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); font: 600 11px/1.5 system-ui; }
 .spec-note { margin: 8px 0 0 !important; color: var(--text-2); }
-.spec-std td.from { color: var(--text-2); font-size: 12px; }
-.spec-panel i { font-style: italic; }
-.spec-std th.c { text-align: center; }
