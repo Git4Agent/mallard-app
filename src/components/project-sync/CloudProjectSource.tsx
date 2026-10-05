@@ -28,7 +28,7 @@ import {
   type FolderRun,
   type FolderVerdict,
 } from "./projectFolder";
-import { useHomePath } from "./ProjectSetupWorkspace";
+import { useHomePath, useProfilePathProbes } from "./ProjectSetupWorkspace";
 import RepositoryAddressPicker, {
   isManagedCloudStorage,
   useManagedCloudRepositories,
@@ -291,17 +291,28 @@ export async function connectExistingFolder(
   return connectFolder(path, choices, mismatchAcknowledged(folder.kind, ticked));
 }
 
-/** Setup's rule for agents: each one the registry sets up by default, from
- *  its only profile here; with two or more, the person picks. */
-function defaultAgents(providers: ProviderDescriptor[], profiles: ProviderProfileSummary[]) {
+interface AgentChoices {
+  enabled: Record<ProviderKey, boolean>;
+  chosen: Record<ProviderKey, string>;
+}
+
+/** Prefer the resolved default home, then the sole usable profile.
+ *  Explicit choices stay in place when the default-home probes finish. */
+export function defaultAgents(
+  providers: ProviderDescriptor[],
+  profiles: ProviderProfileSummary[],
+  defaultPaths: Record<ProviderKey, string>,
+  choices: AgentChoices,
+): AgentChoices {
   const enabled: Record<ProviderKey, boolean> = {};
   const chosen: Record<ProviderKey, string> = {};
   for (const descriptor of providers) {
     const options = usableProfiles(profiles, descriptor.key);
     enabled[descriptor.key] = descriptor.setup_default && options.length > 0;
-    chosen[descriptor.key] = options.length === 1 ? options[0].profile_id : "";
+    const preferred = options.find((profile) => profile.canonical_path === defaultPaths[descriptor.key]);
+    chosen[descriptor.key] = preferred?.profile_id ?? (options.length === 1 ? options[0].profile_id : "");
   }
-  return { enabled, chosen };
+  return { enabled: { ...enabled, ...choices.enabled }, chosen: { ...chosen, ...choices.chosen } };
 }
 
 function usableProfiles(profiles: ProviderProfileSummary[], provider: ProviderKey) {
@@ -360,7 +371,17 @@ export default function CloudProjectSource({
   const suggestedFolder = useRef("");
   // The tick belongs to one folder for one repository.
   const [tickedFor, setTickedFor] = useState<string | null>(null);
-  const [agents, setAgents] = useState(() => defaultAgents(providers, profiles));
+  const [agentChoices, setAgents] = useState<AgentChoices>({ enabled: {}, chosen: {} });
+  const defaultProbes = useProfilePathProbes(providers.flatMap((descriptor) => (
+    homePath && descriptor.setup_default && descriptor.default_profile_directory
+      && usableProfiles(profiles, descriptor.key).length > 1
+      ? [{ provider: descriptor.key, path: joinFolder(homePath, descriptor.default_profile_directory) }]
+      : []
+  )), isActive);
+  const defaultPaths = Object.fromEntries(Object.entries(defaultProbes).flatMap(([provider, state]) => (
+    state.status === "ok" && state.probe.readable ? [[provider, state.probe.canonical_path]] : []
+  )));
+  const agents = defaultAgents(providers, profiles, defaultPaths, agentChoices);
   const [run, setRun] = useState<Run>({ phase: "idle" });
   const [probeRound, setProbeRound] = useState(0);
   const operationRef = useRef<string | null>(null);

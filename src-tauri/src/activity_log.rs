@@ -15,6 +15,33 @@ use mallard_infrastructure::activity_log::day_for_timestamp;
 
 static PERSISTENCE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
+/// Keep Cloud upload evidence in the activity log, separate from the short
+/// command error used by the notice. Subscribe before commands can run.
+pub fn start_cloud_diagnostic_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    let mut events = mallard_infrastructure::managed_cloud::diagnostics::upload_diagnostics();
+    std::thread::Builder::new()
+        .name("mallard-cloud-diagnostics".to_string())
+        .spawn(move || loop {
+            let message = match events.blocking_recv() {
+                Ok(message) => message,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    format!("Cloud upload diagnostics omitted {count} entries because the log queue was full.")
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            emit_activity_log(
+                &app,
+                ActivityLogType::Storage,
+                "warning",
+                "storage.cloud_upload_diagnostic",
+                &message,
+                None,
+                ActivityLogContext::default(),
+            );
+        })
+        .ok();
+}
+
 /// Resolve the activity log store below the machine-global metadata directory.
 fn activity_log_store() -> Result<ActivityLogStore, String> {
     let repository = LocalStateRepository::from_user_home()?;

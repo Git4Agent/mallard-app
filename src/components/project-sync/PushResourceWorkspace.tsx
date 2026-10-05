@@ -206,8 +206,11 @@ export function pushReviewBlockers(
   projectContentInventory?: ProjectContentInventory | null,
   acknowledgedWarningDigests: ReadonlySet<string> = new Set(),
   projectContentRemovals: ReadonlySet<string> = new Set(),
+  projectFilesShown = false,
 ): PushReviewBlocker[] {
   const blockers: PushReviewBlocker[] = [];
+  const capturesProjectFiles = !!projectContentInventory
+    && pushProjectFileWork(projectContentInventory, selected, projectContentRemovals, projectFilesShown) !== null;
   for (const entry of threadComparison?.entries ?? []) {
     // Thread rows never disable the whole Push: a diverged or held thread
     // is unselectable and keeps its cloud version, while every other
@@ -233,7 +236,8 @@ export function pushReviewBlockers(
       });
       continue;
     }
-    if (selectedEntry && entry.warning_digest && !acknowledgedWarningDigests.has(entry.warning_digest)) {
+    if (capturesProjectFiles && selectedEntry && entry.local_present
+      && entry.warning_digest && !acknowledgedWarningDigests.has(entry.warning_digest)) {
       blockers.push({
         kind: "local",
         step: "project_files",
@@ -616,6 +620,7 @@ export function pushReviewDisabledReason({
     projectContentInventory,
     acknowledgedWarningDigests,
     projectContentRemovals,
+    projectFilesShown,
   );
   const blockerSentence = pushBlockerSentence(blockers, threadComparison, projectContentInventory);
   if (blockerSentence) return blockerSentence;
@@ -798,9 +803,26 @@ export default function PushResourceWorkspace({
     () => conversations.filter((resource) => visibleConversationResourceIds.has(resource.resource_id)),
     [conversations, visibleConversationResourceIds],
   );
+  const selectableIds = useMemo(
+    () => pushSelectableResourceIds(resources, threadComparison, projectContentInventory),
+    [projectContentInventory, resources, threadComparison],
+  );
+  const effectiveSelected = useMemo(
+    () => new Set([...selected].filter((resourceId) => selectableIds.has(resourceId))),
+    [selectableIds, selected],
+  );
+  const capturesProjectFiles = !!projectContentInventory
+    && pushProjectFileWork(projectContentInventory, effectiveSelected, projectContentRemovals, projectFilesShown) !== null;
   const visibleProjectContentEntries = useMemo(
-    () => (projectContentInventory?.entries ?? []).filter(isPushReviewProjectContent),
-    [projectContentInventory],
+    () => (projectContentInventory?.entries ?? []).filter((entry) => (
+      isPushReviewProjectContent(entry)
+      // File work captures selected unchanged files too. Keep their warning
+      // controls visible, including after the user marks them reviewed.
+      || (capturesProjectFiles && entry.local_present && entry.state === "synced"
+        && entry.warning_digest && effectiveSelected.has(entry.descriptor.resource_id)
+        && !projectContentRemovals.has(entry.descriptor.resource_id))
+    )),
+    [capturesProjectFiles, effectiveSelected, projectContentInventory, projectContentRemovals],
   );
   const visibleProjectFileResourceIds = useMemo(
     () => new Set(visibleProjectContentEntries.map((entry) => entry.descriptor.resource_id)),
@@ -813,14 +835,6 @@ export default function PushResourceWorkspace({
   const visibleResources = useMemo(
     () => [...visibleConversations, ...other, ...visibleProjectFiles],
     [other, visibleConversations, visibleProjectFiles],
-  );
-  const selectableIds = useMemo(
-    () => pushSelectableResourceIds(resources, threadComparison, projectContentInventory),
-    [projectContentInventory, resources, threadComparison],
-  );
-  const effectiveSelected = useMemo(
-    () => new Set([...selected].filter((resourceId) => selectableIds.has(resourceId))),
-    [selectableIds, selected],
   );
   const safeProjectDefaults = useMemo(
     () => new Set([...projectDefaults].filter((resourceId) => selectableIds.has(resourceId))),
@@ -845,6 +859,7 @@ export default function PushResourceWorkspace({
     projectContentInventory,
     acknowledgedWarningDigests,
     projectContentRemovals,
+    projectFilesShown,
   );
   const pullHolds = pushReviewPullHolds(threadComparison);
   const warningSteps = new Set<SyncReviewStep>();

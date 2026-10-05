@@ -37,8 +37,9 @@ socket2 = "0.6"
 httparse = "1.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "multipart"] }
 
+# Inspect typed HTTP error causes; reqwest already uses this dependency.
+hyper = { version = "1", default-features = false }
 # Reusable loopback server is compiled only with test support.
-hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 
@@ -52,7 +53,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 # Exposes test-only helpers (apply/recover conversation fixtures, capture
 # helpers, BundleEngine::publish) to other crates' test suites. Enabled from
 # dev-dependencies only.
-test-support = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+test-support = ["hyper/server", "hyper/http1", "dep:hyper-util", "dep:http-body-util"]
 
 [dev-dependencies]
 # Test-only domain helpers (compiled out of production builds).

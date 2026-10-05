@@ -28,7 +28,7 @@ impl InstalledMacApp {
     /// The Codex CLI the app ships and resumes sessions with — its own copy,
     /// versioned with the app, never the one on PATH.
     pub(crate) fn bundled_cli(&self) -> PathBuf {
-        self.bundle_path.join("Contents/Resources/codex")
+        self.bundle_path.join("Contents/Resources/codex-cli/bin/codex")
     }
 }
 

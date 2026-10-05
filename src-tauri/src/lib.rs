@@ -180,6 +180,7 @@ pub fn run() {
             ));
             project_sync::config_watcher::start_connection_forwarder(app.handle().clone());
             project_sync::config_watcher::start_ignored_name_forwarder(app.handle().clone());
+            activity_log::start_cloud_diagnostic_forwarder(app.handle().clone());
             // The Feishu sign-ins this computer keeps live beside the
             // config; a launch that cannot find the state root keeps no
             // store, and every Feishu storage then reads as reconnect.

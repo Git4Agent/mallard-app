@@ -8,6 +8,7 @@
 //! (`STORE_API.md` in the service tree): the store routes carry the
 //! desktop's own keys, and the three operations a store needs, put, get and
 //! list, are the three requests here. A put is one request with no retry.
+use super::diagnostics::{report_upload, TransportCause};
 use crate::storage_core::{
     ConnectionEvidence, ConnectionHealth, ConnectionHealthCell, ConnectionState,
 };
@@ -112,6 +113,7 @@ pub struct Error {
 struct ErrorDiagnostics {
     cf_ray: Option<String>,
     transport: Option<&'static str>,
+    cause: TransportCause,
     service_reason: Option<&'static str>,
     upload: Option<UploadDiagnostics>,
 }
@@ -193,6 +195,14 @@ impl Error {
     /// The sentence for notices. Fixed per kind; validation refusals carry
     /// the service's own detail.
     pub fn message(&self) -> String {
+        self.format_message(false)
+    }
+
+    fn diagnostic_message(&self) -> String {
+        self.format_message(true)
+    }
+
+    fn format_message(&self, detailed: bool) -> String {
         let fixed = match self.kind {
             ErrorKind::Auth => "Mallard Cloud rejected the saved sign-in. Reconnect Mallard Cloud in storage settings.",
             ErrorKind::Permission => "Mallard Cloud refused this request.",
@@ -210,11 +220,38 @@ impl Error {
             ErrorKind::Integrity => "Mallard Cloud rejected the object bytes: the digest does not match.",
             ErrorKind::RateLimit => "Mallard Cloud rate limit reached. Wait and try again.",
             ErrorKind::Unreachable => "Mallard Cloud could not be reached. Check the network and try again.",
+            ErrorKind::Unknown if self.diagnostics.upload.is_some() => "The Mallard Cloud upload result is unknown. Refresh remote state, then try again later.",
             ErrorKind::Unknown => "The Mallard Cloud request result is unknown. Refresh remote state before retrying.",
             ErrorKind::Unavailable => "Mallard Cloud is temporarily unavailable. Try again shortly.",
             ErrorKind::Limit => "A Mallard Cloud response exceeded its safety limit or was malformed.",
             ErrorKind::Local => "Mallard could not prepare the Mallard Cloud request.",
         };
+        if let Some(upload) = self.diagnostics.upload.as_ref().filter(|_| !detailed) {
+            let mut facts = vec![format!("{} upload", upload.kind)];
+            if let Some(cause) = self.diagnostics.cause.summary {
+                facts.push(cause.to_owned());
+            } else if let Some(transport) = self.diagnostics.transport {
+                facts.push(
+                    match transport {
+                        "timeout" => "request timed out",
+                        "connect" => "connection failed",
+                        "body" => "upload interrupted",
+                        _ => "request failed",
+                    }
+                    .to_owned(),
+                );
+            }
+            if let Some(status) = self.status {
+                facts.push(format!("HTTP {status}"));
+            }
+            if let Some(code) = self.code {
+                facts.push(code.to_owned());
+            }
+            return match &self.detail {
+                Some(detail) => format!("{fixed} {detail} ({})", facts.join("; ")),
+                None => format!("{fixed} ({})", facts.join("; ")),
+            };
+        }
         let mut facts = vec![self.route.to_owned()];
         if let Some(status) = self.status {
             facts.push(format!("HTTP {status}"));
@@ -238,6 +275,12 @@ impl Error {
         }
         if let Some(transport) = self.diagnostics.transport {
             facts.push(format!("transport={transport}"));
+        }
+        if !self.diagnostics.cause.tags.is_empty() {
+            facts.push(format!("causes={}", self.diagnostics.cause.tags.join("/")));
+        }
+        if let Some(code) = self.diagnostics.cause.os_code {
+            facts.push(format!("os_code={code}"));
         }
         if let Some(reason) = self.diagnostics.service_reason {
             facts.push(format!("service_reason={reason}"));
@@ -870,6 +913,7 @@ impl ManagedCloudClient {
                 } else {
                     "transport"
                 });
+                error.diagnostics.cause = TransportCause::inspect(&failure);
                 return Err(error);
             }
         };
@@ -1346,6 +1390,7 @@ impl ManagedCloudClient {
                         .then(|| sha256.to_owned()),
                     elapsed: started.elapsed(),
                 });
+                report_upload(error.diagnostic_message());
                 Err(error)
             }
         }
@@ -1787,6 +1832,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_upload_diagnostics_reach_the_activity_log_without_retry() {
+        let mut diagnostics = super::super::diagnostics::upload_diagnostics();
         let (client, requests, server) = upload_response(
             503,
             json!({"error": "temporarily_unavailable", "detail": "The bytes could not be stored; retry."}),
@@ -1805,14 +1851,31 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
 
-        // The production Push command persists this same error conversion.
-        let failure: String = error.into();
+        let notice = error.message();
+        assert!(notice.contains("try again") || notice.contains("Try again"));
+        assert!(notice.contains("object upload; HTTP 503"));
+        for verbose in [
+            "sha256=",
+            "bytes=",
+            "elapsed_ms=",
+            "v1/repositories",
+            "cf_ray=",
+        ] {
+            assert!(!notice.contains(verbose), "verbose notice: {notice}");
+        }
+        // Persist the actual diagnostic event in an isolated activity log.
+        let failure = loop {
+            let message = diagnostics.try_recv().expect("upload diagnostic emitted");
+            if message.contains(&sha256) {
+                break message;
+            }
+        };
         let entry = ActivityLogEntry::new(
-            ActivityLogType::Push,
-            "error",
-            "push.failed",
-            &format!("Push failed: {failure}"),
-            Some("push-fixture".into()),
+            ActivityLogType::Storage,
+            "warning",
+            "storage.cloud_upload_diagnostic",
+            &failure,
+            None,
             ActivityLogContext::default(),
         );
         let temp = tempfile::tempdir().unwrap();
@@ -1871,6 +1934,8 @@ mod tests {
         assert!(error.diagnostics.service_reason.is_none());
         assert!(!error.message().contains("private"));
         assert!(!error.message().contains("remote-secret"));
+        assert!(!error.diagnostic_message().contains("private"));
+        assert!(!error.diagnostic_message().contains("remote-secret"));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         server.abort();
     }
@@ -1911,9 +1976,79 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Unknown);
         assert!(error.status.is_none());
-        assert!(error.message().contains("transport=connect"));
-        assert!(error.message().contains("object_kind=object"));
+        assert!(error.diagnostic_message().contains("transport=connect"));
+        assert!(error.diagnostic_message().contains("object_kind=object"));
+        assert!(error.message().contains("object upload"));
+        assert!(error.message().contains("try again later"));
         assert!(!error.message().contains(&endpoint));
+    }
+
+    #[tokio::test]
+    async fn lost_upload_response_reports_closed_connection_without_retry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let count = Arc::new(AtomicUsize::new(0));
+        let requests = count.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                // Read the complete request, then close without a response.
+                // This models a write that may have reached the server.
+                let mut received = Vec::new();
+                let mut buffer = [0; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = received.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers =
+                            String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if received.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                stream.shutdown().await.unwrap();
+            }
+        });
+        let mut diagnostics = super::super::diagnostics::upload_diagnostics();
+        let client = ManagedCloudClient::new(&endpoint, None).unwrap();
+        let bytes = Bytes::from_static(b"lost response fixture");
+        let sha256 = mallard_domain::sha256_hex(&bytes);
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.put_object("private-repository", "_objects/fixture", bytes, &sha256, 1),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        server.abort();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(error.kind, ErrorKind::Unknown);
+        assert!(error.status.is_none());
+        assert_eq!(error.message(), "The Mallard Cloud upload result is unknown. Refresh remote state, then try again later. (object upload; connection closed)");
+        let diagnostic = loop {
+            let message = diagnostics.try_recv().expect("upload diagnostic emitted");
+            if message.contains(&sha256) {
+                break message;
+            }
+        };
+        assert!(diagnostic.contains("transport=request"));
+        assert!(diagnostic.contains("causes=http_incomplete_message"));
+        assert!(diagnostic.contains("bytes=21"));
+        assert!(!diagnostic.contains(&endpoint));
+        assert!(!diagnostic.contains("private-repository"));
+        assert!(!diagnostic.contains("lost response fixture"));
     }
 
     #[test]

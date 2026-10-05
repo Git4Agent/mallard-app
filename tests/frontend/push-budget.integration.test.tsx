@@ -7,6 +7,7 @@ import PushResourceWorkspace, {
   pushBlockerPillLabel,
   pushBlockerSentence,
   pushBudgetTotal,
+  pushProjectFileWork,
   pushReviewDisabledReason,
   recommendedPushSelection,
   sanitizePushSelection,
@@ -975,6 +976,90 @@ test("a flagged file stops Push with a pill at the button, and both Push buttons
   const push = reviewedFooter.slice(reviewedFooter.lastIndexOf("<button", reviewedFooter.indexOf("sync-pull-apply-button")));
   assert.doesNotMatch(push.slice(0, push.indexOf(">")), /disabled=""/);
 });
+
+test("unchanged warned files do not block a session push without file capture", () => {
+  const files = [flaggedFile("run.sh", "executable", "e".repeat(64)), flaggedFile(".env.local", "possible_secret", "s".repeat(64))];
+  const inventory: ProjectContentInventory = {
+    ...projectFiles,
+    entries: files.map(({ inventoryEntry }) => ({
+      ...inventoryEntry,
+      state: "synced",
+      storage_present: true,
+      selected_in_recipe: true,
+      undecided: false,
+    })),
+  };
+  const selected = new Set([fits.resource_id, ...files.map(({ descriptor }) => descriptor.resource_id)]);
+  for (const projectFilesShown of [false, true]) {
+    assert.equal(pushProjectFileWork(inventory, selected, new Set(), projectFilesShown), null);
+    assert.equal(pushReviewDisabledReason({
+      selected, threadComparison: comparison(), projectContentInventory: inventory,
+      projectFilesShown, deletionApproved: true,
+    }), null);
+    const html = renderToStaticMarkup(
+      <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled={false}
+        resources={[conversationResource(fits), ...files.map(({ descriptor }) => descriptor)]}
+        selected={selected} projectDefaults={selected} busy={false} threadComparison={comparison()}
+        projectContentInventory={inventory} projectContentScanned projectFilesShown={projectFilesShown}
+        showProjectFiles activeStep="project_files" onToggle={() => undefined}
+        onToggleProjectContentWarning={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+    );
+    assert.match(html, /aria-label="Project files, 0 selected"/);
+    assert.doesNotMatch(html, /sync-review-blocker-pill|Mark reviewed/);
+    assert.match(html, /sync-pull-apply-button"(?![^>]*disabled)/);
+  }
+});
+
+for (const work of ["send", "remember"] as const) {
+  test(`${work} file work exposes unchanged warned files until and after approval`, () => {
+    const run = flaggedFile("run.sh", "executable", "e".repeat(64));
+    const env = flaggedFile(".env.local", "possible_secret", "s".repeat(64));
+    const fresh = flaggedFile("notes.md", "", "");
+    const inventory: ProjectContentInventory = {
+      ...projectFiles,
+      entries: [run, env].map(({ inventoryEntry }): ProjectContentInventory["entries"][number] => ({
+        ...inventoryEntry,
+        state: "synced",
+        storage_present: true,
+        selected_in_recipe: true,
+        undecided: false,
+      })).concat([fresh.inventoryEntry]),
+    };
+    const selected = new Set([fits.resource_id, run.descriptor.resource_id, env.descriptor.resource_id]);
+    if (work === "send") selected.add(fresh.descriptor.resource_id);
+    assert.equal(pushProjectFileWork(inventory, selected, new Set(), true), work);
+    for (const approvedCount of [0, 1, 2]) {
+      const acknowledged = new Set([run.inventoryEntry.warning_digest, env.inventoryEntry.warning_digest].slice(0, approvedCount));
+      const reason = pushReviewDisabledReason({
+        selected, threadComparison: comparison(), projectContentInventory: inventory,
+        projectFilesShown: true, acknowledgedWarningDigests: acknowledged, deletionApproved: true,
+      });
+      assert.equal(reason, approvedCount === 0
+        ? "2 files need review — mark them reviewed or exclude them."
+        : approvedCount === 1 ? ".env.local may hold a secret — mark it reviewed or exclude it." : null);
+      const html = renderToStaticMarkup(
+        <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled
+          resources={[conversationResource(fits), run.descriptor, env.descriptor, fresh.descriptor]}
+          selected={selected} projectDefaults={selected} busy={false} threadComparison={comparison()}
+          projectContentInventory={inventory} projectContentScanned projectFilesShown
+          acknowledgedWarningDigests={acknowledged} showProjectFiles activeStep="project_files"
+          onToggle={() => undefined} onToggleProjectContentWarning={() => undefined}
+          onClose={() => undefined} onPush={() => undefined} />,
+      );
+      assert.match(html, /data-resource-id="project:file:run\.sh"/);
+      assert.match(html, /data-resource-id="project:file:\.env\.local"/);
+      assert.equal((html.match(/aria-label="Reviewed:/g) ?? []).length, 2);
+      if (approvedCount < 2) {
+        assert.match(html, /Mark reviewed/);
+        assert.match(html, /sync-review-blocker-pill/);
+        assert.match(html, /sync-pull-apply-button" disabled=""/);
+      } else {
+        assert.doesNotMatch(html, /sync-review-blocker-pill/);
+        assert.match(html, /sync-pull-apply-button"(?![^>]*disabled)/);
+      }
+    }
+  });
+}
 
 test("the blocker pill opens its card: the step switches and the files page scrolls to it and hands it focus", () => {
   const workspace = readFileSync("src/components/project-sync/PushResourceWorkspace.tsx", "utf8");

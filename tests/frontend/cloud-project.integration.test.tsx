@@ -9,6 +9,7 @@ import CloudProjectSource, {
   clonesFrom,
   cloneFailureText,
   connectExistingFolder,
+  defaultAgents,
   defaultProjectParent,
   destinationVerdict,
   joinFolder,
@@ -94,6 +95,51 @@ const profile = (profileId: string, provider: string, dir: string): ProviderProf
   revision: 1, created_at: 0, updated_at: 0, available: true, readable: true, writable: true, used_by_projects: [], error: null,
 });
 const profiles = [profile("p-codex", "codex", ".codex"), profile("p-claude", "claude", ".claude")];
+
+test("cloud setup prefers each resolved default home among several profiles, regardless of name or order", () => {
+  const defaults = profiles.map((item) => ({
+    ...item,
+    display_name: "Renamed profile",
+    canonical_path: `/resolved/${item.provider}`,
+  }));
+  const custom = providers.map((item) => profile(`custom-${item.key}`, item.key, `${item.key}-custom`));
+  const paths = { codex: "/resolved/codex", claude: "/resolved/claude" };
+  for (const candidates of [[...custom, ...defaults], [...defaults, ...custom]]) {
+    assert.deepEqual(defaultAgents(providers, candidates, paths, { enabled: {}, chosen: {} }), {
+      enabled: { codex: true, claude: true },
+      chosen: { codex: "p-codex", claude: "p-claude" },
+    });
+  }
+});
+
+test("cloud setup excludes unusable defaults and only selects an unambiguous remaining profile", () => {
+  const paths = { codex: `${HOME}/.codex`, claude: `${HOME}/.claude` };
+  const unavailable = profiles.map((item) => ({ ...item, available: false }));
+  const unreadable = profiles.map((item) => ({ ...item, readable: false }));
+  const custom = providers.map((item) => profile(`custom-${item.key}`, item.key, `${item.key}-custom`));
+  for (const unusable of [unavailable, unreadable]) {
+    assert.deepEqual(defaultAgents(providers, unusable, paths, { enabled: {}, chosen: {} }), {
+      enabled: { codex: false, claude: false }, chosen: { codex: "", claude: "" },
+    });
+    assert.deepEqual(defaultAgents(providers, [...unusable, ...custom], paths, { enabled: {}, chosen: {} }).chosen, {
+      codex: "custom-codex", claude: "custom-claude",
+    });
+  }
+  assert.deepEqual(defaultAgents(providers, [...profiles, ...custom], {}, { enabled: {}, chosen: {} }).chosen, {
+    codex: "", claude: "",
+  });
+});
+
+test("cloud setup preserves manual selections, cleared selections, and disabled agents when defaults resolve", () => {
+  const custom = providers.map((item) => profile(`custom-${item.key}`, item.key, `${item.key}-custom`));
+  const choices = { enabled: { claude: false }, chosen: { codex: "custom-codex", claude: "" } };
+  const resolvedPaths: Record<string, string>[] = [{}, { codex: `${HOME}/.codex`, claude: `${HOME}/.claude` }];
+  for (const paths of resolvedPaths) {
+    assert.deepEqual(defaultAgents(providers, [...profiles, ...custom], paths, choices), {
+      enabled: { codex: true, claude: false }, chosen: choices.chosen,
+    });
+  }
+});
 
 function renderSource(storages: StorageSummary[], initialStorageId: string | null = null) {
   return renderToStaticMarkup(

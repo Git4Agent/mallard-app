@@ -589,7 +589,7 @@ mod tests {
         };
         // Build the shipped layout independently of the resolver so a wrong
         // bundled path cannot also silently change this test's fixture.
-        let bundled_cli = app.bundle_path.join("Contents/Resources/codex");
+        let bundled_cli = app.bundle_path.join("Contents/Resources/codex-cli/bin/codex");
         let home = temp.path().join("codex-home");
         std::fs::create_dir_all(&home).unwrap();
         let before = home_entries(&home);
