@@ -19,6 +19,8 @@ interface Props {
 }
 
 export default function StorageProviderPicker({ providers, busy, appActions, onChoose, onCancel }: Props) {
+  // Feishu is temporarily hidden from storage setup.
+  const visibleProviders = providers.filter((provider) => provider.key !== "feishu");
   return (
     <>
       <SyncPathBar
@@ -40,7 +42,7 @@ export default function StorageProviderPicker({ providers, busy, appActions, onC
         ariaLabel="New storage path"
       />
       <main className="sync-main sync-project-links-page sync-landing-page">
-        {providers.length === 0 ? (
+        {visibleProviders.length === 0 ? (
           <section className="landing-picker landing-picker-empty" aria-labelledby="landing-picker-title">
             <span className="landing-picker-mark" aria-hidden="true">
               <img src="/mallard-logo-duck.svg" alt="" />
@@ -55,7 +57,7 @@ export default function StorageProviderPicker({ providers, busy, appActions, onC
               <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
             </div>
             <ul className="landing-picker-grid">
-              {providers.map((provider) => (
+              {visibleProviders.map((provider) => (
                 <li key={provider.key}>
                   <button
                     type="button"

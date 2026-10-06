@@ -24,7 +24,7 @@ import { cloudPinMoved } from "../managed-cloud/managedCloudLink";
  * | --- | --- | --- | --- |
  * | gone, being deleted | any | | none: the workspace's status notice speaks |
  * | another repository is read | any | | Created again |
- * | the link's repository | replaced | the public version | Draft discarded: Mallard Cloud holds public version N |
+ * | the link's repository | replaced | the latest version | Draft discarded: Mallard Cloud holds version N |
  * | the link's repository | replaced | any other | Draft discarded and pushed again |
  * | the link's repository | missing | | Draft discarded: Push creates a new draft |
  * | the link's repository | displaced | | as on any storage |
@@ -63,13 +63,14 @@ export function clearedStorageNotice(
     if (continuity.state === "remote_missing") {
       return { key: "storage-cleared", severity: "warning", title: "Draft discarded", message: "— Push creates a new draft." };
     }
-    if (cloud.publication?.state === "matches_published") {
-      const version = cloud.publication.public_revision;
+    // A discard returns the draft to the latest version.
+    const version = cloud.publication?.draft_ahead === 0 ? cloud.publication.latest_version : null;
+    if (version !== null) {
       return {
         key: "storage-cleared",
         severity: "warning",
         title: "Draft discarded",
-        message: `— Mallard Cloud holds ${version == null ? "the public version" : `public version ${version}`}.${pullFirst}`,
+        message: `— Mallard Cloud holds version ${version}.${pullFirst}`,
       };
     }
     return {

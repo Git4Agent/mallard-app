@@ -1,4 +1,4 @@
-import type { ManagedCloudDiscardedDraft, ManagedCloudLink, ManagedCloudListingPage, ManagedCloudPublicSort } from "../managed-cloud/types";
+import type { ManagedCloudDiscardedDraft, ManagedCloudListingPage, ManagedCloudPublicSort, ManagedCloudPublishedVersion } from "../managed-cloud/types";
 import { listen } from "@tauri-apps/api/event";
 import { Channel, invoke } from "../../ipc";
 import type {
@@ -340,13 +340,13 @@ export const projectSyncApi = {
   },
   cancelManagedCloudSetup: (draftId: string, expectedRevision: number) =>
     invoke<void>("cancel_managed_cloud_setup", { draftId, expectedRevision }),
-  /** The website page and release state of a project on a Mallard Cloud
-   *  storage; null when the storage is not Mallard Cloud or nothing was
-   *  pushed yet. */
-  requestManagedCloudRelease: (localProjectId: string, storageId: string, expectedRepositoryRevision: number) =>
-    invoke<ManagedCloudLink>("request_managed_cloud_release", { localProjectId, storageId, expectedRepositoryRevision }),
-  /** The Owner's discard of a draft over a public version: every push after
-   *  the public version is removed from Mallard Cloud. One request; nothing
+  /** Publish version: the draft in Mallard Cloud is frozen as the next
+   *  version, for the team, under an optional name. Nothing becomes public,
+   *  and nothing on this computer is read, written or deleted. */
+  publishManagedCloudVersion: (localProjectId: string, storageId: string, name: string | null) =>
+    invoke<ManagedCloudPublishedVersion>("publish_managed_cloud_version", { localProjectId, storageId, name }),
+  /** The Owner's discard of a draft past the latest version: every push
+   *  after that version is removed from Mallard Cloud. One request; nothing
    *  on this computer is read, written or deleted. */
   discardManagedCloudDraft: (localProjectId: string, storageId: string, expectedRepositoryRevision: number) =>
     invoke<ManagedCloudDiscardedDraft>("discard_managed_cloud_draft", { localProjectId, storageId, expectedRepositoryRevision }),

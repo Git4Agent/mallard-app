@@ -443,6 +443,13 @@ publication, restore apply, and conversation materialization. It
 prevents two individually valid operations from interleaving across config,
 provider files, and cloud state. The guard explicitly unlocks on drop.
 
+Readouts do not take it. The Files scan (`inspect_project_files`) and the
+push destination status read one project state snapshot under
+`persistence.lock`, do their work without any lock, read the snapshot again,
+and refuse their result when it moved. A Mallard Cloud pin set from that
+snapshot carries the config revision, so a readout's pin never replaces one a
+later Push, Pull, or link save set.
+
 The activity log has its own `_activity.lock`. A local-folder bundle store has
 a separate `.mallard/.storage.lock`; that lock protects the portable storage
 folder, not `~/.mallard`. Library documents use `locks/catalog-state.lock`,

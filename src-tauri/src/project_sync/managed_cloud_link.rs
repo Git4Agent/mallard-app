@@ -1,22 +1,19 @@
 //! The website bridge for a project linked to a Mallard Cloud storage: the
-//! repository's page and where its release stands, read from the service
-//! on demand, the two actions the desktop offers, a release request and
-//! the Owner's discard of a draft over a public version, and the reads
-//! that let a project be connected to a repository by its website address:
-//! the account's repositories, one address resolved, and one invitation
-//! code entered.
+//! two actions the desktop offers on its repository, Publish version and
+//! the Owner's discard of the draft, and the reads that let a project be
+//! connected to a repository by its website address: the account's
+//! repositories, one address resolved, and one invitation code entered.
 use super::service::repository;
-use mallard_domain::{sha256_hex, LocalProjectId, StorageId};
+use mallard_domain::{sha256_hex, BundleId, LocalProjectId, Mainline, RecordName, StorageId};
 use mallard_infrastructure::managed_cloud::address::{parse_repository_address, AddressError};
 use mallard_infrastructure::managed_cloud::client::{
-    DiscardedDraft, ManagedCloudClient, PublicFilter, PublicSort, RepositoryListing,
-    RepositorySummary,
+    DiscardedDraft, ManagedCloudClient, PublicFilter, PublicSort, PublishVersion,
+    RepositoryListing, RepositorySummary,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
+use mallard_infrastructure::storage_core::publication::{RecordStream, MAX_LISTED_RECORDS};
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
 use serde::Serialize;
-
-use mallard_infrastructure::managed_cloud::client::ManagedCloudLink;
 
 /// How a cloud repository's Git remote compares with the local project's.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -355,6 +352,8 @@ pub async fn accept_managed_cloud_invitation(
 struct Target {
     client: ManagedCloudClient,
     repository_id: String,
+    /// The project's bundle, whose record stream the repository holds.
+    bundle_id: BundleId,
 }
 
 /// The repository a link's action names: the link's pin, exactly. `None`
@@ -389,30 +388,114 @@ fn target(
             .managed_cloud_repository_id
             .clone()
             .ok_or("Cloud link has no repository ID. Reconnect the repository.")?,
+        bundle_id: link.bundle_id.clone(),
     }))
 }
 
-/// Ask the Owner (and then Super Admin) to make the current private
-/// snapshot public. Names the repository revision the link showed.
-#[tauri::command]
-pub async fn request_managed_cloud_release(
-    local_project_id: LocalProjectId,
-    storage_id: StorageId,
-    expected_repository_revision: u64,
-) -> Result<ManagedCloudLink, String> {
-    let Some(target) = target(&repository()?, &local_project_id, &storage_id)? else {
+/// What Publish answered: the version the draft was frozen as.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedCloudPublishedVersion {
+    pub repository_id: String,
+    pub version: u64,
+}
+
+/// The service refuses a longer name.
+const VERSION_NAME_CHARS: usize = 80;
+
+/// The draft of a repository as one listing of the project's stream shows
+/// it: the selected record, and the repository revision the listing carried.
+async fn listed_draft(target: &Target) -> Result<(RecordName, u64), String> {
+    let stream = RecordStream::project(&target.bundle_id)?;
+    let prefix = stream.prefix().as_str();
+    let mut names = Vec::new();
+    let mut revision = None;
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = target
+            .client
+            .list_keys(&target.repository_id, prefix, cursor.as_deref())
+            .await?;
+        if revision.is_none() {
+            revision = page.link.map(|link| link.repository_revision);
+        }
+        names.extend(page.keys.iter().filter_map(|key| {
+            let name = key.strip_prefix(prefix)?.strip_prefix('/')?;
+            RecordName::parse(name)
+        }));
+        if names.len() > MAX_LISTED_RECORDS {
+            return Err(
+                "publication listing exceeds its object limit; the view is incomplete".to_string(),
+            );
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let revision = revision.ok_or("Mallard Cloud omitted the repository revision")?;
+    let draft = Mainline::select(names)
+        .selected()
+        .cloned()
+        .ok_or("Nothing is pushed to Mallard Cloud yet.")?;
+    Ok((draft, revision))
+}
+
+/// Publish: freeze the draft as the next version, for the team. One listing
+/// of the project's stream gives the draft and the repository revision; one
+/// request names both, and is never sent again. Nothing becomes public, and
+/// nothing on this computer is read, written or deleted.
+pub(super) async fn publish_version(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    name: Option<&str>,
+) -> Result<ManagedCloudPublishedVersion, String> {
+    let name = name.map(str::trim).filter(|name| !name.is_empty());
+    if name.is_some_and(|name| name.chars().count() > VERSION_NAME_CHARS) {
+        return Err(format!(
+            "A version's name holds at most {VERSION_NAME_CHARS} characters."
+        ));
+    }
+    let Some(target) = target(repository, local_project_id, storage_id)? else {
         return Err("This storage is not Mallard Cloud.".to_string());
     };
-    target
+    let (draft, expected_repository_revision) = listed_draft(&target).await?;
+    let published = target
         .client
-        .create_release_request(&target.repository_id, expected_repository_revision)
+        .publish_version(
+            &target.repository_id,
+            &PublishVersion {
+                commit_id: draft.commit_id(),
+                name,
+                expected_repository_revision,
+            },
+        )
         .await?;
-    let summary = target.client.get_repository(&target.repository_id).await?;
-    Ok(target.client.link_from_summary(&summary))
+    Ok(ManagedCloudPublishedVersion {
+        repository_id: target.repository_id,
+        version: published.version,
+    })
+}
+
+/// Publish version, from the Cloud chip's panel. Names the repository by
+/// the link's pin.
+#[tauri::command]
+pub async fn publish_managed_cloud_version(
+    local_project_id: LocalProjectId,
+    storage_id: StorageId,
+    name: Option<String>,
+) -> Result<ManagedCloudPublishedVersion, String> {
+    publish_version(
+        &repository()?,
+        &local_project_id,
+        &storage_id,
+        name.as_deref(),
+    )
+    .await
 }
 
 /// One request to the service, which does the removing: every push after
-/// the public version goes from Mallard Cloud, and the draft is the public
+/// the latest version goes from Mallard Cloud, and the draft is that
 /// version again. Nothing on this computer is read, written or deleted; the
 /// link's records of the removed pushes are stale from here on and read as
 /// absent at the next comparison.
@@ -431,7 +514,7 @@ pub(super) async fn discard_draft(
         .await?)
 }
 
-/// The Owner's discard of a draft over a public version, confirmed in the
+/// The Owner's discard of a draft past the latest version, confirmed in the
 /// workspace. Names the repository by the link's pin and the repository
 /// revision the status showed.
 #[tauri::command]
@@ -453,25 +536,15 @@ pub async fn discard_managed_cloud_draft(
 mod tests {
     use super::*;
 
-    fn summary(
-        open: Option<&str>,
-        public_commit: Option<&str>,
-        registration_only: bool,
-    ) -> RepositorySummary {
-        let head = |commit: &str| {
-            serde_json::json!({
-                "scope": "private", "revision": 3, "commit_id": commit, "manifest_sha256": "a".repeat(64),
-                "manifest_size": 10, "updated_at": 500, "kind": "project", "bundle_id": "b".repeat(32)
-            })
-        };
+    fn summary() -> RepositorySummary {
         serde_json::from_value(serde_json::json!({
             "id": "repo_1", "owner": {"user_id": "user_1", "github_login": "octocat"}, "name": "Project", "repository_class": "git_project", "bundle_id": "b".repeat(32),
-            "revision": 7, "state": "active", "visibility": if public_commit.is_some() { "public" } else { "private" }, "writer": true,
-            "private_revision": 3, "public_revision": 1,
-            "private_head": head("commit-aaaaaaaa"),
-            "public_head": public_commit.map(head),
-            "private_summary": {"display_name": "Project", "kind": "project", "revision": 3, "updated_at": 500, "resources": 1, "files": 1, "registration_only": registration_only, "providers": ["codex"]},
-            "open_release_request": open.map(|state| serde_json::json!({"id": "rel_1", "state": state, "requested_by": "user_2", "created_at": 600})),
+            "revision": 7, "state": "active", "visibility": "private", "writer": true, "public_version": null,
+            "private_head": {
+                "scope": "private", "revision": 3, "commit_id": "commit-aaaaaaaa", "manifest_sha256": "a".repeat(64),
+                "manifest_size": 10, "updated_at": 500, "kind": "project", "bundle_id": "b".repeat(32)
+            },
+            "private_summary": {"display_name": "Project", "kind": "project", "revision": 3, "updated_at": 500, "resources": 1, "files": 1, "registration_only": false, "providers": ["codex"]},
         }))
         .unwrap()
     }
@@ -480,8 +553,8 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "id": "repo_2", "owner": {"user_id": "user_9", "github_login": "rikaqu0223-arch"}, "name": "ledger-api",
             "repository_class": "git_project", "bundle_id": "c".repeat(32), "repository_fingerprint": null, "github_url": github_url,
-            "revision": 3, "state": "active", "visibility": "public", "private_revision": 0, "public_revision": 2, "role": null, "writer": false,
-            "public_head": {"scope": "public", "revision": 2, "commit_id": "commit-pub", "manifest_sha256": "a".repeat(64), "manifest_size": 10, "updated_at": 900, "kind": "project", "bundle_id": "c".repeat(32)},
+            "revision": 3, "state": "active", "visibility": "public", "public_version": 2, "role": null, "writer": false,
+            "public_head": {"scope": "version", "version": 2, "revision": 2, "commit_id": "commit-pub", "manifest_sha256": "a".repeat(64), "manifest_size": 10, "updated_at": 900, "kind": "project", "bundle_id": "c".repeat(32)},
             "public_summary": {"display_name": "ledger-api", "kind": "project", "revision": 2, "updated_at": 900, "resources": 1, "files": 1, "registration_only": false, "providers": []},
         }))
         .unwrap()
@@ -490,7 +563,7 @@ mod tests {
     #[test]
     fn a_repository_is_described_by_address_and_remote_match() {
         let origin = "https://mallard-ai.com";
-        let mine = summary(None, None, false);
+        let mine = summary();
         let local = "a".repeat(64);
         let described = describe_repository(origin, &mine, None);
         assert_eq!(described.address, "octocat/Project");
@@ -513,7 +586,7 @@ mod tests {
         );
         let with_fingerprint = |fingerprint: &str| RepositorySummary {
             repository_fingerprint: Some(fingerprint.to_owned()),
-            ..summary(None, None, false)
+            ..summary()
         };
         assert_eq!(
             describe_repository(origin, &with_fingerprint(&local), Some(&local)).git_remote,

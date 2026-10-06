@@ -201,6 +201,8 @@ export function orderStorages<T extends { provider: string; name: string }>(
 export function storageDoors(providers: readonly StorageProviderDescriptor[]): StorageDoor[] {
   const doors: StorageDoor[] = [];
   for (const provider of providers) {
+    // Feishu is temporarily hidden from storage setup.
+    if (provider.key === "feishu") continue;
     if (doors.some((door) => door.key === provider.key)) continue;
     doors.push({
       key: provider.key,

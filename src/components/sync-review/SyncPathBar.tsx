@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
-import Notice from "../notice/Notice";
+import Notice, { NoticeZone, type NoticeTiming, type NoticeZoneProps } from "../notice/Notice";
 import { menuOptions, moveMenuFocus } from "./menuKeyboard";
 import TopLayer from "./TopLayer";
 import { useDebugPopoverPlacement } from "./debugPopoverPlacement";
@@ -110,6 +110,8 @@ interface Props {
   /** Pull and Push: rendered by the caller, which owns their state. */
   actions?: ReactNode;
   ariaLabel?: string;
+  /** Page messages join the shell's single banner below the bar. */
+  notices?: Pick<NoticeZoneProps, "items"> & NoticeTiming;
 }
 
 // Inert rows stay in the roving order on purpose: their reason line is part
@@ -429,11 +431,12 @@ export function PathBarMenu({
 /* The row under the bar. The shell's notice zone is one box for the whole
  * workspace, but the bar belongs to the page that renders it, so the shell
  * cannot put the zone between the bar and the page on its own. It hands the
- * zone down through this context and the bar renders it right after its own
+ * messages down through this context and the bar renders them with page
+ * messages in one zone right after its own
  * row — where you are, then what happened — in the DOM as well as on screen,
  * so the tab sequence reads in the same order the eye does. A screen with no
  * path bar renders the zone under the shell's own titlebar instead. */
-export const PathBarBelow = createContext<ReactNode>(null);
+export const PathBarBelow = createContext<NoticeZoneProps | null>(null);
 
 /* The bar's one open menu, shared with the popovers a caller puts among the
  * actions: a crumb menu and a popover are never open together, and both close
@@ -574,6 +577,7 @@ export default function SyncPathBar({
   openMenuRequest,
   actions,
   ariaLabel = "Workspace path",
+  notices,
 }: Props) {
   const baseId = useId().replace(/[^a-zA-Z0-9_-]/g, "-");
   const [openMenu, setOpenMenu] = useState<string | null>(null);
@@ -666,6 +670,12 @@ export default function SyncPathBar({
   const overflowOpen = openMenu === "overflow";
   const overflowMenuId = `${baseId}-overflow`;
   const below = useContext(PathBarBelow);
+  const noticeGroups = [below, notices].filter((group) => group && group.items.length > 0);
+  const noticeTiming: NoticeTiming = noticeGroups.some((group) => group?.timing === "blocking")
+    ? { timing: "blocking" }
+    : noticeGroups.some((group) => group?.timing === "progress")
+      ? { timing: "progress" }
+      : { timing: "standing", label: "Messages from Mallard" };
 
   /* Stable, so a popover's mount effect runs once rather than every render. */
   const popoverControls = useRef({
@@ -877,7 +887,12 @@ export default function SyncPathBar({
         )}
       </div>
     </header>
-    {below}
+    <NoticeZone
+      items={[...(below?.items ?? []), ...(notices?.items ?? [])]}
+      subject="messages from Mallard"
+      className="sync-backend-banner"
+      {...noticeTiming}
+    />
     </PathBarMenus.Provider>
   );
 }

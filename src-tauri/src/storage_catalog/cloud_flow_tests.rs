@@ -210,19 +210,7 @@ async fn cloud_pet_connection_preview_pull_release_and_discard_share_the_reposit
         .cloud_status(&alice_scope, &alice.storage.id, resource, id)
         .await
         .unwrap();
-    assert_eq!(
-        initial.link.as_ref().unwrap().release,
-        ReleaseState::Private
-    );
-    let revision = initial.link.unwrap().repository_revision;
-    assert!(alice_service
-        .request_cloud_release(&alice_scope, &alice.storage.id, resource, id, revision + 1)
-        .await
-        .is_err());
-    alice_service
-        .request_cloud_release(&alice_scope, &alice.storage.id, resource, id, revision)
-        .await
-        .unwrap();
+    assert_eq!(initial.link.unwrap().release, ReleaseState::Private);
     let invitation = {
         let mut state = stub.state.lock().unwrap();
         let owner = state.repositories[id].owner_id.clone();

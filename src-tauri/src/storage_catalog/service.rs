@@ -6511,7 +6511,7 @@ mod tests {
                     1,
                     BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
                         service_origin: stub.endpoint.clone(),
-                        account_id: user.id.clone(),
+                        github_user_id: user.github_user_id.clone(),
                         account_login: login.to_string(),
                     })
                     .unwrap(),
@@ -7023,7 +7023,7 @@ mod tests {
         ///
         /// ```sh
         /// MALLARD_LIVE_CLOUD_ORIGIN=http://localhost:8787 MALLARD_LIVE_CLOUD_TOKEN=… \
-        /// MALLARD_LIVE_CLOUD_ACCOUNT_ID=usr_… MALLARD_LIVE_CLOUD_LOGIN=octocat \
+        /// MALLARD_LIVE_CLOUD_GITHUB_USER_ID=123 MALLARD_LIVE_CLOUD_LOGIN=octocat \
         ///   cargo test --manifest-path src-tauri/Cargo.toml --lib managed_cloud_live_library -- --ignored --nocapture
         /// ```
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7031,7 +7031,7 @@ mod tests {
         async fn managed_cloud_live_library_round_trip() {
             let origin = std::env::var("MALLARD_LIVE_CLOUD_ORIGIN").unwrap();
             let token = std::env::var("MALLARD_LIVE_CLOUD_TOKEN").unwrap();
-            let account_id = std::env::var("MALLARD_LIVE_CLOUD_ACCOUNT_ID").unwrap();
+            let github_user_id = std::env::var("MALLARD_LIVE_CLOUD_GITHUB_USER_ID").unwrap();
             let login = std::env::var("MALLARD_LIVE_CLOUD_LOGIN").unwrap();
             let root = tempfile::tempdir().unwrap();
             let stamp = now_secs();
@@ -7067,7 +7067,7 @@ mod tests {
                         1,
                         BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
                             service_origin: origin.clone(),
-                            account_id: account_id.clone(),
+                            github_user_id: github_user_id.clone(),
                             account_login: login.clone(),
                         })
                         .unwrap(),

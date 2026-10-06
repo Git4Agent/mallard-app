@@ -4,7 +4,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import Icon, { type IconName } from "../src/components/Icons";
 import ManagedCloudChip from "../src/components/managed-cloud/ManagedCloudChip";
 import type { ManagedCloudStatus } from "../src/components/managed-cloud/types";
-import Notice, { NoticeZone, type NoticeItem } from "../src/components/notice/Notice";
+import Notice, { NoticeZone, type NoticeItem, type NoticeZoneProps } from "../src/components/notice/Notice";
 import NewProjectFolderStep from "../src/components/project-sync/NewProjectFolderStep";
 import ProjectSidebar from "../src/components/project-sync/ProjectSidebar";
 import RestorePlanView from "../src/components/project-sync/RestorePlanView";
@@ -549,9 +549,9 @@ const MOCHI_STATUS: ManagedCloudStatus = {
   state: "ready",
   link: {
     visibility: "public", can_pull: true, can_push: false, repository_id: MOCHI.repository_id, website_url: MOCHI.website_url,
-    owner_login: "maya", name: "Mochi", release: { kind: "public" }, repository_revision: 5, can_request_release: false, role: null,
+    owner_login: "maya", name: "Mochi", release: { kind: "public" }, repository_revision: 5, can_request_release: false, can_publish_version: false, role: null,
   },
-  publication: { state: "matches_published", private_revision: 5, public_revision: 5 },
+  publication: { draft: "pushed", latest_version: 5, next_version: 6, draft_ahead: 0, public_version: 5, review_version: null },
   message: null,
 };
 
@@ -746,8 +746,8 @@ function Sidebar({ storages, activeProjectId, activeCatalogScopeId, addingProjec
 }
 
 /** The shell's zone under the bar, as the app places it. */
-function Zone({ items }: { items: NoticeItem[] }) {
-  return <NoticeZone items={items} subject="messages from Mallard" className="sync-backend-banner" timing="progress" />;
+function zoneProps(items: NoticeItem[]): NoticeZoneProps {
+  return { items, subject: "messages from Mallard", className: "sync-backend-banner", timing: "progress" };
 }
 
 const STORAGE_CRUMB: PathBarCrumb = { id: "storage", label: "Mallard Cloud", icon: "storage-mallard", tone: "root" };
@@ -800,7 +800,7 @@ function Titlebar({ icon, title }: { icon: IconName; title: string }) {
 }
 
 /** The project's Activity, where the link arrives: its bar is real, its body is not drawn. */
-function ProjectPage({ zone, summary, pull }: { zone: ReactNode; summary: LocalProjectSummary; pull: number }) {
+function ProjectPage({ zone, summary, pull }: { zone: NoticeZoneProps; summary: LocalProjectSummary; pull: number }) {
   return (
     <PathBarBelow.Provider value={zone}>
       <SyncPathBar crumbs={[STORAGE_CRUMB, projectCrumb(summary)]} actions={<ProjectActions pull={pull} push={0} />} ariaLabel={`${summary.display_name} path`} />
@@ -816,7 +816,7 @@ function ProjectPage({ zone, summary, pull }: { zone: ReactNode; summary: LocalP
 
 /** The shipped Pull review in the project's workspace: the storage card opens into it. */
 function ReviewPage({ zone, summary, review, pulling, onApply, onBack }: {
-  zone: ReactNode;
+  zone: NoticeZoneProps;
   summary: LocalProjectSummary;
   review: PullReview;
   pulling: boolean;
@@ -868,7 +868,7 @@ function ReviewPage({ zone, summary, review, pulling, onApply, onBack }: {
 }
 
 /** The session's page after the Pull: the shipped page on the stand-in backend. */
-function SessionPage({ zone, summary, session }: { zone: ReactNode; summary: LocalProjectSummary; session: SessionFixture }) {
+function SessionPage({ zone, summary, session }: { zone: NoticeZoneProps; summary: LocalProjectSummary; session: SessionFixture }) {
   return (
     <PathBarBelow.Provider value={zone}>
       <SyncPathBar
@@ -930,11 +930,11 @@ function Driven({ address, door, children }: { address: string; door?: boolean; 
   return <div ref={ref} style={{ display: "contents" }}>{children}</div>;
 }
 
-function NewProjectPage({ zone, storages, subject }: { zone: ReactNode; storages: StorageSummary[]; subject: string }) {
+function NewProjectPage({ zone, storages, subject }: { zone: NoticeZoneProps; storages: StorageSummary[]; subject: string }) {
   return (
     <>
       <Titlebar icon="folder" title="New project" />
-      {zone}
+      <NoticeZone {...zone} />
       <main className="sync-main sync-project-links-page sync-project-setup-page">
         <section className="profile-links-section sync-project-overview" aria-label="Project setup">
           <Driven address={subject}>
@@ -961,11 +961,11 @@ function NewProjectPage({ zone, storages, subject }: { zone: ReactNode; storages
   );
 }
 
-function AddCatalogPage({ zone, subject, onAdded }: { zone: ReactNode; subject: string; onAdded: () => void }) {
+function AddCatalogPage({ zone, subject, onAdded }: { zone: NoticeZoneProps; subject: string; onAdded: () => void }) {
   return (
     <>
       <Titlebar icon="catalog" title="Add Catalog resource" />
-      {zone}
+      <NoticeZone {...zone} />
       <Driven address={subject} door>
         <AddCatalogScopeWorkspace
           workflowEpoch={1}
@@ -991,7 +991,7 @@ const CONTENT_CLASS = "sync-inline-action-content sync-push-resource-content syn
 
 /** The Catalog item's page: its bar with the Cloud chip, and its one-item Pull review, drawn in the review's own classes. */
 function CatalogItemPage({ zone, item, reviewOpen, pulling, onApply, onBack }: {
-  zone: ReactNode;
+  zone: NoticeZoneProps;
   item: CatalogCloudRepository;
   reviewOpen: boolean;
   pulling: boolean;
@@ -1003,7 +1003,7 @@ function CatalogItemPage({ zone, item, reviewOpen, pulling, onApply, onBack }: {
   const leaf: PathBarCrumb = { id: "item", label: item.display_name };
   const actions = (
     <>
-      <ManagedCloudChip status={{ ...MOCHI_STATUS, repository_id: item.repository_id, link: { ...MOCHI_STATUS.link!, repository_id: item.repository_id, website_url: item.website_url, owner_login: item.owner_login, name: item.name, repository_revision: item.revision } }} storageName={PERSONAL.name} busy={false} refreshing={false} onOpenUrl={noop} onRequestRelease={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
+      <ManagedCloudChip status={{ ...MOCHI_STATUS, repository_id: item.repository_id, link: { ...MOCHI_STATUS.link!, repository_id: item.repository_id, website_url: item.website_url, owner_login: item.owner_login, name: item.name, repository_revision: item.revision } }} storageName={PERSONAL.name} busy={false} refreshing={false} onOpenUrl={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
       <ProjectActions pull={reviewOpen ? 1 : 0} push={0} pullActive={reviewOpen} pushDisabled />
     </>
   );
@@ -1208,7 +1208,7 @@ function Window({ scene, dir, run, jump, onStage }: { scene: Scene; dir: Dir; ru
       }
     }
   }
-  const zone = <Zone items={items} />;
+  const zone = zoneProps(items);
 
   const catalog = scene.review.kind === "catalog" || scene.review.kind === "add";
   const item = scene.review.kind === "add" ? PDF_TOOLS : MOCHI;
@@ -1245,7 +1245,7 @@ function Window({ scene, dir, run, jump, onStage }: { scene: Scene; dir: Dir; ru
     page = (
       <>
         <Titlebar icon="storage-mallard" title="New storage" />
-        {zone}
+        <NoticeZone {...zone} />
         <main className="sync-main">
           <div className="spec-standin">
             <strong>Mallard Cloud sign-in</strong>

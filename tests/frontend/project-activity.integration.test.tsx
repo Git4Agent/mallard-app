@@ -1664,12 +1664,14 @@ test("a storage another computer cleared shows one standing note with no unlink 
   const cloudLink: NonNullable<CloudStatus["link"]> = {
     repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
     website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
-    repository_revision: 7, can_request_release: false, role: "owner", release: { kind: "public" },
+    repository_revision: 7, can_request_release: false, can_publish_version: false, role: "owner", release: { kind: "public" },
   };
+  // Public at version 2, and the draft is that version.
+  const atVersion = { draft: "pushed" as const, latest_version: 2, next_version: 3, draft_ahead: 0, public_version: 2, review_version: null };
   const cloud = (overrides: Partial<CloudStatus> = {}): CloudStatus => ({
     repository_id: "repo_one", state: "ready", message: null,
     link: cloudLink,
-    publication: { state: "matches_published", private_revision: 2, public_revision: 2 },
+    publication: atVersion,
     ...overrides,
   });
   const localOnly = {
@@ -1694,19 +1696,22 @@ test("a storage another computer cleared shows one standing note with no unlink 
     assert.match(html, /Not in Mallard Cloud|Only on this|Local only|Push to/i, state);
   }
   const onCloud = (comparison: ThreadSyncComparison, status = cloud()) => render({ ...comparison, storage_name: "Mallard Cloud", managed_cloud_status: status });
-  // The draft was discarded: the repository holds its public version.
+  // The draft was discarded: the repository holds its latest version.
   const discarded = onCloud(recreated);
-  assert.match(discarded, /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds public version 2\. Pull, then push again\./);
-  assert.match(onCloud(elsewhere), /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds public version 2\.(?! Pull)/);
+  assert.match(discarded, /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds version 2\. Pull, then push again\./);
+  assert.match(onCloud(elsewhere), /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds version 2\.(?! Pull)/);
+  // A private repository returns to its latest version the same way.
+  const privateVersion = cloud({ link: { ...cloudLink, visibility: "private", release: { kind: "private" } }, publication: { ...atVersion, public_version: null } });
+  assert.match(onCloud(elsewhere, privateVersion), /notice-lead">Draft discarded<\/strong> — Mallard Cloud holds version 2\.(?! Pull)/);
   // Discarded, and another computer pushed a new draft since.
-  const pushedSince = cloud({ publication: { state: "unpublished_draft", private_revision: 3, public_revision: 2 } });
+  const pushedSince = cloud({ publication: { ...atVersion, draft_ahead: 1 } });
   assert.match(onCloud(recreated, pushedSince), /notice-lead">Draft discarded and pushed again<\/strong> — Pull, then push again\./);
   assert.match(onCloud(elsewhere, pushedSince), /notice-lead">Draft discarded and pushed again<\/strong>/);
   assert.doesNotMatch(onCloud(elsewhere, pushedSince), /Pull, then push again/);
-  // A private repository, discarded on the website, holds nothing.
+  // A private repository without a version, discarded on the website, holds nothing.
   const emptied = cloud({
     link: { ...cloudLink, visibility: "private", release: { kind: "not_pushed" } },
-    publication: { state: "no_draft", private_revision: null, public_revision: null },
+    publication: { draft: "none", latest_version: null, next_version: 1, draft_ahead: null, public_version: null, review_version: null },
   });
   assert.match(onCloud(cleared, emptied), /notice-lead">Draft discarded<\/strong> — Push creates a new draft\./);
   // The link's repository is gone and another computer created it again.

@@ -2,7 +2,7 @@ import { StrictMode, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import Icon from "../src/components/Icons";
-import Notice, { FieldMessage, NoticeZone } from "../src/components/notice/Notice";
+import Notice, { FieldMessage, type NoticeZoneProps } from "../src/components/notice/Notice";
 import ProviderMark from "../src/components/sync-review/ProviderMark";
 import SyncPathBar, { PathBarBelow } from "../src/components/sync-review/SyncPathBar";
 import ProjectFolderField from "../src/components/project-sync/ProjectFolderField";
@@ -461,20 +461,18 @@ function FromCloud({ view }: { view: View }) {
  *  its path bar saying the folder is empty. */
 function AfterFallback({ view }: { view: View }) {
   const { repo, knobs } = view;
-  const zone = (
-    <NoticeZone
-      className="sync-backend-banner"
-      subject="messages from Mallard"
-      timing="progress"
-      items={[{
-        key: "clone-fallback",
-        severity: "warning",
-        title: `${repo.name} wasn’t cloned.`,
-        message: <>{reasonText(knobs.reason)} The folder is empty; clone into it: <code>{repo.command}</code></>,
-        action: <button type="button" className="btn">Copy command</button>,
-      }]}
-    />
-  );
+  const zone: NoticeZoneProps = {
+    className: "sync-backend-banner",
+    subject: "messages from Mallard",
+    timing: "progress",
+    items: [{
+      key: "clone-fallback",
+      severity: "warning",
+      title: `${repo.name} wasn’t cloned.`,
+      message: <>{reasonText(knobs.reason)} The folder is empty; clone into it: <code>{repo.command}</code></>,
+      action: <button type="button" className="btn">Copy command</button>,
+    }],
+  };
   return (
     <PathBarBelow.Provider value={zone}>
       <SyncPathBar

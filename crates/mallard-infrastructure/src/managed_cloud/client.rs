@@ -27,7 +27,7 @@ const ERROR_BODY_LIMIT: u64 = 64 * 1024;
 /// The service's fixed error codes (`STORE_API.md` section 7 and the
 /// architecture's section 7.1). Nothing outside this list is retained from
 /// an error body.
-pub const SERVICE_ERROR_CODES: [&str; 26] = [
+pub const SERVICE_ERROR_CODES: [&str; 27] = [
     "authentication_required",
     "forbidden",
     "not_found",
@@ -35,6 +35,7 @@ pub const SERVICE_ERROR_CODES: [&str; 26] = [
     "invalid_request",
     "manifest_invalid",
     "revision_conflict",
+    "version_unchanged",
     "repository_discarding",
     "already_present",
     "claim_taken",
@@ -212,6 +213,7 @@ impl Error {
             ErrorKind::ClaimTaken => "Another computer claimed this version on Mallard Cloud.",
             ErrorKind::ClaimMismatch => "Mallard Cloud refused the record: the claim of its parent does not hold it.",
             ErrorKind::Conflict if self.code == Some("repository_discarding") => "Mallard Cloud is discarding this repository. Wait for deletion to finish.",
+            ErrorKind::Conflict if self.code == Some("version_unchanged") => "Mallard Cloud has nothing new to publish.",
             ErrorKind::Conflict => "Mallard Cloud refused a stale request. Refresh and try again.",
             ErrorKind::AccountExists => "This account already has a Mallard Cloud repository for this project.",
             ErrorKind::Quota => "The Mallard Cloud repository is out of quota.",
@@ -306,6 +308,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct User {
     pub id: String,
+    pub github_user_id: String,
     pub github_login: String,
     pub service_role: String,
 }
@@ -350,12 +353,20 @@ pub struct PushedBy {
     pub github_login: String,
 }
 
+/// Which row of the index a head is: the draft's push, or a version.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadScope {
+    Private,
+    Version,
+}
+
 /// A head as the index describes it (architecture section 7.3): the facts
 /// of the selected record, as the service indexed them. Display only; the
 /// store never reads it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct HeadBody {
-    pub scope: String,
+    pub scope: HeadScope,
     pub revision: u64,
     pub commit_id: String,
     pub manifest_sha256: String,
@@ -364,12 +375,18 @@ pub struct HeadBody {
     pub kind: String,
     #[serde(default)]
     pub bundle_id: Option<String>,
+    /// A version head's number.
     #[serde(default)]
-    pub private_revision: Option<u64>,
-    #[serde(default)]
-    pub public_revision: Option<u64>,
+    pub version: Option<u64>,
     #[serde(default)]
     pub pushed_by: Option<PushedBy>,
+}
+
+/// A key the answer always carries and that may hold `null`.
+fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error> {
+    Option::deserialize(deserializer)
 }
 
 /// The publication summary a listing row is synthesized from (section 5.3).
@@ -386,14 +403,6 @@ pub struct TagSummary {
     pub registration_only: bool,
     #[serde(default)]
     pub providers: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct OpenReleaseRequest {
-    pub id: String,
-    pub state: String,
-    pub requested_by: String,
-    pub created_at: u64,
 }
 
 /// The coordinate a catalog repository is bound to, with the item's
@@ -425,8 +434,18 @@ pub struct RepositorySummary {
     pub revision: u64,
     pub state: String,
     pub visibility: String,
-    pub private_revision: u64,
-    pub public_revision: u64,
+    /// The version the public pointer names while the repository is public.
+    #[serde(deserialize_with = "nullable")]
+    pub public_version: Option<u64>,
+    /// For whoever may read the draft, on one repository's own summary: the
+    /// highest available version, the number Publish would give, and how
+    /// many pushes the draft is past the latest version.
+    #[serde(default)]
+    pub latest_version: Option<u64>,
+    #[serde(default)]
+    pub next_version: Option<u64>,
+    #[serde(default)]
+    pub draft_ahead: Option<u64>,
     /// The caller's membership role; `None` on the public face and for a
     /// contributor (a signed-in account on a public repository).
     #[serde(default)]
@@ -449,8 +468,6 @@ pub struct RepositorySummary {
     pub private_summary: Option<TagSummary>,
     #[serde(default)]
     pub public_summary: Option<TagSummary>,
-    #[serde(default)]
-    pub open_release_request: Option<OpenReleaseRequest>,
     /// The Owner's own line about the repository, and GitHub's short
     /// description mirrored for a linked git project.
     #[serde(default)]
@@ -561,7 +578,7 @@ pub struct PublicFilter<'a> {
 
 #[derive(Deserialize)]
 struct ListingHeadWire {
-    scope: String,
+    scope: HeadScope,
     revision: u64,
     updated_at: u64,
 }
@@ -613,8 +630,7 @@ struct PublicRowWire {
     description: Option<String>,
     #[serde(default)]
     github_description: Option<String>,
-    #[serde(default)]
-    public_revision: u64,
+    public_version: u64,
     #[serde(default)]
     manifest_revision: u64,
     published_at: u64,
@@ -688,10 +704,24 @@ pub struct CreateRepository {
     pub github_url: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct ReleaseRequest {
-    pub id: String,
-    pub state: String,
+/// What Publish names: the draft the caller saw, by its commit, the
+/// repository revision the same listing carried, and the version's name.
+#[derive(Clone, Debug, Serialize)]
+pub struct PublishVersion<'a> {
+    pub commit_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<&'a str>,
+    pub expected_repository_revision: u64,
+}
+
+/// What Publish answered: the version the draft was frozen as.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PublishedVersion {
+    pub version: u64,
+    pub commit_id: String,
+    #[serde(deserialize_with = "nullable")]
+    pub name: Option<String>,
+    pub created_at: u64,
 }
 
 /// What a discard of the draft answered (`STORE_API.md` section 3).
@@ -702,10 +732,10 @@ pub struct DiscardedDraft {
     /// `done`, or `deleting` while the service finishes the removal; every
     /// listing selects the kept push either way.
     pub state: String,
-    /// The depth of the push the draft returned to: the one the public
-    /// version was released from. `None` when no push is kept.
-    #[serde(default)]
-    pub kept_revision: Option<u64>,
+    /// The version the draft returned to: the latest one. `None` when the
+    /// repository has no version, and no push is kept.
+    #[serde(deserialize_with = "nullable")]
+    pub kept_version: Option<u64>,
 }
 
 /// What a streamed object answered with.
@@ -1172,7 +1202,7 @@ impl ManagedCloudClient {
                 let member = row
                     .head
                     .as_ref()
-                    .is_some_and(|head| head.scope == "private");
+                    .is_some_and(|head| head.scope == HeadScope::Private);
                 let revision = summary_revision(row.summary.as_ref())
                     .or(row.head.as_ref().map(|head| head.revision))
                     .unwrap_or(0);
@@ -1236,7 +1266,7 @@ impl ManagedCloudClient {
                     if row.manifest_revision > 0 {
                         row.manifest_revision
                     } else {
-                        row.public_revision
+                        row.public_version
                     },
                 );
                 ListingRow {
@@ -1489,31 +1519,36 @@ impl ManagedCloudClient {
         Ok(listing)
     }
 
-    pub async fn create_release_request(
+    /// Publish: freeze the draft as the next version. Names the draft by the
+    /// commit the caller's listing selected and the repository revision that
+    /// listing carried. One request, not a read, never sent again. A
+    /// refusal carries the service's sentence: `revision_conflict` when the
+    /// repository or the draft moved, `version_unchanged` when the draft is
+    /// already a version, `forbidden` for anyone who is not a collaborator,
+    /// `invalid_request` when nothing is pushed or the name is too long.
+    pub async fn publish_version(
         &self,
         repository_id: &str,
-        expected_repository_revision: u64,
-    ) -> Result<ReleaseRequest> {
-        let route = "v1/repositories/{id}/release-requests";
+        version: &PublishVersion<'_>,
+    ) -> Result<PublishedVersion> {
+        let route = "v1/repositories/{id}/versions";
         let request = self
             .request(
                 Method::POST,
                 route,
-                &format!("/v1/repositories/{repository_id}/release-requests"),
+                &format!("/v1/repositories/{repository_id}/versions"),
             )?
-            .header("Idempotency-Key", idempotency_key()?)
-            .json(
-                &serde_json::json!({"expected_repository_revision": expected_repository_revision}),
-            );
+            .json(version);
         self.json(route, false, request).await
     }
 
     /// Discard the draft, naming the repository revision the status showed:
-    /// on a public repository every push after the public version is removed
-    /// from Mallard Cloud. One request, not a read, never sent again. A
-    /// refusal carries the service's sentence: `forbidden` for anyone but
-    /// the Owner and Admins, `revision_conflict` for a stale revision,
-    /// `invalid_request` when there is no draft to discard.
+    /// every push after the latest version is removed from Mallard Cloud,
+    /// and every push when the repository has no version. One request, not a
+    /// read, never sent again. A refusal carries the service's sentence:
+    /// `forbidden` for anyone but the Owner and Admins, `revision_conflict`
+    /// for a stale revision, `invalid_request` when there is no draft to
+    /// discard.
     pub async fn discard_private_snapshot(
         &self,
         repository_id: &str,
@@ -1533,62 +1568,9 @@ impl ManagedCloudClient {
         self.json(route, false, request).await
     }
 
-    fn website_url(&self, owner_login: &str, name: &str) -> String {
+    /// `{origin}/{owner_login}/{name}`: a repository's page on the website.
+    pub fn website_url(&self, owner_login: &str, name: &str) -> String {
         format!("{}/{}/{}", self.origin(), owner_login, name)
-    }
-
-    /// The link a summary describes: what the stream listing carries,
-    /// read from the index instead. A release the Owner turned down is
-    /// not on the summary, so it reads as `private` here.
-    pub fn link_from_summary(&self, summary: &RepositorySummary) -> ManagedCloudLink {
-        let registration_only = summary
-            .private_summary
-            .as_ref()
-            .is_some_and(|tag| tag.registration_only);
-        let release = match (&summary.private_head, &summary.open_release_request) {
-            (None, _) => ReleaseState::NotPushed,
-            (Some(_), _) if registration_only => ReleaseState::NotPushed,
-            (Some(_), Some(request)) if request.state == "pending_super_admin" => {
-                ReleaseState::WaitingSuperAdmin
-            }
-            (Some(_), Some(request)) if request.state == "pending_owner" => {
-                ReleaseState::WaitingOwner {
-                    requested_by: request.requested_by.clone(),
-                }
-            }
-            (Some(private), _) if summary.visibility == "public" => {
-                if summary
-                    .public_head
-                    .as_ref()
-                    .is_some_and(|public| public.commit_id == private.commit_id)
-                {
-                    ReleaseState::Public
-                } else {
-                    ReleaseState::SnapshotChanged
-                }
-            }
-            (Some(_), _) => ReleaseState::Private,
-        };
-        let can_request_release = summary.writer
-            && matches!(
-                release,
-                ReleaseState::Private
-                    | ReleaseState::SnapshotChanged
-                    | ReleaseState::Rejected { .. }
-            );
-        ManagedCloudLink {
-            visibility: summary.visibility.clone(),
-            can_pull: true,
-            repository_id: summary.id.clone(),
-            website_url: self.website_url(&summary.owner.github_login, &summary.name),
-            owner_login: summary.owner.github_login.clone(),
-            name: summary.name.clone(),
-            release,
-            repository_revision: summary.revision,
-            can_request_release,
-            role: summary.role.clone(),
-            can_push: summary.writer,
-        }
     }
 }
 
@@ -1619,20 +1601,20 @@ async fn bounded(mut response: Response, max: u64) -> std::result::Result<Vec<u8
 pub enum ReleaseState {
     /// Registered, nothing pushed yet.
     NotPushed,
-    /// A private snapshot nobody has asked to release.
+    /// A repository that is not public, with no release request open.
     Private,
-    WaitingOwner {
-        requested_by: String,
-    },
+    /// A release request is open, of a version or of the draft, and waits
+    /// for the Owner.
+    WaitingOwner { requested_by: String },
+    /// The open release request waits for Mallard's review.
     WaitingSuperAdmin,
-    /// The public version is the current private snapshot.
+    /// The draft is the public version.
     Public,
-    /// A newer private snapshot was pushed since the last release.
+    /// The draft is not the public version: pushed past it, or published as
+    /// a newer version.
     SnapshotChanged,
-    /// The latest request on this snapshot was turned down.
-    Rejected {
-        reason: Option<String>,
-    },
+    /// A request was turned down, and the draft is still what it named.
+    Rejected { reason: Option<String> },
 }
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1646,11 +1628,14 @@ pub struct ManagedCloudLink {
     pub owner_login: String,
     pub name: String,
     pub release: ReleaseState,
-    /// The revision a release request must name.
+    /// The revision Publish and Discard draft must name.
     pub repository_revision: u64,
     /// Whether Request public release is offered: a private snapshot with
     /// no open request that is not already public.
     pub can_request_release: bool,
+    /// Whether Publish is open to this account now: a collaborator, with a
+    /// draft that holds something and is not already a version.
+    pub can_publish_version: bool,
     /// The account's membership role; `None` for a public repository the
     /// account does not belong to, where it still pushes as a contributor.
     pub role: Option<String>,
@@ -1676,33 +1661,51 @@ pub enum ManagedCloudStatusState {
     Unavailable,
 }
 
-/// Where the private snapshot stands against the public one, as the stream
-/// listing reports it: the head it describes is the selection over the
+/// Where the draft stands against the repository's versions, as the stream
+/// listing reports it: the draft it describes is the selection over the
 /// names just listed. Computed for the current observation only. Never
 /// stored in sync metadata.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicationStatus {
-    pub state: PublicationState,
-    pub private_revision: Option<u64>,
-    pub public_revision: Option<u64>,
+    pub draft: DraftState,
+    /// The highest available version; `None` when there is none.
+    #[serde(deserialize_with = "nullable")]
+    pub latest_version: Option<u64>,
+    /// The number Publish would give. 0 with `DraftState::Unavailable`,
+    /// where no number is known.
+    pub next_version: u64,
+    /// How many pushes the draft is past `latest_version`; 0 when the draft
+    /// is that version. `None` with no version or no draft.
+    #[serde(deserialize_with = "nullable")]
+    pub draft_ahead: Option<u64>,
+    /// The version the public pointer names while the repository is public.
+    #[serde(deserialize_with = "nullable")]
+    pub public_version: Option<u64>,
+    /// The version the open release request names. `None` when no request
+    /// is open, and when the open one names the draft.
+    #[serde(deserialize_with = "nullable")]
+    pub review_version: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum PublicationState {
-    NoDraft,
-    NotPublic,
-    MatchesPublished,
-    UnpublishedDraft,
+pub enum DraftState {
+    /// Nothing is pushed.
+    None,
+    Pushed,
+    /// The listing carried no status. Never the service's word.
     Unavailable,
 }
 
 impl PublicationStatus {
     pub fn unavailable() -> Self {
         Self {
-            state: PublicationState::Unavailable,
-            private_revision: None,
-            public_revision: None,
+            draft: DraftState::Unavailable,
+            latest_version: None,
+            next_version: 0,
+            draft_ahead: None,
+            public_version: None,
+            review_version: None,
         }
     }
 }
@@ -2168,81 +2171,209 @@ mod tests {
         assert!(!answer.truncated);
     }
 
-    fn summary(value: serde_json::Value) -> RepositorySummary {
-        serde_json::from_value(value).unwrap()
+    fn summary(value: serde_json::Value) -> serde_json::Result<RepositorySummary> {
+        serde_json::from_value(value)
     }
 
     #[test]
-    fn the_link_of_a_summary_reads_release_from_the_heads_and_the_open_request() {
-        let client = ManagedCloudClient::new("https://mallard-ai.com", None).unwrap();
+    fn a_summary_carries_versions_and_the_shape_before_them_does_not_parse() {
         let head = json!({"scope":"private", "revision":4, "commit_id":"commit-draft", "manifest_sha256":"a".repeat(64), "manifest_size":10, "updated_at":5, "kind":"project", "bundle_id":"b".repeat(32)});
         let mut public = head.clone();
-        public["scope"] = json!("public");
+        public["scope"] = json!("version");
+        public["version"] = json!(2);
         public["commit_id"] = json!("commit-public");
-        let base = json!({"id":"repo_one", "owner":{"user_id":"user_one", "github_login":"owner"}, "name":"Project", "repository_class":"git_project", "revision":7, "state":"active", "visibility":"public", "private_revision":4, "public_revision":2, "writer":true, "role":"owner", "private_head":head, "public_head":public});
-        let link = client.link_from_summary(&summary(base.clone()));
-        assert_eq!(link.release, ReleaseState::SnapshotChanged);
-        assert!(link.can_request_release);
-        assert_eq!(link.website_url, "https://mallard-ai.com/owner/Project");
-
-        let mut same = base.clone();
-        same["public_head"]["commit_id"] = json!("commit-draft");
+        let base = json!({"id":"repo_one", "owner":{"user_id":"user_one", "github_login":"owner"}, "name":"Project", "repository_class":"git_project", "revision":7, "state":"active", "visibility":"public", "public_version":2, "latest_version":3, "next_version":4, "draft_ahead":1, "writer":true, "role":"owner", "private_head":head, "public_head":public});
+        let read = summary(base.clone()).unwrap();
+        assert_eq!(read.public_version, Some(2));
         assert_eq!(
-            client.link_from_summary(&summary(same)).release,
-            ReleaseState::Public
+            (read.latest_version, read.next_version, read.draft_ahead),
+            (Some(3), Some(4), Some(1))
+        );
+        assert_eq!(read.private_head.unwrap().scope, HeadScope::Private);
+        let version = read.public_head.unwrap();
+        assert_eq!(
+            (version.scope, version.version),
+            (HeadScope::Version, Some(2))
         );
 
-        let mut waiting = base.clone();
-        waiting["open_release_request"] = json!({"id":"rel_1", "state":"pending_owner", "requested_by":"user_two", "created_at":9});
-        let link = client.link_from_summary(&summary(waiting));
+        // A row of the account's listing carries the public version alone.
+        let mut row = base.clone();
+        for key in ["latest_version", "next_version", "draft_ahead"] {
+            row.as_object_mut().unwrap().remove(key);
+        }
+        row["public_version"] = json!(null);
+        let row = summary(row).unwrap();
         assert_eq!(
-            link.release,
-            ReleaseState::WaitingOwner {
-                requested_by: "user_two".into()
-            }
-        );
-        assert!(!link.can_request_release);
-
-        let mut registered = base.clone();
-        registered["visibility"] = json!("private");
-        registered["public_head"] = json!(null);
-        registered["private_summary"] = json!({"display_name":"Project", "kind":"project", "revision":4, "updated_at":5, "resources":0, "files":0, "registration_only":true});
-        assert_eq!(
-            client.link_from_summary(&summary(registered)).release,
-            ReleaseState::NotPushed
+            (row.public_version, row.latest_version, row.next_version),
+            (None, None, None)
         );
 
-        let mut private = base;
-        private["visibility"] = json!("private");
-        private["public_head"] = json!(null);
-        assert_eq!(
-            client.link_from_summary(&summary(private)).release,
-            ReleaseState::Private
-        );
+        // The numbers of the shape before versions name nothing any more.
+        let mut before = base.clone();
+        before.as_object_mut().unwrap().remove("public_version");
+        before["private_revision"] = json!(4);
+        before["public_revision"] = json!(2);
+        assert!(summary(before).is_err());
+        let mut public_scope = base;
+        public_scope["public_head"]["scope"] = json!("public");
+        assert!(summary(public_scope).is_err());
     }
 
     #[test]
     fn a_status_observed_from_a_listing_carries_its_link_and_publication() {
-        let listing: StoreKeyListing = serde_json::from_value(json!({
-            "keys": [], "next_cursor": null,
-            "link": {"repository_id":"repo_one", "visibility":"private", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"private"}, "repository_revision":3, "can_request_release":true, "role":"owner", "can_push":true},
-            "publication": {"state":"not_public", "private_revision":2, "public_revision":null}
-        }))
+        let link = json!({"repository_id":"repo_one", "visibility":"private", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"private"}, "repository_revision":3, "can_request_release":true, "can_publish_version":true, "role":"owner", "can_push":true});
+        let publication = json!({"draft":"pushed", "latest_version":2, "next_version":4, "draft_ahead":3, "public_version":null, "review_version":null});
+        let listing: StoreKeyListing = serde_json::from_value(
+            json!({"keys": [], "next_cursor": null, "link": link, "publication": publication}),
+        )
         .unwrap();
         let status = ManagedCloudStatus::observed("repo_one", &listing);
         assert_eq!(status.state, ManagedCloudStatusState::Ready);
-        assert_eq!(status.link.unwrap().release, ReleaseState::Private);
+        let observed = status.link.unwrap();
+        assert_eq!(observed.release, ReleaseState::Private);
+        assert!(observed.can_publish_version);
         assert_eq!(
-            status.publication.unwrap().state,
-            PublicationState::NotPublic
+            status.publication.unwrap(),
+            PublicationStatus {
+                draft: DraftState::Pushed,
+                latest_version: Some(2),
+                next_version: 4,
+                draft_ahead: Some(3),
+                public_version: None,
+                review_version: None,
+            }
         );
         let bare: StoreKeyListing = serde_json::from_value(json!({"keys": ["k"]})).unwrap();
         assert_eq!(
             ManagedCloudStatus::observed("repo_one", &bare)
                 .publication
-                .unwrap()
-                .state,
-            PublicationState::Unavailable
+                .unwrap(),
+            PublicationStatus::unavailable()
         );
+
+        // The status before versions, a status that leaves a number out, and
+        // a link that does not say whether Publish is open do not parse.
+        let listing = |link: &serde_json::Value, publication: serde_json::Value| {
+            serde_json::from_value::<StoreKeyListing>(
+                json!({"keys": [], "link": link, "publication": publication}),
+            )
+        };
+        assert!(listing(
+            &link,
+            json!({"state":"not_public", "private_revision":2, "public_revision":null})
+        )
+        .is_err());
+        let mut partial = publication.clone();
+        partial.as_object_mut().unwrap().remove("review_version");
+        assert!(listing(&link, partial).is_err());
+        let mut silent = link.clone();
+        silent
+            .as_object_mut()
+            .unwrap()
+            .remove("can_publish_version");
+        assert!(listing(&silent, publication).is_err());
+    }
+
+    #[test]
+    fn a_discard_answer_names_the_version_kept() {
+        let answer = |kept: serde_json::Value| {
+            let mut body = json!({"ok": true, "repository_id":"repo_one", "removal_id":"rmv_1", "state":"done"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(kept.as_object().unwrap().clone());
+            serde_json::from_value::<DiscardedDraft>(body)
+        };
+        assert_eq!(
+            answer(json!({"kept_version": 3})).unwrap().kept_version,
+            Some(3)
+        );
+        assert_eq!(
+            answer(json!({"kept_version": null})).unwrap().kept_version,
+            None
+        );
+        assert!(answer(json!({"kept_revision": 3})).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_publish_the_service_refuses_is_classified_and_never_sent_again() {
+        let version = PublishVersion {
+            commit_id: "commit-111111111111111111111111",
+            name: None,
+            expected_repository_revision: 7,
+        };
+        assert_eq!(
+            serde_json::to_value(&version).unwrap(),
+            json!({"commit_id": "commit-111111111111111111111111", "expected_repository_revision": 7})
+        );
+        async fn refused(
+            version: &PublishVersion<'_>,
+            status: u16,
+            code: &'static str,
+            detail: &'static str,
+        ) -> Error {
+            let (client, requests, server) = upload_response(
+                status,
+                json!({"error": code, "detail": detail}),
+                "req-publish",
+                "1234567890abcdef-SJC",
+            )
+            .await;
+            let error = client
+                .publish_version("repo_one", version)
+                .await
+                .unwrap_err();
+            assert_eq!(requests.load(Ordering::SeqCst), 1, "{code}");
+            server.abort();
+            error
+        }
+        let unchanged = refused(
+            &version,
+            409,
+            "version_unchanged",
+            "The draft is already version 3.",
+        )
+        .await;
+        assert_eq!(unchanged.kind, ErrorKind::Conflict);
+        assert_eq!(unchanged.code, Some("version_unchanged"));
+        assert!(unchanged.message().starts_with(
+            "Mallard Cloud has nothing new to publish. The draft is already version 3. (v1/repositories/{id}/versions, HTTP 409, version_unchanged, request req-publish"
+        ));
+        let moved = refused(&version, 409, "revision_conflict", "The draft moved.").await;
+        assert_eq!(moved.kind, ErrorKind::Conflict);
+        assert!(moved.message().starts_with(
+            "Mallard Cloud refused a stale request. Refresh and try again. The draft moved."
+        ));
+        let discarding = refused(&version, 409, "repository_discarding", "").await;
+        assert_eq!(discarding.kind, ErrorKind::Conflict);
+        assert!(discarding
+            .message()
+            .starts_with("Mallard Cloud is discarding this repository."));
+        let forbidden = refused(
+            &version,
+            403,
+            "forbidden",
+            "Only a collaborator can publish a version.",
+        )
+        .await;
+        assert_eq!(forbidden.kind, ErrorKind::Permission);
+        assert!(forbidden
+            .message()
+            .contains("Only a collaborator can publish a version."));
+        let invalid = refused(&version, 400, "invalid_request", "Nothing is pushed yet.").await;
+        assert_eq!(invalid.kind, ErrorKind::Invalid);
+        assert!(invalid.message().contains("Nothing is pushed yet."));
+        let unavailable = refused(&version, 503, "temporarily_unavailable", "").await;
+        assert_eq!(unavailable.kind, ErrorKind::Unavailable);
+
+        // A request that never completes leaves the outcome unknown.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let offline = ManagedCloudClient::new(&endpoint, None).unwrap();
+        let lost = offline
+            .publish_version("repo_one", &version)
+            .await
+            .unwrap_err();
+        assert_eq!(lost.kind, ErrorKind::Unknown);
     }
 }

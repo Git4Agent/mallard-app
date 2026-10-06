@@ -5,7 +5,8 @@ import { writeClipboardText } from "../sync-review/clipboard";
 import { PathBarPopover } from "../sync-review/SyncPathBar";
 
 import {
-  cloudContributor, cloudFacts, cloudHeadline, cloudReleaseUrl, cloudStatusNotice, cloudVerbs, cloudVersionUrl, discardDraftQuestion,
+  canPublishVersion, cloudContributor, cloudFacts, cloudHeadline, cloudReleaseUrl, cloudStatusNotice, cloudVerbs, cloudVersionUrl,
+  cloudVersionsUrl, discardDraftQuestion, publishVersionHold,
 } from "./managedCloudLink";
 
 /**
@@ -18,7 +19,10 @@ import {
 
 export interface ManagedCloudChipActions {
   onOpenUrl: (url: string) => void;
-  onRequestRelease: () => void;
+  /** A project's repository publishes versions here and lists them on the
+   *  website. A Catalog item's page has neither, so the Library leaves this
+   *  out, and its panel offers no Publish and no Versions. */
+  onPublishVersion?: () => void;
   onDiscardDraft: () => void;
   onRetry: () => void;
   onStorageSettings: () => void;
@@ -27,7 +31,7 @@ export interface ManagedCloudChipActions {
 interface PanelProps extends ManagedCloudChipActions {
   status: ManagedCloudStatus;
   storageName: string;
-  /** A Push, Pull or Cloud request is running: the release and the discard wait. */
+  /** A Push, Pull or Cloud request is running: Publish and the discard wait. */
   busy: boolean;
   refreshing: boolean;
   close: (returnFocus: boolean) => void;
@@ -48,7 +52,7 @@ interface CloudRow {
 const COPIED_FOR_MS = 2_000;
 
 export function ManagedCloudPanel({
-  status, storageName, busy, refreshing, close, onOpenUrl, onRequestRelease, onDiscardDraft, onRetry, onStorageSettings,
+  status, storageName, busy, refreshing, close, onOpenUrl, onPublishVersion, onDiscardDraft, onRetry, onStorageSettings,
 }: PanelProps) {
   const [copied, setCopied] = useState<string | null>(null);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -79,30 +83,39 @@ export function ManagedCloudPanel({
       close(true);
       onOpenUrl(url);
     };
-    const release = { name: "release link", url: cloudReleaseUrl(link) };
-    if (verbs.requestRelease) {
+    if (onPublishVersion && verbs.publishVersion !== null) {
       rows.push({
-        id: "request-release", label: "Request public release", icon: "check-circle", disabled: busy, copy: release,
+        id: "publish-version", label: `Publish version ${verbs.publishVersion}…`, icon: "git-commit",
+        disabled: busy || !canPublishVersion(status), title: publishVersionHold(status) ?? undefined,
         onSelect: () => {
           close(true);
-          onRequestRelease();
+          onPublishVersion();
         },
       });
+    }
+    const release = { name: "release link", url: cloudReleaseUrl(link) };
+    if (verbs.requestRelease) {
+      rows.push({ id: "request-release", label: "Request public release", icon: "check-circle", copy: release, onSelect: open(release.url) });
     } else if (verbs.viewRelease) {
       rows.push({ id: "view-release", label: "View release request", icon: "external-link", copy: release, onSelect: open(release.url) });
     }
     if (verbs.viewDraft) {
-      const url = cloudVersionUrl(link, "private");
+      const url = cloudVersionUrl(link, "draft");
       rows.push({ id: "view-draft", label: "View draft", icon: "external-link", copy: { name: "draft link", url }, onSelect: open(url) });
     }
-    if (verbs.viewPublished) {
-      const url = cloudVersionUrl(link, "public");
-      rows.push({ id: "view-published", label: "View published version", icon: "external-link", copy: { name: "published link", url }, onSelect: open(url) });
+    if (onPublishVersion && verbs.versions) {
+      const url = cloudVersionsUrl(link);
+      rows.push({ id: "versions", label: "Versions", icon: "external-link", copy: { name: "versions link", url }, onSelect: open(url) });
+    }
+    if (verbs.viewPublic !== null) {
+      const url = cloudVersionUrl(link, verbs.viewPublic);
+      rows.push({ id: "view-public", label: "View public version", icon: "external-link", copy: { name: "public link", url }, onSelect: open(url) });
     }
     if (verbs.discardDraft) {
+      const { kept } = discardDraftQuestion(link, status.publication);
       rows.push({
         id: "discard-draft", label: "Discard draft…", icon: "x", danger: true, disabled: busy,
-        title: `Discard draft… · back to ${discardDraftQuestion(link, status.publication).kept}`,
+        title: kept ? `Discard draft… · back to ${kept}` : "Discard draft… · every push",
         onSelect: () => {
           close(true);
           onDiscardDraft();

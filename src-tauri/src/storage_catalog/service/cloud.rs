@@ -141,7 +141,7 @@ fn repository_row(
         owner_login: summary.owner.github_login.clone(),
         name: summary.name.clone(),
         address: format!("{}/{}", summary.owner.github_login, summary.name),
-        website_url: client.link_from_summary(summary).website_url,
+        website_url: client.website_url(&summary.owner.github_login, &summary.name),
         visibility: summary.visibility.clone(),
         role: summary.role.clone(),
         can_push: summary.writer,
@@ -679,21 +679,6 @@ impl StorageCatalogService {
             Ok(listing) => ManagedCloudStatus::observed(repository_id, &listing),
             Err(error) => ManagedCloudStatus::failed(repository_id, &error),
         })
-    }
-
-    pub async fn request_cloud_release(
-        &self,
-        scope_id: &CatalogScopeId,
-        storage_id: &StorageId,
-        resource_id: &CatalogResourceId,
-        repository_id: &str,
-        expected_revision: u64,
-    ) -> Result<(), String> {
-        let client = self.cloud_target(scope_id, storage_id, resource_id, repository_id)?;
-        client
-            .create_release_request(repository_id, expected_revision)
-            .await?;
-        Ok(())
     }
 
     pub async fn discard_cloud_draft(

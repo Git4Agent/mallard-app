@@ -35,7 +35,7 @@ const cloud: StorageSummary = {
     { field_id: "account_login", label: "Account", value: "Rika321", is_path: false },
     { field_id: "service_origin", label: "Service", value: "https://mallard-ai.com", is_path: false },
   ],
-  settings: { service_origin: "https://mallard-ai.com", account_id: "user_1", account_login: "Rika321" },
+  settings: { service_origin: "https://mallard-ai.com", github_user_id: "123", account_login: "Rika321" },
   secrets: [{ secret_id: "account_token", present: true }],
 };
 

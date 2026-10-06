@@ -420,7 +420,7 @@ const cloudStorage = (id: string, login: string): StorageSummary => ({
     { field_id: "account_login", label: "Account", value: login, is_path: false },
     { field_id: "service_origin", label: "Service", value: `https://${HOST}`, is_path: false },
   ],
-  settings: { service_origin: `https://${HOST}`, account_id: `user_${login}`, account_login: login },
+  settings: { service_origin: `https://${HOST}`, github_user_id: login === "octocat" ? "123" : "456", account_login: login },
   secrets: [{ secret_id: "account_token", present: true }],
 });
 const PROVIDERS = [

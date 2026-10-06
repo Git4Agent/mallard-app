@@ -5,7 +5,7 @@ import type {
   PullReview,
 } from "../../types";
 import Icon from "../Icons";
-import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import { NoticeZone, SEVERITY_ICON, type NoticeItem } from "../notice/Notice";
 import ProjectActivityPage, { compactThreadTitle, REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
@@ -440,19 +440,14 @@ export default function RestorePlanView({
     warningSteps.add("project_files");
   }
   const conversationIds = pullSelectableResourceIds(conversationItems);
-  /* The banner zone that heads the review scroll. Both messages can be on
-     screen at once, so they share one box at the loudest rung present. A Pull
-     of a storage that was cleared and pushed again is an ordinary first Pull,
-     so nothing here speaks about the storage's history. */
+  /* Sessions a computer pushed with credential redaction off. Each row says
+     so in its detail; the footer says once, by Pull, what that means for what
+     arrives — the line Push draws while its own setting is off. */
+  const storedWithoutRedaction = plan.conversation_review.some((row) => row.stored_without_credential_redaction);
+  /* The banner zone that heads the review scroll holds the Pull failure. A
+     Pull of a storage that was cleared and pushed again is an ordinary first
+     Pull, so nothing here speaks about the storage's history. */
   const banners: NoticeItem[] = [];
-  if (plan.conversation_review.some((row) => row.stored_without_credential_redaction)) {
-    banners.push({
-      key: "stored-without-redaction",
-      severity: "warning",
-      title: "Stored without credential redaction",
-      message: "This review includes sessions that can contain API keys, tokens, and passwords.",
-    });
-  }
   if (error) {
     banners.push({
       key: "pull-failed",
@@ -471,15 +466,6 @@ export default function RestorePlanView({
       onDismiss: onDismissError,
     });
   }
-  /* The redaction note comes from the plan and appears on the first render —
-     standing content, and a named region rather than a live one. The error is
-     the opposite: the review always mounts with `error` null (the host clears
-     it before it plans, and even the supporting-check failure lands after the
-     plan is handed over), so an error that is present arrived after an action
-     and stops the flow. One present error re-times the whole box. */
-  const bannerTiming: NoticeTiming = error
-    ? { timing: "blocking" }
-    : { timing: "standing", label: "Notes about this Pull review" };
   const projectContentRows: ProjectFileReviewRow[] = projectContentItems
     .filter((item) => item.projectContentPath && item.projectContentEntryType)
     .map((item) => {
@@ -557,7 +543,11 @@ export default function RestorePlanView({
                box's own margin, which is the only thing the notice cannot do
                for itself. */
             <div className="sync-review-banners">
-              <NoticeZone items={banners} subject="notes about this Pull review" {...bannerTiming} />
+              {/* The review always mounts with `error` null (the host clears it
+                  before it plans, and even the supporting-check failure lands
+                  after the plan is handed over), so an error that is present
+                  arrived after an action and stops the flow. */}
+              <NoticeZone items={banners} subject="notes about this Pull review" timing="blocking" />
             </div>
           )}
           {activeStep === "history" && (
@@ -655,6 +645,12 @@ export default function RestorePlanView({
       </div>
 
       <footer className="sync-pull-apply-bar sync-inline-action-footer sync-sync-review-footer">
+        {storedWithoutRedaction && (
+          <p className="sync-review-footer-note redaction-off">
+            <Icon name={SEVERITY_ICON.warning} size={12} />
+            <span>Not redacted: some sessions can include API keys, tokens, and passwords.</span>
+          </p>
+        )}
         {overLimitSentence && (
           /* The refusal takes a row of its own above the button cluster, where
              the gauge that caused it and the button it stops both sit. It does

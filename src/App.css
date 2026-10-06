@@ -1662,6 +1662,9 @@ svg[data-icon="lightbulb"] path:last-child {
 /* Where the service's answer will land, so the sheet keeps its size. */
 .app-link-placeholder { width: 70px; height: 12px; border-radius: 6px; background: var(--chip-strong-bg); }
 .app-link-placeholder.short { width: 44px; }
+/* Publish version asks in the same frame; its one field takes the line. */
+.publish-version-name { min-width: 0; display: flex; }
+.publish-version-name input { width: 100%; min-height: 30px; padding: 0 9px; }
 .sync-modal-header {
   padding: 18px 20px 15px;
   display: flex;
@@ -7570,6 +7573,21 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .sync-review-footer-note.danger { color: var(--danger-text); }
+
+/* Unredacted sessions: by Push while the setting is off, by Pull when the
+   storage holds sessions pushed with it off. The note's muted ink, with only
+   the warning rung's glyph: a consequence of a setting, not a message box. */
+.sync-review-footer-note.redaction-off {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 5px;
+}
+
+.sync-review-footer-note.redaction-off > svg {
+  flex: 0 0 auto;
+  color: var(--warning-text);
+}
 
 /* What stops Push among the selected rows: the gauge pill's shape in the
    warning ink, beside the gauge and the button it disables. It reads a

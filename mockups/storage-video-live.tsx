@@ -140,7 +140,7 @@ if (new URLSearchParams(window.location.search).get("seed") === "cloud") {
   drafts.delete(seed.draft_id);
   config.storages = [summaryOf({
     ...seed, name: "Mallard Cloud octocat",
-    settings: { service_origin: ORIGIN, account_id: "user_octocat", account_login: "octocat" },
+    settings: { service_origin: ORIGIN, github_user_id: "123", account_login: "octocat" },
     secrets: [{ secret_id: "account_token", present: true }],
   })];
 }
@@ -156,12 +156,12 @@ projectSyncApi.signInManagedCloudStorage = async (draftId, _revision, _mode, onP
   const draft = drafts.get(draftId)!;
   const next: StorageSetupDraft = {
     ...draft,
-    settings: { service_origin: ORIGIN, account_id: "user_octocat", account_login: "octocat" },
+    settings: { service_origin: ORIGIN, github_user_id: "123", account_login: "octocat" },
     secrets: [{ secret_id: "account_token", present: true }],
     revision: draft.revision + 1, updated_at: now,
   };
   drafts.set(draftId, next);
-  const login: ManagedCloudSetupLogin = { account: { id: "user_octocat", login: "octocat" }, service_origin: ORIGIN };
+  const login: ManagedCloudSetupLogin = { account: { github_user_id: "123", login: "octocat" }, service_origin: ORIGIN };
   return login;
 };
 projectSyncApi.cancelManagedCloudSetup = async () => {};

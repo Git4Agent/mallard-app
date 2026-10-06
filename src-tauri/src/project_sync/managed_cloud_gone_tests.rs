@@ -6,7 +6,7 @@ mod managed_cloud_gone {
     use super::*;
     use mallard_domain::{BoundedConfigObject, SecretMap, SecretValue, StorageProviderConfig};
     use mallard_infrastructure::managed_cloud::client::{
-        ManagedCloudStatus, ManagedCloudStatusState, PublicationState,
+        DraftState, ManagedCloudStatus, ManagedCloudStatusState,
     };
     use mallard_infrastructure::managed_cloud::stub::{StubManagedCloud, StubState};
     use mallard_infrastructure::storage_providers::managed_cloud::{
@@ -120,7 +120,7 @@ mod managed_cloud_gone {
                 1,
                 BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
                     service_origin: cloud.endpoint.clone(),
-                    account_id,
+                    github_user_id: cloud.state().users[&account_id].github_user_id.clone(),
                     account_login: login.to_string(),
                 })
                 .unwrap(),
@@ -709,14 +709,11 @@ mod managed_cloud_gone {
             a.session(THIRD);
             assert_eq!(a.push().revision, Some(3));
             let drafted = a.cloud_status();
-            assert_eq!(
-                drafted.publication.unwrap().state,
-                PublicationState::UnpublishedDraft
-            );
+            assert_eq!(drafted.publication.unwrap().draft_ahead, Some(1));
             let reviewed = a.link();
             assert!(repository_bases(&reviewed).all(|base| base.revision == 3));
 
-            assert_eq!(cloud.state().discard(&id), Ok(Some(2)));
+            assert_eq!(cloud.state().discard(&id), Ok(Some(1)));
             let before = a.config_bytes();
             let files = a.files();
             cloud.clear_log();
@@ -727,8 +724,14 @@ mod managed_cloud_gone {
             assert_eq!(status.link.as_ref().unwrap().repository_id, id);
             assert_eq!(status.link.as_ref().unwrap().visibility, "public");
             let publication = status.publication.clone().unwrap();
-            assert_eq!(publication.state, PublicationState::MatchesPublished);
-            assert_eq!(publication.private_revision, Some(2));
+            assert_eq!(
+                (
+                    publication.latest_version,
+                    publication.draft_ahead,
+                    publication.public_version
+                ),
+                (Some(1), Some(0), Some(1))
+            );
             assert_eq!(
                 comparison.remote_continuity,
                 RemoteContinuity::Replaced {
@@ -814,10 +817,9 @@ mod managed_cloud_gone {
                 .values()
                 .all(|state| *state == ThreadSyncState::Synced));
             let publication = settled.managed_cloud_status.unwrap().publication.unwrap();
-            assert_eq!(publication.state, PublicationState::UnpublishedDraft);
             assert_eq!(
-                (publication.private_revision, publication.public_revision),
-                (Some(3), Some(1))
+                (publication.draft_ahead, publication.public_version),
+                (Some(1), Some(1))
             );
             // B reads ahead, and its Pull installs the two sessions.
             let behind = b.compare();
@@ -901,7 +903,7 @@ mod managed_cloud_gone {
             );
             assert_eq!(answer.repository_id, id);
             assert_eq!(answer.state, "done");
-            assert_eq!(answer.kept_revision, Some(2));
+            assert_eq!(answer.kept_version, Some(1));
             assert_eq!(a.config_bytes(), before);
             assert_eq!(a.files(), files);
 
@@ -922,10 +924,119 @@ mod managed_cloud_gone {
         .await;
     }
 
-    /// A private repository keeps no push, so its discard reads as a cleared
-    /// storage does: nothing to compare with, Push open, a first version.
+    /// The desktop's Publish verb: one listing of the project's stream, then
+    /// one request that names the draft the listing selected, the repository
+    /// by the link's pin, and the revision the listing carried. It reads
+    /// nothing and writes nothing on this computer, and no other storage has
+    /// it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn after_a_discard_on_a_private_repository_a_push_starts_a_first_version() {
+    async fn the_publish_verb_lists_once_names_the_draft_and_changes_nothing_here() {
+        with_cloud(|cloud| {
+            let a = Computer::new(&cloud, "rika", "cloud-publish-verb");
+            let elsewhere = StorageId::parse("cloud-publish-verb-folder").unwrap();
+            add_local_storage(
+                &a.repo,
+                &elsewhere,
+                &a.root.parent().unwrap().join("folder-store"),
+            );
+            save_project_link_with_repository(
+                &a.repo,
+                SaveProjectLinkRequest {
+                    local_project_id: a.project.local_project_id.clone(),
+                    storage_id: elsewhere.clone(),
+                    pinned: true,
+                },
+            )
+            .unwrap();
+            a.session(FIRST);
+            assert_eq!(a.push().revision, Some(2));
+            let id = a.pin();
+            let publish = |storage: &StorageId, name: Option<&str>| {
+                tokio::runtime::Handle::current().block_on(
+                    crate::project_sync::managed_cloud_link::publish_version(
+                        &a.repo,
+                        &a.project.local_project_id,
+                        storage,
+                        name,
+                    ),
+                )
+            };
+            let before = a.config_bytes();
+            let files = a.files();
+            cloud.clear_log();
+
+            // Another storage has no versions, and a name too long is
+            // refused before any request.
+            assert_eq!(
+                publish(&elsewhere, None).unwrap_err(),
+                "This storage is not Mallard Cloud."
+            );
+            assert_eq!(
+                publish(&a.storage_id, Some(&"n".repeat(81))).unwrap_err(),
+                "A version's name holds at most 80 characters."
+            );
+            assert!(cloud.requests().is_empty());
+
+            let draft = a.mainline().selected().cloned().unwrap();
+            cloud.clear_log();
+            let answer = publish(&a.storage_id, Some("  First cut ")).unwrap();
+            assert_eq!(
+                cloud.requests(),
+                vec![
+                    format!("GET /v1/repositories/{id}/store"),
+                    format!("POST /v1/repositories/{id}/versions"),
+                ]
+            );
+            assert_eq!(
+                (answer.repository_id.as_str(), answer.version),
+                (id.as_str(), 1)
+            );
+            {
+                let state = cloud.state();
+                let version = state.repositories[&id].latest().unwrap();
+                assert_eq!(version.record_name, draft.file_name());
+                assert_eq!(version.name.as_deref(), Some("First cut"));
+            }
+            assert_eq!(a.config_bytes(), before);
+            assert_eq!(a.files(), files);
+
+            // What follows is the refresh's: the draft is version 1, private
+            // as it was, and Publish is off until a push.
+            let status = a.compare().managed_cloud_status.unwrap();
+            let link = status.link.unwrap();
+            assert_eq!(link.visibility, "private");
+            assert!(!link.can_publish_version);
+            let publication = status.publication.unwrap();
+            assert_eq!(
+                (
+                    publication.latest_version,
+                    publication.next_version,
+                    publication.draft_ahead
+                ),
+                (Some(1), 2, Some(0))
+            );
+            let refused = publish(&a.storage_id, None).unwrap_err();
+            assert!(
+                refused.contains("The draft is already version 1."),
+                "{refused}"
+            );
+            assert_eq!(cloud.state().repositories[&id].versions.len(), 1);
+
+            // A push moves the draft, and the next Publish is version 2.
+            a.session(SECOND);
+            assert_eq!(a.push().revision, Some(3));
+            assert!(a.cloud_status().link.unwrap().can_publish_version);
+            assert_eq!(publish(&a.storage_id, Some(" ")).unwrap().version, 2);
+            assert_eq!(cloud.state().repositories[&id].latest().unwrap().name, None);
+        })
+        .await;
+    }
+
+    /// A private repository without a version keeps no push, so its discard
+    /// reads as a cleared storage does: nothing to compare with, Push open,
+    /// a first push.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_a_discard_on_a_private_repository_without_a_version_a_push_starts_over() {
         with_cloud(|cloud| {
             let a = Computer::new(&cloud, "rika", "cloud-discard-private");
             a.session(FIRST);
@@ -937,7 +1048,7 @@ mod managed_cloud_gone {
             let status = comparison.managed_cloud_status.clone().unwrap();
             assert_eq!(status.state, ManagedCloudStatusState::Ready);
             assert_eq!(status.link.unwrap().repository_id, id);
-            assert_eq!(status.publication.unwrap().state, PublicationState::NoDraft);
+            assert_eq!(status.publication.unwrap().draft, DraftState::None);
             assert_eq!(
                 comparison.remote_continuity,
                 RemoteContinuity::RemoteMissing { base_revision: 2 }

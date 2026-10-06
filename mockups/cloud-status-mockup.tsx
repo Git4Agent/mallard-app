@@ -1,11 +1,11 @@
-import type { ManagedCloudPublicationStatus, ManagedCloudReleaseState } from "../src/components/managed-cloud/types";
-import type { ManagedCloudLink, ManagedCloudStatus } from "../src/components/managed-cloud/types";
+import type { ManagedCloudReleaseState } from "../src/components/managed-cloud/types";
+import type { ManagedCloudLink as ShippedLink, ManagedCloudStatus as ShippedStatus } from "../src/components/managed-cloud/types";
 import { StrictMode, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import Icon, { type IconName } from "../src/components/Icons";
 import { NoticeZone, type NoticeItem } from "../src/components/notice/Notice";
 import { PathBarMenu, type PathBarMenuGroup, type PathBarMenuItem } from "../src/components/sync-review/SyncPathBar";
-import { cloudStatusNotice, cloudVerbs, cloudVersionUrl } from "../src/components/managed-cloud/managedCloudLink";
+import { cloudStatusNotice as shippedStatusNotice } from "../src/components/managed-cloud/managedCloudLink";
 
 import { writeClipboardText } from "../src/components/sync-review/clipboard";
 
@@ -26,6 +26,42 @@ import "./cloud-status-mockup.css";
  * `?dir=all|a|b|c&state=<id>&width=580|800|1100&mark=composite|swap&copy=split|links|rows&nonready=mark|notice&theme=light|dark`)
  * or /mockups/cloud-status-b-mockup.html (the picks: `?state=<id>&theme=light|dark`).
  */
+
+/* ——— the status as the service answered it when this page was drawn ———
+   The draft carried a number and "published" meant public. The shipped types
+   and words moved on to versions (docs/PLAN_CLOUD_VERSIONS.md,
+   cloud-versions-mockup.tsx); this page keeps the shapes it drew, and the
+   three functions it read from managedCloudLink.ts as they were. */
+
+type ManagedCloudLink = Omit<ShippedLink, "can_publish_version">;
+interface ManagedCloudPublicationStatus {
+  state: "no_draft" | "not_public" | "matches_published" | "unpublished_draft" | "unavailable";
+  private_revision: number | null;
+  public_revision: number | null;
+}
+interface ManagedCloudStatus extends Omit<ShippedStatus, "link" | "publication"> {
+  link: ManagedCloudLink | null;
+  publication?: ManagedCloudPublicationStatus | null;
+}
+
+/** The workspace's note reads the state and the message alone. */
+const cloudStatusNotice = (status: ManagedCloudStatus) => shippedStatusNotice({ ...status, link: null, publication: null });
+
+function cloudVerbs(status: ManagedCloudStatus) {
+  const link = status.state === "ready" ? status.link : null;
+  return {
+    viewDraft: !!link,
+    viewPublished: link?.visibility === "public",
+    requestRelease: !!link && link.can_request_release,
+    discardDraft: link?.role === "owner" && link.visibility === "public" && status.publication?.state === "unpublished_draft",
+  };
+}
+
+function cloudVersionUrl(link: ManagedCloudLink, version: "private" | "public"): string {
+  const url = new URL(link.website_url);
+  url.searchParams.set("version", version);
+  return url.toString();
+}
 
 /* ——— the chip as it shipped before this redesign (the "Today" frames) ——— */
 

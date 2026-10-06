@@ -45,7 +45,7 @@ import type {
 } from "../../types";
 import { PROJECT_SYNC_SCHEMA } from "../../types";
 import Icon from "../Icons";
-import Notice, { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import Notice, { NoticeZone, type NoticeItem, type NoticeTiming, type NoticeZoneProps } from "../notice/Notice";
 import BundleConnectionDialog, { type BundleConnectionChoice } from "./BundleConnectionDialog";
 import { isManagedCloudStorage, managedCloudAccount } from "./RepositoryAddressPicker";
 import ActivityLogDrawer from "./ActivityLogDrawer";
@@ -4047,14 +4047,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
      bar on every screen — the bar is the window's title bar, and the trail is
      read before the message — so a screen that draws its own path bar has to
      place it: it reaches those screens through `PathBarBelow`. */
-  const shellNoticeZone = (
-    <NoticeZone
-      items={shellNotices}
-      subject="messages from Mallard"
-      className="sync-backend-banner"
-      {...shellNoticeTiming}
-    />
-  );
+  const shellNoticeZone: NoticeZoneProps = {
+    items: shellNotices,
+    subject: "messages from Mallard",
+    className: "sync-backend-banner",
+    ...shellNoticeTiming,
+  };
 
   return (
     <div
@@ -4174,7 +4172,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           </div>
           {windowActions}
         </header>
-        {shellNoticeZone}
+        <NoticeZone {...shellNoticeZone} />
         </>
         )}
 
@@ -4288,6 +4286,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             onSelectStorage={(projectId, storageId) => selectStorage(projectId, storageId)}
             onOpenSessionDetail={openSessionDetail}
             onSessionActionError={setSessionActionError}
+            onNotify={(message) => notify(message)}
             onProjectFilesToPullChange={setProjectFilesToPull}
             onCloseSessionDetail={closeProjectSubview}
             onLinkStorage={(projectId, storageId) => linkStorage(projectId, storageId)}

@@ -432,7 +432,7 @@ mod tests {
         let item: RepositorySummary = serde_json::from_value(serde_json::json!({
             "id": "repo_pet", "owner": {"user_id": "user_1", "github_login": "maya"}, "name": "Mochi",
             "repository_class": "catalog", "revision": 5, "state": "active", "visibility": "public",
-            "private_revision": 0, "public_revision": 5, "role": null,
+            "public_version": 5, "role": null,
             "catalog": {"provider": "codex", "resource_kind": "desktop_pet", "format": "openai.codex-pet", "format_version": 2, "resource_id": "mochi", "library_repository_id": "lib"},
         }))
         .unwrap();
@@ -454,7 +454,7 @@ mod tests {
         let project: RepositorySummary = serde_json::from_value(serde_json::json!({
             "id": "repo_1", "owner": {"user_id": "user_1", "github_login": "octocat"}, "name": "Project",
             "repository_class": "git_project", "bundle_id": "b".repeat(32), "revision": 7, "state": "active",
-            "visibility": "private", "private_revision": 3, "public_revision": 0, "role": "owner",
+            "visibility": "private", "public_version": null, "role": "owner",
         }))
         .unwrap();
         let described = describe(&project);
@@ -478,7 +478,7 @@ mod tests {
                 1,
                 BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
                     service_origin: origin.into(),
-                    account_id: format!("user_{login}"),
+                    github_user_id: "123".into(),
                     account_login: login.into(),
                 })
                 .unwrap(),

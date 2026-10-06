@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import SyncPathBar, { PathBarBelow } from "../../src/components/sync-review/SyncPathBar";
-import { NoticeZone } from "../../src/components/notice/Notice";
+import type { NoticeZoneProps } from "../../src/components/notice/Notice";
+import { connectionDetail, connectionSuspends } from "../../src/components/project-sync/StorageSettings";
 import StorageIndexPage from "../../src/components/project-sync/StorageIndexPage";
 import SettingsPage from "../../src/components/project-sync/SettingsPage";
 import type { AppUpdates } from "../../src/components/AppUpdater";
@@ -33,14 +36,12 @@ const idleUpdates: AppUpdates = {
  * sibling. Either way the DOM order is bar, zone, page — the same order the
  * eye and the tab sequence follow. */
 
-const zone = (
-  <NoticeZone
-    items={[{ key: "receipt", severity: "success", message: "backup removed — files kept on disk." }]}
-    subject="messages from Mallard"
-    className="sync-backend-banner"
-    timing="progress"
-  />
-);
+const zone: NoticeZoneProps = {
+  items: [{ key: "receipt", severity: "success", message: "backup removed — files kept on disk." }],
+  subject: "messages from Mallard",
+  className: "sync-backend-banner",
+  timing: "progress",
+};
 
 const BAR = 'class="sync-pathbar sync-titlebar"';
 const ZONE = 'class="notice success sync-backend-banner"';
@@ -102,15 +103,96 @@ test("a path-bar screen flattens to bar, zone, page in the workspace column", ()
 test("the shell keeps its own titlebar first and hands the zone to path-bar screens", () => {
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const titlebar = shell.indexOf('<header className="sync-titlebar" data-tauri-drag-region>');
-  const underTitlebar = shell.indexOf("{shellNoticeZone}");
+  const underTitlebar = shell.indexOf("<NoticeZone {...shellNoticeZone} />");
   const handedDown = shell.indexOf("<PathBarBelow.Provider value={showsPathBar ? shellNoticeZone : null}>");
   assert.ok(titlebar > -1, "the shell draws a titlebar for screens without a path bar");
   assert.ok(underTitlebar > titlebar, "the zone follows the shell's own titlebar");
   assert.ok(handedDown > underTitlebar, "path-bar screens receive the zone through the bar");
 
   // One zone, built once, drawn in exactly one of the two places.
-  assert.equal((shell.match(/\{shellNoticeZone\}/g) ?? []).length, 1);
-  assert.equal((shell.match(/className="sync-backend-banner"/g) ?? []).length, 1);
+  assert.equal((shell.match(/<NoticeZone \{\.\.\.shellNoticeZone\} \/>/g) ?? []).length, 1);
+  assert.equal((shell.match(/className: "sync-backend-banner"/g) ?? []).length, 1);
+});
+
+// Render the production storage notice selection and its actual path bar.
+// Commands and provider homes are not used by this fixture.
+function storageBanner(options: {
+  bundleError?: string;
+  catalogRepoError?: string;
+  storageDraftActionError?: string;
+  refused?: boolean;
+  bundleLoading?: boolean;
+}, shell: NoticeZoneProps = { ...zone, items: [] }) {
+  const source = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  const start = source.indexOf("    const storageNotices: NoticeItem[] = [];");
+  const end = source.indexOf("    /* On an existing storage", start);
+  const barStart = source.indexOf("      <SyncPathBar", end);
+  const barEnd = source.indexOf("      />", barStart) + "      />".length;
+  assert.ok(start >= 0 && end > start && barStart > end && barEnd > barStart);
+  const pageEnd = source.indexOf("    const workspaceNotices", barEnd);
+  assert.doesNotMatch(source.slice(barEnd, pageEnd), /items=\{storageNotices\}/, "no second storage error box in page content");
+  const context = {
+    React: { createElement }, SyncPathBar, connectionDetail, connectionSuspends,
+    storageDraftActionError: options.storageDraftActionError ?? null,
+    storageSession: null, descriptor: null, providerLabelForPage: "Mallard Cloud",
+    savedEditedStorage: { connection: options.refused ? {
+      state: "reconnect_required", message: "Reconnect Mallard Cloud.", evidence: null,
+    } : null },
+    creatingStorage: false, bundleLoading: options.bundleLoading ?? false,
+    bundleError: options.bundleError ?? null, catalogRepoError: options.catalogRepoError ?? null,
+    revealError: null, pageStorageId: "storage-test",
+    storagePathCrumbs: [{ id: "storage-test", label: "Test storage" }],
+    storagePathOverflow: [], busy: false, storagePathActions: null, storageName: "Test storage",
+  };
+  const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");
+  const code = transformSync(`${source.slice(start, end)}\nreturn (${source.slice(barStart, barEnd)});`, { loader: "tsx" }).code;
+  const render = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${code}`);
+  return renderToStaticMarkup(
+    <PathBarBelow.Provider value={shell}>
+      {render(context)}
+      <main className="sync-main">Storage settings</main>
+    </PathBarBelow.Provider>,
+  );
+}
+
+test("storage repository and catalog failures reach the shared banner before page content", () => {
+  for (const options of [
+    { bundleError: "Mallard Cloud rejected the saved sign-in. HTTP 401." },
+    { catalogRepoError: "Catalog repositories could not be read." },
+  ]) {
+    const html = storageBanner(options);
+    assertOrder(html, BAR, 'class="notice danger sync-backend-banner"', PAGE);
+    assert.match(html, /role="region" aria-label="Messages from Mallard"/);
+    const message = options.bundleError ?? options.catalogRepoError!;
+    assert.ok(html.includes(message));
+    assert.equal((html.match(/class="sync-notice-dismiss"/g) ?? []).length, 1);
+  }
+});
+
+test("storage and shell failures share one banner with blocking announcements", () => {
+  const html = storageBanner({ bundleError: "Storage read failed." }, {
+    ...zone, timing: "blocking",
+    items: [{ key: "shell-error", severity: "danger", message: "Rename failed." }],
+  });
+  assertOrder(html, BAR, 'class="notice danger sync-backend-banner"', PAGE);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /Storage read failed\./);
+  assert.match(html, /Rename failed\./);
+  assert.match(html, /aria-label="Dismiss: all 2 messages from Mallard"/);
+  assert.match(html, /aria-label="Dismiss: Error\. Storage read failed\."/);
+  assert.match(html, /aria-label="Dismiss: Error\. Rename failed\."/);
+  const actionFailure = storageBanner({ storageDraftActionError: "Draft save failed." }, zone);
+  assert.match(actionFailure, /role="alert"/);
+  assert.match(actionFailure, /Draft save failed\./);
+  assert.match(actionFailure, /backup removed/);
+});
+
+test("the shared storage banner preserves refusal precedence and clears after a successful read", () => {
+  const refused = storageBanner({ refused: true, bundleError: "Duplicate listing failure." });
+  assert.match(refused, /Reconnect Mallard Cloud\./);
+  assert.doesNotMatch(refused, /Duplicate listing failure/);
+  assert.doesNotMatch(storageBanner({ bundleError: "Previous failure.", bundleLoading: true }), /sync-backend-banner|Previous failure/);
+  assert.doesNotMatch(storageBanner({}), /sync-backend-banner/);
 });
 
 test("the shell zone stacks under the bar so the bar's menus open over it", () => {

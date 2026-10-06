@@ -4,7 +4,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { formatFullDateTime, formatRelativeTime } from "../src/clock";
 import { formatBytes } from "../src/format";
 import Icon from "../src/components/Icons";
-import { NoticeZone, type NoticeItem } from "../src/components/notice/Notice";
+import { type NoticeItem } from "../src/components/notice/Notice";
 import ProjectSidebar from "../src/components/project-sync/ProjectSidebar";
 import CatalogConnectDialog from "../src/components/storage-catalog/CatalogConnectDialog";
 import { storageCatalogApi } from "../src/components/storage-catalog/api";
@@ -252,7 +252,7 @@ function Shell({ children }: { children: ReactNode }) {
 function ShellNote({ note, onDismiss, children }: { note: string | null; onDismiss: () => void; children: ReactNode }) {
   const items: NoticeItem[] = note ? [{ key: note, severity: "success", message: note, onDismiss }] : [];
   return (
-    <PathBarBelow.Provider value={<NoticeZone items={items} subject="messages from Mallard" className="sync-backend-banner" timing="progress" />}>
+    <PathBarBelow.Provider value={{ items, subject: "messages from Mallard", className: "sync-backend-banner", timing: "progress" }}>
       {children}
     </PathBarBelow.Provider>
   );

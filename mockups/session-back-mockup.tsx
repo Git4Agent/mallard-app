@@ -112,9 +112,10 @@ const CLOUD: ManagedCloudStatus = {
     release: { kind: "private" },
     repository_revision: 4,
     can_request_release: true,
+    can_publish_version: true,
     role: "owner",
   },
-  publication: { state: "not_public", private_revision: 4, public_revision: null },
+  publication: { draft: "pushed", latest_version: null, next_version: 1, draft_ahead: null, public_version: null, review_version: null },
   message: null,
 };
 
@@ -193,7 +194,7 @@ function PathActions({ page }: { page: Page }) {
         busy={false}
         refreshing={false}
         onOpenUrl={noop}
-        onRequestRelease={noop}
+        onPublishVersion={noop}
         onDiscardDraft={noop}
         onRetry={noop}
         onStorageSettings={noop}

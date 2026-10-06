@@ -28,12 +28,15 @@ pub struct Failure {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<Account>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_origin: Option<String>,
 }
 impl Failure {
     fn code(code: &str) -> Self {
         Self {
             code: code.into(),
             account: None,
+            service_origin: None,
         }
     }
     fn local() -> Self {
@@ -49,7 +52,7 @@ pub enum Progress {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Account {
-    pub id: String,
+    pub github_user_id: String,
     pub login: String,
 }
 
@@ -171,7 +174,7 @@ pub async fn sign_in_managed_cloud_storage(
         .storage
         .provider_config
         .settings
-        .get_str("account_id")
+        .get_str("github_user_id")
         .filter(|id| !id.is_empty())
         .map(str::to_owned);
     let run = control.begin(&draft_id, expected_revision)?;
@@ -193,14 +196,16 @@ pub async fn sign_in_managed_cloud_storage(
         return Err(Failure::code("managed_cloud_setup_cancelled"));
     }
     let account = Account {
-        id: signed.user.id,
+        github_user_id: signed.user.github_user_id,
         login: signed.user.github_login,
     };
     let about_account = |code: &str| Failure {
         code: code.into(),
         account: Some(account.clone()),
+        service_origin: Some(origin.clone()),
     };
-    if mode == Mode::Reconnect && pinned_account.as_deref() != Some(account.id.as_str()) {
+    if mode == Mode::Reconnect && pinned_account.as_deref() != Some(account.github_user_id.as_str())
+    {
         return Err(about_account("managed_cloud_account_mismatch"));
     }
     // The draft operation pins the reviewed revision: a draft that moved
@@ -219,7 +224,7 @@ pub async fn sign_in_managed_cloud_storage(
         &draft_id,
         mallard_application::managed_cloud_setup::SignedInAccount {
             service_origin: &origin,
-            account_id: &account.id,
+            github_user_id: &account.github_user_id,
             account_login: &account.login,
             token: &signed.token,
         },

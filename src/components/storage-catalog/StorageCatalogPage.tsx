@@ -1190,9 +1190,9 @@ export default function StorageCatalogPage({
   const openPush = () => openReview("push", itemRow?.resource_id ? [itemRow.resource_id] : undefined);
   const openPull = () => openReview("pull", itemRow?.resource_id ? [itemRow.resource_id] : undefined);
 
-  /** The release and the discard name the item's saved repository. One the
-   *  page learned from the account's listing is saved first, as the item's
-   *  next Push or Pull would save it. */
+  /** The discard names the item's saved repository. One the page learned
+   *  from the account's listing is saved first, as the item's next Push or
+   *  Pull would save it. */
   const savedItemRepository = async (): Promise<string> => {
     if (!itemId || !itemRepository || !storageId) throw new Error("This item has no repository yet.");
     if (!itemSaved) {
@@ -1200,21 +1200,6 @@ export default function StorageCatalogPage({
       await storageCatalogApi.connectCloudRepository(scope.scope.scope_id, storageId, itemId, itemRepository, link.revision);
     }
     return itemRepository;
-  };
-  const requestRelease = async () => {
-    const link = itemStatus?.link;
-    if (!link || !itemId || !storageId || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const repositoryId = await savedItemRepository();
-      await storageCatalogApi.requestCloudRelease(scope.scope.scope_id, storageId, itemId, repositoryId, link.repository_revision);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-    await load();
   };
   const discardDraft = async () => {
     if (!itemId || !storageId || busy) return;
@@ -1649,7 +1634,6 @@ export default function StorageCatalogPage({
               busy={busy}
               refreshing={!itemStatus}
               onOpenUrl={(url) => void openUrl(url).catch((reason) => setError(errorMessage(reason)))}
-              onRequestRelease={() => void requestRelease()}
               onDiscardDraft={() => void discardDraft()}
               onRetry={retryItemStatus}
               onStorageSettings={() => { if (storageId) onOpenStorageDetails(storageId); }}

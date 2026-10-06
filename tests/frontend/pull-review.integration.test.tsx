@@ -827,10 +827,17 @@ test("missing-child recovery names the child and remains selectable", () => {
 
 
 test("Pull identifies content stored with redaction Off", () => {
+  const line = "Not redacted: some sessions can include API keys, tokens, and passwords.";
   const row = { ...conversationRow("create_local", "off-selection"), stored_without_credential_redaction: true };
   const items = buildPullReviewItems({ ...restorePlan, conversation_review: [row] });
   assert.ok(items.some((item) => item.detail.includes("Stored without credential redaction")));
-  assert.match(renderReview({ ...restorePlan, conversation_review: [row] }), /Stored without credential redaction/);
+  // Said once, as a muted line by Pull — not a message box over the list.
+  const html = renderReview({ ...restorePlan, conversation_review: [row] });
+  const footer = html.slice(html.indexOf("<footer"));
+  assert.match(footer, /class="sync-review-footer-note redaction-off"/);
+  assert.ok(footer.includes(line));
+  assert.doesNotMatch(html, /sync-review-banners/);
+  assert.doesNotMatch(renderReview(restorePlan), /Not redacted/);
 });
 
 test("an Apply exception stays visible and leaves the review available for retry", async () => {

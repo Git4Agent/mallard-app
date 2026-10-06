@@ -1,5 +1,10 @@
 # OneDrive user App Folder proof of concept
 
+**5 October update:** This document tests the former mutable-head protocol.
+Use the [current OneDrive assessment](ONEDRIVE_FEASIBILITY_2026-10-05.md) for
+today's immutable-record requirements and the new create-only probe.
+The stale update-session test below is no longer a product blocker.
+
 **Date:** 2026-09-02  
 **Scope:** Same-account, two-client OneDrive user App Folder capability gate  
 **Production status:** Not integrated  

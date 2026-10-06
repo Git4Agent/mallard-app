@@ -12,7 +12,7 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
-import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import { NoticeZone, SEVERITY_ICON, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type PushGitHistory, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, {
   projectFileReviewCards,
@@ -668,12 +668,19 @@ function pushBudgetBreakdown(total: PushBudget): string {
 export const PUSH_RUNNING_NOTE = "A running push finishes or fails whole — it can’t be cancelled midway.";
 
 /** Both reviews that push say this while Settings › Privacy › Credential
- *  redaction is off. It comes from the setting, never the selection. */
-export const CREDENTIAL_REDACTION_OFF_NOTICE: NoticeItem = {
-  key: "credential-redaction",
-  severity: "warning",
-  message: "Exported content can include API keys, tokens, and passwords.",
-};
+ *  redaction is off. The header's flag already names the setting, and Off is
+ *  the default, so a warning box over the list repeated it on every review.
+ *  This is a muted line by Push instead: what the push sends, said where it
+ *  is sent. It is the setting's consequence rather than an event, so it has
+ *  no close control, like the footer's other notes. */
+export function CredentialRedactionOffNote() {
+  return (
+    <p className="sync-review-footer-note redaction-off">
+      <Icon name={SEVERITY_ICON.warning} size={12} />
+      <span>Not redacted: API keys, tokens, and passwords push as written.</span>
+    </p>
+  );
+}
 
 /** The commit of both reviews that push. It wears the wait while the rows
  *  load and the folder is walked, and the transfer's own readout while it
@@ -916,7 +923,6 @@ export default function PushResourceWorkspace({
         : undefined,
     });
   }
-  if (!credentialRedactionEnabled) banners.push(CREDENTIAL_REDACTION_OFF_NOTICE);
   /* No comparison means no row can be selected: every session shows its
      fallback status and the counts read 0/0. That is a broken review, not an
      empty one, so it says why at the top. Reset is offered only when the
@@ -1257,6 +1263,7 @@ export default function PushResourceWorkspace({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
+        {!credentialRedactionEnabled && <CredentialRedactionOffNote />}
         {overLimitSentence && (
           /* The refusal takes a row of its own above the button cluster, where
              the gauge that caused it and the button it stops both sit. It does

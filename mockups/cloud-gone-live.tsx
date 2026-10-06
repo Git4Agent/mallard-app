@@ -20,13 +20,18 @@ import "../src/App.css";
 const link: ManagedCloudLink = {
   repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
   website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
-  repository_revision: 7, can_request_release: true, role: "owner",
+  repository_revision: 7, can_request_release: true, can_publish_version: true, role: "owner",
   release: { kind: "snapshot_changed" },
 };
+/** Where a pushed draft stands: the latest version, the pushes past it, and
+ *  the version the public reads. */
+const standing = (latest: number | null, ahead: number | null, shown: number | null): NonNullable<ManagedCloudStatus["publication"]> => ({
+  draft: "pushed", latest_version: latest, next_version: (latest ?? 0) + 1, draft_ahead: ahead, public_version: shown, review_version: null,
+});
 const ready = (overrides: Partial<ManagedCloudStatus> = {}, of: Partial<ManagedCloudLink> = {}): ManagedCloudStatus => ({
   repository_id: "repo_one", state: "ready", message: null,
   link: { ...link, ...of },
-  publication: { state: "unpublished_draft", private_revision: 5, public_revision: 2 },
+  publication: standing(2, 3, 2),
   ...overrides,
 });
 const failed = (state: ManagedCloudStatus["state"], message: string): ManagedCloudStatus => (
@@ -52,7 +57,7 @@ function comparison(
   };
 }
 
-const chipActions = { onOpenUrl: () => {}, onRequestRelease: () => {}, onDiscardDraft: () => {}, onRetry: () => {}, onStorageSettings: () => {} };
+const chipActions = { onOpenUrl: () => {}, onPublishVersion: () => {}, onDiscardDraft: () => {}, onRetry: () => {}, onStorageSettings: () => {} };
 
 /** The bar's two buttons and its Cloud chip, as the workspace decides them. */
 function Actions({ status }: { status: ManagedCloudStatus }) {
@@ -111,9 +116,9 @@ function Specimen({ when, where, children }: { when: string; where: string; chil
 const gone = failed("gone", "Deleted, or this account lost access. Push creates it again.");
 const deleting = failed("deleting", "Push creates it again.");
 const refused = failed("inaccessible", "Mallard Cloud refused this account. It may be suspended.");
-const createdAgain = ready({ publication: { state: "not_public", private_revision: 1, public_revision: null } }, { repository_id: "repo_two", visibility: "private", release: { kind: "private" } });
-const backAtPublic = ready({ publication: { state: "matches_published", private_revision: 2, public_revision: 2 } }, { release: { kind: "public" }, can_request_release: false });
-const emptied = ready({ publication: { state: "no_draft", private_revision: null, public_revision: null } }, { visibility: "private", release: { kind: "not_pushed" }, can_request_release: false });
+const createdAgain = ready({ publication: standing(null, null, null) }, { repository_id: "repo_two", visibility: "private", release: { kind: "private" } });
+const backAtPublic = ready({ publication: standing(2, 0, 2) }, { release: { kind: "public" }, can_request_release: false, can_publish_version: false });
+const emptied = ready({ publication: { ...standing(null, null, null), draft: "none" } }, { visibility: "private", release: { kind: "not_pushed" }, can_request_release: false, can_publish_version: false });
 const question = discardDraftQuestion(link, ready().publication);
 
 document.documentElement.dataset.theme = new URLSearchParams(window.location.search).get("theme") === "dark" ? "dark" : "light";
@@ -137,7 +142,7 @@ createRoot(document.getElementById("root")!).render(
         <Actions status={createdAgain} />
         <ActivityNote of={comparison(createdAgain, { state: "replaced", base_revision: 2, remote_revision: 1 }, { state: "unreviewed", remote_revision: 1 })} />
       </Specimen>
-      <Specimen when="Draft discarded, back at the public version" where="On every computer that had pushed or pulled the draft.">
+      <Specimen when="Draft discarded, back at the latest version" where="On every computer that had pushed or pulled the draft.">
         <Actions status={backAtPublic} />
         <ActivityNote of={comparison(backAtPublic, { state: "replaced", base_revision: 5, remote_revision: 2 }, { state: "unreviewed", remote_revision: 2 })} />
       </Specimen>
@@ -149,13 +154,13 @@ createRoot(document.getElementById("root")!).render(
         <Actions status={emptied} />
         <ActivityNote of={comparison(emptied, { state: "remote_missing", base_revision: 2 }, { state: "fresh" })} />
       </Specimen>
-      <Specimen when="The Owner's Cloud panel, draft over a public version" where="Discard draft… is the last row, in danger ink.">
+      <Specimen when="The Owner's Cloud panel, draft past the public version" where="Discard draft… is the last row, in danger ink.">
         <Menu status={ready()} />
       </Specimen>
       <Specimen when="An Admin's Cloud panel, the same repository" where="No discard: an Admin discards on the website.">
         <Menu status={ready({}, { role: "admin" })} />
       </Specimen>
-      <Specimen when="The Cloud panel while another repository is read in place of the link's" where="The release and the discard name the repository by the link, so they wait.">
+      <Specimen when="The Cloud panel while another repository is read in place of the link's" where="Publish and the discard name the repository by the link, so they wait.">
         <Menu status={ready({}, { repository_id: "repo_two" })} />
       </Specimen>
       <Specimen when="What Discard draft… asks" where="In the system's dialog: Cancel, Discard.">

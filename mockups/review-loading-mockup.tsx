@@ -2,7 +2,7 @@ import { StrictMode, createContext, useContext, useEffect, useRef, useState, typ
 import { createRoot } from "react-dom/client";
 import Icon from "../src/components/Icons";
 import LoadingScaffold, { LoadingBone } from "../src/components/LoadingScaffold";
-import { NoticeZone, type NoticeItem } from "../src/components/notice/Notice";
+import { NoticeZone, type NoticeItem, type NoticeZoneProps } from "../src/components/notice/Notice";
 import NameSearchField from "../src/components/sync-review/NameSearchField";
 import { sessionNoun } from "../src/components/project-sync/model";
 import ProviderMark from "../src/components/sync-review/ProviderMark";
@@ -899,14 +899,12 @@ function ActivityBackdrop({ verb }: { verb: Verb }) {
 }
 
 function Workspace({ verb, frame }: { verb: Verb; frame: Frame }) {
-  const zone = (
-    <NoticeZone
-      items={frame.shell ? [frame.shell] : []}
-      subject="messages from Mallard"
-      className="sync-backend-banner"
-      timing="progress"
-    />
-  );
+  const zone: NoticeZoneProps = {
+    items: frame.shell ? [frame.shell] : [],
+    subject: "messages from Mallard",
+    className: "sync-backend-banner",
+    timing: "progress",
+  };
   const reviewOpen = frame.page === "review" && !!frame.review;
   return (
     <PathBarBelow.Provider value={zone}>

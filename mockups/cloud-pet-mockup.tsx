@@ -203,39 +203,58 @@ const storageName = (view: View) => (view.storage === "cloud" ? STORAGE_NAME : V
 const link = (owner: string, name: string, of: Partial<ManagedCloudLink> = {}): ManagedCloudLink => ({
   repository_id: `repo_${owner}_${name}`.toLowerCase(), visibility: "private", can_pull: true, can_push: true,
   website_url: `https://${HOST}/${owner}/${name}`, owner_login: owner, name,
-  repository_revision: 4, can_request_release: true, role: "owner", release: { kind: "private" }, ...of,
+  repository_revision: 4, can_request_release: true, can_publish_version: false, role: "owner", release: { kind: "private" }, ...of,
 });
-const ready = (of: ManagedCloudLink, publication: ManagedCloudStatus["publication"], saved = of.repository_id): ManagedCloudStatus => ({
-  repository_id: saved, state: "ready", link: of, publication, message: null,
-});
+/* How far a repository's stream has come, which this page prints as an
+   item's number in readouts, plans and outcomes: the push a collaborator
+   reads, and the one everyone else reads once it is public. The status the
+   service answers carries versions instead (docs/PLAN_CLOUD_VERSIONS.md), so
+   the two numbers are kept beside it. */
+interface Reads { draft: number | null; live: number | null }
+const READS = new WeakMap<ManagedCloudStatus, Reads>();
+const readsOf = (status: ManagedCloudStatus | null | undefined): Reads | undefined => (status ? READS.get(status) : undefined);
+const ready = (of: ManagedCloudLink, reads: Reads, saved = of.repository_id): ManagedCloudStatus => {
+  const shown = of.visibility === "public" ? reads.live : null;
+  const status: ManagedCloudStatus = {
+    repository_id: saved, state: "ready", link: of, message: null,
+    publication: {
+      draft: reads.draft === null ? "none" : "pushed",
+      latest_version: shown, next_version: (shown ?? 0) + 1,
+      draft_ahead: shown === null || reads.draft === null ? null : reads.draft - shown,
+      public_version: shown, review_version: null,
+    },
+  };
+  READS.set(status, reads);
+  return status;
+};
 const failed = (state: ManagedCloudStatus["state"], message: string, repositoryId = "repo_rika321_duck"): ManagedCloudStatus => ({
   repository_id: repositoryId, state, link: null, message,
 });
 const publicRead = { visibility: "public", role: null, release: { kind: "public" }, can_request_release: false } as const;
 
 const STATUS = {
-  notPushed: ready(link(LOGIN, "Duck", { release: { kind: "not_pushed" }, can_request_release: false }), { state: "no_draft", private_revision: null, public_revision: null }),
-  duckPrivate: ready(link(LOGIN, "Duck"), { state: "not_public", private_revision: 1, public_revision: null }),
-  duckMaya: ready(link("maya", "Duck", publicRead), { state: "matches_published", private_revision: 6, public_revision: 6 }),
-  duckKai: ready(link("kai", "Duck", { role: "member", can_request_release: false }), { state: "not_public", private_revision: 4, public_revision: null }),
-  pip: ready(link(LOGIN, "Pip"), { state: "not_public", private_revision: 3, public_revision: null }),
-  mossy: ready(link(LOGIN, "Mossy", { visibility: "public", release: { kind: "snapshot_changed" } }), { state: "unpublished_draft", private_revision: 4, public_revision: 2 }),
-  fable: ready(link(LOGIN, "Fable"), { state: "not_public", private_revision: 1, public_revision: null }),
-  mochi: ready(link("maya", "Mochi", publicRead), { state: "matches_published", private_revision: 5, public_revision: 5 }),
-  biscuit: ready(link("kai", "Biscuit", { role: "member", can_request_release: false }), { state: "not_public", private_revision: 2, public_revision: null }),
-  lintRules: ready(link("kai", "lint-rules", { role: "member", can_request_release: false }), { state: "not_public", private_revision: 3, public_revision: null }),
-  deploy: ready(link(LOGIN, "deploy-checklist"), { state: "not_public", private_revision: 2, public_revision: null }),
-  pdf: ready(link(LOGIN, "pdf-tools"), { state: "not_public", private_revision: 5, public_revision: null }),
-  pdfMaya: ready(link("maya", "pdf-tools", publicRead), { state: "matches_published", private_revision: 9, public_revision: 9 }),
-  sql: ready(link(LOGIN, "sql-review", { visibility: "public", release: { kind: "snapshot_changed" } }), { state: "unpublished_draft", private_revision: 4, public_revision: 3 }),
+  notPushed: ready(link(LOGIN, "Duck", { release: { kind: "not_pushed" }, can_request_release: false }), { draft: null, live: null }),
+  duckPrivate: ready(link(LOGIN, "Duck"), { draft: 1, live: null }),
+  duckMaya: ready(link("maya", "Duck", publicRead), { draft: 6, live: 6 }),
+  duckKai: ready(link("kai", "Duck", { role: "member", can_request_release: false }), { draft: 4, live: null }),
+  pip: ready(link(LOGIN, "Pip"), { draft: 3, live: null }),
+  mossy: ready(link(LOGIN, "Mossy", { visibility: "public", release: { kind: "snapshot_changed" } }), { draft: 4, live: 2 }),
+  fable: ready(link(LOGIN, "Fable"), { draft: 1, live: null }),
+  mochi: ready(link("maya", "Mochi", publicRead), { draft: 5, live: 5 }),
+  biscuit: ready(link("kai", "Biscuit", { role: "member", can_request_release: false }), { draft: 2, live: null }),
+  lintRules: ready(link("kai", "lint-rules", { role: "member", can_request_release: false }), { draft: 3, live: null }),
+  deploy: ready(link(LOGIN, "deploy-checklist"), { draft: 2, live: null }),
+  pdf: ready(link(LOGIN, "pdf-tools"), { draft: 5, live: null }),
+  pdfMaya: ready(link("maya", "pdf-tools", publicRead), { draft: 9, live: 9 }),
+  sql: ready(link(LOGIN, "sql-review", { visibility: "public", release: { kind: "snapshot_changed" } }), { draft: 4, live: 3 }),
   release: failed("inaccessible", "Mallard Cloud refused this account for maya/release-notes.", "repo_maya_release-notes"),
-  commit: ready(link(LOGIN, "commit-style"), { state: "not_public", private_revision: 1, public_revision: null }),
-  changelog: ready(link("maya", "changelog-bot", publicRead), { state: "matches_published", private_revision: 2, public_revision: 2 }),
-  inReview: ready(link(LOGIN, "Duck", { release: { kind: "waiting_owner", requested_by: "user_2" }, can_request_release: false }), { state: "not_public", private_revision: 2, public_revision: null }),
-  published: ready(link(LOGIN, "Duck", { visibility: "public", release: { kind: "public" }, can_request_release: false }), { state: "matches_published", private_revision: 2, public_revision: 2 }),
+  commit: ready(link(LOGIN, "commit-style"), { draft: 1, live: null }),
+  changelog: ready(link("maya", "changelog-bot", publicRead), { draft: 2, live: 2 }),
+  inReview: ready(link(LOGIN, "Duck", { release: { kind: "waiting_owner", requested_by: "user_2" }, can_request_release: false }), { draft: 2, live: null }),
+  published: ready(link(LOGIN, "Duck", { visibility: "public", release: { kind: "public" }, can_request_release: false }), { draft: 2, live: 2 }),
   /* Learned from the account's listing, not yet saved by a Push or Pull:
      the status names no saved repository, so the verbs that name it wait. */
-  learned: ready(link(LOGIN, "Fable"), { state: "not_public", private_revision: 1, public_revision: null }, ""),
+  learned: ready(link(LOGIN, "Fable"), { draft: 1, live: null }, ""),
   gone: failed("gone", "Deleted, or this account lost access. Push creates it again."),
   deleting: failed("deleting", "Push creates it again."),
   signIn: failed("sign_in_required", "Signed out of Mallard Cloud. Sign in again from Storage settings."),
@@ -356,7 +375,7 @@ function pullSource(id: ItemId, view: View): Readout | undefined {
   const address = `${of.owner_login}/${of.name}`;
   /* What a Pull reads: the draft for a collaborator, the public version for
      a repository this account only reads. */
-  const version = of.role === null ? `public v${status.publication?.public_revision}` : `draft v${status.publication?.private_revision}`;
+  const version = of.role === null ? `public v${readsOf(status)?.live}` : `draft v${readsOf(status)?.draft}`;
   return { address, tooltip: `Pulls ${version} from ${address}` };
 }
 
@@ -428,7 +447,7 @@ function pushOutcomeView(view: View, single: boolean): SyncOutcomeView {
   const kind = KINDS[view.kind];
   const stats: SyncOutcomeStat[] = [{ icon: "upload", value: String(ids.length), label: ids.length === 1 ? kind.noun : kind.plural }];
   if (single) {
-    const before = ids[0] === "duck" ? 0 : statusOf(ids[0], view)?.publication?.private_revision ?? 0;
+    const before = ids[0] === "duck" ? 0 : readsOf(statusOf(ids[0], view))?.draft ?? 0;
     stats.push({ icon: "git-branch", label: "Version", value: String(before + 1), lead: true });
   }
   return {
@@ -460,7 +479,7 @@ function pullOutcomeView(view: View, single: boolean): SyncOutcomeView {
   ];
   if (single) {
     const status = statusOf(ids[0], view);
-    const version = status?.link?.role === null ? status.publication?.public_revision : status?.publication?.private_revision;
+    const version = status?.link?.role === null ? readsOf(status)?.live : readsOf(status)?.draft;
     stats.push({ icon: "git-branch", label: "Version", value: String(version ?? 1), lead: true });
   }
   const rows: SyncOutcomeRow[] = [
@@ -542,7 +561,7 @@ function Shell({ kind, adding, onOpenScope, onAddScope, children }: {
 function ShellNote({ note, onDismiss, children }: { note: string | null; onDismiss: () => void; children: ReactNode }) {
   const items: NoticeItem[] = note ? [{ key: note, severity: "success", message: note, onDismiss }] : [];
   return (
-    <PathBarBelow.Provider value={<NoticeZone items={items} subject="messages from Mallard" className="sync-backend-banner" timing="progress" />}>
+    <PathBarBelow.Provider value={{ items, subject: "messages from Mallard", className: "sync-backend-banner", timing: "progress" }}>
       {children}
     </PathBarBelow.Provider>
   );
@@ -573,7 +592,7 @@ const repositoryOf = (status: ManagedCloudStatus, id: ItemId, role?: string | nu
     ...COORDINATES[kind], repository_id: of.repository_id, owner_login: of.owner_login, name: of.name,
     address: `${of.owner_login}/${of.name}`, website_url: of.website_url, visibility: of.visibility, description: null, star_count: 0, viewer_starred: false,
     role: role === undefined ? of.role : role, can_push: of.can_push,
-    revision: status.publication?.private_revision ?? status.publication?.public_revision ?? 0,
+    revision: readsOf(status)?.draft ?? readsOf(status)?.live ?? 0,
     updated_at: ITEMS[id].edited - 600, registration_only: of.release.kind === "not_pushed",
     resource_id: id, display_name: ITEMS[id].name, available: true,
   };
@@ -584,8 +603,8 @@ const repositoryStatus = (id: ItemId, repositoryId: string): ManagedCloudStatus 
   if (known) return known;
   if (id === "release-notes") {
     return repositoryId.startsWith("repo_maya")
-      ? ready(link("maya", "release-notes", { role: "member", can_request_release: false }), { state: "not_public", private_revision: 5, public_revision: null })
-      : ready(link(LOGIN, "release-notes"), { state: "not_public", private_revision: 2, public_revision: null });
+      ? ready(link("maya", "release-notes", { role: "member", can_request_release: false }), { draft: 5, live: null })
+      : ready(link(LOGIN, "release-notes"), { draft: 2, live: null });
   }
   if (today.created.has(id)) return { ...STATUS.notPushed, repository_id: repositoryId, link: { ...STATUS.notPushed.link!, repository_id: repositoryId, name: ITEMS[id].name } };
   return TODAY_STATUS[id] ?? null;
@@ -697,8 +716,8 @@ storageCatalogApi.listCloudRepositories = async (_scopeId, _storageId, resourceI
   await wait(300);
   if (resourceId === "release-notes") {
     return [
-      repositoryOf(ready(link(LOGIN, "release-notes"), { state: "not_public", private_revision: 2, public_revision: null }), "release-notes"),
-      repositoryOf(ready(link("maya", "release-notes", { role: "member", can_request_release: false }), { state: "not_public", private_revision: 5, public_revision: null }), "release-notes"),
+      repositoryOf(ready(link(LOGIN, "release-notes"), { draft: 2, live: null }), "release-notes"),
+      repositoryOf(ready(link("maya", "release-notes", { role: "member", can_request_release: false }), { draft: 5, live: null }), "release-notes"),
     ];
   }
   return resourceId === "duck" ? [repositoryOf(STATUS.duckKai, "duck")] : [];
@@ -747,10 +766,9 @@ storageCatalogApi.createCloudRepository = async (scopeId, _storageId, resourceId
   today.revision += 1;
   return repositoryOf(repositoryStatus(id, repositoryId)!, id);
 };
-storageCatalogApi.requestCloudRelease = async () => { await wait(300); };
 storageCatalogApi.discardCloudDraft = async (_scopeId, _storageId, _resourceId, repositoryId) => {
   await wait(300);
-  return { repository_id: repositoryId, removal_id: "removal_1", state: "done", kept_revision: 2 };
+  return { repository_id: repositoryId, removal_id: "removal_1", state: "done", kept_version: 2 };
 };
 storageCatalogApi.preparePush = async (scopeId, storageId) => {
   await wait(900);
@@ -792,7 +810,7 @@ storageCatalogApi.applyPush = async (planId, selected, _acknowledged, onProgress
     plan_id: planId, published: true, stopped: null, message: "", revision: cloud ? null : 8,
     results: selected.map((id) => ({
       resource_id: id, display_name: ITEMS[id as ItemId].name, state: "published" as const, message: null,
-      revision: cloud ? (TODAY_STATUS[id as ItemId]?.publication?.private_revision ?? 0) + 1 : null,
+      revision: cloud ? (readsOf(TODAY_STATUS[id as ItemId])?.draft ?? 0) + 1 : null,
     })),
   };
 };
@@ -826,7 +844,7 @@ storageCatalogApi.preparePull = async (scopeId, storageId) => {
       const reads = status.link.role === null ? "public" as const : "draft" as const;
       return [[item.resource_id, {
         repository_id: status.link.repository_id, address: `${status.link.owner_login}/${status.link.name}`, reads,
-        revision: (reads === "public" ? status.publication?.public_revision : status.publication?.private_revision) ?? 1,
+        revision: (reads === "public" ? readsOf(status)?.live : readsOf(status)?.draft) ?? 1,
       }]];
     })) : undefined,
     items, created_at: now, expires_at: now + 600,
@@ -1319,7 +1337,6 @@ function ListPage({ view, go }: { view: View; go: Go }) {
  *  repository. */
 const CHIP_ACTIONS = {
   onOpenUrl: noop,
-  onRequestRelease: noop,
   onDiscardDraft: noop,
   onRetry: noop,
   onStorageSettings: noop,
@@ -1602,7 +1619,7 @@ function PullReview({ view, go, ids, single }: { view: View; go: Go; ids: ItemId
   /* One repository has one version to name, as the project's header does;
      a batch reads several, and each row's readout names its own. */
   const source = single ? statusOf(ids[0], view) : null;
-  const version = source?.link?.role === null ? source.publication?.public_revision : source?.publication?.private_revision;
+  const version = source?.link?.role === null ? readsOf(source)?.live : readsOf(source)?.draft;
   const back = () => go({ page: single ? "item" : "list" });
   const run = () => start(() => {
     const chosen = ids.filter((id) => selected.has(id));
@@ -2310,7 +2327,7 @@ function StateBar({ status }: { status: ManagedCloudStatus }) {
   const blocked = cloudSyncBlocked(status);
   return (
     <div className="sync-path-actions pet-state-bar">
-      <ManagedCloudChip status={status} storageName={STORAGE_NAME} busy={false} refreshing={false} onOpenUrl={noop} onRequestRelease={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
+      <ManagedCloudChip status={status} storageName={STORAGE_NAME} busy={false} refreshing={false} onOpenUrl={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
       <div className="sync-path-action-group" role="group" aria-label="Sync actions">
         <button type="button" className="sync-path-sync" disabled={blocked}><Icon name="download" size={14} /><span className="sync-path-sync-label">Pull</span></button>
         <button type="button" className="sync-path-sync" disabled={blocked}><Icon name="upload" size={14} /><span className="sync-path-sync-label">Push</span></button>
@@ -2354,14 +2371,14 @@ function StatesBoard() {
         <header><strong>The Owner’s panel, draft ahead of public</strong><span>The project’s verbs. No Change repository…, no Disconnect: a connected pet keeps its repository.</span></header>
         <div className="sync-path-menu pet-held-panel">
           <ManagedCloudPanel status={STATUS.mossy} storageName={STORAGE_NAME} busy={false} refreshing={false} close={noop}
-            onOpenUrl={noop} onRequestRelease={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
+            onOpenUrl={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
         </div>
       </section>
       <section className="pet-state">
         <header><strong>Learned from the listing, not saved yet</strong><span>Release and discard name the saved binding, so they wait until a Push or Pull saves it, as they wait for a project whose pin moved.</span></header>
         <div className="sync-path-menu pet-held-panel">
           <ManagedCloudPanel status={STATUS.learned} storageName={STORAGE_NAME} busy={false} refreshing={false} close={noop}
-            onOpenUrl={noop} onRequestRelease={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
+            onOpenUrl={noop} onDiscardDraft={noop} onRetry={noop} onStorageSettings={noop} />
         </div>
       </section>
     </div>

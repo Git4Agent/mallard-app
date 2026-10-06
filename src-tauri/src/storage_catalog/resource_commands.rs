@@ -410,24 +410,6 @@ pub async fn get_catalog_cloud_status(
         .await
 }
 #[tauri::command]
-pub async fn request_catalog_cloud_release(
-    scope_id: CatalogScopeId,
-    storage_id: StorageId,
-    resource_id: CatalogResourceId,
-    repository_id: String,
-    expected_revision: u64,
-) -> Result<(), String> {
-    StorageCatalogService::from_user_home()?
-        .request_cloud_release(
-            &scope_id,
-            &storage_id,
-            &resource_id,
-            &repository_id,
-            expected_revision,
-        )
-        .await
-}
-#[tauri::command]
 pub async fn discard_catalog_cloud_draft(
     scope_id: CatalogScopeId,
     storage_id: StorageId,

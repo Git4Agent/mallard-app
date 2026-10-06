@@ -1,0 +1,128 @@
+/* Publish sheet specimen. Specimen chrome first, then the proposed rules
+   (mock-only, prefixed pv-), which a picked direction would move into
+   src/App.css. Everything inside a sheet uses the app's tokens and the
+   shipped .sync-modal frame. */
+
+/* App.css locks html, body and #root for the app shell; #root scrolls. */
+html, body { height: 100%; overflow: hidden !important; }
+body { display: block !important; padding: 0 !important; background: var(--retro-frame-gutter, var(--bg-0)) !important; color: var(--text-0); }
+#root { height: 100%; overflow-y: auto !important; }
+
+/* ——— specimen chrome ———————————————————————————————————————————————— */
+.spec { max-width: 1540px; margin: 0 auto; padding: 16px 20px 80px; display: grid; gap: 16px; font: 13px/1.45 system-ui, sans-serif; }
+.spec-title { margin: 0; font: 700 20px/1.2 system-ui; }
+.spec-sub { margin: -8px 0 0; color: var(--text-2); max-width: 1080px; }
+.spec code { font-family: var(--font-mono); font-size: 12px; }
+.spec-controls { position: sticky; top: 0; z-index: 60; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+.spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.spec-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+.spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+.spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+.spec-panel { padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+.spec-panel > strong { display: block; margin-bottom: 4px; font-size: 14px; }
+.spec-panel ul, .spec-panel ol { margin: 4px 0 0 18px; padding: 0; display: grid; gap: 4px; }
+.spec-panel a, .pv-cell a { color: inherit; }
+.spec-panel p { margin: 4px 0; }
+.spec-std { width: 100%; margin-top: 6px; border-collapse: collapse; font-size: 12.5px; }
+.spec-std th, .spec-std td { padding: 5px 8px 5px 0; border-top: 1px solid var(--border); text-align: left; vertical-align: top; }
+.spec-std thead th { border-top: 0; color: var(--text-2); font-weight: 600; white-space: nowrap; }
+.spec-std td.c { text-align: center; white-space: nowrap; }
+.spec-std .yes { color: var(--success-text); font-weight: 700; }
+.spec-std .no { color: var(--danger-text); font-weight: 700; }
+.spec-std .part { color: var(--text-2); }
+.spec-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 16px; align-items: start; }
+
+.pv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 22px 18px; align-items: start; }
+.pv-cell { margin: 0; min-width: 0; }
+.pv-cell > figcaption { display: flex; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: baseline; gap: 4px 8px; margin: 0 0 6px 2px; color: var(--text-1); font: 600 12.5px/1.35 system-ui; }
+.pv-cell > figcaption b { color: var(--text-0); font-size: 13.5px; }
+.pv-cell > figcaption small { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); font-weight: 500; }
+.pv-cell > figcaption em { padding: 1px 8px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font: 600 11px/1.5 system-ui; font-style: normal; }
+.pv-cell > figcaption em.change { background: transparent; color: var(--warning-text); box-shadow: inset 0 0 0 1px currentColor; }
+.pv-count { margin-left: auto; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); font: 600 11px/1.5 system-ui; }
+
+/* A crop of the window: the bar with the Cloud chip, a sidebar, cards. */
+.pv-frame { position: relative; height: 470px; overflow: hidden; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--app-shell); font-family: var(--font-sans); font-size: var(--type-sm); }
+.pv-app { position: absolute; inset: 0; display: grid; grid-template-columns: 150px 1fr; grid-template-rows: 52px 1fr; }
+.pv-app-bar { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: var(--box-border); background: var(--surface-subtle); }
+.pv-app-crumb { font-family: var(--font-display); font-weight: var(--weight-heavy); color: var(--text-0); }
+.pv-app-crumb.dim { color: var(--text-2); font-weight: var(--weight-medium); }
+.pv-app-chip, .pv-app-pill { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 11px; border: var(--box-border); border-radius: var(--r-pill); background: var(--button-bg); color: var(--text-0); font-family: var(--font-display); font-size: var(--type-xs); font-weight: var(--weight-bold); box-shadow: var(--shadow-control); }
+.pv-app-crumb.dim + .pv-app-chip { margin-left: auto; }
+.pv-app-side { display: grid; align-content: start; gap: 12px; padding: 16px 14px; border-right: 1px solid var(--border); }
+.pv-app-row { height: 10px; border-radius: 5px; background: var(--chip-strong-bg); }
+.pv-app-main { display: grid; grid-template-columns: 1fr 1fr; align-content: start; gap: 12px; padding: 16px; }
+.pv-app-card { height: 92px; border: var(--box-border); border-radius: var(--retro-panel-radius); background: var(--surface-card); box-shadow: var(--shadow-card); }
+
+/* The modal backdrop, as `.sync-modal::backdrop` draws it. */
+.pv-scrim { position: absolute; inset: 0; backdrop-filter: blur(8px); background: repeating-linear-gradient(0deg, rgba(0,0,0,.2) 0, rgba(0,0,0,.2) 1px, rgba(0,0,0,.13) 1px, rgba(0,0,0,.13) 3px); }
+
+/* A sheet sits in its frame, not in the viewport's top layer. */
+.pv-frame > dialog[open] { position: absolute; inset: 0; margin: auto; height: fit-content; max-height: calc(100% - 24px); z-index: 2; }
+/* G hangs under the Cloud chip: its right edge on the chip's (Pull and Push sit to the right). */
+.pv-frame.anchored > dialog[open] { top: 60px; right: 162px; left: auto; bottom: auto; margin: 0; }
+
+/* The ring the field wears when the sheet opens (the app focuses it). */
+.pv-focused .pv-frame dialog input[type="text"] { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* ——— proposed rules (mock-only) ——————————————————————————————————————— */
+
+/* Every direction is a .sync-modal at the link sheet's measure. */
+.sync-modal.pv-sheet { width: 400px; }
+.pv-sheet .sync-modal-header { align-items: center; }
+.pv-sheet .sync-modal-header h1 { overflow-wrap: anywhere; }
+.pv-body { display: grid; gap: 12px; padding: 16px 20px 18px; }
+
+/* What the version holds, and who gets it: one line of glyph + word. */
+.pv-facts { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.pv-fact { display: inline-flex; align-items: center; gap: 4px; color: var(--text-1); font-size: var(--type-xs); }
+.pv-fact > svg { flex: none; color: var(--text-2); }
+
+/* Sessions here that the version will not hold: said, never a stop. */
+.pv-waiting { margin: 0; display: flex; align-items: center; gap: 6px; color: var(--text-1); font-size: var(--type-xs); font-weight: var(--weight-medium); }
+.pv-waiting > svg { flex: none; }
+
+/* A field with a label of its own; Optional rides beside it. */
+.pv-field { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.pv-label { display: flex; align-items: baseline; gap: 7px; color: var(--text-1); font-size: var(--type-xs); font-weight: var(--weight-semibold); }
+.pv-label > small { color: var(--text-2); font-size: var(--type-2xs); font-weight: var(--weight-medium); }
+.pv-field input { width: 100%; min-height: 32px; padding: 0 9px; }
+.pv-field textarea { width: 100%; min-height: 64px; padding: 7px 9px; resize: vertical; font: inherit; font-size: var(--type-sm); }
+
+/* B · Version card: the row the version will be. */
+.pv-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: var(--box-border); border-radius: 10px; background: var(--surface-row); box-shadow: var(--shadow-control); }
+.pv-num { flex: none; width: 36px; height: 36px; display: grid; place-items: center; border: var(--box-border); border-radius: 8px; background: var(--surface-muted); color: var(--text-0); font-family: var(--font-display); font-size: var(--type-lg); font-weight: var(--weight-heavy); }
+.pv-card-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.pv-card-text > strong { color: var(--text-0); font-size: var(--type-sm); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.pv-card-text > strong.unnamed { color: var(--text-2); font-weight: var(--weight-medium); }
+
+/* C · Draft → Version: two ends, the one to come dashed. */
+.pv-end { min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: var(--box-border); border-radius: 10px; background: var(--surface-row); box-shadow: var(--shadow-control); }
+.pv-end.becomes { border-style: dashed; background: transparent; box-shadow: none; }
+.pv-end-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--text-0); font-size: var(--type-sm); }
+.pv-end-head > b { font-weight: var(--weight-semibold); }
+.pv-end-head > .pv-audience { margin-left: auto; }
+.pv-route-arrow { justify-self: center; margin: -8px 0; display: grid; color: var(--text-2); }
+
+/* D · Summary in the head: the facts are the title's second line. */
+.pv-d .sync-modal-header p.pv-head-line { margin: 6px 0 0; }
+
+/* E · Facts in the foot, beside the verb they describe. */
+.sync-modal.pv-e { width: 460px; }
+.pv-foot-facts { min-width: 0; flex: 1; }
+
+/* F · Name and note: the note waits behind one quiet button. */
+.pv-add-note { justify-self: start; display: inline-flex; align-items: center; gap: 5px; font-size: var(--type-xs); }
+
+/* G · Anchored card: popover measure, no backdrop. */
+.sync-modal.pv-g { width: 340px; box-shadow: var(--shadow-popover) !important; }
+.pv-g .sync-modal-header { padding: 12px 12px 12px 16px; }
+.pv-g .sync-modal-header h1 { font-size: var(--type-xl); }
+.pv-g .pv-body { padding: 12px 16px 14px; }
+.pv-g .sync-modal-footer { min-height: 50px; }
+
+/* ?bare=1: the sheets alone on the gutter, for one picture of all eight. */
+.pv-bare .spec-controls, .pv-bare .spec-panel, .pv-bare .spec-cols, .pv-bare .pv-app, .pv-bare .pv-scrim { display: none; }
+.pv-bare .pv-grid { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 18px; }
+.pv-bare .pv-frame { height: 400px; display: grid; place-items: center; overflow: visible; background: transparent; }
+.pv-bare .pv-frame > dialog[open] { position: static; margin: 0; max-height: none; }

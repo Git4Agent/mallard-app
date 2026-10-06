@@ -1,0 +1,11 @@
+{
+  "name": "mallard-sharepoint-browser-auth-poc",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node browser-auth.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": { "@azure/msal-node": "7.0.1" }
+}

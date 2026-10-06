@@ -44,7 +44,7 @@ import type {
 const commandNames = [
   "list_catalog_cloud_repositories", "list_catalog_cloud_shared", "list_catalog_cloud_starred", "list_catalog_cloud_public", "resolve_catalog_cloud_repository", "join_catalog_cloud_repository",
   "find_catalog_cloud_repository",
-  "connect_catalog_cloud_repository", "create_catalog_cloud_repository", "get_catalog_cloud_status", "request_catalog_cloud_release", "discard_catalog_cloud_draft",
+  "connect_catalog_cloud_repository", "create_catalog_cloud_repository", "get_catalog_cloud_status", "discard_catalog_cloud_draft",
   "apply_catalog_resource_fork",
   "apply_catalog_scope_pull",
   "apply_catalog_scope_push",

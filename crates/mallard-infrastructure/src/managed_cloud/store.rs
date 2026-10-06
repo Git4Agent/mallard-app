@@ -264,13 +264,23 @@ fn library_item(stream: &str, manifest_bytes: &[u8]) -> Result<LibraryItem, Stri
     })
 }
 
+/// A scope's saved repository as the config an engine was opened with named
+/// it, stamped with that config's revision. `id: None` records that a newer
+/// config unpinned the scope, so a stale pin cannot bring the old one back.
+#[derive(Clone, Debug)]
+struct Pin {
+    stamp: u64,
+    id: Option<String>,
+}
+
 struct Inner {
     client: ManagedCloudClient,
     runtime: Handle,
     /// Scope → repository id, learned from lookups, listings and creates.
     repositories: Mutex<BTreeMap<Scope, String>>,
-    /// Exact repository destinations from link metadata.
-    pinned: Mutex<BTreeMap<Scope, String>>,
+    /// Exact repository destinations from link metadata, each with the
+    /// revision of the config that named it.
+    pinned: Mutex<BTreeMap<Scope, Pin>>,
     /// Local origin URLs supplied by the publisher, never local paths or credentials.
     project_origins: Mutex<BTreeMap<BundleId, String>>,
     /// The scopes whose repository answered gone at their last stream
@@ -332,18 +342,25 @@ impl ManagedObjectStore {
         Ok(())
     }
 
-    /// The link's saved repository, set at every engine open. The same pin
-    /// again changes nothing: a pin that answered gone stays gone, with what
-    /// stands in for it, until a Push or a Pull has saved another.
-    pub fn set_pin(&self, bundle: &BundleId, id: Option<&str>) -> Result<(), String> {
-        self.set_scope_pin(&Scope::Project(bundle.clone()), id)
+    /// The link's saved repository, set at every engine open from the config
+    /// the engine was opened with; `stamp` is that config's revision. A pin
+    /// from an older config never replaces one from a newer config: a
+    /// readout takes no host lock, and one that loaded its state before a
+    /// Pull or a link save changed the pin must not route a Push that began
+    /// after. The same pin again changes nothing: a pin that answered gone
+    /// stays gone, with what stands in for it, until a Push or a Pull has
+    /// saved another.
+    pub fn set_pin(&self, bundle: &BundleId, id: Option<&str>, stamp: u64) -> Result<(), String> {
+        self.set_scope_pin(&Scope::Project(bundle.clone()), id, stamp)
     }
 
+    /// A Library pin lives on a per-operation store where nothing competes,
+    /// so it carries no stamp.
     pub fn set_library_pin(&self, stream: &str, id: Option<&str>) -> Result<(), String> {
-        self.set_scope_pin(&Scope::Library(stream.to_owned()), id)
+        self.set_scope_pin(&Scope::Library(stream.to_owned()), id, 0)
     }
 
-    fn set_scope_pin(&self, scope: &Scope, id: Option<&str>) -> Result<(), String> {
+    fn set_scope_pin(&self, scope: &Scope, id: Option<&str>, stamp: u64) -> Result<(), String> {
         if let Some(id) = id {
             if id.is_empty()
                 || id.len() > 128
@@ -353,14 +370,30 @@ impl ManagedObjectStore {
             {
                 return Err("Invalid Mallard Cloud repository ID.".to_string());
             }
-            let previous = Self::lock(&self.inner.pinned)?.insert(scope.clone(), id.to_owned());
+        }
+        let previous = {
+            let mut pinned = Self::lock(&self.inner.pinned)?;
+            if pinned.get(scope).is_some_and(|pin| pin.stamp > stamp) {
+                return Ok(());
+            }
+            pinned
+                .insert(
+                    scope.clone(),
+                    Pin {
+                        stamp,
+                        id: id.map(str::to_owned),
+                    },
+                )
+                .and_then(|pin| pin.id)
+        };
+        if let Some(id) = id {
             if previous.as_deref() != Some(id) {
                 Self::lock(&self.inner.statuses)?.remove(scope);
                 Self::lock(&self.inner.moved)?.remove(scope);
             }
             self.remember(scope, id)
         } else {
-            if Self::lock(&self.inner.pinned)?.remove(scope).is_some() {
+            if previous.is_some() {
                 Self::lock(&self.inner.repositories)?.remove(scope);
                 Self::lock(&self.inner.moved)?.remove(scope);
             }
@@ -377,7 +410,11 @@ impl ManagedObjectStore {
     }
 
     fn scope_status(&self, scope: &Scope) -> Option<ManagedCloudStatus> {
-        let repository_id = Self::lock(&self.inner.pinned).ok()?.get(scope)?.clone();
+        let repository_id = Self::lock(&self.inner.pinned)
+            .ok()?
+            .get(scope)?
+            .id
+            .clone()?;
         if let Some(health) = self
             .inner
             .client
@@ -425,7 +462,7 @@ impl ManagedObjectStore {
         if let Some(standing) = Self::lock(&self.inner.moved)?.get(scope).cloned() {
             return Ok(standing);
         }
-        if let Some(id) = Self::lock(&self.inner.pinned)?.get(scope).cloned() {
+        if let Some(id) = self.pin_of(scope)? {
             return Ok(Some(id));
         }
         Ok(Self::lock(&self.inner.repositories)?.get(scope).cloned())
@@ -544,7 +581,9 @@ impl ManagedObjectStore {
     }
 
     fn pin_of(&self, scope: &Scope) -> Result<Option<String>, String> {
-        Ok(Self::lock(&self.inner.pinned)?.get(scope).cloned())
+        Ok(Self::lock(&self.inner.pinned)?
+            .get(scope)
+            .and_then(|pin| pin.id.clone()))
     }
 
     /// Record what a stream listing told about a pinned bundle. The status
@@ -1603,7 +1642,10 @@ mod tests {
 #[cfg(test)]
 mod stub_tests {
     use super::*;
-    use crate::managed_cloud::client::{ManagedCloudStatusState, PublicationState, ReleaseState};
+    use crate::managed_cloud::client::{
+        DraftState, ManagedCloudLink, ManagedCloudStatusState, PublicationStatus, PublishVersion,
+        PublishedVersion, ReleaseState,
+    };
     use crate::managed_cloud::stub::{Fault, ListingFault, StubManagedCloud};
     use crate::storage_core::publication::{
         finish_claimed_push, list_stream, read_record, write_record, RecordStream, StreamView,
@@ -1654,7 +1696,7 @@ mod stub_tests {
             mallard_domain::BoundedConfigObject::encode(
                 &crate::storage_providers::managed_cloud::ManagedCloudSettingsV1 {
                     service_origin: stub.endpoint.clone(),
-                    account_id: user.id.clone(),
+                    github_user_id: user.github_user_id.clone(),
                     account_login: login.into(),
                 },
             )
@@ -1800,8 +1842,56 @@ mod stub_tests {
         })
         .await;
         let id = repository_id(stub, number);
-        managed(store).set_pin(&bundle(number), Some(&id)).unwrap();
+        managed(store)
+            .set_pin(&bundle(number), Some(&id), 0)
+            .unwrap();
         (id, names)
+    }
+
+    /// One more push of bundle `number`, on `parent`.
+    async fn push_on(
+        store: &ConfiguredObjectStore,
+        number: u64,
+        parent: &RecordName,
+    ) -> RecordName {
+        let store = store.clone();
+        let parent = parent.clone();
+        blocking(move || {
+            let revision = parent.revision() + 1;
+            let next = manifest(identity(number), revision, revision * 100);
+            stored(push(&store, &next, Some(&parent), revision * 1_000))
+        })
+        .await
+    }
+
+    /// What a refresh of bundle `number` reads about its repository.
+    async fn observed(
+        store: &ConfiguredObjectStore,
+        number: u64,
+    ) -> (ManagedCloudLink, PublicationStatus) {
+        refresh(store, number).await.unwrap();
+        let status = managed(store).status(&bundle(number)).unwrap();
+        (status.link.unwrap(), status.publication.unwrap())
+    }
+
+    /// A draft that holds something: against the latest version, the number
+    /// Publish would give, the pushes past the latest version, the public
+    /// version, and the version in review.
+    fn standing(
+        latest_version: Option<u64>,
+        next_version: u64,
+        draft_ahead: Option<u64>,
+        public_version: Option<u64>,
+        review_version: Option<u64>,
+    ) -> PublicationStatus {
+        PublicationStatus {
+            draft: DraftState::Pushed,
+            latest_version,
+            next_version,
+            draft_ahead,
+            public_version,
+            review_version,
+        }
     }
 
     fn stream_listing(id: &str, number: u64) -> String {
@@ -2029,7 +2119,7 @@ mod stub_tests {
             .lock()
             .unwrap()
             .add_member(&id, &member_id, "member");
-        managed(&member).set_pin(&bundle(4), Some(&id)).unwrap();
+        managed(&member).set_pin(&bundle(4), Some(&id), 0).unwrap();
         let theirs = manifest(identity(4), 2, 200);
         let ours = manifest(identity(4), 2, 201);
         blocking({
@@ -2280,6 +2370,30 @@ mod stub_tests {
         .await;
     }
 
+    /// A pin carries the revision of the config that named it. A readout
+    /// that loaded an older config never replaces what a newer config set,
+    /// pins and unpins alike.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pin_from_an_older_config_never_replaces_a_newer_one() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let cloud = managed(&store);
+        let in_use = || cloud.repository_in_use(&bundle(30)).unwrap();
+
+        cloud.set_pin(&bundle(30), Some("repo-new"), 12).unwrap();
+        cloud.set_pin(&bundle(30), Some("repo-old"), 10).unwrap();
+        assert_eq!(in_use(), Some("repo-new".to_string()));
+        cloud.set_pin(&bundle(30), None, 11).unwrap();
+        assert_eq!(in_use(), Some("repo-new".to_string()));
+
+        cloud.set_pin(&bundle(30), Some("repo-newer"), 13).unwrap();
+        assert_eq!(in_use(), Some("repo-newer".to_string()));
+        cloud.set_pin(&bundle(30), None, 14).unwrap();
+        assert_eq!(in_use(), None);
+        cloud.set_pin(&bundle(30), Some("repo-old"), 13).unwrap();
+        assert_eq!(in_use(), None);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_pinned_status_comes_from_the_stream_listing() {
         let stub = StubManagedCloud::start().await;
@@ -2293,7 +2407,7 @@ mod stub_tests {
         })
         .await;
         let id = repository_id(&stub, 9);
-        managed(&store).set_pin(&bundle(9), Some(&id)).unwrap();
+        managed(&store).set_pin(&bundle(9), Some(&id), 0).unwrap();
         let stream = RecordStream::project(&bundle(9)).unwrap();
         let refresh = |store: ConfiguredObjectStore, stream: RecordStream| async move {
             blocking(move || list_stream(&store, &stream)).await
@@ -2306,8 +2420,8 @@ mod stub_tests {
             ReleaseState::NotPushed
         );
         assert_eq!(
-            registered.publication.as_ref().unwrap().state,
-            PublicationState::NoDraft
+            registered.publication.as_ref().unwrap().draft,
+            DraftState::None
         );
         assert_eq!(
             registered.link.as_ref().unwrap().website_url,
@@ -2323,8 +2437,8 @@ mod stub_tests {
         let pushed = managed(&store).status(&bundle(9)).unwrap();
         assert_eq!(pushed.link.as_ref().unwrap().release, ReleaseState::Private);
         let publication = pushed.publication.as_ref().unwrap();
-        assert_eq!(publication.state, PublicationState::NotPublic);
-        assert_eq!(publication.private_revision, Some(2));
+        assert_eq!(publication.draft, DraftState::Pushed);
+        assert_eq!(publication.latest_version, None);
 
         stub.state.lock().unwrap().release(&id, None);
         refresh(store.clone(), stream.clone()).await.unwrap();
@@ -2334,8 +2448,8 @@ mod stub_tests {
             ReleaseState::Public
         );
         assert_eq!(
-            released.publication.as_ref().unwrap().state,
-            PublicationState::MatchesPublished
+            released.publication.as_ref().unwrap().public_version,
+            Some(1)
         );
 
         stub.state.lock().unwrap().fail_next_listing = Some(ListingFault::Unavailable);
@@ -2350,7 +2464,7 @@ mod stub_tests {
             ManagedCloudStatusState::Ready
         );
         // Removing the pin disables the status, even with a warm store.
-        managed(&store).set_pin(&bundle(9), None).unwrap();
+        managed(&store).set_pin(&bundle(9), None, 0).unwrap();
         assert!(managed(&store).status(&bundle(9)).is_none());
     }
 
@@ -2451,7 +2565,7 @@ mod stub_tests {
             );
         }
         // The link saves the new repository as its pin: the old one is asked no more.
-        managed(&store).set_pin(&bundle(20), Some(&new)).unwrap();
+        managed(&store).set_pin(&bundle(20), Some(&new), 0).unwrap();
         stub.clear_log();
         assert_eq!(
             refresh(&store, 20).await.unwrap().mainline().selected(),
@@ -2519,7 +2633,7 @@ mod stub_tests {
             ManagedObjectStore::new(client, Handle::current())
         };
         let (old, _) = pushed(&stub, &first, 22, 1).await;
-        second.set_pin(&bundle(22), Some(&old)).unwrap();
+        second.set_pin(&bundle(22), Some(&old), 0).unwrap();
         stub.state.lock().unwrap().remove(&old);
         assert!(refresh(&first, 22).await.unwrap().mainline().is_empty());
         let again = manifest(identity(22), 1, 300);
@@ -2615,7 +2729,9 @@ mod stub_tests {
             .lock()
             .unwrap()
             .add_member(&theirs, &rika_id, "member");
-        managed(&rika).set_pin(&bundle(23), Some(&theirs)).unwrap();
+        managed(&rika)
+            .set_pin(&bundle(23), Some(&theirs), 0)
+            .unwrap();
         assert!(!refresh(&rika, 23).await.unwrap().mainline().is_empty());
         // Tom removes her: lost access reads as gone, and her Push creates
         // a private repository on her own account.
@@ -2643,7 +2759,9 @@ mod stub_tests {
             managed(&rika).repository_in_use(&bundle(23)).unwrap(),
             Some(own.id.clone())
         );
-        managed(&rika).set_pin(&bundle(23), Some(&own.id)).unwrap();
+        managed(&rika)
+            .set_pin(&bundle(23), Some(&own.id), 0)
+            .unwrap();
 
         // Later Tom's repository becomes public, and later still Rika
         // removes her own on the website.
@@ -2711,7 +2829,7 @@ mod stub_tests {
             .lock()
             .unwrap()
             .add_member(&id, &member_id, "member");
-        managed(&member).set_pin(&bundle(24), Some(&id)).unwrap();
+        managed(&member).set_pin(&bundle(24), Some(&id), 0).unwrap();
         assert_eq!(
             refresh(&member, 24).await.unwrap().mainline().selected(),
             names.last()
@@ -2737,7 +2855,7 @@ mod stub_tests {
             None
         );
         // The same pin at the next engine open changes nothing.
-        managed(&member).set_pin(&bundle(24), Some(&id)).unwrap();
+        managed(&member).set_pin(&bundle(24), Some(&id), 0).unwrap();
         assert_eq!(
             managed(&member).repository_in_use(&bundle(24)).unwrap(),
             None
@@ -2842,7 +2960,7 @@ mod stub_tests {
         let client =
             ManagedCloudClient::new(&dead, Some(SecretValue::parse(&token).unwrap())).unwrap();
         let offline = ManagedObjectStore::new(client, Handle::current());
-        offline.set_pin(&bundle(25), Some(&id)).unwrap();
+        offline.set_pin(&bundle(25), Some(&id), 0).unwrap();
         let listed = blocking({
             let offline = offline.clone();
             move || {
@@ -2882,7 +3000,7 @@ mod stub_tests {
             (ManagedObjectStore::new(client, Handle::current()), user.id)
         };
         let (old, _) = pushed(&stub, &first, 26, 1).await;
-        second.set_pin(&bundle(26), Some(&old)).unwrap();
+        second.set_pin(&bundle(26), Some(&old), 0).unwrap();
         stub.state.lock().unwrap().remove(&old);
         // Both computers list the gone repository; the first one pushes.
         let stream =
@@ -2938,11 +3056,11 @@ mod stub_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_discard_on_a_public_repository_reads_as_its_public_version() {
+    async fn a_discard_returns_the_draft_to_the_latest_version() {
         let stub = StubManagedCloud::start().await;
         let (store, _) = store(&stub, "octocat").await;
         let (id, names) = pushed(&stub, &store, 27, 2).await;
-        // Version 2 is released, then the draft moves on by two pushes.
+        // Push 2 is released as version 1, then the draft moves on by two pushes.
         stub.state.lock().unwrap().release(&id, None);
         refresh(&store, 27).await.unwrap();
         let draft = blocking({
@@ -2966,12 +3084,9 @@ mod stub_tests {
         })
         .await;
         let before = managed(&store).status(&bundle(27)).unwrap();
-        assert_eq!(
-            before.publication.as_ref().unwrap().state,
-            PublicationState::UnpublishedDraft
-        );
+        assert_eq!(before.publication.as_ref().unwrap().draft_ahead, Some(2));
         let objects_before = stub.state.lock().unwrap().repositories[&id].objects.len();
-        assert_eq!(stub.state.lock().unwrap().discard(&id), Ok(Some(2)));
+        assert_eq!(stub.state.lock().unwrap().discard(&id), Ok(Some(1)));
         {
             let state = stub.state.lock().unwrap();
             let repository = &state.repositories[&id];
@@ -3025,8 +3140,10 @@ mod stub_tests {
         assert_eq!(status.link.as_ref().unwrap().visibility, "public");
         assert_eq!(status.link.as_ref().unwrap().release, ReleaseState::Public);
         let publication = status.publication.unwrap();
-        assert_eq!(publication.state, PublicationState::MatchesPublished);
-        assert_eq!(publication.private_revision, Some(2));
+        assert_eq!(
+            (publication.latest_version, publication.draft_ahead),
+            (Some(1), Some(0))
+        );
         stub.clear_log();
         refresh(&store, 27).await.unwrap();
         assert_eq!(stub.request_lines(), vec![stream_listing(&id, 27)]);
@@ -3047,19 +3164,18 @@ mod stub_tests {
         assert_eq!(next.parent(), Some(names[1].token()));
         let status = managed(&store).status(&bundle(27)).unwrap();
         assert_eq!(status.link.unwrap().release, ReleaseState::SnapshotChanged);
-        assert_eq!(
-            status.publication.unwrap().state,
-            PublicationState::UnpublishedDraft
-        );
-        // A draft that is the public version leaves nothing to discard, and
-        // a repository made private is emptied like any private one.
+        assert_eq!(status.publication.unwrap().draft_ahead, Some(1));
+        // A draft that is the latest version leaves nothing to discard, and
+        // a repository made private keeps its versions like a public one.
         let mut state = stub.state.lock().unwrap();
-        assert_eq!(state.discard(&id), Ok(Some(2)));
+        assert_eq!(state.discard(&id), Ok(Some(1)));
         assert_eq!(state.discard(&id), Err("There is no draft to discard."));
         state.make_private(&id);
-        assert_eq!(state.discard(&id), Ok(None));
-        assert!(state.repositories[&id].private_head.is_none());
         assert_eq!(state.discard(&id), Err("There is no draft to discard."));
+        assert_eq!(
+            state.repositories[&id].private_head.as_deref(),
+            Some(names[1].file_name().as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3209,12 +3325,12 @@ mod stub_tests {
         );
         assert_eq!(answer.repository_id, id);
         assert_eq!(answer.state, "done");
-        assert_eq!(answer.kept_revision, Some(2));
+        assert_eq!(answer.kept_version, Some(1));
         assert_eq!(
             refresh(&owner, 28).await.unwrap().mainline().selected(),
             Some(&names[1])
         );
-        // The draft is the public version: there is nothing to discard.
+        // The draft is the latest version: there is nothing to discard.
         let nothing = client(&owner)
             .discard_private_snapshot(&id, revision + 1)
             .await
@@ -3240,11 +3356,334 @@ mod stub_tests {
             .discard_private_snapshot(&id, revision + 1)
             .await
             .unwrap();
-        assert_eq!(answer.kept_revision, Some(2));
+        assert_eq!(answer.kept_version, Some(1));
         assert_eq!(
             refresh(&owner, 28).await.unwrap().mainline().selected(),
             Some(&names[1])
         );
+    }
+
+    /// The states the Cloud chip words (docs/PLAN_CLOUD_VERSIONS.md), each
+    /// as the stream listing reports it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_stream_listing_says_where_the_draft_stands_against_the_versions() {
+        let stub = StubManagedCloud::start().await;
+        let (store, owner) = store(&stub, "rika").await;
+        let state = || stub.state.lock().unwrap();
+
+        // Nothing pushed: the registration alone.
+        let (id, names) = pushed(&stub, &store, 41, 1).await;
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::NotPushed);
+        assert!(!link.can_publish_version);
+        assert_eq!(
+            publication,
+            PublicationStatus {
+                draft: DraftState::None,
+                ..standing(None, 1, None, None, None)
+            }
+        );
+
+        // Private, no version yet.
+        let mut draft = push_on(&store, 41, &names[0]).await;
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::Private);
+        assert!(link.can_publish_version);
+        assert_eq!(publication, standing(None, 1, None, None, None));
+
+        // Private, the draft is version 1: Publish is off until a push.
+        assert_eq!(state().publish(&id, None), Ok(1));
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::Private);
+        assert!(!link.can_publish_version);
+        assert_eq!(publication, standing(Some(1), 2, Some(0), None, None));
+        assert_eq!(state().publish(&id, None), Err(1));
+
+        // Private, the draft two pushes past version 1.
+        for _ in 0..2 {
+            draft = push_on(&store, 41, &draft).await;
+        }
+        let (link, publication) = observed(&store, 41).await;
+        assert!(link.can_publish_version);
+        assert_eq!(publication, standing(Some(1), 2, Some(2), None, None));
+
+        // In review, the draft asked for; the next push closes the request.
+        state().request_release(&id, &owner, None);
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(
+            link.release,
+            ReleaseState::WaitingOwner {
+                requested_by: owner.clone()
+            }
+        );
+        assert!(!link.can_request_release);
+        assert_eq!(publication, standing(Some(1), 2, Some(2), None, None));
+        draft = push_on(&store, 41, &draft).await;
+        let (link, _) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::Private);
+
+        // In review, a version asked for: a push moves the draft, not the request.
+        assert_eq!(state().publish(&id, Some("Second cut")), Ok(2));
+        state().request_release(&id, &owner, Some(2));
+        observed(&store, 41).await;
+        draft = push_on(&store, 41, &draft).await;
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(
+            link.release,
+            ReleaseState::WaitingOwner {
+                requested_by: owner.clone()
+            }
+        );
+        assert_eq!(publication, standing(Some(2), 3, Some(1), None, Some(2)));
+
+        // Turned down: it reads as rejected only while the draft is what the
+        // request named.
+        state().reject_release(&id, "Revise B");
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::Private);
+        assert_eq!(publication.review_version, None);
+        state().request_release(&id, &owner, None);
+        state().reject_release(&id, "Revise B");
+        let (link, _) = observed(&store, 41).await;
+        assert_eq!(
+            link.release,
+            ReleaseState::Rejected {
+                reason: Some("Revise B".into())
+            }
+        );
+        assert!(link.can_request_release);
+
+        // Public, the draft is the public version: the approved request
+        // froze the draft as version 3.
+        state().release(&id, None);
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::Public);
+        assert!(!link.can_publish_version);
+        assert_eq!(publication, standing(Some(3), 4, Some(0), Some(3), None));
+
+        // Public, the draft one push on.
+        draft = push_on(&store, 41, &draft).await;
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::SnapshotChanged);
+        assert!(link.can_publish_version);
+        assert_eq!(publication, standing(Some(3), 4, Some(1), Some(3), None));
+
+        // Public, version 4 published and not public; then a push past it.
+        assert_eq!(state().publish(&id, None), Ok(4));
+        let (link, publication) = observed(&store, 41).await;
+        assert_eq!(link.release, ReleaseState::SnapshotChanged);
+        assert!(!link.can_publish_version);
+        assert_eq!(publication, standing(Some(4), 5, Some(0), Some(3), None));
+        push_on(&store, 41, &draft).await;
+        let (_, publication) = observed(&store, 41).await;
+        assert_eq!(publication, standing(Some(4), 5, Some(1), Some(3), None));
+
+        // A removed version's number is never given again.
+        state().remove_version(&id, 4);
+        let (link, publication) = observed(&store, 41).await;
+        assert!(link.can_publish_version);
+        assert_eq!(publication, standing(Some(3), 5, Some(2), Some(3), None));
+        assert_eq!(state().publish(&id, None), Ok(5));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publish_is_one_request_of_a_collaborator_and_every_refusal_is_the_services() {
+        async fn publish(
+            store: &ConfiguredObjectStore,
+            id: &str,
+            commit_id: &str,
+            name: Option<&str>,
+            expected_repository_revision: u64,
+        ) -> Result<PublishedVersion, Error> {
+            let version = PublishVersion {
+                commit_id,
+                name,
+                expected_repository_revision,
+            };
+            managed(store).client().publish_version(id, &version).await
+        }
+        let stub = StubManagedCloud::start().await;
+        let (owner, _) = store(&stub, "rika").await;
+        let (member, member_id) = store(&stub, "jeff").await;
+        let (guest, _) = store(&stub, "guest").await;
+        let (id, names) = pushed(&stub, &owner, 42, 1).await;
+        stub.state
+            .lock()
+            .unwrap()
+            .add_member(&id, &member_id, "member");
+        for other in [&member, &guest] {
+            managed(other).set_pin(&bundle(42), Some(&id), 0).unwrap();
+        }
+
+        // Nothing pushed: a registration is not a draft.
+        let (link, _) = observed(&owner, 42).await;
+        let nothing = publish(
+            &owner,
+            &id,
+            names[0].commit_id(),
+            None,
+            link.repository_revision,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(nothing.kind, ErrorKind::Invalid);
+        assert!(nothing.message().contains("Nothing is pushed yet."));
+
+        let draft = push_on(&owner, 42, &names[0]).await;
+        let (link, _) = observed(&owner, 42).await;
+        let revision = link.repository_revision;
+        // The repository moved, the draft moved, a name too long.
+        for (commit_id, expected) in [
+            (draft.commit_id(), revision + 1),
+            (names[0].commit_id(), revision),
+        ] {
+            let stale = publish(&owner, &id, commit_id, None, expected)
+                .await
+                .unwrap_err();
+            assert_eq!(stale.kind, ErrorKind::Conflict);
+            assert_eq!(stale.code, Some("revision_conflict"));
+        }
+        let long = publish(
+            &owner,
+            &id,
+            draft.commit_id(),
+            Some(&"n".repeat(81)),
+            revision,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(long.kind, ErrorKind::Invalid);
+        assert!(stub.state.lock().unwrap().repositories[&id]
+            .versions
+            .is_empty());
+
+        // The one request, with no idempotency key: it is never sent again.
+        stub.clear_log();
+        let first = publish(&owner, &id, draft.commit_id(), Some("First cut"), revision)
+            .await
+            .unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(first.commit_id, draft.commit_id());
+        assert_eq!(first.name.as_deref(), Some("First cut"));
+        assert_eq!(
+            stub.request_lines(),
+            vec![format!("POST /v1/repositories/{id}/versions")]
+        );
+        assert_eq!(stub.requests()[0].idempotency_key, None);
+        {
+            let state = stub.state.lock().unwrap();
+            let version = state.repositories[&id].latest().unwrap();
+            assert_eq!(version.record_name, draft.file_name());
+            assert_eq!(version.name.as_deref(), Some("First cut"));
+        }
+
+        // The draft is version 1: no version of an unchanged draft.
+        let (link, publication) = observed(&owner, 42).await;
+        assert_eq!(publication, standing(Some(1), 2, Some(0), None, None));
+        let unchanged = publish(
+            &owner,
+            &id,
+            draft.commit_id(),
+            None,
+            link.repository_revision,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unchanged.kind, ErrorKind::Conflict);
+        assert_eq!(unchanged.code, Some("version_unchanged"));
+        assert!(unchanged.message().starts_with(
+            "Mallard Cloud has nothing new to publish. The draft is already version 1."
+        ));
+
+        // A Member publishes; someone who is not on the team does not.
+        let next = push_on(&owner, 42, &draft).await;
+        let (link, _) = observed(&member, 42).await;
+        assert_eq!(link.role.as_deref(), Some("member"));
+        assert!(link.can_publish_version);
+        let second = publish(
+            &member,
+            &id,
+            next.commit_id(),
+            None,
+            link.repository_revision,
+        )
+        .await
+        .unwrap();
+        assert_eq!((second.version, second.name), (2, None));
+        stub.state.lock().unwrap().release(&id, None);
+        observed(&owner, 42).await;
+        let third = push_on(&owner, 42, &next).await;
+        let (link, publication) = observed(&guest, 42).await;
+        assert_eq!(link.role, None);
+        assert!(link.can_push && !link.can_publish_version);
+        assert_eq!(publication, standing(Some(2), 3, Some(1), Some(2), None));
+        let forbidden = publish(
+            &guest,
+            &id,
+            third.commit_id(),
+            None,
+            link.repository_revision,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(forbidden.kind, ErrorKind::Permission);
+        assert_eq!(
+            forbidden.message(),
+            "Mallard Cloud refused this request. Only a collaborator can publish a version. (v1/repositories/{id}/versions, HTTP 403, forbidden, request stub-request)"
+        );
+        assert_eq!(
+            stub.state.lock().unwrap().repositories[&id].versions.len(),
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_discard_on_a_private_repository_keeps_every_version() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "rika").await;
+        let (id, names) = pushed(&stub, &store, 43, 2).await;
+        assert_eq!(stub.state.lock().unwrap().publish(&id, None), Ok(1));
+        observed(&store, 43).await;
+        let third = push_on(&store, 43, &names[1]).await;
+        assert_eq!(stub.state.lock().unwrap().publish(&id, None), Ok(2));
+        observed(&store, 43).await;
+        let fourth = push_on(&store, 43, &third).await;
+        push_on(&store, 43, &fourth).await;
+        let (link, publication) = observed(&store, 43).await;
+        assert_eq!(publication, standing(Some(2), 3, Some(2), None, None));
+
+        let answer = managed(&store)
+            .client()
+            .discard_private_snapshot(&id, link.repository_revision)
+            .await
+            .unwrap();
+        assert_eq!(answer.kept_version, Some(2));
+        assert_eq!(
+            refresh(&store, 43).await.unwrap().mainline().selected(),
+            Some(&third)
+        );
+        let (link, publication) = observed(&store, 43).await;
+        assert_eq!(link.visibility, "private");
+        assert_eq!(link.release, ReleaseState::Private);
+        assert_eq!(publication, standing(Some(2), 3, Some(0), None, None));
+        let state = stub.state.lock().unwrap();
+        let repository = &state.repositories[&id];
+        // The two pushes after version 2 went; what both versions hold stayed.
+        assert_eq!(
+            repository
+                .publications
+                .iter()
+                .map(|publication| publication.state.as_str())
+                .collect::<Vec<_>>(),
+            ["retired", "retired", "available", "removed", "removed"]
+        );
+        assert_eq!(
+            repository
+                .keys_under(&format!("{REPOSITORY_PREFIX}/{}/_manifests", bundle(43)))
+                .len(),
+            3
+        );
+        assert_eq!(repository.versions.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

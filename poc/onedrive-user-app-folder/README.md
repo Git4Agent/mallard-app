@@ -1,9 +1,54 @@
-# OneDrive user App Folder PoC
+# OneDrive capability probes
+
+The current assessment is
+[OneDrive support feasibility](../../docs/ONEDRIVE_FEASIBILITY_2026-10-05.md).
+Mallard now uses immutable publication records. It has no mutable head.
+
+For multiple users or SharePoint, see the
+[shared-storage assessment](../../docs/ONEDRIVE_SHARED_SHAREPOINT_FEASIBILITY_2026-10-05.md).
+These probes require a private user App Folder. They do not accept a shared
+folder root or a SharePoint document library. Changing only the tokens is
+not sufficient for those tests.
+
+Use `immutable-storage-poc.mjs` to test the current small-object requirement.
+It runs two clients against the same App Folder. It checks one-request
+create-only writes, a rejected replacement, verified downloads, an empty file,
+and listing across pages. It uses the credential format documented below.
+
+```sh
+node --test poc/onedrive-user-app-folder/*.test.mjs
+node poc/onedrive-user-app-folder/immutable-storage-poc.mjs live \
+  --credentials /absolute/path/to/onedrive-poc.json
+```
+
+The live command creates two random synthetic files. Cleanup checks their
+SHA-256 digests and uses `If-Match` on each file. It never deletes a folder.
+App Folder lookup can create the app's folder if it does not exist. Use a
+dedicated test application and account. No live run has been performed.
+
+If cleanup reports `required`, inspect only these generated names:
+
+```text
+mallard-onedrive-immutable-<probe-id>-claim.bin
+mallard-onedrive-immutable-<probe-id>-empty.bin
+```
+
+The new probe has 16 passing local tests. A local test validates the harness,
+not Microsoft Graph. A live pass observes one run; it does not prove a service
+consistency guarantee or qualify a production adapter. This probe does not
+test nested `.mallard` paths, long names, large uploads, OAuth, refresh, full
+publication selection, or a second physical device. These remain live and
+integration tests in the current assessment.
+
+The rest of this file describes the historical mutable-head probe. Its
+`If-Match` update-session race is no longer a condition for current Mallard
+support. The file remains useful as a separate provider experiment.
 
 ## Result
 
-This harness tests whether one OneDrive user App Folder can preserve Mallard's
-mutable-head safety contract across two access tokens for the same account.
+The historical `onedrive-app-folder-poc.mjs` harness tests whether one
+OneDrive user App Folder can preserve the former mutable-head safety contract
+across two access tokens for the same account.
 The two tokens represent two device clients. The operator must establish the
 device origin of each token. The harness cannot prove physical device identity.
 It does not change Mallard's production schema, storage adapters, commands, or

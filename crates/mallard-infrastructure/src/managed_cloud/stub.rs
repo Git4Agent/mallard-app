@@ -4,9 +4,10 @@
 //! writes, the per-class checks, the claim guard on a record, the index
 //! kept the way the Worker keeps it, the stream listing that carries the
 //! repository's status, by-bundle and by-library resolution, the coordinate
-//! answer, releases, removal with its three repository states, discard as
-//! the service runs it, and the desktop sign-in dance. State lives in
-//! memory; tests reach it directly.
+//! answer, versions and the public pointer that names one, Publish, release
+//! requests as the website files them, removal with its three repository
+//! states, discard as the service runs it, and the desktop sign-in dance.
+//! State lives in memory; tests reach it directly.
 use crate::storage_core::publication::record_name_of;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -38,6 +39,7 @@ pub struct StubRequest {
 #[derive(Clone, Debug)]
 pub struct StubUser {
     pub id: String,
+    pub github_user_id: String,
     pub login: String,
 }
 
@@ -61,6 +63,20 @@ pub struct Publication {
     pub summary: Value,
     pub created_by: String,
     pub created_at: u64,
+    pub state: String,
+}
+
+/// One version: a frozen, numbered copy of a push (`scope = 'version'` in
+/// the Worker's index). It holds what the push held and never changes.
+#[derive(Clone, Debug)]
+pub struct Version {
+    pub number: u64,
+    /// The record name of the push it froze.
+    pub record_name: String,
+    pub name: Option<String>,
+    pub created_by: String,
+    pub created_at: u64,
+    /// `available`, or `removed` once a Super Admin took it down.
     pub state: String,
 }
 
@@ -104,12 +120,17 @@ pub struct Repository {
     /// The canonical GitHub address the service discloses to every reader.
     pub github_url: Option<String>,
     pub revision: u64,
+    /// How often the index moved its head. No answer carries it.
     pub private_revision: u64,
-    pub public_revision: u64,
     /// The record name the index points at as the private head.
     pub private_head: Option<String>,
-    /// The commit id of the released publication.
-    pub public_commit_id: Option<String>,
+    /// The highest version number given. Never lowered, so a number is
+    /// never given twice.
+    pub latest_version: u64,
+    pub versions: Vec<Version>,
+    /// The version the public pointer names. It stays on the row of a
+    /// repository made private, where it plays no part.
+    pub public_version: Option<u64>,
     pub publications: Vec<Publication>,
     /// Desktop key → object: the repository's R2 prefix.
     pub objects: BTreeMap<String, StoredObject>,
@@ -212,38 +233,120 @@ impl Repository {
             .and_then(|name| self.publication(name))
     }
 
-    fn public_head(&self) -> Option<&Publication> {
-        let commit = self.public_commit_id.as_deref()?;
-        self.publications
+    /// The versions nobody removed, in the order they were published.
+    fn available_versions(&self) -> impl Iterator<Item = &Version> {
+        self.versions
             .iter()
-            .find(|publication| publication.commit_id == commit)
+            .filter(|version| version.state == "available")
+    }
+
+    /// The highest available version.
+    pub fn latest(&self) -> Option<&Version> {
+        self.available_versions()
+            .max_by_key(|version| version.number)
+    }
+
+    /// The available version that froze the push `record_name`.
+    fn version_of(&self, record_name: &str) -> Option<&Version> {
+        self.available_versions()
+            .find(|version| version.record_name == record_name)
+    }
+
+    /// The version the public reads: the pointer's, while the repository is
+    /// public.
+    fn pointer(&self) -> Option<&Version> {
+        let number = self
+            .public_version
+            .filter(|_| self.visibility == "public")?;
+        self.available_versions()
+            .find(|version| version.number == number)
+    }
+
+    fn public_head(&self) -> Option<&Publication> {
+        self.publication(&self.pointer()?.record_name)
     }
 
     fn active(&self) -> bool {
         self.state == "active"
     }
 
-    /// Public with a released head: anyone signed in reads and pushes.
+    /// Public with a version the pointer names: anyone signed in reads and
+    /// pushes.
     fn open(&self) -> bool {
-        self.active() && self.visibility == "public" && self.public_commit_id.is_some()
+        self.active() && self.pointer().is_some()
     }
 
-    /// How many pushes a discard keeps: on a public repository those up to
-    /// the push the public version was released from, on any other none.
-    /// `None` when there is no draft to discard.
+    /// Whether the selected record is a draft that holds something: a
+    /// registration alone is not one. Read from the index, and from the
+    /// record itself while the index lags.
+    fn has_draft(&self, mainline: &Mainline) -> bool {
+        mainline.selected().is_some_and(|name| {
+            let registration_only = self
+                .publication(&name.file_name())
+                .map(|publication| publication.summary["registration_only"] == true)
+                .or_else(|| {
+                    let key = format!("{}/{}", self.stream_prefix(), name.file_name());
+                    let record: Value =
+                        serde_json::from_slice(&self.objects.get(&key)?.bytes).ok()?;
+                    Some(record["summary"]["registration_only"] == true)
+                })
+                .unwrap_or(false);
+            !registration_only
+        })
+    }
+
+    /// How many pushes the draft is past the latest version: 0 when the
+    /// draft is that version. `None` with no version or no draft.
+    fn draft_ahead(&self, mainline: &Mainline) -> Option<u64> {
+        let latest = self.latest()?;
+        if !self.has_draft(mainline) {
+            return None;
+        }
+        let names = mainline.names();
+        let frozen = names
+            .iter()
+            .position(|name| name.file_name() == latest.record_name);
+        Some(frozen.map_or(names.len(), |index| names.len() - 1 - index) as u64)
+    }
+
+    /// Freeze the push `record_name` as the next version. `Err` names the
+    /// version that already holds it.
+    fn freeze(&mut self, record_name: &str, user_id: &str, name: Option<&str>) -> Result<u64, u64> {
+        if let Some(version) = self.version_of(record_name) {
+            return Err(version.number);
+        }
+        self.latest_version += 1;
+        self.versions.push(Version {
+            number: self.latest_version,
+            record_name: record_name.to_owned(),
+            name: name.map(str::to_owned),
+            created_by: user_id.to_owned(),
+            created_at: now(),
+            state: "available".to_owned(),
+        });
+        Ok(self.latest_version)
+    }
+
+    /// How many pushes a discard keeps: those up to the push the latest
+    /// version froze, and none in a repository without a version. `None`
+    /// when there is no draft to discard.
     fn discard_keeps(&self) -> Option<usize> {
         let (names, mainline) = self.stream();
-        if !self.open() {
+        let Some(latest) = self.latest() else {
             return (!names.is_empty()).then_some(0);
-        }
-        let released = &self.public_head()?.record_name;
+        };
         let kept = mainline
             .names()
             .iter()
-            .position(|name| &name.file_name() == released)?
+            .position(|name| name.file_name() == latest.record_name)?
             + 1;
         (mainline.names().len() > kept).then_some(kept)
     }
+}
+
+/// Whether a release request still waits for a decision.
+fn request_open(request: &Value) -> bool {
+    request["state"] == "pending_owner" || request["state"] == "pending_super_admin"
 }
 
 struct Attempt {
@@ -305,6 +408,7 @@ impl StubState {
     pub fn add_user(&mut self, login: &str) -> (StubUser, String) {
         let user = StubUser {
             id: self.id("user"),
+            github_user_id: self.next.to_string(),
             login: login.to_owned(),
         };
         let token = format!("tok_{}_{}", user.id, "x".repeat(24));
@@ -367,9 +471,103 @@ impl StubState {
         repository.revision += 1;
         raw
     }
-    /// Release the private head: the repository turns public, its public
-    /// head is the current private one, and `github_url` is what
-    /// non-members learn about its Git remote.
+    /// Publish as a collaborator would: freeze the index's head as the next
+    /// version. `Err` names the version the draft already is.
+    pub fn publish(&mut self, repository_id: &str, name: Option<&str>) -> Result<u64, u64> {
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        let head = repository.private_head.clone().expect("a draft to publish");
+        let owner = repository.owner_id.clone();
+        let version = repository.freeze(&head, &owner, name)?;
+        repository.revision += 1;
+        Ok(version)
+    }
+    /// Take a version down, as a Super Admin would: its number is not given
+    /// again, a request that names it is closed, and a repository whose
+    /// public pointer named it is private.
+    pub fn remove_version(&mut self, repository_id: &str, number: u64) {
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        let version = repository
+            .versions
+            .iter_mut()
+            .find(|version| version.number == number)
+            .expect("version");
+        version.state = "removed".to_owned();
+        if repository.public_version == Some(number) {
+            repository.public_version = None;
+            repository.visibility = "private".to_owned();
+        }
+        repository
+            .release_requests
+            .retain(|request| request["version"].as_u64() != Some(number));
+        repository.revision += 1;
+    }
+    /// Ask for a public release, as the website's Release tab does: of one
+    /// version, or of the draft. A draft that is already a version is taken
+    /// as that version.
+    pub fn request_release(&mut self, repository_id: &str, user_id: &str, version: Option<u64>) {
+        let id = self.id("rr");
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        let frozen = match version {
+            Some(number) => Some(
+                repository
+                    .available_versions()
+                    .find(|version| version.number == number)
+                    .expect("version"),
+            ),
+            None => repository.version_of(repository.private_head.as_deref().expect("a draft")),
+        };
+        let (commit_id, version) = match frozen {
+            Some(version) => (
+                repository
+                    .publication(&version.record_name)
+                    .expect("an indexed version")
+                    .commit_id
+                    .clone(),
+                Some(version.number),
+            ),
+            None => (
+                repository
+                    .head()
+                    .expect("an indexed draft")
+                    .commit_id
+                    .clone(),
+                None,
+            ),
+        };
+        repository.release_requests.push(json!({
+            "id": id, "state": "pending_owner", "requested_by": user_id, "created_at": now(),
+            "commit_id": commit_id, "version": version,
+        }));
+        repository.revision += 1;
+    }
+    /// The Owner turns the open release request down.
+    pub fn reject_release(&mut self, repository_id: &str, reason: &str) {
+        let repository = self
+            .repositories
+            .get_mut(repository_id)
+            .expect("repository");
+        let request = repository
+            .release_requests
+            .last_mut()
+            .filter(|request| request_open(request))
+            .expect("an open release request");
+        request["state"] = json!("rejected");
+        request["reason"] = json!(reason);
+        repository.revision += 1;
+    }
+    /// Release the draft, as an approved request that names it does: the
+    /// index's head becomes the next version unless it already is one, the
+    /// public pointer names that version, and the repository is public.
+    /// `github_url` is what non-members learn about its Git remote.
     pub fn release(&mut self, repository_id: &str, github_url: Option<&str>) {
         let repository = self
             .repositories
@@ -377,15 +575,16 @@ impl StubState {
             .expect("repository");
         repository.visibility = "public".to_owned();
         repository.github_url = github_url.map(str::to_owned);
-        if let Some(head) = repository.head().map(|head| head.commit_id.clone()) {
-            repository.public_commit_id = Some(head);
-            repository.public_revision += 1;
+        if let Some(head) = repository.head().map(|head| head.record_name.clone()) {
+            let owner = repository.owner_id.clone();
+            let (Ok(version) | Err(version)) = repository.freeze(&head, &owner, None);
+            repository.public_version = Some(version);
         }
         repository.release_requests.clear();
         repository.revision += 1;
     }
     /// Make a repository private, as its Owner would on the website. Its
-    /// released version stays on the row and plays no part from here on.
+    /// versions stay, and the pointer plays no part from here on.
     pub fn make_private(&mut self, repository_id: &str) {
         let repository = self
             .repositories
@@ -395,12 +594,13 @@ impl StubState {
         repository.release_requests.clear();
         repository.revision += 1;
     }
-    /// Discard the draft, as the service runs it in the request. On a public
-    /// repository the draft returns to the public version: the claim of the
-    /// push it was released from goes, then every push after it and their
-    /// claims. On any other repository every claim and every push goes.
-    /// Content used only by removed pushes is deleted. The depth of the push that is
-    /// kept, or `None` when nothing is; `Err` when there is no draft.
+    /// Discard the draft, as the service runs it in the request. The draft
+    /// returns to the latest version: the claim of the push it froze goes,
+    /// then every push after it and their claims. In a repository without a
+    /// version every claim and every push goes. Content used only by removed
+    /// pushes is deleted, and a release request that names a removed push is
+    /// closed. The version the draft returned to, or `None` when no push is
+    /// kept; `Err` when there is no draft.
     pub fn discard(&mut self, repository_id: &str) -> Result<Option<u64>, &'static str> {
         let repository = self
             .repositories
@@ -452,7 +652,7 @@ impl StubState {
         let mut protected = BTreeSet::new();
         for publication in &repository.publications {
             if publication.state != "removed"
-                || Some(&publication.commit_id) == repository.public_commit_id.as_ref()
+                || repository.version_of(&publication.record_name).is_some()
             {
                 let key = format!("{content}/{}", publication.manifest_key);
                 let Some(object) = repository.objects.get(&key) else {
@@ -480,9 +680,11 @@ impl StubState {
             .map(|object| object.bytes.len() as u64)
             .sum();
         repository.private_head = head;
-        repository.release_requests.clear();
+        repository
+            .release_requests
+            .retain(|request| request["version"].is_u64());
         repository.revision += 1;
-        Ok(chain.last().map(RecordName::revision))
+        Ok(repository.latest().map(|version| version.number))
     }
     /// Confirm a repository's removal, as its Owner would on the website: it
     /// is `deleting` and stops counting at once.
@@ -508,9 +710,12 @@ impl StubState {
         repository.counted.clear();
         repository.committed_bytes = 0;
         repository.private_head = None;
-        repository.public_commit_id = None;
+        repository.public_version = None;
         for publication in &mut repository.publications {
             publication.state = "removed".to_owned();
+        }
+        for version in &mut repository.versions {
+            version.state = "removed".to_owned();
         }
     }
     /// The active repository of a bundle: the one the service resolves.
@@ -678,14 +883,16 @@ fn no_content() -> Reply {
     )
 }
 
+/// A head: the draft's push, or, with `version`, the version that froze
+/// the push.
 fn head_body(
     repository: &Repository,
     publication: &Publication,
-    scope: &str,
+    version: Option<u64>,
     users: &BTreeMap<String, StubUser>,
 ) -> Value {
     let mut body = json!({
-        "scope": scope,
+        "scope": if version.is_some() { "version" } else { "private" },
         "revision": publication.manifest_revision,
         "commit_id": publication.commit_id,
         "manifest_sha256": publication.manifest_sha256,
@@ -695,10 +902,8 @@ fn head_body(
         "bundle_id": repository.bundle_id,
         "pushed_by": users.get(&publication.created_by).map(|u| json!({"user_id": u.id, "github_login": u.login})),
     });
-    if scope == "public" {
-        body["public_revision"] = json!(repository.public_revision);
-    } else {
-        body["private_revision"] = json!(repository.private_revision);
+    if let Some(version) = version {
+        body["version"] = json!(version);
     }
     body
 }
@@ -775,16 +980,17 @@ fn summary(state: &StubState, repository: &Repository, role: Option<&str>, write
     let member = writer;
     let private_head = repository
         .head()
-        .map(|p| head_body(repository, p, "private", &state.users));
+        .map(|p| head_body(repository, p, None, &state.users));
+    let public_version = repository.pointer().map(|version| version.number);
     let public_head = repository
         .public_head()
-        .map(|p| head_body(repository, p, "public", &state.users));
+        .map(|p| head_body(repository, p, public_version, &state.users));
     let private_tag = repository.head().map(|p| p.summary.clone());
     let public_tag = repository.public_head().map(|p| p.summary.clone());
     let open_request = repository
         .release_requests
         .last()
-        .filter(|r| r["state"] == "pending_owner" || r["state"] == "pending_super_admin")
+        .filter(|request| request_open(request))
         .cloned();
     json!({
         "id": repository.id,
@@ -798,8 +1004,7 @@ fn summary(state: &StubState, repository: &Repository, role: Option<&str>, write
         "revision": repository.revision,
         "state": repository.state,
         "visibility": repository.visibility,
-        "private_revision": repository.private_revision,
-        "public_revision": repository.public_revision,
+        "public_version": public_version,
         "committed_bytes": repository.committed_bytes,
         "description": repository.description,
         "github_description": Value::Null,
@@ -837,10 +1042,13 @@ fn coordinate_value(repository: &Repository) -> Value {
 /// gets the private head, everyone else the public one.
 fn viewer_row(state: &StubState, repository: &Repository, user_id: &str) -> Value {
     let member = repository.members.contains_key(user_id);
-    let (scope, publication) = if member {
-        ("private", repository.head())
+    let (version, publication) = if member {
+        (None, repository.head())
     } else {
-        ("public", repository.public_head())
+        (
+            repository.pointer().map(|version| version.number),
+            repository.public_head(),
+        )
     };
     json!({
         "id": repository.id,
@@ -855,7 +1063,8 @@ fn viewer_row(state: &StubState, repository: &Repository, user_id: &str) -> Valu
         "star_count": repository.stars.len(),
         "viewer_starred": repository.stars.contains(user_id),
         "head": publication.map(|p| json!({
-            "scope": scope, "revision": p.manifest_revision, "commit_id": p.commit_id, "updated_at": p.created_at,
+            "scope": if version.is_some() { "version" } else { "private" }, "version": version,
+            "revision": p.manifest_revision, "commit_id": p.commit_id, "updated_at": p.created_at,
             "pushed_by": state.users.get(&p.created_by).map(|u| json!({"user_id": u.id, "github_login": u.login})),
         })),
         "summary": publication.map(|p| p.summary.clone()),
@@ -877,7 +1086,7 @@ fn public_row(state: &StubState, repository: &Repository, user_id: &str) -> Valu
         "github_url": repository.github_url,
         "description": repository.description,
         "github_description": Value::Null,
-        "public_revision": repository.public_revision,
+        "public_version": repository.pointer().map(|version| version.number),
         "commit_id": publication.commit_id,
         "manifest_revision": publication.manifest_revision,
         "published_at": publication.created_at,
@@ -900,6 +1109,22 @@ fn summary_viewed(
 ) -> Value {
     let mut body = summary(state, repository, role, writer);
     body["viewer_starred"] = json!(repository.stars.contains(viewer));
+    body
+}
+
+/// One repository's own summary, by id or by name: whoever may read the
+/// draft also learns where it stands against the versions.
+fn summary_of_one(
+    state: &StubState,
+    repository: &Repository,
+    role: Option<&str>,
+    viewer: &str,
+) -> Value {
+    let mut body = summary_viewed(state, repository, role, true, viewer);
+    let (_, mainline) = repository.stream();
+    body["latest_version"] = json!(repository.latest().map(|version| version.number));
+    body["next_version"] = json!(repository.latest_version + 1);
+    body["draft_ahead"] = json!(repository.draft_ahead(&mainline));
     body
 }
 
@@ -1163,36 +1388,21 @@ fn identity_holds(repository: &Repository, record: &Value) -> bool {
     }
 }
 
-/// The publication state the stream listing carries.
+/// Where the draft stands against the versions, as the stream listing
+/// carries it.
 fn publication_status(repository: &Repository, mainline: &Mainline) -> Value {
-    let selected = mainline.selected();
-    let registration_only = selected.is_some_and(|name| {
-        repository
-            .publication(&name.file_name())
-            .map(|publication| publication.summary["registration_only"] == true)
-            .or_else(|| {
-                let key = format!("{}/{}", repository.stream_prefix(), name.file_name());
-                let record: Value =
-                    serde_json::from_slice(&repository.objects.get(&key)?.bytes).ok()?;
-                Some(record["summary"]["registration_only"] == true)
-            })
-            .unwrap_or(false)
-    });
-    let has_draft = selected.is_some() && !registration_only;
-    let live = repository.visibility == "public" && repository.public_commit_id.is_some();
-    let state = if !has_draft {
-        "no_draft"
-    } else if !live {
-        "not_public"
-    } else if repository.public_commit_id.as_deref() == selected.map(RecordName::commit_id) {
-        "matches_published"
-    } else {
-        "unpublished_draft"
-    };
+    let review_version = repository
+        .release_requests
+        .last()
+        .filter(|request| request_open(request))
+        .and_then(|request| request["version"].as_u64());
     json!({
-        "state": state,
-        "private_revision": if has_draft { selected.map(RecordName::revision) } else { None },
-        "public_revision": if live { Some(repository.public_revision) } else { None },
+        "draft": if repository.has_draft(mainline) { "pushed" } else { "none" },
+        "latest_version": repository.latest().map(|version| version.number),
+        "next_version": repository.latest_version + 1,
+        "draft_ahead": repository.draft_ahead(mainline),
+        "public_version": repository.pointer().map(|version| version.number),
+        "review_version": review_version,
     })
 }
 
@@ -1210,11 +1420,12 @@ fn link_body(
             .is_some_and(|publication| publication.summary["registration_only"] == true)
     });
     let request = repository.release_requests.last();
+    let public_commit = repository
+        .public_head()
+        .map(|publication| publication.commit_id.as_str());
     let release = if selected.is_none() || registration_only {
         json!({"kind": "not_pushed"})
-    } else if let Some(request) =
-        request.filter(|r| r["state"] == "pending_owner" || r["state"] == "pending_super_admin")
-    {
+    } else if let Some(request) = request.filter(|request| request_open(request)) {
         if request["state"] == "pending_super_admin" {
             json!({"kind": "waiting_super_admin"})
         } else {
@@ -1224,8 +1435,8 @@ fn link_body(
         r["state"] == "rejected" && r["commit_id"].as_str() == selected.map(RecordName::commit_id)
     }) {
         json!({"kind": "rejected", "reason": request["reason"]})
-    } else if repository.visibility == "public" && repository.public_commit_id.is_some() {
-        if repository.public_commit_id.as_deref() == selected.map(RecordName::commit_id) {
+    } else if public_commit.is_some() {
+        if public_commit == selected.map(RecordName::commit_id) {
             json!({"kind": "public"})
         } else {
             json!({"kind": "snapshot_changed"})
@@ -1238,11 +1449,14 @@ fn link_body(
             release["kind"].as_str(),
             Some("private" | "snapshot_changed" | "rejected")
         );
+    let can_publish = role.is_some()
+        && repository.has_draft(mainline)
+        && selected.is_some_and(|name| repository.version_of(&name.file_name()).is_none());
     json!({
         "repository_id": repository.id, "owner_login": state.users[&repository.owner_id].login,
         "name": repository.name, "visibility": repository.visibility, "release": release,
         "repository_revision": repository.revision, "role": role, "can_pull": true, "can_push": writer,
-        "can_request_release": can_request
+        "can_request_release": can_request, "can_publish_version": can_publish
     })
 }
 
@@ -1365,7 +1579,11 @@ fn index_record(state: &mut StubState, repository_id: &str, name: &RecordName, u
         }
         repository.private_head = Some(name.file_name());
         repository.private_revision += 1;
-        repository.release_requests.clear();
+        // A push closes an open request that names the draft; one that
+        // names a version stays.
+        repository
+            .release_requests
+            .retain(|request| !request_open(request) || request["version"].is_u64());
         let content = repository.content_prefix();
         for reference in references {
             let key = format!("{content}/{reference}");
@@ -1443,7 +1661,7 @@ fn route(
         state.tokens.insert(token.clone(), user.id.clone());
         return json(
             StatusCode::OK,
-            json!({"token": token, "expires_at": now() + 90 * 24 * 3600, "user": {"id": user.id, "github_login": user.login, "service_role": "user"}}),
+            json!({"token": token, "expires_at": now() + 90 * 24 * 3600, "user": {"id": user.id, "github_user_id": user.github_user_id, "github_login": user.login, "service_role": "user"}}),
         );
     }
     // Everything else needs a session.
@@ -1457,7 +1675,7 @@ fn route(
     if method == Method::GET && path == "/v1/me" {
         return json(
             StatusCode::OK,
-            json!({"user": {"id": user.id, "github_login": user.login, "service_role": "user"}, "client": "desktop", "limits": {}}),
+            json!({"user": {"id": user.id, "github_user_id": user.github_user_id, "github_login": user.login, "service_role": "user"}, "client": "desktop", "limits": {}}),
         );
     }
     if method == Method::GET && path == "/v1/repositories" {
@@ -1735,9 +1953,10 @@ fn route(
             github_url,
             revision: 1,
             private_revision: 0,
-            public_revision: 0,
             private_head: None,
-            public_commit_id: None,
+            latest_version: 0,
+            versions: vec![],
+            public_version: None,
             publications: vec![],
             objects,
             counted: BTreeSet::new(),
@@ -1841,14 +2060,14 @@ fn route(
         if let Some((_, role)) = repository.members.get(&user_id) {
             return json(
                 StatusCode::OK,
-                summary_viewed(state, repository, Some(role), true, &user_id),
+                summary_of_one(state, repository, Some(role), &user_id),
             );
         }
         if repository.open() {
             // Anyone signed in is a writer on an open repository (section 4.3).
             return json(
                 StatusCode::OK,
-                summary_viewed(state, repository, None, true, &user_id),
+                summary_of_one(state, repository, None, &user_id),
             );
         }
         return error("not_found", "not visible");
@@ -1930,7 +2149,7 @@ fn route(
             (&Method::GET, []) => {
                 return json(
                     StatusCode::OK,
-                    summary_viewed(state, &repository, role.as_deref(), true, &user_id),
+                    summary_of_one(state, &repository, role.as_deref(), &user_id),
                 )
             }
             (&Method::GET, ["members"]) => {
@@ -2012,26 +2231,53 @@ fn route(
                     json!({"ok": true, "repository_id": repository_id, "repository_revision": repository.revision}),
                 );
             }
-            (&Method::GET, ["release-requests"]) => {
-                return json(
-                    StatusCode::OK,
-                    json!({"open": repository.release_requests.last().cloned(), "recent": []}),
-                );
-            }
-            (&Method::POST, ["release-requests"]) => {
-                let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                if value["expected_repository_revision"].as_u64() != Some(repository.revision) {
-                    return error("revision_conflict", "stale version");
+            (&Method::POST, ["versions"]) => {
+                if role.is_none() {
+                    return error("forbidden", "Only a collaborator can publish a version.");
                 }
-                let Some(head) = repository.head() else {
-                    return error("release_request_invalid", "nothing to release");
+                let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let name = value["name"].as_str();
+                if name.is_some_and(|name| name.chars().count() > 80)
+                    || value["note"]
+                        .as_str()
+                        .is_some_and(|note| note.chars().count() > 500)
+                {
+                    return error("invalid_request", "The name or the note is too long.");
+                }
+                let (_, mainline) = repository.stream();
+                let Some(selected) = mainline
+                    .selected()
+                    .filter(|_| repository.has_draft(&mainline))
+                else {
+                    return error("invalid_request", "Nothing is pushed yet.");
                 };
-                let id = state.id("rr");
-                let request = json!({"id": id, "state": "pending_owner", "requested_by": user_id, "created_at": now(), "commit_id": head.commit_id});
+                if value["expected_repository_revision"].as_u64() != Some(repository.revision)
+                    || value["commit_id"].as_str() != Some(selected.commit_id())
+                {
+                    return error(
+                        "revision_conflict",
+                        "The repository or its draft changed since you read it. Reload and retry.",
+                    );
+                }
+                // A push the index has not caught up with is indexed first.
+                if repository.publication(&selected.file_name()).is_none() {
+                    index_record(state, &repository_id, selected, &user_id);
+                }
                 let repository = state.repositories.get_mut(&repository_id).unwrap();
-                repository.release_requests.push(request.clone());
+                let version = match repository.freeze(&selected.file_name(), &user_id, name) {
+                    Ok(version) => version,
+                    Err(version) => {
+                        return error(
+                            "version_unchanged",
+                            &format!("The draft is already version {version}."),
+                        )
+                    }
+                };
                 repository.revision += 1;
-                return json(StatusCode::CREATED, request);
+                return json(
+                    StatusCode::CREATED,
+                    json!({"version": version, "commit_id": selected.commit_id(), "name": name, "created_at": now()}),
+                );
             }
             (&Method::POST, ["private-snapshot", "discard"]) => {
                 if !manages {
@@ -2047,14 +2293,14 @@ fn route(
                         "The repository changed since you read it. Reload and retry.",
                     );
                 }
-                let kept_revision = match state.discard(&repository_id) {
+                let kept_version = match state.discard(&repository_id) {
                     Ok(kept) => kept,
                     Err(detail) => return error("invalid_request", detail),
                 };
                 let removal_id = state.id("rmv");
                 return json(
                     StatusCode::OK,
-                    json!({"ok": true, "repository_id": repository_id, "removal_id": removal_id, "state": "done", "kept_revision": kept_revision}),
+                    json!({"ok": true, "repository_id": repository_id, "removal_id": removal_id, "state": "done", "kept_version": kept_version}),
                 );
             }
             _ => {}

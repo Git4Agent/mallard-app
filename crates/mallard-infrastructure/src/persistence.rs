@@ -122,8 +122,10 @@ pub struct LocalStateWipeResult {
 }
 
 /// Project-facing machine state read under one persistence lock. The config
-/// document is loaded once and validates both dependent documents.
-#[derive(Clone, Debug)]
+/// document is loaded once and validates both dependent documents. Equality
+/// is how a readout that takes no host lock proves nothing committed while
+/// it worked.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalProjectStateSnapshot {
     pub host_identity: HostIdentity,
     pub config: SyncConfig,

@@ -1,5 +1,5 @@
 import { projectOutcomeAction } from "./syncOutcome";
-import type { ManagedCloudStatus } from "../managed-cloud/types";
+import type { ManagedCloudPublicationStatus, ManagedCloudStatus } from "../managed-cloud/types";
 import {
 
   lazy,
@@ -19,6 +19,7 @@ import type {
   CommitStorageDraftResult,
   LocalProjectSummary,
   ProjectBinding,
+  ProjectContentInventory,
   ProjectStorageLink,
   ProviderProfileSummary,
   PullScope,
@@ -29,6 +30,7 @@ import type {
   StorageSetupDraft,
   StorageSummary,
   StorageProviderKey,
+  ThreadSyncComparison,
 } from "../../types";
 import Icon, { storageIconName } from "../Icons";
 import { NoticeChip, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
@@ -83,8 +85,9 @@ import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
 import { FeishuSetupLane, useFeishuSetup } from "./FeishuSetup";
 import { ManagedCloudSetupLane, useManagedCloudSetup } from "./ManagedCloudSetup";
-import { cloudRepositoryGone, cloudStatusNotice, cloudSyncBlocked, cloudVerbs, discardCloudDraft } from "../managed-cloud/managedCloudLink";
+import { canPublishVersion, cloudRepositoryGone, cloudStatusNotice, cloudSyncBlocked, cloudVerbs, discardCloudDraft } from "../managed-cloud/managedCloudLink";
 import ManagedCloudChip from "../managed-cloud/ManagedCloudChip";
+import PublishVersionSheet, { type PublishVersionFact } from "../managed-cloud/PublishVersionSheet";
 import ManagedCloudAddress from "../managed-cloud/ManagedCloudAddress";
 import { isManagedCloudStorage, managedCloudAccount } from "./RepositoryAddressPicker";
 import { openExternalUrl } from "./externalLink";
@@ -168,6 +171,8 @@ interface Props {
   /** A failed session action in the Activity list, or null to clear it;
       the shell draws it under the path bar. */
   onSessionActionError: (message: string | null) => void;
+  /** A finished action's one receipt; the shell draws it under the path bar. */
+  onNotify: (message: string) => void;
   onCloseSessionDetail: () => void;
   onLinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
   onUnlinkStorage: (projectId: string, storageId: string) => Promise<void> | void;
@@ -513,6 +518,29 @@ export function projectSyncCountPhrase(threads: number, files: number): string {
   return phrases.join(" and ");
 }
 
+/** What the Publish sheet says the version holds: the draft as the pair's
+ *  comparison and file scan read it, and how far it is past the latest
+ *  version. A read that is missing leaves its fact out. */
+export function publishVersionHolds(
+  comparison: ThreadSyncComparison | null | undefined,
+  inventory: ProjectContentInventory | null | undefined,
+  publication: ManagedCloudPublicationStatus | null | undefined,
+): PublishVersionFact[] {
+  const count = (total: number, one: string, many: string) => `${total} ${total === 1 ? one : many}`;
+  const facts: PublishVersionFact[] = [];
+  if (comparison) {
+    facts.push({ icon: "message", word: count(comparison.entries.filter((entry) => entry.storage_present).length, "session", "sessions") });
+  }
+  if (inventory?.eligibility.state === "eligible") {
+    const files = inventory.entries.filter((entry) => entry.entry_type === "file" && entry.storage_present).length;
+    facts.push({ icon: "file", word: count(files, "file", "files") });
+  }
+  if (publication?.latest_version != null && publication.draft_ahead) {
+    facts.push({ icon: "upload", word: `${count(publication.draft_ahead, "push", "pushes")} since version ${publication.latest_version}` });
+  }
+  return facts;
+}
+
 export function storageActionLockedForReview(
   reviewKind: StorageReviewKind | null,
   action: StorageReviewKind | "storage",
@@ -538,6 +566,7 @@ export default function ProjectLinksWorkspace({
   onSelectStorage,
   onOpenSessionDetail,
   onSessionActionError,
+  onNotify,
   onCloseSessionDetail,
   onLinkStorage,
   onUnlinkStorage,
@@ -1361,26 +1390,41 @@ export default function ProjectLinksWorkspace({
   }, [managedCloudKey, runningAction]);
   /* The repository's verbs live in the Cloud chip's panel, beside the state
      they act on (docs/PLAN_CLOUD_STATUS_CHIP.md). The panel decides which it
-     offers from the status (cloudVerbs); these are what the release and the
-     discard do. Both name the repository by the link, so they wait while
+     offers from the status (cloudVerbs); these are what Publish version and
+     the discard do. Both name the repository by the link, so they wait while
      another repository is read in place of the link's. */
-  const requestCloudRelease = () => {
-    const link = currentManagedCloudLink;
-    if (!link || !managedCloudKey || !managedCloudProjectId || !managedCloudStorageId || !cloudVerbs(cloudStatus).requestRelease) return;
+  const [publishSheetKey, setPublishSheetKey] = useState<string | null>(null);
+  /* The sheet is this pair's, and open only while Publish is: the number is
+     the one the status gives. A status that stops offering Publish lets the
+     sheet go, so it never comes back by itself. */
+  const publishVersionNumber = publishSheetKey !== null && publishSheetKey === managedCloudKey && canPublishVersion(cloudStatus)
+    ? cloudVerbs(cloudStatus).publishVersion
+    : null;
+  useEffect(() => {
+    if (publishSheetKey !== null && publishVersionNumber === null) setPublishSheetKey(null);
+  }, [publishSheetKey, publishVersionNumber]);
+  const cloudActivity = activityHeader?.projectId === managedCloudProjectId && activityHeader?.storageId === managedCloudStorageId
+    ? activityHeader
+    : null;
+  const cloudFileScan = projectFilesScan.inventory?.local_project_id === managedCloudProjectId && projectFilesScan.inventory?.storage_id === managedCloudStorageId
+    ? projectFilesScan.inventory
+    : null;
+  const publishCloudVersion = (name: string | null) => {
+    if (!managedCloudKey || !managedCloudProjectId || !managedCloudStorageId || !canPublishVersion(cloudStatus)) return;
     const linkKey = managedCloudKey;
     const projectId = managedCloudProjectId;
     const storageId = managedCloudStorageId;
-    void run(`release:${linkKey}`, async () => {
+    void run(`publish:${linkKey}`, async () => {
       try {
         projectSyncApi.invalidateProjectActivity(projectId, storageId);
-        const next = await projectSyncApi.requestManagedCloudRelease(projectId, storageId, link.repository_revision);
-        setCloudObservation({ key: linkKey, status: { repository_id: next.repository_id, state: "ready", link: next, publication: next.repository_revision === link.repository_revision ? cloudStatus?.publication : null, message: null } });
+        const published = await projectSyncApi.publishManagedCloudVersion(projectId, storageId, name);
         setCloudActionError(null);
-        cloudRefreshRef.current?.();
+        onNotify(`Published version ${published.version}.`);
       } catch (reason) {
+        // The sheet closes itself once answered; a refusal is read on the page.
         setCloudActionError({ key: linkKey, message: reason instanceof Error ? reason.message : String(reason) });
-        cloudRefreshRef.current?.();
       }
+      cloudRefreshRef.current?.();
     });
   };
   const discardCloudDraftNow = () => {
@@ -1802,8 +1846,8 @@ export default function ProjectLinksWorkspace({
       storageNotices.push({
         key: "storage-connection",
         severity: "danger",
-        // The settings card's guide row, right under this box, carries the
-        // Reconnect… door; the box states the refusal.
+        // The settings card's guide row carries Reconnect…; the shared
+        // banner states the refusal.
         message: connectionDetail(storageConnection),
       });
     }
@@ -1900,6 +1944,10 @@ export default function ProjectLinksWorkspace({
         overflowDisabled={busy}
         actions={storagePathActions}
         ariaLabel={`${creatingStorage ? "New storage" : storageName} path`}
+        notices={{
+          items: storageNotices.map((item) => ({ ...item, key: `storage:${pageStorageId}:${item.key}` })),
+          ...storageNoticeTiming,
+        }}
       />
       <main className="sync-main sync-project-links-page sync-storage-settings-page">
         <section
@@ -1910,15 +1958,6 @@ export default function ProjectLinksWorkspace({
             ref={storageSettingsRef}
             className="sync-storage-settings-below sync-storage-settings-dedicated"
           >
-            {/* The column's one box, at the head of the column it speaks for,
-                the way the session page's zone sits under its header. */}
-            <NoticeZone
-              items={storageNotices}
-              subject="problems with this storage"
-              {...storageNoticeTiming}
-            />
-
-
             <div className="sync-storage-details-panel">
               {creatingStorage && storageSession && descriptor && (
                 <StorageEditor
@@ -2501,7 +2540,7 @@ export default function ProjectLinksWorkspace({
           busy={busy || !!runningAction}
           refreshing={!!activityHeader?.refreshing}
           onOpenUrl={(url) => void openExternalUrl(url)}
-          onRequestRelease={requestCloudRelease}
+          onPublishVersion={() => setPublishSheetKey(managedCloudKey)}
           onDiscardDraft={discardCloudDraftNow}
           onRetry={() => cloudRefreshRef.current?.()}
           onStorageSettings={() => {
@@ -3238,6 +3277,16 @@ export default function ProjectLinksWorkspace({
           onAddStorage();
         }}
         onCancel={() => setLinkingProjectId(null)}
+      />
+    )}
+    {publishVersionNumber !== null && (
+      <PublishVersionSheet
+        version={publishVersionNumber}
+        holds={publishVersionHolds(cloudActivity?.comparison, cloudFileScan, cloudStatus?.publication)}
+        sessionsToPush={cloudActivity?.counts.push ?? 0}
+        busy={runningAction === `publish:${managedCloudKey}`}
+        onPublish={publishCloudVersion}
+        onClose={() => setPublishSheetKey(null)}
       />
     )}
     </>

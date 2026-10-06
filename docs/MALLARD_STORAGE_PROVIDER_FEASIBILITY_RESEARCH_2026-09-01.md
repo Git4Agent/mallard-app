@@ -6,6 +6,10 @@
 
 **Research date:** 1 September 2026
 
+**5 October update:** The OneDrive mutable-head blocker below is obsolete.
+See [OneDrive support feasibility](ONEDRIVE_FEASIBILITY_2026-10-05.md) for the
+current immutable-record contract, Microsoft API review, and isolated probe.
+
 **19 September update:** The Google Drive CAS blocker below describes the
 earlier mutable-head protocol. The current non-CAS assessment and local proof
 are in [Google Drive with non-CAS publication](GOOGLE_DRIVE_NON_CAS_POC_2026-09-19.md).

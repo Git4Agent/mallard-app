@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { createRoot } from "react-dom/client";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import Icon, { type IconName } from "../src/components/Icons";
-import { NoticeZone, type NoticeItem } from "../src/components/notice/Notice";
+import { NoticeZone, type NoticeItem, type NoticeZoneProps } from "../src/components/notice/Notice";
 import ProjectPicker from "../src/components/project-sync/ProjectPicker";
 import ProjectSidebar from "../src/components/project-sync/ProjectSidebar";
 import CatalogIndexPage from "../src/components/storage-catalog/CatalogIndexPage";
@@ -164,15 +164,15 @@ const SCENES: Scene[] = [
 
 type Stage = "before" | "arrival" | "setup" | "landed";
 
-function Zone({ items }: { items: NoticeItem[] }) {
-  return <NoticeZone items={items} subject="messages from Mallard" className="sync-backend-banner" timing="progress" />;
+function zoneProps(items: NoticeItem[]): NoticeZoneProps {
+  return { items, subject: "messages from Mallard", className: "sync-backend-banner", timing: "progress" };
 }
 
 const STORAGE_CRUMB: PathBarCrumb = { id: "storage", label: "Mallard Cloud", icon: "storage-mallard", tone: "root" };
 const crumb = (id: string, label: string, icon?: IconName): PathBarCrumb => ({ id, label, icon });
 
 /** A page the link arrives over: its bar is real, its body is not drawn. */
-function StandIn({ zone, crumbs, title, children }: { zone: ReactNode; crumbs: PathBarCrumb[]; title: string; children: ReactNode }) {
+function StandIn({ zone, crumbs, title, children }: { zone: NoticeZoneProps; crumbs: PathBarCrumb[]; title: string; children: ReactNode }) {
   return (
     <PathBarBelow.Provider value={zone}>
       <SyncPathBar crumbs={crumbs} ariaLabel={`${title} path`} />
@@ -253,7 +253,7 @@ function Window({ scene, run }: { scene: Scene; run: number }) {
     action: <button type="button" className="btn" onClick={() => setStage("landed")}>Open</button>,
     onDismiss: () => setStage("before"),
   }] : [];
-  const zone = <Zone items={items} />;
+  const zone = zoneProps(items);
   const landed = stage === "landed";
   const storages = landed && scene.storages.length === 0 ? [CLOUD] : scene.storages;
 
@@ -262,7 +262,7 @@ function Window({ scene, run }: { scene: Scene; run: number }) {
     page = (
       <>
         <Titlebar icon="storage-mallard" title="New storage" />
-        {zone}
+        <NoticeZone {...zone} />
         <main className="sync-main">
           <div className="spec-standin">
             <strong>Mallard Cloud sign-in</strong>
@@ -282,7 +282,7 @@ function Window({ scene, run }: { scene: Scene; run: number }) {
     page = (
       <>
         <Titlebar icon="folder" title="Projects" />
-        {zone}
+        <NoticeZone {...zone} />
         <main className="sync-main sync-project-links-page sync-landing-page">
           <ProjectPicker projects={scene.projects} profiles={PROFILES} storages={storages} rememberedStorageByProject={{}} onAddProject={noop} onAddCloudProject={noop} onSelectProject={noop} />
         </main>
@@ -298,7 +298,7 @@ function Window({ scene, run }: { scene: Scene; run: number }) {
     page = (
       <>
         <Titlebar icon="settings" title="Settings" />
-        {zone}
+        <NoticeZone {...zone} />
         <main className="sync-main">
           <div className="spec-standin"><strong>Settings</strong>Where you were when the link arrived. A stand-in.</div>
         </main>

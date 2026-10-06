@@ -18,7 +18,7 @@ pub struct ManagedCloudAdapter;
 #[serde(deny_unknown_fields)]
 pub struct ManagedCloudSettingsV1 {
     pub service_origin: String,
-    pub account_id: String,
+    pub github_user_id: String,
     pub account_login: String,
 }
 
@@ -45,8 +45,9 @@ fn valid_login(login: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
-fn valid_account_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_graphic())
+fn valid_github_user_id(id: &str) -> bool {
+    id.parse::<u64>()
+        .is_ok_and(|value| value > 0 && value <= 9_007_199_254_740_991 && value.to_string() == id)
 }
 /// The settings and a client for one saved storage, for callers outside
 /// the object-store contract (the website bridge).
@@ -107,7 +108,7 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
     ) -> Result<BoundedConfigObject, StorageAdapterError> {
         let typed: ManagedCloudSettingsV1 = settings.decode().map_err(|_| invalid())?;
         if !origin_allowed(&typed.service_origin)
-            || !valid_account_id(&typed.account_id)
+            || !valid_github_user_id(&typed.github_user_id)
             || !valid_login(&typed.account_login)
         {
             return Err(invalid());
@@ -150,7 +151,7 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
         config: &StorageProviderConfig,
     ) -> Result<Vec<String>, String> {
         let typed = decode(config).map_err(|e| e.to_string())?;
-        Ok(vec![typed.service_origin, typed.account_id])
+        Ok(vec![typed.service_origin, typed.github_user_id])
     }
     fn local_root(&self, _config: &StorageProviderConfig) -> Result<Option<PathBuf>, String> {
         Ok(None)
@@ -181,7 +182,7 @@ impl StorageProviderAdapter for ManagedCloudAdapter {
                 message,
             )
         })?;
-        if me.user.id != settings.account_id || me.user.github_login != settings.account_login {
+        if me.user.github_user_id != settings.github_user_id {
             return Err(StorageAdapterError::invalid(
                 "managed_cloud_account_mismatch",
                 "The sign-in belongs to another Mallard Cloud account than this storage. Reconnect with the storage's account.",
@@ -209,7 +210,7 @@ mod tests {
 
     pub(crate) fn config(
         origin: &str,
-        account_id: &str,
+        github_user_id: &str,
         login: &str,
         token: &str,
     ) -> StorageProviderConfig {
@@ -221,7 +222,7 @@ mod tests {
             1,
             BoundedConfigObject::encode(&ManagedCloudSettingsV1 {
                 service_origin: origin.into(),
-                account_id: account_id.into(),
+                github_user_id: github_user_id.into(),
                 account_login: login.into(),
             })
             .unwrap(),
@@ -232,17 +233,17 @@ mod tests {
     const TOKEN: &str = "desktop-token-canary-0123456789";
 
     #[test]
-    fn identity_is_origin_and_account_never_the_token_or_login() {
+    fn identity_is_origin_and_github_user_never_the_token_or_login() {
         let first = config(
             crate::managed_cloud::PRODUCTION_ORIGIN,
-            "user_1",
+            "123",
             "octocat",
             TOKEN,
         );
         let second = config(
             crate::managed_cloud::PRODUCTION_ORIGIN,
-            "user_1",
-            "octocat",
+            "123",
+            "renamed",
             "another-token-0123456789abcdef",
         );
         ManagedCloudAdapter.validate_config(&first).unwrap();
@@ -250,7 +251,7 @@ mod tests {
             ManagedCloudAdapter.continuity_coordinates(&first).unwrap(),
             vec![
                 crate::managed_cloud::PRODUCTION_ORIGIN.to_string(),
-                "user_1".to_string()
+                "123".to_string()
             ]
         );
         assert_eq!(
@@ -279,6 +280,38 @@ mod tests {
     }
 
     #[test]
+    fn github_identity_requires_a_canonical_positive_decimal_id() {
+        for id in [
+            "",
+            "0",
+            "01",
+            "-1",
+            "1.0",
+            " 123",
+            "usr_old",
+            "9007199254740992",
+        ] {
+            assert!(
+                ManagedCloudAdapter
+                    .validate_config(&config(
+                        crate::managed_cloud::PRODUCTION_ORIGIN,
+                        id,
+                        "octocat",
+                        TOKEN,
+                    ))
+                    .is_err(),
+                "{id}"
+            );
+        }
+        let old = BoundedConfigObject::from_json(&serde_json::json!({
+            "service_origin": crate::managed_cloud::PRODUCTION_ORIGIN,
+            "account_id": "usr_old", "account_login": "octocat"
+        }))
+        .unwrap();
+        assert!(ManagedCloudAdapter.validate_settings(&old).is_err());
+    }
+
+    #[test]
     fn configuration_rejects_bad_origins_logins_tokens_and_extras() {
         for origin in [
             "https://mallard-ai.com/",
@@ -287,7 +320,7 @@ mod tests {
         ] {
             assert!(
                 ManagedCloudAdapter
-                    .validate_config(&config(origin, "user_1", "octocat", TOKEN))
+                    .validate_config(&config(origin, "123", "octocat", TOKEN))
                     .is_err(),
                 "{origin}"
             );
@@ -303,7 +336,7 @@ mod tests {
         assert!(ManagedCloudAdapter
             .validate_config(&config(
                 crate::managed_cloud::PRODUCTION_ORIGIN,
-                "user_1",
+                "123",
                 "octo cat",
                 TOKEN
             ))
@@ -311,25 +344,25 @@ mod tests {
         assert!(ManagedCloudAdapter
             .validate_config(&config(
                 crate::managed_cloud::PRODUCTION_ORIGIN,
-                "user_1",
+                "123",
                 "octocat",
                 "short"
             ))
             .is_err());
         let mut extra = config(
             crate::managed_cloud::PRODUCTION_ORIGIN,
-            "user_1",
+            "123",
             "octocat",
             TOKEN,
         );
         extra.settings = BoundedConfigObject::from_json(&serde_json::json!({
-            "service_origin": crate::managed_cloud::PRODUCTION_ORIGIN, "account_id": "user_1", "account_login": "octocat", "extra": 1
+            "service_origin": crate::managed_cloud::PRODUCTION_ORIGIN, "github_user_id": "123", "account_login": "octocat", "extra": 1
         }))
         .unwrap();
         assert!(ManagedCloudAdapter.validate_config(&extra).is_err());
         let mut two = config(
             crate::managed_cloud::PRODUCTION_ORIGIN,
-            "user_1",
+            "123",
             "octocat",
             TOKEN,
         );
@@ -342,7 +375,7 @@ mod tests {
         assert!(ManagedCloudAdapter.validate_config(&two).is_err());
         let mut next = config(
             crate::managed_cloud::PRODUCTION_ORIGIN,
-            "user_1",
+            "123",
             "octocat",
             TOKEN,
         );
@@ -352,7 +385,7 @@ mod tests {
         // may point at a local Worker.
         assert_eq!(
             ManagedCloudAdapter
-                .validate_config(&config("http://localhost:8787", "user_1", "octocat", TOKEN))
+                .validate_config(&config("http://localhost:8787", "123", "octocat", TOKEN))
                 .is_ok(),
             cfg!(debug_assertions)
         );

@@ -406,30 +406,41 @@ bundle the service does not know (section 5.3). The desktop derives the class
 from the manifest: a `repository_fingerprint` makes it `git_project`,
 otherwise `non_git_project`.
 
-### 4.2 Private snapshot and public history
+### 4.2 Draft, versions and the public version
 
-| State | Meaning | Writer |
+Since 2026-10-05 (`PLAN_CLOUD_VERSIONS.md`) a repository holds three things,
+and no page or message uses one word for another:
+
+| Thing | Meaning | Who moves it |
 | --- | --- | --- |
-| `private_publication_id`, `private_revision` | The one current private snapshot, or none | Desktop push by any writer (section 4.3) through the engine's head compare-and-swap |
-| `public_publication_id`, `public_revision` | The current public revision, or none | Owner approval; Super Admin approval when required; revision removal |
-| `public_admitted_at` | Timestamp of current Super Admin approval; null requires approval before publishing | Super Admin release approval sets it; Super Admin Make private clears it |
+| Draft | The latest push: the stream's selected record. It moves with every push and carries no number. | Desktop push by any writer (section 4.3) |
+| Version | A frozen, numbered copy of one push. Numbers start at 1 and are never given again. It can carry a name and a note. | Publish, by a collaborator; or the approval of a release request that names the draft |
+| Public version | The version the public pointer names. A private repository has none. | Owner approval of a release; Super Admin approval when required; removal of that version |
 
-A push replaces the private snapshot. The previous private publication is
-retired at once: no route lists it, serves its payloads, or pulls it. Its
-manifest stays readable by collaborators as metadata for the continuity probe
-(section 3.3, row 8). The service keeps the last 32 retired private
-manifests per repository and erases older ones.
+| State | Meaning |
+| --- | --- |
+| `private_publication_id` | The draft's push, or none |
+| `version_count` | Version numbers given so far; the next version is one more |
+| `public_publication_id`, `release_count` | The version row the public pointer names, and how often the pointer moved |
+| `public_admitted_at` | Timestamp of current Super Admin approval; null requires approval before a release |
+
+A push moves the draft. Earlier pushes stay stored and stay readable by
+whoever may read the draft, at their commit, until Discard draft removes
+them. Publish freezes the draft as the next version and makes nothing
+public. Only collaborators publish: a version protects its push from
+Discard draft, so an account that is not on the team asks for a release with
+the draft instead, and the Owner's approval makes the version.
 
 Push semantics are the engine's (section 3.2): unselected scopes are carried
 forward with their revision and digest, reviewed retained files are kept,
 and tombstones are minted for explicit removals. The service stores
 manifests; it does not interpret scope semantics.
 
-A public release copies nothing. The new public publication row references
-the same manifest object and the same payload objects as the private
-publication it was released from. Payload bytes are charged once per
-repository. Public revisions form a linear history; anonymous readers see
-only the current public head.
+A version copies nothing. Its row references the same manifest object and
+the same payload objects as the push it froze, and a release moves the
+pointer alone. Payload bytes are charged once per repository. Whoever may
+read the draft reads every version at its own address (`?version=3`);
+anonymous readers see only the public version.
 
 ### 4.3 Roles and invitations
 
@@ -478,12 +489,15 @@ other.
 
 ### 4.4 Public release
 
-1. A writer (section 4.3) requests a release from the desktop or the website.
-   The request pins the current private publication and the current public
-   publication (or none) and the repository revision. One open request per
-   repository; a newer private push invalidates it.
-2. The Owner opens the repository on the website, browses the private
-   snapshot (sessions, session details, files, or the catalog item), reads the
+1. A writer (section 4.3) requests a release on the website's Release tab;
+   the desktop's row opens that tab. The request names one version, the
+   latest unless another is chosen, or the draft as it stands, and pins the
+   current public version (or none) and the repository revision. One open
+   request per repository. A request for a version stays open while the team
+   pushes on. A request for the draft is closed by the next push; Publish of
+   that draft turns it into a request for the version.
+2. The Owner opens the repository on the website, browses what the request
+   names (sessions, session details, files, or the catalog item), reads the
    comparison with the current public version (added, changed, and removed
    resources by identity and digest), and approves or rejects. Approval
    acknowledges public disclosure of that exact snapshot.
@@ -492,31 +506,32 @@ other.
    Super Admin makes the repository private. Super Admin approves or rejects
    on the website. Releases with current admission publish on Owner approval.
    The API returns `requires_super_admin_approval`.
-4. Publication adds a public publication row, sets the public head, and makes
-   the repository public. If a private repository submits the exact source
-   snapshot of its retained public head, approval restores that head without
-   a new public revision or copied object references. The private snapshot
-   is unchanged. If it was discarded, push a snapshot before requesting release.
+4. The release moves the public pointer to the version and makes the
+   repository public. For a request that names the draft it first makes that
+   push the next version, published by whoever asked. The draft and the other
+   versions stay as they are, and an earlier version can be released as well
+   as the latest.
 
 Making the repository private stops public reads and access by contributors
-without membership. It keeps both heads, history, members, stars, and stored
-objects. Owner/Admin Make private preserves current admission. Super Admin
+without membership. It keeps the draft, every version, members, stars, and
+stored objects. Owner/Admin Make private preserves current admission. Super Admin
 Make private clears `public_admitted_at`, requires a reason and the current
 repository revision, invalidates open release requests, and records the actor
-and reason in the audit log. The repository remains active. Publish decisions
+and reason in the audit log. The repository remains active. Release decisions
 check admission inside their transaction. Downloaded copies cannot be revoked.
 
 ### 4.5 Discard and removal
 
 **Discard private snapshot** is the Owner's and an Admin's, after a
 confirmation, and takes effect in its request
-(`PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md`, 2026-09-26). On a public
-repository it returns the private snapshot to the public version: every push
-after the one the public version was released from is removed, and that push
-and the ones before it stay with their claims. On a private repository, one
-made private after a release included, it removes every push and the
-repository stays, empty. It invalidates the open request, deletes nothing
-local, removes no object, view or manifest, and changes nothing public.
+(`PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md`, 2026-09-26; the rule of what is
+kept is `PLAN_CLOUD_VERSIONS.md`, 2026-10-05). It returns the draft to the
+latest version, public or not: every push after the one that version froze
+is removed, with the content only those pushes held, and that push and the
+ones before it stay with their claims. With no version it removes every push
+and the repository stays, empty. It closes an open request that names the
+draft, leaves a request for a version open, deletes nothing local, and
+changes no version and nothing public.
 
 **Repository removal** is immediate. An Owner or Admin confirms the display
 name and the current revision. The transaction sets `state = 'deleting'`,
@@ -536,12 +551,13 @@ erases every object and manifest of the repository's own prefix, and marks it
 | Approve or reject an Owner-approved release when admission is absent or revoked | Same |
 | Make an active public repository private and revoke admission; no membership required | Same; reason and current repository revision required |
 | Remove any repository immediately | Same |
-| Remove one public revision | Same |
+| Remove one version, public or not | The API (section 7.7) |
 
-Revision removal marks the public publication `removed`, drops its object
-references, and, if it was the head, clears the public head and makes the
-repository private. The row stays as a marker in history. Shared bytes remain
-while another available publication references them.
+Version removal marks the version `removed`, drops its object references,
+and, if the public pointer named it, clears the pointer and makes the
+repository private. The row stays as a marker in the versions list and its
+number is not given again. Shared bytes remain while another available
+publication references them.
 
 ### 4.7 What the website shows
 
@@ -549,8 +565,10 @@ For a public project repository, anyone can open the repository page, the
 list of every session in the public head, each session's detail page, and the
 list of reviewed project files. For a public catalog repository, anyone can
 open the item page: a skill's `SKILL.md` and file list, a plugin intent's
-source and policy, or a pet's idle frame and metadata. Collaborators see the
-same pages for the private snapshot and for every retained public revision.
+source and policy, or a pet's idle frame and metadata. Whoever may read the
+draft sees the same pages for the draft and for every version: a pop-up at
+the head of the content names what is shown, the Versions tab lists every
+version with Publish, and the Release tab asks which version to release.
 
 Session pages render **session views** (section 5.4): bounded timelines the
 desktop builds from the redacted, path-mapped wire transcript at push time.
@@ -690,8 +708,8 @@ one, by entering its invitation code (`accept_managed_cloud_invitation`).
 **Revision numbers.** The manifest keeps the revision and commit ID the
 engine minted. The synthesized public `BundleHead` uses the manifest's own
 revision, so the engine's head-to-manifest check holds and public revisions
-seen by the desktop increase monotonically. The public sequence number
-(`public_revision`) is service metadata for history pages.
+seen by the desktop increase monotonically. A version's number is service
+metadata: the manifest does not carry it.
 
 ### 5.4 Session views
 
@@ -812,7 +830,7 @@ Push and Pull are the existing screens. The project path bar carries one
 Mallard Cloud chip beside Push and Pull (docs/PLAN_CLOUD_STATUS_CHIP.md). It
 shows whatever the status answered, read when the pair opens, on window
 focus, and after every Push or Pull ends. That covers the release and the
-draft (`Draft vN`, `Published vN`, `Private`, `In review`, `Rejected`,
+draft (`Draft`, `Version N`, `Public vN`, `Private`, `In review`, `Rejected`,
 `Not pushed`), a repository gone or being deleted, a sign-in needed, a
 refused account, and a service that cannot be reached. The chip opens a
 panel with the repository's facts and verbs:
@@ -839,10 +857,15 @@ The desktop side of this section shipped as
 `MANAGED_CLOUD_DESKTOP_WIRING_PLAN.md` describes, with these deltas:
 
 - Provider key `managed_cloud`, display name "Mallard Cloud", first in the
-  picker (`display_rank` 5). Settings `service_origin`, `account_id`,
+  picker (`display_rank` 5). Settings `service_origin`, `github_user_id`,
   `account_login`; one secret `account_token`, declared as the managed
   secret. The descriptor declares no manual fields: the lane is the only
   way in, and a draft is ready only once the lane produced the token.
+  `github_user_id` is the verified numeric GitHub ID as a decimal string.
+  The service address and GitHub ID identify one local storage; login names
+  are display data. Reconnect may replace the token and refresh the login,
+  including when Cloud has recreated its internal user ID. Schema versions
+  stay at 1. Old `account_id` settings are not migrated or accepted.
 - Release builds accept the production origin only; development builds may
   point at a local Worker or staging through `MALLARD_MANAGED_CLOUD_ORIGIN`.
 - The loopback receiver is shared: `loopback_browser.rs` serves both the
@@ -950,6 +973,16 @@ private publications reference the same keys. A listing is used only by the
 removal job to verify that a repository prefix is empty.
 
 ### 6.3 D1 schema
+
+The schema of record is the service's `migrations/0001_init.sql`; the listing
+below is the September draft. Since 2026-10-05 (`PLAN_CLOUD_VERSIONS.md`):
+`publications.scope` is `private` or `version` (a version row carries its
+number in `revision`, the push it froze in `source_publication_id`, and its
+own `name` and `note`; one live version per push); `repositories` holds
+`version_count` and `release_count` in place of `public_revision`, and
+`public_publication_id` names a version row; a `release_requests` row names
+exactly one of `version_publication_id` and `push_publication_id`;
+`removals.target` is `repository`, `version` or `chain`.
 
 ```sql
 -- One column per API error code, each with a NAMED check constraint, so the
@@ -1444,8 +1477,9 @@ Head body (both head routes):
 
 `pushed_by` is the collaborator whose push created the snapshot: the private
 publication's `created_by`, followed through `source_publication_id` for a
-public head, so a release credits the pusher rather than the approver. The
-same object sits on every row of the public listing and of `/history`. The
+version, so a version credits the pusher rather than whoever published or
+approved it. The same object sits on every row of the public listing; a row
+of `/versions` carries `published_by`, who froze it. The
 avatar URL is built from the GitHub account id (stable across renames); the
 website adds `s=` for the size it renders. It is `null` only when the user
 row cannot be joined.
@@ -1487,7 +1521,8 @@ section 4.1 says, so these become `Mallard-Desktop`, `Research-Notes`, `Rika`):
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/repositories/{id}/head` | The head the caller may read (body as in section 7.3); `204` when absent |
-| `GET` | `/v1/repositories/{id}/history` | Public publications newest first, including `removed` markers |
+| `GET` | `/v1/repositories/{id}/versions` | Versions newest first, including `removed` markers, for whoever may read the draft |
+| `POST` | `/v1/repositories/{id}/versions` | Publish: `{commit_id, name?, note?, expected_repository_revision}` freezes the draft the caller saw as the next version → `201 {version, commit_id, name, created_at}`; `409 version_unchanged` while the draft is a version already |
 | `GET` | `/v1/repositories/{id}/manifests/{commit_id}` | Manifest bytes |
 | `GET` | `/v1/repositories/{id}/objects/{sha256}` | Payload bytes for collaborators |
 | `GET` | `/v1/repositories/{id}/views/{resource_id}?commit_id=` | Session view for collaborators |
@@ -1495,7 +1530,7 @@ section 4.1 says, so these become `Mallard-Desktop`, `Research-Notes`, `Rika`):
 | `PUT` | `/v1/repositories/{id}/uploads/{upload}/objects/{sha256}` | Step 2 |
 | `POST` | `/v1/repositories/{id}/uploads/{upload}/commit` | Step 3 |
 | `POST` | `/v1/repositories/{id}/uploads/{upload}/abandon` | End an open upload |
-| `POST` | `/v1/repositories/{id}/private-snapshot/discard` | `{confirm: true, expected_repository_revision}` → `{ok, repository_id, removal_id, state, kept_revision}` (`STORE_API.md` section 3) |
+| `POST` | `/v1/repositories/{id}/private-snapshot/discard` | `{confirm: true, expected_repository_revision}` → `{ok, repository_id, removal_id, state, kept_version}` (`STORE_API.md` section 3) |
 
 Upload creation: `multipart/form-data`; part `manifest` carries the raw
 manifest bytes, part `request` carries this JSON:
@@ -1515,8 +1550,8 @@ manifest bytes, part `request` carries this JSON:
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET`, `POST` | `/v1/repositories/{id}/release-requests` | Read the open request and its comparison; create `{expected_repository_revision}` |
-| `POST` | `/v1/repositories/{id}/release-requests/{request}/decision` | `{decision: "approve" or "reject" or "withdraw", private_commit_id, acknowledge_disclosure, reason}` |
+| `GET`, `POST` | `/v1/repositories/{id}/release-requests` | Read the open request and its comparison; create `{expected_repository_revision}` with `version: n` or `draft_commit_id`, exactly one |
+| `POST` | `/v1/repositories/{id}/release-requests/{request}/decision` | `{decision: "approve" or "reject" or "withdraw", commit_id, acknowledge_disclosure, reason}` |
 
 The comparison is computed on read from the two manifests: resources present
 on one side, present on both with different digests, and identical. It is a
@@ -1532,7 +1567,7 @@ listing, not a merge.
 | `POST` | `/v1/super-admin/release-requests/{request}/decision` | Approve or reject a release that requires admission |
 | `POST` | `/v1/super-admin/repositories/{id}/visibility` | Make private and revoke admission `{visibility: "private", expected_repository_revision, reason}` |
 | `POST` | `/v1/super-admin/repositories/{id}/removal` | Immediate removal `{confirmed_name, reason}` |
-| `POST` | `/v1/super-admin/repositories/{id}/publications/{commit_id}/removal` | Remove one public revision `{reason}` |
+| `POST` | `/v1/super-admin/repositories/{id}/versions/{n}/removal` | Remove one version `{reason}` |
 | `GET` | `/v1/super-admin/removals/{removal_id}` | Progress |
 | `POST` | `/v1/super-admin/jobs/run` | Run the cron work now |
 
@@ -1812,9 +1847,8 @@ same files. Regenerating fixtures is part of any DTO change.
 
 | Data | Rule |
 | --- | --- |
-| Current private snapshot | Until replaced, discarded, or removed |
-| Retired private manifests | Newest 32 per repository, metadata only |
-| Public publications | Until revision or repository removal, within quota |
+| The draft and the pushes before it | Until Discard draft removes the pushes after the latest version, or the repository is removed |
+| Versions | Until the version or the repository is removed, within quota |
 | Open upload | 24 hours |
 | Unreferenced objects | Deleted by the next cleanup runs |
 | Invitation code | Until rotated, revoked, or the repository is removed |
@@ -1870,16 +1904,17 @@ Owner approval:
 
 - Mallard stores selected content without end-to-end encryption; controlled
   operators and Super Admins can inspect it.
-- The repository's Owner, Admins, and Members can read the private snapshot
-  and public history.
-- Only one private snapshot is kept; a later push replaces it. Service
-  recovery clears private snapshots.
+- The repository's Owner, Admins, and Members can read the draft and every
+  version.
+- The draft is the latest push, and a new push moves it. Every published
+  version stays until the repository is removed. Discard draft removes the
+  pushes after the latest version.
 - Anyone can read the public version and every session in it, and sees the
   GitHub name and picture of whoever pushed it. Downloaded copies cannot be
   revoked.
 - A public release needs Owner approval on the website. Super Admin approval
   is also required before the first release and after a Super Admin makes
-  the repository private. Super Admins can remove any revision or repository.
+  the repository private. Super Admins can remove any version or repository.
 - Credentials and complete provider homes must not be selected.
 
 ## 12. Delivery
@@ -1972,8 +2007,9 @@ first column are the draft's.
 | (added 2026-09-14) Stars erased when a repository goes private, as GitHub does | Stars persist; read access applies when the Starred list is read | One predicate at query time instead of cascades on make-private, member removal, and leave; a re-release restores the count |
 | (added 2026-09-16) Membership gates every push; per-person single-use invitation codes | Anyone signed in pushes to a public repository (`Access.writer`, `G.writer`); a private repository has one standing code on its row (`repositories.invite_code_*`), set, rotated, or revoked by the Owner or an Admin | Public work needs no invitations, and the Owner still decides every release; one code per repository is what "invite at the repo level" asked for, and it drops a table, a quota, an expiry job, and a label |
 | (added 2026-09-26) Stars need an account, one per account, as on GitHub | A star is a vote: signed in or not, up to 24 per voter per repository per UTC day; a signed-out voter is a connection (the IP hashed with the day's secret); Starred takes a repository off the list and keeps the count | Visitors can back a repository without signing in; the website's control stays as it was, and with no Trending page the daily cap bounds what one voter can add |
+| (added 2026-10-05) One private slot that every push overwrites; a public release makes its own numbered row | Draft, numbered versions, and a public pointer (`PLAN_CLOUD_VERSIONS.md`): Publish freezes the draft as a version, a release names a version, Discard returns the draft to the latest version | The owner asked that a private repository keep more than its latest push. A public release row already was a frozen, numbered copy of a push, so a version is that row without the approval and a release is the pointer alone |
 
-Kept from the draft: one private slot, retained public history, Owner plus
+Kept from the draft: one draft that every push moves, Owner plus
 Super Admin approval when admission is absent, one item per catalog repository, the
 cleanup claim protocol, `publication_objects` for read authorization,
 content-addressed create-only objects, GitHub sign-in through the Worker,

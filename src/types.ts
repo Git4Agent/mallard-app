@@ -1831,13 +1831,14 @@ export interface FeishuSetupProgress {
  *  signs in; a reconnect keeps the storage's account. */
 export type ManagedCloudSetupMode = "create" | "reconnect";
 export interface ManagedCloudSetupLogin {
-  account: { id: string; login: string };
+  account: { github_user_id: string; login: string };
   service_origin: string;
 }
 /** A failure after the sign-in itself names the account it is about. */
 export interface ManagedCloudSetupFailure {
   code: string;
-  account?: { id: string; login: string } | null;
+  account?: { github_user_id: string; login: string } | null;
+  service_origin?: string | null;
 }
 export interface ManagedCloudSetupProgress {
   status: "authorization_link";

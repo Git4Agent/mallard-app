@@ -59,8 +59,6 @@ export const storageCatalogApi = {
     invoke<CatalogCloudRepository>("create_catalog_cloud_repository", { scopeId, storageId, resourceId, expectedLinkRevision }),
   getCloudStatus: (scopeId: string, storageId: string, resourceId: string, repositoryId: string) =>
     invoke<ManagedCloudStatus>("get_catalog_cloud_status", { scopeId, storageId, resourceId, repositoryId }),
-  requestCloudRelease: (scopeId: string, storageId: string, resourceId: string, repositoryId: string, expectedRevision: number) =>
-    invoke<void>("request_catalog_cloud_release", { scopeId, storageId, resourceId, repositoryId, expectedRevision }),
   discardCloudDraft: (scopeId: string, storageId: string, resourceId: string, repositoryId: string, expectedRevision: number) =>
     invoke<ManagedCloudDiscardedDraft>("discard_catalog_cloud_draft", { scopeId, storageId, resourceId, repositoryId, expectedRevision }),
   /** Every capability this build registers, in the backend's display order.

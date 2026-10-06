@@ -8,10 +8,25 @@ export type ManagedCloudReleaseState =
   | { kind: "public" }
   | { kind: "snapshot_changed" }
   | { kind: "rejected"; reason?: string | null };
+/** Where the draft stands against the repository's versions
+ *  (docs/PLAN_CLOUD_VERSIONS.md), read beside the link. Push moves the
+ *  draft; Publish freezes it as the next version; a release makes one
+ *  version public. */
 export interface ManagedCloudPublicationStatus {
-  state: "no_draft" | "not_public" | "matches_published" | "unpublished_draft" | "unavailable";
-  private_revision: number | null;
-  public_revision: number | null;
+  /** `unavailable`: the answer carried no status. Never the service's word. */
+  draft: "none" | "pushed" | "unavailable";
+  /** The highest available version; null when there is none. */
+  latest_version: number | null;
+  /** The number Publish would give. 0 with `unavailable`. */
+  next_version: number;
+  /** How many pushes the draft is past `latest_version`; 0 when the draft is
+   *  that version. Null with no version or no draft. */
+  draft_ahead: number | null;
+  /** The version the public reads while the repository is public. */
+  public_version: number | null;
+  /** The version the open release request names; null when none is open, and
+   *  when the open one names the draft. */
+  review_version: number | null;
 }
 export interface ManagedCloudStatus {
   /** The repository the link saved. While it is gone and another one of the
@@ -30,7 +45,12 @@ export interface ManagedCloudDiscardedDraft {
   removal_id: string;
   state: "done" | "deleting";
   /** The version the draft returned to; null when no push is kept. */
-  kept_revision: number | null;
+  kept_version: number | null;
+}
+/** What Publish answered: the version the draft was frozen as. */
+export interface ManagedCloudPublishedVersion {
+  repository_id: string;
+  version: number;
 }
 export interface ManagedCloudLink {
   visibility: "private" | "public";
@@ -43,6 +63,9 @@ export interface ManagedCloudLink {
   release: ManagedCloudReleaseState;
   repository_revision: number;
   can_request_release: boolean;
+  /** Whether Publish is open to this account now: a collaborator, with a
+   *  draft that holds something and is not already a version. */
+  can_publish_version: boolean;
   /** The account's membership role; null for a public repository the
    *  account does not belong to, where it still pushes as a contributor. */
   role: string | null;

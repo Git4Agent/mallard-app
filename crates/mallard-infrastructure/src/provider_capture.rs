@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
@@ -1365,11 +1365,13 @@ fn add_project_content_file(
 ) -> Result<(), String> {
     validate_logical_project_relative(relative)?;
     reject_unsafe_ancestors(path, root)?;
-    let bytes = fs::read(path).map_err(|error| format!("read '{}': {}", path.display(), error))?;
+    let bytes = read_project_content_bytes(path, before.len())?;
     let after = fs::symlink_metadata(path)
         .map_err(|error| format!("reinspect '{}': {}", path.display(), error))?;
     if after.file_type().is_symlink()
         || !after.is_file()
+        || bytes.len() as u64 > MAX_FILE_BYTES
+        || bytes.len() as u64 != before.len()
         || before.len() != after.len()
         || modified_secs(before) != modified_secs(&after)
         || safe_mode(before) != safe_mode(&after)
@@ -1449,6 +1451,28 @@ fn add_blocked_project_content_candidate(
             conversation: None,
         },
     )
+}
+
+/// Read one project-content file through a no-follow handle, taking at most
+/// one byte past the limit. The walker's size gate saw `expected_len`; a file
+/// that grew since then fails the caller's byte-count check without ever
+/// being read in full.
+fn read_project_content_bytes(path: &Path, expected_len: u64) -> Result<Vec<u8>, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| format!("read '{}': {}", path.display(), error))?;
+    let mut bytes = Vec::with_capacity(expected_len.min(MAX_FILE_BYTES) as usize);
+    file.take(MAX_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read '{}': {}", path.display(), error))?;
+    Ok(bytes)
 }
 
 fn project_content_resource_id(entry_type: &str, relative: &str) -> String {
@@ -3353,6 +3377,45 @@ mod tests {
             .resources
             .iter()
             .any(|resource| resource.display_name.ends_with("too-deep.txt")));
+    }
+
+    #[test]
+    fn project_content_file_that_grows_past_the_limit_is_rejected_by_a_bounded_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        write(&project.join("growing.bin"), b"small");
+        let root = fs::canonicalize(&project).unwrap();
+        let path = root.join("growing.bin");
+        let before = fs::symlink_metadata(&path).unwrap();
+        // A second handle grows the file (sparsely) far past the limit after
+        // the walker's size gate saw it small. The read stops one byte past
+        // the limit instead of pulling the whole file in.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES * 4 + 1)
+            .unwrap();
+
+        let mut discovery = Discovery::default();
+        let error = add_project_content_file(&mut discovery, &root, &path, "growing.bin", &before)
+            .unwrap_err();
+        assert!(error.contains("changed while it was scanned"), "{error}");
+        assert!(discovery.resources.is_empty());
+
+        // A symlink that replaced the file after the snapshot is never opened:
+        // the no-follow open refuses it before any byte of the target is read.
+        #[cfg(unix)]
+        {
+            fs::remove_file(&path).unwrap();
+            write(&root.join("target.txt"), b"target");
+            std::os::unix::fs::symlink(root.join("target.txt"), &path).unwrap();
+            let error =
+                add_project_content_file(&mut discovery, &root, &path, "growing.bin", &before)
+                    .unwrap_err();
+            assert!(error.starts_with("read '"), "{error}");
+            assert!(discovery.resources.is_empty());
+        }
     }
 
     #[test]

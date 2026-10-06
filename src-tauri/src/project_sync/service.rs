@@ -78,7 +78,8 @@ use mallard_infrastructure::owned_subagents;
 use mallard_infrastructure::payload::PayloadBytes;
 use mallard_infrastructure::persistence::{
     ConfigMutation, ConfigTransactionError, LocalProjectActivityStateSnapshot,
-    LocalStateRepository, LockedConversationPull, StorageSyncMetadataResetResult,
+    LocalProjectStateSnapshot, LocalStateRepository, LockedConversationPull,
+    StorageSyncMetadataResetResult,
 };
 use mallard_infrastructure::portable_resources::PortableResourceRegistry;
 use mallard_infrastructure::project_activity::{
@@ -2438,21 +2439,59 @@ struct ProjectContentVersion {
     digest: String,
 }
 
+/// The Files readout, for the Files face and the Push dialog's Files step.
+/// It takes no host lock: it is built from one state snapshot and refused
+/// when that snapshot moved before it returned (`refuse_if_state_moved`).
+/// The review token it mints is honoured only by a Push that walks the
+/// project again under the host lock and mints the same token.
 pub(super) fn inspect_project_files_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<ProjectContentInventory, String> {
-    let _host_operation = repository.acquire_host_operation()?;
-    inspect_project_files_guarded(repository, local_project_id, storage_id)
+    inspect_project_files_with_progress(repository, local_project_id, storage_id, &mut |_, _| {})
 }
 
-fn inspect_project_files_guarded(
+/// `on_phase` reports the finished scan once, before the snapshot is read
+/// again. It runs outside every persistence lock.
+pub(super) fn inspect_project_files_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
+    on_phase: &mut dyn FnMut(&str, Duration),
 ) -> Result<ProjectContentInventory, String> {
+    let started = Instant::now();
     let state = repository.load_project_state_snapshot()?;
+    let inventory =
+        inspect_project_files_from_state(repository, &state, local_project_id, storage_id)?;
+    on_phase("scan", started.elapsed());
+    refuse_if_state_moved(repository, &state)?;
+    Ok(inventory)
+}
+
+/// A readout that takes no host lock is built from one snapshot. Reading the
+/// snapshot again after the work proves no Mallard operation committed in
+/// between; otherwise the result describes a state this machine no longer
+/// has, and it is refused. Whole documents are compared, not revisions. An
+/// editor or an agent writing project files is outside this rule, as it was
+/// outside the lock: the digest-bound review token answers for it at Push.
+fn refuse_if_state_moved(
+    repository: &LocalStateRepository,
+    before: &LocalProjectStateSnapshot,
+) -> Result<(), String> {
+    if repository.load_project_state_snapshot()? == *before {
+        Ok(())
+    } else {
+        Err("Mallard state changed while it was read; try again".to_string())
+    }
+}
+
+fn inspect_project_files_from_state(
+    repository: &LocalStateRepository,
+    state: &LocalProjectStateSnapshot,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+) -> Result<ProjectContentInventory, String> {
     let config = &state.config;
     let project = config
         .project(local_project_id)
@@ -2508,7 +2547,9 @@ fn inspect_project_files_guarded(
 /// content included) and one already-read remote snapshot, with the chain
 /// it was selected on: the project area's base is read through that chain
 /// (`project_base`) before its manifest is opened. The review token minted
-/// here binds current disk state and the observed remote head.
+/// here binds current disk state and the observed remote head; a Push
+/// honours it only after minting the same token from its own walk under the
+/// host lock.
 #[allow(clippy::too_many_arguments)]
 fn build_project_files_inventory(
     local_project_id: &LocalProjectId,
@@ -8565,12 +8606,12 @@ pub(super) fn prepare_push_review_with_progress(
     })
 }
 
+/// A readout: no host lock, one snapshot, refused if the snapshot moved.
 pub(super) fn get_push_destination_status_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
 ) -> Result<PushDestinationStatus, String> {
-    let _host_operation = repository.acquire_host_operation()?;
     let state = repository.load_project_state_snapshot()?;
     let config = &state.config;
     let project = config
@@ -8590,12 +8631,14 @@ pub(super) fn get_push_destination_status_with_repository(
         })?;
     let (_, engine) = storage_engine_from_state(repository, config, &state.bindings, storage_id)?;
     let (observation, _) = observe_linked_bundle(repository, &engine, &link)?;
-    Ok(classify_push_destination(
+    let status = classify_push_destination(
         observation.snapshot(),
         &observation.mainline,
         &link,
         &binding,
-    ))
+    );
+    refuse_if_state_moved(repository, &state)?;
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -15549,7 +15592,11 @@ fn storage_engine_from_state(
             .iter()
             .filter(|link| link.storage_id == *storage_id)
         {
-            cloud.set_pin(&link.bundle_id, link.managed_cloud_repository_id.as_deref())?;
+            cloud.set_pin(
+                &link.bundle_id,
+                link.managed_cloud_repository_id.as_deref(),
+                config.revision,
+            )?;
         }
     }
     let engine = engine_for_storage_config(&storage)?;
@@ -18153,13 +18200,22 @@ mod tests {
         assert!(save_project_binding_with_repository(&repo, request)
             .unwrap_err()
             .contains("host-sensitive operation"));
+        // Readouts take no host lock: both get past it to the state read,
+        // where the unregistered project is what stops them.
         assert!(inspect_project_files_with_repository(
             &repo,
             &LocalProjectId::parse("project-a").unwrap(),
             &StorageId::parse("storage-a").unwrap(),
         )
         .unwrap_err()
-        .contains("host-sensitive operation"));
+        .contains("unknown local project"));
+        assert!(get_push_destination_status_with_repository(
+            &repo,
+            &LocalProjectId::parse("project-a").unwrap(),
+            &StorageId::parse("storage-a").unwrap(),
+        )
+        .unwrap_err()
+        .contains("unknown local project"));
         assert!(remove_project_link_with_repository(
             &repo,
             &LocalProjectId::parse("project-a").unwrap(),
@@ -18185,6 +18241,80 @@ mod tests {
         .unwrap_err()
         .contains("host-sensitive operation"));
         drop(guard);
+    }
+
+    /// One eligible project with one file, linked to a local-folder storage.
+    fn readout_fixture(
+        temp: &tempfile::TempDir,
+    ) -> (LocalStateRepository, LocalProjectId, StorageId) {
+        let repo = repository(temp);
+        let storage_id = StorageId::parse("readout-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(project_root.join("notes.md"), b"notes").unwrap();
+        bind_and_link_test_replica(
+            &repo,
+            &project,
+            &storage_id,
+            &project_root,
+            &temp.path().join("codex"),
+        );
+        (repo, project.local_project_id, storage_id)
+    }
+
+    /// The Files scan and the push destination status are readouts: they
+    /// run to completion while a host-sensitive operation holds the lock.
+    #[test]
+    fn files_scan_and_destination_status_run_while_a_host_operation_holds_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, project_id, storage_id) = readout_fixture(&temp);
+
+        let _guard = repo.acquire_host_operation().unwrap();
+        let scanned =
+            inspect_project_files_with_repository(&repo, &project_id, &storage_id).unwrap();
+        assert_eq!(
+            scanned.eligibility.state,
+            ProjectFileSyncEligibilityState::Eligible
+        );
+        assert!(scanned
+            .entries
+            .iter()
+            .any(|entry| entry.relative_path == "notes.md"));
+        assert!(scanned.review_token.is_some());
+        get_push_destination_status_with_repository(&repo, &project_id, &storage_id).unwrap();
+    }
+
+    /// A readout is refused when Mallard state moves between its snapshot
+    /// and its return: the walk completes, the config is bumped in the
+    /// phase callback, and the second snapshot read differs from the first.
+    #[test]
+    fn files_scan_is_refused_when_mallard_state_moves_during_the_walk() {
+        let temp = tempfile::tempdir().unwrap();
+        let (repo, project_id, storage_id) = readout_fixture(&temp);
+
+        let mut phases = Vec::new();
+        let error = inspect_project_files_with_progress(
+            &repo,
+            &project_id,
+            &storage_id,
+            &mut |phase, _| {
+                phases.push(phase.to_string());
+                repo.mutate_config(|_| Ok::<(), String>(())).unwrap();
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("Mallard state changed"), "{error}");
+        assert_eq!(phases, vec!["scan".to_string()]);
+
+        // Nothing moves during the next scan, so it stands.
+        let scanned =
+            inspect_project_files_with_repository(&repo, &project_id, &storage_id).unwrap();
+        assert!(scanned
+            .entries
+            .iter()
+            .any(|entry| entry.relative_path == "notes.md"));
     }
 
     /// Remove one bundle from a local-folder storage the way a clear does:

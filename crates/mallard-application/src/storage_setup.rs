@@ -2359,14 +2359,38 @@ fn storage_settings_locked() -> StorageSetupError {
     )
 }
 
-/// A committed storage keeps its settings for life: a draft that would
-/// write different ones is refused, whichever way it was produced.
+/// A committed storage keeps its destination for life. Cloud sign-in may
+/// refresh the display login while keeping the service and GitHub user ID.
 fn validate_settings_locked(
     config: &SyncConfig,
     candidate: &StorageConfig,
 ) -> Result<(), StorageSetupError> {
     if let Some(current) = config.storages.iter().find(|s| s.id == candidate.id) {
         if current.provider_config.settings != candidate.provider_config.settings {
+            use mallard_infrastructure::storage_providers::managed_cloud::{
+                provider_key, ManagedCloudSettingsV1,
+            };
+            if current.provider == provider_key()
+                && candidate.provider == current.provider
+                && candidate.provider_config.version == current.provider_config.version
+            {
+                if let (Ok(saved), Ok(next)) = (
+                    current
+                        .provider_config
+                        .settings
+                        .decode::<ManagedCloudSettingsV1>(),
+                    candidate
+                        .provider_config
+                        .settings
+                        .decode::<ManagedCloudSettingsV1>(),
+                ) {
+                    if saved.service_origin == next.service_origin
+                        && saved.github_user_id == next.github_user_id
+                    {
+                        return Ok(());
+                    }
+                }
+            }
             return Err(storage_settings_locked());
         }
     }

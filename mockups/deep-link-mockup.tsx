@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { createRoot } from "react-dom/client";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import Icon, { type IconName } from "../src/components/Icons";
-import Notice, { NoticeZone, type NoticeItem } from "../src/components/notice/Notice";
+import Notice, { NoticeZone, type NoticeItem, type NoticeZoneProps } from "../src/components/notice/Notice";
 import NewProjectFolderStep from "../src/components/project-sync/NewProjectFolderStep";
 import ProjectSidebar from "../src/components/project-sync/ProjectSidebar";
 import { projectSyncApi } from "../src/components/project-sync/api";
@@ -345,15 +345,15 @@ function Sidebar({ storages, activeProjectId, activeCatalogScopeId, addingProjec
 }
 
 /** The shell's zone under the bar, as the app places it. */
-function Zone({ items }: { items: NoticeItem[] }) {
-  return <NoticeZone items={items} subject="messages from Mallard" className="sync-backend-banner" timing="progress" />;
+function zoneProps(items: NoticeItem[]): NoticeZoneProps {
+  return { items, subject: "messages from Mallard", className: "sync-backend-banner", timing: "progress" };
 }
 
 const STORAGE_CRUMB: PathBarCrumb = { id: "storage", label: "Mallard Cloud", icon: "storage-mallard", tone: "root" };
 const crumb = (id: string, label: string, icon?: IconName): PathBarCrumb => ({ id, label, icon });
 
 /** A page the link only opens: its bar is real, its body is not drawn. */
-function StandIn({ zone, crumbs, title, children }: { zone: ReactNode; crumbs: PathBarCrumb[]; title: string; children: ReactNode }) {
+function StandIn({ zone, crumbs, title, children }: { zone: NoticeZoneProps; crumbs: PathBarCrumb[]; title: string; children: ReactNode }) {
   return (
     <PathBarBelow.Provider value={zone}>
       <SyncPathBar crumbs={crumbs} ariaLabel={`${title} path`} />
@@ -428,11 +428,11 @@ function Driven({ address, door, hintFor, children }: { address: string; door?: 
   return <div ref={ref} style={{ display: "contents" }}>{children}</div>;
 }
 
-function NewProjectPage({ zone, storages, subject, several }: { zone: ReactNode; storages: StorageSummary[]; subject: string; several: boolean }) {
+function NewProjectPage({ zone, storages, subject, several }: { zone: NoticeZoneProps; storages: StorageSummary[]; subject: string; several: boolean }) {
   return (
     <>
       <Titlebar icon="folder" title="New project" />
-      {zone}
+      <NoticeZone {...zone} />
       <main className="sync-main sync-project-links-page sync-project-setup-page">
         <section className="profile-links-section sync-project-overview" aria-label="Project setup">
           <Driven address={subject} hintFor={several ? subject : null}>
@@ -459,11 +459,11 @@ function NewProjectPage({ zone, storages, subject, several }: { zone: ReactNode;
   );
 }
 
-function AddCatalogPage({ zone, subject }: { zone: ReactNode; subject: string }) {
+function AddCatalogPage({ zone, subject }: { zone: NoticeZoneProps; subject: string }) {
   return (
     <>
       <Titlebar icon="catalog" title="Add Catalog resource" />
-      {zone}
+      <NoticeZone {...zone} />
       <Driven address={subject} door>
         <AddCatalogScopeWorkspace
           workflowEpoch={1}
@@ -592,7 +592,7 @@ function Window({ scene, dir, run }: { scene: Scene; dir: Dir; run: number }) {
       });
     }
   }
-  const zone = <Zone items={items} />;
+  const zone = zoneProps(items);
 
   const over = stage === "before" || stage === "opening" || stage === "arrival";
   const landing = stage === "landed" ? scene.landing : null;
@@ -623,7 +623,7 @@ function Window({ scene, dir, run }: { scene: Scene; dir: Dir; run: number }) {
     page = (
       <>
         <Titlebar icon="storage-mallard" title="New storage" />
-        {zone}
+        <NoticeZone {...zone} />
         <main className="sync-main">
           <div className="spec-standin">
             <strong>Mallard Cloud sign-in</strong>

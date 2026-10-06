@@ -47,8 +47,13 @@ function errorCode(reason: unknown): string {
 /** The account a failure after sign-in is about, when the backend named it. */
 function failedAccount(reason: unknown): ManagedCloudSetupLogin["account"] | null {
   const account = reason && typeof reason === "object" && "account" in reason ? reason.account : null;
-  return account && typeof account === "object" && "id" in account && "login" in account
-    && typeof account.id === "string" && typeof account.login === "string" ? { id: account.id, login: account.login } : null;
+  return account && typeof account === "object" && "github_user_id" in account && "login" in account
+    && typeof account.github_user_id === "string" && typeof account.login === "string" ? { github_user_id: account.github_user_id, login: account.login } : null;
+}
+
+function failedOrigin(reason: unknown): string | null {
+  return reason && typeof reason === "object" && "service_origin" in reason && typeof reason.service_origin === "string"
+    ? reason.service_origin : null;
 }
 
 export function useManagedCloudSetup({ enabled, draftId, mode, port, api = projectSyncApi }: {
@@ -101,7 +106,7 @@ export function useManagedCloudSetup({ enabled, draftId, mode, port, api = proje
         if (adopted && generation.current === token && !cancelled.current) patch({ phase: "review" });
       } catch (reason) {
         if (generation.current === token) {
-          patch({ error: cancelled.current ? "managed_cloud_setup_cancelled" : errorCode(reason), account: failedAccount(reason), link: null });
+          patch({ error: cancelled.current ? "managed_cloud_setup_cancelled" : errorCode(reason), account: failedAccount(reason), serviceOrigin: failedOrigin(reason), link: null });
         }
       } finally {
         if (generation.current === token) {
@@ -240,7 +245,7 @@ export function ManagedCloudSetupLane({ flow, mode, storages, disabled, onOpenSt
   const retryButton = button("Try again", () => flow.start(), "primary");
   const changeLoginButton = button(<><Icon name="user" size={12} /> Change login</>, () => flow.start());
   const existing = state.error === "storage_managed_account_exists" && state.account
-    ? storages.find((storage) => storage.provider === "managed_cloud" && storage.settings.account_id === state.account?.id) ?? null
+    ? storages.find((storage) => storage.provider === "managed_cloud" && storage.settings.github_user_id === state.account?.github_user_id && storage.settings.service_origin === state.serviceOrigin) ?? null
     : null;
 
   const signIn: StepView = (() => {

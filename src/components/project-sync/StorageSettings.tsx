@@ -670,10 +670,9 @@ export function StorageEditor({
           aria-label="Storage name"
           placeholder="Storage name"
         />
-        {/* The type switch lists every provider this build offers; a draft
-            restarts on the chosen one. */}
+        {/* Feishu is temporarily hidden from storage setup. */}
         <div className="sync-segmented" role="radiogroup" aria-label="Storage type">
-          {(providers ?? [descriptor]).map((provider) => {
+          {(providers ?? [descriptor]).filter((provider) => provider.key !== "feishu").map((provider) => {
             const current = provider.key === descriptor.key && provider.config_version === descriptor.config_version;
             return (
               <button
@@ -1169,7 +1168,7 @@ export function StorageLockedForm({
           {descriptor.key === "r2" && (
             <CopyAllButton disabled={disabled} busy={copyingAll} receipt={copies.receipts.all} onCopy={() => void copyAll()} />
           )}
-          {suspended && !reconnect.open && (
+          {(suspended || descriptor.key === "managed_cloud") && !reconnect.open && (
             <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={reconnect.onOpen}>
               <Icon name="refresh" size={12} /> Reconnect…
             </button>
