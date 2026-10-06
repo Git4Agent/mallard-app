@@ -90,7 +90,7 @@ impl SessionAdapter for TestProviderAdapter {
             profile_label: ".testprov profile".to_string(),
             default_profile_directory: Some(".testprov".to_string()),
             setup_default: false,
-            cli_launcher: None,
+            has_cli: false,
             maintenance_actions: self.maintenance_actions(),
         }
     }

@@ -8055,8 +8055,10 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-page small { color: var(--text-3); font-size: var(--type-2xs); }
 
 /* The page spaces its children with its own gap, so the shared search row
-   sheds the margin it carries on the Sessions face. */
-.sync-project-files-page > .sync-name-search { margin-bottom: 0; }
+   sheds the margin it carries on the Sessions face — alone, or as the list
+   head that carries the view switch or the review's Rescan beside it. */
+.sync-project-files-page > .sync-name-search,
+.sync-project-files-page > .sync-list-head { margin-bottom: 0; }
 
 .sync-project-files-page > .sync-pull-empty {
   min-height: 0;
@@ -8189,6 +8191,11 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 
 .sync-status-scopes.sync-project-tabs > button:not(.active):not(:hover) .thread-status-icon,
 .sync-status-scopes.sync-project-tabs > button:not(.active):not(:hover) > svg { opacity: 0.6; }
+
+/* The Files page spaces its children with its own gap: the strip pulls up
+   flush under the field whose rule it takes over, and the gap spaces it
+   from the first tile. */
+.sync-project-files-page > .sync-status-scopes.sync-project-tabs { margin: -12px 0 0; }
 
 /* The blocked row's marker is a strip of the file card (`.notice-strip`),
    inset to the card's text column. */

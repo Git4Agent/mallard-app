@@ -26,6 +26,7 @@ import LoadingScaffold from "../LoadingScaffold";
 import ListTile from "../sync-review/ListTile";
 import NameSearchField from "../sync-review/NameSearchField";
 import StatusScopeBar from "../sync-review/StatusScopeBar";
+import { STATUS_SCOPES, type StatusScope } from "../sync-review/statusScopes";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
 import { projectLabel, sessionNoun } from "./model";
 import { clearedStorageNotice } from "./clearedStorageNotice";
@@ -125,8 +126,8 @@ interface PageProps extends SessionSearchProps {
 interface ContentProps extends SessionSearchProps {
   /** The status scope the standing list is narrowed to; null is All. Like
    *  the query, the list holds it unless its host does. */
-  statusScope?: SessionStatusScope | null;
-  onStatusScopeChange?: (scope: SessionStatusScope | null) => void;
+  statusScope?: StatusScope | null;
+  onStatusScopeChange?: (scope: StatusScope | null) => void;
   comparisonErrorHandled?: boolean;
   project: LocalProjectSummary;
   binding: ProjectBinding | null;
@@ -603,13 +604,9 @@ export function sessionSyncPresentation(
   }
 }
 
-/** The parts a status splits the list into, in the path bar's own terms: its
- *  two verbs, its attention chip, and what is left. */
-export type SessionStatusScope = "push" | "pull" | "attention" | "synced" | "unknown";
-
 /** The one mapping from a row's badge to its scope. The path bar's tallies and
  *  the list's scope bar both read it, so they cannot sort a row differently. */
-export function sessionStatusScope(status: ThreadStatusIconName): SessionStatusScope {
+export function sessionStatusScope(status: ThreadStatusIconName): StatusScope {
   switch (status) {
     case "local-outstanding": return "push";
     case "cloud-outstanding": return "pull";
@@ -623,17 +620,6 @@ export function sessionStatusScope(status: ThreadStatusIconName): SessionStatusS
     case "unknown": return "unknown";
   }
 }
-
-/** The scopes in the order the bar shows them: work first, then what is
- *  settled, then what was never judged. Each wears the glyph its rows do;
- *  Attention wears the path bar chip's. */
-const SESSION_STATUS_SCOPES: readonly { id: SessionStatusScope; label: string; mark: ReactNode }[] = [
-  { id: "push", label: "To push", mark: <ThreadStatusIcon status="local-outstanding" size={15} /> },
-  { id: "pull", label: "To pull", mark: <ThreadStatusIcon status="cloud-outstanding" size={15} /> },
-  { id: "attention", label: "Attention", mark: <Icon name="alert-triangle" size={14} /> },
-  { id: "synced", label: "Up to date", mark: <ThreadStatusIcon status="synced" size={15} /> },
-  { id: "unknown", label: "Not compared", mark: <ThreadStatusIcon status="unknown" size={15} /> },
-];
 
 /** What the path bar says on the activity list's behalf: two numbers that ride
  *  the buttons resolving them, and one for everything neither button can.
@@ -1876,7 +1862,7 @@ export function ProjectChatHistoryContent({
   viewSwitch,
 }: ContentProps) {
   const [localQuery, setLocalQuery] = useState("");
-  const [localStatusScope, setLocalStatusScope] = useState<SessionStatusScope | null>(null);
+  const [localStatusScope, setLocalStatusScope] = useState<StatusScope | null>(null);
   const listRef = useRef<HTMLElement>(null);
   /* A review's list is keyed on settled reads, not on request flags: every
      flag starts false, so a flag-keyed branch painted nothing on the first
@@ -1937,7 +1923,7 @@ export function ProjectChatHistoryContent({
     ).status),
   ])), [reviewSessions, syncIndex, rowStorageName, syncFallback]);
   const scopeCounts = useMemo(() => {
-    const counts = new Map<SessionStatusScope, number>();
+    const counts = new Map<StatusScope, number>();
     for (const scope of scopeBySession.values()) counts.set(scope, (counts.get(scope) ?? 0) + 1);
     return counts;
   }, [scopeBySession]);
@@ -2249,7 +2235,7 @@ export function ProjectChatHistoryContent({
       total={searchableIds.size}
       active={statusScope}
       onChange={chooseStatusScope}
-      scopes={SESSION_STATUS_SCOPES
+      scopes={STATUS_SCOPES
         .filter((scope) => (scopeCounts.get(scope.id) ?? 0) > 0 || scope.id === statusScope)
         .map((scope) => ({ ...scope, count: scopeCounts.get(scope.id) ?? 0 }))}
     />

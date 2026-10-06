@@ -1,7 +1,7 @@
 use crate::error::CliError;
 use mallard_application::storage_setup::SecretString;
 use mallard_domain::{HostId, SecretValue};
-use mallard_infrastructure::codex_binary::find_binary;
+use mallard_infrastructure::cli_discovery::{find_tool, ShellDiscovery};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::BTreeSet;
@@ -92,7 +92,7 @@ impl WranglerClient {
     pub fn new() -> Result<Self, CliError> {
         #[cfg(not(windows))]
         let mut client = {
-            let program = find_binary("wrangler")
+            let program = find_tool("wrangler", ShellDiscovery::Skip)
                 .map_err(|_| map_wrangler_auth_process_error(ProcessFailure::Missing))?;
             let program = program.canonicalize().map_err(|_| runtime_error())?;
             Self::with_program(program.into_os_string())?
@@ -107,12 +107,12 @@ impl WranglerClient {
                 .map(|directory| directory.join("node_modules/wrangler/bin/wrangler.js"))
                 .find(|path| path.is_file())
                 .ok_or_else(|| map_wrangler_auth_process_error(ProcessFailure::Missing))?;
-            let node = find_binary("node").map_err(|_| runtime_error())?;
+            let node = find_tool("node", ShellDiscovery::Skip).map_err(|_| runtime_error())?;
             let mut client = Self::with_program(node.into_os_string())?;
             client.prefix_args.push(entry.into_os_string());
             client
         };
-        if let Ok(node) = find_binary("node") {
+        if let Ok(node) = find_tool("node", ShellDiscovery::Skip) {
             if let Some(directory) = node.parent() {
                 let mut paths = vec![directory.to_path_buf()];
                 paths.extend(std::env::split_paths(

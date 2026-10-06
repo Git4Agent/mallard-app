@@ -55,8 +55,8 @@ const ROWS: Row[] = [
 const pathOf = (row: Row) => `${HOME}/${row.rel}`;
 
 const PROVIDERS = [
-  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, maintenance_actions: [] },
-  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, maintenance_actions: [] },
+  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, has_cli: true, maintenance_actions: [] },
+  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, has_cli: true, maintenance_actions: [] },
 ] as ProviderDescriptor[];
 
 const PROJECTS = ROWS.filter((row) => row.kind === "added").map((row) => ({

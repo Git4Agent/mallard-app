@@ -517,7 +517,11 @@ pub(crate) mod test_support {
             Err("the test provider has no desktop app".to_string())
         }
 
-        fn launch_home_terminal(&self, _home: &Path) -> Result<(), String> {
+        fn launch_home_terminal(
+            &self,
+            _home: &Path,
+            _cli_path: Option<&Path>,
+        ) -> Result<(), String> {
             Err("the test provider has no terminal launcher".to_string())
         }
 

@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ProjectContentEntry,
   ProjectContentInventory,
@@ -8,6 +8,8 @@ import LoadingScaffold from "../LoadingScaffold";
 import Notice, { NoticeChip } from "../notice/Notice";
 import ListTile from "../sync-review/ListTile";
 import NameSearchField from "../sync-review/NameSearchField";
+import StatusScopeBar from "../sync-review/StatusScopeBar";
+import { STATUS_SCOPES, type StatusScope } from "../sync-review/statusScopes";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { nameMatchesSearch } from "../sync-review/nameSearch";
 import { formatBytes } from "../../format";
@@ -29,8 +31,9 @@ import SessionRowIcon from "./SessionRowIcon";
  * readout line in the session rows' glyphs, the way a session's messages and
  * tokens do — and every folder is a `ListTile`, the storage-only partition
  * leading as the cloud-tinted tile. Hierarchy is containment, never floating
- * headings. The search row is the Sessions face's own field, and the path
- * bar's refresh is this face's rescan, so the two faces share their chrome.
+ * headings. The search row is the Sessions face's own field, with the same
+ * status scope bar under it, and the path bar's refresh is this face's
+ * rescan, so the two faces share their chrome.
  */
 
 /** One scan of a non-Git project's files against its storage. */
@@ -86,35 +89,48 @@ export function useProjectFilesScan(
   };
 }
 
+/**
+ * The one mapping from a file to its scope, in the rows' own vocabulary: a
+ * file only in storage, newer there, or deleted here while storage kept it is
+ * one Pull brings here; a file only here or newer here is one Push sends. A
+ * blocked file moves with neither verb and a diverged one waits on the
+ * reader's choice. The path bar's tallies and the face's scope bar both read
+ * it, so they cannot sort a file differently.
+ */
+export function fileStatusScope(entry: ProjectContentEntry): StatusScope {
+  if (entry.blocked_reason || entry.state === "blocked") return "attention";
+  switch (entry.state) {
+    case "local_only":
+    case "local_ahead":
+      return "push";
+    case "storage_only":
+    case "storage_ahead":
+    case "missing":
+      return "pull";
+    case "diverged":
+      return "attention";
+    case "synced":
+      return "synced";
+    default:
+      return "unknown";
+  }
+}
+
 /** Files a scan says Pull or Push would move. */
 export interface ProjectFileSyncCounts {
   pull: number;
   push: number;
 }
 
-/**
- * Tallied in the rows' own vocabulary: a file only in storage or newer there
- * is one Pull brings here; a file only here or newer here is one Push sends.
- * Directory rows are not drawn, a blocked file moves with neither verb, and a
- * diverged or missing file waits on the reader's choice, so none is counted.
- */
+/** Directory rows are not drawn, so they are never counted. */
 export function projectFileSyncCounts(inventory: ProjectContentInventory | null): ProjectFileSyncCounts {
   const counts = { pull: 0, push: 0 };
   if (!inventory || inventory.eligibility.state !== "eligible") return counts;
   for (const entry of inventory.entries) {
     if (entry.entry_type === "directory") continue;
-    switch (entry.state) {
-      case "storage_only":
-      case "storage_ahead":
-        counts.pull += 1;
-        break;
-      case "local_only":
-      case "local_ahead":
-        counts.push += 1;
-        break;
-      default:
-        break;
-    }
+    const scope = fileStatusScope(entry);
+    if (scope === "pull") counts.pull += 1;
+    else if (scope === "push") counts.push += 1;
   }
   return counts;
 }
@@ -185,16 +201,19 @@ function groupByDirectory(entries: ProjectContentEntry[]): FileGroup[] {
     .map((directory) => ({ directory, entries: byDirectory.get(directory)! }));
 }
 
-/** Search the complete file inventory — by path, word for word, the way the
- * Sessions face matches titles — then apply one global card budget before
- * the cloud/local partition and directory grouping. */
+/** Narrow the complete file inventory — by status scope, then by path, word
+ * for word, the way the Sessions face matches titles — then apply one global
+ * card budget before the cloud/local partition and directory grouping, so a
+ * scope reaches a file past the budget the way a search does. */
 export function buildProjectFilesActivityProjection(
   fileEntries: ProjectContentEntry[],
   query: string,
+  scope: StatusScope | null,
 ) {
-  const matchingEntries = query.trim()
-    ? fileEntries.filter((entry) => nameMatchesSearch(entry.relative_path, query))
-    : fileEntries;
+  const matchingEntries = fileEntries.filter((entry) => (
+    (scope === null || fileStatusScope(entry) === scope)
+    && nameMatchesSearch(entry.relative_path, query)
+  ));
   const visibleEntries = matchingEntries.slice(0, PROJECT_FILE_CARD_RENDER_LIMIT);
   const cloudEntries = visibleEntries.filter((entry) => (
     !entry.local_present && entry.storage_present
@@ -339,6 +358,8 @@ export function ProjectFilesActivityView({
   onOpenFile,
   onRevealPath,
   viewSwitch,
+  statusScope: hostStatusScope,
+  onStatusScopeChange,
 }: {
   inventory: ProjectContentInventory | null;
   storageName: string;
@@ -347,8 +368,14 @@ export function ProjectFilesActivityView({
   onOpenFile?: (relativePath: string) => void;
   onRevealPath?: (path: string) => void;
   viewSwitch?: ReactNode;
+  /** The scope in force, when the host holds it; the view holds its own
+   *  otherwise, for as long as the face is mounted — like its search. */
+  statusScope?: StatusScope | null;
+  onStatusScopeChange?: (scope: StatusScope | null) => void;
 }) {
   const [search, setSearch] = useState("");
+  const [localStatusScope, setLocalStatusScope] = useState<StatusScope | null>(null);
+  const pageRef = useRef<HTMLElement>(null);
   const deferredSearch = useDeferredValue(search);
   /* Directory rows carry no bytes and no per-file identity, and the tiles
      already speak for the folders — files (and blocked candidates) are the
@@ -357,10 +384,35 @@ export function ProjectFilesActivityView({
     () => (inventory?.entries ?? []).filter((entry) => entry.entry_type !== "directory"),
     [inventory],
   );
+  const scopeCounts = useMemo(() => {
+    const counts = new Map<StatusScope, number>();
+    for (const entry of fileEntries) {
+      const scope = fileStatusScope(entry);
+      counts.set(scope, (counts.get(scope) ?? 0) + 1);
+    }
+    return counts;
+  }, [fileEntries]);
+  const chosenStatusScope = hostStatusScope === undefined ? localStatusScope : hostStatusScope;
+  const chooseStatusScope = onStatusScopeChange ?? setLocalStatusScope;
+  /* The Sessions face's rule: the bar is drawn when it can narrow something —
+     files in two scopes — or while a scope is chosen, so it can be released.
+     A scope chosen before the files went away is not applied behind the
+     reader's back. */
+  const scopeBarShown = fileEntries.length > 0 && (scopeCounts.size > 1 || chosenStatusScope !== null);
+  const statusScope = scopeBarShown ? chosenStatusScope : null;
   const { matchingCount, cloudEntries, localGroups } = useMemo(
-    () => buildProjectFilesActivityProjection(fileEntries, deferredSearch),
-    [fileEntries, deferredSearch],
+    () => buildProjectFilesActivityProjection(fileEntries, deferredSearch, statusScope),
+    [fileEntries, deferredSearch, statusScope],
   );
+  /* Releasing the scope brings rows back only if the name alone matches some. */
+  const scopeEmptiedList = statusScope !== null && matchingCount === 0
+    && fileEntries.some((entry) => nameMatchesSearch(entry.relative_path, deferredSearch));
+  /* The button leaves with the box it sits in, so focus goes to the field
+     first, as the field's own clear does. */
+  const clearStatusScope = () => {
+    pageRef.current?.querySelector<HTMLInputElement>(".sync-name-search input")?.focus();
+    chooseStatusScope(null);
+  };
   /* The switch rides the search row when there is one, and stands alone at
      the top of every other state, so it never moves between the two faces. */
   const switchRow = viewSwitch ? <div className="sync-project-view-row">{viewSwitch}</div> : null;
@@ -400,7 +452,7 @@ export function ProjectFilesActivityView({
   }
 
   return (
-    <section className="sync-project-files-page" aria-label="Project files">
+    <section ref={pageRef} className="sync-project-files-page" aria-label="Project files">
       {fileEntries.length > 0 ? (
         /* The Sessions face's own search row: the switch leads it, and the
            path bar's refresh is this face's rescan, so neither face carries
@@ -412,16 +464,37 @@ export function ProjectFilesActivityView({
           matches={matchingCount}
           total={fileEntries.length}
           noun={fileNoun}
+          narrowed={statusScope !== null}
           leading={viewSwitch}
         />
       ) : switchRow}
+      {scopeBarShown && (
+        /* The bar rides under the field it narrows with. A scope no file
+           falls in has no place on it — unless it is the one in force,
+           which stays, at zero, so it can be released. */
+        <StatusScopeBar
+          label="Show files by status"
+          noun={fileNoun}
+          total={fileEntries.length}
+          active={statusScope}
+          onChange={chooseStatusScope}
+          scopes={STATUS_SCOPES
+            .filter((scope) => (scopeCounts.get(scope.id) ?? 0) > 0 || scope.id === statusScope)
+            .map((scope) => ({ ...scope, count: scopeCounts.get(scope.id) ?? 0 }))}
+        />
+      )}
       {fileEntries.length === 0 ? (
         <div className="sync-pull-empty">
           <Icon name="check-circle" size={16} />
           <span><strong>No files</strong><small>Nothing in this folder syncs yet.</small></span>
         </div>
       ) : matchingCount === 0 ? (
-        <div className="sync-history-state">No matching files.</div>
+        <div className="sync-history-state">
+          No matching files.
+          {scopeEmptiedList && (
+            <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>Clear filter</button>
+          )}
+        </div>
       ) : (
         <>
           {cloudEntries.length > 0 && (
@@ -466,7 +539,8 @@ export function ProjectFilesActivityView({
           ))}
           {matchingCount > PROJECT_FILE_CARD_RENDER_LIMIT && (
             <div className="sync-project-file-limit">
-              First {PROJECT_FILE_CARD_RENDER_LIMIT} of {matchingCount} files shown. Search to narrow the list.
+              First {PROJECT_FILE_CARD_RENDER_LIMIT} of {matchingCount} files shown.
+              {scopeBarShown ? " Search or choose a status to narrow the list." : " Search to narrow the list."}
             </div>
           )}
         </>

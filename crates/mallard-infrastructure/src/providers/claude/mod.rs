@@ -3,8 +3,9 @@
 //! target planning, and safe session actions.
 
 pub mod actions;
-mod deletion;
+pub mod cli;
 pub mod codec;
+mod deletion;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
@@ -12,7 +13,7 @@ pub mod publication;
 pub mod subagents;
 
 use super::traits::{
-    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCli,
     ProviderDescriptor, ScanFailure, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
     SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
@@ -247,10 +248,19 @@ impl Default for ClaudeAdapter {
 }
 
 impl SessionAdapter for ClaudeAdapter {
-    fn project_open_commands(&self, home: &Path, project_root: &str) -> Vec<ProjectOpenCommand> {
+    fn project_open_commands(
+        &self,
+        home: &Path,
+        project_root: &str,
+        cli_path: Option<&Path>,
+    ) -> Vec<ProjectOpenCommand> {
         use crate::providers::launch::TerminalCommand;
+        let program = cli_path.map_or_else(
+            || "claude".to_string(),
+            |path| path.to_string_lossy().into_owned(),
+        );
         let cli = || {
-            TerminalCommand::new("claude")
+            TerminalCommand::new(program.clone())
                 .cwd(Path::new(project_root))
                 .env("CLAUDE_CONFIG_DIR", home)
         };
@@ -274,10 +284,7 @@ impl SessionAdapter for ClaudeAdapter {
             profile_label: ".claude profile".to_string(),
             default_profile_directory: Some(".claude".to_string()),
             setup_default: true,
-            cli_launcher: Some(ProviderCliLauncher {
-                program: "claude".to_string(),
-                display_name: "Claude Code".to_string(),
-            }),
+            has_cli: true,
             maintenance_actions: Vec::new(),
         }
     }
@@ -320,6 +327,14 @@ impl SessionAdapter for ClaudeAdapter {
 
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {
         discovery::discover(context, |path| self.scan_metadata(path))
+    }
+
+    fn locate_session(
+        &self,
+        context: &SessionDiscoveryContext<'_>,
+        is_requested: &mut dyn FnMut(&str, &Path) -> Result<bool, String>,
+    ) -> Result<Option<crate::providers::DiscoveredSession>, String> {
+        discovery::locate_session(context, is_requested, |path| self.scan_metadata(path))
     }
 
     fn recent_session_homes(
@@ -461,8 +476,18 @@ impl SessionAdapter for ClaudeAdapter {
         actions::available_actions(context)
     }
 
-    fn delete_session(&self, home: &Path, session: &crate::providers::DiscoveredSession) -> Result<(), String> {
+    /// Claude deletion is file work; it needs no CLI.
+    fn delete_session(
+        &self,
+        home: &Path,
+        session: &crate::providers::DiscoveredSession,
+        _cli_path: Option<&Path>,
+    ) -> Result<(), String> {
         deletion::delete(home, session)
+    }
+
+    fn cli(&self) -> Option<&dyn ProviderCli> {
+        Some(&cli::ClaudeCli)
     }
 
     fn execute_action(

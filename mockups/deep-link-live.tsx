@@ -164,7 +164,7 @@ mockIPC(async (command, payload) => {
     case "list_catalog_resource_profiles": return [CATALOG_PROFILE];
     case "list_project_repository_kinds": return { "project-api": true, "project-physics": false };
     case "list_agent_providers": return [
-      { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, maintenance_actions: [] },
+      { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, has_cli: true, maintenance_actions: [] },
     ];
     case "list_storage_providers": return [];
     case "list_provider_profiles": return [{

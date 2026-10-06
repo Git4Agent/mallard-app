@@ -156,8 +156,8 @@ const committable = (verdict: Verdict) => verdict.kind === "new" || verdict.kind
 /* ——— registry data ——————————————————————————————————————————————— */
 
 const PROVIDERS: ProviderDescriptor[] = [
-  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", default_profile_directory: ".codex", setup_default: true, maintenance_actions: [] },
-  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", default_profile_directory: ".claude", setup_default: true, maintenance_actions: [] },
+  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", default_profile_directory: ".codex", setup_default: true, has_cli: true, maintenance_actions: [] },
+  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", default_profile_directory: ".claude", setup_default: true, has_cli: true, maintenance_actions: [] },
 ];
 
 function profilesFor(home: string): ProviderProfileSummary[] {

@@ -67,8 +67,8 @@ const pathOf = (row: Row) => (row.rel ? `~/${row.rel}` : "~");
 const usable = (row: Row) => row.kind !== "missing" && row.kind !== "mallard";
 
 const PROVIDERS = [
-  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, maintenance_actions: [] },
-  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, maintenance_actions: [] },
+  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, has_cli: true, maintenance_actions: [] },
+  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, has_cli: true, maintenance_actions: [] },
 ] as ProviderDescriptor[];
 const PROJECTS = ROWS.filter((row) => row.kind === "added").map((row) => ({
   local_project_id: `project-${row.name}`, bundle_id: `bundle-${row.name}`, display_name: row.name, revision: 1,

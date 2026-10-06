@@ -405,12 +405,11 @@ impl StorageCatalogService {
         let user_home = mallard_infrastructure::persistence::user_home_dir()
             .ok_or_else(|| "could not resolve the user home directory".to_string())?;
         let registry = CatalogRegistry::production();
-        Self::with_registry(
+        let runner = Box::new(NativeProcessRunner::new(
+            registry.clone(),
             user_home.clone(),
-            user_home,
-            Box::new(NativeProcessRunner::new(registry.clone())),
-            registry,
-        )
+        ));
+        Self::with_registry(user_home.clone(), user_home, runner, registry)
     }
 
     pub fn from_home_dirs(
@@ -542,9 +541,10 @@ impl StorageCatalogService {
         profile_id: &LocalCatalogProfileId,
     ) -> Result<(), String> {
         let (provider, home) = profile_launch_home(&self.catalog, profile_id)?;
+        let settings = mallard_infrastructure::app_settings::load_app_settings(&self.state)?;
         self.registry
             .require_provider(&provider)?
-            .launch_home_terminal(&home)
+            .launch_home_terminal(&home, settings.cli_path(&provider))
     }
 
     pub fn list_scopes(&self) -> Result<Vec<CatalogScopeDto>, String> {

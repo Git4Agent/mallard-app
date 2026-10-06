@@ -1,11 +1,12 @@
 //! Bounded, one-shot requests to the selected Codex home's app server.
 
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 pub(super) fn request(
     executable: &Path,
+    search_path: Option<&OsStr>,
     home: &Path,
     method: &str,
     params: Value,
@@ -17,6 +18,9 @@ pub(super) fn request(
         .map_err(|_| "Could not start Codex request runtime.")?;
     runtime.block_on(async {
         let mut command = tokio::process::Command::new(executable);
+        if let Some(search_path) = search_path {
+            command.env("PATH", search_path);
+        }
         command.args(["app-server", "--stdio"])
             .env("CODEX_HOME", home).current_dir(home)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())

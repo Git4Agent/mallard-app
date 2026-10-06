@@ -151,29 +151,38 @@ const CLAUDE_APP_UNAVAILABLE: &str =
 /// The Terminal command a Library profile launch runs: the CLI reading this
 /// home, no session and no `cd` — Terminal's own default directory is the
 /// working directory.
-fn claude_home_terminal_command(claude_home: &Path) -> Result<TerminalCommand, String> {
-    if !claude_home.is_absolute() {
-        return Err("Claude home must be absolute".to_string());
+fn claude_home_terminal_command(
+    claude_cli: &Path,
+    claude_home: &Path,
+) -> Result<TerminalCommand, String> {
+    if !claude_cli.is_absolute() || !claude_home.is_absolute() {
+        return Err("Claude CLI and Claude home must be absolute".to_string());
     }
-    Ok(TerminalCommand::new("claude").env("CLAUDE_CONFIG_DIR", claude_home))
+    Ok(TerminalCommand::new(claude_cli.to_string_lossy()).env("CLAUDE_CONFIG_DIR", claude_home))
 }
 
 /// Open a terminal running the Claude CLI against one profile home.
-pub fn launch_claude_home_terminal(claude_home: &Path) -> Result<(), String> {
-    let command = claude_home_terminal_command(claude_home)?;
+/// `cli_path` is the executable saved in Settings, if any.
+pub fn launch_claude_home_terminal(
+    claude_home: &Path,
+    cli_path: Option<&Path>,
+) -> Result<(), String> {
+    let cli = super::cli::resolve(cli_path)?;
+    let command = claude_home_terminal_command(&cli.executable, claude_home)?;
     launch_terminal(&command)
 }
 
 fn claude_resume_terminal_command(
+    claude_cli: &Path,
     session_id: &str,
     project_root: &Path,
     claude_home: &Path,
 ) -> Result<TerminalCommand, String> {
     validated_session_id(session_id)?;
-    if !project_root.is_absolute() || !claude_home.is_absolute() {
-        return Err("project root and Claude home must be absolute".to_string());
+    if !claude_cli.is_absolute() || !project_root.is_absolute() || !claude_home.is_absolute() {
+        return Err("Claude CLI, project root, and Claude home must be absolute".to_string());
     }
-    Ok(TerminalCommand::new("claude")
+    Ok(TerminalCommand::new(claude_cli.to_string_lossy())
         .cwd(project_root)
         .env("CLAUDE_CONFIG_DIR", claude_home)
         .arg("--resume")
@@ -220,7 +229,9 @@ pub(super) fn execute_action(
             Ok(SessionActionOutcome::Launched)
         }
         OPEN_IN_TERMINAL => {
+            let cli = super::cli::resolve(request.cli_path)?;
             let command = claude_resume_terminal_command(
+                &cli.executable,
                 request.provider_session_id,
                 request.project_root,
                 request.provider_home,
@@ -251,14 +262,16 @@ mod tests {
 
     #[test]
     fn home_launches_pin_the_config_dir_and_nothing_else() {
-        let command = claude_home_terminal_command(Path::new("/Users/dev/my claude")).unwrap();
+        let cli = Path::new("/Users/dev/.local/bin/claude");
+        let command = claude_home_terminal_command(cli, Path::new("/Users/dev/my claude")).unwrap();
         assert_eq!(
             command.shell_line(),
-            "CLAUDE_CONFIG_DIR='/Users/dev/my claude' claude"
+            "CLAUDE_CONFIG_DIR='/Users/dev/my claude' '/Users/dev/.local/bin/claude'"
         );
         assert!(command.args.is_empty());
         assert!(command.cwd.is_none());
         let resume = claude_resume_terminal_command(
+            cli,
             "0193b6c1-5352-7b12-9c6e-000000000001",
             Path::new("/Users/dev/my project"),
             Path::new("/Users/dev/.claude"),
@@ -266,10 +279,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             resume.shell_line(),
-            "cd '/Users/dev/my project' && CLAUDE_CONFIG_DIR='/Users/dev/.claude' claude \
-             --resume 0193b6c1-5352-7b12-9c6e-000000000001"
+            "cd '/Users/dev/my project' && CLAUDE_CONFIG_DIR='/Users/dev/.claude' \
+             '/Users/dev/.local/bin/claude' --resume 0193b6c1-5352-7b12-9c6e-000000000001"
         );
-        assert!(claude_home_terminal_command(Path::new("relative")).is_err());
+        // The executable is the resolved one, never a bare name the terminal
+        // would look up on its own.
+        assert!(
+            claude_home_terminal_command(Path::new("claude"), Path::new("/Users/dev")).is_err()
+        );
+        assert!(claude_home_terminal_command(cli, Path::new("relative")).is_err());
         assert!(launch_claude_home_app(Path::new("relative")).is_err());
     }
 

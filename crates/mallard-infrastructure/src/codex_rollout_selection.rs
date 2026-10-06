@@ -23,6 +23,11 @@ fn native_ids(path: &Path) -> Option<(&str, &str)> {
     Some(ids.split_once('_').unwrap_or((ids, ids)))
 }
 
+/// The thread a native rollout file name claims; `None` for any other name.
+pub(crate) fn logical_id(path: &Path) -> Option<&str> {
+    native_ids(path).map(|(logical, _)| logical)
+}
+
 pub(crate) fn select_current(
     thread_id: &str,
     candidates: &[PathBuf],

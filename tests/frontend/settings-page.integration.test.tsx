@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import SettingsPage from "../../src/components/project-sync/SettingsPage";
+import SettingsPage, { cliStatusLine } from "../../src/components/project-sync/SettingsPage";
 import type { AppUpdates } from "../../src/components/AppUpdater";
 import {
   getPreference,
@@ -65,7 +65,7 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // Seven groups, in reading order, each heading on the shared chrome class.
   const headings = [...html.matchAll(/class="settings-section-title"[^>]*>.*?<\/svg>([^<]+)</g)]
     .map((match) => match[1].trim());
-  assert.deepEqual(headings, ["Appearance", "Privacy", "Sync", "Performance", "Logs", "Display", "Local data"]);
+  assert.deepEqual(headings, ["Appearance", "Privacy", "Sync", "Agent CLIs", "Performance", "Logs", "Display", "Local data"]);
 
   // Theme: a radiogroup of the three choices; absence of a stored key means
   // System, so it is the checked one under the test's bare environment.
@@ -108,6 +108,14 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // their defaults rather than inventing values.
   assert.match(html, /<option value="30" selected="">30 days<\/option>/);
   assert.match(html, /<option value="100" selected="">100 MB<\/option>/);
+
+  // Agent CLIs: the provider rows arrive with the provider list, so a static
+  // render holds only the detection row — and never a provider process.
+  assert.match(html, /aria-labelledby="settings-cli"/);
+  assert.match(html, /<button[^>]*>.*?Refresh detection<\/button>/);
+  assert.match(html, /then the PATH your shell sets/);
+  assert.match(html, /On Windows a changed PATH needs a Mallard restart\./);
+  assert.doesNotMatch(html, /Detecting…/);
 
   // The Performance group: four tuning selects on the same shell, each
   // defaulting to what was hardcoded before the knobs existed. The thread
@@ -279,4 +287,63 @@ test("every export-shaping setting says that changing it re-uploads synced sessi
   assert.match(source, /Hide detected credentials in pushed sessions\. Changing it re-uploads synced\s*sessions on the next Push\. Earlier copies stay in storage history\./);
   assert.match(source, /Changing it re-uploads synced Codex sessions\s*on the next Push\./);
   assert.match(source, /Changing it re-uploads synced Claude sessions\s*on the next Push\./);
+});
+
+test("each agent CLI row reads the selection policy, saves a chosen path as app settings, and tests only --version", () => {
+  const page = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
+  const api = readFileSync("src/components/project-sync/api.ts", "utf8");
+  const types = readFileSync("src/types.ts", "utf8");
+  const commands = readFileSync("src-tauri/src/project_sync/provider_cli.rs", "utf8");
+  const lib = readFileSync("src-tauri/src/lib.rs", "utf8");
+  const document = readFileSync("crates/mallard-infrastructure/src/app_settings.rs", "utf8");
+  const discovery = readFileSync("crates/mallard-infrastructure/src/cli_discovery.rs", "utf8");
+
+  // One row per provider that declares a CLI, never a fixed provider list;
+  // the path is one more app-settings field saved through the same handler.
+  assert.match(page, /\.filter\(\(provider\) => provider\.has_cli\)/);
+  assert.match(page, /applyTuning\(\{ \[cliSettingKey\(provider\)\]: picked \}\)/);
+  assert.match(page, /applyTuning\(\{ \[cliSettingKey\(provider\)\]: null \}\)/);
+  assert.match(page, /openFile\(\{\s*multiple: false,\s*directory: false,/);
+  assert.match(types, /codex_cli_path: string \| null;/);
+  assert.match(types, /claude_cli_path: string \| null;/);
+  assert.match(types, /has_cli: boolean;/);
+  assert.doesNotMatch(types, /ProviderCliLauncher|cli_launcher/);
+
+  // The row's sentence: mode, then where, then the test's answer.
+  const detecting = cliStatusLine(null, undefined);
+  assert.equal(detecting, "Detecting…");
+  const found = {
+    provider: "codex", selected_path: null, launcher: "/opt/homebrew/bin/codex",
+    executable: "/opt/homebrew/Cellar/codex/0.156.0/bin/codex", source: "inherited_path" as const, error: null,
+  };
+  assert.equal(cliStatusLine(found, undefined), "Automatic · /opt/homebrew/bin/codex");
+  assert.equal(cliStatusLine(found, { kind: "version", text: "0.156.0" }), "Automatic · /opt/homebrew/bin/codex · Version 0.156.0");
+  assert.equal(
+    cliStatusLine({ ...found, selected_path: "/Users/dev/bin/codex", launcher: "/Users/dev/bin/codex", source: "selected" }, { kind: "failed", text: "Codex did not report a version." }),
+    "Selected · /Users/dev/bin/codex · Test failed: Codex did not report a version.",
+  );
+  assert.equal(
+    cliStatusLine({ ...found, selected_path: "/Users/dev/bin/codex", launcher: null, executable: null, source: null, error: "Selected Codex executable is unavailable. Choose it again in Settings." }, undefined),
+    "Selected · Selected Codex executable is unavailable. Choose it again in Settings.",
+  );
+
+  assert.match(api, /invoke<ProviderCliStatus>\("inspect_provider_cli", \{ provider \}\)/);
+  assert.match(api, /invoke<string>\("test_provider_cli", \{ provider \}\)/);
+  assert.match(api, /invoke<void>\("refresh_cli_detection"\)/);
+  assert.match(lib, /project_sync::provider_cli::inspect_provider_cli,\s*project_sync::provider_cli::test_provider_cli,\s*project_sync::provider_cli::refresh_cli_detection,/);
+
+  // Rust side: the saved path is validated as one absolute file path, the
+  // document is bounded on read as well as write, and a path change is not
+  // a tuning change (it must purge no cache). Test runs --version alone.
+  assert.match(document, /pub codex_cli_path: Option<String>,/);
+  assert.match(document, /pub claude_cli_path: Option<String>,/);
+  assert.match(document, /const MAX_SETTINGS_BYTES: u64 = 16 \* 1024;/);
+  assert.match(document, /metadata\.len\(\) > MAX_SETTINGS_BYTES/);
+  assert.match(document, /fn validate_cli_path\(label: &str, path: &str\)/);
+  assert.match(document, /Tuning values only: a CLI path or an export setting never purges a cache\./);
+  assert.match(commands, /cli\.probe_version\(&resolved\)/);
+  assert.match(discovery, /\.arg\("--version"\)\s*\.env_clear\(\)/);
+  assert.match(discovery, /\.args\(\["-i", "-l", "-c", &script\]\)/);
+  assert.match(discovery, /SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs\(10\)/);
+  assert.match(discovery, /SHELL_PROBE_OUTPUT_LIMIT: usize = 64 \* 1024/);
 });

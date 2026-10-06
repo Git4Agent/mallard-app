@@ -11,7 +11,7 @@ use super::service::{
     repository_fingerprint_from_remote_url, ProjectFolderProbe,
 };
 use mallard_domain::{sha256_hex, LocalProjectId};
-use mallard_infrastructure::codex_binary::find_binary;
+use mallard_infrastructure::cli_discovery::{find_tool, ShellDiscovery};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::project_activity::normalize_github_repository_url;
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
@@ -251,24 +251,32 @@ pub(super) struct CloneTools {
     git: Option<PathBuf>,
 }
 
-static CLONE_TOOLS: OnceLock<CloneTools> = OnceLock::new();
+static CLONE_TOOLS: Mutex<CloneTools> = Mutex::new(CloneTools {
+    gh: None,
+    git: None,
+});
 
-/// Found once per run of the app: a login-shell lookup is too slow to repeat
-/// on every keystroke of the Folder field.
+/// A found tool is kept for the run of the app; a missing one is looked for
+/// again on each call, so installing it needs no restart. The lookup is
+/// cheap: the shell `PATH` is probed once per process by discovery itself.
 fn clone_tools() -> CloneTools {
-    CLONE_TOOLS
-        .get_or_init(|| CloneTools {
-            gh: find_binary("gh").ok(),
-            git: usable_git(),
-        })
-        .clone()
+    let mut tools = CLONE_TOOLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if tools.gh.is_none() {
+        tools.gh = find_tool("gh", ShellDiscovery::Use).ok();
+    }
+    if tools.git.is_none() {
+        tools.git = usable_git();
+    }
+    tools.clone()
 }
 
 /// A git that runs. On macOS `/usr/bin/git` is a stub until Apple's
 /// command line tools are installed, and running it offers to install them,
 /// so it counts only once `xcode-select -p` names a developer folder.
 fn usable_git() -> Option<PathBuf> {
-    let found = find_binary("git").ok();
+    let found = find_tool("git", ShellDiscovery::Use).ok();
     #[cfg(target_os = "macos")]
     {
         let stub = Path::new("/usr/bin/git");
@@ -948,7 +956,7 @@ mod tests {
     fn git_only() -> CloneTools {
         CloneTools {
             gh: None,
-            git: find_binary("git").ok(),
+            git: find_tool("git", ShellDiscovery::Skip).ok(),
         }
     }
 

@@ -152,6 +152,68 @@ fn sidecar_session_id(
     }
 }
 
+/// The one project-owned session `is_requested` accepts. A transcript is
+/// named by its session, so the walk opens nothing until the requested
+/// session is found; its head then supplies the ownership evidence
+/// `discover` would have gathered. Sidecars and memory are not visited.
+pub(super) fn locate_session(
+    context: &SessionDiscoveryContext<'_>,
+    is_requested: &mut dyn FnMut(&str, &Path) -> Result<bool, String>,
+    scan_metadata: impl Fn(&Path) -> Result<crate::providers::traits::SessionFileMetadata, String>,
+) -> Result<Option<DiscoveredSession>, String> {
+    let canonical_home = canonical_existing_dir(context.provider_home, "Claude home")?;
+    let projects = canonical_home.join("projects");
+    if !projects.exists() {
+        return Ok(None);
+    }
+    let mut canonical_homes = BTreeMap::new();
+    for entry in WalkDir::new(&projects)
+        .follow_links(false)
+        .min_depth(2)
+        .max_depth(3)
+        .into_iter()
+        .filter_entry(provider_walk_entry)
+    {
+        let entry = entry.map_err(|e| format!("walk Claude projects: {}", e))?;
+        if !entry.file_type().is_file()
+            || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
+            continue;
+        }
+        let Some(session_id) = entry.path().file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if !is_requested(session_id, entry.path())? {
+            continue;
+        }
+        let meta = scan_metadata(entry.path())?;
+        if meta.session_id != session_id {
+            return Err("Claude transcript names a different session than its file".into());
+        }
+        // The same session can sit in more than one project directory; the
+        // one that ran in this project is the one requested.
+        if !session_home_is_project_root(
+            context.project_root,
+            &meta.authorized_home,
+            &mut canonical_homes,
+        ) {
+            continue;
+        }
+        return Ok(Some(DiscoveredSession {
+            session_id: meta.session_id.clone(),
+            physical_path: entry.path().to_path_buf(),
+            display_name: meta.session_id,
+            blocked_reason: inspect_candidate_files_with_limit(
+                &canonical_home,
+                &[entry.path().to_path_buf()],
+                crate::app_settings::conversation_file_limit_bytes(),
+            )
+            .err(),
+        }));
+    }
+    Ok(None)
+}
+
 pub(super) fn discover(
     context: &SessionDiscoveryContext<'_>,
     scan_metadata: impl Fn(
@@ -318,6 +380,96 @@ pub(super) fn discover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the requested transcript is opened. A session named the same in
+    /// a foreign project directory is passed over once its head names
+    /// another folder, and a name no request matches is never opened.
+    #[test]
+    fn locate_session_opens_only_the_requested_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("claude");
+        let project = temp.path().join("project");
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let home = home.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let bucket = home
+            .join("projects")
+            .join(encode_claude_project_path(project.to_str().unwrap()));
+        let foreign = home
+            .join("projects")
+            .join(encode_claude_project_path(elsewhere.to_str().unwrap()));
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let write = |bucket: &Path, session_id: &str, cwd: &Path| {
+            let record = serde_json::json!({
+                "type": "user", "uuid": "u1", "parentUuid": null,
+                "sessionId": session_id, "cwd": cwd,
+                "message": {"role": "user", "content": "hello"}
+            });
+            let path = bucket.join(format!("{session_id}.jsonl"));
+            std::fs::write(&path, format!("{record}\n")).unwrap();
+            path
+        };
+        let wanted = write(&bucket, "session-wanted", &project);
+        write(&foreign, "session-foreign", &elsewhere);
+        write(&foreign, "session-twin", &elsewhere);
+        let twin = write(&bucket, "session-twin", &project);
+
+        let context = SessionDiscoveryContext {
+            provider_home: &home,
+            project_root: &project,
+        };
+        let adapter = crate::providers::claude::ClaudeAdapter::new();
+        let scan = |path: &Path| crate::providers::SessionAdapter::scan_metadata(&adapter, path);
+        let metrics = crate::sync_metrics::register_root(&home);
+        let locate = |session_id: &str, offered: &mut BTreeSet<String>| {
+            let before = metrics.snapshot();
+            let found = locate_session(
+                &context,
+                &mut |candidate, _| {
+                    offered.insert(candidate.to_string());
+                    Ok(candidate == session_id)
+                },
+                scan,
+            )
+            .unwrap();
+            (
+                found,
+                metrics.snapshot().delta_since(&before).files_head_read,
+            )
+        };
+
+        let mut offered = BTreeSet::new();
+        let (found, reads) = locate("session-wanted", &mut offered);
+        let found = found.unwrap();
+        assert_eq!(found.physical_path, wanted);
+        assert_eq!(found.display_name, "session-wanted");
+        assert!(found.blocked_reason.is_none());
+        assert_eq!(reads, 1);
+
+        let (found, reads) = locate("session-foreign", &mut offered);
+        assert!(found.is_none());
+        assert_eq!(reads, 1);
+
+        let (found, reads) = locate("session-twin", &mut offered);
+        assert_eq!(found.unwrap().physical_path, twin);
+        assert!(reads <= 2, "{reads}");
+
+        let (found, reads) = locate("session-missing", &mut offered);
+        assert!(found.is_none());
+        assert_eq!(reads, 0);
+        assert_eq!(
+            offered,
+            BTreeSet::from([
+                "session-foreign".to_string(),
+                "session-twin".to_string(),
+                "session-wanted".to_string(),
+            ])
+        );
+    }
 
     /// One project directory is one folder: dated by its newest transcript,
     /// named by the first `cwd` in that transcript's head. Nested transcripts

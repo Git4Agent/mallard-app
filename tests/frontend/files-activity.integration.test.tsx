@@ -8,9 +8,11 @@ import type {
   ProjectResourceDescriptor,
   ResourceSyncState,
 } from "../../src/types";
+import type { StatusScope } from "../../src/components/sync-review/statusScopes";
 import {
   ProjectFilesActivityView,
   buildProjectFilesActivityProjection,
+  fileStatusScope,
   projectFileSyncCounts,
 } from "../../src/components/project-sync/ProjectFilesActivityPage";
 import { PROJECT_FILE_CARD_RENDER_LIMIT } from "../../src/components/project-sync/model";
@@ -85,7 +87,12 @@ function inventoryWith(entries: ProjectContentEntry[], overrides: Partial<Projec
   };
 }
 
-function renderView(inventory: ProjectContentInventory | null, loading = false, error: string | null = null) {
+function renderView(
+  inventory: ProjectContentInventory | null,
+  loading = false,
+  error: string | null = null,
+  statusScope?: StatusScope | null,
+) {
   return renderToStaticMarkup(
     <ProjectFilesActivityView
       inventory={inventory}
@@ -94,6 +101,7 @@ function renderView(inventory: ProjectContentInventory | null, loading = false, 
       error={error}
       onOpenFile={() => undefined}
       onRevealPath={() => undefined}
+      statusScope={statusScope}
     />,
   );
 }
@@ -115,14 +123,14 @@ test("a scan's Pull and Push tallies follow the verbs its rows name", () => {
     entry("only-here", "draft.md", "local_only"),
     entry("newer-here", "notes/outline.md", "local_ahead"),
     // Pull brings what is only in storage or newer there — a removal in
-    // storage included.
+    // storage included — and what was deleted here while storage kept it.
     entry("only-there", "press-kit.pdf", "storage_only", { local_present: false, storage_present: true }),
     entry("newer-there", "score.mp3", "storage_ahead"),
     entry("removed-there", "retired.md", "storage_ahead", { storage_present: false, base_present: true }),
-    // Neither verb claims a file waiting on the reader's choice, a settled
-    // one, an unknown one, or one that cannot travel.
-    entry("both-sides", "both.md", "diverged"),
     entry("gone-here", "doc/test-design.md", "missing", { local_present: false, storage_present: true, base_present: true }),
+    // Neither verb claims a file waiting on the reader's choice, a settled
+    // one, an unknown one, or one that cannot travel — even a new one.
+    entry("both-sides", "both.md", "diverged"),
     entry("same", "same.md", "synced"),
     entry("unknown", "unknown.md", "unknown"),
     entry("blocked", "poster.psd", "blocked", {
@@ -130,6 +138,7 @@ test("a scan's Pull and Push tallies follow the verbs its rows name", () => {
       blocked_reason: "File exceeds the 16 MiB project-content limit",
       storage_present: false,
     }),
+    entry("blocked-new", "render.mov", "local_only", { blocked_reason: "File exceeds the 16 MiB project-content limit" }),
     // Directory rows are never drawn, so they are never counted.
     {
       ...entry("dir-assets", "assets", "storage_only", { local_present: false, storage_present: true }),
@@ -137,7 +146,7 @@ test("a scan's Pull and Push tallies follow the verbs its rows name", () => {
       descriptor: { ...descriptor("dir-assets", "assets"), kind: { key: "project_content_directory", version: 1 } },
     },
   ]));
-  assert.deepEqual(counts, { pull: 3, push: 2 });
+  assert.deepEqual(counts, { pull: 4, push: 2 });
 
   // No scan yet, or a folder whose files cannot travel, claims nothing.
   assert.deepEqual(projectFileSyncCounts(null), { pull: 0, push: 0 });
@@ -205,10 +214,10 @@ test("the activity list searches the full inventory but renders at most 500 file
   assert.match(markup, /sync-project-file-limit/);
   assert.match(
     markup,
-    new RegExp(`First ${PROJECT_FILE_CARD_RENDER_LIMIT} of ${files.length} files shown\\. Search to narrow the list\\.`),
+    new RegExp(`First ${PROJECT_FILE_CARD_RENDER_LIMIT} of ${files.length} files shown\\. Search or choose a status to narrow the list\\.`),
   );
 
-  const completeProjection = buildProjectFilesActivityProjection(files, "");
+  const completeProjection = buildProjectFilesActivityProjection(files, "", null);
   const completeVisibleCount = completeProjection.cloudEntries.length
     + completeProjection.localGroups.reduce((sum, group) => sum + group.entries.length, 0);
   assert.equal(completeProjection.matchingCount, files.length);
@@ -216,13 +225,24 @@ test("the activity list searches the full inventory but renders at most 500 file
   assert.ok(completeProjection.cloudEntries.length > 0, "the bounded result retains cloud rows");
   assert.ok(completeProjection.localGroups.length > 0, "the bounded result retains local groups");
 
-  const narrowedProjection = buildProjectFilesActivityProjection(files, "needle-after-limit");
+  const narrowedProjection = buildProjectFilesActivityProjection(files, "needle-after-limit", null);
   const narrowedEntries = [
     ...narrowedProjection.cloudEntries,
     ...narrowedProjection.localGroups.flatMap((group) => group.entries),
   ];
   assert.equal(narrowedProjection.matchingCount, 1, "search runs before the render cap");
   assert.equal(narrowedEntries[0]?.relative_path, "deep/needle-after-limit.md");
+
+  // A status scope runs before the cap too: To pull reaches the needle, the
+  // last file of the inventory, and To push leaves it out.
+  const pullProjection = buildProjectFilesActivityProjection(files, "", "pull");
+  const pullEntries = [
+    ...pullProjection.cloudEntries,
+    ...pullProjection.localGroups.flatMap((group) => group.entries),
+  ];
+  assert.equal(pullProjection.matchingCount, Math.ceil(files.length / 2));
+  assert.ok(pullEntries.some((candidate) => candidate.relative_path === "deep/needle-after-limit.md"));
+  assert.equal(buildProjectFilesActivityProjection(files, "needle-after-limit", "push").matchingCount, 0);
 
   const source = readFileSync("src/components/project-sync/ProjectFilesActivityPage.tsx", "utf8");
   assert.match(source, /useDeferredValue\(search\)/, "large-inventory search uses deferred input");
@@ -422,4 +442,104 @@ test("the project's view switch leads the Files face in every state", () => {
 
   // The review renders the same page with no switch.
   assert.doesNotMatch(renderView(inventoryWith([entry("file-a", "a.md", "local_only")])), /sync-project-view/);
+});
+
+/* One of each scope's files, in three folders and the cloud partition. */
+function scopedInventory(): ProjectContentInventory {
+  return inventoryWith([
+    entry("only-here", "draft.md", "local_only"),
+    entry("newer-here", "notes/outline.md", "local_ahead"),
+    entry("only-there", "press-kit.pdf", "storage_only", { local_present: false, storage_present: true }),
+    entry("gone-here", "doc/test-design.md", "missing", { local_present: false, storage_present: true, base_present: true }),
+    entry("newer-there", "notes/score.mp3", "storage_ahead"),
+    entry("both-sides", "notes/both.md", "diverged"),
+    entry("blocked", "poster.psd", "blocked", {
+      entry_type: "blocked",
+      blocked_reason: "File exceeds the 16 MiB project-content limit",
+      storage_present: false,
+    }),
+    entry("same", "same.md", "synced"),
+  ]);
+}
+
+const scopeStrip = (html: string) => html.match(/<div class="sync-project-tabs sync-status-scopes"[\s\S]*?<\/div>/)?.[0] ?? "";
+const scopeRadios = (html: string) => [...scopeStrip(html).matchAll(/role="radio" aria-checked="(true|false)" aria-label="([^"]+)"/g)]
+  .map(([, checked, label]) => (checked === "true" ? `${label} ✓` : label));
+const showsFile = (html: string, path: string) => (
+  html.includes(`title="Open ${path}"`) || html.includes(`<strong title="${path}">`)
+);
+
+test("the Files face carries the Sessions face's scope bar, counted from the file badges", () => {
+  const inventory = scopedInventory();
+  const markup = renderView(inventory);
+
+  // The strip follows the search row, named for what it narrows, with the
+  // Sessions face's words and a count on every scope.
+  assert.match(scopeStrip(markup), /role="radiogroup" aria-label="Show files by status"/);
+  assert.ok(markup.indexOf("sync-name-search") < markup.indexOf("sync-status-scopes"));
+  assert.ok(markup.indexOf("sync-status-scopes") < markup.indexOf("sync-history-thread-card"));
+  assert.deepEqual(scopeRadios(markup), [
+    "All, 8 files ✓",
+    "To push, 2 files",
+    "To pull, 3 files",
+    "Attention, 2 files",
+    "Up to date, 1 file",
+  ]);
+
+  // The path bar's file tallies read the same mapping, so the strip's two
+  // verbs equal its numbers — a deleted-here file counted under Pull.
+  const counts = projectFileSyncCounts(inventory);
+  const scopeCount = (scope: StatusScope) => inventory.entries.filter((candidate) => fileStatusScope(candidate) === scope).length;
+  assert.deepEqual(counts, { pull: scopeCount("pull"), push: scopeCount("push") });
+  assert.equal(fileStatusScope(inventory.entries.find((candidate) => candidate.state === "missing")!), "pull");
+  assert.equal(fileStatusScope(inventory.entries.find((candidate) => candidate.state === "blocked")!), "attention");
+
+  // One status across every file narrows nothing, so there is no strip.
+  const settled = renderView(inventoryWith([entry("a", "a.md", "synced"), entry("b", "notes/b.md", "synced")]));
+  assert.doesNotMatch(settled, /sync-status-scopes/);
+});
+
+test("a status scope narrows the files, keeps their folders, and reads like a search", () => {
+  const pull = renderView(scopedInventory(), false, null, "pull");
+  assert.ok(scopeRadios(pull).includes("To pull, 3 files ✓"));
+  for (const path of ["press-kit.pdf", "doc/test-design.md", "notes/score.mp3"]) {
+    assert.ok(showsFile(pull, path), `${path} is a file to pull`);
+  }
+  for (const path of ["draft.md", "notes/outline.md", "notes/both.md", "poster.psd", "same.md"]) {
+    assert.ok(!showsFile(pull, path), `${path} is not a file to pull`);
+  }
+  // The cloud partition still leads; a folder with nothing to pull leaves.
+  assert.match(pull, /sync-list-tile cloud/);
+  assert.ok(pull.includes("<span>notes/</span></strong>"));
+  assert.doesNotMatch(pull, />Project root</);
+  // The count reads as it does under a search.
+  assert.match(pull, /class="sync-name-search-count"><b>3<\/b><span> of 8 files<\/span>/);
+
+  const attention = renderView(scopedInventory(), false, null, "attention");
+  assert.ok(showsFile(attention, "notes/both.md"));
+  assert.ok(showsFile(attention, "poster.psd"));
+  assert.ok(!showsFile(attention, "doc/test-design.md"), "a deleted-here file waits on Pull, not on a person");
+});
+
+test("a chosen scope with no files stays at 0 and offers Clear filter", () => {
+  const settledPush = inventoryWith([
+    entry("a", "a.md", "synced"),
+    entry("b", "notes/b.md", "storage_only", { local_present: false, storage_present: true }),
+  ]);
+  const emptied = renderView(settledPush, false, null, "push");
+  assert.ok(scopeRadios(emptied).includes("To push, 0 files ✓"));
+  assert.match(emptied, /No matching files\.<button type="button" class="btn btn-ghost">Clear filter<\/button>/);
+  assert.doesNotMatch(emptied, /sync-history-thread-card/);
+
+  // Nothing to scope, no strip: a scope chosen before the files went away is
+  // not applied to an empty folder.
+  const empty = renderView(inventoryWith([]), false, null, "push");
+  assert.doesNotMatch(empty, /sync-status-scopes|Clear filter/);
+  assert.match(empty, /No files/);
+
+  // The strip sits flush under the field whose rule it takes over; the
+  // page's own gap spaces it from the list.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.sync-project-files-page > \.sync-name-search,\n\.sync-project-files-page > \.sync-list-head \{ margin-bottom: 0; \}/);
+  assert.match(css, /\.sync-project-files-page > \.sync-status-scopes\.sync-project-tabs \{ margin: -12px 0 0; \}/);
 });

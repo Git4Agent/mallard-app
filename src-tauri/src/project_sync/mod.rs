@@ -16,4 +16,5 @@ pub mod feishu_setup;
 pub mod managed_cloud_link;
 pub mod managed_cloud_setup;
 pub mod observation_cache;
+pub mod provider_cli;
 pub mod service;

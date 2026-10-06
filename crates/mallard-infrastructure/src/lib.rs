@@ -8,11 +8,11 @@ pub mod app_settings;
 pub mod bounded_preparation;
 mod bounded_process;
 pub mod bundle_engine;
+pub mod cli_discovery;
 pub mod claude_history_tail;
 #[cfg(target_os = "macos")]
 mod codex_app;
 pub mod codex_app_refresh;
-pub mod codex_binary;
 pub mod codex_history_graph;
 pub mod codex_paginated_projection;
 pub mod codex_rollout;

@@ -1,6 +1,7 @@
 //! Safe Codex session actions: desktop-app deep links and Terminal resume.
 
 use super::cli_version::{require_session_resume, ResumeCli};
+use crate::cli_discovery::ResolvedCli;
 #[cfg(target_os = "macos")]
 use crate::codex_app::{find_installed_mac_app, InstalledMacApp};
 use crate::providers::launch::{launch_terminal, shell_quote, TerminalCommand};
@@ -8,9 +9,8 @@ use crate::providers::traits::{
     SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
     SessionActionRequest,
 };
+use std::ffi::OsStr;
 use std::path::Path;
-#[cfg(any(target_os = "macos", windows))]
-use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 #[cfg(any(target_os = "macos", windows))]
@@ -227,7 +227,7 @@ fn open_session_in_mac_app(
     before_launch: &mut dyn FnMut(&str),
     mut open: impl FnMut(&InstalledMacApp, &Path, &str, &str) -> Result<(), String>,
 ) -> Result<(), String> {
-    require_session_resume(&app.bundled_cli(), ResumeCli::DesktopApp)?;
+    require_session_resume(&app.bundled_cli(), None, ResumeCli::DesktopApp)?;
     let commands = deep_links
         .each_ref()
         .map(|deep_link| codex_app_open_command(&app.bundle_path, codex_home, deep_link));
@@ -252,12 +252,12 @@ const CODEX_APP_UNAVAILABLE: &str =
 
 /// Use the same CLI selection as provider maintenance and plugin commands.
 #[cfg(any(target_os = "macos", windows))]
-fn resolve_codex_cli() -> Result<PathBuf, String> {
-    crate::codex_binary::find_binary("codex")
+fn resolve_codex_cli(cli_path: Option<&Path>) -> Result<ResolvedCli, String> {
+    super::cli::resolve(cli_path)
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn resolve_codex_cli() -> Result<PathBuf, String> {
+fn resolve_codex_cli(_cli_path: Option<&Path>) -> Result<ResolvedCli, String> {
     Err("Open in Terminal is supported only on macOS and Windows".to_string())
 }
 
@@ -283,11 +283,13 @@ pub(crate) fn launch_terminal_resume(
     thread_id: &str,
     project_root: &Path,
     codex_home: &Path,
+    cli_path: Option<&Path>,
     before_launch: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
-    let codex_cli = resolve_codex_cli()?;
+    let codex_cli = resolve_codex_cli(cli_path)?;
     resume_in_terminal(
-        &codex_cli,
+        &codex_cli.executable,
+        Some(&codex_cli.search_path),
         thread_id,
         project_root,
         codex_home,
@@ -301,6 +303,7 @@ pub(crate) fn launch_terminal_resume(
 /// testable.
 fn resume_in_terminal(
     codex_cli: &Path,
+    search_path: Option<&OsStr>,
     thread_id: &str,
     project_root: &Path,
     codex_home: &Path,
@@ -308,7 +311,7 @@ fn resume_in_terminal(
     launch: impl FnOnce(&TerminalCommand) -> Result<(), String>,
 ) -> Result<(), String> {
     let command = terminal_resume_command(codex_cli, thread_id, project_root, codex_home)?;
-    require_session_resume(codex_cli, ResumeCli::Terminal)?;
+    require_session_resume(codex_cli, search_path, ResumeCli::Terminal)?;
     before_launch(&command.display_line());
     launch(&command)
 }
@@ -361,9 +364,13 @@ fn codex_home_terminal_command(
 }
 
 /// Open a terminal running the Codex CLI against one profile home.
-pub fn launch_codex_home_terminal(codex_home: &Path) -> Result<(), String> {
-    let codex_cli = resolve_codex_cli()?;
-    let command = codex_home_terminal_command(&codex_cli, codex_home)?;
+/// `cli_path` is the executable saved in Settings, if any.
+pub fn launch_codex_home_terminal(
+    codex_home: &Path,
+    cli_path: Option<&Path>,
+) -> Result<(), String> {
+    let codex_cli = resolve_codex_cli(cli_path)?;
+    let command = codex_home_terminal_command(&codex_cli.executable, codex_home)?;
     launch_terminal(&command)
 }
 
@@ -408,6 +415,7 @@ pub(super) fn execute_action(
                 request.provider_session_id,
                 request.project_root,
                 request.provider_home,
+                request.cli_path,
                 request.before_launch,
             )?;
             Ok(SessionActionOutcome::Launched)
@@ -539,6 +547,7 @@ mod tests {
             let mut announced = Vec::new();
             let error = resume_in_terminal(
                 &cli,
+                None,
                 THREAD,
                 Path::new("/Users/dev/project"),
                 &home,
@@ -563,6 +572,7 @@ mod tests {
             let mut launched = Vec::new();
             resume_in_terminal(
                 &cli,
+                None,
                 THREAD,
                 Path::new("/Users/dev/project"),
                 Path::new("/Users/dev/.codex"),

@@ -177,7 +177,7 @@ fn redacted<T, E>(result: Result<T, E>, message: &'static str) -> T {
 
 fn codex_binary() -> PathBuf {
     redacted(
-        mallard_infrastructure::codex_binary::find_binary("codex"),
+        mallard_infrastructure::providers::codex::cli::resolve(None).map(|cli| cli.executable),
         "the live test requires an installed Codex CLI",
     )
 }

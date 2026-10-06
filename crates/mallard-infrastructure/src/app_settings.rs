@@ -8,6 +8,7 @@
 //! live in process-wide atomics; readers pay one relaxed load, and a process
 //! that never installs (tests, the CLI) runs on the documented defaults.
 
+use crate::cli_discovery::MAX_SELECTED_PATH_BYTES;
 use crate::persistence::{write_json_atomic, LocalStateRepository};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,7 +22,8 @@ pub const DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_COMPARISON_WORKERS: u32 = 4;
 pub const DEFAULT_CLOUD_TRANSFER_CONCURRENCY: u32 = 6;
 const SETTINGS_FILE: &str = "settings.json";
-const MAX_SETTINGS_BYTES: u64 = 4 * 1024;
+/// Two saved CLI paths of up to 4096 bytes each, JSON-escaped, still fit.
+const MAX_SETTINGS_BYTES: u64 = 16 * 1024;
 
 fn default_enabled() -> bool {
     true
@@ -47,8 +49,15 @@ fn default_cloud_transfer_concurrency() -> u32 {
     DEFAULT_CLOUD_TRANSFER_CONCURRENCY
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AppSettings {
+    /// The Codex executable this device runs, chosen by the user. Absent
+    /// means automatic discovery. Never a tuning value and never portable.
+    #[serde(default)]
+    pub codex_cli_path: Option<String>,
+    /// The Claude executable this device runs; see `codex_cli_path`.
+    #[serde(default)]
+    pub claude_cli_path: Option<String>,
     #[serde(default)]
     pub push_codex_children: bool,
     #[serde(default)]
@@ -76,6 +85,8 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema: APP_SETTINGS_SCHEMA,
+            codex_cli_path: None,
+            claude_cli_path: None,
             push_codex_children: false,
             push_claude_children: false,
             credential_redaction_enabled: false,
@@ -105,6 +116,17 @@ impl AppSettings {
         }
     }
 
+    /// The CLI executable the user saved for `provider`, if any.
+    pub fn cli_path(&self, provider: &mallard_domain::ProviderKey) -> Option<&Path> {
+        match provider.as_str() {
+            "codex" => self.codex_cli_path.as_deref(),
+            "claude" => self.claude_cli_path.as_deref(),
+            _ => None,
+        }
+        .map(Path::new)
+    }
+
+    /// Tuning values only: a CLI path or an export setting never purges a cache.
     pub fn tuning_differs(&self, other: &Self) -> bool {
         self.conversation_file_limit_bytes != other.conversation_file_limit_bytes
             || self.timeline_preview_limit_bytes != other.timeline_preview_limit_bytes
@@ -132,8 +154,33 @@ impl AppSettings {
         if !(1..=16).contains(&self.cloud_transfer_concurrency) {
             return Err("cloud transfer concurrency must be between 1 and 16".to_string());
         }
+        for (label, path) in [
+            ("Codex", &self.codex_cli_path),
+            ("Claude", &self.claude_cli_path),
+        ] {
+            if let Some(path) = path {
+                validate_cli_path(label, path)?;
+            }
+        }
         Ok(())
     }
+}
+
+/// One absolute file path: no arguments, no shell syntax, no control
+/// characters. Spaces and Unicode are ordinary path content.
+fn validate_cli_path(label: &str, path: &str) -> Result<(), String> {
+    if path.is_empty() || path.len() > MAX_SELECTED_PATH_BYTES {
+        return Err(format!(
+            "{label} CLI path must be between 1 and {MAX_SELECTED_PATH_BYTES} bytes"
+        ));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(format!("{label} CLI path contains control characters"));
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(format!("{label} CLI path must be absolute"));
+    }
+    Ok(())
 }
 
 fn settings_path(repository: &LocalStateRepository) -> PathBuf {
@@ -154,9 +201,19 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
 pub fn load_app_settings(repository: &LocalStateRepository) -> Result<AppSettings, String> {
     let path = settings_path(repository);
     reject_symlink(&path)?;
-    let settings: AppSettings = match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|error| format!("parse settings '{}': {error}", path.display()))?,
+    let settings: AppSettings = match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() > MAX_SETTINGS_BYTES => {
+            return Err(format!(
+                "settings '{}' exceed {MAX_SETTINGS_BYTES} bytes",
+                path.display()
+            ))
+        }
+        Ok(_) => {
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("read settings '{}': {error}", path.display()))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse settings '{}': {error}", path.display()))?
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => AppSettings::default(),
         Err(error) => return Err(format!("read settings '{}': {error}", path.display())),
     };
@@ -262,61 +319,67 @@ mod tests {
     fn validate_rejects_each_field_outside_its_range() {
         let ok = AppSettings::default();
         for (label, bad) in [
-            ("schema", AppSettings { schema: 2, ..ok }),
+            (
+                "schema",
+                AppSettings {
+                    schema: 2,
+                    ..ok.clone()
+                },
+            ),
             (
                 "thread floor",
                 AppSettings {
                     conversation_file_limit_bytes: 1024 * 1024 - 1,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "thread ceiling",
                 AppSettings {
                     conversation_file_limit_bytes: 512 * 1024 * 1024 + 1,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "preview floor",
                 AppSettings {
                     timeline_preview_limit_bytes: 64 * 1024 - 1,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "preview ceiling",
                 AppSettings {
                     timeline_preview_limit_bytes: 2 * 1024 * 1024 + 1,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "workers floor",
                 AppSettings {
                     comparison_workers: 0,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "workers ceiling",
                 AppSettings {
                     comparison_workers: 17,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "transfers floor",
                 AppSettings {
                     cloud_transfer_concurrency: 0,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
             (
                 "transfers ceiling",
                 AppSettings {
                     cloud_transfer_concurrency: 17,
-                    ..ok
+                    ..ok.clone()
                 },
             ),
         ] {
@@ -327,7 +390,7 @@ mod tests {
             timeline_preview_limit_bytes: 2 * 1024 * 1024,
             comparison_workers: 16,
             cloud_transfer_concurrency: 16,
-            ..ok
+            ..ok.clone()
         }
         .validate()
         .unwrap();
@@ -336,7 +399,7 @@ mod tests {
             timeline_preview_limit_bytes: 64 * 1024,
             comparison_workers: 1,
             cloud_transfer_concurrency: 1,
-            ..ok
+            ..ok.clone()
         }
         .validate()
         .unwrap();
@@ -369,7 +432,7 @@ mod tests {
 
         let invalid = AppSettings {
             comparison_workers: 0,
-            ..settings
+            ..settings.clone()
         };
         assert!(save_app_settings(&repository, &invalid).is_err());
         // The rejected save must not have touched the stored document.
@@ -406,7 +469,7 @@ mod tests {
             let settings = AppSettings {
                 push_codex_children: codex,
                 push_claude_children: claude,
-                ..defaults
+                ..defaults.clone()
             };
             save_app_settings(&repo, &settings).unwrap();
             assert_eq!(load_app_settings(&repo).unwrap(), settings);

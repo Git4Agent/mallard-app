@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { confirm, open as openFile } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import type { ActivityLogPolicy, ActivityLogStats, AppSettings, LocalStateSummary } from "../../types";
+import type {
+  ActivityLogPolicy,
+  ActivityLogStats,
+  AppSettings,
+  LocalStateSummary,
+  ProviderCliStatus,
+  ProviderDescriptor,
+} from "../../types";
 import Icon from "../Icons";
 import SettingsSectionIcon from "./SettingsSectionIcon";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
@@ -73,6 +80,8 @@ const TUNING_KEYS = [
   "update_check_enabled",
   "push_codex_children",
   "push_claude_children",
+  "codex_cli_path",
+  "claude_cli_path",
   "conversation_file_limit_bytes",
   "timeline_preview_limit_bytes",
   "comparison_workers",
@@ -92,6 +101,8 @@ const SETTING_LABELS: Record<SettingKey, string> = {
   update_check_enabled: "Automatic updates",
   push_codex_children: "Push Codex subagents",
   push_claude_children: "Push Claude subagents",
+  codex_cli_path: "Codex CLI",
+  claude_cli_path: "Claude CLI",
   openLogsOnSync: "Open Logs on Push and Pull",
   refreshOnFocus: "Refresh on window focus",
   conversation_file_limit_bytes: "Thread size limit",
@@ -114,6 +125,27 @@ const RECEIPT_TEXT: Record<RowReceipt["kind"], string> = {
 };
 
 const rowId = (key: SettingKey) => `settings-row-${key}`;
+
+/** The app-settings field that holds a provider's saved CLI path. */
+const cliSettingKey = (provider: ProviderDescriptor): TuningKey =>
+  `${provider.key}_cli_path` as TuningKey;
+
+/** What a provider's CLI row says: where the CLI is, then the test result. */
+export function cliStatusLine(
+  status: ProviderCliStatus | null | undefined,
+  test: CliTestResult | undefined,
+): string {
+  const mode = status?.selected_path ? "Selected" : "Automatic";
+  const where = !status
+    ? "Detecting…"
+    : status.error
+      ? `${mode} · ${status.error}`
+      : `${mode} · ${status.launcher}`;
+  if (!test) return where;
+  return `${where} · ${test.kind === "version" ? `Version ${test.text}` : `Test failed: ${test.text}`}`;
+}
+
+type CliTestResult = { kind: "version" | "failed"; text: string };
 
 function formatOldest(timestamp?: number | null): string | null {
   if (!timestamp) return null;
@@ -297,7 +329,15 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
   const [tuning, setTuning] = useState<AppSettings | null>(null);
   const [tuningBusy, setTuningBusy] = useState(false);
   const [tuningError, setTuningError] = useState<string | null>(null);
-  const [tuningSection, setTuningSection] = useState<"privacy" | "sync" | "performance">("privacy");
+  const [tuningSection, setTuningSection] = useState<"privacy" | "sync" | "cli" | "performance">("privacy");
+  /* The CLI rows: one per provider that declares a command-line tool, each
+     with what discovery resolves right now and the last Test's answer. The
+     status may wait on one shell probe per app process; the row says
+     Detecting… meanwhile. */
+  const [cliProviders, setCliProviders] = useState<ProviderDescriptor[] | null>(null);
+  const [cliStatus, setCliStatus] = useState<Record<string, ProviderCliStatus | null>>({});
+  const [cliTests, setCliTests] = useState<Record<string, CliTestResult>>({});
+  const [cliBusy, setCliBusy] = useState(false);
   const [tuningLoading, setTuningLoading] = useState(true);
   const [pendingTuning, setPendingTuning] = useState<Partial<AppSettings> | null>(null);
   const [localSummary, setLocalSummary] = useState<LocalStateSummary | null>(null);
@@ -350,6 +390,92 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
 
   useEffect(() => { void loadTuning(); }, [loadTuning]);
 
+  const inspectCli = useCallback(async (provider: ProviderDescriptor) => {
+    setCliStatus((current) => ({ ...current, [provider.key]: null }));
+    try {
+      const status = await projectSyncApi.inspectProviderCli(provider.key);
+      setCliStatus((current) => ({ ...current, [provider.key]: status }));
+    } catch (reason) {
+      setCliStatus((current) => ({
+        ...current,
+        [provider.key]: {
+          provider: provider.key,
+          selected_path: null,
+          launcher: null,
+          executable: null,
+          source: null,
+          error: errorMessage(reason),
+        },
+      }));
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const providers = (await projectSyncApi.listAgentProviders()).filter((provider) => provider.has_cli);
+        if (cancelled) return;
+        setCliProviders(providers);
+        for (const provider of providers) void inspectCli(provider);
+      } catch (reason) {
+        if (!cancelled) {
+          setCliProviders([]);
+          setTuningError(errorMessage(reason));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [inspectCli]);
+
+  /** Settings stores the path as picked; discovery re-reads it on the next action. */
+  const chooseCli = async (provider: ProviderDescriptor) => {
+    const picked = await openFile({
+      multiple: false,
+      directory: false,
+      title: `Choose the ${provider.display_name} executable`,
+    });
+    if (typeof picked !== "string") return;
+    await applyTuning({ [cliSettingKey(provider)]: picked });
+    setCliTests((current) => { const next = { ...current }; delete next[provider.key]; return next; });
+    void inspectCli(provider);
+  };
+
+  const useAutomaticCli = async (provider: ProviderDescriptor) => {
+    await applyTuning({ [cliSettingKey(provider)]: null });
+    setCliTests((current) => { const next = { ...current }; delete next[provider.key]; return next; });
+    void inspectCli(provider);
+  };
+
+  /** Only `--version`, against throwaway homes; the version shows only after this. */
+  const testCli = async (provider: ProviderDescriptor) => {
+    setCliBusy(true);
+    try {
+      const version = await projectSyncApi.testProviderCli(provider.key);
+      setCliTests((current) => ({ ...current, [provider.key]: { kind: "version", text: version } }));
+    } catch (reason) {
+      setCliTests((current) => ({ ...current, [provider.key]: { kind: "failed", text: errorMessage(reason) } }));
+    } finally {
+      setCliBusy(false);
+    }
+  };
+
+  const refreshCliDetection = async () => {
+    setCliBusy(true);
+    setTuningSection("cli");
+    setTuningFromAction(true);
+    setTuningError(null);
+    try {
+      await projectSyncApi.refreshCliDetection();
+      setCliTests({});
+      for (const provider of cliProviders ?? []) void inspectCli(provider);
+    } catch (reason) {
+      setTuningError(errorMessage(reason));
+    } finally {
+      setCliBusy(false);
+    }
+  };
+
   /* Same retryable shape as loadStats: the readout is a measurement, and a
      failed walk must not wedge the row it decorates. */
   const loadLocalSummary = useCallback(async (retried = false) => {
@@ -401,7 +527,8 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     const key = Object.keys(patch)[0] as TuningKey;
     setTuningBusy(true);
     setTuningSection("credential_redaction_enabled" in patch || "update_check_enabled" in patch ? "privacy"
-      : "push_codex_children" in patch || "push_claude_children" in patch ? "sync" : "performance");
+      : "push_codex_children" in patch || "push_claude_children" in patch ? "sync"
+        : "codex_cli_path" in patch || "claude_cli_path" in patch ? "cli" : "performance");
     setTuningFromAction(true);
     setTuningError(null);
     setPendingTuning(patch);
@@ -804,6 +931,78 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
               </SettingsRow>
             </div>
             {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
+          </section>
+
+          <section className="sync-settings-group" aria-labelledby="settings-cli">
+            <h2 className="settings-section-title" id="settings-cli">
+              <SettingsSectionIcon name="cli" /> Agent CLIs
+            </h2>
+            <div className="sync-settings-card">
+              {(cliProviders ?? []).map((provider) => {
+                const key = cliSettingKey(provider);
+                const status = cliStatus[provider.key];
+                return (
+                  <SettingsRow
+                    key={provider.key}
+                    label={`${provider.display_name} CLI`}
+                    setting={key}
+                    receipt={receiptFor(key)}
+                    control={(
+                      <>
+                        {status?.selected_path && (
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={tuningBusy || !tuning}
+                            onClick={() => void useAutomaticCli(provider)}
+                          >
+                            Use automatic
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={tuningBusy || !tuning}
+                          onClick={() => void chooseCli(provider)}
+                          title={`Pick the ${provider.display_name} executable this computer runs`}
+                        >
+                          Choose…
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={cliBusy || !status?.executable}
+                          onClick={() => void testCli(provider)}
+                          title="Run --version against a throwaway home"
+                        >
+                          Test
+                        </button>
+                      </>
+                    )}
+                  >
+                    {cliStatusLine(status, cliTests[provider.key])}
+                  </SettingsRow>
+                );
+              })}
+              <SettingsRow
+                label="Detection"
+                control={(
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={cliBusy}
+                    onClick={() => void refreshCliDetection()}
+                  >
+                    <Icon name="refresh" size={14} />
+                    Refresh detection
+                  </button>
+                )}
+              >
+                Looks in Mallard's PATH, then the PATH your shell sets, then the usual
+                install folders. On Windows a changed PATH needs a Mallard restart.
+              </SettingsRow>
+            </div>
+            {tuningSection === "cli" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-performance">

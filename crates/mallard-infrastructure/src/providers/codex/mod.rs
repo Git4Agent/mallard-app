@@ -4,6 +4,7 @@
 
 pub mod actions;
 mod app_server;
+pub mod cli;
 mod cli_version;
 mod deletion;
 pub mod discovery;
@@ -14,7 +15,7 @@ mod timeline_sources;
 
 use super::traits::{
     AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
-    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCli,
     ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
     SessionActionRequest, SessionAdapter, SessionAgentPreview, SessionAnalysis,
     SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
@@ -109,10 +110,7 @@ impl SessionAdapter for CodexAdapter {
             profile_label: ".codex profile".to_string(),
             default_profile_directory: Some(".codex".to_string()),
             setup_default: true,
-            cli_launcher: Some(ProviderCliLauncher {
-                program: "codex".to_string(),
-                display_name: "Codex".to_string(),
-            }),
+            has_cli: true,
             maintenance_actions: self.maintenance_actions(),
         }
     }
@@ -177,9 +175,18 @@ impl SessionAdapter for CodexAdapter {
         }]
     }
 
-    fn project_open_commands(&self, home: &Path, project_root: &str) -> Vec<ProjectOpenCommand> {
+    fn project_open_commands(
+        &self,
+        home: &Path,
+        project_root: &str,
+        cli_path: Option<&Path>,
+    ) -> Vec<ProjectOpenCommand> {
         use crate::providers::launch::TerminalCommand;
-        let cli = || TerminalCommand::new("codex").env("CODEX_HOME", home);
+        let program = cli_path.map_or_else(
+            || "codex".to_string(),
+            |path| path.to_string_lossy().into_owned(),
+        );
+        let cli = || TerminalCommand::new(program.clone()).env("CODEX_HOME", home);
         let mut commands = vec![
             ProjectOpenCommand {
                 label: "Codex — new".to_string(),
@@ -260,6 +267,14 @@ impl SessionAdapter for CodexAdapter {
 
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {
         discovery::discover(context, |path| self.scan_metadata(path))
+    }
+
+    fn locate_session(
+        &self,
+        context: &SessionDiscoveryContext<'_>,
+        is_requested: &mut dyn FnMut(&str, &Path) -> Result<bool, String>,
+    ) -> Result<Option<crate::providers::DiscoveredSession>, String> {
+        discovery::locate_session(context, is_requested, |path| self.scan_metadata(path))
     }
 
     fn recent_session_homes(
@@ -436,8 +451,17 @@ impl SessionAdapter for CodexAdapter {
         actions::available_actions(context)
     }
 
-    fn delete_session(&self, home: &Path, session: &crate::providers::DiscoveredSession) -> Result<(), String> {
-        deletion::delete(home, &session.session_id)
+    fn delete_session(
+        &self,
+        home: &Path,
+        session: &crate::providers::DiscoveredSession,
+        cli_path: Option<&Path>,
+    ) -> Result<(), String> {
+        deletion::delete(home, &session.session_id, cli_path)
+    }
+
+    fn cli(&self) -> Option<&dyn ProviderCli> {
+        Some(&cli::CodexCli)
     }
 
     fn execute_action(

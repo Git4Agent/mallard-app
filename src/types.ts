@@ -75,6 +75,10 @@ export interface ActivityLogCleanupResult {
 /** Backend tuning knobs, persisted in ~/.mallard/settings.json. Every field
  * has a serde default on the Rust side, so a partial file still parses. */
 export interface AppSettings {
+  /** The Codex executable this device runs; null means automatic discovery. */
+  codex_cli_path: string | null;
+  /** The Claude executable this device runs; null means automatic discovery. */
+  claude_cli_path: string | null;
   push_codex_children: boolean;
   push_claude_children: boolean;
   credential_redaction_enabled: boolean;
@@ -121,11 +125,21 @@ export interface LocalStateWipeResult {
  */
 export type ProviderKey = string;
 
-export interface ProviderCliLauncher {
-  /** Executable name resolved by the opened terminal's login shell. */
-  program: string;
-  /** Human name of the agent CLI, e.g. "Claude Code". */
-  display_name: string;
+/** Which step of the selection policy named a provider's CLI. */
+export type CliSelectionSource = "selected" | "inherited_path" | "shell_path" | "standard_location";
+
+/** `inspect_provider_cli`: one provider's CLI as this machine resolves it now. */
+export interface ProviderCliStatus {
+  provider: ProviderKey;
+  /** The path saved in Settings; null means automatic discovery. */
+  selected_path: string | null;
+  /** The launcher discovery chose, as found; null on failure. */
+  launcher: string | null;
+  /** The executable that launcher runs. */
+  executable: string | null;
+  source: CliSelectionSource | null;
+  /** Why nothing resolved: short, without paths. */
+  error: string | null;
 }
 
 /** Where a provider-declared maintenance action applies. */
@@ -153,8 +167,9 @@ export interface ProviderDescriptor {
   profile_label: string;
   default_profile_directory?: string | null;
   setup_default: boolean;
-  /** Present when the provider ships an agent CLI that takes a prompt. */
-  cli_launcher?: ProviderCliLauncher | null;
+  /** The provider has a command-line tool Mallard runs, so Settings offers
+   *  its executable selection. */
+  has_cli: boolean;
   /** Declared maintenance actions, in display order. */
   maintenance_actions: MaintenanceActionDescriptor[];
 }

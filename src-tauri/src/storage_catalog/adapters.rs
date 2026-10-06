@@ -34,6 +34,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mallard_infrastructure::cli_discovery::ResolvedCli;
+use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::providers::{claude, codex, AgentProviderRegistry};
 
 use super::domain::{
@@ -77,8 +79,9 @@ pub trait PluginProcessRunner: Send + Sync {
     ) -> Result<CmdOutput, String>;
 }
 
-/// The native CLI an adapter declares: the program resolved on the login
-/// PATH and the environment variable that pins the provider home.
+/// The native CLI an adapter declares: its program name, for messages, and
+/// the environment variable that pins the provider home. Which executable
+/// runs is the provider's CLI resolution, through [`CatalogProviderAdapter::resolve_cli`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeCli {
     pub program: String,
@@ -87,15 +90,20 @@ pub struct NativeCli {
 
 /// Launches the real provider CLI with an explicit home environment and the
 /// home as working directory, so behavior never depends on where Mallard was
-/// started. Which program and variable belong to a provider is the
-/// adapter's declaration, resolved through the registry.
+/// started. The executable comes from the provider's CLI selection, read
+/// from this machine's app settings for each run; the child gets the
+/// discovery `PATH`, since Mallard's own may be a desktop launch's minimum.
 pub struct NativeProcessRunner {
     registry: Arc<CatalogRegistry>,
+    machine_home: PathBuf,
 }
 
 impl NativeProcessRunner {
-    pub fn new(registry: Arc<CatalogRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<CatalogRegistry>, machine_home: PathBuf) -> Self {
+        Self {
+            registry,
+            machine_home,
+        }
     }
 }
 
@@ -106,17 +114,18 @@ impl PluginProcessRunner for NativeProcessRunner {
         home: &Path,
         argv: &[String],
     ) -> Result<CmdOutput, String> {
-        let cli = self
-            .registry
-            .require_provider(provider)?
+        let adapter = self.registry.require_provider(provider)?;
+        let cli = adapter
             .native_cli()
             .ok_or_else(|| format!("{} declares no native CLI", provider))?;
-        let program = mallard_infrastructure::codex_binary::find_binary(&cli.program)
-            .map_err(|error| format!("locate {}: {}", cli.program, error))?;
-        let mut command = std::process::Command::new(program);
+        let repository = LocalStateRepository::from_home_dir(&self.machine_home)?;
+        let settings = mallard_infrastructure::app_settings::load_app_settings(&repository)?;
+        let resolved = adapter.resolve_cli(settings.cli_path(provider))?;
+        let mut command = std::process::Command::new(&resolved.executable);
         command
             .args(argv)
             .current_dir(home)
+            .env("PATH", &resolved.search_path)
             .env(&cli.home_env_var, home)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -278,7 +287,13 @@ pub trait CatalogProviderAdapter: Send + Sync {
 
     fn launch_home_app(&self, home: &Path, os_user_home: &Path) -> Result<(), String>;
 
-    fn launch_home_terminal(&self, home: &Path) -> Result<(), String>;
+    /// `cli_path` is the CLI executable saved in app settings, if any.
+    fn launch_home_terminal(&self, home: &Path, cli_path: Option<&Path>) -> Result<(), String>;
+
+    /// The CLI an operation runs, by the provider's selection policy.
+    fn resolve_cli(&self, _cli_path: Option<&Path>) -> Result<ResolvedCli, String> {
+        Err(format!("{} declares no native CLI", self.descriptor().key))
+    }
 
     /// Read provider inventory from local files. This interface cannot run a CLI.
     fn discover_local(&self, home: &Path) -> Result<ProviderInventory, CatalogBlocker>;
@@ -522,8 +537,12 @@ impl CatalogProviderAdapter for CodexCatalogAdapter {
         codex::actions::launch_codex_home_app(home, os_user_home)
     }
 
-    fn launch_home_terminal(&self, home: &Path) -> Result<(), String> {
-        codex::actions::launch_codex_home_terminal(home)
+    fn launch_home_terminal(&self, home: &Path, cli_path: Option<&Path>) -> Result<(), String> {
+        codex::actions::launch_codex_home_terminal(home, cli_path)
+    }
+
+    fn resolve_cli(&self, cli_path: Option<&Path>) -> Result<ResolvedCli, String> {
+        codex::cli::resolve(cli_path)
     }
 
     fn discover_local(&self, home: &Path) -> Result<ProviderInventory, CatalogBlocker> {
@@ -674,8 +693,12 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
         claude::actions::launch_claude_home_app(home)
     }
 
-    fn launch_home_terminal(&self, home: &Path) -> Result<(), String> {
-        claude::actions::launch_claude_home_terminal(home)
+    fn launch_home_terminal(&self, home: &Path, cli_path: Option<&Path>) -> Result<(), String> {
+        claude::actions::launch_claude_home_terminal(home, cli_path)
+    }
+
+    fn resolve_cli(&self, cli_path: Option<&Path>) -> Result<ResolvedCli, String> {
+        claude::cli::resolve(cli_path)
     }
 
     fn discover_local(&self, home: &Path) -> Result<ProviderInventory, CatalogBlocker> {

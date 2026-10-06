@@ -1631,18 +1631,28 @@ pub async fn apply_bundle_restore(
             if operation.success {
                 let review_for_binding = review_for_log.clone();
                 let binding = run_blocking(move || {
-                    current_binding_for_restore_plan(&binding_repository, &review_for_binding)
+                    current_binding_for_restore_plan(&binding_repository, &review_for_binding).map(
+                        |binding| {
+                            // Guidance is informational: an unreadable settings
+                            // file hides a saved CLI path, never the lines.
+                            let settings = mallard_infrastructure::app_settings::load_app_settings(
+                                &binding_repository,
+                            )
+                            .unwrap_or_default();
+                            (binding, settings)
+                        },
+                    )
                 })
                 .await;
                 match binding {
-                    Ok(binding) => {
+                    Ok((binding, settings)) => {
                         log.emit(
                             &app,
                             "info",
                             "pull.open_project_hint",
                             "   Open this project after Pull:",
                         );
-                        for (label, command) in project_open_commands(&binding) {
+                        for (label, command) in project_open_commands(&binding, &settings) {
                             log.emit(
                                 &app,
                                 "info",

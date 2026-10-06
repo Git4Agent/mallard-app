@@ -6,6 +6,7 @@
 //! frontend renders returned descriptors and actions but never constructs
 //! provider commands.
 
+use crate::cli_discovery::ResolvedCli;
 use crate::conversation_codec::CodecLineage;
 use mallard_domain::{ConversationFileRole, NoticeSeverity, ProviderKey};
 use serde::{Deserialize, Serialize};
@@ -87,15 +88,18 @@ pub(crate) fn attach_turn_tool_summaries(
     }
 }
 
-/// How to open this provider's coding-agent CLI with a prompt, for the R2
-/// setup hand-off. Absent when the provider ships no launchable CLI.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ProviderCliLauncher {
-    /// Executable name, resolved on the user's own login-shell PATH by the
-    /// terminal that runs it — never by the GUI app's environment.
-    pub program: String,
-    /// Human name of the agent CLI, e.g. "Claude Code".
-    pub display_name: String,
+/// The provider's command-line tool, resolved per operation by one policy:
+/// the saved selection, Mallard's `PATH`, the login shell's `PATH`, then
+/// documented install directories. Adapters own the launcher-to-binary
+/// step; discovery itself is neutral.
+pub trait ProviderCli: Send + Sync {
+    /// The CLI an operation runs. `explicit` is the path saved in Settings;
+    /// when it is set and invalid the result is an error, never another
+    /// installation.
+    fn resolve(&self, explicit: Option<&Path>) -> Result<ResolvedCli, String>;
+    /// `--version` of a resolved CLI, run where it can touch nothing of the
+    /// user's. Returns the version alone.
+    fn probe_version(&self, cli: &ResolvedCli) -> Result<String, String>;
 }
 
 /// Where a provider-declared maintenance action applies.
@@ -149,10 +153,10 @@ pub struct ProviderDescriptor {
     pub default_profile_directory: Option<String>,
     /// May pre-enable this provider for a new draft; never a requirement.
     pub setup_default: bool,
-    /// This provider's coding-agent CLI, when one exists that takes a prompt
-    /// argument at launch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli_launcher: Option<ProviderCliLauncher>,
+    /// Whether [`SessionAdapter::cli`] names a command-line tool, so
+    /// Settings can offer its executable selection.
+    #[serde(default)]
+    pub has_cli: bool,
     /// Declared maintenance actions, in display order.
     #[serde(default)]
     pub maintenance_actions: Vec<MaintenanceActionDescriptor>,
@@ -746,6 +750,8 @@ pub struct SessionActionRequest<'a> {
     pub provider_home: &'a Path,
     pub project_root: &'a Path,
     pub provider_session_id: &'a str,
+    /// The CLI executable saved in Settings for this provider, if any.
+    pub cli_path: Option<&'a Path>,
     /// Observer for the exact shell command before it is launched, so the
     /// activity log records what ran.
     pub before_launch: &'a mut dyn FnMut(&str),
@@ -823,9 +829,20 @@ pub trait SessionAdapter: Send + Sync {
     }
     /// The ways to open a pulled project with this provider from its
     /// configured home, listed after a Pull. Empty when the provider has no
-    /// pasteable launch.
-    fn project_open_commands(&self, _home: &Path, _project_root: &str) -> Vec<ProjectOpenCommand> {
+    /// pasteable launch. `cli_path` is the saved selection; without one the
+    /// line names the program and the terminal that runs it resolves it.
+    /// Guidance never runs discovery or a provider process.
+    fn project_open_commands(
+        &self,
+        _home: &Path,
+        _project_root: &str,
+        _cli_path: Option<&Path>,
+    ) -> Vec<ProjectOpenCommand> {
         Vec::new()
+    }
+    /// This provider's command-line tool, when it has one Mallard runs.
+    fn cli(&self) -> Option<&dyn ProviderCli> {
+        None
     }
     /// The action a completed Pull offers for this provider, if any.
     fn after_pull_offer(
@@ -857,6 +874,23 @@ pub trait SessionAdapter: Send + Sync {
     /// one provider home. Ownership is proven through each session's
     /// recorded cwd; the adapter must not scan outside `provider_home`.
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String>;
+    /// The one project-owned session that `is_requested` accepts, given its
+    /// provider session id and transcript path, with the same ownership
+    /// evidence `discover` gathers for it. A provider whose file names carry
+    /// the session identity reads only the requested transcript's head; one
+    /// whose names carry nothing discovers every session and selects.
+    fn locate_session(
+        &self,
+        context: &SessionDiscoveryContext<'_>,
+        is_requested: &mut dyn FnMut(&str, &Path) -> Result<bool, String>,
+    ) -> Result<Option<DiscoveredSession>, String> {
+        for session in self.discover(context)?.sessions {
+            if is_requested(&session.session_id, &session.physical_path)? {
+                return Ok(Some(session));
+            }
+        }
+        Ok(None)
+    }
     /// The folders the newest sessions under one provider home ran in,
     /// from a bounded read that never follows links. A provider without a
     /// cheap way to answer offers none.
@@ -1005,7 +1039,14 @@ pub trait SessionAdapter: Send + Sync {
     ) -> Result<SessionActionOutcome, String>;
 
     /// Explicit best-effort deletion. This does not coordinate active writers.
-    fn delete_session(&self, _home: &Path, _session: &DiscoveredSession) -> Result<(), String> {
+    /// `cli_path` is the saved CLI selection, for a provider whose deletion
+    /// goes through its CLI.
+    fn delete_session(
+        &self,
+        _home: &Path,
+        _session: &DiscoveredSession,
+        _cli_path: Option<&Path>,
+    ) -> Result<(), String> {
         Err("This provider does not support local session deletion.".into())
     }
 }

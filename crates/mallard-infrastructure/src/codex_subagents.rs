@@ -572,6 +572,22 @@ impl RolloutLookup {
         Ok(paths)
     }
 
+    /// Every rollout whose native file name claims a thread, grouped by that
+    /// thread: the candidates `select_current` chooses among. No file is
+    /// opened.
+    pub fn rollouts_by_thread(&self) -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
+        let mut grouped: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        for path in self.paths()? {
+            if let Some(thread_id) = crate::codex_rollout_selection::logical_id(path) {
+                grouped
+                    .entry(thread_id.to_string())
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+        Ok(grouped)
+    }
+
     pub fn find_rollout(&self, id: &str) -> Result<Option<PathBuf>, String> {
         let original = format!("-{id}.jsonl");
         let reverted = format!("_{id}.jsonl");

@@ -92,8 +92,8 @@ const PHYSICS = project("physics 225", "Desktop/physics 225", false);
 const PROJECTS = [API_SERVER, PHYSICS];
 
 const PROVIDERS = [
-  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, maintenance_actions: [] },
-  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, maintenance_actions: [] },
+  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, has_cli: true, maintenance_actions: [] },
+  { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, has_cli: true, maintenance_actions: [] },
 ] as ProviderDescriptor[];
 const agentProfile = (profileId: string, provider: string, dir: string): ProviderProfileSummary => ({
   profile_id: profileId, provider, display_name: `~/${dir}`, path: `${HOME}/${dir}`, canonical_path: `${HOME}/${dir}`,

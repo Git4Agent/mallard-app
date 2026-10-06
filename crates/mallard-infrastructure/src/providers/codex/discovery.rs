@@ -229,12 +229,208 @@ pub(super) fn discover(
     Ok(discovery)
 }
 
+/// The one project-owned session `is_requested` accepts. Native file names
+/// carry each rollout's thread, so the walk opens nothing until the
+/// requested thread is found; its current rollout's head then supplies the
+/// identity and ownership evidence `discover` would have gathered. The
+/// session index is never read: the name is the thread id.
+pub(super) fn locate_session(
+    context: &SessionDiscoveryContext<'_>,
+    is_requested: &mut dyn FnMut(&str, &Path) -> Result<bool, String>,
+    scan_metadata: impl Fn(&Path) -> Result<crate::providers::traits::SessionFileMetadata, String>,
+) -> Result<Option<DiscoveredSession>, String> {
+    let canonical_home = canonical_existing_dir(context.provider_home, "Codex home")?;
+    let lookup = crate::codex_subagents::RolloutLookup::new(&canonical_home);
+    let mut canonical_homes = BTreeMap::new();
+    for (session_id, paths) in lookup.rollouts_by_thread()? {
+        let (physical_path, selection_error) = match lookup.select_current(&session_id, &paths) {
+            Ok(Some(path)) => (path, None),
+            Ok(None) => continue,
+            Err(error) => (paths[0].clone(), Some(error)),
+        };
+        if !is_requested(&session_id, &physical_path)? {
+            continue;
+        }
+        let meta = scan_metadata(&physical_path)?;
+        if meta.session_id != session_id {
+            return Err("Codex rollout header disagrees with its filename identity".into());
+        }
+        if meta.is_internal_subagent
+            || !session_home_is_project_root(
+                context.project_root,
+                &meta.authorized_home,
+                &mut canonical_homes,
+            )
+        {
+            return Ok(None);
+        }
+        let blocked_reason = selection_error.or_else(|| {
+            inspect_candidate_files_with_limit(
+                &canonical_home,
+                std::slice::from_ref(&physical_path),
+                crate::app_settings::conversation_file_limit_bytes(),
+            )
+            .err()
+        });
+        if blocked_reason.is_none() && meta.is_empty {
+            return Ok(None);
+        }
+        return Ok(Some(DiscoveredSession {
+            display_name: session_id.clone(),
+            session_id,
+            physical_path,
+            blocked_reason,
+        }));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::providers::codex::CodexAdapter;
     use crate::providers::traits::SessionAdapter;
     use std::time::{Duration, SystemTime};
+
+    /// Only the requested thread's current rollout is opened. Other threads,
+    /// the superseded copy, and the session index stay closed; the newest
+    /// native name wins over modification time; a foreign folder, a
+    /// subagent, and a thread no name claims yield nothing; a name that
+    /// disagrees with its header is refused.
+    #[test]
+    fn locate_session_opens_only_the_requested_rollout() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(home.join("sessions/2026/09/12")).unwrap();
+        std::fs::create_dir_all(home.join("archived_sessions")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let home = home.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let day = home.join("sessions/2026/09/12");
+        let write = |path: PathBuf, id: &str, cwd: &Path, subagent: bool| {
+            let mut payload = serde_json::json!({ "id": id, "cwd": cwd });
+            if subagent {
+                payload["thread_source"] = serde_json::json!("subagent");
+            }
+            let header = serde_json::json!({ "type": "session_meta", "payload": payload });
+            let message = serde_json::json!({
+                "type": "event_msg", "payload": {"type": "user_message", "message": "Hello"}
+            });
+            std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+            path
+        };
+        let wanted = "0193b6c1-5352-7b12-9c6e-000000000001";
+        let foreign = "0193b6c1-5352-7b12-9c6e-000000000002";
+        let child = "0193b6c1-5352-7b12-9c6e-000000000003";
+        let renamed = "0193b6c1-5352-7b12-9c6e-000000000004";
+        let current = write(
+            home.join(format!(
+                "archived_sessions/rollout-2026-09-13T00-19-15-{wanted}_rollout-1.jsonl"
+            )),
+            wanted,
+            &project,
+            false,
+        );
+        // Written last: modification time would pick the superseded copy.
+        write(
+            day.join(format!("rollout-2026-09-12T01-03-07-{wanted}.jsonl")),
+            wanted,
+            &project,
+            false,
+        );
+        write(
+            day.join(format!("rollout-2026-09-12T01-03-08-{foreign}.jsonl")),
+            foreign,
+            &elsewhere,
+            false,
+        );
+        write(
+            day.join(format!("rollout-2026-09-12T01-03-09-{child}.jsonl")),
+            child,
+            &project,
+            true,
+        );
+        write(
+            day.join(format!("rollout-2026-09-12T01-03-10-{renamed}.jsonl")),
+            foreign,
+            &project,
+            false,
+        );
+        std::fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({"id": wanted, "thread_name": "Named in the index"})
+            ),
+        )
+        .unwrap();
+
+        let context = SessionDiscoveryContext {
+            provider_home: &home,
+            project_root: &project,
+        };
+        let adapter = CodexAdapter::new();
+        let scan = |path: &Path| adapter.scan_metadata(path);
+        let metrics = crate::sync_metrics::register_root(&home);
+        let locate = |session_id: &str, offered: &mut BTreeSet<String>| {
+            let before = metrics.snapshot();
+            let found = locate_session(
+                &context,
+                &mut |candidate, _| {
+                    offered.insert(candidate.to_string());
+                    Ok(candidate == session_id)
+                },
+                scan,
+            );
+            (
+                found,
+                metrics.snapshot().delta_since(&before).files_head_read,
+            )
+        };
+
+        let mut offered = BTreeSet::new();
+        let (found, reads) = locate(wanted, &mut offered);
+        let found = found.unwrap().unwrap();
+        assert_eq!(found.physical_path, current);
+        assert_eq!(found.display_name, wanted, "the index is not read");
+        assert!(found.blocked_reason.is_none());
+        assert_eq!(reads, 1);
+
+        let (found, reads) = locate(foreign, &mut offered);
+        assert!(found.unwrap().is_none());
+        assert_eq!(reads, 1);
+
+        let (found, reads) = locate(child, &mut offered);
+        assert!(found.unwrap().is_none());
+        assert_eq!(reads, 1);
+
+        let (found, reads) = locate(renamed, &mut offered);
+        assert_eq!(
+            found.unwrap_err(),
+            "Codex rollout header disagrees with its filename identity"
+        );
+        assert_eq!(reads, 1);
+
+        let (found, reads) = locate("0193b6c1-5352-7b12-9c6e-000000000009", &mut offered);
+        assert!(found.unwrap().is_none());
+        assert_eq!(reads, 0);
+        assert_eq!(
+            offered,
+            BTreeSet::from([wanted, foreign, child, renamed].map(String::from))
+        );
+
+        // The inventory still names the thread by its index title.
+        let listed = adapter.discover(&context).unwrap();
+        let listed = listed
+            .sessions
+            .iter()
+            .find(|session| session.session_id == wanted)
+            .unwrap();
+        assert_eq!(listed.display_name, "Named in the index");
+    }
 
     fn write_rollout(
         directory: &Path,

@@ -9,8 +9,8 @@ import {
   ProjectChatHistoryContent,
   sessionStatusScope,
   sessionSyncPresentation,
-  type SessionStatusScope,
 } from "../src/components/project-sync/ProjectActivityPage";
+import type { StatusScope } from "../src/components/sync-review/statusScopes";
 import { sessionNoun } from "../src/components/project-sync/model";
 import type {
   ConversationBlocker,
@@ -644,7 +644,7 @@ function Frame({ dir, kind, scene = "mixed", bar = false, picks = [], query: sta
   const [query, setQuery] = useState(startQuery);
   const [picked, setPicked] = useState<ReadonlySet<StatusKey>>(() => new Set(picks));
   /* C is the shipped page: its own field, its own bar, the scope held here. */
-  const [scope, setScope] = useState<SessionStatusScope | null>(() => (picks.length ? sessionStatusScope(picks[0]) : null));
+  const [scope, setScope] = useState<StatusScope | null>(() => (picks.length ? sessionStatusScope(picks[0]) : null));
   const input = useRef<HTMLInputElement>(null);
   const proposed = dir !== SHIPPED;
 

@@ -10551,6 +10551,14 @@ fn build_publish_request(
                     ));
                     return Ok(());
                 }
+                // A thread a removed registration still owns is this
+                // session's own failure: refused before anything of it is
+                // written, while every other selection publishes.
+                if provider_thread_has_foreign_owner(&document.bindings, &publication.operation) {
+                    return Err(PublicationRefusal::from(
+                        PUSH_SESSION_OWNED_BY_REMOVED_REGISTRATION.to_string(),
+                    ));
+                }
                 let owner = PathOriginsOwner::for_project(
                     binding, &action.pins.context.provider_profile_id,
                     publication.operation.provider_thread_id.as_deref()
@@ -10719,56 +10727,96 @@ fn cloud_publication_from_snapshot(snapshot: &BundleSnapshot) -> ConversationClo
     }
 }
 
+/// A provider thread on this host: one owner per host, profile, and
+/// provider thread ID.
+type ProviderThreadKey = (HostId, LocalProviderProfileId, String);
+/// The conversation row that owns a provider thread: its replica, project,
+/// and local thread.
+type ProviderThreadOwner = (ReplicaId, LocalProjectId, ThreadId);
+
+fn binding_provider_thread_owner(
+    binding: &LocalConversationBinding,
+) -> Option<(ProviderThreadKey, ProviderThreadOwner)> {
+    let provider_thread_id = binding.provider_thread_id.as_ref()?;
+    Some((
+        (
+            binding.host_id.clone(),
+            binding.provider_profile_id.clone(),
+            provider_thread_id.clone(),
+        ),
+        (
+            binding.replica_id.clone(),
+            binding.local_project_id.clone(),
+            binding.thread_id.clone(),
+        ),
+    ))
+}
+
+fn operation_provider_thread_owner(
+    operation: &ConversationApplyOperation,
+) -> Option<(ProviderThreadKey, ProviderThreadOwner)> {
+    let provider_thread_id = operation.provider_thread_id.as_deref()?;
+    Some((
+        (
+            operation.host_id.clone(),
+            operation.provider_profile_id.clone(),
+            provider_thread_id.to_string(),
+        ),
+        (
+            operation.replica_id.clone(),
+            operation.local_project_id.clone(),
+            operation.thread_id.clone(),
+        ),
+    ))
+}
+
+/// True when a binding row other than this operation's own already owns its
+/// provider thread on this host and profile. Removing a project detaches its
+/// replica and keeps its conversation rows, so a registration of the same
+/// folder that does not reactivate that replica finds its sessions owned.
+fn provider_thread_has_foreign_owner(
+    bindings: &[LocalConversationBinding],
+    operation: &ConversationApplyOperation,
+) -> bool {
+    let Some((key, target)) = operation_provider_thread_owner(operation) else {
+        return false;
+    };
+    bindings
+        .iter()
+        .filter_map(binding_provider_thread_owner)
+        .any(|(owner_key, owner)| owner_key == key && owner != target)
+}
+
+/// Result-row reason for a session whose provider thread a removed
+/// registration still owns. Names no provider ID and no path.
+const PUSH_SESSION_OWNED_BY_REMOVED_REGISTRATION: &str = "This session still belongs to an earlier registration of this folder that was removed. Remove this project and set it up again with that registration's repository and agent configs to push it.";
+
 /// Prove every provider thread can be committed to its reviewed binding
-/// before immutable publication and the record write.  The binding
-/// document's global uniqueness check remains the final invariant, but it is
-/// too late to discover an ownership conflict after the cloud commit.
+/// before immutable publication and the record write. A session a removed
+/// registration owns was already refused on its own while the batch was
+/// built; this pass catches a batch that claims one thread twice and
+/// anything that changed before the apply lock. The binding document's
+/// global uniqueness check remains the final invariant, but it is too late
+/// to discover an ownership conflict after the cloud commit.
 fn validate_cloud_publication_binding_owners(
     bindings: &[LocalConversationBinding],
     operations: &[ConversationApplyOperation],
 ) -> Result<(), String> {
-    let mut owners = BTreeMap::new();
-    for binding in bindings {
-        let Some(provider_thread_id) = binding.provider_thread_id.as_ref() else {
-            continue;
-        };
-        owners.insert(
-            (
-                binding.host_id.clone(),
-                binding.provider_profile_id.clone(),
-                provider_thread_id.clone(),
-            ),
-            (
-                binding.replica_id.clone(),
-                binding.local_project_id.clone(),
-                binding.thread_id.clone(),
-            ),
-        );
-    }
+    let mut owners: BTreeMap<ProviderThreadKey, ProviderThreadOwner> = bindings
+        .iter()
+        .filter_map(binding_provider_thread_owner)
+        .collect();
     for operation in operations {
-        let Some(provider_thread_id) = operation.provider_thread_id.as_deref() else {
+        let Some((key, target)) = operation_provider_thread_owner(operation) else {
             continue;
         };
-        let owner_key = (
-            operation.host_id.clone(),
-            operation.provider_profile_id.clone(),
-            provider_thread_id.to_string(),
-        );
-        let target = (
-            operation.replica_id.clone(),
-            operation.local_project_id.clone(),
-            operation.thread_id.clone(),
-        );
-        if owners
-            .get(&owner_key)
-            .is_some_and(|current| current != &target)
-        {
+        if owners.get(&key).is_some_and(|current| current != &target) {
             return Err(
                 "conversation Push cannot publish because a selected provider thread belongs to another local project registration; re-register that project before pushing"
                     .to_string(),
             );
         }
-        owners.insert(owner_key, target);
+        owners.insert(key, target);
     }
     Ok(())
 }
@@ -12645,10 +12693,15 @@ fn rename_committed_codex_titles(
 ) {
     for request in requests {
         #[cfg(not(test))]
-        let outcome = mallard_infrastructure::providers::codex::naming::rename(
-            &request.home,
-            &request.row.provider_thread_id,
-            &request.row.thread_name,
+        let outcome = mallard_infrastructure::app_settings::load_app_settings(repository).and_then(
+            |settings| {
+                mallard_infrastructure::providers::codex::naming::rename(
+                    &request.home,
+                    &request.row.provider_thread_id,
+                    &request.row.thread_name,
+                    settings.cli_path(&mallard_infrastructure::providers::codex::provider_key()),
+                )
+            },
         );
         #[cfg(test)]
         let outcome = pull_test_support::rename(
@@ -15320,8 +15373,12 @@ pub(super) fn current_binding_for_restore_plan(
 }
 
 /// Every bound provider's declared ways to open the pulled project, in
-/// provider display order.
-pub(super) fn project_open_commands(resolved: &ResolvedBinding) -> Vec<(String, String)> {
+/// provider display order. `settings` supplies a saved CLI selection; the
+/// lines run no discovery.
+pub(super) fn project_open_commands(
+    resolved: &ResolvedBinding,
+    settings: &mallard_infrastructure::app_settings::AppSettings,
+) -> Vec<(String, String)> {
     let mut commands = Vec::new();
     for descriptor in provider_registry().descriptors() {
         let Some(home) = resolved.homes.get(&descriptor.key) else {
@@ -15332,7 +15389,11 @@ pub(super) fn project_open_commands(resolved: &ResolvedBinding) -> Vec<(String, 
         };
         commands.extend(
             adapter
-                .project_open_commands(Path::new(home), &resolved.binding.project_root)
+                .project_open_commands(
+                    Path::new(home),
+                    &resolved.binding.project_root,
+                    settings.cli_path(&descriptor.key),
+                )
                 .into_iter()
                 .map(|command| (command.label, command.command)),
         );
@@ -18058,35 +18119,12 @@ mod tests {
     }
 
     #[test]
-    fn every_registered_cli_launcher_is_terminal_safe() {
-        // Both shipped agents launch; anything registered stays a bare
-        // program name the login shell resolves, never a path or shell text.
-        let mut launchable = 0;
-        for descriptor in provider_registry().descriptors() {
-            let Some(launcher) = descriptor.cli_launcher else {
-                continue;
-            };
-            launchable += 1;
-            assert!(
-                launcher
-                    .program
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-                "{}: program {:?}",
-                descriptor.display_name,
-                launcher.program,
-            );
-            assert!(!launcher.display_name.trim().is_empty());
-        }
-        assert!(launchable >= 2, "claude and codex both ship launchers");
+    fn both_shipped_agents_declare_a_cli() {
         for key in ["claude", "codex"] {
             let key = ProviderKey::parse(key).expect("static provider key");
-            assert!(provider_registry()
-                .require(&key)
-                .unwrap()
-                .descriptor()
-                .cli_launcher
-                .is_some());
+            let adapter = provider_registry().require(&key).unwrap();
+            assert!(adapter.descriptor().has_cli, "{key}");
+            assert!(adapter.cli().is_some(), "{key}");
         }
     }
 
@@ -20146,6 +20184,85 @@ mod tests {
         assert!(!entry(&scan(), "notes/ideas.md").undecided);
     }
 
+    /// A file deleted here while storage kept it counts as a file to pull on
+    /// the Files face and the path bar, so a Pull must offer it back: one
+    /// write with no local digest to check, which the review reads as Add
+    /// file and ticks.
+    #[test]
+    fn a_file_deleted_here_is_planned_back_by_pull_as_an_add() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("project-files-deleted-here").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let root = temp.path().join("machine-a/project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("kept.md"), b"kept\n").unwrap();
+        std::fs::write(root.join("gone.md"), b"gone\n").unwrap();
+        let binding = bind_and_link_test_replica(
+            &repo,
+            &project,
+            &storage_id,
+            &root,
+            &temp.path().join("machine-a/codex"),
+        );
+        let scanned =
+            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let pushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            reviewed_project_content_recipe(&scanned),
+            ProjectContentPushReview {
+                scope: PushScope::Project,
+                git_history_review_token: None,
+                credential_redaction_enabled: true,
+                subagent_selections: BTreeMap::new(),
+                review_token: scanned.review_token.clone(),
+                files_shown: true,
+                removal_ids: BTreeSet::new(),
+                acknowledged_warning_digests: BTreeSet::new(),
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(pushed.success, "{}", pushed.message);
+
+        std::fs::remove_file(root.join("gone.md")).unwrap();
+        let rescanned =
+            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let state_of = |path: &str| {
+            rescanned
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == path)
+                .unwrap()
+                .state
+                .clone()
+        };
+        assert_eq!(state_of("gone.md"), "missing");
+        assert_eq!(state_of("kept.md"), "synced");
+
+        let plan = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &project.bundle_id, &binding)
+            .unwrap();
+        let writes = plan
+            .actions
+            .iter()
+            .filter(|action| {
+                matches!(
+                    &action.kind,
+                    RestoreActionKind::WriteProjectFile { logical_path, .. }
+                        if logical_path.as_str() == "project/gone.md"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(writes.len(), 1, "{:?}", plan.actions);
+        assert_eq!(writes[0].expected_target_sha256, None);
+    }
+
     #[test]
     fn project_content_nested_tree_and_empty_directory_round_trip_then_delete_safely() {
         let temp = tempfile::tempdir().unwrap();
@@ -20899,7 +21016,10 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let commands = project_open_commands(&resolved);
+        let commands = project_open_commands(
+            &resolved,
+            &mallard_infrastructure::app_settings::AppSettings::default(),
+        );
         // App discovery can omit the launch command. If present, it must
         // pin the same profile and checkout, whatever the install location.
         #[cfg(target_os = "macos")]
@@ -34251,6 +34371,122 @@ mod tests {
             .exists());
     }
 
+    /// Setting the same folder up again on a new repository mints a new
+    /// replica; the removed registration's detached replica keeps its
+    /// conversation rows. Push refuses only the sessions those rows own,
+    /// writes nothing for them, and publishes the rest.
+    #[test]
+    fn push_skips_sessions_a_removed_registration_owns_and_publishes_the_rest() {
+        let fixture = setup_fixture();
+        let draft = draft_ready_to_finalize(&fixture);
+        let first =
+            finalize_project_setup_with_repository(&fixture.repo, &draft.draft_id, draft.revision)
+                .unwrap();
+        let first_binding = first.binding.clone().expect("initial binding");
+        let first_project_id = first.project.local_project_id.clone();
+        let storage_id = first.links[0].storage_id.clone();
+        let profile_id = first_binding.profile_ids[&codex_key()].clone();
+
+        let owned_thread_id = "019f7500-0000-7000-8000-00000000ab01";
+        let sessions = fixture.codex_home.join("sessions/2026/08/08");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("rollout-{owned_thread_id}.jsonl")),
+            command_test_transcript(
+                owned_thread_id,
+                &fixture.project_dir,
+                &[("message-1", "user", "first")],
+            ),
+        )
+        .unwrap();
+        let initial_push =
+            push_bundle_with_repository(&fixture.repo, &first_project_id, &storage_id).unwrap();
+        assert_eq!(initial_push.revision, Some(2));
+        let owned_rows = fixture.repo.load_conversation_bindings().unwrap();
+        assert_eq!(owned_rows.bindings.len(), 1);
+
+        assert!(remove_local_project_with_repository(&fixture.repo, &first_project_id).unwrap());
+        let created = create_setup_draft_with_repository(
+            &fixture.repo,
+            &fixture.project_dir.to_string_lossy(),
+        )
+        .unwrap();
+        let mut again = created.draft;
+        again.profiles = BTreeMap::from([(
+            codex_key(),
+            DraftProfileSelection::Existing {
+                profile_id: profile_id.clone(),
+            },
+        )]);
+        again.storage = Some(DraftStorageSelection {
+            storage_id: storage_id.clone(),
+        });
+        again.repository = DraftRepositoryChoice::New;
+        let again = update_setup_draft_with_repository(&fixture.repo, again).unwrap();
+        let second =
+            finalize_project_setup_with_repository(&fixture.repo, &again.draft_id, again.revision)
+                .unwrap();
+        let second_binding = second.binding.expect("new binding");
+        let second_project_id = second.project.local_project_id.clone();
+        assert_ne!(second_project_id, first_project_id);
+        assert_ne!(second.project.bundle_id, first.project.bundle_id);
+        assert_ne!(second_binding.replica_id, first_binding.replica_id);
+
+        let fresh_thread_id = "019f7500-0000-7000-8000-00000000ab02";
+        std::fs::write(
+            sessions.join(format!("rollout-{fresh_thread_id}.jsonl")),
+            command_test_transcript(
+                fresh_thread_id,
+                &fixture.project_dir,
+                &[("message-1", "user", "fresh")],
+            ),
+        )
+        .unwrap();
+        let path_origins = fixture.repo.root().join("path_origins");
+        let origins_before = std::fs::read_dir(&path_origins).unwrap().count();
+
+        let result =
+            push_bundle_with_repository(&fixture.repo, &second_project_id, &storage_id).unwrap();
+        // A partial Push reports what it published and what it did not.
+        assert!(!result.success, "{result:?}");
+        assert_eq!(result.message, "Published version 2 — 1 session not pushed");
+        assert_eq!(result.revision, Some(2), "{result:?}");
+        assert_eq!(result.resources_changed, Some(1));
+        let failed = result
+            .results
+            .iter()
+            .filter(|row| row.state == PUSH_RESULT_FAILED)
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 1, "{result:?}");
+        assert_eq!(
+            failed[0].message.as_deref(),
+            Some(PUSH_SESSION_OWNED_BY_REMOVED_REGISTRATION)
+        );
+        assert!(failed[0].resource_id.as_str().contains(owned_thread_id));
+
+        // The fresh session published under the new replica; the owned
+        // session's row is untouched and nothing of it was written.
+        let rows = fixture.repo.load_conversation_bindings().unwrap();
+        assert_eq!(rows.bindings.len(), 2, "{rows:?}");
+        let owned_row = rows
+            .bindings
+            .iter()
+            .find(|row| row.provider_thread_id.as_deref() == Some(owned_thread_id))
+            .expect("owned row kept");
+        assert_eq!(owned_row, &owned_rows.bindings[0]);
+        let fresh_row = rows
+            .bindings
+            .iter()
+            .find(|row| row.provider_thread_id.as_deref() == Some(fresh_thread_id))
+            .expect("fresh row committed");
+        assert_eq!(fresh_row.replica_id, second_binding.replica_id);
+        assert_eq!(fresh_row.local_project_id, second_project_id);
+        assert_eq!(
+            std::fs::read_dir(&path_origins).unwrap().count(),
+            origins_before + 1
+        );
+    }
+
     #[test]
     fn paginated_thread_with_an_empty_leaf_pushes_its_resolved_history() {
         let fixture = setup_fixture();
@@ -35212,9 +35448,18 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("another local project registration"));
         assert!(!error.contains(provider_thread_id));
+        assert!(provider_thread_has_foreign_owner(
+            std::slice::from_ref(&owner),
+            &operation
+        ));
+        assert!(!PUSH_SESSION_OWNED_BY_REMOVED_REGISTRATION.contains(provider_thread_id));
 
         owner.replica_id = operation.replica_id.clone();
         owner.local_project_id = operation.local_project_id.clone();
+        assert!(!provider_thread_has_foreign_owner(
+            std::slice::from_ref(&owner),
+            &operation
+        ));
         assert!(validate_cloud_publication_binding_owners(&[owner], &[operation]).is_ok());
     }
 

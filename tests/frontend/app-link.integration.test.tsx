@@ -424,7 +424,7 @@ const cloudStorage = (id: string, login: string): StorageSummary => ({
   secrets: [{ secret_id: "account_token", present: true }],
 });
 const PROVIDERS = [
-  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, maintenance_actions: [] },
+  { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, has_cli: true, maintenance_actions: [] },
 ] as ProviderDescriptor[];
 
 function newProject(storages: StorageSummary[], initialStorageId: string | null, initialAddress: string | null) {

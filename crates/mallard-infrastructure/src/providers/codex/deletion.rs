@@ -1,18 +1,25 @@
-use std::{path::Path, time::Duration};
+use std::{ffi::OsStr, path::Path, time::Duration};
 
 use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
 
-pub(super) fn delete(home: &Path, thread_id: &str) -> Result<(), String> {
+/// `cli_path` is the Codex executable saved in Settings, if any.
+pub(super) fn delete(home: &Path, thread_id: &str, cli_path: Option<&Path>) -> Result<(), String> {
     super::actions::validate_thread_uuid(thread_id)?;
-    let executable = crate::codex_binary::find_binary("codex")?;
-    delete_with_binary(&executable, home, thread_id)
+    let cli = super::cli::resolve(cli_path)?;
+    delete_with_binary(&cli.executable, Some(&cli.search_path), home, thread_id)
 }
 
-fn delete_with_binary(executable: &Path, home: &Path, thread_id: &str) -> Result<(), String> {
+fn delete_with_binary(
+    executable: &Path,
+    search_path: Option<&OsStr>,
+    home: &Path,
+    thread_id: &str,
+) -> Result<(), String> {
     super::app_server::request(
         executable,
+        search_path,
         home,
         "thread/delete",
         json!({"threadId": thread_id}),
@@ -48,7 +55,7 @@ printf '%s\n' '{"id":2,"error":{"code":-32601,"message":"unsupported"}}'
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let sentinel = temp.path().join("session.jsonl");
         std::fs::write(&sentinel, "keep").unwrap();
-        let error = delete_with_binary(&executable, temp.path(), "selected").unwrap_err();
+        let error = delete_with_binary(&executable, None, temp.path(), "selected").unwrap_err();
         assert!(error.contains("-32601"));
         let requests = std::fs::read_to_string(temp.path().join("requests")).unwrap();
         let methods: Vec<_> = requests
@@ -96,7 +103,7 @@ printf '%s\n' '{"id":2,"error":{"code":-32601,"message":"unsupported"}}'
             }
             std::fs::write(&paths[index], format!("{}\n", json!({"type":"session_meta","timestamp":"2026-09-26T00:00:00Z","payload":payload}))).unwrap();
         }
-        delete(home, ids[1]).unwrap();
+        delete(home, ids[1], None).unwrap();
         assert!(!paths[1].exists(), "selected root remains");
         assert!(!paths[3].exists(), "spawned child remains");
         assert!(paths[0].exists(), "parent was removed");

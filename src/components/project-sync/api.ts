@@ -58,6 +58,7 @@ import type {
   ProjectSessionsDeleteResult,
   ProjectSetupDraft,
   ProjectStorageLink,
+  ProviderCliStatus,
   ProviderDescriptor,
   ProviderKey,
   ProviderProfile,
@@ -215,6 +216,19 @@ export const projectSyncApi = {
 
   updateAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("update_app_settings", { settings }),
+
+  /** What discovery finds for one provider's CLI on this machine. May run
+   *  the user's shell once per app process. */
+  inspectProviderCli: (provider: ProviderKey) =>
+    invoke<ProviderCliStatus>("inspect_provider_cli", { provider }),
+
+  /** `--version` of the resolved CLI, isolated from the user's homes. */
+  testProviderCli: (provider: ProviderKey) =>
+    invoke<string>("test_provider_cli", { provider }),
+
+  /** Forget the probed shell PATH so the next inspection runs the shell again. */
+  refreshCliDetection: () =>
+    invoke<void>("refresh_cli_detection"),
 
   prepareAppUpdate: () =>
     invoke<AppUpdateStatus>("prepare_app_update"),

@@ -146,7 +146,7 @@ test("choosing a folder resumes its draft, opens its project, or starts setup", 
 
 test("New project opens at the Folder field and writes nothing until a folder is chosen", () => {
   const providers = [
-    { key: "codex", display_name: "Codex", display_rank: 0, profile_label: "Codex home", setup_default: true },
+    { key: "codex", display_name: "Codex", display_rank: 0, profile_label: "Codex home", setup_default: true, has_cli: true },
   ] as unknown as ProviderDescriptor[];
   const html = renderToStaticMarkup(
     <NewProjectFolderStep

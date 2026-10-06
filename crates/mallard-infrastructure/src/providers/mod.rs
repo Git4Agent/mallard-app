@@ -23,7 +23,7 @@ pub use traits::{
     DiscoveredSession, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
     SessionAgentStatus, SessionChildIdentity, AGENT_RESOURCE_SEGMENT,
     DiscoveredSidecar, DiscoveredStateFile, MaintenanceActionDescriptor, MaintenanceActionScope,
-    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCliLauncher,
+    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCli,
     ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionKind,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint,
     SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscovery,

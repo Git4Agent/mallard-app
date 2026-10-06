@@ -1503,11 +1503,13 @@ pub fn execute_project_session_action(
     let (provider, _, session) = resolve_action_session(registry, &state, &resolved, resource_id)?;
     let adapter = registry.require(&provider)?;
     let home = &resolved.homes[&provider];
+    let settings = crate::app_settings::load_app_settings(repository)?;
     let mut request = SessionActionRequest {
         action_id,
         provider_home: &home.home,
         project_root: &resolved.project_root,
         provider_session_id: &session.session_id,
+        cli_path: settings.cli_path(&provider),
         before_launch,
     };
     adapter.execute_action(&mut request).map(|_| ())
@@ -1544,29 +1546,26 @@ fn resolve_action_session(
         provider_home: &home.home,
         project_root: &resolved.project_root,
     };
-    let discovery = adapter.discover(&context)?;
-    let mut matched_session = None;
-    for session in discovery.sessions {
-        let matches = match session_for_thread.as_deref() {
-            Some(expected) => expected == session.session_id,
-            None => {
-                resolve_local_provider_alias_thread_from_state(
-                    &state,
-                    &resolved,
-                    &provider,
-                    &session.session_id,
-                    &session.physical_path,
-                )?
-                .as_ref()
-                    == Some(&thread_id)
-            }
-        };
-        if matches {
-            matched_session = Some(session);
-            break;
-        }
-    }
-    let session = matched_session
+    // A bound thread names its provider session outright. An unbound one is
+    // known only through the alias rules, applied to each candidate the
+    // adapter offers; neither test opens a transcript.
+    let session = adapter
+        .locate_session(&context, &mut |session_id, physical_path| {
+            Ok(match session_for_thread.as_deref() {
+                Some(expected) => expected == session_id,
+                None => {
+                    resolve_local_provider_alias_thread_from_state(
+                        state,
+                        resolved,
+                        &provider,
+                        session_id,
+                        physical_path,
+                    )?
+                    .as_ref()
+                        == Some(&thread_id)
+                }
+            })
+        })?
         .ok_or_else(|| "session does not belong to the selected project".to_string())?;
     Ok((provider, thread_id, session))
 }
@@ -1616,6 +1615,7 @@ pub fn delete_local_project_sessions(
                     result.provider_errors.push(format!("{provider}: {error}"));
                 }
             }
+            let settings = crate::app_settings::load_app_settings(repository)?;
             for (provider, home) in &resolved.homes {
                 if !matches!(provider.as_str(), "codex" | "claude") {
                     continue;
@@ -1632,7 +1632,11 @@ pub fn delete_local_project_sessions(
                     Ok((adapter, discovery)) => {
                         result.provider_errors.extend(discovery.warnings);
                         for session in discovery.sessions {
-                            match adapter.delete_session(&home.home, &session) {
+                            match adapter.delete_session(
+                                &home.home,
+                                &session,
+                                settings.cli_path(provider),
+                            ) {
                                 Ok(()) => result.sessions_deleted += 1,
                                 Err(error) => {
                                     result.sessions_failed += 1;
@@ -1680,8 +1684,11 @@ pub fn delete_local_project_session(
             && binding.provider_profile_id == home.profile_id
             && binding.thread_id == thread_id
     });
+    let settings = crate::app_settings::load_app_settings(repository)?;
     let provider_error = match resolve_action_session(registry, &state, &resolved, resource_id) {
-        Ok((_, _, session)) => adapter.delete_session(&home.home, &session).err(),
+        Ok((_, _, session)) => adapter
+            .delete_session(&home.home, &session, settings.cli_path(&provider))
+            .err(),
         // A missing or unreadable provider file must not prevent known binding cleanup.
         Err(error) if bound => Some(error),
         Err(error) => return Err(error),
@@ -2651,7 +2658,7 @@ mod activity_only_tests {
                 profile_label: "Instrumented profile".to_string(),
                 default_profile_directory: None,
                 setup_default: false,
-                cli_launcher: None,
+                has_cli: false,
                 maintenance_actions: Vec::new(),
             }
         }
@@ -2776,6 +2783,111 @@ mod activity_only_tests {
         ) -> Result<SessionActionOutcome, String> {
             Err("instrumented adapter has no actions".to_string())
         }
+    }
+
+    /// A local Codex session with no conversation binding is found by its
+    /// native file name through the alias rules, reading only its own
+    /// rollout head; a thread no rollout claims is refused without a read.
+    #[test]
+    fn action_session_is_located_without_a_binding_from_its_own_rollout_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        fs::create_dir_all(home.join("sessions/2026/09/12")).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        let home = fs::canonicalize(&home).unwrap();
+        let project = fs::canonicalize(&project).unwrap();
+        let day = home.join("sessions/2026/09/12");
+        let wanted = "0193b6c1-5352-7b12-9c6e-000000000001";
+        for id in [wanted, "0193b6c1-5352-7b12-9c6e-000000000002"] {
+            let header = serde_json::json!({
+                "type": "session_meta", "payload": {"id": id, "cwd": project}
+            });
+            let message = serde_json::json!({
+                "type": "event_msg", "payload": {"type": "user_message", "message": "Hello"}
+            });
+            fs::write(
+                day.join(format!("rollout-2026-09-12T01-03-07-{id}.jsonl")),
+                format!("{header}\n{message}\n"),
+            )
+            .unwrap();
+        }
+
+        let (mut resolved, provider, profile_id) = alias_test_context();
+        resolved.project_root = project.clone();
+        resolved.binding.project_root = project.to_string_lossy().into_owned();
+        resolved.binding.canonical_project_root = project.to_string_lossy().into_owned();
+        resolved.homes.insert(
+            provider.clone(),
+            ResolvedProviderHome {
+                profile_id: profile_id.clone(),
+                home: home.clone(),
+            },
+        );
+        let state = crate::persistence::LocalProjectActivityStateSnapshot {
+            host_identity: mallard_domain::HostIdentity {
+                schema: mallard_domain::HOST_IDENTITY_SCHEMA,
+                revision: 0,
+                host_id: resolved.binding.host_id.clone(),
+                local_display_name: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+            config: SyncConfig::default(),
+            bindings: mallard_domain::MachineProjectState {
+                schema: mallard_domain::MACHINE_PROJECT_SCHEMA,
+                revision: 0,
+                profiles: vec![ProviderProfile {
+                    profile_id: profile_id.clone(),
+                    provider: provider.clone(),
+                    display_name: "Codex".to_string(),
+                    path: home.to_string_lossy().into_owned(),
+                    canonical_path: home.to_string_lossy().into_owned(),
+                    provider_config: mallard_domain::AgentProviderConfig::version_1(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                }],
+                bindings: vec![resolved.binding.clone()],
+            },
+            conversation_bindings: ConversationBindings::empty(resolved.binding.host_id.clone()),
+            materializations: Materializations::default(),
+        };
+        let registry = AgentProviderRegistry::from_adapters(vec![Arc::new(
+            crate::providers::codex::CodexAdapter::new(),
+        )])
+        .unwrap();
+        let resource = |provider_thread_id: &str| {
+            let thread_id =
+                initial_conversation_thread_id(&resolved.bundle_id, &provider, provider_thread_id)
+                    .unwrap();
+            (
+                format!("codex:conversation:{}", thread_id.as_str()),
+                thread_id,
+            )
+        };
+        let metrics = crate::sync_metrics::register_root(&home);
+
+        let (resource_id, thread_id) = resource(wanted);
+        let before = metrics.snapshot();
+        let (found_provider, found_thread, session) =
+            resolve_action_session(&registry, &state, &resolved, &resource_id).unwrap();
+        assert_eq!(found_provider, provider);
+        assert_eq!(found_thread, thread_id);
+        assert_eq!(session.session_id, wanted);
+        assert_eq!(
+            session.physical_path,
+            day.join(format!("rollout-2026-09-12T01-03-07-{wanted}.jsonl"))
+        );
+        assert_eq!(metrics.snapshot().delta_since(&before).files_head_read, 1);
+
+        let (resource_id, _) = resource("0193b6c1-5352-7b12-9c6e-000000000009");
+        let before = metrics.snapshot();
+        assert_eq!(
+            resolve_action_session(&registry, &state, &resolved, &resource_id).unwrap_err(),
+            "session does not belong to the selected project"
+        );
+        assert_eq!(metrics.snapshot().delta_since(&before).files_head_read, 0);
     }
 
     fn alias_test_context() -> (ResolvedActivityProject, ProviderKey, LocalProviderProfileId) {

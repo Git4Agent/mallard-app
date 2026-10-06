@@ -113,7 +113,10 @@ The fastest path is the packaged macOS DMG (Apple Silicon or Intel) from the
 [latest release](https://github.com/Git4Agent/mallard-app/releases/latest).
 The app is Developer ID signed and notarized, so it opens without a security
 override. The first **Open in Terminal** or Codex App refresh asks for
-Automation permission; allow it. Mallard downloads newer releases in the
+Automation permission; allow it. Mallard finds the Codex and Claude CLIs the
+way your terminal does, including the `PATH` your shell sets; if a machine
+keeps one somewhere else, pick the executable under Settings › Agent CLIs,
+where **Test** runs its `--version`. Mallard downloads newer releases in the
 background; **Update** in the sidebar's version mark restarts into one, and
 quitting installs it for the next launch. **Automatic updates** can be
 turned off under Settings › Privacy, where **Check for updates** always

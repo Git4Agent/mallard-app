@@ -331,8 +331,8 @@ mockIPC(async (command, payload) => {
     case "list_catalog_capabilities":
     case "list_catalog_resource_profiles": return [];
     case "list_agent_providers": return [
-      { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, maintenance_actions: [] },
-      { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, maintenance_actions: [] },
+      { key: "codex", display_name: "Codex", display_rank: 10, profile_label: "Codex home", setup_default: true, has_cli: true, maintenance_actions: [] },
+      { key: "claude", display_name: "Claude", display_rank: 20, profile_label: "Claude config", setup_default: true, has_cli: true, maintenance_actions: [] },
     ];
     case "list_provider_profiles": return (["codex", "claude"] as const).map((provider) => ({
       profile_id: `p-${provider}`, provider, display_name: `~/.${provider}`, path: `${HOME}/.${provider}`, canonical_path: `${HOME}/.${provider}`,

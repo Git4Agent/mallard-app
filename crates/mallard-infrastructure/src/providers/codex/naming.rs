@@ -1,17 +1,31 @@
 //! Native presentation updates. Call only after the reviewed Pull commits.
 
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::{ffi::OsStr, path::Path, time::Duration};
 
-pub fn rename(home: &Path, thread_id: &str, title: &str) -> Result<(), String> {
+/// `cli_path` is the Codex executable saved in Settings, if any.
+pub fn rename(
+    home: &Path,
+    thread_id: &str,
+    title: &str,
+    cli_path: Option<&Path>,
+) -> Result<(), String> {
     super::actions::validate_thread_uuid(thread_id)?;
     mallard_domain::validate_title("Codex thread name", title)?;
-    let executable = crate::codex_binary::find_binary("codex")?;
-    rename_with_binary(&executable, home, thread_id, title, Duration::from_secs(5))
+    let cli = super::cli::resolve(cli_path)?;
+    rename_with_binary(
+        &cli.executable,
+        Some(&cli.search_path),
+        home,
+        thread_id,
+        title,
+        Duration::from_secs(5),
+    )
 }
 
 fn rename_with_binary(
     executable: &Path,
+    search_path: Option<&OsStr>,
     home: &Path,
     thread_id: &str,
     title: &str,
@@ -19,6 +33,7 @@ fn rename_with_binary(
 ) -> Result<(), String> {
     super::app_server::request(
         executable,
+        search_path,
         home,
         "thread/name/set",
         json!({"threadId": thread_id, "name": title}),
@@ -67,7 +82,7 @@ printf '%s\n' "$rename" >> requests
             "printf '%s\\n' '{\"method\":\"thread/name/updated\"}' '{\"id\":2,\"result\":{}}'",
         );
         let title = "Title \"quoted\" (Preserved 1 · device)";
-        rename_with_binary(&binary, &home, ID, title, Duration::from_secs(2)).unwrap();
+        rename_with_binary(&binary, None, &home, ID, title, Duration::from_secs(2)).unwrap();
         let requests = fs::read_to_string(home.join("requests")).unwrap();
         let rows: Vec<Value> = requests
             .lines()
@@ -101,7 +116,7 @@ printf '%s\n' "$rename" >> requests
             let home = temp.path().canonicalize().unwrap();
             fs::write(home.join("session.jsonl"), "unchanged").unwrap();
             let binary = fake(&home, response);
-            let error = rename_with_binary(&binary, &home, ID, "New", timeout).unwrap_err();
+            let error = rename_with_binary(&binary, None, &home, ID, "New", timeout).unwrap_err();
             assert!(error.contains(expected), "{case}: expected {expected:?}, got {error}");
             assert!(!error.contains("private"));
             assert_eq!(fs::read_to_string(home.join("requests")).unwrap().lines().count(), 3);
@@ -111,14 +126,15 @@ printf '%s\n' "$rename" >> requests
 
     #[test]
     fn rename_rejects_invalid_identity_and_title_before_launch() {
-        assert!(rename(Path::new("/missing"), "not-a-uuid", "Title").is_err());
-        assert!(rename(Path::new("/missing"), ID, "").is_err());
+        assert!(rename(Path::new("/missing"), "not-a-uuid", "Title", None).is_err());
+        assert!(rename(Path::new("/missing"), ID, "", None).is_err());
     }
 
     #[test]
     #[ignore = "requires an installed Codex CLI; temporary homes only"]
     fn native_rename_preserves_transcripts_and_updates_both_names() {
-        let executable = crate::codex_binary::find_binary("codex").unwrap();
+        let cli = super::super::cli::resolve(None).unwrap();
+        let executable = cli.executable.clone();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         let sessions = home.join("sessions/2026/09/30");
@@ -134,10 +150,19 @@ printf '%s\n' "$rename" >> requests
                 json!({"type":"response_item","timestamp":"2026-09-30T00:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fixture initial prompt"}]}})
             );
             fs::write(&path, &bytes).unwrap();
-            rename_with_binary(&executable, &home, id, title, Duration::from_secs(5)).unwrap();
+            rename_with_binary(
+                &executable,
+                Some(&cli.search_path),
+                &home,
+                id,
+                title,
+                Duration::from_secs(5),
+            )
+            .unwrap();
             // A new app-server process must see the persisted name.
             let read = super::super::app_server::request(
                 &executable,
+                Some(&cli.search_path),
                 &home,
                 "thread/read",
                 json!({"threadId":id,"includeTurns":false}),
