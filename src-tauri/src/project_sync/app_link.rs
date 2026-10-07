@@ -357,6 +357,27 @@ mod tests {
     };
 
     #[test]
+    fn a_name_of_any_script_reads_the_same_raw_and_encoded() {
+        // The website encodes the name in its href, and the browser encodes
+        // the whole page address once more into the link; a pasted raw
+        // spelling reads the same.
+        for link in [
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2F%25E5%25A4%25A7%25E9%25BB%2584",
+            "mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2F大黄%2F",
+            "mallard://open?address=https://mallard-ai.com/Rika321/%E5%A4%A7%E9%BB%84/release?commit=1",
+        ] {
+            assert_eq!(
+                read_link(link),
+                AppLinkArrival::Repository {
+                    host: "mallard-ai.com".into(),
+                    address: "Rika321/大黄".into()
+                },
+                "{link}"
+            );
+        }
+    }
+
+    #[test]
     fn a_link_is_read_once_and_the_newest_waits() {
         assert_eq!(
             read_link("mallard://open?address=https%3A%2F%2Fmallard-ai.com%2FRika321%2FHorrorGame%2Frelease%3Fcommit%3D1"),

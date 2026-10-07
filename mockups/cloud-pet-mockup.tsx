@@ -14,6 +14,13 @@ import { ModeDoor } from "../src/components/project-sync/StorageSettings";
 import { buildPullOutcome, buildPushOutcome, projectOutcomeAction, type SyncOutcome } from "../src/components/project-sync/syncOutcome";
 import type { PullReviewItem } from "../src/components/project-sync/pullReviewModel";
 import { predictRepositoryAddress } from "../src/components/managed-cloud/repositoryAddress";
+
+/** The specimen's names all derive an address; a refusal here is a wrong fixture. */
+function predicted(name: string, owned: ReadonlyArray<{ owner_login: string; name: string }> = []) {
+  const prediction = predictRepositoryAddress(LOGIN, name, owned);
+  if (prediction.kind !== "address") throw new Error(`no address for ${name}`);
+  return prediction;
+}
 import { formatRelativeTime } from "../src/clock";
 import StorageCatalogPage, { type CatalogStorageOption } from "../src/components/storage-catalog/StorageCatalogPage";
 import AddCatalogScopeWorkspace, { type CatalogCloudLanding } from "../src/components/storage-catalog/AddCatalogScopeWorkspace";
@@ -364,7 +371,7 @@ function pushDestination(id: ItemId, view: View): Readout | undefined {
   if (view.storage !== "cloud") return undefined;
   const of = statusOf(id, view)?.link;
   if (of) return { address: `${of.owner_login}/${of.name}`, tooltip: `Pushes to ${of.owner_login}/${of.name}` };
-  const address = predictRepositoryAddress(LOGIN, ITEMS[id].name, []).address;
+  const address = predicted(ITEMS[id].name).address;
   return { address, tooltip: `This Push creates ${address}, private to you and your collaborators.`, created: true };
 }
 function pullSource(id: ItemId, view: View): Readout | undefined {
@@ -432,7 +439,7 @@ function actionChipLabel(label: string, noun: string): string {
    reads "kept independently", and a success folds itself. Any other storage
    keeps today's Catalog card. */
 const pushedAddress = (id: ItemId, view: View) => (view.lastPushCreated.includes(id)
-  ? predictRepositoryAddress(LOGIN, ITEMS[id].name, []).address
+  ? predicted(ITEMS[id].name).address
   : pushDestination(id, view)?.address);
 
 function pushOutcomeView(view: View, single: boolean): SyncOutcomeView {
@@ -785,7 +792,7 @@ storageCatalogApi.preparePush = async (scopeId, storageId) => {
       const status = known[id] ? repositoryStatus(id, known[id]) : null;
       return [id, status?.link
         ? { repository_id: known[id], address: `${status.link.owner_login}/${status.link.name}`, create: false }
-        : { repository_id: null, address: predictRepositoryAddress(LOGIN, row.display_name, []).address, create: true }];
+        : { repository_id: null, address: predicted(row.display_name).address, create: true }];
     })) : undefined,
     rows: rows.map((row) => ({ row: {
       ...COORDINATES[kind], resource_id: row.resource_id!, display_name: row.display_name,
@@ -1348,7 +1355,7 @@ const CHIP_ACTIONS = {
  *  the section steps aside and the repository lives in the bar's Cloud chip,
  *  as a linked project's does. */
 function RepositoryCard({ it, onChoose }: { it: Item; onChoose: () => void }) {
-  const prediction = predictRepositoryAddress(LOGIN, it.name, []);
+  const prediction = predicted(it.name);
   return (
     <>
       <div className="sync-history-section-heading">
@@ -1846,7 +1853,7 @@ function useRepositoryChoice(reason: ChooseReason, view: View, preset: ConnectPr
   const [joinError, setJoinError] = useState<string | null>(preset?.joinError ?? null);
   const [selection, setSelection] = useState<"new" | string | null>(preset?.selection !== undefined ? preset.selection : offerNew ? "new" : null);
   const owned = listing.map((row) => ({ owner_login: row.owner, name: row.name }));
-  const prediction = predictRepositoryAddress(LOGIN, subjectName, preset?.taken ? [...owned, { owner_login: LOGIN, name: subjectName }] : owned);
+  const prediction = predicted(subjectName, preset?.taken ? [...owned, { owner_login: LOGIN, name: subjectName }] : owned);
 
   const answer = (typed: string): Lookup => {
     const text = typed.trim().replace(/^https?:\/\//i, "");

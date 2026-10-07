@@ -1,8 +1,12 @@
 //! A Mallard Cloud repository address as a person pastes it: the page
 //! address from the website (`https://mallard-ai.com/Rika321/HorrorGame`,
 //! with or without the scheme, with or without a `/sessions/…` tail), or
-//! the bare `owner/name`. The storage's own origin is the only host
-//! accepted, so a staging address never reaches the production service.
+//! the bare `owner/name`. A name is any script, spelled raw
+//! (`Rika321/大黄`) or percent-encoded (`Rika321/%E5%A4%A7%E9%BB%84`, what a
+//! browser hands an app link): both read the same. The storage's own origin
+//! is the only host accepted, so a staging address never reaches the
+//! production service.
+use super::names;
 use mallard_domain::{parse_cloud_conversation_resource_id, CloudThreadId, ProviderKey};
 use std::fmt;
 
@@ -51,17 +55,6 @@ fn login_shaped(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// GitHub's repository character set, as the service's `isRepositoryName`.
-fn name_shaped(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 100
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
 /// The host (with its port when the origin carries one) an address must
@@ -203,24 +196,28 @@ pub fn parse_session_page_address(
     Ok((host, address, session))
 }
 
-/// `{owner}/{name}` at the head of a page's path.
+/// `{owner}/{name}` at the head of a page's path. Each segment is
+/// percent-decoded on its own and the name read in NFC, so the raw and the
+/// encoded spelling are one address; a segment that decodes to something
+/// outside the rule (`/`, `%`, a space, a control) is not a name.
 fn repository_in(path: &str) -> Result<RepositoryAddress, AddressError> {
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
     let (Some(owner), Some(name)) = (segments.next(), segments.next()) else {
         return Err(AddressError::Invalid);
     };
-    if !login_shaped(owner)
-        || !name_shaped(name)
+    let (Some(owner), Some(name)) = (names::decode_segment(owner), names::decode_segment(name))
+    else {
+        return Err(AddressError::Invalid);
+    };
+    if !login_shaped(&owner)
+        || !names::is_repository_name(&name)
         || RESERVED_OWNERS
             .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(owner))
+            .any(|reserved| reserved.eq_ignore_ascii_case(&owner))
     {
         return Err(AddressError::Invalid);
     }
-    Ok(RepositoryAddress {
-        owner: owner.to_owned(),
-        name: name.to_owned(),
-    })
+    Ok(RepositoryAddress { owner, name })
 }
 
 #[cfg(test)]
@@ -268,6 +265,60 @@ mod tests {
             parse_repository_address("localhost:8787/octocat/x_y-z", "http://localhost:8787"),
             address("octocat", "x_y-z")
         );
+    }
+
+    #[test]
+    fn a_name_of_any_script_reads_the_same_raw_and_encoded() {
+        for input in [
+            "Rika321/大黄",
+            "Rika321/%E5%A4%A7%E9%BB%84",
+            "mallard-ai.com/Rika321/大黄/",
+            "https://www.mallard-ai.com/Rika321/%E5%A4%A7%E9%BB%84/sessions/x?commit=1",
+            "https://mallard-ai.com/Rika321/%E5%A4%A7%E9%BB%84",
+            "/Rika321/大黄/",
+        ] {
+            assert_eq!(
+                parse_repository_address(input, ORIGIN),
+                address("Rika321", "大黄"),
+                "{input}"
+            );
+        }
+        // A decomposed spelling reads in NFC; an encoded login is a login.
+        assert_eq!(
+            parse_repository_address("Rika321/Cafe%CC%81", ORIGIN),
+            address("Rika321", "Caf\u{e9}")
+        );
+        assert_eq!(
+            parse_repository_address("%52ika321/Caf\u{e9}", ORIGIN),
+            address("Rika321", "Caf\u{e9}")
+        );
+        assert_eq!(
+            parse_page_address("https://mallard-ai.com/Rika321/%E5%A4%A7%E9%BB%84/"),
+            Ok((
+                "mallard-ai.com".into(),
+                RepositoryAddress {
+                    owner: "Rika321".into(),
+                    name: "大黄".into()
+                }
+            ))
+        );
+        // What decodes to something outside the rule is not an address.
+        for input in [
+            "Rika321/%E5%A4%A7%20%E9%BB%84",
+            "Rika321/%E5%A4%A7%2F%E9%BB%84",
+            "Rika321/%25",
+            "Rika321/%FF",
+            "Rika321/%F0%9F%A6%86",
+            "Rika321/%CC%81a",
+            "%E5%A4%A7/HorrorGame",
+            "Rika321/大 黄",
+        ] {
+            assert_eq!(
+                parse_repository_address(input, ORIGIN),
+                Err(AddressError::Invalid),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]

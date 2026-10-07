@@ -206,7 +206,7 @@ fn expectation_matches(
     }
 }
 
-fn journal_upsert(
+pub(super) fn journal_upsert(
     repository: &CatalogStateRepository,
     entry: CatalogOperationJournalEntry,
 ) -> Result<(), String> {
@@ -219,7 +219,7 @@ fn journal_upsert(
     })
 }
 
-fn journal_phase(
+pub(super) fn journal_phase(
     repository: &CatalogStateRepository,
     operation_id: &CatalogOperationId,
     phase: CatalogOperationPhase,
@@ -245,7 +245,7 @@ fn journal_phase(
 
 /// A journal entry with every optional field empty; callers fill what their
 /// operation pins.
-fn journal_entry(
+pub(super) fn journal_entry(
     operation_id: CatalogOperationId,
     kind: CatalogOperationKind,
     coordinate: CatalogCoordinate,
@@ -1473,6 +1473,29 @@ pub fn recover_catalog_operations(
             continue;
         }
         match entry.kind {
+            CatalogOperationKind::LocalRemoval => {
+                let identity = entry.target.decode()?;
+                let Some(_lock) =
+                    repository.try_acquire_target_lock(Path::new(&identity.canonical_root))?
+                else {
+                    continue;
+                };
+                // Never continue destructive work after restart. A new review is required.
+                journal_phase(
+                    repository,
+                    &entry.operation_id,
+                    CatalogOperationPhase::Failed,
+                    Some(CatalogActionOutcome::Partial),
+                    Some(
+                        "Local removal was interrupted. Refresh and review the remaining content."
+                            .to_string(),
+                    ),
+                    now,
+                )?;
+                messages.push(
+                    "Local removal was interrupted. Some local content may remain.".to_string(),
+                );
+            }
             CatalogOperationKind::NativeApply => {
                 // Never replay stale native arguments; fresh inventory decides.
                 journal_phase(

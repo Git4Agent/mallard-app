@@ -1,0 +1,115 @@
+import { memo, useMemo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import type { PluggableList } from "unified";
+import "katex/dist/katex.min.css";
+import Icon from "../Icons";
+import { makeMermaidPre } from "../mermaid/MermaidFlowchart";
+import { remarkMermaidFences } from "../mermaid/remarkMermaidFences";
+import { writeClipboardText } from "../sync-review/clipboard";
+import { isSafeExternalMarkdownUrl, safeMarkdownUrl } from "./markdownUrl";
+import { remarkLatexMath } from "./remarkLatexMath";
+
+/**
+ * The app's one Markdown renderer: GitHub-flavoured Markdown, math, and
+ * Mermaid flowcharts, with raw HTML skipped and every destination passed
+ * through `safeMarkdownUrl`. A page styles it with `.markdown-copy` and may
+ * replace how images and links render; by default an image is a chip that is
+ * never fetched, and a link opens outside the app only when it is http(s) or
+ * mailto and the page says how.
+ */
+
+/** Alt text (or the path) inside a bordered chip: the still-loading and
+ * cannot-embed states share one calm shape instead of the webview's
+ * broken-image glyph. */
+export function MarkdownImagePlaceholder({
+  label,
+  detail,
+  loading,
+}: {
+  label: string;
+  detail?: string;
+  loading?: boolean;
+}) {
+  /* A tint is not a text alternative, and a tooltip on a non-interactive span
+     is not keyboard-reachable. Print the state as a word and repeat it in the
+     accessible name because `role="img"` replaces the subtree. */
+  const state = loading ? "loading…" : "not shown";
+  const accessibleName = detail
+    ? `${label} — image ${state}. ${detail}`
+    : `${label} — image ${state}`;
+  return (
+    <span
+      className={`markdown-image-placeholder${loading ? " is-loading" : ""}`}
+      role="img"
+      aria-label={accessibleName}
+      {...(detail ? { title: detail } : {})}
+    >
+      <Icon name="file" size={12} />
+      <span className="markdown-image-placeholder-label">{label}</span>
+      <span className="markdown-image-placeholder-state">{state}</span>
+    </span>
+  );
+}
+
+/* A fresh array literal every render is a changed prop to ReactMarkdown, so
+   these live at module scope. */
+const REMARK_PLUGINS = [remarkGfm, remarkMermaidFences, remarkMath, remarkLatexMath];
+const REHYPE_PLUGINS: PluggableList = [[rehypeKatex, {
+  trust: false,
+  maxExpand: 1000,
+  maxSize: 25,
+}]];
+
+/* Parsing is the most expensive thing a Markdown page does, and its page
+   re-renders for reasons that never change the text. Memoized on its own
+   inputs, each body is parsed once; a caller keeps `components` stable. */
+const MarkdownText = memo(function MarkdownText({
+  text,
+  components,
+  onOpenExternal,
+}: {
+  text: string;
+  /** Replaces the default renderers by tag, e.g. a page's own `img` or `a`. */
+  components?: Components;
+  /** Opens an http(s) or mailto link outside the app; without it a link is text. */
+  onOpenExternal?: (url: string) => void;
+}) {
+  const merged = useMemo<Components>(() => ({
+    pre: makeMermaidPre(writeClipboardText),
+    img: ({ alt }) => <MarkdownImagePlaceholder label={alt || "image"} />,
+    a: ({ href, children, ...props }) => {
+      const safeHref = href ? safeMarkdownUrl(href) : "";
+      if (!onOpenExternal || !isSafeExternalMarkdownUrl(safeHref)) return <span>{children}</span>;
+      return (
+        <a
+          {...props}
+          href={safeHref}
+          rel="noopener noreferrer"
+          onClick={(event) => {
+            event.preventDefault();
+            onOpenExternal(safeHref);
+          }}
+        >
+          {children}
+        </a>
+      );
+    },
+    ...components,
+  }), [components, onOpenExternal]);
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      skipHtml
+      urlTransform={safeMarkdownUrl}
+      components={merged}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+export default MarkdownText;

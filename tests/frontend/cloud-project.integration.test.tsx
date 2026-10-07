@@ -69,6 +69,7 @@ const repository = (overrides: Partial<ManagedCloudRepository> = {}): ManagedClo
   owner_login: "maya",
   name: "portal",
   address: "maya/portal",
+  display_name: overrides.name ?? "portal",
   website_url: "https://mallard-ai.com/maya/portal",
   bundle_id: "b".repeat(32),
   repository_class: "git_project",

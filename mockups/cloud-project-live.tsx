@@ -54,7 +54,7 @@ const STORAGES: StorageSummary[] = knob("accounts", "several") === "none"
 
 const now = Math.floor(Date.now() / 1000);
 const repo = (overrides: Partial<ManagedCloudRepository>): ManagedCloudRepository => ({
-  repository_id: "repo_portal", owner_login: "maya", name: "portal", address: "maya/portal", description: null, star_count: 0, viewer_starred: false,
+  repository_id: "repo_portal", owner_login: "maya", name: "portal", address: "maya/portal", display_name: overrides.name ?? "portal", description: null, star_count: 0, viewer_starred: false,
   website_url: "https://mallard-ai.com/maya/portal", bundle_id: "b".repeat(32), repository_class: "git_project",
   visibility: "private", role: "member", can_push: true, repository_fingerprint: "f".repeat(64), git_remote: "differs",
   github_url: "https://github.com/acme/portal", revision: 12, updated_at: now - 7_200, resources: 9, registration_only: false,
@@ -95,7 +95,7 @@ projectSyncApi.listManagedCloudRepositories = async (storageId) => {
   return storageId === "storage-work" ? REPOS : [];
 };
 const listed = (overrides: Partial<ManagedCloudListingRow>): ManagedCloudListingRow => ({
-  repository_id: "repo_agent_kit", owner_login: "lin", name: "agent-kit", address: "lin/agent-kit",
+  repository_id: "repo_agent_kit", owner_login: "lin", name: "agent-kit", address: "lin/agent-kit", display_name: overrides.name ?? "agent-kit",
   website_url: "https://mallard-ai.com/lin/agent-kit", repository_class: "git_project", catalog: null, visibility: "public",
   role: null, github_url: "https://github.com/lin/agent-kit", description: "Sessions from building a small agent harness.",
   star_count: 48, viewer_starred: true, revision: 22, updated_at: now - 2 * 86_400, ...overrides,

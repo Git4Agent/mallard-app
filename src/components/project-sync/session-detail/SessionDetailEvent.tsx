@@ -1,13 +1,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import { makeMermaidPre } from "../../mermaid/MermaidFlowchart";
-import { remarkMermaidFences } from "../../mermaid/remarkMermaidFences";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import type { PluggableList } from "unified";
-import { remarkLatexMath } from "./remarkLatexMath";
-import "katex/dist/katex.min.css";
+import type { Components } from "react-markdown";
+import MarkdownText, { MarkdownImagePlaceholder } from "../../markdown/MarkdownText";
+import { isSafeExternalMarkdownUrl, safeMarkdownUrl, safeRelativeMarkdownPath } from "../../markdown/markdownUrl";
 import type { SessionAgentPreview, SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
@@ -25,11 +19,8 @@ import {
   formatSessionCount,
   formatSessionDetailClock,
   formatSessionDuration,
-  isSafeExternalMarkdownUrl,
   projectMarkdownDisplayPath,
   type ProjectMarkdownImageState,
-  safeMarkdownUrl,
-  safeProjectMarkdownPath,
   SESSION_AGENT_STATUS_LABELS,
   SESSION_EVENT_KIND_LABELS,
   sessionDetailDateTime,
@@ -52,39 +43,6 @@ interface Props {
   repositoryUrl?: string | null;
   /** Opens another session page — an agent's transcript — in this workspace. */
   onOpenSession?: (resourceId: string) => void;
-}
-
-/** Alt text (or the path) inside a bordered chip: the still-loading and
- * cannot-embed states share one calm shape instead of the webview's
- * broken-image glyph. */
-function MarkdownImagePlaceholder({
-  label,
-  detail,
-  loading,
-}: {
-  label: string;
-  detail?: string;
-  loading?: boolean;
-}) {
-  /* A tint is not a text alternative, and a tooltip on a non-interactive span
-     is not keyboard-reachable. Print the state as a word and repeat it in the
-     accessible name because `role="img"` replaces the subtree. */
-  const state = loading ? "loading…" : "not shown";
-  const accessibleName = detail
-    ? `${label} — image ${state}. ${detail}`
-    : `${label} — image ${state}`;
-  return (
-    <span
-      className={`session-detail-image-placeholder${loading ? " is-loading" : ""}`}
-      role="img"
-      aria-label={accessibleName}
-      {...(detail ? { title: detail } : {})}
-    >
-      <Icon name="file" size={12} />
-      <span className="session-detail-image-placeholder-label">{label}</span>
-      <span className="session-detail-image-placeholder-state">{state}</span>
-    </span>
-  );
 }
 
 /** Requests one validated in-project image on mount, rendering the loading
@@ -113,15 +71,6 @@ function ProjectMarkdownImage({
   return <MarkdownImagePlaceholder label={alt || relativePath} loading />;
 }
 
-/* A fresh array literal every render is a changed prop to ReactMarkdown, so
-   this lives at module scope. */
-const REMARK_PLUGINS = [remarkGfm, remarkMermaidFences, remarkMath, remarkLatexMath];
-const REHYPE_PLUGINS: PluggableList = [[rehypeKatex, {
-  trust: false,
-  maxExpand: 1000,
-  maxSize: 25,
-}]];
-
 /* Parsing a markdown body is the most expensive thing this page does, and the
    page re-renders whenever any tool call expands or a tool detail resolves —
    none of which changes any body's text. Memoized on its own inputs, each body
@@ -140,7 +89,6 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   projectRoot?: string;
 }) {
   const components = useMemo<Components>(() => ({
-        pre: makeMermaidPre(writeClipboardText),
         img: ({ src, alt }) => {
           const url = typeof src === "string" ? src : "";
           const label = alt ?? "";
@@ -159,7 +107,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
           // project root, served through the bounded validated command.
           // Absolute paths, traversal, and foreign schemes arrive here as
           // "" from the shared urlTransform and fall to the plain chip.
-          const projectPath = url ? safeProjectMarkdownPath(url) : null;
+          const projectPath = url ? safeRelativeMarkdownPath(url) : null;
           if (!projectPath || !onLoadProjectImage) {
             return (
               <MarkdownImagePlaceholder
@@ -183,7 +131,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
           const safeHref = href ? safeMarkdownUrl(href) : "";
           if (!safeHref) return <span>{children}</span>;
           const external = isSafeExternalMarkdownUrl(safeHref);
-          const projectPath = safeProjectMarkdownPath(safeHref);
+          const projectPath = safeRelativeMarkdownPath(safeHref);
           if (projectPath && !onOpenProjectPath) return <span>{children}</span>;
           const displayPath = projectPath
             ? projectMarkdownDisplayPath(projectRoot, projectPath)
@@ -223,15 +171,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   }), [onOpenProjectPath, projectImages, onLoadProjectImage, projectRoot]);
 
   return (
-    <ReactMarkdown
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={REHYPE_PLUGINS}
-      skipHtml
-      urlTransform={safeMarkdownUrl}
-      components={components}
-    >
-      {text}
-    </ReactMarkdown>
+    <MarkdownText text={text} components={components} />
   );
 });
 
@@ -475,7 +415,7 @@ function PromptCard({
           )}
         </div>
       )}
-      <div className="session-detail-event-copy">
+      <div className="session-detail-event-copy markdown-copy">
         {event.text ? (
           <SessionDetailMarkdown
             text={event.text}
@@ -514,7 +454,7 @@ function ReplyCard({
           <time dateTime={sessionDetailDateTime(event.timestamp)}>{clock}</time>
         </div>
       )}
-      <div className="session-detail-event-copy">
+      <div className="session-detail-event-copy markdown-copy">
         {event.text ? (
           <SessionDetailMarkdown
             text={event.text}
@@ -655,7 +595,7 @@ export default function SessionDetailEvent({
             projectRoot={projectRoot}
           />
         ) : (
-          <div className="session-detail-event-copy session-detail-intermediate-prose">
+          <div className="session-detail-event-copy markdown-copy session-detail-intermediate-prose">
             {event.text ? (
               <SessionDetailMarkdown
                 text={event.text}

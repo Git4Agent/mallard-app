@@ -1875,6 +1875,10 @@ export interface ManagedCloudRepository {
   name: string;
   /** `{owner_login}/{name}` in the service's spelling. */
   address: string;
+  /** What a row prints: the display name of the head the account may read
+   *  (the project's title as it was pushed), else the address segment. */
+  display_name: string;
+  /** The repository's page on the website, the name percent-encoded. */
   website_url: string;
   bundle_id: string | null;
   repository_class: string;

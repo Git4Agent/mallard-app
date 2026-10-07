@@ -311,6 +311,14 @@ pub trait CatalogProviderAdapter: Send + Sync {
         inventory: &ProviderInventory,
     ) -> Result<Option<String>, String>;
 
+    /// A provider-owned uninstall. Unknown adapters refuse rather than guess syntax.
+    fn plan_native_remove(
+        &self,
+        _envelope: &CatalogResourceEnvelope,
+    ) -> Result<Vec<String>, String> {
+        Err("this provider does not support plugin removal".to_string())
+    }
+
     /// Plan the exact native operation for one approved stored resource.
     /// Fails through a typed blocker when the native contract cannot express
     /// the intent or the resource restores manually.
@@ -566,6 +574,19 @@ impl CatalogProviderAdapter for CodexCatalogAdapter {
         inventory: &ProviderInventory,
     ) -> Result<Option<String>, String> {
         native_state_for(&codex::provider_key(), envelope, inventory, |_| true)
+    }
+
+    // Verified with isolated CLI help: Codex 0.156.0 / Claude plugin uninstall.
+    fn plan_native_remove(
+        &self,
+        envelope: &CatalogResourceEnvelope,
+    ) -> Result<Vec<String>, String> {
+        let intent = PluginInstallIntent::decode(envelope)?;
+        Ok(vec![
+            "plugin".to_string(),
+            "remove".to_string(),
+            intent.identity.plugin_id,
+        ])
     }
 
     fn plan_native_apply(
@@ -825,6 +846,20 @@ impl CatalogProviderAdapter for ClaudeCatalogAdapter {
         )
     }
 
+    fn plan_native_remove(
+        &self,
+        envelope: &CatalogResourceEnvelope,
+    ) -> Result<Vec<String>, String> {
+        let intent = PluginInstallIntent::decode(envelope)?;
+        Ok(vec![
+            "plugin".to_string(),
+            "uninstall".to_string(),
+            intent.identity.plugin_id,
+            "--scope".to_string(),
+            "user".to_string(),
+        ])
+    }
+
     fn plan_native_apply(
         &self,
         envelope: &CatalogResourceEnvelope,
@@ -917,6 +952,22 @@ mod tests {
         }
         .envelope(&ProviderKey::parse(provider).unwrap())
         .unwrap()
+    }
+
+    #[test]
+    fn removal_uses_provider_uninstall_and_pins_claude_user_scope() {
+        assert_eq!(
+            CodexCatalogAdapter
+                .plan_native_remove(&intent("codex", None))
+                .unwrap(),
+            vec!["plugin", "remove", "tools@acme"]
+        );
+        assert_eq!(
+            ClaudeCatalogAdapter
+                .plan_native_remove(&intent("claude", None))
+                .unwrap(),
+            vec!["plugin", "uninstall", "tools@acme", "--scope", "user"]
+        );
     }
 
     #[test]

@@ -382,6 +382,10 @@ test("the sheet titles itself with what the link names, says the rest in two sho
   assert.match(answered, /<span class="app-link-here" title="Not on this computer\.">Not here<\/span>/);
   assert.deepEqual(buttons(answered), ["", "Cancel", "Set up project…"]);
   assert.equal((answered.match(/btn btn-primary/g) ?? []).length, 1, "one verb");
+  // A name of any script is printed as the service spells it, raw, never encoded.
+  const big = sheet({ phase: "answered", verdict: linkVerdict(answer([account("s-personal", "Rika321", found(project({ address: "maya/大黄" })))], { address: "maya/大黄" }), context()) }, "maya/大黄");
+  assert.match(big, /<h1[^>]*>maya\/大黄<\/h1>/);
+  assert.doesNotMatch(big, /%E5%A4%A7/);
 
   // A stop is the title, its sentence the description; the subject stays in view.
   const signIn = sheet({ phase: "answered", verdict: linkVerdict(answer([]), context()) });

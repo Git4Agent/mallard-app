@@ -3,13 +3,15 @@ import { createRoot } from "react-dom/client";
 import Icon from "../src/components/Icons";
 import ProjectFileCommitImpact, { type ProjectFileCommitImpactCounts } from "../src/components/project-sync/ProjectFileCommitImpact";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "../src/components/project-sync/ProjectFilesReviewPage";
-import { PUSH_RUNNING_NOTE, PushApplyButton } from "../src/components/project-sync/PushResourceWorkspace";
+import { PushApplyButton } from "../src/components/project-sync/PushResourceWorkspace";
 import { projectReviewTabs } from "../src/components/project-sync/reviewSteps";
 import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../src/components/sync-review/ReviewBudgetMeter";
 import SyncReviewSelectionBar from "../src/components/sync-review/SyncReviewSelectionBar";
 import SyncReviewTabs from "../src/components/sync-review/SyncReviewTabs";
 import ThreadStatusIcon from "../src/components/sync-review/ThreadStatusIcon";
 import "../src/App.css";
+
+const PUSH_RUNNING_NOTE = "A running push finishes or fails whole — it can’t be cancelled midway.";
 
 /**
  * Mockup: the Push review footer when a selected item blocks the push.

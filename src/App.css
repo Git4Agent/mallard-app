@@ -8489,9 +8489,541 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 
 /* The fork button shows pressed while its drawer is open — the crumb and ⓘ
    contract, applied to the card's action cluster. */
-.catalog-card .sync-history-thread-actions .btn[aria-expanded="true"] {
+.catalog-card .sync-history-thread-actions .btn[aria-expanded="true"],
+.catalog-item-actions .btn[aria-expanded="true"] {
   background: var(--button-bg-active);
   color: var(--text-0);
+}
+
+/* A Catalog item's page (CatalogItemPage), made like its page on Mallard
+   Cloud: the item's body in a panel, and what only this Mac knows — edited,
+   size, warnings, and the card's launch run — in a rail beside it. Each fact
+   is said once; the bar names the item, its kind, its sync state and its
+   repository. Under 880px of page the rail becomes one line above the panel. */
+.catalog-item-page {
+  container: catalog-item / inline-size;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* The page's section stacks with no gap, and what can stand above the item —
+   an outcome, the repository its first Push creates, a blocked note — ends
+   in a card whose hard shadow would touch the facts line. The space a
+   section heading would have taken. */
+.profile-links-section > * + .catalog-item-page {
+  margin-top: 18px;
+}
+
+.catalog-item-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.catalog-item-facts-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.catalog-item-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-pill);
+  background: var(--surface-row);
+  color: var(--text-1);
+  font-size: var(--type-sm);
+  white-space: nowrap;
+}
+
+.catalog-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.catalog-item-hub {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.catalog-item-panel {
+  min-width: 0;
+  padding: 14px 16px 16px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.catalog-item-rail {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: var(--box-border);
+  border-radius: var(--retro-panel-radius);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+@container catalog-item (min-width: 880px) {
+  .catalog-item-line {
+    display: none;
+  }
+
+  .catalog-item-hub {
+    grid-template-columns: minmax(0, 1fr) 260px;
+  }
+
+  .catalog-item-rail {
+    display: flex;
+  }
+}
+
+.catalog-item-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+}
+
+.catalog-item-facts dt {
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+}
+
+.catalog-item-facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  overflow-wrap: anywhere;
+}
+
+.catalog-item-skill,
+.catalog-item-plugin,
+.catalog-item-pet {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.catalog-item-lede {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--type-md);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.catalog-item-muted {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--type-sm);
+}
+
+.catalog-item-document {
+  min-width: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--retro-panel-radius-inner);
+  background: var(--surface-row);
+  color: var(--text-0);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.catalog-item-files {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--type-sm);
+}
+
+.catalog-item-files td {
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-1);
+}
+
+.catalog-item-files td:first-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.catalog-item-files td:last-child {
+  width: 1%;
+  color: var(--text-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.catalog-item-exec {
+  display: inline-flex;
+  color: var(--warning-text);
+}
+
+.catalog-item-plugin p {
+  margin: 0;
+}
+
+.catalog-item-by {
+  color: var(--text-2);
+  font-size: var(--type-sm);
+}
+
+.catalog-item-by b {
+  color: var(--text-0);
+  font-family: var(--font-display);
+  font-size: var(--type-lg);
+}
+
+.catalog-item-here {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  justify-self: start;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-pill);
+  background: var(--surface-row);
+  color: var(--text-0);
+  font-size: var(--type-sm);
+}
+
+.catalog-item-here > svg {
+  color: var(--success-text);
+}
+
+.catalog-item-here.is-absent > svg {
+  color: var(--text-2);
+}
+
+.catalog-item-install {
+  display: grid;
+  gap: 6px;
+  max-width: 640px;
+  min-width: 0;
+  padding: 8px 10px 10px 14px;
+  border: 2px solid var(--control-border);
+  border-radius: 12px;
+  background: var(--surface-row);
+  box-shadow: var(--shadow-control);
+}
+
+.catalog-item-install-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.catalog-item-install-head .sync-segmented button {
+  min-height: 26px;
+  padding: 0 11px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--type-xs);
+  font-weight: var(--weight-bold);
+  cursor: pointer;
+}
+
+.catalog-item-install-name {
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+  font-weight: var(--weight-bold);
+}
+
+.catalog-item-copy {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
+.catalog-item-lines {
+  min-width: 0;
+  margin: 0;
+  padding: 2px 0;
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.catalog-item-lines code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+
+.catalog-item-prompt,
+.catalog-item-note {
+  color: var(--text-3);
+  user-select: none;
+}
+
+.catalog-item-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+}
+
+.catalog-item-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-0);
+  font-size: var(--type-sm);
+}
+
+/* The pet on its desk: Mallard Cloud's player (web/src/styles.css .pet-*). */
+.catalog-pet {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.catalog-pet-desk {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--retro-panel-radius-inner);
+  background: var(--bg-3);
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.catalog-pet-desk-pet {
+  position: absolute;
+  bottom: 14px;
+  z-index: 1;
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+
+.catalog-pet-desk-pet:active,
+.catalog-pet-desk-pet.is-running {
+  cursor: grabbing;
+}
+
+.catalog-pet-desk-pet:focus-visible,
+.catalog-pet-moment:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.catalog-pet-sprite {
+  display: block;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+}
+
+.catalog-pet-window {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  width: min(60%, 440px);
+  height: 72%;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-card);
+}
+
+.catalog-pet-window-bar {
+  display: flex;
+  gap: 5px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.catalog-pet-window-bar i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--border-mid);
+}
+
+.catalog-pet-window-body {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+}
+
+.catalog-pet-window-line {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--chip-strong-bg);
+}
+
+.catalog-pet-window-dots {
+  display: inline-flex;
+  gap: 5px;
+  padding-top: 4px;
+}
+
+.catalog-pet-window-dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-2);
+}
+
+.catalog-pet-window-ask {
+  padding: 10px;
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.catalog-pet-window-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.catalog-pet-window-buttons b {
+  padding: 1px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-card);
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+}
+
+.catalog-pet-window-buttons b:first-child {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+}
+
+.catalog-pet-window-diff {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.catalog-pet-window-diff i {
+  display: block;
+  height: 8px;
+  border-radius: 3px;
+}
+
+.catalog-pet-window-diff .is-del {
+  width: 56%;
+  background: color-mix(in srgb, var(--red) 40%, transparent);
+}
+
+.catalog-pet-window-diff .is-add {
+  width: 72%;
+  background: color-mix(in srgb, var(--green) 40%, transparent);
+}
+
+.catalog-pet-window-diff .is-add + .is-add {
+  width: 48%;
+}
+
+.catalog-pet-window-fail {
+  display: flex;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--danger-soft);
+}
+
+.catalog-pet-window-fail b {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--danger-text);
+  color: var(--surface-card);
+  font-size: var(--type-xs);
+}
+
+.catalog-pet-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.catalog-pet-moments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.catalog-pet-moment {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-pill);
+  background: var(--surface-row);
+  color: var(--text-1);
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-bold);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.catalog-pet-moment:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-row-hover);
+}
+
+.catalog-pet-moment[aria-pressed="true"] {
+  padding: 0 11px;
+  border: 2px solid var(--ink-line);
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+}
+
+.catalog-pet-play {
+  min-height: 28px;
+  padding: 0 11px;
+  font-size: var(--type-sm);
 }
 
 /* Provider-neutral session detail ---------------------------------------- */
@@ -9107,44 +9639,46 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-size: var(--type-md);
 }
 
-.session-detail-event-copy > :first-child,
-.session-detail-event-copy > :first-child > :first-child {
+/* Rendered Markdown (components/markdown/MarkdownText): a session's
+   transcript and a Catalog item's page. */
+.markdown-copy > :first-child,
+.markdown-copy > :first-child > :first-child {
   margin-top: 0;
 }
 
-.session-detail-event-copy > :last-child,
-.session-detail-event-copy > :last-child > :last-child {
+.markdown-copy > :last-child,
+.markdown-copy > :last-child > :last-child {
   margin-bottom: 0;
 }
 
-.session-detail-event-copy p,
-.session-detail-event-copy ul,
-.session-detail-event-copy ol,
-.session-detail-event-copy blockquote,
-.session-detail-event-copy pre,
-.session-detail-event-copy table {
+.markdown-copy p,
+.markdown-copy ul,
+.markdown-copy ol,
+.markdown-copy blockquote,
+.markdown-copy pre,
+.markdown-copy table {
   margin: 0 0 11px;
 }
 
-.session-detail-event-copy ul,
-.session-detail-event-copy ol {
+.markdown-copy ul,
+.markdown-copy ol {
   padding-left: 22px;
 }
 
-.session-detail-event-copy li + li {
+.markdown-copy li + li {
   margin-top: 3px;
 }
 
-.session-detail-event-copy h1,
-.session-detail-event-copy h2,
-.session-detail-event-copy h3,
-.session-detail-event-copy h4 {
+.markdown-copy h1,
+.markdown-copy h2,
+.markdown-copy h3,
+.markdown-copy h4 {
   margin: 18px 0 7px;
   font-size: 1em;
   line-height: 1.35;
 }
 
-.session-detail-event-copy code {
+.markdown-copy code {
   padding: 1px 4px;
   border: 1px solid var(--border);
   border-radius: 3px;
@@ -9157,7 +9691,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   box-decoration-break: clone;
 }
 
-.session-detail-event-copy pre {
+.markdown-copy pre {
   max-width: 100%;
   overflow: auto;
   padding: 11px 12px;
@@ -9166,38 +9700,40 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   background: var(--surface-muted);
 }
 
-.session-detail-event-copy pre code {
+.markdown-copy pre code {
   padding: 0;
   border: 0;
   background: transparent;
 }
 
-.session-detail-event-copy .katex-display {
+.markdown-copy .katex-display {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 0.25em 0;
 }
 
-.session-detail-event-copy .katex-display > .katex {
+.markdown-copy .katex-display > .katex {
   display: block;
   width: max-content;
   min-width: 100%;
 }
 
-.session-detail-event-copy .katex-error {
+.markdown-copy .katex-error {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.session-detail-event-copy blockquote {
+.markdown-copy blockquote {
   padding-left: 12px;
   border-left: 2px solid var(--border-strong);
   color: var(--text-1);
 }
 
-.session-detail-event-copy a {
-  color: var(--session-detail-link);
+/* The session page's link ink, for the same reason: --blue alone is under
+   4.5:1 on light paper. */
+.markdown-copy a {
+  color: color-mix(in srgb, var(--blue) 72%, var(--text-0));
   text-underline-offset: 2px;
 }
 
@@ -9254,7 +9790,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   border-radius: 8px;
 }
 
-.session-detail-image-placeholder {
+.markdown-image-placeholder {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -9267,24 +9803,24 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   vertical-align: middle;
 }
 
-.session-detail-image-placeholder.is-loading {
+.markdown-image-placeholder.is-loading {
   opacity: 0.7;
 }
 
-.session-detail-image-placeholder-label {
+.markdown-image-placeholder-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-detail-event-copy table {
+.markdown-copy table {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--type-sm);
 }
 
-.session-detail-event-copy th,
-.session-detail-event-copy td {
+.markdown-copy th,
+.markdown-copy td {
   padding: 6px 8px;
   border: 1px solid var(--border);
   text-align: left;
@@ -13555,6 +14091,11 @@ span.sync-update-pill {
 .repo-row .sync-bundle-choice-copy > .repo-row-blurb,
 .repo-row .sync-bundle-match-copy > .repo-row-blurb { font-family: var(--font); font-size: var(--type-2xs); color: var(--text-2); white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .repo-row .repo-row-blurb:empty { display: none; }
+/* Under a display name: the address, then the description or the role word. */
+.repo-row .repo-row-blurb .repo-row-address { color: var(--text-2); }
+.repo-row .repo-row-blurb .repo-row-sep { margin: 0 4px; font-style: normal; color: var(--text-3); }
+/* A New row whose title the service would refuse: the one sentence, in the warning ink. */
+.repo-new-refusal { color: var(--warning-text); }
 .repo-row .sync-bundle-choice-meta { gap: 2px; }
 .repo-row .sync-bundle-choice-meta small { display: inline-flex; align-items: center; gap: 4px; }
 .repo-row .sync-bundle-choice-meta small > svg { color: var(--text-3); }

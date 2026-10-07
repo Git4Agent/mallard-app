@@ -388,13 +388,19 @@ fingerprint is SHA-256 of the normalized `origin` URL and is not unique across
 the service; the raw URL stays local.
 
 **Address.** Separate from its identity, every repository has a GitHub-style
-address `{owner}/{name}`: the Owner's current GitHub login and a `name` of
-GitHub's character set (`[A-Za-z0-9._-]`, at most 100 characters, not `.` or
-`..`), unique per Owner case-insensitively and freed when the repository is
+address `{owner}/{name}`: the Owner's current GitHub login and a Unicode
+`name` (letters, marks and digits of any script plus `.`, `_` and `-`; 1 to
+100 code points; not `.` or `..`; stored in NFC), unique per Owner by key
+(NFC, lower-cased: `repositories.name_key`) and freed when the repository is
 removed. The service derives `name` from the requested one at creation
-("Horror Game" becomes `Horror-Game`, a title with nothing usable becomes
-`repository`) and suffixes `-2`, `-3`, … while the Owner already holds it;
-a rename (section 7.4) is strict and moves the address without a redirect.
+("Horror Game" becomes `Horror-Game`, `大黄` stays `大黄`, a title with nothing
+usable is refused) and suffixes `-2`, `-3`, … while the Owner already holds
+the key; a rename (section 7.4) is strict and moves the address without a
+redirect. On the wire the name is percent-encoded UTF-8 (RFC 3987), and the
+raw and the encoded spelling resolve alike. The display name shown in
+headings and lists is the selected snapshot's `summary.display_name`, never
+the address: a display-name change travels with the next push and moves
+neither `name` nor `id`.
 The website (section 8) and the desktop's Open on website link use the
 address; the API keeps the id, and `GET /v1/repositories/by-name/{owner}/{name}`
 resolves an address to a summary. A GitHub login rename moves the account's
@@ -1034,7 +1040,9 @@ CREATE TABLE auth_attempts (
 CREATE TABLE repositories (
   id                     TEXT PRIMARY KEY,         -- repo_<random>
   class                  TEXT NOT NULL CHECK (class IN ('git_project','non_git_project','catalog')),
-  name                   TEXT NOT NULL,             -- [A-Za-z0-9._-]{1,100}; the address is {owner login}/{name}
+  name                   TEXT NOT NULL,             -- the address is {owner login}/{name}: letters, marks and digits of any script plus '._-', 1 to 100 code points, stored in NFC (validate/names.ts)
+  -- `nameKey(name)`: NFC and lower-cased by the Worker, since SQLite's NOCASE folds ASCII only. One per Owner among active repositories.
+  name_key               TEXT NOT NULL,
   bundle_id              TEXT,
   repository_fingerprint TEXT,
   catalog_provider       TEXT, catalog_resource_kind TEXT, catalog_format TEXT,
@@ -1065,9 +1073,9 @@ CREATE TABLE repositories (
     (class = 'catalog'         AND bundle_id IS NULL     AND catalog_resource_id IS NOT NULL)
   )
 );
--- One name per Owner among active repositories, compared case-insensitively. A
--- repository frees its name when its removal is confirmed.
-CREATE UNIQUE INDEX repositories_owner_name ON repositories(created_by, name COLLATE NOCASE) WHERE state = 'active';
+-- One name per Owner among active repositories, compared by key (NFC, no
+-- case). A repository frees its name when its removal is confirmed.
+CREATE UNIQUE INDEX repositories_owner_name ON repositories(created_by, name_key) WHERE state = 'active';
 CREATE INDEX repositories_bundle ON repositories(bundle_id) WHERE bundle_id IS NOT NULL;
 
 CREATE TABLE repository_members (
@@ -1459,7 +1467,7 @@ discarded.
 | --- | --- | --- |
 | `GET` | `/v1/repositories?class=` | Joined repositories with both head summaries, role, usage, release status |
 | `GET` | `/v1/repositories/by-bundle/{bundle_id}/head` | The head the caller may read for that bundle, or `204` when unknown |
-| `GET` | `/v1/repositories/by-name/{owner}/{name}` | The repository at that address (section 4.1): the collaborator's summary, else the public face, else `404`; both segments compare case-insensitively |
+| `GET` | `/v1/repositories/by-name/{owner}/{name}` | The repository at that address (section 4.1): the collaborator's summary, else the public face, else `404`; the name arrives percent-encoded or raw, and both segments compare without case (the name by key) |
 | `GET` | `/v1/users/{login}` | Profile: `{user: {user_id, github_login, avatar_url, created_at}, repositories}`, the repositories the account owns that the caller may read, rows as in the Starred listing |
 | `GET` | `/v1/me/starred?cursor=` | The caller's Starred list, latest star first, 50 per page; rows carry `owner`, `name`, `visibility`, `starred_at`, and the readable `head` (section 4.8) |
 | `GET` | `/v1/public/repositories?class=&provider=&kind=&cursor=` | Bounded public listing, 50 per page |

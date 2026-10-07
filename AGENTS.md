@@ -58,6 +58,9 @@ The integration tests intentionally enforce this cutover.
   and Claude skills, plugin intent, and Codex v1/v2 pets) with its own
   `api.ts`, `model.ts`, and `types.ts`; it never imports project-sync
   components, models, or DTOs.
+- `src/components/markdown/` is the app's one Markdown renderer
+  (`MarkdownText`, URL safety, LaTeX), shared by the session transcript and a
+  Catalog item's page; it imports neither feature.
 - `src/components/app-link/` answers the website's `mallard://` link: the
   pure routing model, the hook that holds the newest link, and its sheet. A
   link only reads; the shell navigates when the sheet's verb is pressed. The

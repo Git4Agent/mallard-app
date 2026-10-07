@@ -42,6 +42,7 @@ const STORAGE: StorageSummary = {
 const now = Math.floor(Date.now() / 1000);
 const repo = (overrides: Partial<ManagedCloudRepository>): ManagedCloudRepository => ({
   repository_id: "repo_1", description: null, star_count: 0, viewer_starred: false,
+  display_name: overrides.name ?? "HorrorGame",
   owner_login: "Rika321",
   name: "HorrorGame",
   address: "Rika321/HorrorGame",

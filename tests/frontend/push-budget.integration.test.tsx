@@ -299,6 +299,7 @@ test("a session past the limit is refused in its own words: it has nothing to ex
 test("a running session push seals its exits and narrates the transfer", () => {
   const html = sessionReview(fits, {
     busy: true,
+    credentialRedactionEnabled: false,
     fetchProgress: {
       phase: "push",
       storage_id: "storage-1",
@@ -310,8 +311,7 @@ test("a running session push seals its exits and narrates the transfer", () => {
     },
   });
   assert.match(html, /aria-label="Close push review"[^>]*disabled=""|disabled=""[^>]*aria-label="Close push review"/);
-  // The note takes the footer's note row, announced, never a squeezed column.
-  assert.match(html, /<p class="sync-review-footer-note" role="status">A running push finishes or fails whole/);
+  assert.doesNotMatch(html, /A running push finishes or fails whole|Not redacted:/);
   assert.match(html, /<span class="sync-btn-readout">3\/7 · 0\.8 MB…<\/span>/);
 });
 

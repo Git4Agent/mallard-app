@@ -123,6 +123,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tokio::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 
 const MAX_CONVERSATION_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 const HISTORY_SCAN_LOG_THROTTLE_SECS: u64 = 5 * 60;
@@ -15804,12 +15805,15 @@ pub(super) fn get_project_with_repository(
 /// Keep the shared repository name for the first local project and add the
 /// first available numeric suffix only when that visible name is already in
 /// use on this machine.
+/// Names compare trimmed and in NFC, the equality Mallard Cloud's address
+/// rule uses, so a decomposed spelling of a name already held gets the
+/// `(2)` suffix too.
 fn deduplicated_local_alias(
     display_name: &str,
     existing: &[LocalProjectRegistration],
 ) -> Result<Option<String>, String> {
-    let display_name = display_name.trim();
-    let taken: BTreeSet<&str> = existing
+    let display_name: String = display_name.trim().nfc().collect();
+    let taken: BTreeSet<String> = existing
         .iter()
         .map(|project| {
             project
@@ -15817,10 +15821,12 @@ fn deduplicated_local_alias(
                 .as_deref()
                 .unwrap_or(&project.display_name)
                 .trim()
+                .nfc()
+                .collect()
         })
         .collect();
 
-    if !taken.contains(display_name) {
+    if !taken.contains(&display_name) {
         return Ok(None);
     }
 
@@ -15833,7 +15839,7 @@ fn deduplicated_local_alias(
                     .to_string(),
             );
         }
-        if !taken.contains(candidate.as_str()) {
+        if !taken.contains(&candidate) {
             return Ok(Some(candidate));
         }
         counter = counter

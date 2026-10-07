@@ -392,6 +392,7 @@ export interface CatalogScopePullPlan {
 }
 
 export type CatalogActionOutcome =
+  | "removed"
   | "installed"
   | "updated"
   | "preserved_and_updated"
@@ -517,3 +518,69 @@ export type CatalogCloudResolution =
   | { kind: "wrong_service"; host: string; expected: string }
   | { kind: "github" }
   | { kind: "invalid" };
+
+/** One payload file as an item's page lists it. */
+export interface CatalogDetailFile {
+  path: string;
+  size: number;
+  executable: boolean;
+}
+
+/** The display words an installed plugin's own manifest gives it. */
+export interface CatalogDetailPluginListing {
+  display_name: string | null;
+  developer: string | null;
+  description: string | null;
+  category: string | null;
+  website_url: string | null;
+  privacy_url: string | null;
+  terms_url: string | null;
+}
+
+/** `CatalogResourceDetail`: an item's page, by the shape its format presents
+ *  — read from this Mac's copy when it is here, else from the storage's. */
+export type CatalogResourceDetail =
+  | {
+    kind: "document";
+    path: string;
+    /** Absent when the document is not UTF-8. */
+    text: string | null;
+    files: CatalogDetailFile[];
+  }
+  | {
+    kind: "install";
+    plugin_id: string;
+    marketplace: string;
+    location: string | null;
+    git_ref: string | null;
+    /** The provider CLI's own lines that install it by hand — the argv a
+     *  Pull runs — or none when they cannot be printed safely. */
+    install: string[];
+    /** This Mac's: present only when the plugin is installed here. */
+    installed_version: string | null;
+    listing: CatalogDetailPluginListing | null;
+  }
+  | {
+    kind: "sprite";
+    /** The whole atlas as a data URI. */
+    atlas: string;
+    columns: number;
+    rows: number;
+    description: string | null;
+  };
+
+export interface CatalogResourceRemovalPlan {
+  plan_id: string;
+  scope_id: string;
+  resource_id: string;
+  display_name: string;
+  uninstall: boolean;
+  file_count: number;
+  created_at: number;
+  expires_at: number;
+}
+
+export interface CatalogRemovalResult {
+  removed: boolean;
+  message: string;
+}

@@ -94,6 +94,9 @@ export interface ManagedCloudListingRow {
   name: string;
   /** `{owner_login}/{name}` in the service's spelling. */
   address: string;
+  /** What the row prints: the display name of the head the account may
+   *  read, else the address segment. */
+  display_name: string;
   website_url: string;
   repository_class: string;
   catalog: ManagedCloudListingCatalog | null;

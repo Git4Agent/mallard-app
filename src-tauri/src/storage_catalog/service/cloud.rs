@@ -11,6 +11,7 @@ use mallard_infrastructure::managed_cloud::client::{
     ManagedCloudClient, ManagedCloudStatus, PublicFilter, PublicSort, RepositoryListing,
     RepositorySummary,
 };
+use mallard_infrastructure::managed_cloud::names;
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
 
 /// The refusal a second binding meets.
@@ -182,61 +183,19 @@ fn newest_first(rows: &mut [CatalogCloudRepository]) {
     });
 }
 
-const REPOSITORY_NAME_MAX: usize = 100;
-
-fn valid_repository_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= REPOSITORY_NAME_MAX
-        && name != "."
-        && name != ".."
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-/// A valid name as it is; any other cleaned to the service's characters.
-/// `normalizeRepositoryName` in the frontend is the same rule.
-fn normalize_repository_name(requested: &str) -> String {
-    let trimmed = requested.trim();
-    if valid_repository_name(trimmed) {
-        return trimmed.to_string();
-    }
-    let mut cleaned = String::new();
-    for character in trimmed.chars() {
-        let kept = character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-');
-        let next = if kept { character } else { '-' };
-        if next == '-' && cleaned.ends_with('-') {
-            continue;
-        }
-        cleaned.push(next);
-    }
-    let mut name = cleaned.trim_matches('-').to_string();
-    if name.len() > REPOSITORY_NAME_MAX {
-        name.truncate(REPOSITORY_NAME_MAX);
-        name = name.trim_end_matches('-').to_string();
-    }
-    if valid_repository_name(&name) {
-        name
-    } else {
-        "repository".to_string()
-    }
-}
-
-/// The name the service gives a new repository: the cleaned name, suffixed
-/// `-2`, `-3`, … while the account owns one by that name (compared without
-/// case). The service stays the authority; this is the review's preview,
-/// and `predictRepositoryAddress` in the frontend is the same rule.
-pub(super) fn predicted_repository_name(requested: &str, owned: &BTreeSet<String>) -> String {
-    let base = normalize_repository_name(requested);
-    let mut name = base.clone();
-    let mut suffix = 2;
-    while owned.contains(&name.to_lowercase()) {
-        let tail = format!("-{suffix}");
-        let stem = base[..base.len().min(REPOSITORY_NAME_MAX - tail.len())].trim_end_matches('-');
-        name = format!("{stem}{tail}");
-        suffix += 1;
-    }
-    name
+/// The name the service gives a new repository: the name derived from the
+/// item's display name (`names::derive_repository_name`, so a pet 大黄 goes
+/// to `login/大黄`), suffixed `-2`, `-3`, … while the account owns one by
+/// that key. `None` when the display name derives no name: the service
+/// refuses such a create, and the row says so. The service stays the
+/// authority; this is the review's preview, and `predictRepositoryAddress`
+/// in the frontend is the same rule.
+pub(super) fn predicted_repository_name(
+    requested: &str,
+    owned: &BTreeSet<String>,
+) -> Option<String> {
+    let base = names::derive_repository_name(requested)?;
+    Some(names::pick_available_name(&base, owned))
 }
 
 impl StorageCatalogService {
@@ -703,21 +662,38 @@ mod tests {
     #[test]
     fn predicted_names_follow_the_frontend_rule() {
         let none = BTreeSet::new();
-        assert_eq!(predicted_repository_name("Duck", &none), "Duck");
-        assert_eq!(
-            predicted_repository_name("Horror Game", &none),
-            "Horror-Game"
-        );
-        assert_eq!(predicted_repository_name("My--Repo", &none), "My--Repo");
-        assert_eq!(predicted_repository_name("///", &none), "repository");
+        for (requested, expected) in [
+            ("Duck", "Duck"),
+            ("Horror Game", "Horror-Game"),
+            ("My--Repo", "My--Repo"),
+            ("大黄", "大黄"),
+            ("  日本語  ", "日本語"),
+        ] {
+            assert_eq!(
+                predicted_repository_name(requested, &none).as_deref(),
+                Some(expected),
+                "{requested:?}"
+            );
+        }
+        // Nothing usable predicts no address: the service refuses the create.
+        assert_eq!(predicted_repository_name("///", &none), None);
+        assert_eq!(predicted_repository_name("🦆🦆", &none), None);
         let owned = BTreeSet::from(["duck".to_string(), "duck-2".to_string()]);
-        assert_eq!(predicted_repository_name("Duck", &owned), "Duck-3");
+        assert_eq!(
+            predicted_repository_name("Duck", &owned).as_deref(),
+            Some("Duck-3")
+        );
+        let owned = BTreeSet::from([names::name_key("大黄")]);
+        assert_eq!(
+            predicted_repository_name("大黄", &owned).as_deref(),
+            Some("大黄-2")
+        );
         let long = "a".repeat(120);
-        assert_eq!(predicted_repository_name(&long, &none).len(), 100);
+        assert_eq!(predicted_repository_name(&long, &none).unwrap().len(), 100);
         let owned = BTreeSet::from(["a".repeat(100)]);
         assert_eq!(
             predicted_repository_name(&long, &owned),
-            format!("{}-2", "a".repeat(98))
+            Some(format!("{}-2", "a".repeat(98)))
         );
     }
 }

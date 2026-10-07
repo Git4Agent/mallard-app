@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::codec::{CapturedResource, CatalogFormatCodec};
+use super::codec::{CapturedResource, CatalogFormatCodec, CatalogResourceDetail, PayloadReader};
 use super::domain::{
     validate_display_text, BoundedPortableObject, CatalogCoordinate, CatalogResourceEnvelope,
     ProviderKey,
@@ -273,6 +273,26 @@ impl CatalogFormatCodec for PluginInstallIntentCodec {
     fn collision_key(&self, _captured: &CapturedResource) -> Option<String> {
         None
     }
+
+    /// The intent's page: the plugin and the marketplace it installs from.
+    /// What the installed copy says about itself is this Mac's to add.
+    fn detail(
+        &self,
+        envelope: &CatalogResourceEnvelope,
+        _read_payload: &PayloadReader<'_>,
+    ) -> Result<CatalogResourceDetail, String> {
+        let intent = PluginInstallIntent::decode(envelope)?;
+        let PortablePluginSource::ProviderMarketplace { git, .. } = intent.descriptor.source;
+        Ok(CatalogResourceDetail::Install {
+            plugin_id: intent.identity.plugin_id,
+            marketplace: intent.identity.namespace,
+            location: git.as_ref().map(|git| git.location.clone()),
+            git_ref: git.and_then(|git| git.git_ref),
+            install: Vec::new(),
+            installed_version: None,
+            listing: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +350,22 @@ mod tests {
         .unwrap();
         assert_eq!(changed.resource_id, envelope.resource_id);
         assert_ne!(changed.content_sha256, envelope.content_sha256);
+
+        // Its page names the plugin and where it installs from.
+        assert_eq!(
+            PluginInstallIntentCodec
+                .detail(&envelope, &|_, _| Err("no payloads".to_string()))
+                .unwrap(),
+            CatalogResourceDetail::Install {
+                plugin_id: "tools@acme".to_string(),
+                marketplace: "acme".to_string(),
+                location: Some("https://example.com/acme/tools".to_string()),
+                git_ref: None,
+                install: Vec::new(),
+                installed_version: None,
+                listing: None,
+            }
+        );
 
         // The same intent under another provider is another resource.
         let claude = resolved

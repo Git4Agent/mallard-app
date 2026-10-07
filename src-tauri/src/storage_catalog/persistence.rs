@@ -64,7 +64,8 @@ pub struct CatalogStorageDataClearResult {
 
 impl CatalogStateRepository {
     pub fn from_user_home() -> Result<Self, String> {
-        let home = mallard_infrastructure::persistence::user_home_dir().ok_or("could not resolve the user home directory")?;
+        let home = mallard_infrastructure::persistence::user_home_dir()
+            .ok_or("could not resolve the user home directory")?;
         Self::from_home_dir(home)
     }
 
@@ -150,6 +151,22 @@ impl CatalogStateRepository {
         file.lock()
             .map_err(|error| format!("lock provider target: {}", error))?;
         Ok(CatalogTargetLock { _file: file })
+    }
+
+    /// Recovery must not mistake an operation in another window for a crash.
+    pub fn try_acquire_target_lock(
+        &self,
+        canonical_path: &Path,
+    ) -> Result<Option<CatalogTargetLock>, String> {
+        let locks_dir = self.root.join("locks");
+        ensure_restricted_directory(&locks_dir)?;
+        let digest = sha256_hex(canonical_path.to_string_lossy().as_bytes());
+        let file = open_lock_file(&locks_dir.join(format!("provider-{digest}.lock")))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(CatalogTargetLock { _file: file })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(error) => Err(format!("lock provider target: {error}")),
+        }
     }
 
     /// Local single-flight for one repository of one storage
@@ -660,7 +677,7 @@ impl CatalogStateRepository {
         super::plan_store::discard_where(&self.root, |plan| match plan {
             CatalogResourcePlanDocument::Push(plan) => &plan.storage_id == storage_id,
             CatalogResourcePlanDocument::Pull(plan) => &plan.storage_id == storage_id,
-            CatalogResourcePlanDocument::Fork(_) => false,
+            CatalogResourcePlanDocument::Fork(_) | CatalogResourcePlanDocument::Removal(_) => false,
         });
 
         Ok((

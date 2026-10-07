@@ -16,7 +16,7 @@ import {
   type ScopeId,
   type ScopeTab,
 } from "../managed-cloud/CloudScopes";
-import { predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
+import { nameRefusal, predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
 import Notice, { FieldMessage } from "../notice/Notice";
 import { formatRelativeTime } from "../../clock";
 import { errorMessage } from "../../storageError";
@@ -209,12 +209,12 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
   const kind = entryKind(entry);
   const needle = kind === "filter" ? entry.trim() : "";
   const filtering = needle.length > 0;
-  const fits = (address: string, description: string | null) => matchesFilter(needle, address, description);
-  const shownRows = rows.filter((row) => fits(row.address, row.description));
+  const fits = (row: { address: string; description: string | null; display_name: string }) => matchesFilter(needle, row.address, row.description, row.display_name);
+  const shownRows = rows.filter(fits);
   const starredAll = listings.starred.state === "ready" ? listings.starred.rows : [];
   const publicAll = listings.public.state === "ready" ? listings.public.rows : [];
-  const starredRows = starredAll.filter((row) => fits(row.address, row.description));
-  const publicRows = publicAll.filter((row) => fits(row.address, row.description));
+  const starredRows = starredAll.filter(fits);
+  const publicRows = publicAll.filter(fits);
 
   /** The scope whose rows hold the repository, if one does. */
   const scopeHolding = (repositoryId: string): ScopeId | null => (
@@ -396,7 +396,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
         disabled={working} onClick={() => choose(row, row.address)}>
         <span className="sync-bundle-radio"><span /></span>
         <RepoRowTile mark={markFor(row)} pet={row.resource_kind === "desktop_pet"} skin={skin} />
-        <RepoRowCopy address={row.address} kind={door ? kindFor(row) : undefined} skin={skin}
+        <RepoRowCopy address={row.address} displayName={row.display_name} kind={door ? kindFor(row) : undefined} skin={skin}
           blurb={row.description ?? (skin === "match" ? role : null)} />
         <RepoRowMeta role={role} stars={row.star_count} starred={row.viewer_starred} age={rowAge(row)} skin={skin} />
       </button>
@@ -420,8 +420,17 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
             onClick={() => choose("new")}>
             <span className="sync-bundle-radio"><span /></span>
             <span className="sync-bundle-choice-copy">
-              <strong>{prediction.address}<small className="sync-bundle-recommended">New</small></strong>
-              {prediction.suffixed && <span>{prediction.base} is taken.</span>}
+              {prediction.kind === "address" ? (
+                <>
+                  <strong>{prediction.address}<small className="sync-bundle-recommended">New</small></strong>
+                  {prediction.suffixed && <span>{prediction.base} is taken.</span>}
+                </>
+              ) : (
+                <>
+                  <strong>New repository<small className="sync-bundle-recommended">New</small></strong>
+                  <span className="repo-new-refusal">{nameRefusal("item")}</span>
+                </>
+              )}
             </span>
             <span className="sync-bundle-choice-meta"><small>Private</small></span>
           </button>

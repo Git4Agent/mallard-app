@@ -29,8 +29,6 @@ import {
   mergeSessionTimelinePages,
   projectMarkdownDisplayPath,
   readableToolPayload,
-  safeMarkdownUrl,
-  safeProjectMarkdownPath,
   sessionDetailFilterToggles,
   sessionEventCoverage,
   sessionPushFacts,
@@ -39,6 +37,7 @@ import {
   sessionTurnSpans,
   toolCommandLabel,
 } from "../../src/components/project-sync/session-detail/sessionDetailModel";
+import { safeMarkdownUrl, safeRelativeMarkdownPath } from "../../src/components/markdown/markdownUrl";
 
 import { diagram as suppliedFlowchart, fenced } from "../../poc/mermaid-flowcharts/fixtures";
 
@@ -788,9 +787,9 @@ test("the timeline is a column of tiles for turns and punches for calls, no spea
   // You ask in a card: markdown body plus a clock · duration · calls meta line.
   assert.match(html, /class="session-detail-card session-detail-card-prompt"/);
   // The stamp leads the card: clock · duration · calls, then the copy.
-  assert.match(html, /class="session-detail-card-head"><time[^>]*>\d{2}:\d{2}<\/time><span>6m<\/span><span>2 calls<\/span><\/div><div class="session-detail-event-copy"/);
+  assert.match(html, /class="session-detail-card-head"><time[^>]*>\d{2}:\d{2}<\/time><span>6m<\/span><span>2 calls<\/span><\/div><div class="session-detail-event-copy markdown-copy"/);
   // The reply is a card too, stamped with its clock alone.
-  assert.match(html, /class="session-detail-card session-detail-card-reply"><div class="session-detail-card-head"><time[^>]*>\d{2}:\d{2}<\/time><\/div><div class="session-detail-event-copy"/);
+  assert.match(html, /class="session-detail-card session-detail-card-reply"><div class="session-detail-card-head"><time[^>]*>\d{2}:\d{2}<\/time><\/div><div class="session-detail-event-copy markdown-copy"/);
 
   // The eyebrow that restated the heading, and the count that contradicted the
   // filter panel, are both gone.
@@ -1276,7 +1275,7 @@ test("Markdown project images embed through the validated loader only", () => {
     />,
   );
   assert.doesNotMatch(failed, /<img/);
-  assert.match(failed, /session-detail-image-placeholder/);
+  assert.match(failed, /markdown-image-placeholder/);
   assert.match(failed, /title="too large"/);
 
   const pending = renderToStaticMarkup(
@@ -1287,7 +1286,7 @@ test("Markdown project images embed through the validated loader only", () => {
     />,
   );
   assert.doesNotMatch(pending, /<img/);
-  assert.match(pending, /session-detail-image-placeholder is-loading/);
+  assert.match(pending, /markdown-image-placeholder is-loading/);
 });
 
 test("Markdown images outside the project never reach the webview as requests", () => {
@@ -1314,7 +1313,7 @@ test("Markdown images outside the project never reach the webview as requests", 
   // The chip names the file AND says what happened to it: a bare alt text left
   // "not shown" to the 30%-opacity tint, which no screen reader reports.
   for (const alt of ["Escape", "Parent", "Scheme"]) {
-    assert.match(html, new RegExp(`session-detail-image-placeholder[^>]*aria-label="${alt} — image not shown`));
+    assert.match(html, new RegExp(`markdown-image-placeholder[^>]*aria-label="${alt} — image not shown`));
   }
   // Without a loader wired (plain markdown contexts), project images also
   // stay chips instead of firing requests.
@@ -1322,7 +1321,7 @@ test("Markdown images outside the project never reach the webview as requests", 
     <SessionDetailMarkdown text={"![GIF](./animation.gif)"} />,
   );
   assert.doesNotMatch(unwired, /<img/);
-  assert.match(unwired, /session-detail-image-placeholder/);
+  assert.match(unwired, /markdown-image-placeholder/);
 });
 
 test("Markdown links clean project-relative paths and rejects every escape form", () => {
@@ -1338,13 +1337,13 @@ test("Markdown links clean project-relative paths and rejects every escape form"
   assert.match(html, /aria-label="Open \/Users\/example\/HorrorGame\/story\.md"/);
   assert.match(html, />Outside<\/span>/);
   assert.match(html, />Parent<\/span>/);
-  assert.equal(safeProjectMarkdownPath("./docs/story%20one.md"), "docs/story one.md");
-  assert.equal(safeProjectMarkdownPath("../secret.md"), null);
-  assert.equal(safeProjectMarkdownPath("%2e%2e/secret.md"), null);
-  assert.equal(safeProjectMarkdownPath("/tmp/story.md"), null);
-  assert.equal(safeProjectMarkdownPath("%2ftmp/story.md"), null);
-  assert.equal(safeProjectMarkdownPath("file:///tmp/story.md"), null);
-  assert.equal(safeProjectMarkdownPath("file%3a///tmp/story.md"), null);
+  assert.equal(safeRelativeMarkdownPath("./docs/story%20one.md"), "docs/story one.md");
+  assert.equal(safeRelativeMarkdownPath("../secret.md"), null);
+  assert.equal(safeRelativeMarkdownPath("%2e%2e/secret.md"), null);
+  assert.equal(safeRelativeMarkdownPath("/tmp/story.md"), null);
+  assert.equal(safeRelativeMarkdownPath("%2ftmp/story.md"), null);
+  assert.equal(safeRelativeMarkdownPath("file:///tmp/story.md"), null);
+  assert.equal(safeRelativeMarkdownPath("file%3a///tmp/story.md"), null);
   assert.equal(safeMarkdownUrl("docs/story.md"), "docs/story.md");
   assert.equal(
     projectMarkdownDisplayPath("C:\\project\\HorrorGame\\", "docs/story.md"),

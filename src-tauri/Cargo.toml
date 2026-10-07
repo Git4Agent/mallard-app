@@ -45,12 +45,19 @@ libc = "0.2"
 tempfile = "3"
 chrono = "0.4"
 notify = "8.2"
+unicode-normalization = "0.1"
+regex = "1"
 
 # Windows and Linux start another process for a link; this hands its
 # arguments to the running app and ends it. macOS delivers a link to the
 # running app itself. Same 2.4 line as the deep-link plugin.
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "~2.4.5", features = ["deep-link"] }
+
+# Use the same Windows filesystem API version as infrastructure. Removal
+# marks the verified open handle for deletion instead of resolving its path again.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # Test-only domain and infrastructure helpers (compiled out of production

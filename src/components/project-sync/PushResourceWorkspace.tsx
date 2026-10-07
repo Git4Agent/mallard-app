@@ -662,11 +662,6 @@ function pushBudgetBreakdown(total: PushBudget): string {
   return `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
 }
 
-/** Every exit is sealed while the transfer runs, on purpose: the backend has
- *  no safe mid-write abort. Saying so beats leaving the user hunting for a
- *  cancel that does not exist. */
-export const PUSH_RUNNING_NOTE = "A running push finishes or fails whole — it can’t be cancelled midway.";
-
 /** Both reviews that push say this while Settings › Privacy › Credential
  *  redaction is off. The header's flag already names the setting, and Off is
  *  the default, so a warning box over the list repeated it on every review.
@@ -1263,7 +1258,7 @@ export default function PushResourceWorkspace({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        {!credentialRedactionEnabled && <CredentialRedactionOffNote />}
+        {!busy && !credentialRedactionEnabled && <CredentialRedactionOffNote />}
         {overLimitSentence && (
           /* The refusal takes a row of its own above the button cluster, where
              the gauge that caused it and the button it stops both sit. It does
@@ -1284,15 +1279,6 @@ export default function PushResourceWorkspace({
             has no explanation. The region stays mounted, so the change is what
             it reads; a blocker present at first render is not announced. */}
         <span className="sync-visually-hidden" role="status">{blockerSentence ?? ""}</span>
-        {busy && (
-          /* The sentence states a standing contract rather than reporting an
-             event — the event is the push, which the button beside it is
-             already narrating. It still announces: it appears only once
-             `busy` flips, and it is the only thing that explains why Escape
-             has stopped closing the review and the button under the reader's
-             focus has gone dead. */
-          <p className="sync-review-footer-note" role="status">{PUSH_RUNNING_NOTE}</p>
-        )}
         {emptyReview ? (
           /* Nothing to commit, so the commit's slot holds the way out — the
              way Settings' Done leaves a page with nothing to save. A box, not

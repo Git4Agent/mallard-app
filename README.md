@@ -64,10 +64,14 @@ resources portable across teammates and machines.
   row's page works like a project's: one storage chosen in the path bar, one
   list of resources each wearing the same status badge a thread wears, and
   Push and Pull as page verbs with a review. Storage setup returns to the
-  originating Catalog row. On Mallard Cloud, each item is its own repository
-  and has its own page, as a project does: its name opens it, and its path
-  bar carries the Cloud chip (status, release, draft) and Pull and Push for
-  that item alone. An item with no repository shows the private one its first
+  originating Catalog row. On every storage an item's name opens its page,
+  made like its page on Mallard Cloud: a skill's SKILL.md and files, a
+  plugin's own words and the provider CLI lines that install it, a pet playing
+  on its desk — read from this Mac's copy, or the storage's when only it has
+  the item — beside what only this Mac knows (edited, size, warnings, and the
+  launch actions); its path bar carries Pull and Push for that item alone. On
+  Mallard Cloud each item is its own repository, and the bar adds the Cloud
+  chip (status, release, draft). An item with no repository shows the private one its first
   Push creates, and Change… opens the project's connect dialog: create it now,
   or choose one by address or invite code. A connected item keeps its
   repository. The row's + adds someone else's item from Mallard Cloud, and so
@@ -99,8 +103,16 @@ linking storage, Push, Pull review, and skill Pull/Fork do not require a
 provider executable. Codex plugin presence uses local config or remote-install
 markers plus cached manifests; cache-only packages are not listed as installed.
 Remote plugin enablement remains unknown when it is absent from local config.
-Plugin installation or overwrite still runs the provider CLI after approval,
+Plugin installation, overwrite, or uninstall runs the provider CLI after approval,
 with local state checked before and after execution. Schemas remain version 1.
+
+Local item cards and item pages have a trash button. **Delete local skill** and
+**Delete local pet** prepare a removal review, count the complete local folder,
+and ask for confirmation. Deletion checks file digests and removes only empty
+directories. **Uninstall local plugin** uses the selected provider home; Claude
+uninstalls only the user scope. Changed or expired reviews must be prepared
+again. Removal keeps storage copies and links, so a stored item can be pulled
+again. Interrupted removal is reported and is never replayed automatically.
 
 Library resources use a clean cutover: there is no backward compatibility,
 migration, legacy execution path, or parallel storage-wide catalog.

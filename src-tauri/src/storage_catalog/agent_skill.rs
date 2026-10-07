@@ -19,8 +19,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::codec::{
-    content_warnings, read_directory_tree, CapturedFile, CapturedResource, CatalogFormatCodec,
-    TreeLimits,
+    content_warnings, detail_files, read_detail_payload, read_directory_tree, CapturedFile,
+    CapturedResource, CatalogFormatCodec, CatalogResourceDetail, PayloadReader, TreeLimits,
 };
 use super::domain::{
     validate_component_name, validate_root_class, BoundedPortableObject, CatalogResourceEnvelope,
@@ -262,6 +262,24 @@ impl CatalogFormatCodec for AgentSkillCodec {
         let files = rename_skill_tree(&captured.files, new_name)?;
         capture_from_tree(&identity.root, new_name, files)
     }
+
+    /// The skill's page: `SKILL.md` as written (the page splits its
+    /// frontmatter), and every file beside it.
+    fn detail(
+        &self,
+        envelope: &CatalogResourceEnvelope,
+        read_payload: &PayloadReader<'_>,
+    ) -> Result<CatalogResourceDetail, String> {
+        let skill_md = envelope
+            .file("SKILL.md")
+            .ok_or("this skill has no SKILL.md")?;
+        let bytes = read_detail_payload(skill_md, MAX_SKILL_MD_BYTES, read_payload)?;
+        Ok(CatalogResourceDetail::Document {
+            path: skill_md.path.clone(),
+            text: String::from_utf8(bytes).ok(),
+            files: detail_files(envelope),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -428,5 +446,44 @@ mod tests {
             .unwrap()
             .to_envelope(&coordinate());
         assert_eq!(restaged, envelope);
+    }
+
+    #[test]
+    fn detail_reads_skill_md_by_digest_and_lists_every_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("notes");
+        let skill_md = b"---\nname: notes\ndescription: Takes notes.\n---\n# Notes\n";
+        write(&dir.join("SKILL.md"), skill_md);
+        write(&dir.join("scripts/run.sh"), b"#!/bin/sh\necho ok\n");
+        let captured = AgentSkillCodec
+            .capture_directory(&dir, "provider-home")
+            .unwrap();
+        let envelope = captured.to_envelope(&coordinate());
+        let payloads = captured.payloads();
+        let reader = |sha256: &str, _size: u64| {
+            payloads
+                .get(sha256)
+                .map(|bytes| bytes.to_vec())
+                .ok_or_else(|| "missing".to_string())
+        };
+        let CatalogResourceDetail::Document { path, text, files } =
+            AgentSkillCodec.detail(&envelope, &reader).unwrap()
+        else {
+            panic!("a skill's page is a document");
+        };
+        assert_eq!(path, "SKILL.md");
+        assert_eq!(text.as_deref().map(str::as_bytes), Some(&skill_md[..]));
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| (file.path.as_str(), file.executable))
+                .collect::<Vec<_>>(),
+            vec![("SKILL.md", false), ("scripts/run.sh", true)]
+        );
+
+        // A reader that answers other bytes is refused, whatever it claims.
+        let lying = |_: &str, size: u64| Ok(vec![b'x'; size as usize]);
+        let error = AgentSkillCodec.detail(&envelope, &lying).unwrap_err();
+        assert!(error.contains("does not match its digest"), "{}", error);
     }
 }

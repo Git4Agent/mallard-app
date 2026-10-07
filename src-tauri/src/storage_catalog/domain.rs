@@ -1552,6 +1552,7 @@ pub enum CatalogOperationKind {
     Preservation,
     Fork,
     NativeApply,
+    LocalRemoval,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1675,6 +1676,26 @@ impl CatalogOperationJournalEntry {
             ));
         }
         match self.kind {
+            CatalogOperationKind::LocalRemoval => {
+                if self.storage_id.is_some()
+                    || self.plan_id.is_none()
+                    || self.action_id.is_some()
+                    || any_copy
+                    || self.expected_target_sha256.is_none()
+                    || self.incoming_content_sha256.is_some()
+                    || self.copy_content_sha256.is_some()
+                    || self.backup_path.is_some()
+                    || self.backup_tree_sha256.is_some()
+                    || !matches!(
+                        self.phase,
+                        CatalogOperationPhase::Journaled
+                            | CatalogOperationPhase::Completed
+                            | CatalogOperationPhase::Failed
+                    )
+                {
+                    return Err("invalid local removal journal".to_string());
+                }
+            }
             CatalogOperationKind::DirectoryReplace => {
                 if !has_storage_plan_action
                     || !has_target
@@ -2553,12 +2574,74 @@ impl CatalogResourceForkPlan {
     }
 }
 
+/// One complete local removal review. Paths and fingerprints stay on this machine.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogResourceRemovalPlan {
+    pub plan_id: CatalogPlanId,
+    pub scope_id: CatalogScopeId,
+    pub resource_id: CatalogResourceId,
+    pub display_name: String,
+    pub uninstall: bool,
+    pub file_count: usize,
+    pub created_at: u64,
+    pub expires_at: u64,
+    #[serde(skip_serializing)]
+    pub scope_revision: u64,
+    #[serde(skip_serializing)]
+    pub profile_pins: Vec<CatalogProfilePin>,
+    #[serde(skip_serializing)]
+    pub target_pins: Vec<CatalogTargetPin>,
+    #[serde(skip_serializing)]
+    pub target: CatalogTargetConfig,
+    #[serde(skip_serializing)]
+    pub resource: CatalogResourceEnvelope,
+    #[serde(skip_serializing)]
+    pub entries: BTreeMap<String, CatalogRemovalEntry>,
+    #[serde(skip_serializing)]
+    pub native_state_sha256: Option<String>,
+    #[serde(skip_serializing)]
+    pub argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogRemovalEntry {
+    /// None is an exact directory, including empty directories.
+    pub sha256: Option<String>,
+}
+
+impl CatalogResourceRemovalPlan {
+    pub fn validate(&self) -> Result<(), String> {
+        self.target.validate()?;
+        self.resource.validate()?;
+        if self.expires_at <= self.created_at || self.resource_id != self.resource.resource_id {
+            return Err("invalid local removal review".to_string());
+        }
+        if self.uninstall != self.native_state_sha256.is_some()
+            || self.uninstall != !self.argv.is_empty()
+            || self.uninstall && !self.entries.is_empty()
+            || !self.uninstall && !self.entries.contains_key("")
+        {
+            return Err("incomplete local removal review".to_string());
+        }
+        for (path, entry) in &self.entries {
+            if !path.is_empty() {
+                validate_portable_relative_path(path)?;
+            }
+            if let Some(digest) = &entry.sha256 {
+                validate_sha256("removal file", digest)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The one value type the in-memory plan store holds: any pending review.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CatalogResourcePlanDocument {
     Push(CatalogScopePushPlan),
     Pull(CatalogScopePullPlan),
     Fork(CatalogResourceForkPlan),
+    Removal(CatalogResourceRemovalPlan),
 }
 
 impl CatalogResourcePlanDocument {
@@ -2567,6 +2650,7 @@ impl CatalogResourcePlanDocument {
             Self::Push(plan) => &plan.plan_id,
             Self::Pull(plan) => &plan.plan_id,
             Self::Fork(plan) => &plan.plan_id,
+            Self::Removal(plan) => &plan.plan_id,
         }
     }
 
@@ -2575,6 +2659,7 @@ impl CatalogResourcePlanDocument {
             Self::Push(plan) => plan.created_at,
             Self::Pull(plan) => plan.created_at,
             Self::Fork(plan) => plan.created_at,
+            Self::Removal(plan) => plan.created_at,
         }
     }
 
@@ -2583,6 +2668,7 @@ impl CatalogResourcePlanDocument {
             Self::Push(plan) => plan.expires_at,
             Self::Pull(plan) => plan.expires_at,
             Self::Fork(plan) => plan.expires_at,
+            Self::Removal(plan) => plan.expires_at,
         }
     }
 
@@ -2591,6 +2677,7 @@ impl CatalogResourcePlanDocument {
             Self::Push(plan) => plan.validate(),
             Self::Pull(plan) => plan.validate(),
             Self::Fork(plan) => plan.validate(),
+            Self::Removal(plan) => plan.validate(),
         }
     }
 }
@@ -2602,6 +2689,7 @@ impl CatalogResourcePlanDocument {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogActionOutcome {
+    Removed,
     Installed,
     Updated,
     PreservedAndUpdated,

@@ -1,5 +1,5 @@
 import RepositoryLookupField, { entryKind, isInvitationCodeShaped } from "../managed-cloud/RepositoryLookupField";
-import { predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
+import { nameRefusal, predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
 import {
   CloudScopeTabs,
   ListingFoot,
@@ -129,7 +129,7 @@ export function selectionFor(repository: ManagedCloudRepository): RepositorySele
   return {
     kind: "existing",
     bundle_id: repository.bundle_id ?? "",
-    display_name: repository.address,
+    display_name: repository.display_name,
     repository_fingerprint: repository.repository_fingerprint,
     mismatch_acknowledged: false,
   };
@@ -286,12 +286,12 @@ export default function RepositoryAddressPicker({
   const kind = entryKind(entry);
   const needle = kind === "filter" ? entry.trim() : "";
   const filtering = needle.length > 0;
-  const fits = (address: string, description: string | null) => matchesFilter(needle, address, description);
-  const yoursRows = repositories.filter((repository) => fits(repository.address, repository.description));
+  const fits = (row: { address: string; description: string | null; display_name: string }) => matchesFilter(needle, row.address, row.description, row.display_name);
+  const yoursRows = repositories.filter(fits);
   const starredAll = listings.starred.state === "ready" ? listings.starred.rows : [];
   const publicAll = listings.public.state === "ready" ? listings.public.rows : [];
-  const starredRows = starredAll.filter((row) => fits(row.address, row.description));
-  const publicRows = publicAll.filter((row) => fits(row.address, row.description));
+  const starredRows = starredAll.filter(fits);
+  const publicRows = publicAll.filter(fits);
 
   /** The scope whose rows hold the repository, if one does. */
   const scopeHolding = (repositoryId: string): ScopeId | null => (
@@ -601,6 +601,7 @@ export default function RepositoryAddressPicker({
         <RepoRowTile mark={repositoryMark(repository)} pet={false} skin={skin} />
         <RepoRowCopy
           address={repository.address}
+          displayName={repository.display_name}
           github={repository.github_url}
           kind={skin === "match" ? classWord(repository.repository_class) : undefined}
           badge={gitMatch ? <small className="sync-bundle-recommended">Git match</small> : undefined}
@@ -653,8 +654,14 @@ export default function RepositoryAddressPicker({
               {rows === "match-option" && <span className="setup-choice-mark" aria-hidden="true"><Icon name="git-fork" size={24} /></span>}
               <span className={copyClass}>
                 <strong>New repository</strong>
-                <span className="repo-new-address">{prediction.address}</span>
-                {prediction.suffixed && <span>{prediction.base} is already used.</span>}
+                {prediction.kind === "address" ? (
+                  <>
+                    <span className="repo-new-address">{prediction.address}</span>
+                    {prediction.suffixed && <span>{prediction.base} is already used.</span>}
+                  </>
+                ) : (
+                  <span className="repo-new-refusal">{nameRefusal("project")}</span>
+                )}
               </span>
               <span className={metaClass}><small>Private</small></span>
             </button>

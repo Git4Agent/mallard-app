@@ -8,6 +8,7 @@
 //! requests as the website files them, removal with its three repository
 //! states, discard as the service runs it, and the desktop sign-in dance.
 //! State lives in memory; tests reach it directly.
+use super::names;
 use crate::storage_core::publication::record_name_of;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -909,63 +910,6 @@ fn head_body(
         body["version"] = json!(version);
     }
     body
-}
-
-const REPOSITORY_NAME_MAX: usize = 100;
-
-/// Preserve valid names exactly; otherwise apply the service's title cleanup.
-fn normalize_repository_name(requested: &str) -> String {
-    let trimmed = requested.trim();
-    if !trimmed.is_empty()
-        && trimmed.len() <= REPOSITORY_NAME_MAX
-        && trimmed != "."
-        && trimmed != ".."
-        && trimmed
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return trimmed.to_owned();
-    }
-    let mut out = String::new();
-    let mut pending = false;
-    for ch in requested.trim().chars() {
-        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' {
-            if pending && !out.is_empty() {
-                out.push('-');
-            }
-            pending = false;
-            out.push(ch);
-        } else {
-            pending = true;
-        }
-    }
-    out.truncate(REPOSITORY_NAME_MAX);
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() || out == "." || out == ".." {
-        "repository".to_owned()
-    } else {
-        out
-    }
-}
-
-/// The first of `base`, `base-2`, `base-3`, … not in `held` (lower-cased names).
-fn pick_available_name(base: &str, held: &BTreeSet<String>) -> String {
-    if !held.contains(&base.to_ascii_lowercase()) {
-        return base.to_owned();
-    }
-    (2u64..)
-        .map(|n| {
-            let suffix = format!("-{n}");
-            let mut head = base[..base.len().min(REPOSITORY_NAME_MAX - suffix.len())].to_owned();
-            while head.ends_with('-') {
-                head.pop();
-            }
-            format!("{head}{suffix}")
-        })
-        .find(|candidate| !held.contains(&candidate.to_ascii_lowercase()))
-        .expect("an unbounded sequence has a free name")
 }
 
 fn catalog_value(item: &CatalogItem) -> Value {
@@ -1930,12 +1874,20 @@ fn route(
                 );
             }
         }
-        let base = normalize_repository_name(value["name"].as_str().unwrap_or_default());
+        // The name the service derives, or its refusal, before anything is
+        // written: no marker, no row.
+        let Some(base) = names::derive_repository_name(value["name"].as_str().unwrap_or_default())
+        else {
+            return error(
+                "invalid_request",
+                "The name needs a letter or digit. Rename the project, or the pet, and push again.",
+            );
+        };
         let held: BTreeSet<String> = state
             .repositories
             .values()
             .filter(|r| r.active() && r.owner_id == user_id)
-            .map(|r| r.name.to_ascii_lowercase())
+            .map(|r| names::name_key(&r.name))
             .collect();
         let id = state.id("repo");
         let marker = serde_json::to_vec(&crate::storage_core::StorageMarker::current()).unwrap();
@@ -1952,7 +1904,7 @@ fn route(
             id: id.clone(),
             state: "active".to_owned(),
             class,
-            name: pick_available_name(&base, &held),
+            name: names::pick_available_name(&base, &held),
             owner_id: user_id.clone(),
             bundle_id,
             repository_fingerprint: fingerprint,
@@ -2041,18 +1993,28 @@ fn route(
     }
     if method == Method::GET && parts.len() == 5 && parts[..3] == ["v1", "repositories", "by-name"]
     {
-        // Both segments compare case-insensitively, as the service's do.
+        // Both segments arrive percent-encoded or raw and compare without
+        // case, the name by key, as the service's do.
+        let (Some(owner_login), Some(name)) = (
+            names::decode_segment(parts[3]),
+            names::decode_segment(parts[4]),
+        ) else {
+            return error("not_found", "not an address");
+        };
         let Some(owner) = state
             .users
             .values()
-            .find(|u| u.login.eq_ignore_ascii_case(parts[3]))
+            .find(|u| u.login.eq_ignore_ascii_case(&owner_login))
         else {
             return error("not_found", "no such owner");
         };
-        // The active repository of that name, else the newest one being removed.
+        // The active repository of that key, else the newest one being removed.
+        let wanted_key = names::name_key(&name);
         let named = |wanted: &str| {
             state.repositories.values().rfind(|r| {
-                r.state == wanted && r.owner_id == owner.id && r.name.eq_ignore_ascii_case(parts[4])
+                r.state == wanted
+                    && r.owner_id == owner.id
+                    && names::name_key(&r.name) == wanted_key
             })
         };
         let Some(repository) = named("active").or_else(|| named("deleting")) else {

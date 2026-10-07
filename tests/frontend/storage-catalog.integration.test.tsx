@@ -46,11 +46,14 @@ const commandNames = [
   "find_catalog_cloud_repository",
   "connect_catalog_cloud_repository", "create_catalog_cloud_repository", "get_catalog_cloud_status", "discard_catalog_cloud_draft",
   "apply_catalog_resource_fork",
+  "prepare_catalog_resource_removal",
+  "apply_catalog_resource_removal",
   "apply_catalog_scope_pull",
   "apply_catalog_scope_push",
   "create_catalog_scope",
   "delete_catalog_scope",
   "finish_catalog_unfinished_push",
+  "get_catalog_resource_detail",
   "get_catalog_resource_preview",
   "inspect_catalog_resource_profile",
   "link_catalog_scope_storage",
@@ -204,6 +207,7 @@ test("the Catalog API exposes only the scope-level command surface", () => {
     readFileSync("src/components/storage-catalog/AddCatalogScopeWorkspace.tsx", "utf8"),
     readFileSync("src/components/storage-catalog/CatalogHomeStep.tsx", "utf8"),
     readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8"),
+    readFileSync("src/components/storage-catalog/CatalogItemPage.tsx", "utf8"),
   ].join("\n");
   const invoked = [...source.matchAll(/invoke(?:<[^>]+>)?\("([^"]+)"/g)]
     .map((match) => match[1])
@@ -215,7 +219,7 @@ test("the Catalog API exposes only the scope-level command surface", () => {
   );
   for (const method of [
     "listCapabilities", "listProfiles", "saveProfile", "renameProfile", "probeProfile", "inspectProfile",
-    "createScope", "listScopeResources", "getPreview", "linkScopeStorage",
+    "createScope", "listScopeResources", "getPreview", "getDetail", "linkScopeStorage",
     "unlinkScopeStorage", "openProfileApp", "openProfileTerminal",
     "preparePush", "applyPush", "finishUnfinishedPush", "preparePull", "applyPull",
     "prepareFork", "applyFork",
@@ -1192,6 +1196,8 @@ test("provider, kind, and format are open keys with backend labels in the fronte
     "src/components/storage-catalog/CatalogHomeStep.tsx",
     "src/components/storage-catalog/CatalogScopeSetupStep.tsx",
     "src/components/storage-catalog/setupFurniture.tsx",
+    "src/components/storage-catalog/CatalogItemPage.tsx",
+    "src/components/storage-catalog/CatalogPetDesk.tsx",
     "src/components/storage-catalog/api.ts",
     "src/components/storage-catalog/model.ts",
     "src/components/storage-catalog/types.ts",
@@ -1244,6 +1250,8 @@ test("the Catalog remains independent from project sync", () => {
     "src/components/storage-catalog/CatalogHomeStep.tsx",
     "src/components/storage-catalog/CatalogScopeSetupStep.tsx",
     "src/components/storage-catalog/setupFurniture.tsx",
+    "src/components/storage-catalog/CatalogItemPage.tsx",
+    "src/components/storage-catalog/CatalogPetDesk.tsx",
     "src/components/storage-catalog/api.ts",
     "src/components/storage-catalog/model.ts",
     "src/components/storage-catalog/types.ts",
@@ -1535,12 +1543,17 @@ test("the connect dialog is the project's, with fewer words, and opens no review
   assert.doesNotMatch(dialog, /preparePull|applyPull|openPull|Connect and review|Disconnect/);
 });
 
-test("on Mallard Cloud an item has its own page and its repository lives in its bar", () => {
+test("every storage's item has its own page, and on Mallard Cloud its repository lives in its bar", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // The list carries no Cloud chip and no per-row connect; its names open
-  // the item's page on Mallard Cloud only.
+  // the item's page on every storage.
   assert.doesNotMatch(page, /CatalogCloudItem|CatalogCloudConnections|Connect Cloud repository|>Cloud repositories</);
-  assert.match(page, /onOpen=\{managedCloud && resourceId && !itemRow \?/);
+  assert.match(page, /onOpen=\{resourceId && !itemRow \?/);
+  assert.match(page, /const itemRow = itemId \? rowByResource\.get\(itemId\) \?\? null : null;/);
+  // What only Mallard Cloud has stays Mallard Cloud's: the first Push's
+  // repository card, and the several-repositories note.
+  assert.match(page, /\{managedCloud && !itemRepository && itemRow\.state !== "blocked" && !pageCloud && \(/);
+  assert.match(page, /if \(managedCloud && itemRow\?\.state === "blocked" && itemRow\.resource_id\) \{/);
   assert.match(page, /className="sync-history-session-title-button" title=\{`\$\{row\.display_name\} · View \$\{kindNoun\} details`\}/);
   // One chip, in the bar, on an item's page; read once per load.
   assert.equal(page.match(/<ManagedCloudChip/g)?.length, 1);
@@ -1624,4 +1637,247 @@ test("a Mallard Cloud outcome speaks the project's words: what moved, its reposi
     { resource_id: "duck", display_name: "Duck", state: "published", message: null },
   ] });
   assert.deepEqual(folder.stats.map((stat) => stat.label), ["completed", "Version"]);
+});
+
+/* ——— an item's page ——— */
+
+function itemRow(overrides: Partial<CatalogScopeRow> = {}): CatalogScopeRow {
+  return {
+    row_id: "row-release-notes",
+    display_name: "release-notes",
+    resource_id: "release-notes",
+    state: "local_changed",
+    local_present: true,
+    local_path: "/Users/you/.claude/skills/release-notes",
+    local_modified_at: 1_790_000_000,
+    local_files: 2,
+    local_bytes: 4_096,
+    remote_present: true,
+    remote_updated_at: 1_789_000_000,
+    content_sha256: "a".repeat(64),
+    preview_png: null,
+    description: null,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+const itemActions = {
+  provider: "claude",
+  providerLabel: "Claude",
+  onOpenApp: () => {},
+  onOpenTerminal: () => {},
+  onFork: () => {},
+  forkTitle: "Fork release-notes",
+  onReveal: () => {},
+};
+
+test("an item's page holds its body and what only this Mac knows, each said once", async () => {
+  const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  const text = [
+    "---",
+    "name: release-notes",
+    "description: Drafts release notes from the commits since the last tag.",
+    "allowed-tools: Bash(git log:*)",
+    "---",
+    "# Release notes",
+    "",
+    "![diagram](https://example.com/diagram.png)",
+    "",
+    "<script>alert(1)</script>",
+  ].join("\n");
+  const html = renderToStaticMarkup(
+    <CatalogItemPage
+      row={itemRow()}
+      detail={{ status: "ready", detail: { kind: "document", path: "SKILL.md", text, files: [
+        { path: "SKILL.md", size: 1_644, executable: false },
+        { path: "scripts/range.sh", size: 2_444, executable: true },
+      ] } }}
+      actions={itemActions}
+      onOpenExternal={() => {}}
+    />,
+  );
+  // The body: the frontmatter's description, SKILL.md without its
+  // frontmatter, and every file, executables marked.
+  assert.match(html, /<p class="catalog-item-lede">Drafts release notes from the commits since the last tag\.<\/p>/);
+  assert.match(html, /<h1>Release notes<\/h1>/);
+  assert.doesNotMatch(html, /allowed-tools|<script/);
+  assert.match(html, /<code>scripts\/range\.sh<\/code><span class="catalog-item-exec" title="Executable"/);
+  // An image in a skill is never fetched.
+  assert.match(html, /markdown-image-placeholder/);
+  assert.doesNotMatch(html, /<img/);
+  // The bar names the item, its kind, provider and sync state; the page
+  // repeats none of them.
+  assert.doesNotMatch(html, />release-notes</);
+  assert.doesNotMatch(html, /sync-history-branch-state|thread-status-icon|>Skill<|>Claude</);
+  // This Mac's facts, then the launch run with Reveal in Finder last, once in
+  // the rail and once in the line it folds into.
+  assert.match(html, /<dt>Edited<\/dt><dd><time/);
+  assert.match(html, /<dt>Size<\/dt><dd>4\.0 KB<\/dd>/);
+  const runs = [...html.matchAll(/<div class="sync-history-thread-actions catalog-item-actions">(.*?)<\/div>/g)];
+  assert.equal(runs.length, 2);
+  for (const [, run] of runs) {
+    const labels = [...run.matchAll(/aria-label="([^"]+)"/g)].map((match) => match[1]);
+    assert.deepEqual(labels, ["Open in Claude", "Open in Terminal", "Fork release-notes", "Reveal release-notes in Finder"]);
+  }
+  assert.doesNotMatch(html, /\/Users\/you\/\.claude\/skills\/release-notes<\//);
+});
+
+test("a plugin's page is the store hero with this Mac's install state and the adapter's lines", async () => {
+  const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  const plugin = (overrides: Partial<Extract<import("../../src/components/storage-catalog/types").CatalogResourceDetail, { kind: "install" }>> = {}) => ({
+    kind: "install" as const,
+    plugin_id: "lint-buddy@acme-tools",
+    marketplace: "acme-tools",
+    location: "acme-tools/claude-plugins",
+    git_ref: null,
+    install: ["claude plugin marketplace add acme-tools/claude-plugins --scope user", "claude plugin install lint-buddy@acme-tools --scope user"],
+    installed_version: "1.4.0",
+    listing: {
+      display_name: "Lint Buddy", developer: "Acme Tools", description: "Runs your linters.", category: "Code quality",
+      website_url: "https://example.com/lint-buddy", privacy_url: null, terms_url: null,
+    },
+    ...overrides,
+  });
+  const render = (row: CatalogScopeRow, detail: ReturnType<typeof plugin>) => renderToStaticMarkup(
+    <CatalogItemPage row={row} detail={{ status: "ready", detail }} actions={{ ...itemActions, onFork: undefined }} onOpenExternal={() => {}} />,
+  );
+  const installed = render(itemRow({ display_name: "lint-buddy@acme-tools", local_files: null, local_bytes: null }), plugin());
+  assert.match(installed, /<b>Lint Buddy<\/b> by Acme Tools · Code quality/);
+  assert.match(installed, /Installed · 1\.4\.0/);
+  assert.match(installed, /<span class="catalog-item-prompt" aria-hidden="true">\$ <\/span>claude plugin install lint-buddy@acme-tools --scope user/);
+  assert.match(installed, /aria-label="Copy claude plugin marketplace add acme-tools\/claude-plugins --scope user &amp;&amp; claude plugin install/);
+  assert.match(installed, /acme-tools\/claude-plugins<svg/);
+  assert.match(installed, />Website<svg/);
+  // Stored only: Pull is the install. No printable lines: no box.
+  const stored = render(
+    itemRow({ local_present: false, local_path: null, local_modified_at: null, local_files: null, local_bytes: null }),
+    plugin({ installed_version: null, listing: null, install: [] }),
+  );
+  assert.match(stored, /Pull installs it/);
+  assert.doesNotMatch(stored, /catalog-item-install|Installed ·/);
+  assert.match(stored, /<dt>Stored<\/dt>/);
+  // Not on this Mac: nothing to fork or reveal.
+  assert.match(stored, /disabled="" title="Not on this Mac"/);
+});
+
+test("a pet's page plays its atlas on the desk, with Pause, and says what it is once", async () => {
+  const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  const html = renderToStaticMarkup(
+    <CatalogItemPage
+      row={itemRow({ display_name: "Mossy", resource_id: "mossy" })}
+      detail={{ status: "ready", detail: { kind: "sprite", atlas: "data:image/webp;base64,AAAA", columns: 8, rows: 11, description: "A mallard who naps." } }}
+      actions={{ ...itemActions, provider: "codex", providerLabel: "Codex", forkTitle: "Fork Mossy" }}
+      onOpenExternal={() => {}}
+    />,
+  );
+  assert.match(html, /class="catalog-pet-desk"/);
+  for (const moment of ["Idle", "Working", "Needs you", "Review", "Failed"]) {
+    assert.match(html, new RegExp(`class="catalog-pet-moment"[^>]*>${moment}<`));
+  }
+  assert.match(html, />Pause</);
+  assert.equal(html.match(/A mallard who naps\./g)?.length, 1);
+  // The player: Reduce Motion starts it paused, and a v2 atlas turns to look.
+  const desk = readFileSync("src/components/storage-catalog/CatalogPetDesk.tsx", "utf8");
+  assert.match(desk, /const playing = !\(paused \?\? reduced\);/);
+  assert.match(desk, /const looks = rows >= 11;/);
+});
+
+test("off Mallard Cloud, a blocked item's page says why it can't be synced", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(page, /\{!managedCloud && itemRow\.state === "blocked" && \(\s*<Notice severity="warning" timing="standing" label=\{`Why \$\{name\} can't be synced`\} title=\{`\$\{name\} can't be synced\.`\}>\s*\{itemRow\.blocker \?\? /);
+});
+
+test("SKILL.md's frontmatter splits the way Mallard Cloud's skill page splits it", async () => {
+  const { splitSkillFrontmatter } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  const split = splitSkillFrontmatter("---\nname: 'it''s'\ndescription: >\n  Two\n  lines.\nmetadata:\n  nested: skipped\n---\nBody\n");
+  assert.deepEqual(split.fields, { name: "it's", description: "Two lines." });
+  assert.equal(split.body, "Body\n");
+  assert.deepEqual(splitSkillFrontmatter("No frontmatter."), { fields: {}, body: "No frontmatter." });
+});
+
+test("an item's rail sits beside its body from 880px of page, and is one line above it under that", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.catalog-item-page \{[^}]*container: catalog-item \/ inline-size;/);
+  assert.match(css, /\.catalog-item-rail \{[^}]*display: none;/);
+  // Whatever stands above the item (the first Push's repository card, an
+  // outcome, a blocked note) keeps a heading's space from it; nothing above,
+  // no space.
+  assert.match(css, /\.profile-links-section > \* \+ \.catalog-item-page \{\s*margin-top: 18px;\s*\}/);
+  assert.match(css, /@container catalog-item \(min-width: 880px\) \{\s*\.catalog-item-line \{\s*display: none;\s*\}\s*\.catalog-item-hub \{\s*grid-template-columns: minmax\(0, 1fr\) 260px;\s*\}\s*\.catalog-item-rail \{\s*display: flex;\s*\}/);
+});
+
+test("the app's one Markdown renderer belongs to neither feature", () => {
+  const renderer = readFileSync("src/components/markdown/MarkdownText.tsx", "utf8");
+  assert.match(renderer, /skipHtml/);
+  assert.match(renderer, /urlTransform=\{safeMarkdownUrl\}/);
+  assert.match(renderer, /img: \(\{ alt \}\) => <MarkdownImagePlaceholder label=\{alt \|\| "image"\} \/>/);
+  for (const file of ["src/components/markdown/MarkdownText.tsx", "src/components/markdown/markdownUrl.ts", "src/components/markdown/remarkLatexMath.ts"]) {
+    assert.doesNotMatch(readFileSync(file, "utf8"), /project-sync|storage-catalog/, file);
+  }
+  assert.match(readFileSync("src/components/project-sync/session-detail/SessionDetailEvent.tsx", "utf8"), /from "\.\.\/\.\.\/markdown\/MarkdownText"/);
+  assert.match(readFileSync("src/components/storage-catalog/CatalogItemPage.tsx", "utf8"), /from "\.\.\/markdown\/MarkdownText"/);
+});
+
+test("a pet of any script predicts its own address, and a title with nothing usable is a refusal", async () => {
+  const { nameRefusal, predictRepositoryAddress } = await import("../../src/components/managed-cloud/repositoryAddress");
+  assert.deepEqual(predictRepositoryAddress("Rika321", "大黄", []), { kind: "address", address: "Rika321/大黄", name: "大黄", base: "大黄", suffixed: false });
+  assert.deepEqual(predictRepositoryAddress("Rika321", "大黄", [{ owner_login: "Rika321", name: "大黄" }]), { kind: "address", address: "Rika321/大黄-2", name: "大黄-2", base: "大黄", suffixed: true });
+  assert.deepEqual(predictRepositoryAddress("Rika321", "🦆🦆", []), { kind: "refused" });
+  assert.equal(nameRefusal("item"), "Name needs a letter or digit; rename the item first.");
+  // The item page's repository card and the chooser's New row print the prediction, or that one sentence.
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(page, /prediction\.kind === "address" \? \(accountLogin \? prediction\.address : prediction\.name\) : nameRefusal\("item"\)/);
+  const chooser = readFileSync("src/components/storage-catalog/CloudRepositoryChoice.tsx", "utf8");
+  assert.match(chooser, /<span className="repo-new-refusal">\{nameRefusal\("item"\)\}<\/span>/);
+});
+
+test("local removal button follows local presence, safety and busy state", async () => {
+  const { default: CatalogRemoveButton } = await import("../../src/components/storage-catalog/CatalogRemoveButton");
+  const row = { local_present: true, resource_id: "one", blocker: null } as CatalogScopeRow;
+  const action = { label: "Delete local pet", busy: false, removing: false, onRemove() {} };
+  assert.match(renderToStaticMarkup(<CatalogRemoveButton row={row} action={action} />), /aria-label="Delete local pet"/);
+  assert.equal(renderToStaticMarkup(<CatalogRemoveButton row={{ ...row, local_present: false }} action={action} />), "");
+  assert.equal(renderToStaticMarkup(<CatalogRemoveButton row={row} />), "");
+  assert.match(renderToStaticMarkup(<CatalogRemoveButton row={{ ...row, blocker: "Unsafe folder" }} action={action} />), /disabled/);
+  assert.match(renderToStaticMarkup(<CatalogRemoveButton row={row} action={{ ...action, busy: true, removing: true }} />), /icon-spin/);
+});
+
+test("removal cancellation and page changes never apply", async () => {
+  const { removeLocalCatalogResource } = await import("../../src/components/storage-catalog/removalFlow");
+  const plan = { plan_id: "review", scope_id: "scope", resource_id: "item", display_name: "Duck", uninstall: false, file_count: 3, created_at: 1, expires_at: 2 };
+  for (const approved of [false, true]) {
+    let current = true;
+    let applied = false;
+    const result = await removeLocalCatalogResource({
+      kindNoun: "pet", prepare: async () => plan,
+      confirm: async (message, options) => {
+        assert.match(message, /3 files/);
+        assert.equal(options.okLabel, "Delete");
+        if (approved) current = false;
+        return approved;
+      },
+      apply: async () => { applied = true; throw new Error("must not apply"); },
+      refresh: async () => { throw new Error("must not refresh"); }, isCurrent: () => current,
+    });
+    assert.equal(result, null);
+    assert.equal(applied, false);
+  }
+});
+
+test("plugin removal uses uninstall copy and refreshes after success or failure", async () => {
+  const { removeLocalCatalogResource } = await import("../../src/components/storage-catalog/removalFlow");
+  for (const fail of [false, true]) {
+    let refreshed = 0;
+    const work = removeLocalCatalogResource({
+      kindNoun: "plugin",
+      prepare: async () => ({ plan_id: "review", scope_id: "scope", resource_id: "plugin", display_name: "Plugin", uninstall: true, file_count: 0, created_at: 1, expires_at: 2 }),
+      confirm: async (message, options) => { assert.match(message, /user installation/); assert.equal(options.okLabel, "Uninstall"); return true; },
+      apply: async (id) => { assert.equal(id, "review"); if (fail) throw new Error("provider failed"); return { removed: true, message: "Removed" }; },
+      refresh: async () => { refreshed++; }, isCurrent: () => true,
+    });
+    if (fail) await assert.rejects(work, /provider failed/);
+    else assert.equal((await work)?.removed, true);
+    assert.equal(refreshed, 1);
+  }
 });

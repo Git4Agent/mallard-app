@@ -683,62 +683,12 @@ export function readableToolPayload(value: string): SessionPayloadView {
   return { text, raw, transformed: text !== raw };
 }
 
-const EXTERNAL_MARKDOWN_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
-
-const MARKDOWN_URL_SCHEME = /^[a-z][a-z\d+.-]*:/i;
-
-/**
- * Session text crosses the backend boundary with the registered project root
- * rewritten to `.`. Treat only clean relative descendants as project paths:
- * absolute paths, URL schemes, and parent traversal stay plain text.
- */
-export function safeProjectMarkdownPath(url: string): string | null {
-  if (!url || url.startsWith("#") || url.startsWith("/") || url.startsWith("\\")
-      || MARKDOWN_URL_SCHEME.test(url)) {
-    return null;
-  }
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(url).replace(/\\/g, "/");
-  } catch {
-    return null;
-  }
-  if (decoded.startsWith("/") || MARKDOWN_URL_SCHEME.test(decoded)) return null;
-  const parts: string[] = [];
-  for (const part of decoded.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === ".." || part.includes("\0")) return null;
-    parts.push(part);
-  }
-  return parts.length > 0 ? parts.join("/") : null;
-}
-
 export function projectMarkdownDisplayPath(projectRoot: string, relativePath: string): string {
   if (!projectRoot) return relativePath;
   const separator = projectRoot.includes("\\") && !projectRoot.includes("/") ? "\\" : "/";
   const root = projectRoot.replace(/[\\/]+$/, "");
   const path = relativePath.replace(/\//g, separator);
   return root ? `${root}${separator}${path}` : `${separator}${path}`;
-}
-
-export function safeMarkdownUrl(url: string): string {
-  if (url.startsWith("#")) return url;
-  try {
-    const parsed = new URL(url);
-    if (EXTERNAL_MARKDOWN_PROTOCOLS.has(parsed.protocol)) return parsed.toString();
-  } catch {
-    // Relative Markdown destinations are handled as project paths below.
-  }
-  return safeProjectMarkdownPath(url) ?? "";
-}
-
-export function isSafeExternalMarkdownUrl(url: string): boolean {
-  if (url.startsWith("#")) return false;
-  try {
-    return EXTERNAL_MARKDOWN_PROTOCOLS.has(new URL(url).protocol);
-  } catch {
-    return false;
-  }
 }
 
 /**

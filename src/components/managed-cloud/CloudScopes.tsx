@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { nameKey } from "./repositoryAddress";
 import type { ManagedCloudListingPage, ManagedCloudListingRow, ManagedCloudPublicSort } from "./types";
 import { formatRelativeTime } from "../../clock";
 import { errorMessage } from "../../storageError";
@@ -25,10 +26,13 @@ export interface ScopeTab {
 }
 
 /** Whether the filter's words are in the address or the description. */
-export function matchesFilter(needle: string, address: string, description: string | null | undefined): boolean {
-  const wanted = needle.trim().toLowerCase();
+/** Whether a row answers the filter: its address, its display name or its
+ *  description holds the words, compared by key (NFC, no case), so `大`
+ *  finds 大黄 in any spelling. */
+export function matchesFilter(needle: string, address: string, description: string | null | undefined, displayName?: string | null): boolean {
+  const wanted = nameKey(needle);
   if (!wanted) return true;
-  return address.toLowerCase().includes(wanted) || (description ?? "").toLowerCase().includes(wanted);
+  return nameKey(address).includes(wanted) || nameKey(displayName ?? "").includes(wanted) || nameKey(description ?? "").includes(wanted);
 }
 
 const capitalize = (value: string) => (value ? `${value[0].toUpperCase()}${value.slice(1)}` : value);
@@ -169,8 +173,14 @@ export function RepoRowTile({ mark, pet, skin }: { mark: IconName; pet: boolean;
   return <span className="sync-storage-repository-icon" aria-hidden="true"><Icon name={mark} size={14} /></span>;
 }
 
-export function RepoRowCopy({ address, github, kind, badge, blurb, skin }: {
+/** A row's words: the display name leads (the project's title as it was
+ *  pushed, a pet's name), the address sits beneath it with the description
+ *  or the role word; with no display name the address leads, as a row that
+ *  only knows its address does. */
+export function RepoRowCopy({ address, displayName, github, kind, badge, blurb, skin }: {
   address: string;
+  /** The display name of the head the account may read, when the row knows it. */
+  displayName?: string | null;
   github?: string | null;
   /** The kind, printed after the name on the setup page (`git project`). */
   kind?: string | null;
@@ -182,12 +192,16 @@ export function RepoRowCopy({ address, github, kind, badge, blurb, skin }: {
   return (
     <span className={skin === "choice" ? "sync-bundle-choice-copy" : "sync-bundle-match-copy"}>
       <strong>
-        <span>{address}</span>
+        <span>{displayName || address}</span>
         {badge}
         {github && <Icon name="git-branch" size={12} aria-label="On GitHub" />}
         {kind && <code>{kind}</code>}
       </strong>
-      <span className="repo-row-blurb">{blurb}</span>
+      <span className="repo-row-blurb">
+        {displayName ? <span className="repo-row-address">{address}</span> : null}
+        {displayName && blurb ? <i className="repo-row-sep" aria-hidden="true">·</i> : null}
+        {blurb}
+      </span>
     </span>
   );
 }
@@ -245,7 +259,7 @@ export function ListingRows({ rows, skin, selectedId, resolvingId, disabled, ari
             disabled={disabled} onClick={() => onPick(row)}>
             <span className="sync-bundle-radio"><span /></span>
             <RepoRowTile mark={markFor(row)} pet={row.catalog?.resource_kind === "desktop_pet"} skin={skin} />
-            <RepoRowCopy address={row.address} github={row.github_url} kind={kindFor?.(row)} skin={skin}
+            <RepoRowCopy address={row.address} displayName={row.display_name} github={row.github_url} kind={kindFor?.(row)} skin={skin}
               blurb={row.description ?? (skin === "match" ? role : null)}
               badge={resolving ? <small className="sync-bundle-recommended">Looking up…</small> : undefined} />
             <RepoRowMeta role={role} stars={row.star_count} starred={row.viewer_starred} age={rowAge(row)} skin={skin} />

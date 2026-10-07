@@ -14,6 +14,7 @@ use std::io::Read;
 use std::path::Path;
 
 use bytes::Bytes;
+use serde::Serialize;
 
 use super::domain::{
     sha256_hex, validate_portable_relative_path, BoundedPortableObject, CatalogCoordinate,
@@ -165,6 +166,103 @@ pub trait CatalogFormatCodec: Send + Sync {
     ) -> Result<Option<String>, String> {
         Ok(None)
     }
+
+    /// What the resource's page shows, read from the envelope and, where the
+    /// format needs them, its payload files through `read_payload`. Every
+    /// registered format has a page; a format without one is an error.
+    fn detail(
+        &self,
+        _envelope: &CatalogResourceEnvelope,
+        _read_payload: &PayloadReader<'_>,
+    ) -> Result<CatalogResourceDetail, String> {
+        Err("this format has no page".to_string())
+    }
+}
+
+/// One payload file as a resource's page lists it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogDetailFile {
+    pub path: String,
+    pub size: u64,
+    pub executable: bool,
+}
+
+/// The display words an installed plugin's own manifest gives it.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogDetailPluginListing {
+    pub display_name: Option<String>,
+    pub developer: Option<String>,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub website_url: Option<String>,
+    pub privacy_url: Option<String>,
+    pub terms_url: Option<String>,
+}
+
+/// A resource's page, by the shape its format presents. Display only: it
+/// never feeds an identity, a digest, a plan or a manifest.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CatalogResourceDetail {
+    /// A document and the files beside it (an Agent Skill's `SKILL.md`).
+    /// `text` is absent when the document is not UTF-8.
+    Document {
+        path: String,
+        text: Option<String>,
+        files: Vec<CatalogDetailFile>,
+    },
+    /// What an install intent names. `install` is the provider's own
+    /// terminal lines for installing it by hand, filled by its adapter; the
+    /// installed version and listing are this Mac's, filled only when the
+    /// plugin is installed here.
+    Install {
+        plugin_id: String,
+        marketplace: String,
+        location: Option<String>,
+        git_ref: Option<String>,
+        install: Vec<String>,
+        installed_version: Option<String>,
+        listing: Option<Box<CatalogDetailPluginListing>>,
+    },
+    /// An animated sprite atlas (a desktop pet) as a data URI, with its cell
+    /// grid and the format's one-line description.
+    Sprite {
+        atlas: String,
+        columns: u32,
+        rows: u32,
+        description: Option<String>,
+    },
+}
+
+/// One payload file's bytes for a page, checked against the envelope's size
+/// and digest whatever the reader is, and refused above `max_bytes`.
+pub fn read_detail_payload(
+    file: &CatalogPortableFile,
+    max_bytes: u64,
+    read_payload: &PayloadReader<'_>,
+) -> Result<Vec<u8>, String> {
+    if file.size > max_bytes {
+        return Err(format!("'{}' is too large to show", file.path));
+    }
+    let bytes = read_payload(&file.sha256, file.size)?;
+    if bytes.len() as u64 != file.size || sha256_hex(&bytes) != file.sha256 {
+        return Err(format!("'{}' does not match its digest", file.path));
+    }
+    Ok(bytes)
+}
+
+/// The page's file list: every payload file with its size, executables
+/// marked by their portable mode.
+pub fn detail_files(envelope: &CatalogResourceEnvelope) -> Vec<CatalogDetailFile> {
+    envelope
+        .files
+        .iter()
+        .map(|file| CatalogDetailFile {
+            path: file.path.clone(),
+            size: file.size,
+            executable: file.mode & 0o111 != 0,
+        })
+        .collect()
 }
 
 /// Bounds for one bounded directory read.

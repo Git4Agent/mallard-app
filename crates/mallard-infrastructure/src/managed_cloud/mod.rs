@@ -6,6 +6,7 @@ pub mod address;
 pub mod app_link;
 pub mod client;
 pub mod diagnostics;
+pub mod names;
 pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stub;

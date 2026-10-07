@@ -3,11 +3,14 @@ import type { CatalogSyncProgress, CatalogCloudPlace, CatalogCloudRepository, Ca
 import { Channel, invoke } from "../../ipc";
 import type {
   CatalogActionResult,
+  CatalogResourceRemovalPlan,
+  CatalogRemovalResult,
   CatalogCapabilityDescriptor,
   CatalogCoordinate,
   CatalogProfile,
   CatalogProfileInspection,
   CatalogProfileProbe,
+  CatalogResourceDetail,
   CatalogResourceForkPlan,
   CatalogScopeDto,
   CatalogScopeLinkOutcome,
@@ -26,6 +29,10 @@ function progressChannel(receive: (progress: CatalogSyncProgress) => void) {
 }
 
 export const storageCatalogApi = {
+  prepareRemoval: (scopeId: string, resourceId: string) =>
+    invoke<CatalogResourceRemovalPlan>("prepare_catalog_resource_removal", { scopeId, resourceId }),
+  applyRemoval: (planId: string) =>
+    invoke<CatalogRemovalResult>("apply_catalog_resource_removal", { planId }),
   /** The repositories this account belongs to that hold one item. */
   listCloudRepositories: (scopeId: string, storageId: string, resourceId: string) =>
     invoke<CatalogCloudRepository[]>("list_catalog_cloud_repositories", { scopeId, storageId, resourceId }),
@@ -141,6 +148,12 @@ export const storageCatalogApi = {
    * glyph tile. */
   getPreview: (scopeId: string, storageId: string, resourceId: string) =>
     invoke<string>("get_catalog_resource_preview", { scopeId, storageId, resourceId }),
+
+  /** An item's page: this Mac's copy when it is here, read from what the
+   * inventory captured; else the storage's, fetched and verified. Asked once
+   * per page and content, never in the list path. */
+  getDetail: (scopeId: string, storageId: string | null, resourceId: string) =>
+    invoke<CatalogResourceDetail>("get_catalog_resource_detail", { scopeId, storageId, resourceId }),
 
   /** The scope links to the storage once; every resource of this coordinate
    * syncs through that one pairing. Linking is configuration only. */

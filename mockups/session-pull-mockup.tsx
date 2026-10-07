@@ -327,7 +327,7 @@ runtime.isTauri = true;
 mockIPC((command) => (command === "plugin:path|resolve_directory" ? HOME : null));
 
 const cloudProject = (overrides: Partial<ManagedCloudRepository>): ManagedCloudRepository => ({
-  repository_id: "repo_maya_portal", owner_login: "maya", name: "portal", address: "maya/portal",
+  repository_id: "repo_maya_portal", owner_login: "maya", name: "portal", address: "maya/portal", display_name: overrides.name ?? "portal",
   website_url: `${ORIGIN}/maya/portal`, bundle_id: "b".repeat(32), repository_class: "git_project", visibility: "public",
   role: null, can_push: true, repository_fingerprint: "f".repeat(64), git_remote: "differs",
   github_url: "https://github.com/maya/portal", revision: 6, updated_at: now - 9 * DAY, resources: 14, registration_only: false,

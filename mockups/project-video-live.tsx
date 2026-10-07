@@ -164,7 +164,7 @@ function finalize(current: ProjectSetupDraft): ProjectDetail {
 /* ——— Mallard Cloud ——————————————————————————————————————————————————— */
 
 const repo = (name: string, owner: string, role: string, fingerprint: string, bundle: string, revision: number): ManagedCloudRepository => ({
-  repository_id: `repo_${name}`, owner_login: owner, name, address: `${owner}/${name}`, website_url: `${ORIGIN}/${owner}/${name}`,
+  repository_id: `repo_${name}`, owner_login: owner, name, address: `${owner}/${name}`, display_name: name, website_url: `${ORIGIN}/${owner}/${name}`,
   bundle_id: bundle, repository_class: "git_project", visibility: "private", role, can_push: true, repository_fingerprint: fingerprint,
   git_remote: "unknown", github_url: `https://github.com/${owner}/${name}`, revision, updated_at: now - 5 * 60, resources: 3,
   registration_only: false, description: null, star_count: 0, viewer_starred: false,

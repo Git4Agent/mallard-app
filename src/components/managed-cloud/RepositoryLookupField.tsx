@@ -7,10 +7,12 @@ export function isInvitationCodeShaped(text: string): boolean {
 }
 
 /** `owner/name`, `host/owner/name`, or a page link: something a lookup
- *  can answer. Anything else the field holds is a filter. */
+ *  can answer. A name is any script, raw (`Rika321/大黄`) or percent-encoded
+ *  (`Rika321/%E5%A4%A7%E9%BB%84`); hosts and logins stay ASCII. Anything
+ *  else the field holds is a filter. */
 export function isAddressShaped(text: string): boolean {
   const trimmed = text.trim().replace(/^https?:\/\//i, "");
-  return /^([a-z0-9.-]+\/)?[a-z0-9._-]+\/[a-z0-9._-]+\/?$/i.test(trimmed) || /^[a-z0-9.-]+\.[a-z]{2,}\//i.test(trimmed);
+  return /^([a-z0-9.-]+\/)?[a-z0-9._-]+\/(?:[\p{L}\p{M}\p{N}._-]|%[0-9A-F]{2})+\/?$/iu.test(trimmed) || /^[a-z0-9.-]+\.[a-z]{2,}\//i.test(trimmed);
 }
 
 /** What the one field holds: nothing, words that filter the rows, an

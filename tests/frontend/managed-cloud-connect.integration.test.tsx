@@ -14,7 +14,7 @@ import RepositoryAddressPicker, {
   repositoryCautions,
   repositoryVerdict,
 } from "../../src/components/project-sync/RepositoryAddressPicker";
-import { normalizeRepositoryName, predictRepositoryAddress } from "../../src/components/managed-cloud/repositoryAddress";
+import { deriveRepositoryName, nameRefusal, predictRepositoryAddress, type AddressPrediction } from "../../src/components/managed-cloud/repositoryAddress";
 
 /* Connecting a project to a Mallard Cloud repository by its website
    address, or by a private repository's invitation code. The picker never
@@ -48,6 +48,7 @@ function repository(overrides: Partial<ManagedCloudRepository>): ManagedCloudRep
     owner_login: "Rika321",
     name: "HorrorGame",
     address: "Rika321/HorrorGame",
+    display_name: overrides.name ?? "HorrorGame",
     website_url: "https://mallard-ai.com/Rika321/HorrorGame",
     bundle_id: BUNDLE,
     repository_class: "git_project",
@@ -69,23 +70,42 @@ function repository(overrides: Partial<ManagedCloudRepository>): ManagedCloudRep
 }
 
 test("the New row predicts the address the service would create", () => {
-  assert.equal(normalizeRepositoryName("Horror Game"), "Horror-Game");
-  assert.equal(normalizeRepositoryName("  --weird__name.v2--  "), "--weird__name.v2--");
-  assert.equal(normalizeRepositoryName("My--Repo"), "My--Repo");
-  assert.equal(normalizeRepositoryName("///"), "repository");
+  // The case table the service, the desktop and the website all assert.
+  assert.equal(deriveRepositoryName("HorrorGame"), "HorrorGame");
+  assert.equal(deriveRepositoryName("Horror Game"), "Horror-Game");
+  assert.equal(deriveRepositoryName("  --weird__name.v2--  "), "--weird__name.v2--");
+  assert.equal(deriveRepositoryName("My--Repo"), "My--Repo");
+  assert.equal(deriveRepositoryName("大黄"), "大黄");
+  assert.equal(deriveRepositoryName("  日本語  "), "日本語");
+  assert.equal(deriveRepositoryName("Cafe\u0301"), "Caf\u00e9");
+  assert.equal(deriveRepositoryName("大 黄 / 二"), "大-黄-二");
+  assert.equal(deriveRepositoryName(".github"), ".github");
+  assert.equal(deriveRepositoryName("x".repeat(150)), "x".repeat(100));
+  assert.equal(deriveRepositoryName(`${"x".repeat(99)}-yyy`), "x".repeat(99));
+  assert.equal(deriveRepositoryName("黄".repeat(150)), "黄".repeat(100));
+  assert.equal(deriveRepositoryName("😀abc"), "abc");
+  for (const nothing of ["🦆🦆", ".", "..", "///", "", "   "]) assert.equal(deriveRepositoryName(nothing), null, JSON.stringify(nothing));
+  const addressOf = (prediction: AddressPrediction) => (prediction.kind === "address" ? prediction.address : prediction.kind);
   const mine = [repository({}), repository({ repository_id: "repo_2", name: "HorrorGame-2", address: "Rika321/HorrorGame-2" })];
   assert.deepEqual(predictRepositoryAddress("Rika321", "HorrorGame", mine), {
+    kind: "address",
     address: "Rika321/HorrorGame-3",
     name: "HorrorGame-3",
     base: "HorrorGame",
     suffixed: true,
   });
-  assert.equal(predictRepositoryAddress("Rika321", "horrorgame", mine).address, "Rika321/horrorgame-3", "names compare case-insensitively");
-  assert.equal(predictRepositoryAddress("Rika321", "Birding Log", mine).address, "Rika321/Birding-Log");
-  assert.equal(predictRepositoryAddress("Rika321", "My--Repo", [repository({ name: "My--Repo" })]).address, "Rika321/My--Repo-2");
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "horrorgame", mine)), "Rika321/horrorgame-3", "names compare case-insensitively");
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "Birding Log", mine)), "Rika321/Birding-Log");
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "My--Repo", [repository({ name: "My--Repo" })])), "Rika321/My--Repo-2");
+  // Any script; a decomposed spelling of a held name is the same key; a title with nothing usable is a refusal, never `repository`.
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "大黄", mine)), "Rika321/大黄");
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "大黄", [repository({ name: "大黄", address: "Rika321/大黄" })])), "Rika321/大黄-2");
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "A\u0308rger", [repository({ name: "Ärger", address: "Rika321/Ärger" })])), "Rika321/Ärger-2");
+  assert.deepEqual(predictRepositoryAddress("Rika321", "🦆🦆", mine), { kind: "refused" });
+  assert.equal(nameRefusal("project"), "Name needs a letter or digit; rename the project first.");
   // Another owner's repository of the same name does not take the name.
   const theirs = [repository({ owner_login: "someone", address: "someone/HorrorGame" })];
-  assert.equal(predictRepositoryAddress("Rika321", "HorrorGame", theirs).suffixed, false);
+  assert.equal(addressOf(predictRepositoryAddress("Rika321", "HorrorGame", theirs)), "Rika321/HorrorGame");
   assert.deepEqual(managedCloudAccount(cloud), { login: "Rika321", origin: "https://mallard-ai.com", host: "mallard-ai.com" });
 });
 
@@ -145,9 +165,11 @@ test("the picker names repositories by address and never by bundle id", () => {
   assert.match(html, /role="tablist"[\s\S]*?data-scope="yours">[\s\S]*?Yours<small>3<\/small><\/button>/, "Yours heads the scopes, with its count");
   assert.match(html, /data-scope="starred"[\s\S]*?data-scope="public"/);
   assert.doesNotMatch(html, /read-only/i);
-  assert.match(html, /Rika321\/HorrorGame<\/span><small class="sync-bundle-recommended">Git match<\/small>/);
+  // The display name leads the row; the address is the line beneath.
+  assert.match(html, /<strong><span>HorrorGame<\/span><small class="sync-bundle-recommended">Git match<\/small>/);
+  assert.match(html, /class="repo-row-address">Rika321\/HorrorGame<\/span>/);
   assert.match(html, /Private · Owner/);
-  assert.match(html, /rikaqu0223-arch\/tidewatch/);
+  assert.match(html, /<strong><span>tidewatch<\/span>[\s\S]*?class="repo-row-address">rikaqu0223-arch\/tidewatch<\/span>/);
   assert.match(html, /Private · Member/);
   assert.match(html, /Public · Owner/);
   assert.match(html, /not pushed yet/);
@@ -313,7 +335,9 @@ test("a saved folder name reaches the preview without replacing newer name or fo
 test("rows carry the description and the stars, and the one field knows words from an address or a code", () => {
   const rows = [
     repository({ description: "Customer portal.", star_count: 3, viewer_starred: true }),
-    repository({ repository_id: "repo_2", name: "notes", address: "Rika321/notes", bundle_id: "a".repeat(32), repository_class: "non_git_project", git_remote: "differs", repository_fingerprint: null, description: null, star_count: 0 }),
+    repository({ repository_id: "repo_2", name: "notes", address: "Rika321/notes", display_name: "notes", bundle_id: "a".repeat(32), repository_class: "non_git_project", git_remote: "differs", repository_fingerprint: null, description: null, star_count: 0 }),
+    repository({ repository_id: "repo_3", name: "大黄", address: "Rika321/大黄", display_name: "大黄", bundle_id: "c".repeat(32), repository_class: "non_git_project", git_remote: "differs", repository_fingerprint: null, description: "黄色的大狗。", star_count: 0 }),
+    repository({ repository_id: "repo_4", name: "Horror-Game", address: "Rika321/Horror-Game", display_name: "Horror Game", bundle_id: "d".repeat(32), repository_class: "non_git_project", git_remote: "differs", repository_fingerprint: null, description: null, star_count: 0 }),
   ];
   const html = renderToStaticMarkup(
     <RepositoryAddressPicker
@@ -328,9 +352,13 @@ test("rows carry the description and the stars, and the one field knows words fr
       onSelect={() => undefined}
     />,
   );
-  assert.match(html, /class="sync-bundle-choice repo-row starred"[\s\S]*?Rika321\/HorrorGame[\s\S]*?class="repo-row-blurb">Customer portal\.<\/span>/, "the description is the second line");
+  // The display name leads; the address and the description are the second line.
+  assert.match(html, /class="sync-bundle-choice repo-row starred"[\s\S]*?<strong><span>HorrorGame<\/span>[\s\S]*?class="repo-row-blurb"><span class="repo-row-address">Rika321\/HorrorGame<\/span><i class="repo-row-sep" aria-hidden="true">·<\/i>Customer portal\.<\/span>/, "the address and the description are the second line");
   assert.match(html, /data-icon="star-filled"[^>]*>[\s\S]*?<\/svg> 3 · /, "the account's own star is filled, with the count");
-  assert.match(html, /Rika321\/notes[\s\S]*?class="repo-row-blurb"><\/span>/, "no description, no line");
+  assert.match(html, /<strong><span>notes<\/span>[\s\S]*?class="repo-row-blurb"><span class="repo-row-address">Rika321\/notes<\/span><\/span>/, "no description: the address alone");
+  // A name of any script prints as the service spells it; a title that differs from its address shows both.
+  assert.match(html, /<strong><span>大黄<\/span>[\s\S]*?class="repo-row-blurb"><span class="repo-row-address">Rika321\/大黄<\/span><i class="repo-row-sep" aria-hidden="true">·<\/i>黄色的大狗。<\/span>/);
+  assert.match(html, /<strong><span>Horror Game<\/span>[\s\S]*?class="repo-row-address">Rika321\/Horror-Game<\/span>/);
   assert.doesNotMatch(html, /Rika321\/notes[\s\S]*?data-icon="star"/, "no stars, no star");
   assert.match(html, /<strong>Private · Owner<\/strong>/, "the role stays in the meta column");
 
@@ -341,8 +369,16 @@ test("rows carry the description and the stars, and the one field knows words fr
   assert.equal(entryKind("mallard-ai.com/zoe/Lantern/sessions/1"), "address");
   assert.equal(entryKind("mallard-waffle-ivy-2026"), "code");
   assert.ok(isAddressShaped("Rika321/HorrorGame") && !isAddressShaped("horror game"));
+  // A name of any script, raw or percent-encoded, is an address; a bare word or a name with a space is a filter.
+  assert.ok(isAddressShaped("Rika321/大黄") && isAddressShaped("Rika321/%E5%A4%A7%E9%BB%84") && isAddressShaped("mallard-ai.com/Rika321/大黄/"));
+  assert.ok(isAddressShaped("https://mallard-ai.com/Rika321/%E5%A4%A7%E9%BB%84/sessions/x?commit=1"));
+  assert.ok(!isAddressShaped("大黄") && !isAddressShaped("Rika321/大 黄") && !isAddressShaped("大黄/HorrorGame"));
+  assert.equal(entryKind("Rika321/大黄"), "address");
   assert.ok(matchesFilter("beagle", "kai/Biscuit", "A beagle that fetches finished builds."));
   assert.ok(matchesFilter("BIS", "kai/Biscuit", null) && !matchesFilter("tofu", "kai/Biscuit", null));
+  // The display name counts too, and the comparison is by key: NFC and case.
+  assert.ok(matchesFilter("大", "Rika321/大黄", null) && matchesFilter("horror game", "Rika321/Horror-Game", null, "Horror Game"));
+  assert.ok(matchesFilter("CAFÉ", "x/Cafe\u0301", null) && !matchesFilter("duck", "Rika321/大黄", null, "大黄"));
   assert.equal(listingRoleWord({ role: null, visibility: "public" }), "Public");
   assert.equal(listingRoleWord({ role: "member", visibility: "private" }), "Member");
   assert.equal(listingRoleWord({ role: "member", visibility: "public" }), "Public · Member");

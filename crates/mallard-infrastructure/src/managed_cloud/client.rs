@@ -9,6 +9,7 @@
 //! desktop's own keys, and the three operations a store needs, put, get and
 //! list, are the three requests here. A put is one request with no retry.
 use super::diagnostics::{report_upload, TransportCause};
+use super::names;
 use crate::storage_core::{
     ConnectionEvidence, ConnectionHealth, ConnectionHealthCell, ConnectionState,
 };
@@ -509,6 +510,9 @@ pub struct ListingRow {
     pub name: String,
     /// `{owner_login}/{name}`, the service's spelling.
     pub address: String,
+    /// What the row prints: the display name of the head the account may
+    /// read (a project's title, a pet's name), else the address segment.
+    pub display_name: String,
     pub website_url: String,
     pub repository_class: String,
     pub catalog: Option<ListingCatalog>,
@@ -652,6 +656,15 @@ struct PublicListWire {
 /// The publication summary's revision, when the service inlined one.
 fn summary_revision(summary: Option<&serde_json::Value>) -> Option<u64> {
     summary?.get("revision")?.as_u64()
+}
+
+/// The summary's display name, else the address segment.
+fn summary_display_name(summary: Option<&serde_json::Value>, name: &str) -> String {
+    summary
+        .and_then(|summary| summary.get("display_name")?.as_str())
+        .filter(|display_name| !display_name.is_empty())
+        .unwrap_or(name)
+        .to_owned()
 }
 
 fn blurb_of(description: Option<String>, github_description: Option<String>) -> Option<String> {
@@ -1227,6 +1240,7 @@ impl ManagedCloudClient {
                     .unwrap_or(row.updated_at);
                 ListingRow {
                     address: format!("{}/{}", row.owner.github_login, row.name),
+                    display_name: summary_display_name(row.summary.as_ref(), &row.name),
                     website_url: self.website_url(&row.owner.github_login, &row.name),
                     repository_id: row.id,
                     owner_login: row.owner.github_login,
@@ -1285,6 +1299,7 @@ impl ManagedCloudClient {
                 );
                 ListingRow {
                     address: format!("{}/{}", row.owner.github_login, row.name),
+                    display_name: summary_display_name(row.summary.as_ref(), &row.name),
                     website_url: self.website_url(&row.owner.github_login, &row.name),
                     repository_id: row.id,
                     owner_login: row.owner.github_login,
@@ -1350,7 +1365,8 @@ impl ManagedCloudClient {
     /// The repository at an address (section 4.1): the collaborator summary,
     /// or the public face (`role: None`, fingerprint withheld) of a public
     /// repository the caller does not belong to. `None` when nothing the
-    /// caller may see lives there.
+    /// caller may see lives there. Both segments travel percent-encoded, so
+    /// a name of any script reaches the service as the website spells it.
     pub async fn repository_by_name(
         &self,
         owner: &str,
@@ -1360,7 +1376,11 @@ impl ManagedCloudClient {
         let request = self.request(
             Method::GET,
             route,
-            &format!("/v1/repositories/by-name/{owner}/{name}"),
+            &format!(
+                "/v1/repositories/by-name/{}/{}",
+                names::encode_segment(owner),
+                names::encode_segment(name)
+            ),
         )?;
         match self.json(route, true, request).await {
             Ok(summary) => Ok(Some(summary)),
@@ -1603,9 +1623,15 @@ impl ManagedCloudClient {
         self.json(route, false, request).await
     }
 
-    /// `{origin}/{owner_login}/{name}`: a repository's page on the website.
+    /// `{origin}/{owner_login}/{name}`: a repository's page on the website,
+    /// the name percent-encoded as the website's own href is.
     pub fn website_url(&self, owner_login: &str, name: &str) -> String {
-        format!("{}/{}/{}", self.origin(), owner_login, name)
+        format!(
+            "{}/{}/{}",
+            self.origin(),
+            names::encode_segment(owner_login),
+            names::encode_segment(name)
+        )
     }
 }
 

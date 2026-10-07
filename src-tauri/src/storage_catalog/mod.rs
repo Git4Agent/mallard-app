@@ -32,6 +32,7 @@ mod provider_state;
 pub mod registry;
 pub mod resource_commands;
 pub mod resource_engine;
+mod removal_files;
 pub mod resource_planning;
 pub mod service;
 

@@ -21,7 +21,7 @@ fn validate_components(components: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn open_state_path(
+pub(super) fn open_state_path(
     home: &Path,
     components: &[&str],
     directory: bool,

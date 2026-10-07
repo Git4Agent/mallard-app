@@ -8,6 +8,8 @@
 //! unavailable and cannot be operated on.
 
 pub mod cloud;
+mod removal;
+pub use removal::CatalogRemovalResult;
 
 use bytes::Bytes;
 use mallard_domain::{
@@ -17,6 +19,7 @@ use mallard_infrastructure::bundle_engine::{NOT_PULLED, VERSION_INCOMPLETE};
 use mallard_infrastructure::managed_cloud::client::{
     CoordinateQuery, ManagedCloudStatus, ManagedCloudStatusState,
 };
+use mallard_infrastructure::managed_cloud::names as cloud_names;
 use mallard_infrastructure::managed_cloud::ManagedObjectStore;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::publication::{
@@ -30,10 +33,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::adapters::{NativeProcessRunner, PluginProcessRunner, ResolvedCatalogTarget};
+use super::adapters::{
+    NativeProcessRunner, PluginProcessRunner, ProviderInventory, ResolvedCatalogTarget,
+};
 use super::apply::{
     apply_resource_fork, execute_scope_pull_item, recover_catalog_operations, PullApplyEnvironment,
 };
+use super::codec::{CapturedResource, CatalogDetailPluginListing, CatalogResourceDetail};
 use super::domain::{
     CatalogActionOutcome, CatalogActionResult, CatalogCapturedWith, CatalogCoordinate,
     CatalogCoordinateLabels, CatalogFormatKey, CatalogLinkId, CatalogLinkState,
@@ -42,7 +48,7 @@ use super::domain::{
     CatalogResourceKindKey, CatalogResourcePlanDocument, CatalogResourceRepositoryId,
     CatalogResourceWarning, CatalogScope, CatalogScopeId, CatalogScopeLink, CatalogScopePullPlan,
     CatalogScopePushPlan, CatalogTargetConfig, LibraryHeadCoordinate, LibraryResourceManifest,
-    LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId, ProviderKey,
+    LibraryResourceTag, LocalCatalogProfile, LocalCatalogProfileId, PluginApplyMode, ProviderKey,
     PublishedResourceEntry,
 };
 use super::inventory::{inventory_local, CatalogLocalInventory, LocalResourceRecord};
@@ -614,6 +620,23 @@ impl StorageCatalogService {
         resource_id: &CatalogResourceId,
     ) -> Result<String, String> {
         get_catalog_resource_preview_with_repositories(
+            &self.registry,
+            &self.state,
+            &self.catalog,
+            scope_id,
+            storage_id,
+            resource_id,
+            &self.user_home,
+        )
+    }
+
+    pub fn resource_detail(
+        &self,
+        scope_id: &CatalogScopeId,
+        storage_id: Option<&StorageId>,
+        resource_id: &CatalogResourceId,
+    ) -> Result<CatalogResourceDetail, String> {
+        get_catalog_resource_detail_with_repositories(
             &self.registry,
             &self.state,
             &self.catalog,
@@ -2045,6 +2068,44 @@ fn get_catalog_resource_preview_with_repositories(
     resource_id: &CatalogResourceId,
     user_home: &Path,
 ) -> Result<String, String> {
+    let (workspace, repository_id, resource) = stored_scope_resource(
+        registry,
+        state,
+        catalog,
+        scope_id,
+        storage_id,
+        resource_id,
+        user_home,
+    )?;
+    let engine = workspace.engine.as_ref().expect("a storage has an engine");
+    workspace
+        .capability
+        .codec
+        .preview(&resource, &preview_cache_dir(user_home), &|sha256, size| {
+            engine.fetch_payload(&repository_id, sha256, size)
+        })?
+        .ok_or_else(|| "this resource has no preview".to_string())
+}
+
+/// One stored resource of a scope, read from its repository and held to the
+/// scope's coordinate and codec: the first half of every read that serves a
+/// resource this Mac does not have (its preview, its page).
+fn stored_scope_resource(
+    registry: &CatalogRegistry,
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    scope_id: &CatalogScopeId,
+    storage_id: &StorageId,
+    resource_id: &CatalogResourceId,
+    user_home: &Path,
+) -> Result<
+    (
+        ResolvedScopeWorkspace,
+        CatalogResourceRepositoryId,
+        CatalogResourceEnvelope,
+    ),
+    String,
+> {
     let workspace = resolve_scope_workspace(
         registry,
         state,
@@ -2058,23 +2119,159 @@ fn get_catalog_resource_preview_with_repositories(
     let (_, manifest) = engine
         .inspect(&repository_id)?
         .ok_or("the stored resource disappeared")?;
-    let scope = &workspace.scope;
-    let capability = &workspace.capability;
     let resource = manifest
         .resources
         .get(resource_id)
-        .map(|entry| &entry.resource)
+        .map(|entry| entry.resource.clone())
         .ok_or("the stored resource disappeared")?;
-    if resource.coordinate() != scope.coordinate() {
+    if resource.coordinate() != workspace.scope.coordinate() {
         return Err("the stored resource does not belong to this Catalog row".to_string());
     }
-    capability.codec.validate(resource)?;
-    capability
+    workspace.capability.codec.validate(&resource)?;
+    Ok((workspace, repository_id, resource))
+}
+
+/// A resource's page. This Mac's copy when the inventory holds one, read
+/// from the capture the inventory already made — no storage is asked;
+/// otherwise the storage's copy, fetched and verified as a stored-only
+/// preview is. A plugin installed here adds the version the provider
+/// observed and what its own manifest says about it.
+fn get_catalog_resource_detail_with_repositories(
+    registry: &CatalogRegistry,
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    scope_id: &CatalogScopeId,
+    storage_id: Option<&StorageId>,
+    resource_id: &CatalogResourceId,
+    user_home: &Path,
+) -> Result<CatalogResourceDetail, String> {
+    let ResolvedScope { scope, .. } = resolve_scope(catalog, scope_id)?;
+    let capability = require_capability(registry, &scope)?;
+    let context = resolve_profile_context(
+        registry,
+        &catalog.load_profiles()?,
+        &scope.profile_id,
+        &scope.provider,
+        user_home,
+    )
+    .map_err(|blocker| blocker.to_string())?;
+    let inventory =
+        inventory_local(registry, &capability, &context).map_err(|blocker| blocker.to_string())?;
+    if let Some(record) = inventory.resources.get(resource_id) {
+        let payloads = record
+            .captured
+            .as_ref()
+            .map(CapturedResource::payloads)
+            .unwrap_or_default();
+        let mut detail = record
+            .capability
+            .codec
+            .detail(&record.resource, &|sha256, size| {
+                payloads
+                    .get(sha256)
+                    .filter(|bytes| bytes.len() as u64 == size)
+                    .map(|bytes| bytes.to_vec())
+                    .ok_or_else(|| "the captured payload is missing".to_string())
+            })?;
+        fill_install_lines(&mut detail, &record.capability, &record.resource);
+        if let (
+            CatalogResourceDetail::Install {
+                plugin_id,
+                installed_version,
+                listing,
+                ..
+            },
+            Some(native),
+        ) = (&mut detail, inventory.native.as_ref())
+        {
+            let profile = &context.profile;
+            *installed_version = native
+                .observation(plugin_id)
+                .filter(|observation| observation.installed)
+                .and_then(|observation| observation.observed_version.clone());
+            *listing = super::plugin_listing::installed_listing(
+                profile.provider.as_str(),
+                &profile.canonical_home,
+                native,
+                plugin_id,
+            )
+            .map(|listing| {
+                Box::new(CatalogDetailPluginListing {
+                    display_name: listing.display_name,
+                    developer: listing.developer,
+                    description: listing.description,
+                    category: listing.category,
+                    website_url: listing.website_url,
+                    privacy_url: listing.privacy_url,
+                    terms_url: listing.terms_url,
+                })
+            });
+        }
+        return Ok(detail);
+    }
+    let storage_id = storage_id.ok_or("this resource is not on this Mac")?;
+    let (workspace, repository_id, resource) = stored_scope_resource(
+        registry,
+        state,
+        catalog,
+        scope_id,
+        storage_id,
+        resource_id,
+        user_home,
+    )?;
+    let engine = workspace.engine.as_ref().expect("a storage has an engine");
+    let mut detail = workspace
+        .capability
         .codec
-        .preview(resource, &preview_cache_dir(user_home), &|sha256, size| {
+        .detail(&resource, &|sha256, size| {
             engine.fetch_payload(&repository_id, sha256, size)
-        })?
-        .ok_or_else(|| "this resource has no preview".to_string())
+        })?;
+    fill_install_lines(&mut detail, &workspace.capability, &resource);
+    Ok(detail)
+}
+
+/// An install intent's page carries the lines that install it by hand: its
+/// adapter's own plan for a home that has nothing yet — the argv a Pull runs
+/// — with the provider's CLI in front. A plan the adapter refuses (a
+/// marketplace that is not portable, a ref its CLI cannot bind) prints no
+/// lines, and neither does one with a word that is not plain enough to paste
+/// into a shell: the page never hands over a line that does more than install.
+fn fill_install_lines(
+    detail: &mut CatalogResourceDetail,
+    capability: &CatalogCapability,
+    envelope: &CatalogResourceEnvelope,
+) {
+    let CatalogResourceDetail::Install { install, .. } = detail else {
+        return;
+    };
+    let Some(cli) = capability.adapter.native_cli() else {
+        return;
+    };
+    let Ok(plan) = capability.adapter.plan_native_apply(
+        envelope,
+        &ProviderInventory::default(),
+        PluginApplyMode::InstallMissing,
+    ) else {
+        return;
+    };
+    let commands: Vec<Vec<String>> = plan
+        .marketplace_argv
+        .into_iter()
+        .chain(std::iter::once(plan.argv))
+        .collect();
+    let plain = |word: &String| {
+        !word.is_empty()
+            && word
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@%+=:,./_-".contains(&byte))
+    };
+    if !commands.iter().flatten().all(plain) {
+        return;
+    }
+    *install = commands
+        .into_iter()
+        .map(|argv| format!("{} {}", cli.program, argv.join(" ")))
+        .collect();
 }
 
 /// The storage page's Catalog listing: every repository this build can
@@ -2424,7 +2621,7 @@ fn discard_scope_plans(
         CatalogResourcePlanDocument::Pull(plan) => {
             &plan.scope_id == scope_id && &plan.storage_id == storage_id
         }
-        CatalogResourcePlanDocument::Fork(_) => false,
+        CatalogResourcePlanDocument::Fork(_) | CatalogResourcePlanDocument::Removal(_) => false,
     });
 }
 
@@ -2629,12 +2826,12 @@ fn push_destinations(
     let Some(names) = CloudNames::load(workspace, storage) else {
         return BTreeMap::new();
     };
-    // Names the account owns, and the names this Push takes as it goes.
+    // The keys of the names the account owns, and of the names this Push takes as it goes.
     let mut taken = names
         .summaries
         .iter()
         .filter(|summary| summary.role.as_deref() == Some("owner"))
-        .map(|summary| summary.name.to_lowercase())
+        .map(|summary| cloud_names::name_key(&summary.name))
         .collect::<BTreeSet<_>>();
     let mut destinations = BTreeMap::new();
     for row in pushable {
@@ -2651,8 +2848,14 @@ fn push_destinations(
                 }
             }
             None => {
-                let name = cloud::predicted_repository_name(&row.row.display_name, &taken);
-                taken.insert(name.to_lowercase());
+                // A display name that derives no address has no destination
+                // to show: the service refuses the create, and the outcome
+                // carries its sentence.
+                let Some(name) = cloud::predicted_repository_name(&row.row.display_name, &taken)
+                else {
+                    continue;
+                };
+                taken.insert(cloud_names::name_key(&name));
                 CatalogPushDestination {
                     repository_id: None,
                     address: format!("{}/{}", names.login, name),
@@ -3718,6 +3921,385 @@ mod tests {
             profile_id.clone(),
             now,
         )
+    }
+
+    #[test]
+    fn simultaneous_removal_applies_one_review_once() {
+        let fixture = library_fixture();
+        let scope = skill_scope(&fixture);
+        let service = StorageCatalogService::from_home_dirs(
+            &fixture.user_home,
+            &fixture.user_home,
+            Box::new(PanicRunner),
+        )
+        .unwrap();
+        let rows = service
+            .list_scope_resources(&scope.scope.scope_id, None)
+            .unwrap();
+        let plan = service
+            .prepare_removal(
+                &scope.scope.scope_id,
+                rows.rows[0].resource_id.as_ref().unwrap(),
+            )
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|threads| {
+            let run = || {
+                barrier.wait();
+                service.apply_removal(&plan.plan_id)
+            };
+            let first = threads.spawn(run);
+            let second = threads.spawn(run);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| r.as_ref().is_ok_and(|r| r.removed))
+                .count(),
+            1
+        );
+        assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+    }
+
+    #[test]
+    fn removal_recovery_skips_active_work_and_never_replays_deletion() {
+        use super::super::apply::journal_entry;
+        use super::super::domain::{
+            CatalogOperationId, CatalogOperationKind, CatalogOperationPhase,
+        };
+        let fixture = library_fixture();
+        let scope = skill_scope(&fixture);
+        let service = StorageCatalogService::from_home_dirs(
+            &fixture.user_home,
+            &fixture.user_home,
+            Box::new(PanicRunner),
+        )
+        .unwrap();
+        let rows = service
+            .list_scope_resources(&scope.scope.scope_id, None)
+            .unwrap();
+        let plan = service
+            .prepare_removal(
+                &scope.scope.scope_id,
+                rows.rows[0].resource_id.as_ref().unwrap(),
+            )
+            .unwrap();
+        let root = plan.target.decode().unwrap().canonical_root;
+        let lock = fixture
+            .catalog
+            .acquire_target_lock(Path::new(&root))
+            .unwrap();
+        let mut entry = journal_entry(
+            CatalogOperationId::generate().unwrap(),
+            CatalogOperationKind::LocalRemoval,
+            scope.scope.coordinate(),
+            plan.target,
+            now_secs(),
+        );
+        entry.plan_id = Some(plan.plan_id);
+        entry.expected_target_sha256 = Some(plan.resource.content_sha256);
+        entry.target_path = Some(
+            fixture
+                .skill_path
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+        fixture
+            .catalog
+            .mutate_operations(|doc| {
+                doc.operations.push(entry.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            recover_catalog_operations(&fixture.registry, &fixture.catalog, now_secs())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.catalog.load_operations().unwrap().operations[0].phase,
+            CatalogOperationPhase::Journaled
+        );
+        drop(lock);
+        assert_eq!(
+            recover_catalog_operations(&fixture.registry, &fixture.catalog, now_secs())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fixture.catalog.load_operations().unwrap().operations[0].phase,
+            CatalogOperationPhase::Failed
+        );
+        assert!(fixture.skill_path.join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn plugin_version_change_invalidates_removal_even_when_portable_intent_matches() {
+        let fixture = library_fixture();
+        write_plugin_fixture(Path::new(&fixture.profile.configured_home));
+        let scope = create_scope(
+            &fixture.registry,
+            &fixture.catalog,
+            coordinate(
+                "codex",
+                "plugin_install_intent",
+                "mallard.plugin-install-intent",
+                1,
+            ),
+            &fixture.profile.profile_id,
+            2,
+        )
+        .unwrap();
+        let service = StorageCatalogService::from_home_dirs(
+            &fixture.user_home,
+            &fixture.user_home,
+            Box::new(PanicRunner),
+        )
+        .unwrap();
+        let rows = service
+            .list_scope_resources(&scope.scope.scope_id, None)
+            .unwrap();
+        let plan = service
+            .prepare_removal(
+                &scope.scope.scope_id,
+                rows.rows[0].resource_id.as_ref().unwrap(),
+            )
+            .unwrap();
+        let manifest = Path::new(&fixture.profile.configured_home)
+            .join("plugins/cache/acme/tools/1/.codex-plugin/plugin.json");
+        fs::write(manifest, r#"{"name":"tools","version":"2"}"#).unwrap();
+        assert!(service
+            .apply_removal(&plan.plan_id)
+            .unwrap_err()
+            .contains("Plugin state changed"));
+        assert!(fixture
+            .catalog
+            .load_operations()
+            .unwrap()
+            .operations
+            .is_empty());
+    }
+
+    #[test]
+    fn removal_keeps_storage_and_clears_only_the_exact_local_claims() {
+        let fixture = library_fixture();
+        let scope = skill_scope(&fixture);
+        link_scope(&fixture, &scope.scope.scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope.scope.scope_id, &fixture.storage.id);
+        let service = StorageCatalogService::from_home_dirs(
+            &fixture.user_home,
+            &fixture.user_home,
+            Box::new(PanicRunner),
+        )
+        .unwrap();
+        let before = service
+            .list_scope_resources(&scope.scope.scope_id, Some(&fixture.storage.id))
+            .unwrap();
+        let id = before.rows[0].resource_id.as_ref().unwrap();
+        let plan = service.prepare_removal(&scope.scope.scope_id, id).unwrap();
+        fixture
+            .catalog
+            .mutate_materializations(|doc| {
+                for name in ["one", "two"] {
+                    doc.claims.push(super::super::domain::CatalogClaim {
+                        target: plan.target.clone(),
+                        coordinate: scope.scope.coordinate(),
+                        storage_id: storage(name),
+                        resource_id: id.clone(),
+                        content_sha256: plan.resource.content_sha256.clone(),
+                        outcome: CatalogActionOutcome::Installed,
+                        recorded_at: now_secs(),
+                        plan_id: None,
+                    });
+                }
+                let mut other = doc.claims[0].clone();
+                other.target = other.target.with_member("other").unwrap();
+                doc.claims.push(other);
+                Ok(())
+            })
+            .unwrap();
+        let links_before = fixture.catalog.load_scope_links().unwrap();
+        let result = service.apply_removal(&plan.plan_id).unwrap();
+        assert!(result.removed, "{}", result.message);
+        assert!(!fixture.skill_path.exists());
+        assert!(service.apply_removal(&plan.plan_id).is_err());
+        assert_eq!(
+            fixture
+                .catalog
+                .load_materializations()
+                .unwrap()
+                .claims
+                .len(),
+            1
+        );
+        assert_eq!(fixture.catalog.load_scope_links().unwrap(), links_before);
+        let after = service
+            .list_scope_resources(&scope.scope.scope_id, Some(&fixture.storage.id))
+            .unwrap();
+        assert!(!after.rows[0].local_present);
+        assert!(after.rows[0].remote_present);
+        assert_eq!(after.rows[0].state, Some(CatalogLinkState::LocalMissing));
+        assert!(service.prepare_removal(&scope.scope.scope_id, id).is_err());
+    }
+
+    #[test]
+    fn removal_refuses_stale_expired_and_changed_profile_reviews() {
+        let fixture = library_fixture();
+        let scope = skill_scope(&fixture);
+        let service = StorageCatalogService::from_home_dirs(
+            &fixture.user_home,
+            &fixture.user_home,
+            Box::new(PanicRunner),
+        )
+        .unwrap();
+        let rows = service
+            .list_scope_resources(&scope.scope.scope_id, None)
+            .unwrap();
+        let id = rows.rows[0].resource_id.as_ref().unwrap();
+        let plan = service.prepare_removal(&scope.scope.scope_id, id).unwrap();
+        fs::write(fixture.skill_path.join("new.txt"), "new file").unwrap();
+        assert!(service
+            .apply_removal(&plan.plan_id)
+            .unwrap_err()
+            .contains("changed"));
+        assert!(fixture.skill_path.join("SKILL.md").exists());
+        let mut plan = service.prepare_removal(&scope.scope.scope_id, id).unwrap();
+        plan.created_at = 1;
+        plan.expires_at = 2;
+        plan_store::save(
+            fixture.catalog.root(),
+            CatalogResourcePlanDocument::Removal(plan.clone()),
+            1,
+        )
+        .unwrap();
+        assert!(service
+            .apply_removal(&plan.plan_id)
+            .unwrap_err()
+            .contains("expired"));
+        let plan = service.prepare_removal(&scope.scope.scope_id, id).unwrap();
+        service
+            .rename_profile(
+                &fixture.profile.profile_id,
+                "Renamed".to_string(),
+                fixture.profile.revision,
+            )
+            .unwrap();
+        assert!(service
+            .apply_removal(&plan.plan_id)
+            .unwrap_err()
+            .contains("changed"));
+        assert!(fixture.skill_path.exists());
+    }
+
+    #[test]
+    fn removal_of_each_pet_version_counts_the_entire_local_folder() {
+        use super::super::codex_pet::fixtures::{manifest, webp_atlas};
+        for version in [1, 2] {
+            let fixture = library_fixture();
+            let path = Path::new(&fixture.profile.configured_home).join("pets/duck");
+            fs::create_dir_all(path.join("notes/empty")).unwrap();
+            fs::write(
+                path.join("pet.json"),
+                manifest(version, "duck", "Duck", "Test pet", "spritesheet.webp"),
+            )
+            .unwrap();
+            fs::write(path.join("spritesheet.webp"), webp_atlas(version)).unwrap();
+            fs::write(path.join("notes/private.txt"), b"extra local content").unwrap();
+            let scope = create_scope(
+                &fixture.registry,
+                &fixture.catalog,
+                codex_pets(version),
+                &fixture.profile.profile_id,
+                2,
+            )
+            .unwrap();
+            let service = StorageCatalogService::from_home_dirs(
+                &fixture.user_home,
+                &fixture.user_home,
+                Box::new(PanicRunner),
+            )
+            .unwrap();
+            let rows = service
+                .list_scope_resources(&scope.scope.scope_id, None)
+                .unwrap();
+            let id = rows.rows[0].resource_id.as_ref().unwrap();
+            let plan = service.prepare_removal(&scope.scope.scope_id, id).unwrap();
+            assert_eq!(plan.file_count, 3);
+            assert!(service.apply_removal(&plan.plan_id).unwrap().removed);
+            assert!(!path.exists());
+            assert!(fixture.skill_path.exists());
+        }
+    }
+
+    struct PluginRemover {
+        remove: bool,
+        success: bool,
+    }
+    impl PluginProcessRunner for PluginRemover {
+        fn run(
+            &self,
+            provider: &ProviderKey,
+            home: &Path,
+            argv: &[String],
+        ) -> Result<CmdOutput, String> {
+            assert_eq!(provider.as_str(), "codex");
+            assert_eq!(argv, &["plugin", "remove", "tools@acme"]);
+            if self.remove {
+                fs::write(home.join("config.toml"), "[marketplaces.acme]\nsource_type=\"git\"\nsource=\"https://example.com/acme/market\"\n").unwrap();
+            }
+            Ok(CmdOutput {
+                success: self.success,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn plugin_removal_requires_verified_absence_and_never_replays() {
+        for (remove, success) in [(true, true), (false, true), (false, false), (true, false)] {
+            let fixture = library_fixture();
+            write_plugin_fixture(Path::new(&fixture.profile.configured_home));
+            let coordinate = coordinate(
+                "codex",
+                "plugin_install_intent",
+                "mallard.plugin-install-intent",
+                1,
+            );
+            let scope = create_scope(
+                &fixture.registry,
+                &fixture.catalog,
+                coordinate,
+                &fixture.profile.profile_id,
+                2,
+            )
+            .unwrap();
+            let service = StorageCatalogService::from_home_dirs(
+                &fixture.user_home,
+                &fixture.user_home,
+                Box::new(PluginRemover { remove, success }),
+            )
+            .unwrap();
+            let rows = service
+                .list_scope_resources(&scope.scope.scope_id, None)
+                .unwrap();
+            let plan = service
+                .prepare_removal(
+                    &scope.scope.scope_id,
+                    rows.rows[0].resource_id.as_ref().unwrap(),
+                )
+                .unwrap();
+            assert!(plan.uninstall);
+            assert_eq!(plan.file_count, 0);
+            let result = service.apply_removal(&plan.plan_id).unwrap();
+            assert_eq!(result.removed, remove && success);
+            assert!(service.apply_removal(&plan.plan_id).is_err());
+            assert!(fixture.skill_path.exists());
+        }
     }
 
     #[test]
@@ -6182,6 +6764,102 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_page_prints_only_the_adapters_own_plain_install_lines() {
+        use super::super::plugin_intent::{
+            GitMarketplaceSource, PluginInstallIntent, PluginInstallIntentDescriptor,
+            PluginInstallIntentIdentity, PluginResolutionPolicy, PortablePluginSource,
+        };
+        let registry = registry();
+        let lines = |provider: &str, location: Option<&str>, git_ref: Option<&str>| {
+            let provider = ProviderKey::parse(provider).unwrap();
+            let envelope = PluginInstallIntent {
+                identity: PluginInstallIntentIdentity {
+                    namespace: "acme".to_string(),
+                    plugin_id: "tools@acme".to_string(),
+                },
+                descriptor: PluginInstallIntentDescriptor {
+                    source: PortablePluginSource::ProviderMarketplace {
+                        namespace: "acme".to_string(),
+                        git: location.map(|location| GitMarketplaceSource {
+                            location: location.to_string(),
+                            git_ref: git_ref.map(str::to_string),
+                        }),
+                    },
+                    resolution: if location.is_some() {
+                        PluginResolutionPolicy::ProviderResolved
+                    } else {
+                        PluginResolutionPolicy::ManualOnly
+                    },
+                },
+            }
+            .envelope(&provider)
+            .unwrap();
+            let capability = registry.capability(&envelope.coordinate()).unwrap();
+            let mut detail = capability
+                .codec
+                .detail(&envelope, &|_, _| Err("no payloads".to_string()))
+                .unwrap();
+            fill_install_lines(&mut detail, &capability, &envelope);
+            let CatalogResourceDetail::Install { install, .. } = detail else {
+                panic!("a plugin's page is an install");
+            };
+            install
+        };
+        // The argv a Pull runs into an empty home, behind the provider's CLI.
+        assert_eq!(
+            lines("claude", Some("acme/tools"), None),
+            vec![
+                "claude plugin marketplace add acme/tools --scope user",
+                "claude plugin install tools@acme --scope user",
+            ]
+        );
+        assert_eq!(
+            lines("codex", Some("https://example.com/acme/tools"), None),
+            vec![
+                "codex plugin marketplace add https://example.com/acme/tools",
+                "codex plugin add tools@acme",
+            ]
+        );
+        // The adapter refuses a ref it cannot bind and a marketplace that is
+        // not portable; a word a shell would read twice is never printed.
+        assert!(lines("claude", Some("acme/tools"), Some("v1")).is_empty());
+        assert!(lines("claude", None, None).is_empty());
+        assert!(lines("codex", Some("https://example.com/a;touch-x"), None).is_empty());
+    }
+
+    #[test]
+    fn a_local_skill_page_reads_this_macs_copy_without_asking_the_storage() {
+        let fixture = library_fixture();
+        let skills = skill_scope(&fixture);
+        let listed = page(&fixture, &skills.scope.scope_id, None).unwrap();
+        let resource_id = listed.rows[0].resource_id.clone().unwrap();
+        // The storage is gone; this Mac's copy is all the page needs.
+        fs::remove_dir_all(&fixture.storage_path).unwrap();
+        let CatalogResourceDetail::Document { path, text, files } =
+            get_catalog_resource_detail_with_repositories(
+                &fixture.registry,
+                &fixture.state,
+                &fixture.catalog,
+                &skills.scope.scope_id,
+                Some(&fixture.storage.id),
+                &resource_id,
+                &fixture.user_home,
+            )
+            .unwrap()
+        else {
+            panic!("a skill's page is a document");
+        };
+        assert_eq!(path, "SKILL.md");
+        assert_eq!(
+            text.as_deref(),
+            Some("---\nname: review\n---\nDraft-linked skill.\n")
+        );
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "SKILL.md");
+        assert!(!files[0].executable);
+    }
+
+    #[test]
     fn a_stored_only_pet_serves_its_preview_from_the_storage_then_the_cache() {
         use super::super::codec::CatalogFormatCodec;
         use super::super::codex_pet::CodexPetCodec;
@@ -6261,6 +6939,40 @@ mod tests {
         )
         .unwrap();
         assert!(first.starts_with("data:image/png;base64,"), "{}", first);
+
+        // Its page reads the same stored copy: the whole atlas, verified, with
+        // the version's grid. Without a storage there is nothing to read.
+        let CatalogResourceDetail::Sprite {
+            atlas: served,
+            columns,
+            rows,
+            description,
+        } = get_catalog_resource_detail_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &row.scope.scope_id,
+            Some(&fixture.storage.id),
+            &resource_id,
+            &fixture.user_home,
+        )
+        .unwrap()
+        else {
+            panic!("a pet's page is a sprite");
+        };
+        assert!(served.starts_with("data:image/png;base64,"), "{}", served);
+        assert_eq!((columns, rows), (8, 11));
+        assert_eq!(description.as_deref(), Some("A stored-only pet."));
+        assert!(get_catalog_resource_detail_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            &row.scope.scope_id,
+            None,
+            &resource_id,
+            &fixture.user_home,
+        )
+        .is_err());
 
         // Remove the payload object from the storage: the second ask must be
         // answered by the digest-keyed cache, never by another fetch.
@@ -6832,7 +7544,10 @@ mod tests {
             let bob_scope = blocking(&bob, |fixture| {
                 let scope = skill_scope(fixture).scope.scope_id;
                 let link = link_scope(fixture, &scope, &fixture.storage.id, 4);
-                assert_eq!(link.completion, "open", "Cloud linking saves metadata; the next step explicitly prepares Pull");
+                assert_eq!(
+                    link.completion, "open",
+                    "Cloud linking saves metadata; the next step explicitly prepares Pull"
+                );
                 let plan = prepare_pull(fixture, &scope);
                 assert!(plan.head.is_none());
                 assert_eq!(plan.item_heads.len(), 1);

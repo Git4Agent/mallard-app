@@ -8,14 +8,18 @@
 //! a compatibility fallback; unknown version markers block. Which version a
 //! package declares is a typed detail inside this codec, never a wire tag.
 
+use regex::Regex;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
+use unicode_normalization::UnicodeNormalization;
 
 use serde::{Deserialize, Serialize};
 
 use super::codec::{
-    read_file_no_follow, CapturedFile, CapturedResource, CatalogFormatCodec, PayloadReader,
+    read_detail_payload, read_file_no_follow, CapturedFile, CapturedResource, CatalogFormatCodec,
+    CatalogResourceDetail, PayloadReader,
 };
 use super::domain::{
     validate_component_name, validate_display_text, BoundedPortableObject, CatalogResourceEnvelope,
@@ -123,8 +127,24 @@ struct LocalPetManifest {
     spritesheet_path: String,
 }
 
+/// A pet id. Codex puts no character rule on one: its hatch-pet skill names
+/// the directory after the pet (`pets/大黄/`, `"id": "大黄"`), so Mallard's
+/// rule is the address rule plus a directory's needs: NFC; letters, marks,
+/// numbers and `._-`; starting with a letter or number; not ending in `.`;
+/// 1 to 64 scalars and at most 255 bytes.
 pub fn validate_pet_id(label: &str, value: &str) -> Result<(), String> {
-    validate_component_name(label, value, 64)
+    static RULE: OnceLock<Regex> = OnceLock::new();
+    let rule = RULE.get_or_init(|| {
+        Regex::new(r"^[\p{L}\p{N}][\p{L}\p{M}\p{N}._-]{0,63}$").expect("the pet id rule")
+    });
+    if !rule.is_match(value)
+        || value.len() > 255
+        || value.ends_with('.')
+        || value.nfc().ne(value.chars())
+    {
+        return Err(format!("invalid {}: '{}'", label, value.escape_debug()));
+    }
+    Ok(())
 }
 
 fn validate_atlas_basename(basename: &str) -> Result<(), String> {
@@ -239,12 +259,17 @@ struct CapturedPet {
 
 /// Capture one `<CODEX_HOME>/pets/<pet-id>/` package at whatever version it
 /// declares.
+/// The directory name and the manifest id are read in NFC before they are
+/// compared and before the identity is encoded, so one pet has one resource
+/// id on every machine: HFS+ stores names decomposed, APFS and NTFS keep
+/// what was written.
 fn capture_pet(directory: &Path) -> Result<CapturedPet, String> {
-    let directory_name = directory
+    let directory_name: String = directory
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "pet directory name is not UTF-8".to_string())?
-        .to_string();
+        .nfc()
+        .collect();
     validate_pet_id("pet directory", &directory_name)?;
 
     let (manifest_bytes, _) = read_file_no_follow(
@@ -254,7 +279,7 @@ fn capture_pet(directory: &Path) -> Result<CapturedPet, String> {
     )?;
     let manifest: LocalPetManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("pet '{}' manifest is invalid: {}", directory_name, error))?;
-    if manifest.id != directory_name {
+    if manifest.id.nfc().ne(directory_name.chars()) {
         return Err(format!(
             "pet manifest id '{}' does not match its directory '{}'",
             manifest.id, directory_name
@@ -490,7 +515,8 @@ impl CatalogFormatCodec for CodexPetCodec {
         captured: &CapturedResource,
         new_name: &str,
     ) -> Result<CapturedResource, String> {
-        validate_pet_id("pet copy name", new_name)?;
+        let new_name: String = new_name.nfc().collect();
+        validate_pet_id("pet copy name", &new_name)?;
         let descriptor: CodexPetDescriptor = captured
             .descriptor
             .decode()
@@ -501,10 +527,10 @@ impl CatalogFormatCodec for CodexPetCodec {
             .ok_or("pet copy source has no atlas")?;
         captured_resource(
             &CodexPetIdentity {
-                pet_id: new_name.to_string(),
+                pet_id: new_name.clone(),
             },
             &CodexPetDescriptor {
-                display_name: new_name.to_string(),
+                display_name: new_name,
                 description: descriptor.description,
                 atlas_basename: descriptor.atlas_basename,
             },
@@ -528,6 +554,36 @@ impl CatalogFormatCodec for CodexPetCodec {
             read_payload(&atlas.sha256, atlas.size)
         })
         .map(Some)
+    }
+
+    /// The pet's page plays the whole atlas: its bytes by digest, held to the
+    /// version's container and exact dimensions before the page sees them.
+    fn detail(
+        &self,
+        envelope: &CatalogResourceEnvelope,
+        read_payload: &PayloadReader<'_>,
+    ) -> Result<CatalogResourceDetail, String> {
+        let (identity, descriptor) = decode(envelope)?;
+        let atlas = envelope
+            .file(&descriptor.atlas_basename)
+            .ok_or_else(|| format!("pet '{}' has no atlas entry", identity.pet_id))?;
+        let bytes = read_detail_payload(atlas, MAX_PET_ATLAS_BYTES, read_payload)?;
+        validate_atlas(self.format, &descriptor.atlas_basename, &bytes)?;
+        let mime = match atlas_dimensions(&bytes)?.0 {
+            AtlasContainer::Png => "image/png",
+            AtlasContainer::Webp => "image/webp",
+        };
+        let (columns, rows) = self.format.cell_grid();
+        Ok(CatalogResourceDetail::Sprite {
+            atlas: format!(
+                "data:{};base64,{}",
+                mime,
+                aws_smithy_types::base64::encode(&bytes)
+            ),
+            columns,
+            rows,
+            description: Some(descriptor.description),
+        })
     }
 }
 
@@ -820,5 +876,106 @@ mod tests {
             envelope.resource_id,
             captured.to_envelope(&coordinate(2)).resource_id
         );
+    }
+
+    #[test]
+    fn a_pet_of_any_script_is_one_resource_in_every_normalization() {
+        let temp = tempfile::tempdir().unwrap();
+        // The same pet written composed and decomposed, as APFS and HFS+ would hold it.
+        let composed = temp.path().join("Caf\u{e9}");
+        write_pet(
+            &composed,
+            2,
+            "Caf\u{e9}",
+            "spritesheet.webp",
+            &webp_atlas(2),
+        );
+        let decomposed = temp.path().join("nfd").join("Cafe\u{301}");
+        write_pet(
+            &decomposed,
+            2,
+            "Cafe\u{301}",
+            "spritesheet.webp",
+            &webp_atlas(2),
+        );
+        let a = codec(2)
+            .capture_directory(&composed, "provider-home")
+            .unwrap()
+            .to_envelope(&coordinate(2));
+        let b = codec(2)
+            .capture_directory(&decomposed, "provider-home")
+            .unwrap()
+            .to_envelope(&coordinate(2));
+        assert_eq!(a.resource_id, b.resource_id);
+        assert_eq!(codec(2).member_name(&b).unwrap(), "Caf\u{e9}");
+
+        let big = temp.path().join("大黄");
+        write_pet(&big, 2, "大黄", "spritesheet.webp", &webp_atlas(2));
+        let captured = codec(2).capture_directory(&big, "provider-home").unwrap();
+        let envelope = captured.to_envelope(&coordinate(2));
+        codec(2).validate(&envelope).unwrap();
+        assert_eq!(codec(2).member_name(&envelope).unwrap(), "大黄");
+        // Restore writes the id as it is, and a copy takes a name of any script.
+        let stage = temp.path().join("restore").join("大黄");
+        fs::create_dir_all(&stage).unwrap();
+        codec(2)
+            .materialize(&stage, &envelope, &captured.files)
+            .unwrap();
+        assert!(fs::read_to_string(stage.join("pet.json"))
+            .unwrap()
+            .contains("\"id\": \"大黄\""));
+        let copy = codec(2).rename(&captured, "大黄二").unwrap();
+        let identity: CodexPetIdentity = copy.identity.decode().unwrap();
+        assert_eq!(identity.pet_id, "大黄二");
+        assert_eq!(copy.display_name, "大黄二");
+
+        // A space, a leading hyphen or mark, a trailing dot, an emoji and an overlong id are refused.
+        let long = "黄".repeat(65);
+        for bad in [
+            "大 黄",
+            "-duck",
+            "\u{301}duck",
+            "duck.",
+            "🦆",
+            "",
+            long.as_str(),
+        ] {
+            assert!(validate_pet_id("pet id", bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_pet_id("pet id", &"黄".repeat(64)).is_ok());
+        let spaced = temp.path().join("大 黄");
+        write_pet(&spaced, 2, "大 黄", "spritesheet.webp", &webp_atlas(2));
+        let error = codec(2)
+            .capture_directory(&spaced, "provider-home")
+            .unwrap_err();
+        assert!(error.contains("pet directory"), "{error}");
+    }
+
+    #[test]
+    fn detail_serves_the_verified_atlas_with_its_grid() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("drake");
+        let atlas = webp_atlas(2);
+        write_pet(&dir, 2, "drake", "spritesheet.webp", &atlas);
+        let captured = codec(2).capture_directory(&dir, "provider-home").unwrap();
+        let envelope = captured.to_envelope(&coordinate(2));
+        let honest = |_: &str, _: u64| Ok(atlas.clone());
+        let CatalogResourceDetail::Sprite {
+            atlas: uri,
+            columns,
+            rows,
+            description,
+        } = codec(2).detail(&envelope, &honest).unwrap()
+        else {
+            panic!("a pet's page is a sprite");
+        };
+        assert!(uri.starts_with("data:image/webp;base64,"), "{}", uri);
+        assert_eq!((columns, rows), (8, 11));
+        assert_eq!(description.as_deref(), Some("One short sentence."));
+
+        // Bytes that are not the envelope's atlas never reach the page.
+        let other = webp_atlas(1);
+        let lying = |_: &str, _: u64| Ok(other.clone());
+        assert!(codec(2).detail(&envelope, &lying).is_err());
     }
 }

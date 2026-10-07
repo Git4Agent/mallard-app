@@ -10,6 +10,7 @@ use mallard_infrastructure::managed_cloud::client::{
     DiscardedDraft, ManagedCloudClient, PublicFilter, PublicSort, PublishVersion,
     RepositoryListing, RepositorySummary,
 };
+use mallard_infrastructure::managed_cloud::names;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::storage_core::publication::{RecordStream, MAX_LISTED_RECORDS};
 use mallard_infrastructure::storage_providers::managed_cloud::{client_for, provider_key};
@@ -38,6 +39,12 @@ pub struct ManagedCloudRepository {
     pub name: String,
     /// `{owner_login}/{name}`, the service's spelling.
     pub address: String,
+    /// What a row prints: the display name of the head the account may
+    /// read (the project's title as it was pushed), else the address
+    /// segment. A display-name change travels with the next push and moves
+    /// neither `name` nor `repository_id`.
+    pub display_name: String,
+    /// The repository's page on the website, the name percent-encoded.
     pub website_url: String,
     pub bundle_id: Option<String>,
     pub repository_class: String,
@@ -131,7 +138,15 @@ fn describe_repository(
         owner_login: summary.owner.github_login.clone(),
         name: summary.name.clone(),
         address: format!("{}/{}", summary.owner.github_login, summary.name),
-        website_url: format!("{origin}/{}/{}", summary.owner.github_login, summary.name),
+        display_name: tag
+            .map(|tag| tag.display_name.clone())
+            .filter(|display_name| !display_name.is_empty())
+            .unwrap_or_else(|| summary.name.clone()),
+        website_url: format!(
+            "{origin}/{}/{}",
+            names::encode_segment(&summary.owner.github_login),
+            names::encode_segment(&summary.name)
+        ),
         bundle_id: summary.bundle_id.clone(),
         repository_class: summary.repository_class.clone(),
         visibility: summary.visibility.clone(),
@@ -627,6 +642,80 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_name_of_any_script_is_created_resolved_and_suffixed_by_key() {
+        use mallard_infrastructure::managed_cloud::client::CreateRepository;
+        use mallard_infrastructure::managed_cloud::stub::StubManagedCloud;
+        use unicode_normalization::UnicodeNormalization;
+        let stub = StubManagedCloud::start().await;
+        let (_, owner_token) = stub.state.lock().unwrap().add_user("Rika321");
+        let client = ManagedCloudClient::new(
+            &stub.endpoint,
+            Some(mallard_domain::SecretValue::parse(&owner_token).unwrap()),
+        )
+        .unwrap();
+        let origin = stub.endpoint.clone();
+        let create = |name: &str, bundle: char| CreateRepository {
+            repository_class: "non_git_project",
+            github_url: None,
+            name: name.into(),
+            bundle_id: Some(bundle.to_string().repeat(32)),
+            repository_fingerprint: None,
+            catalog: None,
+        };
+        // The title is kept in its script; a decomposed spelling of a held
+        // name is the same key and gets the suffix; nothing usable is refused.
+        let created = client
+            .create_repository(&create("大黄", 'a'))
+            .await
+            .unwrap();
+        assert_eq!(created.name, "大黄");
+        let second = client
+            .create_repository(&create("Caf\u{e9}", 'b'))
+            .await
+            .unwrap();
+        assert_eq!(second.name, "Caf\u{e9}");
+        let third = client
+            .create_repository(&create("cafe\u{301}", 'c'))
+            .await
+            .unwrap();
+        assert_eq!(third.name, "cafe\u{301}-2".nfc().collect::<String>());
+        assert!(client
+            .create_repository(&create("🦆🦆", 'd'))
+            .await
+            .is_err());
+
+        // The raw and the encoded spelling resolve to the one repository,
+        // whose page link is encoded and whose row name is the title.
+        for input in [
+            "Rika321/大黄".to_owned(),
+            "Rika321/%E5%A4%A7%E9%BB%84".to_owned(),
+            format!("{origin}/rika321/%E5%A4%A7%E9%BB%84/"),
+        ] {
+            let resolved = resolve_repository(&client, &origin, &input, None)
+                .await
+                .unwrap();
+            let ManagedCloudRepositoryResolution::Collaborator { repository } = resolved else {
+                panic!("{input}: {resolved:?}");
+            };
+            assert_eq!(repository.repository_id, created.id, "{input}");
+            assert_eq!(repository.address, "Rika321/大黄");
+            assert_eq!(repository.display_name, "大黄");
+            assert_eq!(
+                repository.website_url,
+                format!("{origin}/Rika321/%E5%A4%A7%E9%BB%84")
+            );
+        }
+        let ManagedCloudRepositoryResolution::Collaborator { repository } =
+            resolve_repository(&client, &origin, "Rika321/CAFE%CC%81", None)
+                .await
+                .unwrap()
+        else {
+            panic!("a decomposed, upper-cased spelling is the same key");
+        };
+        assert_eq!(repository.repository_id, second.id);
+    }
+
+    #[tokio::test]
     async fn an_address_resolves_to_the_face_the_account_may_see() {
         use mallard_infrastructure::managed_cloud::client::CreateRepository;
         use mallard_infrastructure::managed_cloud::stub::StubManagedCloud;

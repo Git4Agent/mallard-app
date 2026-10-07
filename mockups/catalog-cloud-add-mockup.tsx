@@ -177,7 +177,7 @@ storageCatalogApi.listCloudShared = async () => {
   return SHARED.filter((row) => !listedNow.has(row.resource_id));
 };
 const listedPet = (id: PetId, owner: string, stars: number, starred: boolean, revision: number, updatedAt: number): ManagedCloudListingRow => ({
-  repository_id: `repo_${owner.toLowerCase()}_${id}`, owner_login: owner, name: PETS[id].name, address: `${owner}/${PETS[id].name}`,
+  repository_id: `repo_${owner.toLowerCase()}_${id}`, owner_login: owner, name: PETS[id].name, address: `${owner}/${PETS[id].name}`, display_name: PETS[id].name,
   website_url: `https://${HOST}/${owner}/${PETS[id].name}`, repository_class: "catalog", catalog: COORDINATE, visibility: "public",
   role: null, github_url: null, description: PETS[id].description, star_count: stars, viewer_starred: starred, revision, updated_at: updatedAt,
 });

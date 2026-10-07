@@ -1,8 +1,11 @@
+import CatalogRemoveButton, { type CatalogRemovalAction } from "./CatalogRemoveButton";
+import { removeLocalCatalogResource } from "./removalFlow";
 import CatalogConnectDialog, { type CatalogConnectReason } from "./CatalogConnectDialog";
 import ManagedCloudChip from "../managed-cloud/ManagedCloudChip";
 import { cloudStatusNotice, cloudSyncBlocked, discardCloudDraft } from "../managed-cloud/managedCloudLink";
-import { predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
+import { nameRefusal, predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
 import { useItemCloudStatus } from "./itemCloudStatus";
+import CatalogItemPage, { useCatalogItemDetail } from "./CatalogItemPage";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import type { SyncOutcomeView } from "../sync-review/outcome";
 import { cloudPullOutcome, cloudPushOutcome, pushOutcome, pullOutcome, type CatalogOutcomeAction } from "./outcomes";
@@ -513,6 +516,7 @@ function ForkDrawer({
  * Reviews put the checkbox where a session's review puts it — inside the
  * title line — and hang the Pull action pill after the name. */
 function ResourceCard({
+  removal,
   row,
   storageName,
   storageRevision,
@@ -535,6 +539,7 @@ function ResourceCard({
   onOpen,
   repository,
 }: {
+  removal?: CatalogRemovalAction;
   row: CatalogScopeRow;
   storageName: string | null;
   storageRevision: number | null;
@@ -761,6 +766,7 @@ function ResourceCard({
           {/* The rule parts the two readouts from the one button. */}
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
+            <CatalogRemoveButton row={row} action={removal} />
             <InfoMenu row={row} storageRevision={storageRevision} kindNoun={kindNoun} />
           </div>
           {/* The tooltip is the whole point of this stop — which time this is
@@ -858,6 +864,7 @@ export default function StorageCatalogPage({
   useEffect(() => { setSearchQuery(""); }, [scope.scope.scope_id, chosenStorageId, mode.kind]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<SyncOutcomeView<CatalogOutcomeAction> | null>(null);
   /* On Mallard Cloud each item is its own repository, and has its own page,
      as a project has: the item it shows, null on the list. A review opened
@@ -992,10 +999,10 @@ export default function StorageCatalogPage({
     }
     return map;
   }, [rows]);
-  /* An item's page, on Mallard Cloud only: its row, the repository the page
-     knows for it (saved, or learned from the account's listing), and the
-     account that names a new one. */
-  const itemRow = managedCloud && itemId ? rowByResource.get(itemId) ?? null : null;
+  /* An item's page, on every storage: its row; on Mallard Cloud, the
+     repository the page knows for it (saved, or learned from the account's
+     listing), and the account that names a new one. */
+  const itemRow = itemId ? rowByResource.get(itemId) ?? null : null;
   const itemRepository = itemRow && itemId ? page?.cloud_repositories[itemId] ?? null : null;
   const itemSaved = !!itemId && !!page?.cloud_connections[itemId];
   const accountLogin = currentStorage?.account_login ?? "";
@@ -1009,6 +1016,7 @@ export default function StorageCatalogPage({
     repositoryId: itemRepository,
     readKey: page,
   });
+  const itemDetail = useCatalogItemDetail(scope.scope.scope_id, storageId ?? null, itemRow);
   /* An item that left the page (switched storage, removed) closes its page. */
   useEffect(() => {
     if (itemId && page && !loading && !rowByResource.has(itemId)) setItemId(null);
@@ -1347,9 +1355,53 @@ export default function StorageCatalogPage({
     await load();
   };
 
+  const runRemoval = async (row: CatalogScopeRow) => {
+    if (!row.resource_id || !row.local_present || row.blocker || busy || applyInFlight.current || prepareInFlight.current) return;
+    applyInFlight.current = true;
+    const epoch = operationEpoch.current;
+    setBusy(true);
+    setRemovingId(row.resource_id);
+    setError(null);
+    try {
+      const result = await removeLocalCatalogResource({
+        kindNoun: noun(1),
+        prepare: () => storageCatalogApi.prepareRemoval(scope.scope.scope_id, row.resource_id!),
+        confirm,
+        apply: storageCatalogApi.applyRemoval,
+        isCurrent: () => epoch === operationEpoch.current,
+        refresh: async () => {
+          setForkFor(null);
+          setPushPlan(null);
+          setPullPlan(null);
+          setRemotePreviews({});
+          previewAttempts.current.clear();
+          await load();
+        },
+      });
+      if (result && epoch === operationEpoch.current) {
+        if (result.removed) notify(result.message);
+        else setError(result.message);
+      }
+    } catch (reason) {
+      if (epoch === operationEpoch.current) setError(errorMessage(reason));
+    } finally {
+      applyInFlight.current = false;
+      setBusy(false);
+      setRemovingId(null);
+    }
+  };
+
+  const removalAction = (row: CatalogScopeRow): CatalogRemovalAction => ({
+    label: `${scope.capability?.capture === "provider_inventory" ? "Uninstall" : "Delete"} local ${noun(1)}`,
+    busy,
+    removing: removingId === row.resource_id,
+    onRemove: () => void runRemoval(row),
+  });
+
   /* A refusal lands in the drawer that asked — never in the page banner. */
   const runFork = async (row: CatalogScopeRow, name: string) => {
-    if (!row.resource_id) return;
+    if (!row.resource_id || busy || applyInFlight.current || prepareInFlight.current) return;
+    applyInFlight.current = true;
     setBusy(true);
     setForkError(null);
     try {
@@ -1361,6 +1413,7 @@ export default function StorageCatalogPage({
     } catch (reason) {
       setForkError(errorMessage(reason));
     } finally {
+      applyInFlight.current = false;
       setBusy(false);
     }
   };
@@ -1537,7 +1590,7 @@ export default function StorageCatalogPage({
      chosen. */
   const cloudClosedReason = pageCloud
     ? pageCloud.message ?? "Mallard Cloud refused this account."
-    : itemRow?.state === "blocked"
+    : managedCloud && itemRow?.state === "blocked"
       ? itemRow.blocker ?? "Choose this item's repository first."
       : itemRow && cloudSyncBlocked(itemStatus)
         ? itemStatus?.message ?? "Mallard Cloud isn't ready for this item."
@@ -1776,7 +1829,7 @@ export default function StorageCatalogPage({
   };
   cloudNote("account", pageCloud, () => void load());
   if (itemRow && !pageCloud) cloudNote("repository", itemStatus, retryItemStatus);
-  if (itemRow?.state === "blocked" && itemRow.resource_id) {
+  if (managedCloud && itemRow?.state === "blocked" && itemRow.resource_id) {
     const resourceId = itemRow.resource_id;
     cloudNotes.push({
       key: "several",
@@ -2266,9 +2319,9 @@ export default function StorageCatalogPage({
     return (
       <ResourceCard
         key={row.row_id}
-        /* On Mallard Cloud each item is its own repository: its name opens
-           its page. The page's own card is where you already are. */
-        onOpen={managedCloud && resourceId && !itemRow ? () => {
+        removal={removalAction(row)}
+        /* An item's name opens its page, on every storage. */
+        onOpen={resourceId && !itemRow ? () => {
           setOutcome(null);
           setItemId(resourceId);
         } : undefined}
@@ -2347,19 +2400,21 @@ export default function StorageCatalogPage({
     ? <StorageCard name={storageName ?? "Mallard Cloud"}>{outcomeNotice}</StorageCard>
     : null;
 
-  /* An item's page: while it has no repository, the one its first Push
-     creates, with Change… to choose another; then its own card, under the
-     heading the list puts it under. Once it has a repository, that lives in
-     the bar's Cloud chip and is fixed. */
+  /* An item's page: on Mallard Cloud, while it has no repository, the one
+     its first Push creates, with Change… to choose another — once it has
+     one, that lives in the bar's Cloud chip and is fixed; then the item
+     itself. */
   const itemPage = itemRow && (() => {
     const resourceId = itemRow.resource_id!;
     const name = itemRow.display_name;
+    const itemForkOpen = forkable && forkFor === resourceId;
     const prediction = predictRepositoryAddress(accountLogin, name, []);
-    const address = accountLogin ? prediction.address : prediction.name;
+    // The address the first Push creates, or the one sentence for a name the service would refuse.
+    const address = prediction.kind === "address" ? (accountLogin ? prediction.address : prediction.name) : nameRefusal("item");
     return (
       <section className="profile-links-section" aria-label={name}>
         {outcomeCard}
-        {!itemRepository && itemRow.state !== "blocked" && !pageCloud && (
+        {managedCloud && !itemRepository && itemRow.state !== "blocked" && !pageCloud && (
           <>
             <div className="sync-history-section-heading">
               <h2><Icon name="cloud" size={14} />Repository</h2>
@@ -2398,8 +2453,48 @@ export default function StorageCatalogPage({
             </div>
           </>
         )}
-        {!itemRow.local_present && itemRow.remote_present ? cloudHeading(1) : kindHeading}
-        <div className="sync-history-thread-list">{renderRow(itemRow)}</div>
+        {/* Off Mallard Cloud, a blocked item says why here: its page wears
+            no badge, and Pull and Push have nothing to take. Mallard Cloud's
+            own note covers its case. */}
+        {!managedCloud && itemRow.state === "blocked" && (
+          <Notice severity="warning" timing="standing" label={`Why ${name} can't be synced`} title={`${name} can't be synced.`}>
+            {itemRow.blocker ?? "This Mac and the storage cannot be compared for it."}
+          </Notice>
+        )}
+        <CatalogItemPage
+          row={itemRow}
+          detail={itemDetail ?? { status: "loading" }}
+          actions={{
+            removal: removalAction(itemRow),
+            provider: scope.scope.provider,
+            providerLabel: profile.provider_label,
+            onOpenApp: openProfileApp,
+            onOpenTerminal: openProfileTerminal,
+            onFork: forkable ? () => {
+              setForkError(null);
+              setForkFor(itemForkOpen ? null : resourceId);
+            } : undefined,
+            forkOpen: itemForkOpen,
+            forkTitle: `Fork ${name} — duplicate this ${noun(1)} under a new name`,
+            onReveal: () => reveal(itemRow),
+          }}
+          onOpenExternal={(url) => void openUrl(url).catch((reason) => setError(errorMessage(reason)))}
+          footer={itemForkOpen && (
+            <ForkDrawer
+              displayName={name}
+              seed={forkSeed(itemRow)}
+              maxLength={128}
+              busy={busy}
+              error={forkError}
+              onEdited={() => setForkError(null)}
+              onSubmit={(next) => void runFork(itemRow, next)}
+              onClose={() => {
+                setForkError(null);
+                setForkFor(null);
+              }}
+            />
+          )}
+        />
       </section>
     );
   })();

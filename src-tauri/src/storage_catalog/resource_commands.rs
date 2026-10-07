@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use mallard_domain::StorageId;
 
+use super::codec::CatalogResourceDetail;
 use super::domain::{
     CatalogActionResult, CatalogFormatKey, CatalogLinkId, CatalogPlanActionId, CatalogPlanId,
     CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey, CatalogScopeId,
@@ -154,6 +155,23 @@ pub async fn get_catalog_resource_preview(
         StorageCatalogService::from_user_home()?.resource_preview(
             &scope_id,
             &storage_id,
+            &resource_id,
+        )
+    })
+    .await
+}
+
+/// A resource's page: this Mac's copy when it is here, else the storage's.
+#[tauri::command]
+pub async fn get_catalog_resource_detail(
+    scope_id: CatalogScopeId,
+    storage_id: Option<StorageId>,
+    resource_id: CatalogResourceId,
+) -> Result<CatalogResourceDetail, String> {
+    run_blocking(move || {
+        StorageCatalogService::from_user_home()?.resource_detail(
+            &scope_id,
+            storage_id.as_ref(),
             &resource_id,
         )
     })
@@ -426,4 +444,22 @@ pub async fn discard_catalog_cloud_draft(
             expected_revision,
         )
         .await
+}
+
+#[tauri::command]
+pub async fn prepare_catalog_resource_removal(
+    scope_id: CatalogScopeId,
+    resource_id: CatalogResourceId,
+) -> Result<super::domain::CatalogResourceRemovalPlan, String> {
+    run_blocking(move || {
+        StorageCatalogService::from_user_home()?.prepare_removal(&scope_id, &resource_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn apply_catalog_resource_removal(
+    plan_id: CatalogPlanId,
+) -> Result<super::service::CatalogRemovalResult, String> {
+    run_blocking(move || StorageCatalogService::from_user_home()?.apply_removal(&plan_id)).await
 }
