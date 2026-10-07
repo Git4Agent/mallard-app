@@ -263,6 +263,7 @@ pub fn run() {
             project_sync::commands::open_project_markdown_path,
             project_sync::commands::read_project_markdown_image,
             project_sync::commands::execute_project_session_action,
+            project_sync::commands::start_project_session,
             project_sync::commands::delete_local_project_session,
             project_sync::commands::remove_local_project,
             project_sync::commands::delete_local_project_sessions,

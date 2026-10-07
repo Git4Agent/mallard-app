@@ -15,13 +15,13 @@ mod timeline_sources;
 
 use super::traits::{
     AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
-    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCli,
-    ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionOutcome,
-    SessionActionRequest, SessionAdapter, SessionAgentPreview, SessionAnalysis,
-    SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext, SessionEventDetail,
-    SessionFileMetadata, SessionFileSummary, SessionHomeSighting, SessionTimelineContext,
-    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
-    SessionTimelineQuery,
+    MaterializationTargetRequest, NewSessionRequest, PlannedProviderTarget, ProjectOpenCommand,
+    ProviderCli, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
+    SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
+    SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
+    SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionHomeSighting,
+    SessionTimelineContext, SessionTimelineIndex, SessionTimelineIndexEntry,
+    SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::conversation_codec::{
     analyze_codex_transcript, CODEX_CODEC_VERSION, CODEX_LINEAGE_CODEC_KEY,
@@ -190,7 +190,12 @@ impl SessionAdapter for CodexAdapter {
         let mut commands = vec![
             ProjectOpenCommand {
                 label: "Codex — new".to_string(),
-                command: cli().arg("-C").arg(project_root).display_line(),
+                command: actions::new_session_terminal_command(
+                    &program,
+                    home,
+                    Path::new(project_root),
+                )
+                .display_line(),
             },
             ProjectOpenCommand {
                 label: "Codex — resume".to_string(),
@@ -476,6 +481,10 @@ impl SessionAdapter for CodexAdapter {
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String> {
         actions::execute_action(request)
+    }
+
+    fn start_session(&self, request: &mut NewSessionRequest<'_>) -> Result<(), String> {
+        actions::start_session(request)
     }
 }
 

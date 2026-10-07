@@ -1383,6 +1383,10 @@ export type SessionSourceState = "local_only" | "remote_only" | "local_and_remot
 
 export type SessionActionKind = "open_in_app" | "open_in_terminal";
 
+/** Where a new session opens: the agent's desktop app, or its CLI in a new
+ *  terminal window. Mirrors Rust `NewSessionSurface`. */
+export type NewSessionSurface = "app" | "terminal";
+
 export interface SessionActionDescriptor {
   action_id: string;
   kind: SessionActionKind;

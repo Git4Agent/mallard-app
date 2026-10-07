@@ -416,9 +416,17 @@ export function PathBarMenu({
           </>
         ) : (
           populated.map((group, groupIndex) => (
-            <div key={group.label ?? `group-${groupIndex}`} className="sync-path-menu-group">
+            /* A labelled group names its rows for assistive tech too: two
+               menus may each hold a "Terminal" that only the label tells
+               apart. */
+            <div
+              key={group.label ?? `group-${groupIndex}`}
+              className="sync-path-menu-group"
+              role={group.label ? "group" : undefined}
+              aria-labelledby={group.label ? `${id}-group-${groupIndex}` : undefined}
+            >
               {groupIndex > 0 && <div className="sync-path-menu-separator" role="separator" />}
-              {group.label && <div className="sync-path-menu-label">{group.label}</div>}
+              {group.label && <div id={`${id}-group-${groupIndex}`} className="sync-path-menu-label">{group.label}</div>}
               {group.items.map((item) => renderItem(item, false))}
             </div>
           ))

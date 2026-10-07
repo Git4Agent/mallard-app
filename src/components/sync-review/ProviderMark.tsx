@@ -9,6 +9,12 @@ const PROVIDER_MARKS: Record<string, IconName> = {
   claude: "claude-mark",
 };
 
+/** The provider's mark as an icon name, for a surface that takes one (a menu
+ *  row's leading icon); undefined for a provider Mallard ships no art for. */
+export function providerMarkIcon(provider: string): IconName | undefined {
+  return PROVIDER_MARKS[provider];
+}
+
 export default function ProviderMark({ provider, displayName, size = 14 }: {
   provider: string;
   displayName: string;

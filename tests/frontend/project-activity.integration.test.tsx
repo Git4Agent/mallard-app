@@ -4360,3 +4360,109 @@ test("a stored row opens its page through the storage the list shows", () => {
   assert.match(source, /\.\.\.\(stored && storageId \? \{ storageId \} : \{\}\),/);
   assert.match(source, /storageId=\{activeStorageId\}/);
 });
+
+test("the standing list's search row starts a new session with each bound agent", () => {
+  const providers = [
+    { provider: "codex", display_name: "Codex", access: "bound_ready" as const },
+    {
+      provider: "claude",
+      display_name: "Claude",
+      access: "bound_unavailable" as const,
+      detail: "claude profile path changed; open Project Settings",
+    },
+    // Stored remotely, bound nowhere here: nothing local can start it.
+    { provider: "gemini", display_name: "Gemini", access: "view_only" as const },
+  ];
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, providers }}
+      onStartSession={() => undefined}
+    />,
+  );
+  // One control, closing the search row, as a menu button.
+  assert.equal(html.match(/class="sync-new-session"/g)?.length, 1);
+  assert.match(html, /class="sync-list-head"><div class="sync-name-search">[\s\S]*?<div class="sync-new-session">/);
+  assert.match(html, /<button[^>]*class="btn"[^>]*aria-haspopup="menu"[^>]*aria-expanded="false"[^>]*aria-label="New session"/);
+  assert.match(html, /<span class="sync-new-session-label">New session<\/span>/);
+  // The menu is closed until pressed.
+  assert.match(html, /class="sync-path-menu end" hidden=""/);
+
+  // A group per bound agent, named for assistive tech too: its app, then Terminal.
+  const group = (label: string) => {
+    const id = html.match(new RegExp(`id="([^"]+)" class="sync-path-menu-label">${label}<`))?.[1];
+    assert.ok(id, `${label} group label`);
+    const start = html.indexOf(`aria-labelledby="${id}"`);
+    assert.ok(start > 0, `${label} group`);
+    return html.slice(start, html.indexOf('class="sync-path-menu-group"', start + 1) >>> 0);
+  };
+  const codex = group("Codex");
+  assert.match(codex, /role="menuitem"[^>]*>[\s\S]*?data-icon="openai"[\s\S]*?<span>Codex app<\/span>/);
+  assert.match(codex, /data-icon="terminal"[\s\S]*?<span>Terminal<\/span>/);
+  // An unreadable profile keeps one inert row that says why, once.
+  const claude = group("Claude");
+  assert.equal(claude.match(/role="menuitem"/g)?.length, 1);
+  assert.match(claude, /aria-disabled="true"/);
+  assert.match(claude, /<small class="phrase">Can’t read its profile · Agent profile…<\/small>/);
+  assert.doesNotMatch(html, /Gemini app/);
+});
+
+test("a new session is never offered in a review or without a host to start it", () => {
+  const entry: ThreadSyncEntry = {
+    provider: "codex",
+    provider_display_name: "Codex",
+    access: "bound_ready",
+    thread_id: "thread-1",
+    conversation_resource_id: codexResourceId,
+    resource_id: "codex:thread:thread-1",
+    display_name: codexSession.title,
+    state: "local_ahead",
+    local_present: true,
+    storage_present: true,
+    compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+    push_decision: { action: "publish", selectable: true },
+    pull_decision: { action: "no_changes", selectable: false },
+  };
+  const review = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={activity}
+      comparison={emptyComparison({ entries: [entry] })}
+      selectionMode="push"
+      onStartSession={() => undefined}
+    />,
+  );
+  assert.doesNotMatch(review, /sync-new-session/);
+  const hostless = renderToStaticMarkup(<ProjectChatHistoryContent {...contentDefaults} activity={activity} />);
+  assert.doesNotMatch(hostless, /sync-new-session/);
+
+  // The page passes the starter to its standing list only, and a failed
+  // start reports through the same guard as a row action.
+  const page = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  assert.match(page, /onStartSession=\{selectionMode \? undefined : \(provider, surface\) => void startSession\(provider, surface\)\}/);
+  assert.match(page, /startProjectSession\(project\.local_project_id, provider, surface\);\s*\} catch \(reason\) \{ reportActionError\(errorMessage\(reason\)\); \}/);
+});
+
+test("an empty flat list carries New session in its box, not in the search row", () => {
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [], older: null }}
+      onStartSession={() => undefined}
+    />,
+  );
+  assert.equal(html.match(/class="sync-new-session"/g)?.length, 1);
+  assert.match(html, /class="sync-history-state with-start">No sessions yet\.<div class="sync-new-session"><button[^>]*class="btn btn-primary"/);
+  // The box hangs its menu from the button's start edge.
+  assert.match(html, /class="sync-path-menu" hidden=""/);
+  // A Git project's empty rail keeps the control in the search row.
+  const git = renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, sessions: [], git: { ...activity.git, commits: [], unique_session_count: 0 } }}
+      onStartSession={() => undefined}
+    />,
+  );
+  assert.match(git, /class="sync-list-head">[\s\S]*?<div class="sync-new-session"><button[^>]*class="btn"/);
+});

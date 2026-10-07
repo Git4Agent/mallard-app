@@ -13,8 +13,8 @@ pub mod publication;
 pub mod subagents;
 
 use super::traits::{
-    MaterializationTargetRequest, PlannedProviderTarget, ProjectOpenCommand, ProviderCli,
-    ProviderDescriptor, ScanFailure, SessionActionContext, SessionActionDescriptor,
+    MaterializationTargetRequest, NewSessionRequest, PlannedProviderTarget, ProjectOpenCommand,
+    ProviderCli, ProviderDescriptor, ScanFailure, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
     SessionAnalysis, SessionChildIdentity, SessionDiscovery, SessionDiscoveryContext,
     SessionEventDetail, SessionFileMetadata, SessionFileSummary, SessionHomeSighting,
@@ -254,15 +254,12 @@ impl SessionAdapter for ClaudeAdapter {
         project_root: &str,
         cli_path: Option<&Path>,
     ) -> Vec<ProjectOpenCommand> {
-        use crate::providers::launch::TerminalCommand;
         let program = cli_path.map_or_else(
             || "claude".to_string(),
             |path| path.to_string_lossy().into_owned(),
         );
         let cli = || {
-            TerminalCommand::new(program.clone())
-                .cwd(Path::new(project_root))
-                .env("CLAUDE_CONFIG_DIR", home)
+            actions::new_session_terminal_command(&program, home, Path::new(project_root))
         };
         vec![
             ProjectOpenCommand {
@@ -495,6 +492,10 @@ impl SessionAdapter for ClaudeAdapter {
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String> {
         actions::execute_action(request)
+    }
+
+    fn start_session(&self, request: &mut NewSessionRequest<'_>) -> Result<(), String> {
+        actions::start_session(request)
     }
 }
 

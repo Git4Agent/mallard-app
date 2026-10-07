@@ -5,12 +5,14 @@ import type {
   GitBranchSummary,
   GitHistoryOutgoing,
   LocalProjectSummary,
+  NewSessionSurface,
   NoticeSeverity,
   OlderActivity,
   ProjectActivity,
   ProjectBinding,
   ProjectSessionSummary,
   ProviderActivityState,
+  ProviderKey,
   SessionActionDescriptor,
   ThreadSyncComparison,
   ThreadSyncEntry,
@@ -33,6 +35,7 @@ import { projectLabel, sessionNoun } from "./model";
 import { clearedStorageNotice } from "./clearedStorageNotice";
 import { clearStorageWarningDismissal, dismissStorageWarning, useDismissedStorageWarning } from "../../preferences";
 import ProviderMark from "../sync-review/ProviderMark";
+import NewSessionMenu, { newSessionProviders } from "./NewSessionMenu";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
@@ -172,6 +175,11 @@ interface ContentProps extends SessionSearchProps {
   continuityActionBusy?: boolean;
   reviewScaffold?: ReviewScaffold;
   viewSwitch?: ReactNode;
+  /** Starts a new session of a bound agent in the project. Only the
+   *  standing list offers it; a review never does. */
+  onStartSession?: (provider: ProviderKey, surface: NewSessionSurface) => void;
+  /** A start is running. */
+  startSessionBusy?: boolean;
 }
 
 /** A Push review's Git history against the history storage holds. */
@@ -1902,6 +1910,8 @@ export function ProjectChatHistoryContent({
   statusScope: hostStatusScope, onStatusScopeChange,
   reviewScaffold,
   viewSwitch,
+  onStartSession,
+  startSessionBusy = false,
 }: ContentProps) {
   const [localQuery, setLocalQuery] = useState("");
   const [localStatusScope, setLocalStatusScope] = useState<StatusScope | null>(null);
@@ -2255,6 +2265,24 @@ export function ProjectChatHistoryContent({
     ? { timing: "blocking" }
     : { timing: "standing", label: "Notes about this project activity" };
 
+  /* "New session" closes the standing list's search row. A review shows
+     what one verb will move, not where work begins, so it has none. An
+     empty flat list carries it in its box instead, so the page offers it
+     once. */
+  const startProviders = !selectionMode && onStartSession && activity
+    ? newSessionProviders(activity.providers)
+    : [];
+  const startInBox = activity !== null && !activity.git && sessions.length === 0 && !narrowing;
+  const newSession = (inBox: boolean) => (onStartSession && startProviders.length > 0 ? (
+    <NewSessionMenu
+      providers={startProviders}
+      busy={startSessionBusy}
+      primary={inBox}
+      align={inBox ? "start" : "end"}
+      onStart={onStartSession}
+    />
+  ) : null);
+
   /* A review's field lands with its rows: until then the caption stands in
      its slot, and a list that failed has nothing to search. */
   const searchField = hasBoundProvider && !(storageLoading && searchableIds.size === 0)
@@ -2264,7 +2292,8 @@ export function ProjectChatHistoryContent({
       <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
         label={selectionMode ? "Search sessions" : "Search loaded sessions"}
         matches={searchResults.resourceIds.size} total={searchableIds.size} noun={sessionNoun} hiddenSelected={hiddenSelected}
-        narrowed={statusScope !== null} leading={viewSwitch} />
+        narrowed={statusScope !== null} leading={viewSwitch}
+        trailing={startInBox ? undefined : newSession(false) ?? undefined} />
     )
     : null;
   /* The bar rides under the field it narrows with. A scope no loaded row
@@ -2574,8 +2603,9 @@ export function ProjectChatHistoryContent({
                         project whose homes hold no session at all gets no
                         "Load earlier" control, so blaming its window would
                         promise a step the page cannot offer. */}
-                    <div className="sync-history-state">
+                    <div className={`sync-history-state${startProviders.length > 0 ? " with-start" : ""}`}>
                       {(activity.older?.sessions ?? 0) > 0 ? `No sessions in ${windowRange}.` : "No sessions yet."}
+                      {newSession(true)}
                     </div>
                   </div>
                 )) : (
@@ -2724,6 +2754,7 @@ export default function ProjectActivityPage({
   };
   const [actionBusyResourceId, setActionBusyResourceId] = useState<string | null>(null);
   const [actionBusyActionId, setActionBusyActionId] = useState<string | null>(null);
+  const [startSessionBusy, setStartSessionBusy] = useState(false);
   const requestRef = useRef(0);
   const comparisonRequestRef = useRef(0);
   const hasBoundProvider = Object.keys(binding?.profile_ids ?? {}).length > 0;
@@ -3007,5 +3038,21 @@ export default function ProjectActivityPage({
       actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} storageId={activeStorageId} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} reviewResourceIds={reviewResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} />;
+  /* One launch at a time, shared with the row actions. Nothing is added to
+     the list here: the session is listed once its agent writes it and the
+     list is read again. */
+  const startSession = async (provider: ProviderKey, surface: NewSessionSurface) => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
+    reportActionError(null);
+    setStartSessionBusy(true);
+    try {
+      await projectSyncApi.startProjectSession(project.local_project_id, provider, surface);
+    } catch (reason) { reportActionError(errorMessage(reason)); }
+    finally {
+      setStartSessionBusy(false);
+      actionInFlightRef.current = false;
+    }
+  };
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} storageId={activeStorageId} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} reviewResourceIds={reviewResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} onStartSession={selectionMode ? undefined : (provider, surface) => void startSession(provider, surface)} startSessionBusy={startSessionBusy} />;
 }

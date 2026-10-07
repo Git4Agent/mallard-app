@@ -1,9 +1,11 @@
 //! Safe Claude session actions surfaced through the generic action contract.
 
-use crate::providers::launch::{launch_terminal, shell_quote, TerminalCommand};
+use crate::providers::launch::{
+    launch_terminal, percent_encode_uri_component, shell_quote, TerminalCommand,
+};
 use crate::providers::traits::{
-    SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
-    SessionActionRequest,
+    NewSessionRequest, NewSessionSurface, SessionActionContext, SessionActionDescriptor,
+    SessionActionKind, SessionActionOutcome, SessionActionRequest,
 };
 use std::path::Path;
 #[cfg(target_os = "macos")]
@@ -57,15 +59,34 @@ fn launch_claude_app(
     claude_home: &Path,
     before_launch: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
+    let deep_link = claude_app_deep_link(session_id)?;
+    open_app_link(claude_home, &deep_link, "session", before_launch)
+}
+
+/// The desktop app's link for a new Claude Code session rooted at a folder.
+/// The app asks the person to confirm a folder that arrives in a link.
+fn claude_code_new_deep_link(project_root: &Path) -> String {
+    format!(
+        "claude://code/new?folder={}",
+        percent_encode_uri_component(&project_root.to_string_lossy())
+    )
+}
+
+/// Hand one `claude://` link to the desktop app reading `claude_home`.
+/// `target` names what the link opens, for the error.
+fn open_app_link(
+    claude_home: &Path,
+    deep_link: &str,
+    target: &str,
+    before_launch: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    if !claude_home.is_absolute() {
+        return Err("Claude home must be absolute".to_string());
+    }
     #[cfg(target_os = "macos")]
     {
-        if !claude_home.is_absolute() {
-            return Err("Claude home must be absolute".to_string());
-        }
-        let deep_link = claude_app_deep_link(session_id)?;
-        let command = claude_app_open_command(claude_home, &deep_link);
         let environment = format!("CLAUDE_CONFIG_DIR={}", claude_home.to_string_lossy());
-        before_launch(&command);
+        before_launch(&claude_app_open_command(claude_home, deep_link));
         let output = Command::new("/usr/bin/open")
             .args([
                 "-n",
@@ -73,13 +94,13 @@ fn launch_claude_app(
                 "/Applications/Claude.app",
                 "--env",
                 &environment,
-                &deep_link,
+                deep_link,
             ])
             .output()
-            .map_err(|error| format!("open the Claude desktop app session: {error}"))?;
+            .map_err(|error| format!("open the Claude desktop app {target}: {error}"))?;
         if !output.status.success() {
             return Err(format!(
-                "Claude desktop app could not open the session: {}",
+                "Claude desktop app could not open the {target}: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
@@ -87,19 +108,18 @@ fn launch_claude_app(
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler_executable};
-        if !claude_home.is_absolute() {
-            return Err("Claude home must be absolute".to_string());
-        }
-        let deep_link = claude_app_deep_link(session_id)?;
+        use crate::providers::windows_app::{
+            display_launch, launch_app, scheme_handler_executable,
+        };
+        let _ = target;
         let executable = scheme_handler_executable("claude")?;
         let env = [("CLAUDE_CONFIG_DIR", claude_home)];
-        before_launch(&display_launch(&executable, &env, &[deep_link.as_str()]));
-        launch_app(&executable, &env, &[deep_link.as_str()])
+        before_launch(&display_launch(&executable, &env, &[deep_link]));
+        launch_app(&executable, &env, &[deep_link])
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (session_id, claude_home, before_launch);
+        let _ = (deep_link, target, before_launch);
         Err(CLAUDE_APP_UNAVAILABLE.to_string())
     }
 }
@@ -187,6 +207,44 @@ fn claude_resume_terminal_command(
         .env("CLAUDE_CONFIG_DIR", claude_home)
         .arg("--resume")
         .arg(session_id))
+}
+
+/// The Terminal line a new session in a project runs: the CLI reading the
+/// bound home, started in the checkout. The after-Pull hint prints this line.
+pub(super) fn new_session_terminal_command(
+    claude_cli: &str,
+    claude_home: &Path,
+    project_root: &Path,
+) -> TerminalCommand {
+    TerminalCommand::new(claude_cli)
+        .cwd(project_root)
+        .env("CLAUDE_CONFIG_DIR", claude_home)
+}
+
+/// Start a new Claude session in the project: a Claude Code session in the
+/// desktop app rooted at the checkout, or the CLI in a new terminal window.
+pub(super) fn start_session(request: &mut NewSessionRequest<'_>) -> Result<(), String> {
+    if !request.provider_home.is_absolute() || !request.project_root.is_absolute() {
+        return Err("Claude home and project root must be absolute".to_string());
+    }
+    match request.surface {
+        NewSessionSurface::App => open_app_link(
+            request.provider_home,
+            &claude_code_new_deep_link(request.project_root),
+            "new session",
+            request.before_launch,
+        ),
+        NewSessionSurface::Terminal => {
+            let cli = super::cli::resolve(request.cli_path)?;
+            let command = new_session_terminal_command(
+                &cli.executable.to_string_lossy(),
+                request.provider_home,
+                request.project_root,
+            );
+            (request.before_launch)(&command.display_line());
+            launch_terminal(&command)
+        }
+    }
 }
 
 pub(super) fn available_actions(
@@ -289,6 +347,37 @@ mod tests {
         );
         assert!(claude_home_terminal_command(cli, Path::new("relative")).is_err());
         assert!(launch_claude_home_app(Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn new_session_starts_in_the_checkout_on_the_bound_home() {
+        let command = new_session_terminal_command(
+            "/usr/local/bin/claude",
+            Path::new("/Users/dev/my claude's home"),
+            Path::new("/Users/dev/my project"),
+        );
+        assert_eq!(
+            command.shell_line(),
+            "cd '/Users/dev/my project' && CLAUDE_CONFIG_DIR='/Users/dev/my claude'\\''s home' \
+             '/usr/local/bin/claude'"
+        );
+        assert!(command.args.is_empty());
+        assert_eq!(
+            claude_code_new_deep_link(Path::new("/Users/dev/测试 文件")),
+            "claude://code/new?folder=%2FUsers%2Fdev%2F%E6%B5%8B%E8%AF%95%20%E6%96%87%E4%BB%B6"
+        );
+
+        let mut refuse = |command: &str| panic!("a refused start launched {command}");
+        for surface in [NewSessionSurface::App, NewSessionSurface::Terminal] {
+            assert!(start_session(&mut NewSessionRequest {
+                surface,
+                provider_home: Path::new("/Users/dev/.claude"),
+                project_root: Path::new("relative/project"),
+                cli_path: None,
+                before_launch: &mut refuse,
+            })
+            .is_err());
+        }
     }
 
     #[test]

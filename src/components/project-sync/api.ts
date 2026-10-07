@@ -43,6 +43,7 @@ import type {
   LocalStateWipeResult,
   MaintenanceActionRequest,
   MaintenanceActionResult,
+  NewSessionSurface,
   ProjectActivity,
   ProjectActivityRefreshEvent,
   ProjectBinding,
@@ -663,4 +664,10 @@ export const projectSyncApi = {
     invoke<LocalSessionDeleteResult>("delete_local_project_session", { localProjectId, resourceId }),
   executeProjectSessionAction: (localProjectId: string, resourceId: string, actionId: string) =>
     invoke<void>("execute_project_session_action", { localProjectId, resourceId, actionId }),
+
+  /** Start a new session of one bound agent in the project's checkout, on
+   *  the project's agent home. Nothing is recorded: the session joins the
+   *  list once the agent writes it and the list is read again. */
+  startProjectSession: (localProjectId: string, provider: ProviderKey, surface: NewSessionSurface) =>
+    invoke<void>("start_project_session", { localProjectId, provider, surface }),
 };

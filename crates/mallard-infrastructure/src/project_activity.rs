@@ -13,8 +13,8 @@ use crate::persistence::{
 };
 use crate::provider_capture::LocalSessionView;
 use crate::providers::{
-    AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionRequest,
-    SessionDiscoveryContext, SessionFileSummary,
+    AgentProviderRegistry, NewSessionRequest, NewSessionSurface, SessionActionContext,
+    SessionActionDescriptor, SessionActionRequest, SessionDiscoveryContext, SessionFileSummary,
 };
 use crate::storage_core::ConfiguredObjectStore;
 use mallard_domain::{
@@ -605,6 +605,22 @@ fn provider_access(
     } else {
         ProviderAccessState::Unsupported
     }
+}
+
+/// Agents in the registry's display order (Codex, then Claude), as every
+/// other list of agents is; a provider with no adapter goes last.
+fn in_display_order(
+    registry: &AgentProviderRegistry,
+    providers: impl IntoIterator<Item = ProviderKey>,
+) -> Vec<ProviderKey> {
+    let mut providers = providers.into_iter().collect::<Vec<_>>();
+    providers.sort_by_cached_key(|provider| {
+        let rank = registry
+            .get(provider)
+            .map_or(u32::MAX, |adapter| adapter.descriptor().display_rank);
+        (rank, provider.clone())
+    });
+    providers
 }
 
 fn provider_display_name(registry: &AgentProviderRegistry, provider: &ProviderKey) -> String {
@@ -1313,7 +1329,7 @@ pub fn build_project_activity(
         .cloned()
         .collect::<BTreeSet<_>>();
     provider_keys.extend(remote_providers);
-    let providers = provider_keys
+    let providers = in_display_order(registry, provider_keys)
         .into_iter()
         .map(|provider| ProviderActivityState {
             display_name: provider_display_name(registry, &provider),
@@ -1509,6 +1525,61 @@ pub fn execute_project_session_action(
         before_launch,
     };
     adapter.execute_action(&mut request).map(|_| ())
+}
+
+/// Start a new session of one bound provider in the project's checkout,
+/// reading the project's bound home: its desktop app, or its CLI in a new
+/// terminal window. Nothing is recorded here; the session joins the list
+/// once its provider writes it and the list is read again.
+pub fn start_project_session(
+    repository: &LocalStateRepository,
+    registry: &AgentProviderRegistry,
+    local_project_id: &LocalProjectId,
+    provider: &ProviderKey,
+    surface: NewSessionSurface,
+    before_launch: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let state = repository.load_project_activity_state_snapshot()?;
+    let resolved =
+        resolve_activity_project_from_state(&state.config, &state.bindings, local_project_id)?;
+    let settings = crate::app_settings::load_app_settings(repository)?;
+    start_session_in(
+        registry,
+        &resolved,
+        provider,
+        surface,
+        settings.cli_path(provider),
+        before_launch,
+    )
+}
+
+/// The launch half of `start_project_session`, on an already resolved
+/// project: only a provider the project binds, with a readable home, starts.
+fn start_session_in(
+    registry: &AgentProviderRegistry,
+    resolved: &ResolvedActivityProject,
+    provider: &ProviderKey,
+    surface: NewSessionSurface,
+    cli_path: Option<&Path>,
+    before_launch: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    let adapter = registry.require(provider)?;
+    if let Some(reason) = resolved.unavailable.get(provider) {
+        return Err(reason.clone());
+    }
+    let home = resolved.homes.get(provider).ok_or_else(|| {
+        format!(
+            "This project doesn't use {}; choose it in Agent profile.",
+            adapter.descriptor().display_name
+        )
+    })?;
+    adapter.start_session(&mut NewSessionRequest {
+        surface,
+        provider_home: &home.home,
+        project_root: &resolved.project_root,
+        cli_path,
+        before_launch,
+    })
 }
 
 fn resolve_action_session(
@@ -2885,6 +2956,66 @@ mod activity_only_tests {
             "session does not belong to the selected project"
         );
         assert_eq!(metrics.snapshot().delta_since(&before).files_head_read, 0);
+    }
+
+    #[test]
+    fn agents_list_in_the_registry_display_order() {
+        let registry = AgentProviderRegistry::from_adapters(vec![
+            Arc::new(crate::providers::claude::ClaudeAdapter::new()),
+            Arc::new(crate::providers::codex::CodexAdapter::new()),
+        ])
+        .unwrap();
+        let key = |value: &str| ProviderKey::parse(value).unwrap();
+        // Alphabetical order would put Claude first.
+        assert_eq!(
+            in_display_order(
+                &registry,
+                [key("claude"), key("unregistered"), key("codex")]
+            ),
+            [key("codex"), key("claude"), key("unregistered")]
+        );
+    }
+
+    #[test]
+    fn a_new_session_starts_only_for_a_bound_provider_with_a_readable_home() {
+        let registry = AgentProviderRegistry::from_adapters(vec![
+            Arc::new(crate::providers::codex::CodexAdapter::new()),
+            Arc::new(crate::providers::claude::ClaudeAdapter::new()),
+        ])
+        .unwrap();
+        let (mut resolved, codex, _) = alias_test_context();
+        let claude = ProviderKey::parse("claude").unwrap();
+        let mut refuse = |command: &str| panic!("a refused start launched {command}");
+
+        assert_eq!(
+            start_session_in(
+                &registry,
+                &resolved,
+                &claude,
+                NewSessionSurface::Terminal,
+                None,
+                &mut refuse,
+            )
+            .unwrap_err(),
+            "This project doesn't use Claude; choose it in Agent profile."
+        );
+
+        resolved.unavailable.insert(
+            codex.clone(),
+            "codex profile path changed; open Project Settings".to_string(),
+        );
+        assert_eq!(
+            start_session_in(
+                &registry,
+                &resolved,
+                &codex,
+                NewSessionSurface::App,
+                None,
+                &mut refuse,
+            )
+            .unwrap_err(),
+            "codex profile path changed; open Project Settings"
+        );
     }
 
     fn alias_test_context() -> (ResolvedActivityProject, ProviderKey, LocalProviderProfileId) {

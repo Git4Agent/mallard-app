@@ -4,10 +4,12 @@ use super::cli_version::{require_session_resume, ResumeCli};
 use crate::cli_discovery::ResolvedCli;
 #[cfg(target_os = "macos")]
 use crate::codex_app::{find_installed_mac_app, InstalledMacApp};
-use crate::providers::launch::{launch_terminal, shell_quote, TerminalCommand};
+use crate::providers::launch::{
+    launch_terminal, percent_encode_uri_component, shell_quote, TerminalCommand,
+};
 use crate::providers::traits::{
-    SessionActionContext, SessionActionDescriptor, SessionActionKind, SessionActionOutcome,
-    SessionActionRequest,
+    NewSessionRequest, NewSessionSurface, SessionActionContext, SessionActionDescriptor,
+    SessionActionKind, SessionActionOutcome, SessionActionRequest,
 };
 use std::ffi::OsStr;
 use std::path::Path;
@@ -34,21 +36,6 @@ pub(crate) fn validate_thread_uuid(value: &str) -> Result<(), String> {
     valid
         .then_some(())
         .ok_or_else(|| "Codex thread id must be a UUID".to_string())
-}
-
-fn percent_encode_uri_component(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push(char::from(HEX[(byte >> 4) as usize]));
-            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
-        }
-    }
-    encoded
 }
 
 fn codex_app_deep_links(
@@ -321,6 +308,16 @@ fn resume_in_terminal(
 /// workspace, so the new-thread route on the caller's default workspace is
 /// the only home-scoped entry point.
 pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), String> {
+    open_app_new_thread(codex_home, workspace, &mut |_| {})
+}
+
+/// Open the Codex desktop app on a new thread in `workspace`, reading
+/// `codex_home`. Shared by the Library's launch and a project's new session.
+fn open_app_new_thread(
+    codex_home: &Path,
+    workspace: &Path,
+    before_launch: &mut dyn FnMut(&str),
+) -> Result<(), String> {
     if !codex_home.is_absolute() || !workspace.is_absolute() {
         return Err("Codex home and workspace must be absolute".to_string());
     }
@@ -331,22 +328,67 @@ pub fn launch_codex_home_app(codex_home: &Path, workspace: &Path) -> Result<(), 
                 .to_string()
         })?;
         let deep_link = codex_project_deep_link(workspace);
+        before_launch(&codex_app_open_command(
+            &app.bundle_path,
+            codex_home,
+            &deep_link,
+        ));
         run_codex_app_deep_link(&app, codex_home, &deep_link, "workspace")
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{launch_app, scheme_handler_executable};
+        use crate::providers::windows_app::{
+            display_launch, launch_app, scheme_handler_executable,
+        };
         let deep_link = codex_project_deep_link(workspace);
         let executable = scheme_handler_executable("codex")?;
-        launch_app(
-            &executable,
-            &[("CODEX_HOME", codex_home)],
-            &[deep_link.as_str()],
-        )
+        let env = [("CODEX_HOME", codex_home)];
+        before_launch(&display_launch(&executable, &env, &[deep_link.as_str()]));
+        launch_app(&executable, &env, &[deep_link.as_str()])
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
+        let _ = before_launch;
         Err(CODEX_APP_UNAVAILABLE.to_string())
+    }
+}
+
+/// The Terminal line a new session in a project runs: the CLI reading the
+/// bound home, pinned to the checkout. The after-Pull hint prints this line.
+pub(super) fn new_session_terminal_command(
+    codex_cli: &str,
+    codex_home: &Path,
+    project_root: &Path,
+) -> TerminalCommand {
+    TerminalCommand::new(codex_cli)
+        .env("CODEX_HOME", codex_home)
+        .arg("-C")
+        .arg(project_root.to_string_lossy())
+}
+
+/// Start a new Codex session in the project: the desktop app on a new
+/// thread there, or the CLI in a new terminal window. A new thread resumes
+/// nothing, so the resume version gate does not apply.
+pub(super) fn start_session(request: &mut NewSessionRequest<'_>) -> Result<(), String> {
+    if !request.provider_home.is_absolute() || !request.project_root.is_absolute() {
+        return Err("Codex home and project root must be absolute".to_string());
+    }
+    match request.surface {
+        NewSessionSurface::App => open_app_new_thread(
+            request.provider_home,
+            request.project_root,
+            request.before_launch,
+        ),
+        NewSessionSurface::Terminal => {
+            let cli = resolve_codex_cli(request.cli_path)?;
+            let command = new_session_terminal_command(
+                &cli.executable.to_string_lossy(),
+                request.provider_home,
+                request.project_root,
+            );
+            (request.before_launch)(&command.display_line());
+            launch_terminal(&command)
+        }
     }
 }
 
@@ -491,6 +533,36 @@ mod tests {
                 .is_err()
         );
         assert!(launch_codex_home_app(Path::new("relative"), Path::new("/Users/dev")).is_err());
+    }
+
+    #[test]
+    fn new_session_pins_the_bound_home_and_the_checkout() {
+        let command = new_session_terminal_command(
+            "/usr/local/bin/codex",
+            Path::new("/Users/dev/my codex's home"),
+            Path::new("/Users/dev/my project"),
+        );
+        assert_eq!(
+            command.shell_line(),
+            "CODEX_HOME='/Users/dev/my codex'\\''s home' '/usr/local/bin/codex' \
+             -C '/Users/dev/my project'"
+        );
+        assert_eq!(
+            codex_project_deep_link(Path::new("/Users/dev/测试 文件")),
+            "codex://threads/new?path=%2FUsers%2Fdev%2F%E6%B5%8B%E8%AF%95%20%E6%96%87%E4%BB%B6"
+        );
+
+        let mut refuse = |command: &str| panic!("a refused start launched {command}");
+        for surface in [NewSessionSurface::App, NewSessionSurface::Terminal] {
+            assert!(start_session(&mut NewSessionRequest {
+                surface,
+                provider_home: Path::new("relative/.codex"),
+                project_root: Path::new("/Users/dev/project"),
+                cli_path: None,
+                before_launch: &mut refuse,
+            })
+            .is_err());
+        }
     }
 
     #[test]

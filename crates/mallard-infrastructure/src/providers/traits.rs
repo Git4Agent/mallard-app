@@ -859,6 +859,28 @@ pub enum SessionActionOutcome {
     Launched,
 }
 
+/// Where a new session opens: the provider's desktop app, or its CLI in a
+/// new terminal window.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NewSessionSurface {
+    App,
+    Terminal,
+}
+
+/// A new session in a project, on the project's bound provider home. No
+/// session id exists yet: the provider mints one when it writes the session.
+pub struct NewSessionRequest<'a> {
+    pub surface: NewSessionSurface,
+    pub provider_home: &'a Path,
+    pub project_root: &'a Path,
+    /// The CLI executable saved in Settings for this provider, if any.
+    pub cli_path: Option<&'a Path>,
+    /// Observer for the exact command before it is launched, so the
+    /// activity log records what ran.
+    pub before_launch: &'a mut dyn FnMut(&str),
+}
+
 /// One pasteable way to open a pulled project with this provider, as the
 /// post-Pull log lists it: `label: command`. A `command` may also be a
 /// short instruction when no single shell line exists.
@@ -1142,6 +1164,10 @@ pub trait SessionAdapter: Send + Sync {
         &self,
         request: &mut SessionActionRequest<'_>,
     ) -> Result<SessionActionOutcome, String>;
+    /// Start a new session in the project's checkout, reading the bound home.
+    fn start_session(&self, _request: &mut NewSessionRequest<'_>) -> Result<(), String> {
+        Err("This provider cannot start a session from Mallard.".into())
+    }
 
     /// Explicit best-effort deletion. This does not coordinate active writers.
     /// `cli_path` is the saved CLI selection, for a provider whose deletion

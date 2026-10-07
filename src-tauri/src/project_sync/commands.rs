@@ -29,21 +29,22 @@ use super::service::{
     rename_local_project_with_repository, rename_storage_with_repository, repository,
     resolve_project_markdown_path_with_repository, reveal_storage_secret_with_repository,
     save_project_binding_with_repository, save_project_link_with_repository, session_detail_error,
-    should_log_history_scan, sibling_bundle_status_with_repository, storage_log_label,
-    storage_provider_descriptors, test_storage_setup_draft_with_repository,
-    test_storage_with_repository, update_storage_setup_draft_with_repository, AgentFolderList,
-    BundleReadiness, BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
-    CreateSetupDraftResult, HostIdentityStatus, ProjectActivity, ProjectActivityRefreshEvent,
-    ProjectContentInventory, ProjectDetail, ProjectFolderProbe, ProjectMarkdownImage,
-    ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSessionsDeleteResult,
-    ProjectSyncConfigView, ProjectSyncService, ProviderDescriptor, ProviderProfileProbe,
-    ProviderProfileSummary, PushApproval, PushDestinationStatus, PushReviewContext, PushScope,
-    ResourceInventory, RestoreResult, SaveProjectBindingRequest, SaveProjectLinkRequest,
-    SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind, SessionToolCategory,
-    SetupDraftInspection, SetupDraftList, SiblingBundleStatus, StorageDataClearResult,
-    StorageProviderDescriptor, StorageSetupDraftList, StorageSetupDraftSummary,
-    TestStorageDraftResult, UpdateStorageSetupDraftRequest, VerifyStorageResult,
-    HISTORY_SCAN_LOGGED_AT,
+    should_log_history_scan, sibling_bundle_status_with_repository,
+    start_project_session_with_repository, storage_log_label, storage_provider_descriptors,
+    test_storage_setup_draft_with_repository, test_storage_with_repository,
+    update_storage_setup_draft_with_repository, AgentFolderList, BundleReadiness,
+    BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
+    CreateSetupDraftResult, HostIdentityStatus, NewSessionSurface, ProjectActivity,
+    ProjectActivityRefreshEvent, ProjectContentInventory, ProjectDetail, ProjectFolderProbe,
+    ProjectMarkdownImage, ProjectOperationResult, ProjectSessionTimelineRequest,
+    ProjectSessionsDeleteResult, ProjectSyncConfigView, ProjectSyncService, ProviderDescriptor,
+    ProviderProfileProbe, ProviderProfileSummary, PushApproval, PushDestinationStatus,
+    PushReviewContext, PushScope, ResourceInventory, RestoreResult, SaveProjectBindingRequest,
+    SaveProjectLinkRequest, SessionDetailError, SessionDetailErrorCode, SessionTimelineEventKind,
+    SessionToolCategory, SetupDraftInspection, SetupDraftList, SiblingBundleStatus,
+    StorageDataClearResult, StorageProviderDescriptor, StorageSetupDraftList,
+    StorageSetupDraftSummary, TestStorageDraftResult, UpdateStorageSetupDraftRequest,
+    VerifyStorageResult, HISTORY_SCAN_LOGGED_AT,
 };
 use crate::activity_log::{emit_typed_log, ActivityLogScope};
 use mallard_domain::{
@@ -936,6 +937,38 @@ pub async fn execute_project_session_action(
                     &worker_app,
                     "info",
                     "history.session_action",
+                    &format!("$ {command}"),
+                )
+            },
+        )
+    })
+    .await
+}
+
+/// Start a new session of one bound provider in the project. The line that
+/// runs goes to the activity log, as a session action's does.
+#[tauri::command]
+pub async fn start_project_session(
+    app: tauri::AppHandle,
+    local_project_id: LocalProjectId,
+    provider: ProviderKey,
+    surface: NewSessionSurface,
+) -> Result<(), String> {
+    let repository = repository()?;
+    let worker_app = app.clone();
+    let worker_log =
+        ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
+    run_blocking(move || {
+        start_project_session_with_repository(
+            &repository,
+            &local_project_id,
+            &provider,
+            surface,
+            &mut |command| {
+                worker_log.emit(
+                    &worker_app,
+                    "info",
+                    "history.session_start",
                     &format!("$ {command}"),
                 )
             },

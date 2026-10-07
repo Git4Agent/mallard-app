@@ -8084,6 +8084,37 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   margin-bottom: 0;
 }
 
+/* "+ New session ▾": a menu button closing the Sessions search row, or the
+   empty list's primary action. Its menu is the path bar's own panel, hung
+   from the button. */
+.sync-new-session {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.sync-new-session > .btn {
+  gap: 6px;
+}
+
+.sync-new-session .sync-path-menu {
+  min-width: 220px;
+}
+
+/* A narrow list keeps the verb's glyphs and drops its words; the button
+   keeps its name for assistive tech. */
+@container sync-history-layout (max-width: 600px) {
+  .sync-new-session-label {
+    display: none;
+  }
+}
+
+/* An empty list's box stacks its sentence over the verb. */
+.sync-history-state.with-start {
+  flex-direction: column;
+  gap: 12px;
+}
+
 .sync-name-search-input {
   display: flex;
   flex: 1 1 200px;

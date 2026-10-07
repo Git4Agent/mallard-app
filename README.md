@@ -58,6 +58,11 @@ resources portable across teammates and machines.
   Pulls create backups and retain result receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.
   Git-managed project content continues to travel through Git.
+- Starts a new session in a project: **New session** at the end of the
+  Sessions search row (in the empty list's box when there is none yet) runs
+  a bound agent's CLI in Terminal in the project's folder, on the project's
+  own agent home, or opens the agent's desktop app on that folder. The new
+  session is listed once the agent writes it and the list is refreshed.
 - Manages user-global Agent Skills, provider-native plugin install intent, and
   Codex pets as independent Library resources. The Catalog menu starts empty
   and grows one row per **(provider home × resource kind)** the user adds. A
@@ -124,8 +129,8 @@ migration, legacy execution path, or parallel storage-wide catalog.
 The fastest path is the packaged macOS DMG (Apple Silicon or Intel) from the
 [latest release](https://github.com/Git4Agent/mallard-app/releases/latest).
 The app is Developer ID signed and notarized, so it opens without a security
-override. The first **Open in Terminal** or Codex App refresh asks for
-Automation permission; allow it. Mallard finds the Codex and Claude CLIs the
+override. The first **Open in Terminal**, **New session › Terminal**, or Codex App
+refresh asks for Automation permission; allow it. Mallard finds the Codex and Claude CLIs the
 way your terminal does, including the `PATH` your shell sets: it asks your
 login shell once per launch, in the background, with
 `MALLARD_RESOLVING_ENVIRONMENT=1` set so a startup file can skip slow work

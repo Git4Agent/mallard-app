@@ -94,8 +94,8 @@ use mallard_infrastructure::providers::claude::subagents as claude_subagents;
 use mallard_infrastructure::providers::codex::first_codex_user_summary;
 use mallard_infrastructure::providers::AgentProviderRegistry;
 pub use mallard_infrastructure::providers::{
-    AfterPullActionOffer, ProviderDescriptor, SessionEventDetail, SessionTimelineEventKind,
-    SessionToolCategory,
+    AfterPullActionOffer, NewSessionSurface, ProviderDescriptor, SessionEventDetail,
+    SessionTimelineEventKind, SessionToolCategory,
 };
 use mallard_infrastructure::pull_transcript::{
     PreparedPullTranscript, PullTranscriptCheckpoint, PullTranscriptRequest,
@@ -1714,6 +1714,23 @@ pub(super) fn execute_project_session_action_with_repository(
         local_project_id,
         resource_id,
         action_id,
+        before_launch,
+    )
+}
+
+pub(super) fn start_project_session_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    provider: &ProviderKey,
+    surface: NewSessionSurface,
+    before_launch: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    project_activity::start_project_session(
+        repository,
+        provider_registry(),
+        local_project_id,
+        provider,
+        surface,
         before_launch,
     )
 }
