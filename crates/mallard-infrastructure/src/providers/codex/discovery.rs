@@ -113,6 +113,7 @@ pub(super) fn recent_session_homes(
 
 pub(super) fn discover(
     context: &SessionDiscoveryContext<'_>,
+    include_empty: bool,
     scan_metadata: impl Fn(
         &std::path::Path,
     ) -> Result<crate::providers::traits::SessionFileMetadata, String>,
@@ -200,7 +201,7 @@ pub(super) fn discover(
             )
             .err()
         });
-        if blocked_reason.is_none() && meta.is_empty {
+        if !include_empty && blocked_reason.is_none() && meta.is_empty {
             continue;
         }
         selected_thread_ids.insert(session_id.clone());
@@ -558,6 +559,62 @@ mod tests {
         assert!(discovered.sessions[0].blocked_reason.is_none());
         assert_eq!(adapter.recent_session_homes(&home).unwrap().len(), 1);
         drop(writer);
+    }
+
+    #[test]
+    fn deletion_discovery_includes_empty_roots_and_preserves_project_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        let foreign = project.join("nested-project");
+        std::fs::create_dir_all(&foreign).unwrap();
+        for (directory, id, cwd, subagent) in [
+            ("sessions", "empty-active", &project, false),
+            ("archived_sessions", "empty-archived", &project, false),
+            ("sessions", "foreign-active", &foreign, false),
+            ("archived_sessions", "foreign-archived", &foreign, false),
+            ("sessions", "child", &project, true),
+        ] {
+            let directory = home.join(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut payload = serde_json::json!({"id": id, "cwd": cwd});
+            if subagent {
+                payload["thread_source"] = serde_json::json!("subagent");
+                payload["parent_thread_id"] = serde_json::json!("empty-active");
+            }
+            let record = serde_json::json!({"type": "session_meta", "payload": payload});
+            std::fs::write(
+                directory.join(format!("rollout-{id}.jsonl")),
+                format!("{record}\n"),
+            )
+            .unwrap();
+        }
+        let home = home.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let context = SessionDiscoveryContext {
+            provider_home: &home,
+            project_root: &project,
+        };
+        let adapter = CodexAdapter::new();
+        assert!(adapter.discover(&context).unwrap().sessions.is_empty());
+        let deletion = adapter.discover_for_deletion(&context).unwrap();
+        assert!(deletion.warnings.is_empty());
+        assert!(deletion
+            .sessions
+            .iter()
+            .all(|session| session.blocked_reason.is_none()));
+        assert_eq!(
+            deletion
+                .sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["empty-active", "empty-archived"]
+        );
+        assert_eq!(
+            deletion.excluded_subagent_session_ids,
+            BTreeSet::from(["child".to_string()])
+        );
     }
 
     #[test]

@@ -44,8 +44,9 @@ pub enum CliSelectionSource {
     StandardLocation,
 }
 
-/// Whether discovery may spend a shell probe. A process that started from a
-/// terminal already has the user's `PATH` and skips it.
+/// Whether discovery may spend a shell probe at all. General tools such as
+/// `git` never do; a provider CLI may, and even then only when the probe can
+/// change the answer (see [`discover_launcher`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellDiscovery {
     Use,
@@ -84,47 +85,82 @@ pub enum CliDiscoveryError {
 
 /// Find `program` by the selection policy. `program` is one plain name, the
 /// way it is typed in a terminal; platform extensions are the search's job.
+///
+/// The shell probe is spent only where it can change the answer: not for a
+/// saved selection, not when the inherited `PATH` already names the
+/// launcher, and not in a process a terminal started, whose `PATH` is the
+/// shell's already. The order of precedence is unchanged by the saving.
 pub fn discover_launcher(
     program: &str,
     explicit: Option<&Path>,
     shell: ShellDiscovery,
 ) -> Result<DiscoveredLauncher, CliDiscoveryError> {
-    let inherited = inherited_path_dirs();
-    let recovered = match shell {
-        ShellDiscovery::Use => shell_path().unwrap_or_default(),
-        ShellDiscovery::Skip => Vec::new(),
-    };
+    discover_launcher_with(program, explicit, inherited_path_dirs(), || match shell {
+        ShellDiscovery::Use if !launched_from_terminal() => shell_path().unwrap_or_default(),
+        _ => Vec::new(),
+    })
+}
+
+fn discover_launcher_with(
+    program: &str,
+    explicit: Option<&Path>,
+    inherited: Vec<PathBuf>,
+    probe: impl FnOnce() -> Vec<PathBuf>,
+) -> Result<DiscoveredLauncher, CliDiscoveryError> {
     let standard = standard_dirs();
-    let search_path = join_dirs(
-        inherited
-            .iter()
-            .chain(recovered.iter())
-            .chain(standard.iter()),
-    );
-    let found = |launcher: PathBuf, source: CliSelectionSource| DiscoveredLauncher {
-        launcher,
-        source,
-        search_path: search_path.clone(),
-    };
+    let found =
+        |launcher: PathBuf, source: CliSelectionSource, recovered: &[PathBuf]| DiscoveredLauncher {
+            launcher,
+            source,
+            search_path: join_dirs(
+                inherited
+                    .iter()
+                    .chain(recovered.iter())
+                    .chain(standard.iter()),
+            ),
+        };
     if let Some(explicit) = explicit {
         return match validate_executable(explicit) {
-            Ok(_) => Ok(found(explicit.to_path_buf(), CliSelectionSource::Selected)),
+            Ok(_) => Ok(found(
+                explicit.to_path_buf(),
+                CliSelectionSource::Selected,
+                &[],
+            )),
             Err(_) => Err(CliDiscoveryError::SelectedUnavailable),
         };
     }
     if !is_plain_program_name(program) {
         return Err(CliDiscoveryError::NotFound);
     }
-    for (dirs, source) in [
-        (&inherited, CliSelectionSource::InheritedPath),
-        (&recovered, CliSelectionSource::ShellPath),
-        (&standard, CliSelectionSource::StandardLocation),
-    ] {
-        if let Some(launcher) = find_in(program, dirs) {
-            return Ok(found(launcher, source));
-        }
+    if let Some(launcher) = find_in(program, &inherited) {
+        return Ok(found(launcher, CliSelectionSource::InheritedPath, &[]));
+    }
+    let recovered = probe();
+    if let Some(launcher) = find_in(program, &recovered) {
+        return Ok(found(launcher, CliSelectionSource::ShellPath, &recovered));
+    }
+    if let Some(launcher) = find_in(program, &standard) {
+        return Ok(found(
+            launcher,
+            CliSelectionSource::StandardLocation,
+            &recovered,
+        ));
     }
     Err(CliDiscoveryError::NotFound)
+}
+
+/// Whether a shell started this process. A terminal's shell exports `SHLVL`
+/// of one or more; launchd, the Dock, and `open` (which hands the launch to
+/// launchd) export none. The same test keeps JetBrains IDEs from probing.
+fn launched_from_terminal() -> bool {
+    shell_level_names_a_shell(std::env::var_os("SHLVL").as_deref())
+}
+
+fn shell_level_names_a_shell(level: Option<&OsStr>) -> bool {
+    level
+        .and_then(OsStr::to_str)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .is_some_and(|level| level > 0)
 }
 
 /// Find a general tool such as `git` the same way, without a provider's
@@ -286,6 +322,16 @@ pub fn refresh_shell_path() {
     *SHELL_PATH
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// Spend the probe ahead of the first CLI action, so a launch after startup
+/// finds the shell `PATH` already known. Called from a background thread; a
+/// discovery that arrives while the probe runs waits for it rather than
+/// starting another. A terminal-started process skips it, as discovery does.
+pub fn warm_shell_path() {
+    if !launched_from_terminal() {
+        let _ = shell_path();
+    }
 }
 
 #[cfg(unix)]
@@ -583,6 +629,84 @@ mod tests {
             discover_launcher("mallard-no-such-tool-xyz", None, ShellDiscovery::Skip).unwrap_err(),
             CliDiscoveryError::NotFound
         );
+    }
+
+    /// The probe is spent only where it can change the answer, and the
+    /// order of precedence is the same whether or not it was spent.
+    #[test]
+    #[cfg(unix)]
+    fn the_shell_probe_is_spent_only_where_it_can_change_the_answer() {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir().unwrap();
+        let inherited_dir = temp.path().join("inherited");
+        let shell_dir = temp.path().join("shell");
+        let tool = "mallard-probe-test-tool";
+        executable(&shell_dir.join(tool), "true");
+        let probed = Cell::new(0);
+        let probe = || {
+            probed.set(probed.get() + 1);
+            vec![shell_dir.clone()]
+        };
+        let dirs_of = |found: &DiscoveredLauncher| -> Vec<PathBuf> {
+            std::env::split_paths(&found.search_path).collect()
+        };
+
+        // A saved selection: no probe; the child PATH holds the inherited
+        // and standard directories only.
+        let chosen = temp.path().join("chosen");
+        executable(&chosen, "true");
+        let found = discover_launcher_with(tool, Some(&chosen), vec![inherited_dir.clone()], probe)
+            .unwrap();
+        assert_eq!(found.source, CliSelectionSource::Selected);
+        assert_eq!(probed.get(), 0);
+        assert_eq!(dirs_of(&found)[0], inherited_dir);
+        assert!(!dirs_of(&found).contains(&shell_dir));
+
+        // The inherited PATH names the launcher: no probe.
+        executable(&inherited_dir.join(tool), "true");
+        let found = discover_launcher_with(tool, None, vec![inherited_dir.clone()], probe).unwrap();
+        assert_eq!(found.launcher, inherited_dir.join(tool));
+        assert_eq!(found.source, CliSelectionSource::InheritedPath);
+        assert_eq!(probed.get(), 0);
+
+        // Otherwise the probe runs once, and its directories follow the
+        // inherited ones in the child PATH.
+        fs::remove_file(inherited_dir.join(tool)).unwrap();
+        let found = discover_launcher_with(tool, None, vec![inherited_dir.clone()], probe).unwrap();
+        assert_eq!(found.launcher, shell_dir.join(tool));
+        assert_eq!(found.source, CliSelectionSource::ShellPath);
+        assert_eq!(probed.get(), 1);
+        assert_eq!(
+            dirs_of(&found)[..2],
+            [inherited_dir.clone(), shell_dir.clone()]
+        );
+
+        // Nothing anywhere: the probe was spent, and that is the answer.
+        assert_eq!(
+            discover_launcher_with("mallard-no-such-tool-xyz", None, vec![inherited_dir], probe)
+                .unwrap_err(),
+            CliDiscoveryError::NotFound
+        );
+        assert_eq!(probed.get(), 2);
+    }
+
+    #[test]
+    fn a_shell_level_above_zero_means_a_terminal_started_the_process() {
+        for (value, expected) in [
+            (Some("1"), true),
+            (Some("3"), true),
+            (Some(" 2 "), true),
+            (Some("0"), false),
+            (Some(""), false),
+            (Some("deep"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                shell_level_names_a_shell(value.map(OsStr::new)),
+                expected,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

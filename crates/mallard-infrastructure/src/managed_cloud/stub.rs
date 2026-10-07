@@ -398,6 +398,9 @@ pub struct StubState {
     /// (user id, repository id): the public Catalog items an account added
     /// to its Catalog (`PUT …/catalog-addition`).
     pub catalog_additions: BTreeSet<(String, String)>,
+    /// (repository id, commit id) → the body of `PUT …/listings/{commit_id}`:
+    /// what the desktop read from an installed plugin's own manifest.
+    pub plugin_listings: BTreeMap<(String, String), Value>,
 }
 
 impl StubState {
@@ -1452,11 +1455,16 @@ fn link_body(
     let can_publish = role.is_some()
         && repository.has_draft(mainline)
         && selected.is_some_and(|name| repository.version_of(&name.file_name()).is_none());
+    // The discard is the Owner's and an Admin's, while there is something to remove.
+    let can_discard = matches!(role, Some("owner" | "admin"))
+        && repository.has_draft(mainline)
+        && repository.discard_keeps().is_some();
     json!({
         "repository_id": repository.id, "owner_login": state.users[&repository.owner_id].login,
         "name": repository.name, "visibility": repository.visibility, "release": release,
         "repository_revision": repository.revision, "role": role, "can_pull": true, "can_push": writer,
-        "can_request_release": can_request, "can_publish_version": can_publish
+        "can_request_release": can_request, "can_publish_version": can_publish,
+        "can_discard_draft": can_discard
     })
 }
 
@@ -2195,6 +2203,56 @@ fn route(
                     StatusCode::OK,
                     json!({"repository_id": repository.id, "added": true}),
                 );
+            }
+            (&Method::PUT, ["listings", commit_id]) => {
+                // Describes a plugin commit (listings.ts): plugins only, and
+                // only the account that pushed that commit.
+                let plugin = repository
+                    .catalog
+                    .as_ref()
+                    .is_some_and(|item| item.resource_kind == "plugin_install_intent");
+                if !plugin {
+                    return error("invalid_request", "Only a plugin has a listing.");
+                }
+                let pushes: Vec<&Publication> = repository
+                    .publications
+                    .iter()
+                    .filter(|publication| publication.commit_id == *commit_id)
+                    .collect();
+                if pushes.is_empty() {
+                    return error("not_found", "not found");
+                }
+                if !pushes
+                    .iter()
+                    .any(|publication| publication.created_by == user_id)
+                {
+                    return error(
+                        "forbidden",
+                        "Only whoever pushed this snapshot can describe it.",
+                    );
+                }
+                let value: Value = match serde_json::from_slice(&body) {
+                    Ok(value @ Value::Object(_)) => value,
+                    _ => return error("invalid_request", "Body must be a JSON object."),
+                };
+                const FIELDS: [&str; 7] = [
+                    "display_name",
+                    "developer",
+                    "description",
+                    "category",
+                    "website_url",
+                    "privacy_url",
+                    "terms_url",
+                ];
+                let fields = value.as_object().expect("an object");
+                if fields.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+                    return error("invalid_request", "Not part of a listing.");
+                }
+                state.plugin_listings.insert(
+                    (repository.id.clone(), (*commit_id).to_owned()),
+                    value.clone(),
+                );
+                return json(StatusCode::OK, value);
             }
             (&Method::PUT, ["invitation"]) => {
                 if !manages {

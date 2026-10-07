@@ -20,7 +20,7 @@ import "../src/App.css";
 const link: ManagedCloudLink = {
   repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
   website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
-  repository_revision: 7, can_request_release: true, can_publish_version: true, role: "owner",
+  repository_revision: 7, can_request_release: true, can_publish_version: true, can_discard_draft: true, role: "owner",
   release: { kind: "snapshot_changed" },
 };
 /** Where a pushed draft stands: the latest version, the pushes past it, and
@@ -117,8 +117,8 @@ const gone = failed("gone", "Deleted, or this account lost access. Push creates 
 const deleting = failed("deleting", "Push creates it again.");
 const refused = failed("inaccessible", "Mallard Cloud refused this account. It may be suspended.");
 const createdAgain = ready({ publication: standing(null, null, null) }, { repository_id: "repo_two", visibility: "private", release: { kind: "private" } });
-const backAtPublic = ready({ publication: standing(2, 0, 2) }, { release: { kind: "public" }, can_request_release: false, can_publish_version: false });
-const emptied = ready({ publication: { ...standing(null, null, null), draft: "none" } }, { visibility: "private", release: { kind: "not_pushed" }, can_request_release: false, can_publish_version: false });
+const backAtPublic = ready({ publication: standing(2, 0, 2) }, { release: { kind: "public" }, can_request_release: false, can_publish_version: false, can_discard_draft: false });
+const emptied = ready({ publication: { ...standing(null, null, null), draft: "none" } }, { visibility: "private", release: { kind: "not_pushed" }, can_request_release: false, can_publish_version: false, can_discard_draft: false });
 const question = discardDraftQuestion(link, ready().publication);
 
 document.documentElement.dataset.theme = new URLSearchParams(window.location.search).get("theme") === "dark" ? "dark" : "light";

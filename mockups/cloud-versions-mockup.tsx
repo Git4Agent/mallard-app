@@ -48,7 +48,7 @@ const ADDRESS = "rikaqu0223-arch/mallardNonGit";
 const baseLink: ManagedCloudLink = {
   repository_id: "repo_one", visibility: "private", can_pull: true, can_push: true,
   website_url: `https://mallard-ai.com/${ADDRESS}`, owner_login: "rikaqu0223-arch", name: "mallardNonGit",
-  repository_revision: 7, can_request_release: true, can_publish_version: true, role: "owner",
+  repository_revision: 7, can_request_release: true, can_publish_version: true, can_discard_draft: true, role: "owner",
   release: { kind: "private" },
 };
 /** Where a pushed draft stands: the latest version, the pushes past it, the public version, the version in review. */
@@ -107,21 +107,21 @@ const SCENES: Scene[] = [
   },
   {
     id: "private-equal", name: "Private, the draft is version 3", note: "Just after Publish. It is off until a push changes the draft.",
-    today: today(standing(3, 0), { can_publish_version: false }),
+    today: today(standing(3, 0), { can_publish_version: false, can_discard_draft: false }),
     head: { word: "Private", line: "Version 3. Collaborators only.", mark: "cloud-lock", tone: "plain" },
     facts: facts("Same as 3", "3", "Private"),
     rows: [publish(4, true), request, viewDraft, versions],
   },
   {
     id: "review", name: "In review", note: "As today, naming the version. Pushing on changes the draft, not what is reviewed.",
-    today: today(standing(3, 0, null, 3), { role: "member", can_request_release: false, can_publish_version: false, release: { kind: "waiting_owner", requested_by: "usr_1" } }),
+    today: today(standing(3, 0, null, 3), { role: "member", can_request_release: false, can_publish_version: false, can_discard_draft: false, release: { kind: "waiting_owner", requested_by: "usr_1" } }),
     head: { word: "In review", line: "Version 3 is waiting for the Owner.", mark: "cloud-clock", tone: "info" },
     facts: facts("Same as 3", "3", "Private", "Member"),
     rows: [publish(4, true), viewRequest, viewDraft, versions],
   },
   {
     id: "public-equal", name: "Public, the draft is the public version", note: "Today's Published v3. “Published” now means frozen, so the chip says Public.",
-    today: today(standing(3, 0, 3), { visibility: "public", can_request_release: false, can_publish_version: false, release: { kind: "public" } }),
+    today: today(standing(3, 0, 3), { visibility: "public", can_request_release: false, can_publish_version: false, can_discard_draft: false, release: { kind: "public" } }),
     head: { word: "Public v3", line: "Version 3 is public. The draft is the same.", mark: "cloud-check", tone: "success" },
     facts: facts("Same as 3", "3", "3"),
     rows: [publish(4, true), viewDraft, versions, viewPublic],
@@ -135,14 +135,14 @@ const SCENES: Scene[] = [
   },
   {
     id: "public-version", name: "Public, version 4 published and not public", note: "A state today cannot say: a frozen copy newer than what the public reads.",
-    today: today(standing(4, 0, 3), { visibility: "public", can_publish_version: false, release: { kind: "snapshot_changed" } }),
+    today: today(standing(4, 0, 3), { visibility: "public", can_publish_version: false, can_discard_draft: false, release: { kind: "snapshot_changed" } }),
     head: { word: "Version 4", line: "Not public. Public is version 3.", mark: "cloud-dot", tone: "plain" },
     facts: facts("Same as 4", "4", "3"),
     rows: [publish(5, true), request, viewDraft, versions, viewPublic],
   },
   {
     id: "contributor", name: "Public, signed in and not on the team", note: "Today's rule: pushes as a contributor, reads the draft. Publish and Discard are the team's.",
-    today: today(standing(3, 1, 3), { visibility: "public", role: null, can_publish_version: false, release: { kind: "snapshot_changed" } }),
+    today: today(standing(3, 1, 3), { visibility: "public", role: null, can_publish_version: false, can_discard_draft: false, release: { kind: "snapshot_changed" } }),
     head: { word: "Draft", line: "1 push past version 3, which is public.", mark: "cloud-dot", tone: "plain" },
     facts: facts("1 push on", "3", "3", "Contributor"),
     rows: [request, viewDraft, versions, viewPublic],

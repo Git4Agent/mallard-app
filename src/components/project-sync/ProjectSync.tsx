@@ -3649,6 +3649,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         threadComparison={pendingPush.threadComparison}
         busy={busy}
         fetchProgress={fetchProgress}
+        gitHistory={pendingPush.gitHistory}
+        gitHistoryOutgoing={pendingPush.gitHistoryOutgoing}
         onClose={closePushReview}
         onPush={() => void publishPendingPush()}
       />

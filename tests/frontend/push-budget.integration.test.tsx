@@ -176,7 +176,6 @@ const fitsFacts: PushSessionFacts = {
   metrics: {
     started_at: NOW - 7_200,
     ended_at: NOW - 3_600,
-    is_active: false,
     user_round_count: 2,
     agent_message_count: 3,
     tool_call_count: 4,
@@ -314,6 +313,40 @@ test("a running session push seals its exits and narrates the transfer", () => {
   // The note takes the footer's note row, announced, never a squeezed column.
   assert.match(html, /<p class="sync-review-footer-note" role="status">A running push finishes or fails whole/);
   assert.match(html, /<span class="sync-btn-readout">3\/7 · 0\.8 MB…<\/span>/);
+});
+
+test("a session's own review marks the commits its Push adds to the Cloud's history", () => {
+  const history = {
+    branch: "main",
+    head_sha: null,
+    commits: [],
+    uncommitted_session_refs: [],
+    outside_history_session_refs: [],
+    truncated: false,
+  };
+  const marked = sessionReview(fits, { gitHistory: history, gitHistoryOutgoing: { new_commits: 3, rewritten: false } });
+  // The rail's commit chip, holding its count, right after the title; its
+  // words are the chip's sentence with the count and the branch.
+  assert.match(
+    marked,
+    /Refine sync review UX<\/strong><span class="sync-history-branch-state sync-history-outgoing" title="3 commits new since the last Push to Attic R2 · main" aria-label="3 commits new since the last Push to Attic R2 · main" tabindex="0">↑3<\/span>/,
+  );
+  const rewritten = sessionReview(fits, { gitHistory: history, gitHistoryOutgoing: { new_commits: 1, rewritten: true } });
+  assert.match(
+    rewritten,
+    /sync-history-outgoing history-only" title="1 commit new since the last Push to Attic R2 · main\nHistory was rewritten: Attic R2&#x27;s latest commit is no longer on this branch\."[^>]*>↑1<\/span>/,
+  );
+  // Nothing added, or no stored history this branch shares: no mark, as on
+  // the project review's rail. Other storages carry no history at all.
+  assert.doesNotMatch(sessionReview(fits, { gitHistory: history, gitHistoryOutgoing: { new_commits: 0, rewritten: false } }), /sync-history-outgoing/);
+  assert.doesNotMatch(sessionReview(fits, { gitHistory: history, gitHistoryOutgoing: null }), /sync-history-outgoing/);
+  assert.doesNotMatch(sessionReview(fits), /sync-history-outgoing/);
+  // The shell hands the review what the context returned for the session scope.
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /<SessionPushReview[\s\S]*?gitHistory=\{pendingPush\.gitHistory\}\s+gitHistoryOutgoing=\{pendingPush\.gitHistoryOutgoing\}/);
+  // The pill takes the commit chip's size on the title line too.
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.sync-history-commit-meta > \.sync-history-outgoing,\n\.sync-history-thread-title > \.sync-history-outgoing \{/);
 });
 
 test("the shell opens a session's own review on that session alone", () => {

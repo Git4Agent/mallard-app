@@ -2822,7 +2822,7 @@ test("a settled Mallard Cloud storage leads with its website: Copy, Open website
 // a version, a release makes one version public.
 import {
   canDiscardDraft, canPublishVersion, cloudContributor, cloudFacts, cloudHeadline, cloudPinMoved, cloudReleaseUrl, cloudRepositoryGone,
-  cloudStatusNotice, cloudSyncBlocked, cloudVerbs, cloudVersionUrl, cloudVersionsUrl, discardCloudDraft, discardDraftQuestion, publishVersionHold,
+  cloudStatusNotice, cloudSyncBlocked, cloudVerbs, cloudVersionUrl, cloudVersionsUrl, discardCloudDraft, discardDraftHold, discardDraftQuestion, publishVersionHold,
 } from "../../src/components/managed-cloud/managedCloudLink";
 import { ManagedCloudPanel } from "../../src/components/managed-cloud/ManagedCloudChip";
 import PublishVersionSheet from "../../src/components/managed-cloud/PublishVersionSheet";
@@ -2904,7 +2904,7 @@ const notPushed: CloudPublication = { ...standing(null, null), draft: "none" };
 const cloudLink: ManagedCloudLink = {
   repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
   website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
-  repository_revision: 7, can_request_release: true, can_publish_version: true, role: "owner",
+  repository_revision: 7, can_request_release: true, can_publish_version: true, can_discard_draft: true, role: "owner",
   release: { kind: "snapshot_changed" },
 };
 /** Public at version 3, the draft one push on: the Owner's. */
@@ -2980,24 +2980,23 @@ test("a repository created again is read in place of the link's, and the verbs t
   const read = { publishVersion: 4, requestRelease: true, viewRelease: false, viewDraft: true, versions: true, viewPublic: 3 };
   assert.deepEqual(cloudVerbs(cloudReady()), { ...read, discardDraft: true });
   assert.equal(canPublishVersion(cloudReady()), true);
-  // Publish and the discard name the link's repository: the row stays, off, and the discard is not offered.
-  assert.deepEqual(cloudVerbs(moved), { ...read, discardDraft: false });
+  // Publish and the discard name the link's repository: both rows stay, off.
+  assert.deepEqual(cloudVerbs(moved), { ...read, discardDraft: true });
   assert.equal(canPublishVersion(moved), false);
+  assert.equal(canDiscardDraft(moved), false);
 });
 
-test("Discard draft is the Owner's, on a public repository whose draft is past the latest version", () => {
+test("Discard draft follows the service's flag: the Owner and Admins see the row, on while there is something to remove", () => {
   assert.equal(canDiscardDraft(cloudReady()), true);
-  // The latest version is what the draft returns to, public or not.
+  // Private or public, with or without a version, an Admin as the Owner: the flag decides.
+  assert.equal(canDiscardDraft(cloudPrivate(standing(null, null))), true);
+  assert.equal(canDiscardDraft(cloudPrivate(standing(2, 3))), true);
+  assert.equal(canDiscardDraft(cloudPrivate(standing(2, 3), { role: "admin" })), true);
   assert.equal(canDiscardDraft(cloudReady({ publication: standing(4, 2, 3) })), true);
   const refused: Array<[string, ManagedCloudStatus | null]> = [
-    ["an Admin", cloudReady({}, { role: "admin" })],
-    ["a Member", cloudReady({}, { role: "member" })],
-    ["a contributor", cloudReady({}, { role: null })],
-    ["a private repository", cloudPrivate(standing(null, null))],
-    ["a private repository past its version", cloudPrivate(standing(2, 3))],
-    ["a draft that is the public version", cloudReady({ publication: standing(3, 0, 3) }, { release: { kind: "public" } })],
-    ["a draft that is a version the public does not read", cloudReady({ publication: standing(4, 0, 3) })],
-    ["no draft", cloudReady({ publication: { ...notPushed, public_version: 2 } })],
+    ["a flag the service left off", cloudReady({}, { can_discard_draft: false })],
+    ["a draft that is the latest version", cloudPrivate(standing(3, 0), { can_discard_draft: false })],
+    ["no draft", cloudPrivate(notPushed, { release: { kind: "not_pushed" }, can_discard_draft: false })],
     ["a status without its publication", cloudReady({ publication: null })],
     ["a status whose answer carried no publication", cloudReady({ publication: { ...standing(null, null), draft: "unavailable", next_version: 0 } })],
     ["a repository read in place of the link's", cloudReady({}, { repository_id: "repo_two" })],
@@ -3006,10 +3005,19 @@ test("Discard draft is the Owner's, on a public repository whose draft is past t
     ["a status that failed", cloudFailed("unavailable", "")],
     ["no status", null],
   ];
-  for (const [who, status] of refused) {
-    assert.equal(canDiscardDraft(status), false, who);
-    assert.equal(cloudVerbs(status).discardDraft, false, who);
-  }
+  for (const [who, status] of refused) assert.equal(canDiscardDraft(status), false, who);
+  // The row is the Owner's and an Admin's in every ready state, on or off; a Member and a contributor never see it.
+  assert.equal(cloudVerbs(cloudPrivate(standing(3, 0), { can_discard_draft: false })).discardDraft, true);
+  assert.equal(cloudVerbs(cloudPrivate(standing(2, 3), { role: "admin" })).discardDraft, true);
+  assert.equal(cloudVerbs(cloudReady({}, { role: "member" })).discardDraft, false);
+  assert.equal(cloudVerbs(cloudReady({}, { role: null })).discardDraft, false);
+  assert.equal(cloudVerbs(cloudFailed("gone", "")).discardDraft, false);
+  // Off with a reason the row's title carries; on, or off for a reason the status cannot name, with none.
+  assert.equal(discardDraftHold(cloudPrivate(notPushed, { release: { kind: "not_pushed" }, can_discard_draft: false })), "Nothing pushed yet");
+  assert.equal(discardDraftHold(cloudPrivate(standing(3, 0), { can_discard_draft: false })), "Nothing to remove: the draft is version 3");
+  assert.equal(discardDraftHold(cloudReady({ publication: standing(3, 0, 3) }, { can_discard_draft: false })), "Nothing to remove: the draft is version 3");
+  assert.equal(discardDraftHold(cloudReady()), null);
+  assert.equal(discardDraftHold(cloudReady({}, { repository_id: "repo_two" })), null);
 });
 
 test("Discard draft asks first: Cancel sends nothing, Discard sends the revision and compares again, a refusal is reported", async () => {
@@ -3018,20 +3026,20 @@ test("Discard draft asks first: Cancel sends nothing, Discard sends the revision
   assert.equal(question.title, "Discard draft?");
   assert.equal(
     question.message,
-    "Discard the draft of “rika/portal”?\n\nRemoves every push after version 3 from Mallard Cloud. The draft returns to version 3.\n\nNothing is deleted on this computer. This cannot be undone.",
+    "Discard the draft of “rika/portal”?\n\nRemoves every push after version 3 from Mallard Cloud. The draft returns to version 3. Every version stays.\n\nNothing is deleted on this computer. This cannot be undone.",
   );
   assert.equal(question.kept, "version 3");
   // A request that names the draft goes with the pushes; one that names a version stays.
   const waiting: ManagedCloudLink = { ...status.link!, release: { kind: "waiting_owner", requested_by: "user_two" } };
   assert.match(
     discardDraftQuestion(waiting, status.publication).message,
-    /returns to version 3\. The open release request is withdrawn\.\n\nNothing is deleted on this computer\./,
+    /Every version stays\. The open release request is withdrawn\.\n\nNothing is deleted on this computer\./,
   );
   assert.doesNotMatch(discardDraftQuestion(waiting, standing(3, 1, 3, 3)).message, /withdrawn/);
   // A repository without a version keeps no push.
   const none = discardDraftQuestion(status.link!, standing(null, null));
   assert.equal(none.kept, null);
-  assert.match(none.message, /\n\nRemoves every push from Mallard Cloud\. There is no version to return to\.\n\n/);
+  assert.match(none.message, /\n\nRemoves every push from Mallard Cloud\. There is no version to return to: the repository stays, empty\.\n\n/);
   const run = async (answer: boolean, outcome: "accepted" | "refused", of: ManagedCloudStatus | null = status) => {
     const log: string[] = [];
     await discardCloudDraft(of, {
@@ -3056,8 +3064,12 @@ test("Discard draft asks first: Cancel sends nothing, Discard sends the revision
     "ask Discard draft? [Cancel] [Discard] warning true", "discard 7",
     "report Mallard Cloud refused a stale request. Refresh and try again.", "refresh",
   ]);
-  // A status that no longer offers the verb asks nothing and sends nothing.
-  assert.deepEqual(await run(true, "accepted", cloudReady({}, { role: "admin" })), []);
+  // An Admin discards as the Owner does.
+  assert.deepEqual(await run(true, "accepted", cloudReady({}, { role: "admin" })), [
+    "ask Discard draft? [Cancel] [Discard] warning true", "discard 7", "report null", "refresh",
+  ]);
+  // A status that no longer offers the act asks nothing and sends nothing.
+  assert.deepEqual(await run(true, "accepted", cloudReady({}, { can_discard_draft: false })), []);
   assert.deepEqual(await run(true, "accepted", null), []);
 });
 
@@ -3073,10 +3085,10 @@ const versionStates: Array<{
 }> = [
   {
     what: "nothing pushed",
-    status: cloudPrivate(notPushed, { release: { kind: "not_pushed" }, can_request_release: false, can_publish_version: false }),
+    status: cloudPrivate(notPushed, { release: { kind: "not_pushed" }, can_request_release: false, can_publish_version: false, can_discard_draft: false }),
     head: { rank: 9, word: "Not pushed", line: "Nothing pushed yet.", mark: "cloud", tone: "plain" },
     facts: ["—", "—", "Private", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 1, viewDraft: true },
+    verbs: { ...noVerbs, publishVersion: 1, viewDraft: true, discardDraft: true },
     publish: false,
   },
   {
@@ -3084,7 +3096,7 @@ const versionStates: Array<{
     status: cloudPrivate(standing(null, null)),
     head: { rank: 8, word: "Private", line: "Draft only. No version yet.", mark: "cloud-lock", tone: "plain" },
     facts: ["Not published", "—", "Private", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 1, requestRelease: true, viewDraft: true },
+    verbs: { ...noVerbs, publishVersion: 1, requestRelease: true, viewDraft: true, discardDraft: true },
     publish: true,
   },
   {
@@ -3092,20 +3104,20 @@ const versionStates: Array<{
     status: cloudPrivate(standing(2, 3)),
     head: { rank: 8, word: "Private", line: "The draft is 3 pushes past version 2.", mark: "cloud-lock", tone: "plain" },
     facts: ["3 pushes on", "2", "Private", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 3, requestRelease: true, viewDraft: true, versions: true },
+    verbs: { ...noVerbs, publishVersion: 3, requestRelease: true, viewDraft: true, versions: true, discardDraft: true },
     publish: true,
   },
   {
     what: "private, the draft is version 3",
-    status: cloudPrivate(standing(3, 0), { can_publish_version: false }),
+    status: cloudPrivate(standing(3, 0), { can_publish_version: false, can_discard_draft: false }),
     head: { rank: 8, word: "Private", line: "Version 3. Collaborators only.", mark: "cloud-lock", tone: "plain" },
     facts: ["Same as 3", "3", "Private", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 4, requestRelease: true, viewDraft: true, versions: true },
+    verbs: { ...noVerbs, publishVersion: 4, requestRelease: true, viewDraft: true, versions: true, discardDraft: true },
     publish: false,
   },
   {
     what: "in review, a version asked for",
-    status: cloudPrivate(standing(3, 0, null, 3), { role: "member", release: { kind: "waiting_owner", requested_by: "user_2" }, can_request_release: false, can_publish_version: false }),
+    status: cloudPrivate(standing(3, 0, null, 3), { role: "member", release: { kind: "waiting_owner", requested_by: "user_2" }, can_request_release: false, can_publish_version: false, can_discard_draft: false }),
     head: { rank: 5, word: "In review", line: "Version 3 is waiting for the Owner.", mark: "cloud-clock", tone: "info" },
     facts: ["Same as 3", "3", "Private", "Member"],
     verbs: { ...noVerbs, publishVersion: 4, viewRelease: true, viewDraft: true, versions: true },
@@ -3116,15 +3128,15 @@ const versionStates: Array<{
     status: cloudPrivate(standing(2, 1), { release: { kind: "waiting_super_admin" }, can_request_release: false }),
     head: { rank: 5, word: "In review", line: "The draft is waiting for a Mallard Cloud admin.", mark: "cloud-clock", tone: "info" },
     facts: ["1 push on", "2", "Private", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 3, viewRelease: true, viewDraft: true, versions: true },
+    verbs: { ...noVerbs, publishVersion: 3, viewRelease: true, viewDraft: true, versions: true, discardDraft: true },
     publish: true,
   },
   {
     what: "public, the draft is the public version",
-    status: cloudReady({ publication: standing(3, 0, 3) }, { release: { kind: "public" }, can_request_release: false, can_publish_version: false }),
+    status: cloudReady({ publication: standing(3, 0, 3) }, { release: { kind: "public" }, can_request_release: false, can_publish_version: false, can_discard_draft: false }),
     head: { rank: 7, word: "Public v3", line: "Version 3 is public. The draft is the same.", mark: "cloud-check", tone: "success" },
     facts: ["Same as 3", "3", "3", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 4, viewDraft: true, versions: true, viewPublic: 3 },
+    verbs: { ...noVerbs, publishVersion: 4, viewDraft: true, versions: true, viewPublic: 3, discardDraft: true },
     publish: false,
   },
   {
@@ -3145,15 +3157,15 @@ const versionStates: Array<{
   },
   {
     what: "public, version 4 published and not public",
-    status: cloudReady({ publication: standing(4, 0, 3) }, { can_publish_version: false }),
+    status: cloudReady({ publication: standing(4, 0, 3) }, { can_publish_version: false, can_discard_draft: false }),
     head: { rank: 6, word: "Version 4", line: "Not public. Public is version 3.", mark: "cloud-dot", tone: "plain" },
     facts: ["Same as 4", "4", "3", "Owner"],
-    verbs: { ...noVerbs, publishVersion: 5, requestRelease: true, viewDraft: true, versions: true, viewPublic: 3 },
+    verbs: { ...noVerbs, publishVersion: 5, requestRelease: true, viewDraft: true, versions: true, viewPublic: 3, discardDraft: true },
     publish: false,
   },
   {
     what: "public, signed in and not on the team",
-    status: cloudReady({}, { role: null, can_publish_version: false }),
+    status: cloudReady({}, { role: null, can_publish_version: false, can_discard_draft: false }),
     head: { rank: 6, word: "Draft", line: "1 push past version 3, which is public.", mark: "cloud-dot", tone: "plain" },
     facts: ["1 push on", "3", "3", "Contributor"],
     verbs: { ...noVerbs, requestRelease: true, viewDraft: true, versions: true, viewPublic: 3 },
@@ -3180,6 +3192,12 @@ test("the Cloud chip, its line, its facts and its rows say where the draft stand
   assert.equal(publishVersionHold(versionStates[3].status), "Nothing new since version 3");
   assert.equal(publishVersionHold(versionStates[9].status), "Nothing new since version 4");
   assert.equal(publishVersionHold(versionStates[2].status), null);
+  // Discard draft is off with a reason the row's title carries, as Publish is; on, it carries none.
+  assert.equal(discardDraftHold(versionStates[0].status), "Nothing pushed yet");
+  assert.equal(discardDraftHold(versionStates[3].status), "Nothing to remove: the draft is version 3");
+  assert.equal(discardDraftHold(versionStates[6].status), "Nothing to remove: the draft is version 3");
+  assert.equal(discardDraftHold(versionStates[2].status), null);
+  assert.equal(canDiscardDraft(versionStates[2].status), true);
   // A removed version's number is not given again: the row says the service's next number.
   assert.equal(cloudVerbs(cloudPrivate({ ...standing(3, 2), next_version: 5 })).publishVersion, 5);
 });
@@ -3258,22 +3276,26 @@ test("every link row in the Cloud panel copies its address from a button at its 
   assert.match(html, /View public version[^]*?aria-label="Copy public link" title="Copy public link\nhttps:\/\/mallard-ai\.com\/rika\/portal\?version=3"/);
   assert.equal(html.match(/sync-cloud-panel-copy/g)?.length, 4);
   assert.doesNotMatch(html, /version=private|version=public|View published version/);
-  // Discard is the Owner's, in danger ink, last, and has nothing to copy.
+  // Discard is the Owner's and an Admin's, in danger ink, last, and has nothing to copy.
   assert.match(html, /sync-path-menu-item danger"[^>]*title="Discard draft… · back to version 3"[^]*?Discard draft…/);
   assert.doesNotMatch(html, /Copy discard/);
   // While a Push or Pull runs, Publish and the discard wait; the links do not.
   const busy = renderPanel(cloudReady(), true);
   assert.equal(busy.match(/aria-disabled="true"/g)?.length, 2);
-  // Publish is off while the draft is the latest version, and says since which.
-  const unchanged = renderPanel(cloudPrivate(standing(3, 0), { can_publish_version: false }));
+  // Publish and the discard are off while the draft is the latest version, and say why.
+  const unchanged = renderPanel(cloudPrivate(standing(3, 0), { can_publish_version: false, can_discard_draft: false }));
   assert.match(unchanged, /aria-disabled="true" title="Nothing new since version 3"[^]*?Publish version 4…/);
-  assert.equal(unchanged.match(/aria-disabled="true"/g)?.length, 1);
+  assert.match(unchanged, /sync-path-menu-item danger" aria-disabled="true" title="Nothing to remove: the draft is version 3"[^]*?Discard draft…/);
+  assert.equal(unchanged.match(/aria-disabled="true"/g)?.length, 2);
+  // On a private repository the row is on for the Owner and an Admin, and says where the draft returns to.
+  assert.match(renderPanel(cloudPrivate(standing(2, 3), { role: "admin" })), /sync-path-menu-item danger" title="Discard draft… · back to version 2"[^]*?Discard draft…/);
+  assert.match(renderPanel(cloudPrivate(standing(null, null))), /title="Discard draft… · every push"/);
   // While a request waits, the release row is the request's page.
   const waiting = renderPanel(cloudReady({}, { release: { kind: "waiting_super_admin" }, can_request_release: false }));
   assert.match(waiting, /View release request[^]*?aria-label="Copy release link"/);
   assert.doesNotMatch(waiting, /Request public release/);
   // A contributor reads their standing, and Publish is the team's.
-  const contributor = renderPanel(cloudReady({}, { role: null, can_publish_version: false }));
+  const contributor = renderPanel(cloudReady({}, { role: null, can_publish_version: false, can_discard_draft: false }));
   assert.match(contributor, /Not a collaborator/);
   assert.doesNotMatch(contributor, /Publish version|Discard draft/);
   // A Catalog item's page has no Publish and no list of versions: the Library's panel offers neither.

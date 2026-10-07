@@ -1,6 +1,8 @@
 # Session Detail Push Plan
 
-Status: implemented and verified on October 2, 2026.
+Status: implemented and verified on October 2, 2026. Step 6 (skip local
+Git-history capture; copy the stored history forward) is superseded by
+`PLAN_SESSION_PUSH_GIT_HISTORY.md`.
 
 Push from session detail must publish only the open session and its required
 transcript files. It must not capture new project Git history. Project Push

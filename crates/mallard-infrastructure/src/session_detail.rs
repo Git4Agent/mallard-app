@@ -14,7 +14,7 @@ use crate::persistence::{
     persistence_guard, read_json_bounded, write_bytes_atomic, LocalStateRepository,
 };
 use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
-use crate::provider_capture::{modified_secs, LocalSessionView};
+use crate::provider_capture::LocalSessionView;
 use crate::providers::traits::timeline_tool_detail_budgets;
 use crate::providers::{
     AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionAgentPreview,
@@ -24,7 +24,7 @@ use crate::providers::{
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory, AGENT_RESOURCE_SEGMENT,
 };
 use mallard_domain::{
-    hex_lower, now_secs, parse_conversation_resource_id, sha256_hex, LocalConversationBinding,
+    hex_lower, parse_conversation_resource_id, sha256_hex, LocalConversationBinding,
     LocalProjectId, NoticeSeverity, ProviderKey,
 };
 use serde::{Deserialize, Serialize};
@@ -227,7 +227,6 @@ struct ResolvedLocalSession {
     display_name: String,
     file_size: u64,
     modified_nanos: u64,
-    is_active: bool,
     /// The binding of a root session. It says what a Pull installed, and
     /// so which agent calls name a child without a transcript.
     binding: Option<LocalConversationBinding>,
@@ -330,7 +329,6 @@ fn resolve_session(
             display_name: hop.to_string(),
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
-            is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
             binding: None,
             child: Some(child),
         };
@@ -1130,7 +1128,6 @@ fn resolve_local_session(
             display_name: session.descriptor.display_name.clone(),
             file_size: metadata.len(),
             modified_nanos: modified_nanos(&metadata),
-            is_active: now_secs().saturating_sub(modified_secs(&metadata)) < 300,
             binding: local_binding.cloned(),
             child: None,
         });
@@ -1296,7 +1293,6 @@ fn refresh_file_state(session: &mut ResolvedLocalSession) -> SessionDetailResult
     })?;
     session.file_size = metadata.len();
     session.modified_nanos = modified_nanos(&metadata);
-    session.is_active = now_secs().saturating_sub(modified_secs(&metadata)) < 300;
     Ok(())
 }
 
@@ -2028,7 +2024,7 @@ pub fn get_project_session_detail(
             .map(|summary| sanitize_boundary_text(summary, &session)),
         started_at: summary.started_at,
         ended_at: summary.ended_at,
-        is_active: session.is_active,
+        is_active: false,
         branch: summary
             .branch
             .as_deref()
@@ -2335,6 +2331,7 @@ pub fn get_project_session_event_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_capture::modified_secs;
     use crate::providers::{
         SessionSourceSpan, SessionTimelineIndexEntry, SessionToolCallStatus, SessionToolIndexEntry,
     };
@@ -2423,7 +2420,6 @@ mod tests {
             display_name: "thread-1".to_string(),
             file_size: 0,
             modified_nanos: 0,
-            is_active: false,
             binding: None,
             child: None,
         }

@@ -66,6 +66,10 @@ export interface ManagedCloudLink {
   /** Whether Publish is open to this account now: a collaborator, with a
    *  draft that holds something and is not already a version. */
   can_publish_version: boolean;
+  /** Whether Discard draft is open to this account now: the Owner or an
+   *  Admin, with a draft that holds something and something to remove (no
+   *  version yet, or the draft past the latest one). */
+  can_discard_draft: boolean;
   /** The account's membership role; null for a public repository the
    *  account does not belong to, where it still pushes as a contributor. */
   role: string | null;

@@ -266,7 +266,14 @@ impl SessionAdapter for CodexAdapter {
     }
 
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String> {
-        discovery::discover(context, |path| self.scan_metadata(path))
+        discovery::discover(context, false, |path| self.scan_metadata(path))
+    }
+
+    fn discover_for_deletion(
+        &self,
+        context: &SessionDiscoveryContext<'_>,
+    ) -> Result<SessionDiscovery, String> {
+        discovery::discover(context, true, |path| self.scan_metadata(path))
     }
 
     fn locate_session(

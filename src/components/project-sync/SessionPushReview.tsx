@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import type { BundleFetchProgress, ThreadSyncComparison, ThreadSyncEntry } from "../../types";
+import type { BundleFetchProgress, GitHistoryOutgoing, GitHistorySnapshot, ThreadSyncComparison, ThreadSyncEntry } from "../../types";
 import Icon from "../Icons";
 import { ReviewBudgetGauge } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
-import { SessionPushRow, type PushSessionFacts } from "./ProjectActivityPage";
+import { SessionPushRow, type PushSessionFacts, type SessionPushHistory } from "./ProjectActivityPage";
 import {
   CredentialRedactionOffNote,
   PUSH_RUNNING_NOTE,
@@ -29,6 +29,8 @@ export default function SessionPushReview({
   threadComparison,
   busy,
   fetchProgress = null,
+  gitHistory = null,
+  gitHistoryOutgoing = null,
   onClose,
   onPush,
 }: {
@@ -44,6 +46,10 @@ export default function SessionPushReview({
   busy: boolean;
   /** Live upload progress while the push publishes; renders in the footer button. */
   fetchProgress?: BundleFetchProgress | null;
+  /** The project's Git history this Push carries to Mallard Cloud, and what
+   *  it adds to the history storage holds. Null on every other storage. */
+  gitHistory?: GitHistorySnapshot | null;
+  gitHistoryOutgoing?: GitHistoryOutgoing | null;
   onClose: () => void;
   onPush: () => void;
 }) {
@@ -61,6 +67,9 @@ export default function SessionPushReview({
   useEffect(() => setReadyAnnounced(true), []);
 
   const budget = pushBudgetTotal(selected, threadComparison);
+  const history: SessionPushHistory | null = gitHistory && gitHistoryOutgoing
+    ? { branch: gitHistory.branch, outgoing: gitHistoryOutgoing }
+    : null;
   /* The path bar's Push publishes this same review and reads this same rule. */
   const disabledReason = pushReviewDisabledReason({
     selected,
@@ -101,7 +110,7 @@ export default function SessionPushReview({
           <div className="sync-history-page sync-history-embedded sync-history-selection-review">
             <section className="sync-history-content" aria-label="Session">
               <div className="sync-history-thread-list flat">
-                <SessionPushRow entry={entry} storageName={storageName} facts={facts} />
+                <SessionPushRow entry={entry} storageName={storageName} facts={facts} history={history} />
               </div>
             </section>
           </div>

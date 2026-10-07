@@ -48,7 +48,6 @@ export type SessionHeaderModel =
     title: string;
     provider: string;
     providerDisplayName: string;
-    active: boolean;
     refreshing: boolean;
     onRefresh: () => void;
     /** What the row of this session's own Push review prints. */
@@ -204,7 +203,6 @@ export default function SessionDetailPage({
       title: detail.title || "Untitled session",
       provider: detail.provider,
       providerDisplayName: detail.provider_display_name,
-      active: detail.is_active,
       refreshing: detailLoading,
       onRefresh: refreshSession,
       pushFacts: sessionPushFacts(detail),
@@ -426,11 +424,7 @@ export default function SessionDetailPage({
     ) : <SessionDetailEntryState state="loading" back={back} />;
   }
 
-  /* How the transcript was read: the chip at the end of the facts. A running
-     session's last call is in flight, so it has no result yet and its row
-     already says so — the note about calls without one waits for the end. */
-  const notes = mergeWarnings(detail.warnings, timelineWarnings)
-    .filter((warning) => !(detail.is_active && warning.code === "incomplete_tool_call"));
+  const notes = mergeWarnings(detail.warnings, timelineWarnings);
 
   /* The box holds only what happened while the page was open: a failed
      action, or a snapshot that moved under a page request. Both arrive after

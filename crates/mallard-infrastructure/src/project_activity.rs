@@ -11,7 +11,7 @@
 use crate::persistence::{
     read_json_bounded, write_json_atomic, LocalProjectActivityStateSnapshot, LocalStateRepository,
 };
-use crate::provider_capture::{modified_secs, LocalSessionView};
+use crate::provider_capture::LocalSessionView;
 use crate::providers::{
     AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionActionRequest,
     SessionDiscoveryContext, SessionFileSummary,
@@ -35,7 +35,6 @@ use std::time::UNIX_EPOCH;
 const DEFAULT_HISTORY_WINDOW_DAYS: u64 = 7;
 const DAY_SECS: u64 = 24 * 60 * 60;
 const MAX_GIT_COMMITS: usize = mallard_domain::MAX_GIT_HISTORY_COMMITS;
-const ACTIVE_WINDOW_SECS: u64 = 300;
 const ACTIVITY_CACHE_SCHEMA: u32 = 1;
 const MAX_ACTIVITY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_ACTIVITY_CACHE_ENTRIES: usize = 50_000;
@@ -343,7 +342,6 @@ pub struct LocalSessionRecord {
     pub physical_path: PathBuf,
     pub display_name: String,
     pub summary: SessionFileSummary,
-    pub is_active: bool,
 }
 
 fn modified_nanos(metadata: &fs::Metadata) -> u64 {
@@ -396,7 +394,6 @@ pub fn scan_local_session_views(
     let cache_path = repository.root().join("activity_cache.json");
     let (mut cache, mut cache_changed) =
         load_activity_cache(repository.root(), &cache_path, warnings);
-    let now = now_secs();
     let mut records = Vec::new();
     let mut seen_cache_keys = BTreeSet::new();
 
@@ -475,7 +472,6 @@ pub fn scan_local_session_views(
                 session_id: view.provider_thread_id.clone(),
                 physical_path: view.source_path.clone(),
                 display_name: view.descriptor.display_name.clone(),
-                is_active: now.saturating_sub(modified_secs(&metadata)) < ACTIVE_WINDOW_SECS,
                 summary,
             };
             let replace = by_session
@@ -1060,7 +1056,7 @@ fn merge_activity_sessions_with_state(
                 working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
                 sync_blocked_reason: None,
                 recorded_sha: record.summary.recorded_sha.clone(),
-                is_active: record.is_active,
+                is_active: false,
                 user_round_count: record.summary.user_rounds,
                 agent_message_count: record.summary.agent_messages,
                 tool_call_count: record.summary.tool_calls,
@@ -1622,7 +1618,7 @@ pub fn delete_local_project_sessions(
                 }
                 let discovery = registry.require(provider).and_then(|adapter| {
                     adapter
-                        .discover(&SessionDiscoveryContext {
+                        .discover_for_deletion(&SessionDiscoveryContext {
                             provider_home: &home.home,
                             project_root: &resolved.project_root,
                         })
@@ -2136,6 +2132,7 @@ fn git_error(action: &str, output: &Output) -> String {
 #[cfg(test)]
 mod activity_only_tests {
     use super::*;
+    use crate::provider_capture::modified_secs;
     #[test]
     fn captured_git_history_handles_unborn_detached_and_changed_heads() {
         let temp = tempfile::tempdir().unwrap();

@@ -2991,6 +2991,40 @@ fn apply_push_with_repositories(
     })
 }
 
+/// After a plugin lands on Mallard Cloud: the installed copy's own words for
+/// the commit (`plugin_listing.rs`), so the plugin's page can say what it is.
+/// Sent once per push, after the publication lock is released; it is display
+/// only, so whatever it answers, the push and its acceptance stand.
+fn send_plugin_listing(
+    engine: &LibraryResourceEngine<ConfiguredObjectStore>,
+    workspace: &ResolvedScopeWorkspace,
+    record: &LocalResourceRecord,
+    repository_id: &str,
+    commit_id: &str,
+) {
+    if record.resource.resource_kind.as_str() != super::plugin_intent::KIND_KEY {
+        return;
+    }
+    let (Some(cloud), Some(inventory)) = (
+        engine.store().managed_cloud(),
+        workspace.inventory.native.as_ref(),
+    ) else {
+        return;
+    };
+    let Ok(intent) = super::plugin_intent::PluginInstallIntent::decode(&record.resource) else {
+        return;
+    };
+    let profile = &workspace.context.profile;
+    if let Some(listing) = super::plugin_listing::installed_listing(
+        profile.provider.as_str(),
+        &profile.canonical_home,
+        inventory,
+        &intent.identity.plugin_id,
+    ) {
+        let _ = cloud.put_plugin_listing(repository_id, commit_id, &listing);
+    }
+}
+
 /// The Push apply on a storage that holds one item per repository: every
 /// selected item is published on its own stream, in row order, through the
 /// Library engine and the shared protocol; each item's accepted state
@@ -3088,6 +3122,15 @@ fn apply_push_items(
                             .ok()
                             .flatten()
                     });
+                    if let Some(repository_id) = repository.as_deref() {
+                        send_plugin_listing(
+                            engine,
+                            workspace,
+                            record,
+                            repository_id,
+                            outcome.manifest().commit_id.as_str(),
+                        );
+                    }
                     accepted.push((
                         (*resource_id).clone(),
                         record.resource.content_sha256.clone(),
@@ -6686,6 +6729,67 @@ mod tests {
             .await;
             assert!(plan.rows.iter().all(|row| !row.row.selectable));
             assert_eq!(plan.observed_items.len(), 2);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_plugin_push_describes_its_commit_from_the_installed_manifest() {
+            let stub = StubManagedCloud::start().await;
+            let root = tempfile::tempdir().unwrap();
+            let machine = managed_machine(root.path(), &stub, "octocat", &[]);
+            let home = root.path().join("octocat").join("codex-home");
+            fs::write(home.join("config.toml"), "[marketplaces.acme]\nsource_type=\"git\"\nsource=\"https://example.com/acme/market\"\n[plugins.\"tools@acme\"]\nenabled=true\n").unwrap();
+            let manifest = home.join("plugins/cache/acme/tools/1/.codex-plugin/plugin.json");
+            fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+            fs::write(
+                manifest,
+                r#"{"name":"tools","version":"1","description":"Tools for acme.","repository":"https://github.com/acme/secret","interface":{"displayName":"Tools","developerName":"Acme","websiteURL":"https://acme.example/","logo":"./assets/logo.png"}}"#,
+            )
+            .unwrap();
+            blocking(&machine, |fixture| {
+                let scope = create_catalog_scope_with_repositories(
+                    &fixture.registry,
+                    &fixture.catalog,
+                    CatalogCoordinate::new(
+                        "codex",
+                        "plugin_install_intent",
+                        "mallard.plugin-install-intent",
+                        1,
+                    )
+                    .unwrap(),
+                    fixture.profile.profile_id.clone(),
+                    2,
+                )
+                .unwrap()
+                .scope
+                .scope_id;
+                link_scope(fixture, &scope, &fixture.storage.id, 3);
+                push_all(fixture, &scope, &fixture.storage.id);
+            })
+            .await;
+
+            // One listing, for the commit just pushed, with the allowlisted
+            // display fields only: no repository field, path or logo.
+            let state = stub.state.lock().unwrap();
+            let repository = state.repositories.values().next().unwrap();
+            let commit = repository.publications.last().unwrap().commit_id.clone();
+            assert_eq!(state.plugin_listings.len(), 1);
+            assert_eq!(
+                state.plugin_listings[&(repository.id.clone(), commit)],
+                serde_json::json!({
+                    "display_name": "Tools",
+                    "developer": "Acme",
+                    "description": "Tools for acme.",
+                    "category": null,
+                    "website_url": "https://acme.example/",
+                    "privacy_url": null,
+                    "terms_url": null,
+                })
+            );
+            let sent =
+                serde_json::to_string(&state.plugin_listings.values().collect::<Vec<_>>()).unwrap();
+            assert!(
+                !sent.contains("secret") && !sent.contains("logo") && !sent.contains("codex-home")
+            );
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

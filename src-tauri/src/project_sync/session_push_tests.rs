@@ -74,12 +74,14 @@ fn session_push_limits_selection_and_acceptance_to_the_parent_and_approved_child
                 .push_reviewed(&project.local_project_id, &storage, invalid)
                 .unwrap_err()
                 .contains("only the selected session"));
+            // A token the review never issued: refused as a stale Git review
+            // is, before anything is published.
             let mut invalid = approval.clone();
             invalid.git_history_review_token = Some("not-approved".into());
             assert!(service
                 .push_reviewed(&project.local_project_id, &storage, invalid)
                 .unwrap_err()
-                .contains("only the selected session"));
+                .contains("Git history changed after review"));
             assert_eq!(repo.load_config().unwrap().links[0], before);
 
             let result = service
@@ -331,7 +333,7 @@ fn session_push_preserves_other_stored_sessions_and_provider_resources() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_push_preserves_stored_git_commits_and_maps_the_final_sessions() {
+async fn session_push_to_mallard_cloud_publishes_the_local_git_history() {
     managed_cloud_gone::with_cloud(|cloud| {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -353,20 +355,33 @@ async fn session_push_preserves_stored_git_commits_and_maps_the_final_sessions()
         let (_, engine) = storage_engine(&repo, &storage).unwrap();
         let before = engine.inspect(&project.bundle_id).unwrap();
         assert_eq!(before.manifest.all_conversations().count(), 6);
-        let stored_history = before.manifest.git_history.as_ref().unwrap();
+        let stored_history = before.manifest.git_history.clone().unwrap();
+        assert_eq!(stored_history.branch, "main");
         let link_before = repo.load_config().unwrap().links[0].clone();
         std::fs::write(path, held).unwrap();
-        let resource_id = ResourceId::parse(format!("codex:session:{id}")).unwrap();
-        let review = session_push_review(&service, &project, &storage, &resource_id);
-        assert!(review.git_history.is_none());
-        assert!(review.git_history_review_token.is_none());
-        // A branch switch and a new local commit after review do not add Git
-        // work to a session publication.
+        // The session's work was committed on a branch of its own since the
+        // last project Push. Its Push carries that rail, as a project Push
+        // would, instead of filing the session under Uncommitted on storage's
+        // older history.
         git_history_test_command(&root, &["checkout", "-b", "session-local"], None);
         git_history_test_command(
             &root,
-            &["commit", "--allow-empty", "-m", "Unrelated local commit"],
+            &["commit", "--allow-empty", "-m", "Save the artwork session"],
             Some("2026-07-22T00:05:00Z"),
+        );
+        let resource_id = ResourceId::parse(format!("codex:session:{id}")).unwrap();
+        let review = session_push_review(&service, &project, &storage, &resource_id);
+        let reviewed_history = review.git_history.as_ref().unwrap();
+        assert_eq!(reviewed_history.branch, "session-local");
+        assert_eq!(reviewed_history.commits.len(), 4);
+        assert!(review.git_history_review_token.is_some());
+        assert!(review.git_history_changed);
+        assert_eq!(
+            review.git_history_outgoing,
+            Some(mallard_domain::GitHistoryOutgoing {
+                new_commits: 1,
+                rewritten: false
+            })
         );
         let result = service
             .push_reviewed(
@@ -378,29 +393,69 @@ async fn session_push_preserves_stored_git_commits_and_maps_the_final_sessions()
         assert!(result.success, "{result:?}");
         let after = engine.inspect(&project.bundle_id).unwrap();
         assert_eq!(after.manifest.all_conversations().count(), 7);
-        let mut expected_history = stored_history.clone();
-        expected_history.map_sessions(
-            after
-                .manifest
-                .all_conversations()
-                .map(|(_, _, thread)| thread),
+        let history = after.manifest.git_history.as_ref().unwrap();
+        assert_eq!(history.branch, "session-local");
+        assert_eq!(history.head_sha, reviewed_history.head_sha);
+        assert_eq!(history.commits[0].subject, "Save the artwork session");
+        // The session's last prompt (00:03) is followed by the new commit
+        // (00:05), so it sits there, not under Uncommitted. References name
+        // the stored conversation, not the local capture.
+        let pushed = after
+            .manifest
+            .all_conversations()
+            .find(|(_, _, thread)| thread.source_thread_id.as_deref() == Some(id))
+            .map(|(_, _, thread)| thread.resource_id.clone())
+            .unwrap();
+        assert!(history.commits[0].session_refs.contains(&pushed));
+        assert!(history.uncommitted_session_refs.is_empty());
+        assert_eq!(
+            history.commits[1..]
+                .iter()
+                .map(|commit| (&commit.sha, &commit.subject))
+                .collect::<Vec<_>>(),
+            stored_history
+                .commits
+                .iter()
+                .map(|commit| (&commit.sha, &commit.subject))
+                .collect::<Vec<_>>(),
         );
-        assert_eq!(after.manifest.git_history.as_ref(), Some(&expected_history));
-        assert_ne!(
-            expected_history, *stored_history,
-            "the new session needs a reference"
+        assert_eq!(
+            history
+                .commits
+                .iter()
+                .map(|commit| commit.session_refs.len())
+                .sum::<usize>(),
+            7
         );
+        after.manifest.validate().unwrap();
         assert_eq!(
             repo.load_config().unwrap().links[0].recipe,
             link_before.recipe
         );
-        after.manifest.validate().unwrap();
+
+        // The session is now stored, so a new commit alone gives its Push
+        // nothing to do: a history-only change stays a project Push.
+        git_history_test_command(
+            &root,
+            &["commit", "--allow-empty", "-m", "Unrelated commit"],
+            Some("2026-07-22T00:06:00Z"),
+        );
+        let unchanged = session_push_review(&service, &project, &storage, &resource_id);
+        assert!(unchanged.git_history_changed);
+        assert!(service
+            .push_reviewed(
+                &project.local_project_id,
+                &storage,
+                PushApproval::recommended(&unchanged, &storage),
+            )
+            .is_err());
+        assert_eq!(engine.inspect(&project.bundle_id).unwrap().head, after.head);
     })
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_push_to_empty_cloud_does_not_create_git_history() {
+async fn session_push_refuses_a_stale_git_history_review_and_a_missing_repository() {
     managed_cloud_gone::with_cloud(|cloud| {
         let temp = tempfile::tempdir().unwrap();
         let repo = repository(&temp);
@@ -408,13 +463,78 @@ async fn session_push_to_empty_cloud_does_not_create_git_history() {
             &repo,
             &cloud,
             "session-owner",
-            "session-no-history",
+            "session-stale-history",
+        );
+        let (project, root) = git_history_project(&repo, temp.path(), &storage);
+        let service = ProjectSyncService::new(&repo);
+        let resource_id =
+            ResourceId::parse("codex:session:019f7500-0000-7000-8000-000000000000").unwrap();
+        let review = session_push_review(&service, &project, &storage, &resource_id);
+        assert!(review.git_history_review_token.is_some());
+        // A commit between review and Push: the reviewed history is no longer
+        // what the Push would publish, so it is refused as a project Push is.
+        git_history_test_command(
+            &root,
+            &["commit", "--allow-empty", "-m", "Commit after review"],
+            Some("2026-07-22T00:05:00Z"),
+        );
+        let stale = service
+            .push_reviewed(
+                &project.local_project_id,
+                &storage,
+                PushApproval::recommended(&review, &storage),
+            )
+            .unwrap_err();
+        assert!(
+            stale.contains("Git history changed after review"),
+            "{stale}"
+        );
+        let (_, engine) = storage_engine(&repo, &storage).unwrap();
+        assert!(engine.inspect(&project.bundle_id).is_err() || engine
+            .inspect(&project.bundle_id)
+            .unwrap()
+            .manifest
+            .all_conversations()
+            .count()
+            == 0);
+
+        // Without its repository the Git project cannot say what history it
+        // would carry, so the review is refused as the project review is.
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        let missing = service
+            .prepare_push_review_with_phases(
+                &project.local_project_id,
+                &storage,
+                PushScope::Session {
+                    resource_id: resource_id.clone(),
+                },
+                &mut |_, _| {},
+            )
+            .unwrap_err();
+        assert!(missing.contains("Git project is unavailable"), "{missing}");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_push_to_empty_cloud_publishes_the_first_git_history() {
+    managed_cloud_gone::with_cloud(|cloud| {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage = managed_cloud_gone::add_cloud_storage(
+            &repo,
+            &cloud,
+            "session-owner",
+            "session-first-history",
         );
         let (project, _) = git_history_project(&repo, temp.path(), &storage);
         let service = ProjectSyncService::new(&repo);
         let resource_id =
             ResourceId::parse("codex:session:019f7500-0000-7000-8000-000000000000").unwrap();
         let review = session_push_review(&service, &project, &storage, &resource_id);
+        assert_eq!(review.git_history.as_ref().unwrap().commits.len(), 3);
+        // Storage holds no history yet, so nothing reads as new.
+        assert_eq!(review.git_history_outgoing, None);
         let result = service
             .push_reviewed(
                 &project.local_project_id,
@@ -429,7 +549,18 @@ async fn session_push_to_empty_cloud_does_not_create_git_history() {
             .inspect(&project.bundle_id)
             .unwrap();
         assert_eq!(snapshot.manifest.all_conversations().count(), 1);
-        assert!(snapshot.manifest.git_history.is_none());
+        let history = snapshot.manifest.git_history.as_ref().unwrap();
+        assert_eq!(history.branch, "main");
+        assert_eq!(history.commits.len(), 3);
+        // Session 0's last prompt (00:00) is followed by the first commit.
+        let pushed = snapshot
+            .manifest
+            .all_conversations()
+            .map(|(_, _, thread)| thread.resource_id.clone())
+            .next()
+            .unwrap();
+        assert_eq!(history.commits[2].session_refs, vec![pushed]);
+        assert!(history.uncommitted_session_refs.is_empty());
         snapshot.manifest.validate().unwrap();
     })
     .await;

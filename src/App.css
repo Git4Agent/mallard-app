@@ -3652,16 +3652,6 @@ span.sync-path-crumb {
   color: var(--text-1);
 }
 
-.sync-path-leaf-mark.active::after {
-  content: "";
-  position: absolute;
-  right: -3px;
-  bottom: -2px;
-  width: 6px;
-  height: 6px;
-  background: var(--green);
-}
-
 /* Everything neither verb can clear, in one chip instead of four tallies: a
    review, a hold, a conflict and an unsyncable thread all mean "look at this",
    and only the last two mean it loudly. */
@@ -11737,11 +11727,6 @@ span.sync-update-pill {
   border-radius: var(--r-pill);
 }
 
-/* The presence dot squares off with the rest of the skin. */
-.sync-path-leaf-mark.active::after {
-  border-radius: 1px;
-}
-
 .sync-path-attention {
   font-family: var(--font-sans);
   font-size: var(--type-xs);
@@ -12209,8 +12194,10 @@ span.sync-update-pill {
 
 /* A commit the Push adds: the branch-state pill holding one ↑, ahead of the
    sha it travels with. `.history-only` turns it to the warning tone when
-   storage's history was rewritten. */
-.sync-history-commit-meta > .sync-history-outgoing {
+   storage's history was rewritten. On a session's own Push review the same
+   pill holds the count instead, after the session's title. */
+.sync-history-commit-meta > .sync-history-outgoing,
+.sync-history-thread-title > .sync-history-outgoing {
   min-width: 24px;
   display: inline-flex;
   flex: 0 0 auto;

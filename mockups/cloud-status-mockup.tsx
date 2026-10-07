@@ -33,7 +33,7 @@ import "./cloud-status-mockup.css";
    cloud-versions-mockup.tsx); this page keeps the shapes it drew, and the
    three functions it read from managedCloudLink.ts as they were. */
 
-type ManagedCloudLink = Omit<ShippedLink, "can_publish_version">;
+type ManagedCloudLink = Omit<ShippedLink, "can_publish_version" | "can_discard_draft">;
 interface ManagedCloudPublicationStatus {
   state: "no_draft" | "not_public" | "matches_published" | "unpublished_draft" | "unavailable";
   private_revision: number | null;

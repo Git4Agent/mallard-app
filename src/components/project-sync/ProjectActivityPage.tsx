@@ -3,6 +3,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   GitBranchSummary,
+  GitHistoryOutgoing,
   LocalProjectSummary,
   NoticeSeverity,
   OlderActivity,
@@ -798,7 +799,7 @@ export function unresolvedSyncPresentation({
    the session on its commit — are spelled out in full in the label. */
 function SessionTimestamp({ session }: { session: SessionRowMetrics }) {
   const startedLabel = `Started ${formatFullDateTime(session.started_at)}`;
-  const endedLabel = `${session.is_active ? "Last activity" : "Ended"} ${formatFullDateTime(session.ended_at)}${session.is_active ? ", active" : ""}`;
+  const endedLabel = `Ended ${formatFullDateTime(session.ended_at)}`;
   const lastInputLabel = session.last_prompt_at == null
     ? null
     : `Last input ${formatFullDateTime(session.last_prompt_at)}`;
@@ -837,7 +838,6 @@ export type SessionRowMetrics = Pick<
   | "started_at"
   | "ended_at"
   | "last_prompt_at"
-  | "is_active"
   | "user_round_count"
   | "agent_message_count"
   | "tool_call_count"
@@ -872,7 +872,7 @@ export function SessionMetrics({
 }) {
   const durationText = formatDuration(session.started_at, session.ended_at);
   const durationLabel = durationText
-    ? `${session.is_active ? "Active for" : "Ran for"} ${durationText}`
+    ? `Ran for ${durationText}`
     : "";
   const totalTokens = formatCount(session.total_tokens);
   const totalInputTokens = formatCount(session.total_input_tokens);
@@ -897,7 +897,7 @@ export function SessionMetrics({
     {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
-        <SessionRowIcon name={session.is_active ? "activity" : "clock"} /><b>{durationText}</b>
+        <SessionRowIcon name="clock" /><b>{durationText}</b>
       </span>
     )}
     {subagents && subagents.count > 0 && (
@@ -1710,14 +1710,38 @@ export interface PushSessionFacts {
   metrics: SessionRowMetrics;
 }
 
+/** The Git history a session's Push to Mallard Cloud carries: the branch, and
+ *  what it adds to the history storage holds. */
+export interface SessionPushHistory {
+  branch: string;
+  outgoing: GitHistoryOutgoing;
+}
+
+/** The ↑N pill's words: the rail's commit chip sentence, with the count and
+ *  the branch, since the commits themselves are not on this review. */
+export function sessionPushHistoryTitle(storageName: string, history: SessionPushHistory): string {
+  const commits = history.outgoing.new_commits === 1 ? "1 commit" : `${history.outgoing.new_commits} commits`;
+  const head = `${commits} new since the last Push to ${storageName} · ${history.branch}`;
+  return history.outgoing.rewritten
+    ? `${head}\nHistory was rewritten: ${storageName}'s latest commit is no longer on this branch.`
+    : head;
+}
+
 /** The one row of a session's own Push review: the review's session row with
  *  nothing to select and nothing to open. `facts` is null when the session's
- *  page had not loaded; the comparison entry alone still names and sizes it. */
-export function SessionPushRow({ entry, storageName, facts }: {
+ *  page had not loaded; the comparison entry alone still names and sizes it.
+ *  `history` marks the commits the Push adds to the Cloud's Git history with
+ *  the rail's ↑ chip, holding its count; none when it adds none, or when
+ *  storage holds no history this branch shares, as on the rail. */
+export function SessionPushRow({ entry, storageName, facts, history = null }: {
   entry: ThreadSyncEntry;
   storageName: string;
   facts: PushSessionFacts | null;
+  history?: SessionPushHistory | null;
 }) {
+  const historyTitle = history && history.outgoing.new_commits > 0
+    ? sessionPushHistoryTitle(storageName, history)
+    : null;
   const fullTitle = facts?.title
     ?? (entry.display_name.trim() && entry.display_name !== entry.thread_id ? entry.display_name : "Untitled session");
   const title = compactThreadTitle(fullTitle);
@@ -1742,6 +1766,14 @@ export function SessionPushRow({ entry, storageName, facts }: {
             <SessionSyncIndicator presentation={sessionSyncPresentation(entry, storageName)} />
           )}
           <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
+          {historyTitle && history && (
+            <span
+              className={`sync-history-branch-state sync-history-outgoing${history.outgoing.rewritten ? " history-only" : ""}`}
+              title={historyTitle}
+              aria-label={historyTitle}
+              tabIndex={0}
+            >↑{history.outgoing.new_commits}</span>
+          )}
           {entry.subagent_selection.omitted && <ChildOmissionIcon />}
           {entry.state === "synced" && entry.push_decision.action === "publish" && (
             <span className="sync-history-branch-state history-only">{entry.status_detail ?? "Export settings changed"}</span>

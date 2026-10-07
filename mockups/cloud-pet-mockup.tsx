@@ -203,7 +203,7 @@ const storageName = (view: View) => (view.storage === "cloud" ? STORAGE_NAME : V
 const link = (owner: string, name: string, of: Partial<ManagedCloudLink> = {}): ManagedCloudLink => ({
   repository_id: `repo_${owner}_${name}`.toLowerCase(), visibility: "private", can_pull: true, can_push: true,
   website_url: `https://${HOST}/${owner}/${name}`, owner_login: owner, name,
-  repository_revision: 4, can_request_release: true, can_publish_version: false, role: "owner", release: { kind: "private" }, ...of,
+  repository_revision: 4, can_request_release: true, can_publish_version: false, can_discard_draft: false, role: "owner", release: { kind: "private" }, ...of,
 });
 /* How far a repository's stream has come, which this page prints as an
    item's number in readouts, plans and outcomes: the push a collaborator

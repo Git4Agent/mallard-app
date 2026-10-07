@@ -704,6 +704,20 @@ pub struct CreateRepository {
     pub github_url: Option<String>,
 }
 
+/// What a plugin's own manifest says about it, as its page shows it: a
+/// closed set of display fields, each one line, links https only. Never a
+/// path, a repository field, or anything else from the file.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PluginListing {
+    pub display_name: Option<String>,
+    pub developer: Option<String>,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub website_url: Option<String>,
+    pub privacy_url: Option<String>,
+    pub terms_url: Option<String>,
+}
+
 /// What Publish names: the draft the caller saw, by its commit, the
 /// repository revision the same listing carried, and the version's name.
 #[derive(Clone, Debug, Serialize)]
@@ -1312,6 +1326,27 @@ impl ManagedCloudClient {
         }
     }
 
+    /// `PUT /v1/repositories/{id}/listings/{commit_id}`: what the installed
+    /// copy of a plugin says about itself, for the commit this account just
+    /// pushed, so the plugin's page can say what it is. Only the pusher of
+    /// that commit may set it; setting it again replaces it.
+    pub async fn put_plugin_listing(
+        &self,
+        repository_id: &str,
+        commit_id: &str,
+        listing: &PluginListing,
+    ) -> Result<()> {
+        let route = "v1/repositories/{id}/listings/{commit_id}";
+        let request = self
+            .request(
+                Method::PUT,
+                route,
+                &format!("/v1/repositories/{repository_id}/listings/{commit_id}"),
+            )?
+            .json(listing);
+        self.send(route, false, request).await.map(|_| ())
+    }
+
     /// The repository at an address (section 4.1): the collaborator summary,
     /// or the public face (`role: None`, fingerprint withheld) of a public
     /// repository the caller does not belong to. `None` when nothing the
@@ -1636,6 +1671,10 @@ pub struct ManagedCloudLink {
     /// Whether Publish is open to this account now: a collaborator, with a
     /// draft that holds something and is not already a version.
     pub can_publish_version: bool,
+    /// Whether Discard draft is open to this account now: the Owner or an
+    /// Admin, with a draft that holds something and something to remove (no
+    /// version yet, or the draft past the latest one).
+    pub can_discard_draft: bool,
     /// The account's membership role; `None` for a public repository the
     /// account does not belong to, where it still pushes as a contributor.
     pub role: Option<String>,
@@ -2221,7 +2260,7 @@ mod tests {
 
     #[test]
     fn a_status_observed_from_a_listing_carries_its_link_and_publication() {
-        let link = json!({"repository_id":"repo_one", "visibility":"private", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"private"}, "repository_revision":3, "can_request_release":true, "can_publish_version":true, "role":"owner", "can_push":true});
+        let link = json!({"repository_id":"repo_one", "visibility":"private", "can_pull":true, "owner_login":"owner", "name":"Project", "release":{"kind":"private"}, "repository_revision":3, "can_request_release":true, "can_publish_version":true, "can_discard_draft":true, "role":"owner", "can_push":true});
         let publication = json!({"draft":"pushed", "latest_version":2, "next_version":4, "draft_ahead":3, "public_version":null, "review_version":null});
         let listing: StoreKeyListing = serde_json::from_value(
             json!({"keys": [], "next_cursor": null, "link": link, "publication": publication}),

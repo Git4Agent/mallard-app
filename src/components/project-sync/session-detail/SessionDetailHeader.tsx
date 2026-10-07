@@ -93,11 +93,10 @@ export default function SessionDetailHeader({
                 <time dateTime={sessionDetailDateTime(detail.started_at)}>{start}</time>
               </FactChip>
             )}
-            {/* A live session has no end, so label it running. */}
-            {(detail.is_active || length) && (
-              <FactChip title={formatSessionLengthDetail(detail.started_at, detail.ended_at, detail.is_active) ?? undefined}>
-                <Icon name={detail.is_active ? "activity" : "clock"} size={12} />
-                <b>{detail.is_active ? "running" : length}</b>
+            {length && (
+              <FactChip title={formatSessionLengthDetail(detail.started_at, detail.ended_at) ?? undefined}>
+                <Icon name="clock" size={12} />
+                <b>{length}</b>
               </FactChip>
             )}
             <FactChip title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}>

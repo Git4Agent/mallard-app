@@ -454,23 +454,6 @@ test("the header is one strip: hidden h1, the way back, facts as chips, verbs on
   assert.match(html, /class="session-detail-chip" title="Ran 11m, ending \d{2}:\d{2}"><svg[^>]*data-icon="clock"[\s\S]*?<b>11m<\/b>/);
   assert.doesNotMatch(html, /→/);
 
-  // A live session has no end and therefore no length: it says so, and wears
-  // the activity glyph the rows use for the same state.
-  const active = renderToStaticMarkup(
-    <SessionDetailHeader
-      detail={{ ...detail, is_active: true }}
-      back={back}
-      headingRef={{ current: null }}
-      actionBusyId={null}
-      onAction={() => undefined}
-      pushGate={null}
-      notes={[]}
-      onShowToolCalls={null}
-    />,
-  );
-  assert.match(active, /title="Still running · 11m so far"><svg[^>]*data-icon="activity"[\s\S]*?<b>running<\/b>/);
-  assert.doesNotMatch(active, /<b>11m<\/b>/);
-
   // Provider identity is the mark on the leaf crumb and on the launch button
   // itself; the text chip, the Active chip and the second refresh glyph are
   // gone. The launch pair speaks the activity rows' icon vocabulary — the
@@ -556,8 +539,6 @@ test("a Push hold and the transcript notes are chips, never boxes", () => {
   assert.match(workspace, /sessionPushGate\(sessionPushEntry, managedCloudKey \? null : sessionComparison\.comparisonError\)/);
   const page = readFileSync("src/components/project-sync/session-detail/SessionDetailPage.tsx", "utf8");
   assert.match(page, /className="session-detail-notices"\s*timing="blocking"/);
-  // A running session's last call has no result yet; its row says so.
-  assert.match(page, /\.filter\(\(warning\) => !\(detail\.is_active && warning\.code === "incomplete_tool_call"\)\)/);
 });
 
 // The crumb that walks back reads as a place, so the page carries a button
@@ -848,8 +829,6 @@ test("the wait between turns is a chip in the node column, and ticks never carry
   // A day boundary in the middle makes the end's own date load-bearing.
   assert.match(formatSessionLengthDetail(START, START + 86_400) ?? "", /ending \w+ \d+, 2026 · \d{2}:\d{2}$/);
   // Running: a distance so far, never an end.
-  assert.equal(formatSessionLengthDetail(START, START + 660, true), "Still running · 11m so far");
-  assert.equal(formatSessionLengthDetail(START, null, true), "Still running");
   assert.equal(formatSessionLengthDetail(START, null), null);
 });
 
@@ -1443,7 +1422,6 @@ test("the session page reports its counts in the fields its Push row prints", ()
     metrics: {
       started_at: START,
       ended_at: START + 660,
-      is_active: false,
       user_round_count: 2,
       agent_message_count: 3,
       tool_call_count: 4,

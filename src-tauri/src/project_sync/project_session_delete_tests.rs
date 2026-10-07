@@ -190,6 +190,12 @@ fn project_sessions_delete_preserves_other_projects_and_reports_partial_failures
 #[test]
 #[ignore = "requires an installed Codex CLI; temporary homes only"]
 fn project_sessions_delete_mixed_native_includes_archived_and_unbound_sessions() {
+    for archived_has_content in [false, true] {
+        assert_mixed_project_session_deletion(archived_has_content);
+    }
+}
+
+fn assert_mixed_project_session_deletion(archived_has_content: bool) {
     let temp = tempfile::tempdir().unwrap();
     let repo = repository(&temp);
     let storage = StorageId::parse("mixed-delete-store").unwrap();
@@ -251,7 +257,20 @@ fn project_sessions_delete_mixed_native_includes_archived_and_unbound_sessions()
             payload["source"] = serde_json::json!({"subagent":{"thread_spawn":{"parent_thread_id":ids[0],"depth":1}}});
             payload["parent_thread_id"] = serde_json::json!(ids[0]);
         }
-        std::fs::write(&path, format!("{}\n", serde_json::json!({"type":"session_meta","timestamp":"2026-09-26T00:00:00Z","payload":payload}))).unwrap();
+        let mut records = format!(
+            "{}\n",
+            serde_json::json!({"type":"session_meta","timestamp":"2026-09-26T00:00:00Z","payload":payload})
+        );
+        if index == 1 && archived_has_content {
+            records.push_str(&format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "event_msg", "timestamp": "2026-09-26T00:00:01Z",
+                    "payload": {"type": "user_message", "message": "Archived session"}
+                })
+            ));
+        }
+        std::fs::write(&path, records).unwrap();
         paths.push(path);
     }
     assert!(repo
@@ -268,7 +287,11 @@ fn project_sessions_delete_mixed_native_includes_archived_and_unbound_sessions()
     let result =
         delete_local_project_sessions_with_repository(&repo, &project.local_project_id, revision)
             .unwrap();
-    assert_eq!(result.sessions_deleted, 3, "{result:?}");
+    assert_eq!(
+        result.sessions_deleted, 3,
+        "archived_has_content={archived_has_content}: {result:?}"
+    );
+    assert_eq!(result.sessions_failed, 0, "{result:?}");
     assert!(
         result.provider_errors.is_empty() && result.metadata_error.is_none(),
         "{result:?}"

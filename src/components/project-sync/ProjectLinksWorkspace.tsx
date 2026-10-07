@@ -2408,16 +2408,15 @@ export default function ProjectLinksWorkspace({
             ? "Session unavailable"
             : "Opening session…",
         title: sessionHeader?.state === "ready"
-          ? [sessionHeader.title, sessionHeader.providerDisplayName, sessionHeader.active ? "Active" : null]
+          ? [sessionHeader.title, sessionHeader.providerDisplayName]
             .filter(Boolean).join(" · ")
           : undefined,
         leading: sessionHeader?.state === "ready" ? (
-          <span className={`sync-path-leaf-mark${sessionHeader.active ? " active" : ""}`}>
+          <span className="sync-path-leaf-mark">
             <ProviderMark
               provider={sessionHeader.provider}
               displayName={sessionHeader.providerDisplayName}
             />
-            {sessionHeader.active && <span className="sync-visually-hidden">Active</span>}
           </span>
         ) : undefined,
       });

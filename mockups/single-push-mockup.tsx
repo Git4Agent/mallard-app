@@ -291,7 +291,6 @@ const FACTS: PushSessionFacts = {
   metrics: {
     started_at: ENDED_AT - 22 * 60,
     ended_at: ENDED_AT,
-    is_active: false,
     user_round_count: 23,
     agent_message_count: 23,
     tool_call_count: 31,

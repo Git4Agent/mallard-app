@@ -1664,7 +1664,7 @@ test("a storage another computer cleared shows one standing note with no unlink 
   const cloudLink: NonNullable<CloudStatus["link"]> = {
     repository_id: "repo_one", visibility: "public", can_pull: true, can_push: true,
     website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
-    repository_revision: 7, can_request_release: false, can_publish_version: false, role: "owner", release: { kind: "public" },
+    repository_revision: 7, can_request_release: false, can_publish_version: false, can_discard_draft: false, role: "owner", release: { kind: "public" },
   };
   // Public at version 2, and the draft is that version.
   const atVersion = { draft: "pushed" as const, latest_version: 2, next_version: 3, draft_ahead: 0, public_version: 2, review_version: null };
@@ -1763,7 +1763,7 @@ test("permanent session summaries label every metric icon", () => {
   // spelled out in full in the accessible label and tooltip.
   assert.match(html, new RegExp(`<time dateTime="${new Date(codexSession.ended_at * 1_000).toISOString()}"`));
   assert.doesNotMatch(html, new RegExp(`<time dateTime="${new Date(codexSession.started_at * 1_000).toISOString()}"`));
-  assert.match(html, /aria-label="Started [^"]+\. (?:Ended|Last activity) [^"]+"/);
+  assert.match(html, /aria-label="Started [^"]+\. Ended [^"]+"/);
   assert.match(endedTime, / at /);
   assert.match(endedTime, /\d{4}/);
   assert.match(endedTime, /\d{1,2}:\d{2}/);

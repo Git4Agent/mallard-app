@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Session Push review Git history — directions</title>
+    <style>
+      /* App.css locks html, body and #root for the app shell; #root scrolls. */
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+
+      /* ——— specimen chrome (not app CSS) ——————————————————————— */
+      .spec { max-width: 2500px; margin: 0 auto; padding: 16px 20px 80px; display: grid; gap: 18px; font: 13px/1.45 system-ui, sans-serif; }
+      .spec-title { font: 700 20px/1.2 system-ui; }
+      .spec-sub { margin-top: -10px; color: var(--text-2); max-width: 1040px; }
+      .spec-sub code { font: 12px/1 ui-monospace, monospace; }
+      .spec-controls { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .spec-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+      .spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+      .spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+      .spec-col-title { margin: 0 0 4px; font: 700 14px/1.3 system-ui; }
+      .spec-col-title em { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); font: 600 11px/1.4 system-ui; font-style: normal; }
+      .spec-col-note { margin: 0 0 8px; min-height: 54px; color: var(--text-2); font-size: 12px; }
+      .spec-col-note b { color: var(--text-1); }
+      .spec-frame { position: relative; border: 1px dashed var(--border-strong); border-radius: 12px; overflow: hidden; background: var(--bg-0); font-family: var(--font-sans); }
+      .spec-frame .sync-main { height: auto !important; min-height: 160px; overflow: visible !important; }
+      /* The review page lifts this cap in the app; a bare frame keeps it (62vh). */
+      .spec-frame .sync-sync-review-scroll { max-height: none; }
+      .spec-grid { display: flex; flex-wrap: wrap; gap: 22px; align-items: start; }
+      .spec-seen { margin: 0; color: var(--text-2); font-size: 11.5px; }
+      .spec-seen a { color: inherit; }
+      .spec-foot { color: var(--text-2); font-size: 12px; max-width: 1040px; }
+      .spec-foot a { color: inherit; }
+      .spec-table { border-collapse: collapse; font-size: 12px; max-width: 1200px; }
+      .spec-table th, .spec-table td { padding: 5px 10px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+      .spec-table th { background: var(--surface-muted); font-weight: 600; }
+
+      /* ——— proposed app CSS (mock-only) ———————————————————————————
+         Scoped under .spec: App.css loads after this block and would
+         otherwise win every tie. Everything prefixed mk- is new. */
+
+      /* C · the header flag: the redaction flag's pill, holding the branch glyph,
+         the branch name and the count. The branch keeps its case. */
+      /* App.css makes the title's flags display:block to ellipsize; this one is
+         three parts, so it is a flex row again, at the same specificity + 1. */
+      .spec .sync-sync-review-title > .mk-flag { display: inline-flex; align-items: center; gap: 5px; overflow: visible; letter-spacing: 0; text-transform: none; cursor: help; }
+      /* The branch gives way first, as the redaction flag's words do; the count
+         keeps its width. */
+      .spec .sync-sync-review-title > .mk-flag { min-width: 0; }
+      .spec .mk-flag > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--type-2xs); font-weight: var(--weight-medium); color: inherit; }
+      .spec .mk-flag > b { flex: 0 0 auto; }
+      .spec .mk-flag > b { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; }
+      .spec .mk-flag.history-only { border-color: var(--warning-text); color: var(--warning-text); }
+
+      /* D · the count on Push itself: the path bar's count chip, on the primary
+         button's ink. */
+      .spec .mk-btn-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; margin: 0 -3px 0 2px; padding: 0 5px; border-radius: var(--r-pill); background: color-mix(in srgb, currentColor 22%, transparent); color: inherit; font-family: var(--font-mono); font-size: var(--type-2xs); font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; line-height: 1; }
+
+      /* E · the review's rail: the new commits, the session under the one it
+         maps to. Only the rail's own CSS; the fold control is inert. */
+      .spec .mk-rail { margin: 0; }
+
+      /* F · the gauge's title, drawn open so it can be judged. */
+      .spec .mk-tip-host { position: relative; }
+      .spec .mk-tip { position: absolute; z-index: 40; right: 0; bottom: calc(100% + 7px); padding: 5px 7px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-popover); box-shadow: var(--shadow-popover); color: var(--text-0); font-family: var(--font-sans); font-size: var(--type-2xs); font-weight: var(--weight-medium); font-variant-numeric: tabular-nums; line-height: 1.2; white-space: pre; pointer-events: none; }
+
+      /* G · a metric in the row's fact line: the row's own grammar, icon + b. */
+      .spec .mk-metric > b { font-variant-numeric: tabular-nums; }
+      .spec .mk-metric.history-only > svg, .spec .mk-metric.history-only > b { color: var(--warning-text); }
+
+      /* The slot a mark is portalled into inside the shipped row. */
+      .spec .mk-slot { display: contents; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/mockups/session-push-history-mockup.tsx"></script>
+  </body>
+</html>

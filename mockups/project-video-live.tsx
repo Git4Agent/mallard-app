@@ -203,7 +203,7 @@ const cloudStatus = (project: Project): ManagedCloudStatus => {
       visibility: "private", can_pull: true, repository_id: `repo_${project.name}`, website_url: `${ORIGIN}/octocat/${project.name}`,
       owner_login: project.name === "dotfiles" ? "hen" : "octocat", name: project.name,
       release: pushed ? { kind: "private" } : { kind: "not_pushed" }, repository_revision: pushed ? 1 : 0,
-      can_request_release: pushed, can_publish_version: pushed, role: scene === "mate" && project.name === "tidewatch" ? "member" : "owner", can_push: true,
+      can_request_release: pushed, can_publish_version: pushed, can_discard_draft: pushed, role: scene === "mate" && project.name === "tidewatch" ? "member" : "owner", can_push: true,
     },
     publication: { draft: pushed ? "pushed" : "none", latest_version: null, next_version: 1, draft_ahead: null, public_version: null, review_version: null },
   };

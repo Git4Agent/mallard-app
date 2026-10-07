@@ -1006,6 +1006,7 @@ mod managed_cloud_gone {
             let link = status.link.unwrap();
             assert_eq!(link.visibility, "private");
             assert!(!link.can_publish_version);
+            assert!(!link.can_discard_draft, "the draft is version 1");
             let publication = status.publication.unwrap();
             assert_eq!(
                 (
@@ -1025,7 +1026,8 @@ mod managed_cloud_gone {
             // A push moves the draft, and the next Publish is version 2.
             a.session(SECOND);
             assert_eq!(a.push().revision, Some(3));
-            assert!(a.cloud_status().link.unwrap().can_publish_version);
+            let link = a.cloud_status().link.unwrap();
+            assert!(link.can_publish_version && link.can_discard_draft);
             assert_eq!(publish(&a.storage_id, Some(" ")).unwrap().version, 2);
             assert_eq!(cloud.state().repositories[&id].latest().unwrap().name, None);
         })

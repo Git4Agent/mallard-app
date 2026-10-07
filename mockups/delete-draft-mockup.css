@@ -1,0 +1,86 @@
+/* Deleting the draft, the app's side (mockups/delete-draft-mockup.html). The bar, the chip, the
+   panel, the menus, the sheet and the notices are App.css's own; what is here is the specimen's
+   chrome and what the proposal adds, under a `dd-` prefix. */
+
+/* App.css locks html, body and #root for the app shell; #root scrolls. */
+html, body { height: 100%; overflow: hidden !important; }
+body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+#root { height: 100%; overflow-y: auto !important; }
+
+.dd { max-width: 1180px; margin: 0 auto; padding: 18px 22px 120px; display: grid; gap: 30px; }
+.dd-head { display: grid; gap: 6px; }
+.dd-head h1 { margin: 0; font-size: var(--type-2xl); }
+.dd-head p { margin: 0; max-width: 900px; color: var(--text-1); }
+.dd-controls { position: sticky; top: 0; z-index: 60; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; padding: 8px 12px; border: var(--box-border); border-radius: 12px; background: var(--surface-card); }
+.dd-controls > span { margin: 0 4px 0 10px; color: var(--text-2); font-weight: var(--weight-bold); font-size: var(--type-xs); }
+.dd-controls > span:first-child { margin-left: 0; }
+.dd-seg { min-height: 26px; padding: 0 10px; border: 2px solid var(--border-mid); border-radius: 999px; background: transparent; color: var(--text-1); font: inherit; font-size: var(--type-xs); font-weight: var(--weight-bold); cursor: pointer; }
+.dd-seg[aria-pressed="true"] { border-color: var(--text-0); background: var(--text-0); color: var(--bg-0); }
+
+.dd-part { display: grid; gap: 12px; }
+.dd-part > h2 { margin: 0; padding-bottom: 6px; border-bottom: 2px solid var(--text-0); font-size: var(--type-xl); }
+.dd-lede { margin: 0; max-width: 900px; color: var(--text-1); }
+.dd-note { margin: 0; max-width: 900px; color: var(--text-1); font-size: var(--type-sm); }
+.dd-seen { margin: 0; color: var(--text-2); font-size: var(--type-xs); }
+.dd-against { display: flex; align-items: flex-start; gap: 6px; margin: 0; max-width: 900px; color: var(--warning-text); font-size: var(--type-xs); }
+.dd-against > svg { flex: none; margin-top: 2px; }
+
+.dd-places, .dd-states { display: grid; gap: 26px; }
+.dd-place, .dd-state, .dd-asks > article { display: grid; gap: 6px; align-content: start; }
+.dd-place h3, .dd-state h3, .dd-asks h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0; font-size: var(--type-lg); }
+.dd-place h3 span { color: var(--text-2); font-size: var(--type-sm); font-weight: var(--weight-medium); }
+.dd-place h3 em { padding: 1px 8px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font-size: var(--type-2xs); font-style: normal; }
+
+/* A frame holds the bar and what hangs under it, where the window would. */
+.dd-frame { position: relative; display: grid; align-content: start; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--bg-0); }
+.dd-frame.tall { min-height: 420px; }
+.dd-frame > .sync-pathbar { border-radius: 11px 11px 0 0; }
+.dd-below { display: grid; justify-items: end; gap: 6px; padding: 6px 12px 12px; }
+.dd-main { padding: 12px 18px 16px; }
+.dd-main > [role="region"] { margin-bottom: 10px; }
+.dd-hint { margin: 0; color: var(--text-2); font-size: var(--type-sm); }
+.dd-open { position: static; width: 320px; }
+.dd-fresh { margin-left: auto; padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--text-1); font-size: var(--type-2xs); font-style: normal; font-weight: var(--weight-bold); }
+/* A danger row off keeps its ink dim, as the plain rows do. */
+.sync-path-menu-item.danger[aria-disabled="true"], .sync-path-menu-item.danger[aria-disabled="true"] > svg { opacity: 0.5; }
+
+/* The system's dialog, drawn: the app does not style it. */
+.dd-scrim { display: grid; place-items: center; padding: 18px 12px 22px; border-radius: 0 0 11px 11px; background: rgba(0, 0, 0, 0.28); }
+.dd-alert { width: 292px; padding: 20px 18px 16px; border-radius: 14px; background: #ececec; color: #1d1d1f; box-shadow: 0 22px 60px rgba(0, 0, 0, 0.35); font: 13px/1.38 -apple-system, system-ui, sans-serif; text-align: center; }
+.dd-alert-mark { display: grid; place-items: center; width: 52px; height: 52px; margin: 0 auto 12px; border-radius: 12px; background: #f6c343; color: #1d1d1f; font: 800 28px/1 system-ui; }
+.dd-alert h3 { margin: 0 0 6px; font: 700 13px/1.3 -apple-system, system-ui, sans-serif; }
+.dd-alert p { margin: 0 0 8px; font-size: 11.5px; white-space: pre-line; }
+.dd-alert-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.dd-alert-buttons span { padding: 5px 0; border-radius: 6px; background: #fff; box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.22), 0 1px 1px rgba(0, 0, 0, 0.12); font-weight: 500; }
+.dd-alert-buttons span.default { background: #0a7aff; color: #fff; }
+
+/* A2: the sheet, drawn in the page instead of over it. */
+.dd-stage { display: grid; justify-items: center; gap: 6px; padding: 22px 12px; background: var(--surface-muted); border-radius: 0 0 11px 11px; }
+.dd-sheet { position: static; margin: 0; }
+.dd-sheet .btn.danger { color: var(--danger-text); border-color: var(--danger-text); }
+
+/* A3: the question in the panel's own list. */
+.dd-ask { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px 9px; }
+.dd-ask > span { flex: 1 1 auto; min-width: 0; color: var(--danger-text); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+.dd-ask .btn { min-height: 26px; padding: 0 9px; font-size: var(--type-xs); }
+.dd-ask .btn.danger { color: var(--danger-text); border-color: var(--danger-text); }
+
+/* The panel state by state: today beside the proposal. */
+.dd-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 4px; }
+.dd-pair > div { display: grid; justify-items: end; align-content: start; gap: 6px; padding: 12px; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--bg-0); }
+.dd-pair .sync-path-actions { justify-content: flex-end; padding: 0; }
+.dd-tag { justify-self: start; margin: 0; padding: 1px 8px; border-radius: 999px; background: var(--chip-bg); color: var(--text-1); font-size: var(--type-2xs); font-weight: var(--weight-bold); }
+.dd-tag.is-new { background: var(--text-0); color: var(--bg-0); }
+
+/* The three questions side by side. */
+.dd-asks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.dd-asks .dd-scrim { border-radius: 12px; }
+
+.dd-refs { width: 100%; border-collapse: collapse; font-size: var(--type-sm); }
+.dd-refs th, .dd-refs td { padding: 7px 14px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.dd-refs th { color: var(--text-2); }
+.dd-refs td:first-child { min-width: 190px; font-weight: var(--weight-semibold); }
+
+@media (max-width: 900px) {
+  .dd-pair, .dd-asks { grid-template-columns: minmax(0, 1fr); }
+}

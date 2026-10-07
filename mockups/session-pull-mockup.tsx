@@ -549,7 +549,7 @@ const MOCHI_STATUS: ManagedCloudStatus = {
   state: "ready",
   link: {
     visibility: "public", can_pull: true, can_push: false, repository_id: MOCHI.repository_id, website_url: MOCHI.website_url,
-    owner_login: "maya", name: "Mochi", release: { kind: "public" }, repository_revision: 5, can_request_release: false, can_publish_version: false, role: null,
+    owner_login: "maya", name: "Mochi", release: { kind: "public" }, repository_revision: 5, can_request_release: false, can_publish_version: false, can_discard_draft: false, role: null,
   },
   publication: { draft: "pushed", latest_version: 5, next_version: 6, draft_ahead: 0, public_version: 5, review_version: null },
   message: null,

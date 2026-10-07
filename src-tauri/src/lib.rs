@@ -160,6 +160,10 @@ pub fn run() {
                     })
                     .unwrap_or_default(),
             );
+            // The login-shell PATH probe is the slow step of every CLI
+            // launch. Spend it now, off this thread, so the first Open in
+            // Terminal after startup finds the shell PATH already known.
+            std::thread::spawn(mallard_infrastructure::cli_discovery::warm_shell_path);
             // A visible process boundary in the activity log: operations that
             // died with the previous process (no terminal event) become
             // explainable instead of mysterious.

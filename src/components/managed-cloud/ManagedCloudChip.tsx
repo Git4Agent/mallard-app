@@ -5,8 +5,8 @@ import { writeClipboardText } from "../sync-review/clipboard";
 import { PathBarPopover } from "../sync-review/SyncPathBar";
 
 import {
-  canPublishVersion, cloudContributor, cloudFacts, cloudHeadline, cloudReleaseUrl, cloudStatusNotice, cloudVerbs, cloudVersionUrl,
-  cloudVersionsUrl, discardDraftQuestion, publishVersionHold,
+  canDiscardDraft, canPublishVersion, cloudContributor, cloudFacts, cloudHeadline, cloudReleaseUrl, cloudStatusNotice, cloudVerbs, cloudVersionUrl,
+  cloudVersionsUrl, discardDraftHold, discardDraftQuestion, publishVersionHold,
 } from "./managedCloudLink";
 
 /**
@@ -112,10 +112,11 @@ export function ManagedCloudPanel({
       rows.push({ id: "view-public", label: "View public version", icon: "external-link", copy: { name: "public link", url }, onSelect: open(url) });
     }
     if (verbs.discardDraft) {
+      // In view for the Owner and Admins in every state; off, with its reason, while there is nothing to remove.
       const { kept } = discardDraftQuestion(link, status.publication);
       rows.push({
-        id: "discard-draft", label: "Discard draft…", icon: "x", danger: true, disabled: busy,
-        title: kept ? `Discard draft… · back to ${kept}` : "Discard draft… · every push",
+        id: "discard-draft", label: "Discard draft…", icon: "x", danger: true, disabled: busy || !canDiscardDraft(status),
+        title: discardDraftHold(status) ?? (kept ? `Discard draft… · back to ${kept}` : "Discard draft… · every push"),
         onSelect: () => {
           close(true);
           onDiscardDraft();

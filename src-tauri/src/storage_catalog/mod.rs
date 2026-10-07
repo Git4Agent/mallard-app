@@ -26,6 +26,7 @@ pub mod persistence;
 pub mod pet_preview;
 pub mod plan_store;
 pub mod plugin_intent;
+mod plugin_listing;
 pub mod profiles;
 mod provider_state;
 pub mod registry;

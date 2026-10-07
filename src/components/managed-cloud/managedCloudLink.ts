@@ -28,15 +28,25 @@ function cloudStanding(status: ManagedCloudStatus | null | undefined): ManagedCl
   return publication && publication.draft !== "unavailable" ? publication : null;
 }
 
-/** Whether Discard draft is offered: to the Owner, on the repository the link
- *  saved, while it is public and its draft is past the latest version. A
- *  private repository's draft is discarded on the website. */
+/** Whether Discard draft is on: the service says it is open to this account
+ *  and this draft (the Owner or an Admin, with something to remove), on any
+ *  repository. It names the repository by the link, so it waits while
+ *  another one is read in its place. */
 export function canDiscardDraft(status: ManagedCloudStatus | null | undefined): boolean {
   return status?.state === "ready"
     && !cloudPinMoved(status)
-    && status.link?.role === "owner"
-    && status.link.visibility === "public"
-    && (cloudStanding(status)?.draft_ahead ?? 0) > 0;
+    && !!status.link?.can_discard_draft
+    && cloudStanding(status) !== null;
+}
+
+/** Why Discard draft is off, for the row's title, when the status says:
+ *  nothing pushed, or the draft is the latest version. */
+export function discardDraftHold(status: ManagedCloudStatus | null | undefined): string | null {
+  const standing = cloudStanding(status);
+  if (!standing || canDiscardDraft(status)) return null;
+  if (standing.draft === "none") return "Nothing pushed yet";
+  if (standing.latest_version !== null && standing.draft_ahead === 0) return `Nothing to remove: the draft is version ${standing.latest_version}`;
+  return null;
 }
 
 /** Whether Publish version is on: the service says it is open to this
@@ -71,7 +81,8 @@ export function cloudSyncBlocked(status: ManagedCloudStatus | null | undefined):
  *  Publish and the discard name the repository by the link, so they wait
  *  while another one is read in its place. The release request's page is
  *  offered to a collaborator once there is a request to read: waiting, or
- *  turned down with a reason. */
+ *  turned down with a reason. The discard row is the Owner's and an Admin's
+ *  in every state, on or off as `canDiscardDraft` says. */
 export function cloudVerbs(status: ManagedCloudStatus | null | undefined) {
   const link = status?.state === "ready" ? status.link : null;
   const standing = link ? cloudStanding(status) : null;
@@ -88,7 +99,7 @@ export function cloudVerbs(status: ManagedCloudStatus | null | undefined) {
     versions: standing?.latest_version != null,
     /** The public version, by its number; null when there is none to open. */
     viewPublic: link?.visibility === "public" ? standing?.public_version ?? null : null,
-    discardDraft: canDiscardDraft(status),
+    discardDraft: link?.role === "owner" || link?.role === "admin",
   };
 }
 
@@ -119,8 +130,8 @@ export function discardDraftQuestion(link: ManagedCloudLink, publication?: Manag
   const waiting = link.release.kind === "waiting_owner" || link.release.kind === "waiting_super_admin";
   const requested = waiting && publication?.review_version == null;
   const removes = kept
-    ? `Removes every push after ${kept} from Mallard Cloud. The draft returns to ${kept}.`
-    : "Removes every push from Mallard Cloud. There is no version to return to.";
+    ? `Removes every push after ${kept} from Mallard Cloud. The draft returns to ${kept}. Every version stays.`
+    : "Removes every push from Mallard Cloud. There is no version to return to: the repository stays, empty.";
   return {
     /** The version the draft returns to, in words; null when none is kept. */
     kept,
@@ -131,9 +142,9 @@ export function discardDraftQuestion(link: ManagedCloudLink, publication?: Manag
   };
 }
 
-/** The Owner's discard, from the menu row to the refresh: ask, send the one
+/** The discard, from the panel's row to the refresh: ask, send the one
  *  request with the repository revision the status showed, report a refusal,
- *  compare again. Cancel sends nothing. */
+ *  compare again. Cancel sends nothing; a row that is off sends nothing. */
 export async function discardCloudDraft(
   status: ManagedCloudStatus | null | undefined,
   actions: {

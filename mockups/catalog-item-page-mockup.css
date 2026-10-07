@@ -1,0 +1,283 @@
+/* A Catalog item's page in the app (mockups/catalog-item-page-mockup.html). The bar, the chip,
+   the segmented switch, the tabs, the launch buttons and the rendered Markdown are App.css's own;
+   what is here is the specimen's chrome and what the proposal adds, under a `ci-` prefix. The
+   bodies' rules are the website's (mallardInternal web/src/styles.css: .plugin-*, .pet-*,
+   .side-panel, .facts, .ab-*), renamed — both sides share the same token names. */
+
+/* App.css locks html, body and #root for the app shell; #root scrolls. */
+html, body { height: 100%; overflow: hidden !important; }
+body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+#root { height: 100%; overflow-y: auto !important; }
+
+.ci { max-width: 1520px; margin: 0 auto; padding: 18px 22px 120px; display: grid; gap: 34px; }
+.ci-head { display: grid; gap: 6px; }
+.ci-head h1 { margin: 0; font-size: var(--type-2xl); }
+.ci-head p { margin: 0; max-width: 960px; color: var(--text-1); }
+.ci-controls { position: sticky; top: 0; z-index: 60; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; padding: 8px 12px; border: var(--box-border); border-radius: 12px; background: var(--surface-card); }
+.ci-controls > span { margin: 0 4px 0 10px; color: var(--text-2); font-weight: var(--weight-bold); font-size: var(--type-xs); }
+.ci-controls > span:first-child { margin-left: 0; }
+.ci-seg { min-height: 26px; padding: 0 10px; border: 2px solid var(--border-mid); border-radius: 999px; background: transparent; color: var(--text-1); font: inherit; font-size: var(--type-xs); font-weight: var(--weight-bold); cursor: pointer; }
+.ci-seg[aria-pressed="true"] { border-color: var(--text-0); background: var(--text-0); color: var(--bg-0); }
+
+.ci-part { display: grid; gap: 14px; }
+.ci-part > h2 { margin: 0; padding-bottom: 6px; border-bottom: 2px solid var(--text-0); font-size: var(--type-xl); }
+.ci-lede { margin: 0; max-width: 960px; color: var(--text-1); }
+.ci-note { margin: 0; max-width: 960px; color: var(--text-1); font-size: var(--type-sm); }
+.ci-seen { margin: 0; color: var(--text-2); font-size: var(--type-xs); }
+.ci-seen a { color: inherit; }
+.ci-against { display: flex; align-items: flex-start; gap: 6px; margin: 0; max-width: 960px; color: var(--warning-text); font-size: var(--type-xs); }
+.ci-against > svg { flex: none; margin-top: 2px; }
+.ci-muted { color: var(--text-2); }
+
+/* A frame is the window's content column: the bar, then the page under it. The shell's padding
+   is a vw clamp, so each frame takes the one its window would give it. */
+.ci-frame { position: relative; display: flex; height: 760px; max-width: 100%; overflow: hidden; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--retro-frame-gutter); }
+.ci-frame > .ci-app { display: flex; flex-direction: column; flex: 1; min-width: 0; height: 100%; }
+.ci-frame .sync-main { overflow-y: auto; padding-inline: var(--ci-pad, 38px); padding-top: 22px; }
+
+.ci-directions { display: grid; gap: 34px; }
+.ci-direction { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.ci-direction > h3, .ci-body-case > h3, .ci-copy-case > h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0; font-size: var(--type-lg); }
+.ci-direction > h3 em { padding: 1px 8px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font-size: var(--type-2xs); font-style: normal; }
+.ci-direction > h3 .ci-muted { font-size: var(--type-sm); font-weight: var(--weight-medium); }
+.ci-width-row { display: grid; gap: 30px; }
+
+/* ——— the page ——— */
+
+.ci-page { container: ci-page / inline-size; display: grid; gap: 14px; min-width: 0; }
+
+.ci-card { min-width: 0; border: var(--box-border); border-radius: var(--retro-panel-radius, 14px); background: var(--surface-card); box-shadow: var(--shadow-card); }
+
+/* The head: the item's tile, its name and chips, its launch run. */
+.ci-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; min-width: 0; }
+.ci-item-title { display: grid; gap: 6px; flex: 1 1 220px; min-width: 0; }
+.ci-item-title h1 { margin: 0; overflow: hidden; color: var(--text-0); font-family: var(--font-display); font-size: var(--type-2xl); line-height: 1.1; text-overflow: ellipsis; white-space: nowrap; }
+.ci-item-sub { display: flex; flex-wrap: wrap; gap: 6px; }
+.ci-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.ci-act { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 11px; font-size: var(--type-sm); }
+
+.ci-tile { display: grid; flex: none; place-items: center; overflow: hidden; border: var(--box-border); background: var(--chip-strong-bg); color: var(--text-0); box-shadow: var(--shadow-control); }
+.ci-tile-lg { width: 52px; height: 52px; border-radius: 14px; }
+.ci-tile-md { width: 40px; height: 40px; border-radius: 11px; }
+.ci-tile-sm { width: 24px; height: 24px; border-radius: 7px; }
+.ci-tile-skill { background: color-mix(in srgb, var(--accent) 34%, var(--surface-card)); }
+.ci-tile-plugin { background: color-mix(in srgb, var(--purple, #8a7fb5) 30%, var(--surface-card)); }
+.ci-tile-pet { background: var(--bg-3); }
+.ci-tile img { width: 88%; height: 88%; object-fit: contain; }
+
+.ci-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 22px; padding: 0 8px; border: 1px solid var(--border-mid); border-radius: var(--r-pill); background: var(--surface-row); color: var(--text-1); font-family: var(--font-display); font-size: var(--type-xs); font-weight: var(--weight-bold); white-space: nowrap; }
+.ci-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ci-pill { margin-left: 6px; padding: 0 6px; border-radius: var(--r-pill); background: var(--chip-bg); color: var(--text-2); font-family: var(--font-display); font-size: var(--type-2xs); font-weight: var(--weight-bold); }
+.ci-pill.public { background: color-mix(in srgb, var(--green, #4f9a62) 22%, transparent); color: var(--success-text, var(--text-1)); }
+
+/* The body's panel: its head says which copy it shows, as the website's says which version. */
+.ci-panel { display: grid; overflow: hidden; }
+.ci-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 48px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.ci-panel-head > b { font-family: var(--font-display); }
+.ci-panel-status { color: var(--text-2); font-size: var(--type-sm); }
+.ci-panel-body { min-width: 0; padding: 14px 16px 16px; }
+.ci-copy button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 11px; border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: var(--type-sm); font-weight: var(--weight-semibold); cursor: pointer; }
+.ci-copy-one { display: inline-flex; align-items: center; gap: 6px; color: var(--text-1); font-size: var(--type-sm); }
+.ci-copy-one b { font-family: var(--font-display); }
+
+/* A's two columns, and the fold. */
+.ci-hub { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.ci-page-a .ci-side { display: none; }
+.ci-strip-fold { display: block; }
+@container ci-page (min-width: 880px) {
+  .ci-hub { grid-template-columns: minmax(0, 1fr) 280px; }
+  .ci-page-a .ci-side { display: flex; }
+  .ci-strip-fold { display: none; }
+}
+
+/* The rail: one concept per card, as the website's. */
+.ci-side { flex-direction: column; gap: 12px; min-width: 0; }
+.ci-side-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px 13px; }
+.ci-side-card h3 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: var(--type-lg); }
+.ci-blurb { margin: 0; color: var(--text-1); font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.ci-stats { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 0; padding: 8px 0 0; border-top: 1px solid var(--border); list-style: none; }
+.ci-stats li { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: var(--type-sm); }
+.ci-stats b { color: var(--text-0); font-family: var(--font-display); }
+.ci-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; margin: 0; }
+.ci-facts dt { color: var(--text-2); font-family: var(--font-display); font-size: var(--type-sm); }
+.ci-facts dd { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; margin: 0; color: var(--text-0); font-size: var(--type-sm); overflow-wrap: anywhere; }
+.ci-path { max-width: 100%; overflow-wrap: anywhere; }
+.ci-side-more { align-self: flex-start; }
+.ci-link { display: inline-flex; align-items: center; gap: 4px; color: var(--text-0); font-size: var(--type-sm); }
+.ci-links { gap: 4px 14px; }
+.ci-identity { padding: 2px 2px 0; }
+.ci-identity summary { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-family: var(--font-display); font-size: var(--type-sm); cursor: pointer; list-style: none; }
+.ci-identity summary::-webkit-details-marker { display: none; }
+.ci-identity[open] summary svg { transform: rotate(90deg); }
+.ci-identity .ci-facts { margin-top: 8px; }
+.ci-side > .ci-identity { padding: 0 14px; }
+
+/* D's strip, and A's when it folds: the session page's chip run. */
+.ci-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.ci-fact { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border: 1px solid var(--border-mid); border-radius: var(--r-pill); background: var(--surface-row); color: var(--text-1); font-size: var(--type-sm); white-space: nowrap; }
+.ci-fact b { color: var(--text-0); font-family: var(--font-display); }
+.ci-fact code { font-size: var(--type-xs); }
+.ci-fact .ci-pill { margin-left: 0; }
+
+/* B: the hero and the Information block. */
+.ci-hero { display: flex; gap: 16px; align-items: flex-start; min-width: 0; }
+.ci-hero .ci-tile-lg { width: 72px; height: 72px; border-radius: 18px; }
+.ci-hero-words { display: grid; gap: 8px; min-width: 0; }
+.ci-hero-words h1 { margin: 0; font-family: var(--font-display); font-size: var(--type-2xl); }
+.ci-hero-words p { margin: 0; }
+.ci-hero-by { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--text-2); font-size: var(--type-sm); }
+.ci-info h2 { margin: 0 0 8px; font-size: var(--type-lg); }
+.ci-info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px 18px; margin: 0; padding: 12px 0 0; border-top: 1px solid var(--border); }
+.ci-info-grid dt { color: var(--text-2); font-family: var(--font-display); font-size: var(--type-xs); }
+.ci-info-grid dd { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; margin: 2px 0 0; color: var(--text-0); font-size: var(--type-sm); }
+
+/* C: the shipped underline tabs, and Details as a grid of the rail's cards. */
+.ci-tabs { margin-top: -2px; }
+.ci-count { padding: 0 6px; border-radius: var(--r-pill); background: var(--chip-bg); color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-2xs); }
+.ci-details-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; align-items: start; }
+
+/* E: the list and the inspector. */
+.ci-page-e { grid-template-columns: minmax(170px, 0.42fr) minmax(0, 1fr); align-items: start; }
+.ci-mini-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.ci-mini-list li { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; border: 1px solid var(--border-mid); border-radius: 10px; background: var(--surface-card); color: var(--text-1); font-size: var(--type-sm); }
+.ci-mini-list li.is-on { border: var(--box-border); background: var(--surface-row-active); color: var(--text-0); font-weight: var(--weight-semibold); }
+.ci-mini-list li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ci-mini-art { width: 16px; height: 17px; object-fit: contain; }
+.ci-inspector { display: grid; gap: 12px; padding: 14px; }
+.ci-inspector-head, .ci-sheet-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ci-inspector .ci-item-title h1, .ci-sheet .ci-item-title h1 { font-size: var(--type-xl); }
+.ci-inspector-body { min-width: 0; padding-top: 10px; border-top: 1px solid var(--border); }
+
+/* F: the list behind, dimmed; the sheet over it. */
+.ci-page-f { position: relative; min-height: 640px; }
+.ci-behind { display: grid; gap: 8px; }
+.ci-ghost-row { display: flex; align-items: center; gap: 8px; min-height: 64px; padding: 0 16px; color: var(--text-1); font-weight: var(--weight-semibold); }
+.ci-scrim { position: absolute; inset: -22px calc(var(--ci-pad, 38px) * -1) auto; display: grid; justify-items: center; min-height: 700px; padding: 26px 18px; background: color-mix(in srgb, var(--bg-0) 78%, transparent); backdrop-filter: blur(1px); }
+.ci-sheet { display: grid; align-content: start; gap: 12px; width: min(640px, 100%); max-height: 600px; overflow: auto; padding: 16px; }
+.ci-sheet-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+
+/* ——— the skill ——— */
+
+.ci-skill { display: grid; gap: 12px; min-width: 0; }
+.ci-sub { margin: 4px 0 0; font-size: var(--type-lg); }
+.ci-inner { min-width: 0; padding: 12px 16px; border: 1px solid var(--border-mid); border-radius: var(--retro-panel-radius-inner, 10px); background: var(--surface-row); }
+.ci-md { max-width: none !important; }
+.ci-table { width: 100%; border-collapse: collapse; font-size: var(--type-sm); }
+.ci-table th { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border-mid); color: var(--text-2); font-family: var(--font-display); font-weight: var(--weight-bold); text-align: left; }
+.ci-table td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--border); color: var(--text-1); }
+.ci-table tr.is-open td { background: var(--surface-row-active); }
+.ci-exec { color: var(--warning-text); }
+.ci-file-link { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; color: var(--text-0); font: inherit; cursor: pointer; }
+.ci-frontmatter { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0; margin: 0; border: 1px solid var(--border-mid); border-radius: var(--retro-panel-radius-inner, 10px); overflow: hidden; font-size: var(--type-sm); }
+.ci-frontmatter dt, .ci-frontmatter dd { margin: 0; padding: 7px 12px; border-bottom: 1px solid var(--border); }
+.ci-frontmatter dt { background: var(--surface-subtle); color: var(--text-2); }
+.ci-frontmatter dd { color: var(--text-0); overflow-wrap: anywhere; }
+.ci-frontmatter dt:nth-last-of-type(1), .ci-frontmatter dd:last-of-type { border-bottom: 0; }
+
+.ci-browser { display: grid; grid-template-columns: 180px minmax(0, 1fr); min-width: 0; border: 1px solid var(--border-mid); border-radius: var(--retro-panel-radius-inner, 10px); overflow: hidden; }
+.ci-tree { display: grid; align-content: start; gap: 2px; margin: 0; padding: 8px; border-right: 1px solid var(--border); background: var(--surface-subtle); list-style: none; }
+.ci-tree button { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; padding: 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--text-1); font: inherit; font-size: var(--type-xs); text-align: left; cursor: pointer; }
+.ci-tree button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ci-tree button[aria-current="true"] { background: var(--surface-row-active); color: var(--text-0); font-weight: var(--weight-semibold); }
+.ci-viewer { display: grid; align-content: start; gap: 10px; min-width: 0; padding: 10px 14px 14px; }
+.ci-viewer-head { display: flex; justify-content: space-between; gap: 8px; color: var(--text-2); font-size: var(--type-xs); }
+.ci-code { margin: 0; padding: 10px 12px; overflow: auto; border-radius: 8px; background: var(--surface-subtle); color: var(--text-0); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; }
+@container ci-page (max-width: 620px) {
+  .ci-browser { grid-template-columns: minmax(0, 1fr); }
+  .ci-tree { grid-auto-flow: column; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+}
+
+/* ——— the plugin: the website's store hero ——— */
+
+.ci-plugin { display: grid; gap: 8px; min-width: 0; }
+.ci-plugin p { margin: 0; }
+.ci-plugin-name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; font-family: var(--font-display); }
+.ci-plugin-name b { color: var(--text-0); font-size: var(--type-2xl); overflow-wrap: anywhere; }
+.ci-plugin-name span { color: var(--text-2); font-family: var(--font-mono); font-size: var(--type-md); }
+.ci-plugin-by { color: var(--text-2); font-size: var(--type-sm); }
+.ci-plugin-by b { color: var(--text-1); font-weight: var(--weight-semibold); }
+.ci-plugin .ci-lede, .ci-skill > .ci-lede { max-width: 62ch; font-size: var(--type-md); line-height: 1.5; }
+.ci-here { display: inline-flex; align-items: center; gap: 7px; justify-self: start; min-height: 30px; padding: 0 12px; border: 1px solid var(--border-mid); border-radius: var(--r-pill); background: var(--surface-row); color: var(--text-0); font-size: var(--type-sm); }
+.ci-here svg { color: var(--success-text, var(--green)); }
+.ci-here.is-absent svg { color: var(--text-2); }
+.ci-install { display: flex; flex-direction: column; gap: 6px; max-width: 640px; min-width: 0; margin-top: 4px; padding: 8px 10px 10px 14px; border: 2px solid var(--control-border); border-radius: 12px; background: var(--surface-row); box-shadow: var(--shadow-control); }
+.ci-install-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ci-install-head .sync-segmented button { min-height: 26px; padding: 0 11px; border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: var(--type-xs); font-weight: var(--weight-bold); cursor: pointer; }
+.ci-copy-btn { flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; }
+.ci-lines { min-width: 0; margin: 0; padding: 4px 0; color: var(--text-0); font-family: var(--font-mono); font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ci-lines code { padding: 0; background: none; color: inherit; font: inherit; }
+.ci-prompt { color: var(--text-3); user-select: none; }
+.ci-plugin-facts { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+/* ——— the pet: the website's desk ——— */
+
+.ci-pet { display: grid; gap: 10px; min-width: 0; }
+.ci-desk { position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--border-mid); border-radius: var(--retro-panel-radius-inner, 10px); background: var(--bg-3); touch-action: pan-y; user-select: none; }
+.ci-desk-pet { position: absolute; bottom: 14px; z-index: 1; display: block; padding: 0; border: 0; border-radius: 12px; background: transparent; cursor: grab; touch-action: none; }
+.ci-desk-pet:active { cursor: grabbing; }
+.ci-desk-pet:focus-visible, .ci-moment:focus-visible, .ci-sheet-cell:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ci-sprite { display: block; background-repeat: no-repeat; image-rendering: pixelated; }
+.ci-win { position: absolute; left: 18px; top: 18px; width: min(64%, 440px); height: 72%; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-card); box-shadow: 0 6px 18px rgba(51, 39, 27, 0.14); }
+.ci-win-bar { display: flex; gap: 5px; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--bg-2); }
+.ci-win-bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--border-mid); }
+.ci-win-body { display: grid; gap: 9px; padding: 14px; }
+.ci-win-line { display: block; height: 8px; border-radius: 4px; background: var(--chip-strong-bg); }
+.ci-win-dots { display: inline-flex; gap: 5px; padding-top: 4px; }
+.ci-win-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-2); animation: ci-dot 1s steps(2, end) infinite; }
+.ci-win-dots i:nth-child(2) { animation-delay: 0.2s; }
+.ci-win-dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes ci-dot { 50% { opacity: 0.3; } }
+.ci-win-ask { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border-mid); border-radius: 8px; background: var(--accent-soft); }
+.ci-win-btns { display: flex; gap: 6px; }
+.ci-win-btns b { padding: 1px 10px; border: 1px solid var(--border-strong); border-radius: var(--r-pill); background: var(--surface-card); font-family: var(--font-display); font-size: var(--type-xs); }
+.ci-win-btns b:first-child { background: var(--button-primary-bg); color: var(--button-primary-text); }
+.ci-win-diff { display: grid; gap: 4px; padding: 8px; border-radius: 8px; background: var(--surface-subtle); }
+.ci-win-diff i { display: block; height: 8px; border-radius: 3px; }
+.ci-win-diff .is-del { width: 56%; background: color-mix(in srgb, var(--red) 40%, transparent); }
+.ci-win-diff .is-add { width: 72%; background: color-mix(in srgb, var(--green) 40%, transparent); }
+.ci-win-diff .is-add + .is-add { width: 48%; }
+.ci-win-fail { display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 8px; background: var(--danger-soft); }
+.ci-win-fail b { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--danger-text); color: var(--surface-card); font-size: var(--type-xs); }
+.ci-pet-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.ci-moments { display: flex; flex-wrap: wrap; gap: 6px; }
+.ci-moment { display: inline-flex; align-items: center; min-height: 28px; padding: 0 12px; border: 1px solid var(--border-mid); border-radius: var(--r-pill); background: var(--surface-row); color: var(--text-1); font-family: var(--font-display); font-size: var(--type-sm); font-weight: var(--weight-bold); cursor: pointer; white-space: nowrap; }
+.ci-moment:hover { border-color: var(--border-strong); background: var(--surface-row-hover); }
+.ci-moment[aria-pressed="true"] { padding: 0 11px; border: 2px solid var(--ink-line); background: var(--button-primary-bg); color: var(--button-primary-text); }
+@container ci-page (max-width: 560px) {
+  .ci-win { width: 58%; }
+}
+
+.ci-pet-still { justify-items: start; }
+.ci-pet-stage { display: grid; place-items: center; width: 100%; min-height: 260px; border: 1px solid var(--border-mid); border-radius: var(--retro-panel-radius-inner, 10px); background: var(--bg-3); }
+.ci-pet-stage img { image-rendering: auto; }
+.ci-sheet-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+.ci-sheet-cell { display: grid; justify-items: center; gap: 4px; padding: 8px 6px 10px; border: 1px solid var(--border-mid); border-radius: 12px; background: var(--bg-3); color: var(--text-1); font-family: var(--font-display); font-size: var(--type-sm); font-weight: var(--weight-bold); cursor: pointer; }
+.ci-sheet-cell[aria-pressed="true"] { border: 2px solid var(--ink-line); padding: 7px 5px 9px; color: var(--text-0); }
+
+/* ——— side by side: the frames at half size ——— */
+
+.ci-compare { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 22px 18px; align-items: start; }
+.ci-compare-cell { display: grid; gap: 6px; color: inherit; text-decoration: none; }
+.ci-compare-cell h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0; font-size: var(--type-md); }
+.ci-compare-cell h3 em { padding: 1px 8px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font-size: var(--type-2xs); font-style: normal; }
+.ci-compare-zoom { zoom: 0.5; pointer-events: none; }
+
+/* ——— the bodies part ——— */
+
+.ci-body-cases { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 26px; align-items: start; }
+.ci-body-case { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.ci-body-frame { container: ci-page / inline-size; margin-top: 4px; }
+
+/* ——— which copy ——— */
+
+.ci-copy-cases { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 20px; }
+.ci-copy-case { display: grid; gap: 6px; align-content: start; }
+
+/* ——— decisions and references ——— */
+
+.ci-questions { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; align-items: start; }
+.ci-refs { width: 100%; border-collapse: collapse; font-size: var(--type-sm); }
+.ci-refs th, .ci-refs td { padding: 7px 14px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.ci-refs th { color: var(--text-2); font-family: var(--font-display); }
+.ci-refs td:first-child { white-space: nowrap; }
+.ci-refs a { color: var(--text-0); }

@@ -468,8 +468,10 @@ and `pushed_by` (section 8) is the only record of them.
 | Set, rotate, and revoke the invitation code; remove Members and Admins; promote or demote | No | No | Yes | Yes |
 | Rename; make private; discard the private snapshot; remove the repository | No | No | Yes | Yes |
 
-The desktop offers the discard to the Owner alone, and only over a public
-version; an Admin discards on the website (section 4.5).
+Both sides offer the discard to the Owner and Admins on every repository, by
+the service's one flag, `can_discard_draft` (section 4.5,
+`PLAN_DELETE_DRAFT.md`): in view in every state, off with its reason while
+there is nothing to remove.
 
 Creation makes the creator the sole Owner. The Owner or an Admin sets the
 repository's code on the website's Members tab and sends it by any channel;
@@ -846,10 +848,11 @@ panel with the repository's facts and verbs:
   address from a button at the row's end.
 
 Members, invitations, approvals, removal, and Super Admin live on the
-website only. Discard lives on the website, for the Owner and Admins, and in
-the desktop chip's panel, for the Owner over a public version
-(**Discard draft…**, confirmed in the system's dialog). The desktop has no
-account UI in Settings; the account is the storage.
+website only. Discard lives on the website's Versions tab and in the desktop
+chip's panel, for the Owner and Admins on every repository, on the service's
+`can_discard_draft` (**Discard draft…**, confirmed in the system's dialog on
+the desktop and in place on the website; `PLAN_DELETE_DRAFT.md`). The
+desktop has no account UI in Settings; the account is the storage.
 
 ### 5.8 Implementation notes (2026-09-14)
 
@@ -1524,6 +1527,7 @@ section 4.1 says, so these become `Mallard-Desktop`, `Research-Notes`, `Rika`):
 | `GET` | `/v1/repositories/{id}/versions` | Versions newest first, including `removed` markers, for whoever may read the draft |
 | `POST` | `/v1/repositories/{id}/versions` | Publish: `{commit_id, name?, note?, expected_repository_revision}` freezes the draft the caller saw as the next version → `201 {version, commit_id, name, created_at}`; `409 version_unchanged` while the draft is a version already |
 | `GET` | `/v1/repositories/{id}/manifests/{commit_id}` | Manifest bytes |
+| `GET`, `PUT` | `/v1/repositories/{id}/listings/{commit_id}` | A plugin's listing (`display_name`, `developer`, `description`, `category`, `website_url`, `privacy_url`, `terms_url`; `GET` adds `description_from`): the plugin's own manifest on GitHub first, then the desktop's copy, behind the Owner's description. `PUT` is the desktop's copy of the installed manifest, sent once after a plugin push (`storage_catalog/plugin_listing.rs`); only the commit's pusher may set it, and a failure never fails the push. The public form is `GET /v1/public/repositories/{id}/listing` |
 | `GET` | `/v1/repositories/{id}/objects/{sha256}` | Payload bytes for collaborators |
 | `GET` | `/v1/repositories/{id}/views/{resource_id}?commit_id=` | Session view for collaborators |
 | `POST` | `/v1/repositories/{id}/uploads` | Section 6.5 step 1 |

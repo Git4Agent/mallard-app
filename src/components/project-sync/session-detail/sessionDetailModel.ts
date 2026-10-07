@@ -81,7 +81,6 @@ export function sessionPushFacts(detail: ProjectSessionDetail): PushSessionFacts
     metrics: {
       started_at: startedAt,
       ended_at: Math.max(detail.ended_at ?? startedAt, startedAt),
-      is_active: detail.is_active,
       user_round_count: prompts.value ?? 0,
       agent_message_count: responses.value ?? 0,
       tool_call_count: toolCalls.value ?? 0,
@@ -414,15 +413,12 @@ export function formatSessionStart(value?: number | null): string | null {
   return `${formatSessionDetailDay(value)} · ${formatSessionDetailClock(value)}`;
 }
 
-/** Tooltip detail for duration. A completed session names its end; an active
- * session has only elapsed time. */
+/** Tooltip detail for duration and end time. */
 export function formatSessionLengthDetail(
   started?: number | null,
   ended?: number | null,
-  isActive = false,
 ): string | null {
   const length = formatSessionDuration(started, ended);
-  if (isActive) return length ? `Still running · ${length} so far` : "Still running";
   if (length == null || ended == null) return null;
   const sameDay = sessionDetailDayKey(started) === sessionDetailDayKey(ended);
   const end = sameDay

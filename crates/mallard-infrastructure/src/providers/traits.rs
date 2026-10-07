@@ -874,6 +874,14 @@ pub trait SessionAdapter: Send + Sync {
     /// one provider home. Ownership is proven through each session's
     /// recorded cwd; the adapter must not scan outside `provider_home`.
     fn discover(&self, context: &SessionDiscoveryContext<'_>) -> Result<SessionDiscovery, String>;
+    /// Discover project-owned roots for bulk deletion, including empty sessions
+    /// hidden from normal discovery. Keep the same ownership and child checks.
+    fn discover_for_deletion(
+        &self,
+        context: &SessionDiscoveryContext<'_>,
+    ) -> Result<SessionDiscovery, String> {
+        self.discover(context)
+    }
     /// The one project-owned session that `is_requested` accepts, given its
     /// provider session id and transcript path, with the same ownership
     /// evidence `discover` gathers for it. A provider whose file names carry

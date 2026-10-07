@@ -534,6 +534,24 @@ impl ManagedObjectStore {
             .block_on(self.inner.client.get_repository(repository_id))?)
     }
 
+    /// Describes a plugin commit this account just pushed, for its page.
+    /// Display only: the push stands whatever this answers.
+    pub fn put_plugin_listing(
+        &self,
+        repository_id: &str,
+        commit_id: &str,
+        listing: &super::client::PluginListing,
+    ) -> Result<(), String> {
+        Ok(self
+            .inner
+            .runtime
+            .block_on(
+                self.inner
+                    .client
+                    .put_plugin_listing(repository_id, commit_id, listing),
+            )?)
+    }
+
     fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
         mutex
             .lock()
@@ -3376,6 +3394,7 @@ mod stub_tests {
         let (link, publication) = observed(&store, 41).await;
         assert_eq!(link.release, ReleaseState::NotPushed);
         assert!(!link.can_publish_version);
+        assert!(!link.can_discard_draft);
         assert_eq!(
             publication,
             PublicationStatus {
@@ -3389,6 +3408,7 @@ mod stub_tests {
         let (link, publication) = observed(&store, 41).await;
         assert_eq!(link.release, ReleaseState::Private);
         assert!(link.can_publish_version);
+        assert!(link.can_discard_draft, "no version: every push would go");
         assert_eq!(publication, standing(None, 1, None, None, None));
 
         // Private, the draft is version 1: Publish is off until a push.
@@ -3396,6 +3416,7 @@ mod stub_tests {
         let (link, publication) = observed(&store, 41).await;
         assert_eq!(link.release, ReleaseState::Private);
         assert!(!link.can_publish_version);
+        assert!(!link.can_discard_draft, "the draft is version 1");
         assert_eq!(publication, standing(Some(1), 2, Some(0), None, None));
         assert_eq!(state().publish(&id, None), Err(1));
 
@@ -3405,6 +3426,7 @@ mod stub_tests {
         }
         let (link, publication) = observed(&store, 41).await;
         assert!(link.can_publish_version);
+        assert!(link.can_discard_draft, "two pushes past version 1");
         assert_eq!(publication, standing(Some(1), 2, Some(2), None, None));
 
         // In review, the draft asked for; the next push closes the request.
@@ -3459,6 +3481,7 @@ mod stub_tests {
         let (link, publication) = observed(&store, 41).await;
         assert_eq!(link.release, ReleaseState::Public);
         assert!(!link.can_publish_version);
+        assert!(!link.can_discard_draft);
         assert_eq!(publication, standing(Some(3), 4, Some(0), Some(3), None));
 
         // Public, the draft one push on.
@@ -3466,6 +3489,7 @@ mod stub_tests {
         let (link, publication) = observed(&store, 41).await;
         assert_eq!(link.release, ReleaseState::SnapshotChanged);
         assert!(link.can_publish_version);
+        assert!(link.can_discard_draft);
         assert_eq!(publication, standing(Some(3), 4, Some(1), Some(3), None));
 
         // Public, version 4 published and not public; then a push past it.
@@ -3600,6 +3624,7 @@ mod stub_tests {
         let (link, _) = observed(&member, 42).await;
         assert_eq!(link.role.as_deref(), Some("member"));
         assert!(link.can_publish_version);
+        assert!(!link.can_discard_draft, "a Member publishes and does not discard");
         let second = publish(
             &member,
             &id,
@@ -3615,7 +3640,7 @@ mod stub_tests {
         let third = push_on(&owner, 42, &next).await;
         let (link, publication) = observed(&guest, 42).await;
         assert_eq!(link.role, None);
-        assert!(link.can_push && !link.can_publish_version);
+        assert!(link.can_push && !link.can_publish_version && !link.can_discard_draft);
         assert_eq!(publication, standing(Some(2), 3, Some(1), Some(2), None));
         let forbidden = publish(
             &guest,

@@ -205,7 +205,7 @@ function comparisonOf(project: Project) {
       repository_id: project.repository, state: "ready", message: null,
       link: {
         visibility: "private", can_pull: true, repository_id: project.repository, website_url: `${ORIGIN}/Rika321/${project.name}`,
-        owner_login: "Rika321", name: project.name, release: { kind: "private" }, repository_revision: 7, can_request_release: true, can_publish_version: true, role: "owner", can_push: true,
+        owner_login: "Rika321", name: project.name, release: { kind: "private" }, repository_revision: 7, can_request_release: true, can_publish_version: true, can_discard_draft: true, role: "owner", can_push: true,
       },
       publication: { draft: "pushed", latest_version: null, next_version: 1, draft_ahead: null, public_version: null, review_version: null },
     },

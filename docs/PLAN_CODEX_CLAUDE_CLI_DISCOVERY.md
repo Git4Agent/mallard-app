@@ -112,6 +112,17 @@ entries; a project-local file must not become a CLI through an empty or relative
 entry. Do not interpret aliases, shell functions, or shell command strings as
 executable selections.
 
+Spend the shell probe once per process, in a background thread right after
+the window opens, and in discovery only where it can change the answer: not
+for a saved selection, not when the inherited `PATH` names the launcher, and
+not in a process a terminal started (`SHLVL` set), whose `PATH` is the
+shell's already. The order above does not change when the probe is skipped.
+This is what the editors do: VS Code warms the probe after its first window
+opens and skips it for a CLI launch, JetBrains IDEs load it in a startup
+coroutine and skip it under `SHLVL`, Zed loads it in the background unless
+stdout is a terminal. None of them keeps the result across launches. (Added
+2026-10-06.)
+
 Use the Rust [which library](https://docs.rs/which/latest/which/) for ordinary
 executable search with an explicit path list. Add it as a direct dependency.
 Verified against 8.0.6: on Unix it checks `access(X_OK)`; on Windows it tries

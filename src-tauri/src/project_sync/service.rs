@@ -8560,11 +8560,12 @@ pub(super) fn prepare_push_review_with_progress(
             budget.reserved_bytes = 0;
         }
     }
-    let git_history = if scope == PushScope::Project {
-        capture_binding_git_history(config, storage_id, &project, &binding)?
-    } else {
-        None
-    };
+    // Both scopes. A session Push to Mallard Cloud carries the current
+    // history too; copying storage's older history forward filed the session
+    // it added under Uncommitted there.
+    let phase_started = Instant::now();
+    let git_history = capture_binding_git_history(config, storage_id, &project, &binding)?;
+    on_phase("capture Git history", phase_started.elapsed());
     let git_history_review_token = git_history
         .as_ref()
         .map(project_activity::git_history_review_token)
@@ -10884,19 +10885,11 @@ fn publish_reviewed(
         updated_at,
         credential_redaction_enabled,
     )?;
-    let git_history_review_token = if *push_scope == PushScope::Project {
-        git_history
-            .as_ref()
-            .map(project_activity::git_history_review_token)
-            .transpose()?
-    } else {
-        None
-    };
-    request.git_history = if push_scope.session_id().is_some() {
-        previous.and_then(|snapshot| snapshot.manifest.git_history.clone())
-    } else {
-        git_history
-    };
+    let git_history_review_token = git_history
+        .as_ref()
+        .map(project_activity::git_history_review_token)
+        .transpose()?;
+    request.git_history = git_history;
     let verify_git = || -> Result<(), String> {
         if let Some(token) = &git_history_review_token {
             project_activity::verify_git_history_review(Path::new(&binding.project_root), token)?;
@@ -10976,9 +10969,7 @@ fn push_bundle_reviewed_with_repository(
 ) -> Result<ProjectOperationResult, String> {
     // Older content-review fixtures do not exercise the Git review. Supply
     // that new approval from their temporary repository, as the UI now does.
-    if project_content_review.scope == PushScope::Project
-        && project_content_review.git_history_review_token.is_none()
-    {
+    if project_content_review.git_history_review_token.is_none() {
         let state = repository.load_project_state_snapshot()?;
         if let (Some(project), Some(binding)) = (
             state.config.project(local_project_id),
@@ -11171,7 +11162,6 @@ pub(super) fn push_bundle_reviewed_with_progress(
                 .any(|id| id != resource_id)
             || project_content_review.review_token.is_some()
             || project_content_review.files_shown
-            || project_content_review.git_history_review_token.is_some()
             || !project_content_review.removal_ids.is_empty()
             || !project_content_review
                 .acknowledged_warning_digests
@@ -11216,11 +11206,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
         return Err(eligibility.reason);
     }
     let resolved = resolve_project_binding_from_state(&state.bindings, &binding)?;
-    let git_history = if *push_scope == PushScope::Project {
-        capture_binding_git_history(config, storage_id, &project, &binding)?
-    } else {
-        None
-    };
+    let git_history = capture_binding_git_history(config, storage_id, &project, &binding)?;
+    on_phase("capture Git history", phase_started.elapsed());
     let actual_git_token = git_history
         .as_ref()
         .map(project_activity::git_history_review_token)

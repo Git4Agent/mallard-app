@@ -277,6 +277,10 @@ Admin from the website:
 - **R16. The website discards both.** Its control is offered to the Owner
   and Admins while there is something to discard: on a public repository a
   draft that differs from the public version, on any other a draft.
+  *R15 and R16 were superseded on 2026-10-06 by `PLAN_DELETE_DRAFT.md`: both
+  sides offer the discard to the Owner and Admins on every repository, by the
+  service's `can_discard_draft`, in view and off with a reason while there is
+  nothing to remove; the website's control moved to the Versions tab.*
 - **R17. The desktop says what happened.** On Mallard Cloud a pin that
   answers and bases that are stale read "Draft discarded", never "Another
   computer cleared". Nothing is reset. A computer that was on the removed

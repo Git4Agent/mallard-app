@@ -113,6 +113,7 @@ const CLOUD: ManagedCloudStatus = {
     repository_revision: 4,
     can_request_release: true,
     can_publish_version: true,
+    can_discard_draft: true,
     role: "owner",
   },
   publication: { draft: "pushed", latest_version: null, next_version: 1, draft_ahead: null, public_version: null, review_version: null },

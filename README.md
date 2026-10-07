@@ -114,9 +114,12 @@ The fastest path is the packaged macOS DMG (Apple Silicon or Intel) from the
 The app is Developer ID signed and notarized, so it opens without a security
 override. The first **Open in Terminal** or Codex App refresh asks for
 Automation permission; allow it. Mallard finds the Codex and Claude CLIs the
-way your terminal does, including the `PATH` your shell sets; if a machine
-keeps one somewhere else, pick the executable under Settings › Agent CLIs,
-where **Test** runs its `--version`. Mallard downloads newer releases in the
+way your terminal does, including the `PATH` your shell sets: it asks your
+login shell once per launch, in the background, with
+`MALLARD_RESOLVING_ENVIRONMENT=1` set so a startup file can skip slow work
+when it sees it. If a machine keeps a CLI somewhere else, pick the executable
+under Settings › Agent CLIs, where **Test** runs its `--version`. Mallard
+downloads newer releases in the
 background; **Update** in the sidebar's version mark restarts into one, and
 quitting installs it for the next launch. **Automatic updates** can be
 turned off under Settings › Privacy, where **Check for updates** always
@@ -556,12 +559,13 @@ checked-out branch unless another branch was picked in the branch menu. See
   repository it used on the link. Any other answer, such as a suspended
   account, a rejected sign-in or a service that cannot be reached, never
   reads as empty and keeps Push and Pull closed.
-- The Owner of a public Mallard Cloud repository can discard its draft from
-  the Mallard Cloud chip's panel (**Discard draft…**), after a confirmation: every push
-  after the public version is removed from Mallard Cloud, and the sessions
-  are compared with the public version again. Nothing on any computer is
-  deleted. A draft with no public version under it is discarded on the
-  website, by the Owner or an Admin.
+- The Owner or an Admin of a Mallard Cloud repository, private or public, can
+  discard its draft from the Mallard Cloud chip's panel (**Discard draft…**),
+  after a confirmation: every push after the latest version is removed from
+  Mallard Cloud and the draft is that version again; with no version, every
+  push goes and the repository stays, empty. The row stays in view and is
+  off, with its reason, while there is nothing to remove. Nothing on any
+  computer is deleted. The website's Versions tab offers the same act.
 
 Settings > Sync has separate **Push Codex children** and **Push Claude children**
 switches. Both default to Off and control the next Push. Each cloud task carries

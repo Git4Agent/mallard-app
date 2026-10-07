@@ -11,7 +11,6 @@ const paths = {
   "clock": ["M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0", "M12 7v5l3 3"],
   "info": ["M3 5a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14", "M12 8h.01", "M12 16v-4"],
   "chevron-right": ["M9 6l6 6l-6 6"],
-  "activity": ["M3 12h4l3 8l4 -16l3 8h4"],
 } as const;
 
 export default function SessionRowIcon({ name }: { name: keyof typeof paths }) {
