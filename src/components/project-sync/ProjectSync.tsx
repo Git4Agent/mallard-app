@@ -590,6 +590,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       localProjectId: projectId,
       resourceId: request.resourceId,
       occurrenceKey: request.occurrenceKey,
+      ...(request.storageId ? { storageId: request.storageId } : {}),
     });
   }, [preparingTracker]);
 

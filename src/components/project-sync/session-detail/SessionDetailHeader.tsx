@@ -2,8 +2,10 @@ import type { ReactNode, RefObject } from "react";
 import type { ProjectSessionDetail, SessionActionDescriptor, SessionDetailWarning } from "../../../types";
 import Icon, { type IconName } from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
+import ThreadStatusIcon from "../../sync-review/ThreadStatusIcon";
 import SessionDetailBack, { type SessionBackTarget } from "./SessionDetailBack";
 import SessionDetailNotes from "./SessionDetailNotes";
+import { SessionModelChip } from "./SessionModel";
 import {
   formatCompactCount,
   formatSessionCount,
@@ -11,6 +13,7 @@ import {
   formatSessionLengthDetail,
   formatSessionStart,
   sessionDetailDateTime,
+  type SessionDetailSource,
   type SessionPushGate,
 } from "./sessionDetailModel";
 
@@ -34,6 +37,7 @@ export default function SessionDetailHeader({
   pushGate,
   notes,
   onShowToolCalls,
+  source,
 }: {
   detail: ProjectSessionDetail;
   back: SessionBackTarget;
@@ -45,6 +49,9 @@ export default function SessionDetailHeader({
   /** How the transcript was read. */
   notes: SessionDetailWarning[];
   onShowToolCalls: (() => void) | null;
+  /** Where it was read from: this computer, or the storage a stored row
+   *  sits under. */
+  source: SessionDetailSource;
 }) {
   // The page's visible title is the path bar's leaf crumb — stated once, and
   // sticky, so it survives scrolling in a way an in-page poster never did. The
@@ -74,6 +81,16 @@ export default function SessionDetailHeader({
           {/* Facts state themselves: a branch after the branch glyph and a
               7-char sha need no caption. Only the token count keeps a word. */}
           <div className="session-detail-chips" aria-label="Session facts">
+            {/* A stored session's one difference from a local one, said the
+                way its row says it: the row's glyph, with the row's sentence
+                as the tooltip. The face names the fact, not the storage,
+                which is the bar's root crumb. */}
+            {source.kind === "stored" && (
+              <FactChip title={`Only in ${source.storageName}. Pull to download it here.`}>
+                <ThreadStatusIcon status="cloud-outstanding" size={14} />
+                Not on this computer
+              </FactChip>
+            )}
             {detail.branch && (
               <FactChip title={`Recorded branch ${detail.branch}`}>
                 <Icon name="git-branch" size={12} />
@@ -104,6 +121,9 @@ export default function SessionDetailHeader({
                 ? <><code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code> tokens</>
                 : "Tokens unavailable"}
             </FactChip>
+            {/* What the session started with: `model · level`; the transcript
+                notes where it changed. */}
+            {detail.settings && <SessionModelChip settings={detail.settings} />}
             {/* How many agents this session delegated to; the rows say which. */}
             {agentsKnown && (
               <FactChip title={agents.explanation ?? `${formatSessionCount(agents)} agents spawned in this session`}>
@@ -120,7 +140,7 @@ export default function SessionDetailHeader({
                 <code>{agent.role}</code>
               </FactChip>
             )}
-            {agent?.model && <FactChip title={`Model ${agent.model}`}><code>{agent.model}</code></FactChip>}
+            {agent?.model && !detail.settings && <FactChip title={`Model ${agent.model}`}><code>{agent.model}</code></FactChip>}
             {agent && <FactChip title={`Run ${agent.mode}`}>{agent.mode}</FactChip>}
             <SessionDetailNotes notes={notes} onShowToolCalls={onShowToolCalls} />
           </div>

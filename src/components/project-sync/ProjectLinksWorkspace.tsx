@@ -1281,6 +1281,9 @@ export default function ProjectLinksWorkspace({
     && workspaceProject?.local_project_id === activeProjectSubview.localProjectId
     ? activeProjectSubview
     : null;
+  // A stored row's page reads the storage's copy: its one verb is the Pull
+  // of that session, and Push has nothing local to send.
+  const storedSession = sessionDetailSubview?.storageId ?? null;
   const workspaceBinding = workspaceProject
     ? bindingByProject.get(workspaceProject.local_project_id)
     : undefined;
@@ -2467,6 +2470,7 @@ export default function ProjectLinksWorkspace({
     ? activityHeader
     : null;
   const sessionPushIssue = !sessionDetailSubview ? null
+    : storedSession ? "No local session to push."
     : !sessionComparison
       ? "Checking session…"
       : sessionComparison.comparisonError
@@ -2477,12 +2481,15 @@ export default function ProjectLinksWorkspace({
   const sessionPushHold = sessionComparison
     ? sessionPushGate(sessionPushEntry, managedCloudKey ? null : sessionComparison.comparisonError)
     : null;
-  const pullThreadCount = activityHeader?.counts.pull ?? 0;
+  // A stored session's page pulls that one session, as a local session's
+  // page pushes that one session: the count is the session, not the project.
+  const pullThreadCount = storedSession ? 1 : activityHeader?.counts.pull ?? 0;
   const pushThreadCount = sessionDetailSubview
     ? sessionPushIssue === null ? 1 : 0
     : activityHeader?.counts.push ?? 0;
   const pushFileCount = sessionDetailSubview ? 0 : projectFileCounts.push;
-  const pullCount = pullThreadCount + projectFileCounts.pull;
+  const pullFileCount = storedSession ? 0 : projectFileCounts.pull;
+  const pullCount = pullThreadCount + pullFileCount;
   const pushCount = pushThreadCount + pushFileCount;
   // The file scan holds the host-operation lock both verbs take, so a click
   // during it would only be refused; they wait it out, and say why.
@@ -2589,7 +2596,13 @@ export default function ProjectLinksWorkspace({
           setLinkingProjectId(null);
           void run(
             `pull:${workspaceActionPrefix}`,
-            () => onPull(workspaceProject.local_project_id, workspaceStorage.storage_id),
+            () => onPull(
+              workspaceProject.local_project_id,
+              storedSession ?? workspaceStorage.storage_id,
+              storedSession && sessionDetailSubview
+                ? { kind: "session", resource_id: sessionDetailSubview.resourceId }
+                : undefined,
+            ),
           );
         }}
         title={workspaceStorageIssue
@@ -2601,14 +2614,18 @@ export default function ProjectLinksWorkspace({
             ? (inlineStorageReview?.continueTitle ?? "Pull the selected changes from this storage")
             : !workspaceProfilesWritable
               ? "No selected agent profile is writable"
-              : "Review the Pull actions before applying them")}
+              : storedSession
+                ? "Review and pull this session from this storage"
+                : "Review the Pull actions before applying them")}
         aria-label={!workspaceBindingActive
           ? "Set up project before Pull"
           : workspacePullReviewOpen
           ? `${inlineStorageReview?.continueLabel ?? "Pull selected changes"} — ${workspaceStorage.name || "storage"}`
-          : showPullCount
-            ? `Pull ${projectSyncCountPhrase(pullThreadCount, projectFileCounts.pull)} from ${workspaceStorage.name || "storage"}`
-            : `Pull from ${workspaceStorage.name || "storage"}`}
+          : storedSession
+            ? `Pull this session from ${workspaceStorage.name || "storage"}`
+            : showPullCount
+              ? `Pull ${projectSyncCountPhrase(pullThreadCount, pullFileCount)} from ${workspaceStorage.name || "storage"}`
+              : `Pull from ${workspaceStorage.name || "storage"}`}
         aria-expanded={workspacePullReviewOpen}
       >
         <Icon
@@ -3240,6 +3257,13 @@ export default function ProjectLinksWorkspace({
               ?? ""}
             resourceId={sessionDetailSubview.resourceId}
             occurrenceKey={sessionDetailSubview.occurrenceKey}
+            source={sessionDetailSubview.storageId
+              ? {
+                kind: "stored",
+                storageId: sessionDetailSubview.storageId,
+                storageName: storages.find((storage) => storage.storage_id === sessionDetailSubview.storageId)?.name ?? "storage",
+              }
+              : { kind: "local" }}
             back={sessionBack}
             onHeaderChange={handleSessionHeaderChange}
             pushGate={workspaceReviewOpen ? null : sessionPushHold}

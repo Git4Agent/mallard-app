@@ -1,0 +1,44 @@
+/* Specimen chrome for stored-session-mockup.tsx. Nothing here is app CSS;
+   the app's own rules come from App.css. Classes are prefixed ss-. */
+
+.ss-spec { max-width: 1480px; margin: 0 auto; padding: 16px 20px 80px; display: grid; gap: 16px; font: 13px/1.45 system-ui, sans-serif; }
+.ss-title { margin: 0; font: 700 20px/1.2 system-ui; }
+.ss-sub { margin: -8px 0 0; color: var(--text-2); max-width: 1040px; }
+.ss-sub em { font-style: normal; color: var(--text-0); }
+.ss-controls { position: sticky; top: 0; z-index: 60; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+.ss-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ss-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+.ss-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+.ss-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+.ss-h { margin: 8px 0 -6px; font: 700 14px/1.3 system-ui; }
+.ss-h small { margin-left: 8px; color: var(--text-2); font-weight: 500; }
+.ss-h em { margin-left: 8px; padding: 1px 8px; border-radius: 999px; background: var(--text-0); color: var(--bg-0); font: 600 11px/1.5 system-ui; font-style: normal; vertical-align: 2px; }
+.ss-from { margin: 0 0 -6px; color: var(--text-2); }
+.ss-from a { color: inherit; }
+
+/* Frames: the app's shell geometry, as the catalog specimen draws it. */
+.ss-frame { position: relative; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--retro-frame-gutter); font-family: var(--font-sans); overflow: hidden; }
+.ss-app { display: flex; flex-direction: column; min-width: 0; height: 100%; }
+.ss-frame .sync-main { overflow-y: auto; padding: 20px 38px 40px; min-height: 0; }
+.ss-page-frame { height: 820px; max-width: 1180px; }
+.ss-page-frame.ss-head { height: 430px; }
+.ss-page-frame.ss-head .sync-main { overflow: hidden; }
+
+.ss-cells { display: grid; grid-template-columns: repeat(auto-fill, minmax(620px, 1fr)); gap: 18px 16px; align-items: start; }
+.ss-cell > span { display: block; margin: 0 0 4px 2px; color: var(--text-1); font: 600 12px/1.3 system-ui; }
+.ss-cell > span > small { margin-left: 6px; color: var(--text-2); font-weight: 500; }
+.ss-row-frame { height: 560px; }
+.ss-row-frame .sync-main { height: 100%; padding-top: 12px; }
+
+/* A proposed element's seat inside the shipped markup. */
+.ss-slot { display: contents; }
+.ss-row-after .sync-history-thread-title > strong[hidden] { display: none; }
+
+/* B: the row's glyph on the leaf crumb, after the provider mark. */
+.ss-leaf-status { margin-left: -2px; color: var(--text-3); }
+
+/* F: a labelled Pull where the launch buttons sit. */
+.ss-named-pull { height: 28px; padding: 0 10px; gap: 6px; font-size: var(--type-xs); }
+
+/* D: the banner sits where the page's own notices do, under the bar. */
+.ss-banner { max-width: 1380px; margin: 0 auto 12px; }

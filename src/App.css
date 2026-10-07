@@ -9625,6 +9625,91 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   font-variant-numeric: tabular-nums;
 }
 
+/* What the session started with — `model · level` — is a chip among the
+   header's facts (SessionModelChip), and a change is a note on the rail
+   before the message it applies from (SessionModelNote): a chip on a rule,
+   as the day divider draws its date, in the mono the band speaks. Both open
+   Model, Thinking and Source in the path bar's popover box. */
+.session-detail-model-chip {
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.session-detail-model-chip:hover,
+.session-detail-model-chip[aria-expanded="true"] {
+  background: var(--bg-hover);
+}
+
+.session-detail-model-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 10px;
+}
+
+.session-detail-model-note::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.session-detail-model-note-chip {
+  padding: 1px 8px;
+  border: var(--box-border);
+  border-radius: 4px;
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.session-detail-model-note-chip:hover,
+.session-detail-model-note-chip[aria-expanded="true"] {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+/* The facts: Model, Thinking, Source — a name on the left, its value on the
+   right, one line each. */
+.session-detail-model-facts {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 2px 4px;
+  color: var(--text-1);
+  font-size: var(--type-xs);
+  line-height: 1.45;
+}
+
+.session-detail-model-facts > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.session-detail-model-facts dt {
+  color: var(--text-2);
+}
+
+.session-detail-model-facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-0);
+  font-weight: var(--weight-semibold);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.session-detail-model-facts dd code {
+  font-family: var(--font-mono);
+  font-size: inherit;
+}
+
 /* A step — the agent narrating its work between calls — is a note, not an
    answer: the same ink box as everything else in the column, but no stamp band,
    a subtler fill, one size under the reply prose, and its purple kept as a

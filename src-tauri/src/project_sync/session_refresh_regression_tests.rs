@@ -4719,4 +4719,5 @@ mod session_refresh_regressions {
     }
 
     include!("session_pull_tests.rs");
+    include!("stored_session_tests.rs");
 }

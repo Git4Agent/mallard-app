@@ -1548,6 +1548,8 @@ export interface ProjectSessionDetail {
   snapshot_id: string;
   warnings: SessionDetailWarning[];
   agent?: SessionDetailAgent | null;
+  /** What the session started with, when any message recorded it. */
+  settings?: SessionMessageSettings | null;
 }
 
 export interface SessionToolCallPreview {
@@ -1568,6 +1570,21 @@ export interface SessionTurnToolSummary {
   tool_calls: SessionCount;
 }
 
+/** Where a message's model and thinking level were read from: the Codex
+ * turn's settings, a Claude reply's own record, the first Claude reply that
+ * answered an input, or nowhere. */
+export type SessionMessageSettingsSource = "turn" | "reply" | "linked" | "none";
+
+/** The model and thinking level a message was generated with, as the
+ * transcript recorded them: a field is absent when it recorded none. An
+ * input wears the first reply that answered it; nothing is read from the
+ * current configuration. */
+export interface SessionMessageSettings {
+  model?: string | null;
+  effort?: string | null;
+  source: SessionMessageSettingsSource;
+}
+
 export interface SessionTimelineEvent {
   event_id: string;
   ordinal: number;
@@ -1581,6 +1598,8 @@ export interface SessionTimelineEvent {
   tool?: SessionToolCallPreview | null;
   checkpoint?: SessionCheckpoint | null;
   agent?: SessionAgentPreview | null;
+  /** On a prompt or a response: what generated it. */
+  settings?: SessionMessageSettings | null;
 }
 
 export interface ProjectSessionTimelinePage {

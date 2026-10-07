@@ -336,7 +336,7 @@ fn all_categories() -> BTreeSet<SessionToolCategory> {
     .collect()
 }
 
-fn safe_stem(value: &str) -> String {
+pub(crate) fn safe_stem(value: &str) -> String {
     let stem = value
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')

@@ -29,6 +29,7 @@ import {
   sessionDetailFilterFingerprint,
   sessionDetailFilterToggles,
   type SessionDetailFilters,
+  type SessionDetailSource,
   type SessionPushGate,
   sessionPushFacts,
 } from "./sessionDetailModel";
@@ -79,6 +80,9 @@ interface Props {
   /** A hold on this session's Push that the user clears, from the workspace's
    *  comparison. */
   pushGate: SessionPushGate | null;
+  /** Where the session is read from: this computer's provider home, or the
+   *  storage a stored row sits under. Every read passes it on. */
+  source: SessionDetailSource;
 }
 
 function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarning[] {
@@ -124,7 +128,9 @@ export default function SessionDetailPage({
   onHeaderChange,
   onOpenSession,
   pushGate,
+  source,
 }: Props) {
+  const storageId = source.kind === "stored" ? source.storageId : null;
   const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -154,7 +160,7 @@ export default function SessionDetailPage({
     setDetailError(null);
     setActionError(null);
     try {
-      const next = await projectSyncApi.getProjectSessionDetail(localProjectId, resourceId);
+      const next = await projectSyncApi.getProjectSessionDetail(localProjectId, resourceId, storageId);
       if (requestId !== detailRequestRef.current) return;
       setSnapshotChanged(false);
       setTimelineError(null);
@@ -173,7 +179,7 @@ export default function SessionDetailPage({
     } finally {
       if (requestId === detailRequestRef.current) setDetailLoading(false);
     }
-  }, [localProjectId, resourceId]);
+  }, [localProjectId, resourceId, storageId]);
 
   useEffect(() => {
     focusedHeadingRef.current = false;
@@ -253,6 +259,7 @@ export default function SessionDetailPage({
           included_tool_categories: [...ALL_SESSION_TOOL_CATEGORIES],
           turn_id: null,
         },
+        storageId,
       );
       if (requestId !== timelineRequestRef.current) return;
       setSnapshotChanged(false);
@@ -276,7 +283,7 @@ export default function SessionDetailPage({
         setTimelineLoadingMore(false);
       }
     }
-  }, [localProjectId, resourceId]);
+  }, [localProjectId, resourceId, storageId]);
 
   const filterFingerprint = filters ? sessionDetailFilterFingerprint(filters) : "";
   useEffect(() => {
@@ -304,6 +311,7 @@ export default function SessionDetailPage({
         resourceId,
         detail.snapshot_id,
         eventId,
+        storageId,
       );
       if (eventDetailRequestRef.current[eventId] !== requestId) return;
       setToolDetails((current) => ({
@@ -323,7 +331,7 @@ export default function SessionDetailPage({
         },
       }));
     }
-  }, [detail, localProjectId, resourceId, toolDetails]);
+  }, [detail, localProjectId, resourceId, storageId, toolDetails]);
 
   const handleToolExpandedChange = useCallback((eventId: string, expanded: boolean) => {
     setExpandedToolIds((current) => {
@@ -456,6 +464,7 @@ export default function SessionDetailPage({
     >
       <SessionDetailHeader
         detail={detail}
+        source={source}
         back={back}
         headingRef={headingRef}
         actionBusyId={actionBusyId}
@@ -502,6 +511,7 @@ export default function SessionDetailPage({
             repositoryUrl={detail.github_repository_url}
             hasFilterToggles={sessionDetailFilterToggles(detail.event_counts).length > 0}
             onOpenSession={onOpenSession}
+            startSettings={detail.settings}
           />
         </div>
       )}

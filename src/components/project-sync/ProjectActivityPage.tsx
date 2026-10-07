@@ -157,6 +157,9 @@ interface ContentProps extends SessionSearchProps {
   storageLoading?: boolean;
   comparisonError?: string | null;
   activeStorageName?: string | null;
+  /** The storage whose stored rows this list shows. A stored row opens its
+   *  page through it; without one, a stored row's title stays plain. */
+  storageId?: string | null;
   selectionMode?: "push" | "pull";
   pushGitHistory?: PushGitHistory;
   selectedResourceIds?: ReadonlySet<string>;
@@ -956,6 +959,8 @@ interface SessionCardProps {
    *  commands by portable conversation identity. */
   reviewResourceId: string;
   storageName?: string | null;
+  /** The storage a stored row opens its page through. */
+  storageId?: string | null;
   /** Drawn when there is no comparison entry to read. Required, not optional:
    *  the badge slot is a grid column and must never resolve to nothing. */
   syncFallback: SessionSyncPresentation;
@@ -1395,7 +1400,7 @@ function ChildOmissionIcon() {
 function SessionCard({
   session, occurrenceKey, workingDirectory, busy = false, busyActionId = null,
   onSessionAction, onDeleteSession, onOpenSessionDetail,
-  syncEntry, reviewResourceId, storageName, syncFallback, selectionMode, selected = false, selectable = false,
+  syncEntry, reviewResourceId, storageName, storageId = null, syncFallback, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: SessionCardProps) {
   const fullTitle = session.title || "Untitled session";
@@ -1404,10 +1409,14 @@ function SessionCard({
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
   // The status badge owns row state; the branch-unmapped heading owns its pencil.
   const accessNote = sessionAccessNote(session);
+  // A stored row opens through the storage the list shows: reading its copy
+  // needs an adapter, not a provider profile. A local row needs its profile.
+  const stored = session.source === "remote_only";
   const canOpenDetails = !selectionMode
-    && session.source !== "remote_only"
-    && session.access === "bound_ready"
-    && onOpenSessionDetail != null;
+    && onOpenSessionDetail != null
+    && (stored
+      ? storageId != null && session.access !== "unsupported"
+      : session.access === "bound_ready");
   const openAction = session.actions.find((action) => action.kind === "open_in_app") ?? null;
   const otherActions = session.actions.filter(
     (action): action is SessionActionDescriptor & { kind: keyof typeof SESSION_ACTION_ICONS } =>
@@ -1418,6 +1427,7 @@ function SessionCard({
     onOpenSessionDetail?.({
       resourceId: session.resource_id,
       occurrenceKey,
+      ...(stored && storageId ? { storageId } : {}),
     }, trigger);
   };
   return (
@@ -1882,7 +1892,7 @@ function providerNoticeSeverity(state: ProviderActivityState): NoticeSeverity {
 export function ProjectChatHistoryContent({
   project, binding, activity, loading, loadingMore, loadError, onRetryLoad, actionBusyResourceId, actionBusyActionId = null, onShowLess, canShowLess,
   onLoadMore,
-  onSessionAction, onDeleteSession, onOpenSessionDetail, comparison = null,
+  onSessionAction, onDeleteSession, onOpenSessionDetail, comparison = null, storageId = null,
   storageLoading = false, comparisonLoading = false, comparisonError = null, comparisonErrorHandled = false, activeStorageName = null,
   selectionMode, pushGitHistory, selectedResourceIds = new Set(), selectableResourceIds, reviewResourceIds,
   selectionDisabled = false, onToggleResource, onReviewPull,
@@ -2105,7 +2115,7 @@ export function ProjectChatHistoryContent({
       busy={actionBusyResourceId === session.resource_id} busyActionId={actionBusyActionId}
       onSessionAction={onSessionAction} onDeleteSession={onDeleteSession} onOpenSessionDetail={onOpenSessionDetail}
       syncEntry={entry} reviewResourceId={reviewResourceId}
-      storageName={rowStorageName} syncFallback={syncFallback}
+      storageName={rowStorageName} storageId={storageId} syncFallback={syncFallback}
       selectionMode={selectionMode} selected={selectedResourceIds.has(reviewResourceId)}
       selectable={selectable}
       selectionDisabled={selectionDisabled} onToggleResource={onToggleResource}
@@ -2412,9 +2422,8 @@ export function ProjectChatHistoryContent({
               /* Above the timeline, not on it: these rows have no commit and no
                  local file, so the group draws the timeline's frame treatment
                  but no rail segment. The rows are the ordinary session card —
-                 the backend already hands a stored session no actions, and
-                 details stay closed for `remote_only`, so nothing on the row
-                 offers what a missing transcript cannot honor. */
+                 the backend hands a stored session no launch actions, and its
+                 title opens the stored copy's page through this storage. */
               <section className={`sync-history-storage-only${storageOnlyCollapsed ? " collapsed" : ""}`} aria-labelledby="storage-only-heading">
                 <SectionFold
                   collapsed={storageOnlyCollapsed}
@@ -2998,5 +3007,5 @@ export default function ProjectActivityPage({
       actionInFlightRef.current = false;
     }
   };
-  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} reviewResourceIds={reviewResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} />;
+  return <ProjectChatHistoryContent key={`${project.local_project_id}:${activeStorageId}:${selectionMode}`} searchQuery={searchQuery} onSearchQueryChange={onSearchQueryChange} onSearchResultsChange={onSearchResultsChange} project={project} binding={binding} activity={activity} loading={loading} loadingMore={loadingMore} loadError={loadError} onRetryLoad={() => void loadWorkspace(branch)} actionBusyResourceId={actionBusyResourceId} actionBusyActionId={actionBusyActionId} onLoadMore={() => void load(activity?.older ? activity.older.newest_at + 1 : null, activity?.git?.selected_branch ?? branch)} onShowLess={showLess} canShowLess={pages.length > 1} onSessionAction={(session, action) => void runSessionAction(session, action)} onDeleteSession={(session) => void deleteSession(session)} onOpenSessionDetail={onOpenSessionDetail} comparison={comparison} storageLoading={storageLoading} comparisonLoading={comparisonLoading} comparisonError={comparisonError} comparisonErrorHandled={comparisonErrorHandled} activeStorageName={activeStorageName} storageId={activeStorageId} selectionMode={selectionMode} pushGitHistory={pushGitHistory} selectedResourceIds={selectedResourceIds} selectableResourceIds={selectableResourceIds} reviewResourceIds={reviewResourceIds} selectionDisabled={selectionDisabled} onToggleResource={onToggleResource} onReviewPull={onReviewPull} onChooseAgentProfile={onChooseAgentProfile} continuityActionBusy={continuityActionBusy} reviewScaffold={reviewScaffold} viewSwitch={viewSwitch} />;
 }

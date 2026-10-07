@@ -15,7 +15,7 @@ use crate::persistence::{
 };
 use crate::project_activity::{discover_github_repository_url, resolve_activity_project};
 use crate::provider_capture::LocalSessionView;
-use crate::providers::traits::timeline_tool_detail_budgets;
+use crate::providers::traits::{timeline_tool_detail_budgets, SessionMessageSettings};
 use crate::providers::{
     AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionAgentPreview,
     SessionCheckpoint, SessionChildIdentity, SessionCount, SessionCountQuality,
@@ -23,6 +23,7 @@ use crate::providers::{
     SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory, AGENT_RESOURCE_SEGMENT,
 };
+use crate::stored_session::StoredSessionTranscript;
 use mallard_domain::{
     hex_lower, parse_conversation_resource_id, sha256_hex, LocalConversationBinding,
     LocalProjectId, NoticeSeverity, ProviderKey,
@@ -125,6 +126,10 @@ pub struct ProjectSessionDetail {
     /// and the row the parent shows for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionDetailAgent>,
+    /// What the session started with: its first message's model and thinking
+    /// level, when any message recorded them. The transcript marks changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SessionMessageSettings>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -628,6 +633,14 @@ fn sniff_markdown_image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// The two kinds that wear a model stamp: an input and a final reply.
+fn is_message_kind(kind: SessionTimelineEventKind) -> bool {
+    matches!(
+        kind,
+        SessionTimelineEventKind::Prompt | SessionTimelineEventKind::Response
+    )
+}
+
 fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetailResult<()> {
     let file_size = if index.sources.is_empty() {
         file_size
@@ -707,6 +720,16 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
         }
         if let Some(turn_id) = &event.turn_id {
             ensure_identifier("turn id", turn_id)?;
+        }
+        if !event.settings.is_valid()
+            || (!is_message_kind(event.kind)
+                && event.kind != SessionTimelineEventKind::IntermediateStep
+                && event.settings != SessionMessageSettings::none())
+        {
+            return Err(SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider returned invalid message settings.",
+            ));
         }
         if let Some(summary) = &event.turn_tool_summary {
             if event.turn_id.as_deref() != Some(summary.turn_id.as_str())
@@ -872,7 +895,6 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
     Ok(())
 }
 
-
 fn validate_page_slice(
     slice: &SessionTimelinePageSlice,
     index: &SessionTimelineIndex,
@@ -937,6 +959,14 @@ fn validate_page_slice(
                 SessionDetailErrorCode::ProviderError,
                 "The provider returned agent metadata on an invalid event.",
             ));
+        }
+        if let Some(settings) = &event.settings {
+            if !is_message_kind(event.kind) || !settings.is_valid() {
+                return Err(SessionDetailError::new(
+                    SessionDetailErrorCode::ProviderError,
+                    "The provider returned message settings on an invalid event.",
+                ));
+            }
         }
         if let Some(agent) = &event.agent {
             if agent.label.is_empty()
@@ -1145,7 +1175,7 @@ fn resolve_local_session(
     }
 }
 
-fn project_root_aliases(
+pub(crate) fn project_root_aliases(
     resolved: &crate::project_activity::ResolvedActivityProject,
 ) -> Vec<PathBuf> {
     let mut spellings = vec![
@@ -1494,6 +1524,7 @@ fn checkpoint_event(
         tool: None,
         checkpoint: Some(checkpoint),
         agent: None,
+        settings: None,
     }
 }
 
@@ -1729,7 +1760,6 @@ fn summarize_session(
     Ok(summary)
 }
 
-
 fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String {
     let transcript = session.transcript_path.to_string_lossy();
     let provider_home = session.provider_home.to_string_lossy();
@@ -1950,8 +1980,60 @@ pub fn get_project_session_detail(
         Some(mut parent) => Some(describe_child(repository, registry, &mut parent, &session)?),
         None => None,
     };
+    // A child is no session to resume, so it offers no verbs.
+    let actions = if session.child.is_some() {
+        Vec::new()
+    } else {
+        registry
+            .require(&session.provider)
+            .map(|adapter| {
+                adapter.available_actions(&SessionActionContext {
+                    provider_session_id: &session.provider_session_id,
+                    is_local: true,
+                })
+            })
+            .unwrap_or_default()
+    };
+    session_detail_body(
+        registry,
+        &session,
+        SessionDetailParts {
+            index: &index,
+            summary: &summary,
+            snapshot_id,
+            cache_warnings,
+            agent,
+            actions,
+        },
+    )
+}
+
+/// What a page's detail is built from once its transcript is resolved and
+/// indexed, however it was reached: a local file, or a stored copy.
+struct SessionDetailParts<'a> {
+    index: &'a SessionTimelineIndex,
+    summary: &'a crate::providers::SessionFileSummary,
+    snapshot_id: String,
+    cache_warnings: Vec<SessionDetailWarning>,
+    agent: Option<SessionDetailAgent>,
+    actions: Vec<SessionActionDescriptor>,
+}
+
+fn session_detail_body(
+    registry: &AgentProviderRegistry,
+    session: &ResolvedLocalSession,
+    parts: SessionDetailParts<'_>,
+) -> SessionDetailResult<ProjectSessionDetail> {
+    let SessionDetailParts {
+        index,
+        summary,
+        snapshot_id,
+        cache_warnings,
+        agent,
+        mut actions,
+    } = parts;
     // Checkpoints are the parent's; a child neither commits nor is a
-    // session to resume, so it offers no verbs either.
+    // session to resume.
     let checkpoint = if session.child.is_some() {
         CheckpointSupport::Unsupported
     } else {
@@ -1977,22 +2059,9 @@ pub fn get_project_session_detail(
             "This provider transcript does not expose a reliable token total.",
         ),
     };
-    let mut actions = if session.child.is_some() {
-        Vec::new()
-    } else {
-        registry
-            .require(&session.provider)
-            .map(|adapter| {
-                adapter.available_actions(&SessionActionContext {
-                    provider_session_id: &session.provider_session_id,
-                    is_local: true,
-                })
-            })
-            .unwrap_or_default()
-    };
-    sanitize_actions(&mut actions, &session)?;
-    let mut warnings = timeline_warnings(&index, cache_warnings);
-    sanitize_warnings(&mut warnings, &session);
+    sanitize_actions(&mut actions, session)?;
+    let mut warnings = timeline_warnings(index, cache_warnings);
+    sanitize_warnings(&mut warnings, session);
     // The provider index title leads: keep-both preservation markers are
     // title renames in the provider's session index, which the transcript
     // summary never reflects. The transcript title covers unnamed sessions.
@@ -2017,19 +2086,22 @@ pub fn get_project_session_detail(
         provider: session.provider.clone(),
         provider_display_name: provider_display_name(registry, &session.provider),
         provider_session_id: session.provider_session_id.clone(),
-        title: sanitize_boundary_text(&title, &session),
+        title: sanitize_boundary_text(&title, session),
         summary: summary
             .summary
             .as_deref()
-            .map(|summary| sanitize_boundary_text(summary, &session)),
+            .map(|summary| sanitize_boundary_text(summary, session)),
         started_at: summary.started_at,
         ended_at: summary.ended_at,
         is_active: false,
         branch: summary
             .branch
             .as_deref()
-            .map(|branch| sanitize_boundary_text(branch, &session)),
-        recorded_sha: summary.recorded_sha.filter(|sha| valid_full_sha(sha)),
+            .map(|branch| sanitize_boundary_text(branch, session)),
+        recorded_sha: summary
+            .recorded_sha
+            .clone()
+            .filter(|sha| valid_full_sha(sha)),
         tokens,
         event_counts,
         actions,
@@ -2039,8 +2111,22 @@ pub fn get_project_session_detail(
         snapshot_id,
         warnings,
         agent,
+        settings: session_settings(index),
     };
     Ok(detail)
+}
+
+/// What the session started with: its first message's settings, when any
+/// message recorded a value at all. A session recorded before the clients
+/// wrote these fields has none to state.
+fn session_settings(index: &SessionTimelineIndex) -> Option<SessionMessageSettings> {
+    let mut messages = index
+        .events
+        .iter()
+        .filter(|entry| is_message_kind(entry.kind))
+        .map(|entry| &entry.settings);
+    let first = messages.next()?.clone();
+    (first.is_recorded() || messages.any(SessionMessageSettings::is_recorded)).then_some(first)
 }
 
 /// The parent's row for this child, read from the parent's cached index.
@@ -2124,7 +2210,29 @@ pub fn get_project_session_timeline_page(
     if request.snapshot_id != current_snapshot_id {
         return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
     }
-    let fingerprint = filter_fingerprint(&request)?;
+    timeline_page_body(
+        registry,
+        &session,
+        &index,
+        &summary,
+        current_snapshot_id,
+        cache_warnings,
+        &request,
+    )
+}
+
+/// One filtered page of a resolved, indexed session whose snapshot the
+/// request already matched.
+fn timeline_page_body(
+    registry: &AgentProviderRegistry,
+    session: &ResolvedLocalSession,
+    index: &SessionTimelineIndex,
+    summary: &crate::providers::SessionFileSummary,
+    current_snapshot_id: String,
+    cache_warnings: Vec<SessionDetailWarning>,
+    request: &ProjectSessionTimelineRequest,
+) -> SessionDetailResult<ProjectSessionTimelinePage> {
+    let fingerprint = filter_fingerprint(request)?;
     let start_index = if let Some(cursor) = &request.cursor {
         let cursor = decode_cursor(cursor)?;
         if cursor.provider != session.provider
@@ -2164,7 +2272,7 @@ pub fn get_project_session_timeline_page(
         adapter
             .read_timeline_page(
                 &session.transcript_path,
-                &index,
+                index,
                 &query,
                 &session.timeline_context(),
             )
@@ -2180,7 +2288,7 @@ pub fn get_project_session_timeline_page(
             next_index: None,
         }
     };
-    validate_slice_against_query(&slice, &index, &query, &session.provider)?;
+    validate_slice_against_query(&slice, index, &query, &session.provider)?;
     let checkpoint_requested = request.turn_id.is_none()
         && session.child.is_none()
         && request
@@ -2193,13 +2301,13 @@ pub fn get_project_session_timeline_page(
             summary.last_prompt_at.or(summary.ended_at),
         )? {
             if slice.events.len() < limit {
-                slice.events.push(checkpoint_event(&index, checkpoint));
+                slice.events.push(checkpoint_event(index, checkpoint));
             } else {
                 slice.next_index = Some(index.events.len());
             }
         }
     }
-    sanitize_timeline_events(&mut slice.events, &session);
+    sanitize_timeline_events(&mut slice.events, session);
     let next_cursor = slice
         .next_index
         .map(|next_index| {
@@ -2213,10 +2321,10 @@ pub fn get_project_session_timeline_page(
             })
         })
         .transpose()?;
-    let mut warnings = timeline_warnings(&index, cache_warnings);
-    sanitize_warnings(&mut warnings, &session);
+    let mut warnings = timeline_warnings(index, cache_warnings);
+    sanitize_warnings(&mut warnings, session);
     let page = ProjectSessionTimelinePage {
-        resource_id: session.resource_id,
+        resource_id: session.resource_id.clone(),
         snapshot_id: current_snapshot_id,
         events: slice.events,
         next_cursor,
@@ -2263,6 +2371,17 @@ pub fn get_project_session_event_detail(
     if snapshot_id_value != current_snapshot_id {
         return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
     }
+    event_detail_body(registry, &session, &index, event_id)
+}
+
+/// One indexed tool event's body, from a resolved, indexed session whose
+/// snapshot the request already matched.
+fn event_detail_body(
+    registry: &AgentProviderRegistry,
+    session: &ResolvedLocalSession,
+    index: &SessionTimelineIndex,
+    event_id: &str,
+) -> SessionDetailResult<SessionEventDetail> {
     let indexed = index
         .events
         .iter()
@@ -2286,7 +2405,7 @@ pub fn get_project_session_event_detail(
     let mut detail = adapter
         .read_event_detail(
             &session.transcript_path,
-            &index,
+            index,
             event_id,
             &session.timeline_context(),
         )
@@ -2308,10 +2427,10 @@ pub fn get_project_session_event_detail(
         ));
     }
     if let Some(arguments) = detail.arguments.as_mut() {
-        *arguments = sanitize_boundary_text(arguments, &session);
+        *arguments = sanitize_boundary_text(arguments, session);
     }
     if let Some(result) = detail.result.as_mut() {
-        *result = sanitize_boundary_text(result, &session);
+        *result = sanitize_boundary_text(result, session);
     }
     let (argument_budget, result_budget) =
         timeline_tool_detail_budgets(detail.arguments.as_deref(), detail.result.as_deref());
@@ -2326,6 +2445,171 @@ pub fn get_project_session_event_detail(
         &mut detail.result_truncated,
     );
     Ok(detail)
+}
+
+// ---------------------------------------------------------------------------
+// Stored sessions: a row that is only in a storage, read without a Pull
+// ---------------------------------------------------------------------------
+
+/// A stored session, resolved the way a local one is: its private temporary
+/// home is the provider home and its project root is this project's, so
+/// checkpoints come from the local repository and path links open here.
+/// It has no binding (nothing was installed) and is never a child.
+fn resolve_stored_session(
+    stored: &StoredSessionTranscript,
+) -> SessionDetailResult<ResolvedLocalSession> {
+    ensure_identifier("resource id", stored.resource_id())?;
+    let (_, hops) = split_agent_resource_id(stored.resource_id());
+    if !hops.is_empty() {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::NotLocal,
+            "This agent's transcript is not available for a stored session.",
+        ));
+    }
+    let metadata = fs::symlink_metadata(stored.transcript_path()).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The stored session could not be read.",
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The stored session could not be read.",
+        ));
+    }
+    Ok(ResolvedLocalSession {
+        provider: stored.provider().clone(),
+        resource_id: stored.resource_id().to_string(),
+        project_root: stored.project_root().to_path_buf(),
+        project_root_aliases: stored.project_root_aliases().to_vec(),
+        provider_home: stored.provider_home().to_path_buf(),
+        provider_session_id: stored.provider_session_id().to_string(),
+        transcript_path: stored.transcript_path().to_path_buf(),
+        display_name: stored.display_name().to_string(),
+        file_size: metadata.len(),
+        modified_nanos: modified_nanos(&metadata),
+        binding: None,
+        child: None,
+    })
+}
+
+/// A stored session's snapshot is its content: the stored object's digest
+/// and the limits its index is built under. A new publication changes it;
+/// nothing else does, so a page's cursors stay valid across requests even
+/// though each request prepares the transcript afresh.
+fn stored_snapshot_id(stored: &StoredSessionTranscript, timeline_version: u32) -> String {
+    sha256_hex(
+        format!(
+            "stored-session-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            stored.provider(),
+            stored.resource_id(),
+            stored.wire_sha256(),
+            timeline_version,
+            timeline_message_preview_bytes() as u64,
+            conversation_file_limit_bytes(),
+            stored.project_root().display()
+        )
+        .as_bytes(),
+    )
+}
+
+/// Index the prepared transcript for this request only: a stored session
+/// keeps no cache, on disk or in memory.
+fn build_fresh_index(
+    registry: &AgentProviderRegistry,
+    session: &ResolvedLocalSession,
+) -> SessionDetailResult<(SessionTimelineIndex, crate::providers::SessionFileSummary)> {
+    let adapter = registry.require(&session.provider).map_err(|_| {
+        SessionDetailError::new(
+            SessionDetailErrorCode::NotFound,
+            "No registered provider can read this session.",
+        )
+    })?;
+    let timeline_version = adapter.timeline_version();
+    let index = adapter
+        .build_timeline_index(&session.transcript_path, &session.timeline_context())
+        .map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The provider could not build a safe timeline for this session.",
+            )
+        })?;
+    if index.parser_version != timeline_version {
+        return Err(SessionDetailError::new(
+            SessionDetailErrorCode::ProviderError,
+            "The provider returned a timeline with an unexpected parser version.",
+        ));
+    }
+    validate_index(&index, session.file_size)?;
+    let summary = summarize_session(registry, session, &index)?;
+    Ok((index, summary))
+}
+
+/// The page's detail for a stored session. It offers no launch verbs:
+/// nothing here opens in the provider or in Terminal.
+pub fn get_stored_session_detail(
+    registry: &AgentProviderRegistry,
+    stored: &StoredSessionTranscript,
+) -> SessionDetailResult<ProjectSessionDetail> {
+    let session = resolve_stored_session(stored)?;
+    let (index, summary) = build_fresh_index(registry, &session)?;
+    let snapshot_id = stored_snapshot_id(stored, index.parser_version);
+    session_detail_body(
+        registry,
+        &session,
+        SessionDetailParts {
+            index: &index,
+            summary: &summary,
+            snapshot_id,
+            cache_warnings: Vec::new(),
+            agent: None,
+            actions: Vec::new(),
+        },
+    )
+}
+
+pub fn get_stored_session_timeline_page(
+    registry: &AgentProviderRegistry,
+    stored: &StoredSessionTranscript,
+    request: ProjectSessionTimelineRequest,
+) -> SessionDetailResult<ProjectSessionTimelinePage> {
+    ensure_identifier("snapshot id", &request.snapshot_id)?;
+    if let Some(turn_id) = &request.turn_id {
+        ensure_identifier("turn id", turn_id)?;
+    }
+    let session = resolve_stored_session(stored)?;
+    let (index, summary) = build_fresh_index(registry, &session)?;
+    let current_snapshot_id = stored_snapshot_id(stored, index.parser_version);
+    if request.snapshot_id != current_snapshot_id {
+        return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
+    }
+    timeline_page_body(
+        registry,
+        &session,
+        &index,
+        &summary,
+        current_snapshot_id,
+        Vec::new(),
+        &request,
+    )
+}
+
+pub fn get_stored_session_event_detail(
+    registry: &AgentProviderRegistry,
+    stored: &StoredSessionTranscript,
+    snapshot_id_value: &str,
+    event_id: &str,
+) -> SessionDetailResult<SessionEventDetail> {
+    ensure_identifier("snapshot id", snapshot_id_value)?;
+    ensure_identifier("event id", event_id)?;
+    let session = resolve_stored_session(stored)?;
+    let (index, _) = build_fresh_index(registry, &session)?;
+    let current_snapshot_id = stored_snapshot_id(stored, index.parser_version);
+    if snapshot_id_value != current_snapshot_id {
+        return Err(SessionDetailError::snapshot_changed(current_snapshot_id));
+    }
+    event_detail_body(registry, &session, &index, event_id)
 }
 
 #[cfg(test)]
@@ -2401,6 +2685,7 @@ mod tests {
                     result_source: None,
                 }),
                 agent: None,
+                settings: SessionMessageSettings::none(),
             }],
             counts: counts(),
             warnings: Vec::new(),
@@ -2529,6 +2814,39 @@ mod tests {
             summary: summary_fixture(),
             index: index_with_path("file"),
         }
+    }
+
+    #[test]
+    fn a_cache_entry_without_message_settings_is_outdated_and_rebuilt() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let key = "d".repeat(64);
+        write_timeline_cache(&repository, &key, &cache_entry_fixture(), 1024 * 1024).unwrap();
+        assert!(load_timeline_cache(&repository, &key).0.is_some());
+
+        // The shape before per-message settings: the same schema number, no key.
+        let path = repository
+            .root()
+            .join("session_timeline_cache")
+            .join(format!("{key}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["index"]["events"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("settings")
+            .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let (entry, warnings) = load_timeline_cache(&repository, &key);
+        assert!(entry.is_none());
+        assert_eq!(
+            warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["timeline_cache_ignored"]
+        );
     }
 
     #[test]
@@ -2851,6 +3169,7 @@ mod tests {
             }),
             checkpoint: None,
             agent: None,
+            settings: None,
         };
         assert!(validate_page_slice(
             &SessionTimelinePageSlice {
@@ -2889,6 +3208,7 @@ mod tests {
             tool: None,
             checkpoint: None,
             agent: None,
+            settings: None,
         };
         let error = validate_page_slice(
             &SessionTimelinePageSlice {

@@ -509,6 +509,97 @@ pub struct SessionTurnToolSummary {
     pub tool_calls: SessionCount,
 }
 
+/// Where a message's model and thinking level were read from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMessageSettingsSource {
+    /// The Codex `turn_context` of the message's turn.
+    Turn,
+    /// A Claude reply's own record.
+    Reply,
+    /// The first Claude reply that answered this input.
+    Linked,
+    /// Nothing recorded.
+    None,
+}
+
+/// The longest admitted model or effort value.
+pub const MAX_SETTING_VALUE_BYTES: usize = 128;
+
+/// The model and thinking level a message was generated with, as the
+/// transcript recorded them: a field is absent when it recorded none. An
+/// input wears the first reply that answered it; nothing is read from the
+/// current configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionMessageSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    pub source: SessionMessageSettingsSource,
+}
+
+impl SessionMessageSettings {
+    /// Nothing recorded.
+    pub fn none() -> Self {
+        Self {
+            model: None,
+            effort: None,
+            source: SessionMessageSettingsSource::None,
+        }
+    }
+
+    /// What one source recorded. Two absent fields read as nothing recorded,
+    /// whatever the source was.
+    pub fn recorded(
+        model: Option<String>,
+        effort: Option<String>,
+        source: SessionMessageSettingsSource,
+    ) -> Self {
+        if model.is_none() && effort.is_none() {
+            return Self::none();
+        }
+        Self {
+            model,
+            effort,
+            source,
+        }
+    }
+
+    /// Whether either field was recorded.
+    pub fn is_recorded(&self) -> bool {
+        self.model.is_some() || self.effort.is_some()
+    }
+
+    /// Each value is an admitted token, and an empty record names no source.
+    pub fn is_valid(&self) -> bool {
+        [&self.model, &self.effort]
+            .into_iter()
+            .flatten()
+            .all(|value| is_setting_token(value))
+            && self.is_recorded() == (self.source != SessionMessageSettingsSource::None)
+    }
+}
+
+/// A recorded model or effort value the index admits: a short ASCII token
+/// such as `gpt-5.6-sol` or `xhigh`. Anything else reads as not recorded.
+pub fn is_setting_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_SETTING_VALUE_BYTES
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'+' | b'-')
+        })
+}
+
+/// The recorded value, when it is an admitted token.
+pub fn setting_token(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| is_setting_token(value))
+        .map(ToOwned::to_owned)
+}
+
 /// Metadata-only index entry. Visible message text, tool arguments, tool
 /// results, and file contents must never be stored in this structure.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -531,6 +622,9 @@ pub struct SessionTimelineIndexEntry {
     /// Present exactly on `AgentCall` entries, beside the call's `tool`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgentIndexEntry>,
+    /// What generated a prompt or an assistant message; the empty record on
+    /// every other kind. Required: a cache written without it is rebuilt.
+    pub settings: SessionMessageSettings,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -667,6 +761,9 @@ pub struct SessionTimelineEvent {
     pub checkpoint: Option<SessionCheckpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgentPreview>,
+    /// On a prompt or a response: what generated it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SessionMessageSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1097,6 +1194,7 @@ mod tests {
                 offset: position as u64,
                 length: 1,
             },
+            settings: SessionMessageSettings::none(),
             tool: (kind == ToolCall).then(|| SessionToolIndexEntry {
                 provider_call_id: format!("call-{position}"),
                 native_name: "shell".to_string(),

@@ -26,12 +26,23 @@ export type ActiveProjectSubview =
     localProjectId: string;
     resourceId: string;
     occurrenceKey: string;
+    /** Set for a row that is only in a storage: the page reads that
+     *  storage's copy, and its Pull is the Pull of this one session. */
+    storageId?: string;
   };
 
 export interface OpenSessionDetailRequest {
   resourceId: string;
   occurrenceKey: string;
+  /** The storage a stored row is read from; absent for a local row. */
+  storageId?: string;
 }
+
+/** Where a session page reads from: this computer's provider home, or the
+ *  storage a stored row sits under. */
+export type SessionDetailSource =
+  | { kind: "local" }
+  | { kind: "stored"; storageId: string; storageName: string };
 
 export function sessionPushDisabledReason(entry: ThreadSyncEntry | undefined): string | null {
   if (!entry) return "This session cannot be pushed independently.";

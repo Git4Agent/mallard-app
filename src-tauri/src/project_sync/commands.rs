@@ -5,35 +5,34 @@ use super::service::{
     commit_storage_setup_draft_with_repository, connect_project_to_remote_bundle_with_repository,
     create_provider_profile_with_repository, create_storage_edit_draft_with_repository,
     create_storage_setup_draft_with_repository, current_binding_for_restore_plan,
-    delete_local_project_sessions_with_repository,
-    discard_setup_draft_with_repository, discard_storage_setup_draft_with_repository,
-    execute_project_session_action_with_repository, find_project_session_with_repository,
-    format_fetch_started_message, format_mb,
+    delete_local_project_sessions_with_repository, discard_setup_draft_with_repository,
+    discard_storage_setup_draft_with_repository, execute_project_session_action_with_repository,
+    find_project_session_with_repository, format_fetch_started_message, format_mb,
     get_bundle_inventory_with_repository, get_host_identity_status_with_repository,
     get_project_activity_with_repository, get_project_session_detail_with_repository,
     get_project_session_event_detail_with_repository,
     get_project_session_timeline_page_with_repository, get_project_with_repository,
     get_push_destination_status_with_repository, get_restore_readiness_with_repository,
     get_setup_draft_with_repository, get_storage_setup_draft_with_repository,
-    inspect_project_files_with_repository, list_agent_folders_with_repository,
-    list_local_projects_with_repository, list_project_bindings_with_repository,
-    list_project_repository_kinds_with_repository, list_provider_profiles_with_repository,
-    list_remote_bundle_snapshots_with_repository, list_setup_drafts_with_repository,
-    list_storage_setup_drafts_with_repository, load_project_sync_config_with_repository,
-    probe_project_folder_with_repository, probe_provider_profile_with_repository,
-    project_open_commands, project_storage_log_context, pull_action_resource_label,
-    pull_plan_action_counts, pull_review_resource_labels,
+    get_stored_session_detail_with_repository, get_stored_session_event_detail_with_repository,
+    get_stored_session_timeline_page_with_repository, inspect_project_files_with_repository,
+    list_agent_folders_with_repository, list_local_projects_with_repository,
+    list_project_bindings_with_repository, list_project_repository_kinds_with_repository,
+    list_provider_profiles_with_repository, list_remote_bundle_snapshots_with_repository,
+    list_setup_drafts_with_repository, list_storage_setup_drafts_with_repository,
+    load_project_sync_config_with_repository, probe_project_folder_with_repository,
+    probe_provider_profile_with_repository, project_open_commands, project_storage_log_context,
+    pull_action_resource_label, pull_plan_action_counts, pull_review_resource_labels,
     read_project_markdown_image_with_repository, recover_startup_state_with_repository,
     refresh_project_activity_with_progress, remove_local_project_with_repository,
     remove_project_link_with_repository, remove_storage_with_repository,
     rename_local_project_with_repository, rename_storage_with_repository, repository,
-    resolve_project_markdown_path_with_repository,
-    reveal_storage_secret_with_repository, save_project_binding_with_repository,
-    save_project_link_with_repository, session_detail_error, should_log_history_scan,
-    sibling_bundle_status_with_repository, storage_log_label, storage_provider_descriptors,
-    test_storage_setup_draft_with_repository, test_storage_with_repository,
-    update_storage_setup_draft_with_repository, AgentFolderList, BundleReadiness,
-    BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
+    resolve_project_markdown_path_with_repository, reveal_storage_secret_with_repository,
+    save_project_binding_with_repository, save_project_link_with_repository, session_detail_error,
+    should_log_history_scan, sibling_bundle_status_with_repository, storage_log_label,
+    storage_provider_descriptors, test_storage_setup_draft_with_repository,
+    test_storage_with_repository, update_storage_setup_draft_with_repository, AgentFolderList,
+    BundleReadiness, BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
     CreateSetupDraftResult, HostIdentityStatus, ProjectActivity, ProjectActivityRefreshEvent,
     ProjectContentInventory, ProjectDetail, ProjectFolderProbe, ProjectMarkdownImage,
     ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSessionsDeleteResult,
@@ -354,7 +353,9 @@ pub async fn reveal_storage_secret(
             })
             .unwrap_or_else(|| log_secret_id.as_str().to_string());
         Ok((
-            storage.map(|storage| storage.name.clone()).unwrap_or_default(),
+            storage
+                .map(|storage| storage.name.clone())
+                .unwrap_or_default(),
             label,
         ))
     })
@@ -550,10 +551,6 @@ pub fn cancel_r2_storage_setup(
     control.cancel(draft_id, expected_revision)
 }
 
-
-
-
-
 #[tauri::command]
 pub async fn get_host_identity_status() -> Result<HostIdentityStatus, String> {
     let repository = repository()?;
@@ -739,6 +736,10 @@ pub async fn refresh_project_activity(
 pub async fn get_project_session_detail(
     local_project_id: LocalProjectId,
     resource_id: String,
+    // Set for a stored row (`…:cloudthread-…`): the storage its page reads
+    // from. A local row refuses one and a stored row needs one; the two
+    // reads below take it the same way.
+    storage_id: Option<StorageId>,
 ) -> Result<tauri::ipc::Response, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
@@ -747,11 +748,19 @@ pub async fn get_project_session_detail(
         )
     })?;
     let encoded = run_session_detail_blocking(move || {
-        let detail = get_project_session_detail_with_repository(
-            &repository,
-            &local_project_id,
-            &resource_id,
-        )?;
+        let detail = match &storage_id {
+            Some(storage_id) => get_stored_session_detail_with_repository(
+                &repository,
+                &local_project_id,
+                storage_id,
+                &resource_id,
+            )?,
+            None => get_project_session_detail_with_repository(
+                &repository,
+                &local_project_id,
+                &resource_id,
+            )?,
+        };
         mallard_infrastructure::session_detail::encode_project_session_detail_response(&detail)
     })
     .await?;
@@ -769,6 +778,7 @@ pub async fn get_project_session_timeline_page(
     included_event_kinds: Vec<SessionTimelineEventKind>,
     included_tool_categories: Vec<SessionToolCategory>,
     turn_id: Option<String>,
+    storage_id: Option<StorageId>,
 ) -> Result<tauri::ipc::Response, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
@@ -777,19 +787,29 @@ pub async fn get_project_session_timeline_page(
         )
     })?;
     let encoded = run_session_detail_blocking(move || {
-        let page = get_project_session_timeline_page_with_repository(
-            &repository,
-            &local_project_id,
-            &resource_id,
-            ProjectSessionTimelineRequest {
-                snapshot_id,
-                cursor,
-                limit,
-                included_event_kinds: included_event_kinds.into_iter().collect(),
-                included_tool_categories: included_tool_categories.into_iter().collect(),
-                turn_id,
-            },
-        )?;
+        let request = ProjectSessionTimelineRequest {
+            snapshot_id,
+            cursor,
+            limit,
+            included_event_kinds: included_event_kinds.into_iter().collect(),
+            included_tool_categories: included_tool_categories.into_iter().collect(),
+            turn_id,
+        };
+        let page = match &storage_id {
+            Some(storage_id) => get_stored_session_timeline_page_with_repository(
+                &repository,
+                &local_project_id,
+                storage_id,
+                &resource_id,
+                request,
+            )?,
+            None => get_project_session_timeline_page_with_repository(
+                &repository,
+                &local_project_id,
+                &resource_id,
+                request,
+            )?,
+        };
         mallard_infrastructure::session_detail::encode_project_session_timeline_page_response(&page)
     })
     .await?;
@@ -802,6 +822,7 @@ pub async fn get_project_session_event_detail(
     resource_id: String,
     snapshot_id: String,
     event_id: String,
+    storage_id: Option<StorageId>,
 ) -> Result<tauri::ipc::Response, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
@@ -810,13 +831,23 @@ pub async fn get_project_session_event_detail(
         )
     })?;
     let encoded = run_session_detail_blocking(move || {
-        let detail = get_project_session_event_detail_with_repository(
-            &repository,
-            &local_project_id,
-            &resource_id,
-            &snapshot_id,
-            &event_id,
-        )?;
+        let detail = match &storage_id {
+            Some(storage_id) => get_stored_session_event_detail_with_repository(
+                &repository,
+                &local_project_id,
+                storage_id,
+                &resource_id,
+                &snapshot_id,
+                &event_id,
+            )?,
+            None => get_project_session_event_detail_with_repository(
+                &repository,
+                &local_project_id,
+                &resource_id,
+                &snapshot_id,
+                &event_id,
+            )?,
+        };
         mallard_infrastructure::session_detail::encode_session_event_detail_response(&detail)
     })
     .await?;

@@ -109,6 +109,7 @@ function FrameView({ frame }: { frame: Frame }) {
   return (
     <section className="session-detail-page" data-frame={frame.id} data-tool-calls={toolCalls ? "on" : "off"}>
       <SessionDetailHeader
+        source={{ kind: "local" }}
         detail={frame.detail}
         back={frame.id === "agent"
           ? { kind: "session", label: "Plan the release", onActivate: () => undefined }

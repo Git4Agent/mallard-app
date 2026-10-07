@@ -8,13 +8,13 @@ use crate::app_settings::{
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
     agent_resource_id, attach_turn_tool_summaries, most_specific_project_relative_path,
-    timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
-    SessionAgentStatus, SessionChildIdentity, SessionCount, SessionCountQuality,
-    SessionDetailWarning, SessionEventCounts, SessionEventDetail, SessionFileSummary,
-    SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
-    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
-    SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
-    SessionToolIndexEntry,
+    setting_token, timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode,
+    SessionAgentPreview, SessionAgentStatus, SessionChildIdentity, SessionCount,
+    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
+    SessionFileSummary, SessionMessageSettings, SessionMessageSettingsSource, SessionSourceSpan,
+    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
+    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
+    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
 };
 use mallard_domain::NoticeSeverity;
 use serde_json::Value;
@@ -452,6 +452,63 @@ struct AssistantGroup {
     score: (u8, usize, usize, u64),
     stop_reason: String,
     has_tool_use: bool,
+    /// The model and effort the group's records carry: the first recorded.
+    model: Option<String>,
+    effort: Option<String>,
+    /// Each distinct parent among the group's records, for the walk back to
+    /// the input they answer.
+    links: Vec<RecordLink>,
+}
+
+/// Most distinct parents remembered per group. Split records chain to each
+/// other, so one message's records share a handful at most.
+const MAX_GROUP_LINKS: usize = 16;
+
+/// A record's place in the conversation tree: its parent and its session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecordLink {
+    parent: Option<String>,
+    session: Option<String>,
+}
+
+fn record_link(value: &Value) -> RecordLink {
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    RecordLink {
+        parent: field("parentUuid"),
+        session: field("sessionId"),
+    }
+}
+
+/// The input a reply answers: the first prompt met walking `parentUuid` from
+/// the record, through tool results and attachments. None past a missing
+/// parent, a cycle, or a record of another session.
+fn linked_prompt(
+    links: &BTreeMap<String, RecordLink>,
+    prompt_ids: &BTreeSet<String>,
+    link: &RecordLink,
+) -> Option<String> {
+    let mut visited = BTreeSet::new();
+    let mut parent = link.parent.clone();
+    while let Some(uuid) = parent {
+        if !visited.insert(uuid.clone()) {
+            return None;
+        }
+        let node = links.get(&uuid)?;
+        if node.session != link.session {
+            return None;
+        }
+        if prompt_ids.contains(&format!("claude:prompt:{uuid}")) {
+            return Some(uuid);
+        }
+        parent = node.parent.clone();
+    }
+    None
 }
 
 fn is_terminal_response_stop_reason(stop_reason: &str) -> bool {
@@ -466,6 +523,9 @@ struct ClaudeTimelineBuilder {
     // the event identity, independent of the parser's current turn.
     tool_positions_by_call_id: BTreeMap<String, usize>,
     prompt_ids: BTreeSet<String>,
+    /// Every record's parent and session by uuid, for the walk from a reply
+    /// back to the input it answers.
+    links: BTreeMap<String, RecordLink>,
     current_turn_id: Option<String>,
     degraded_all: bool,
     degraded_tools: bool,
@@ -545,6 +605,7 @@ impl ClaudeTimelineBuilder {
                 source,
                 tool: None,
                 agent: None,
+                settings: SessionMessageSettings::none(),
             },
             order: (source.offset, 0),
         });
@@ -561,6 +622,9 @@ impl ClaudeTimelineBuilder {
         output_tokens: u64,
         stop_reason: String,
         has_tool_use: bool,
+        model: Option<&str>,
+        effort: Option<&str>,
+        link: RecordLink,
     ) {
         let turn_id = self
             .current_turn_id
@@ -576,6 +640,11 @@ impl ClaudeTimelineBuilder {
         match self.assistant_groups.get_mut(&message_id) {
             Some(group) => {
                 group.has_tool_use |= has_tool_use;
+                group.model = group.model.take().or_else(|| setting_token(model));
+                group.effort = group.effort.take().or_else(|| setting_token(effort));
+                if group.links.len() < MAX_GROUP_LINKS && !group.links.contains(&link) {
+                    group.links.push(link);
+                }
                 if score >= group.score {
                     group.timestamp = group.timestamp.or(timestamp);
                     group.source = source;
@@ -585,20 +654,21 @@ impl ClaudeTimelineBuilder {
                 }
             }
             None => {
-                self.assistant_groups.insert(
-                    message_id,
-                    AssistantGroup {
-                        event_id,
-                        turn_id,
-                        timestamp,
-                        order: (source.offset, 0),
-                        source,
-                        text,
-                        score,
-                        stop_reason,
-                        has_tool_use,
-                    },
-                );
+                let group = AssistantGroup {
+                    event_id,
+                    turn_id,
+                    timestamp,
+                    order: (source.offset, 0),
+                    source,
+                    text,
+                    score,
+                    stop_reason,
+                    has_tool_use,
+                    model: setting_token(model),
+                    effort: setting_token(effort),
+                    links: vec![link],
+                };
+                self.assistant_groups.insert(message_id, group);
             }
         }
     }
@@ -676,6 +746,7 @@ impl ClaudeTimelineBuilder {
                     affected_paths,
                 }),
                 agent,
+                settings: SessionMessageSettings::none(),
             },
             order: (
                 source.offset,
@@ -737,7 +808,36 @@ impl ClaudeTimelineBuilder {
 
     fn finalize(mut self) -> SessionTimelineIndex {
         let assistant_groups = std::mem::take(&mut self.assistant_groups);
+        let links = std::mem::take(&mut self.links);
+        // An input wears the first reply that answered it and recorded
+        // something, text or not: the earliest group that walks back to it. A
+        // group whose records walk back to different inputs, or to none,
+        // lends nothing.
+        let mut linked: BTreeMap<String, ((u64, u16), SessionMessageSettings)> = BTreeMap::new();
         for group in assistant_groups.into_values() {
+            let settings = SessionMessageSettings::recorded(
+                group.model.clone(),
+                group.effort.clone(),
+                SessionMessageSettingsSource::Reply,
+            );
+            let prompts = group
+                .links
+                .iter()
+                .map(|link| linked_prompt(&links, &self.prompt_ids, link))
+                .collect::<BTreeSet<_>>();
+            if settings.is_recorded() {
+                if let Some(Some(prompt)) = (prompts.len() == 1)
+                    .then(|| prompts.into_iter().next())
+                    .flatten()
+                {
+                    let first = linked
+                        .entry(prompt)
+                        .or_insert_with(|| (group.order, settings.clone()));
+                    if group.order < first.0 {
+                        *first = (group.order, settings.clone());
+                    }
+                }
+            }
             let Some(text) = group.text.filter(|text| !text.trim().is_empty()) else {
                 continue;
             };
@@ -786,9 +886,28 @@ impl ClaudeTimelineBuilder {
                     source: group.source,
                     tool: None,
                     agent: None,
+                    settings,
                 },
                 order: group.order,
             });
+        }
+        for pending in &mut self.events {
+            if pending.entry.kind != SessionTimelineEventKind::Prompt {
+                continue;
+            }
+            let uuid = pending
+                .entry
+                .event_id
+                .strip_prefix("claude:prompt:")
+                .unwrap_or_default();
+            pending.entry.settings = match linked.remove(uuid) {
+                Some((_, first)) => SessionMessageSettings::recorded(
+                    first.model,
+                    first.effort,
+                    SessionMessageSettingsSource::Linked,
+                ),
+                None => SessionMessageSettings::none(),
+            };
         }
         if self.inferred_responses {
             self.warning(
@@ -1208,6 +1327,16 @@ fn consume_claude_record(
 ) {
     let record_type = normalized_type(value.get("type").and_then(Value::as_str));
     let timestamp = value.get("timestamp").and_then(parse_timestamp_value);
+    if let Some(uuid) = value
+        .get("uuid")
+        .and_then(Value::as_str)
+        .filter(|uuid| !uuid.is_empty())
+    {
+        builder
+            .links
+            .entry(uuid.to_string())
+            .or_insert_with(|| record_link(value));
+    }
     match record_type.as_str() {
         "user" => {
             if let Some(text) = meaningful_human_prompt(value) {
@@ -1280,6 +1409,14 @@ fn consume_claude_record(
                     "tooluse" | "servertooluse"
                 )
             });
+            // The settings sit on every split record: the model inside the
+            // message, the effort beside it. An API error's `<synthetic>`
+            // model is no model.
+            let model = message
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|model| *model != "<synthetic>");
+            let effort = value.get("effort").and_then(Value::as_str);
             builder.observe_assistant(
                 message_id.clone(),
                 timestamp,
@@ -1289,6 +1426,9 @@ fn consume_claude_record(
                 output_tokens,
                 stop_reason,
                 has_tool_use,
+                model,
+                effort,
+                record_link(value),
             );
             let turn_id = builder
                 .current_turn_id
@@ -1852,6 +1992,11 @@ pub(crate) fn read_timeline_page(
             tool,
             checkpoint: None,
             agent,
+            settings: matches!(
+                entry.kind,
+                SessionTimelineEventKind::Prompt | SessionTimelineEventKind::Response
+            )
+            .then(|| entry.settings.clone()),
         });
     }
     let next_index = index.events[position..]
@@ -2715,11 +2860,10 @@ mod tests {
             ] {
                 let temp = tempfile::tempdir().unwrap();
                 let transcript = temp.path().join("session.jsonl");
-                let call = json!({"type":"server_tool_use","id":"advisor-1","name":"advisor","input":{}});
+                let call =
+                    json!({"type":"server_tool_use","id":"advisor-1","name":"advisor","input":{}});
                 let result = json!({"type":"advisor_tool_result","tool_use_id":"advisor-1","content":content});
-                let record = |blocks: Vec<Value>| {
-                    json!({"type":"assistant","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":blocks}})
-                };
+                let record = |blocks: Vec<Value>| json!({"type":"assistant","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":blocks}});
                 let records = if same_record {
                     vec![record(vec![call, result])]
                 } else {
@@ -2754,7 +2898,10 @@ mod tests {
         write_jsonl(&transcript, vec![call.clone(), call]);
         let index = build_timeline_index(&transcript, &context(temp.path())).unwrap();
         assert_eq!(count_value(&index.counts.tool_calls), 1);
-        assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::LowerBound);
+        assert_eq!(
+            index.counts.tool_calls.quality,
+            SessionCountQuality::LowerBound
+        );
         assert_eq!(index.warnings.len(), 1);
         assert_eq!(index.warnings[0].code, "incomplete_tool_call");
         // No result is in the transcript, so nothing it recorded is missing.
@@ -2779,13 +2926,19 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let transcript = temp.path().join("session.jsonl");
-            write_jsonl(&transcript, vec![json!({"type":"assistant","message":{
-                "id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[block]
-            }})]);
+            write_jsonl(
+                &transcript,
+                vec![json!({"type":"assistant","message":{
+                    "id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[block]
+                }})],
+            );
             let index = build_timeline_index(&transcript, &context(temp.path())).unwrap();
             assert_eq!(index.warnings.len(), 1);
             assert_eq!(index.warnings[0].code, warning);
-            assert_eq!(index.counts.tool_calls.quality, SessionCountQuality::LowerBound);
+            assert_eq!(
+                index.counts.tool_calls.quality,
+                SessionCountQuality::LowerBound
+            );
         }
     }
 
@@ -3273,6 +3426,337 @@ mod tests {
             .find(|entry| entry.kind == SessionTimelineEventKind::Prompt)
             .unwrap();
         assert_eq!(prompt.quality, SessionCountQuality::LowerBound);
+    }
+
+    fn claude_user(
+        uuid: &str,
+        parent: Option<&str>,
+        session: &str,
+        timestamp: &str,
+        text: &str,
+    ) -> Value {
+        json!({"type":"user","uuid":uuid,"parentUuid":parent,"sessionId":session,"timestamp":timestamp,"message":{"role":"user","content":[{"type":"text","text":text}]}})
+    }
+
+    fn claude_tool_result(
+        uuid: &str,
+        parent: &str,
+        session: &str,
+        timestamp: &str,
+        call_id: &str,
+    ) -> Value {
+        json!({"type":"user","uuid":uuid,"parentUuid":parent,"sessionId":session,"timestamp":timestamp,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call_id,"content":"ok"}]}})
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claude_assistant(
+        uuid: &str,
+        parent: &str,
+        session: &str,
+        timestamp: &str,
+        message_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        stop_reason: &str,
+        content: Value,
+    ) -> Value {
+        let mut record = json!({"type":"assistant","uuid":uuid,"parentUuid":parent,"sessionId":session,"timestamp":timestamp,"message":{"id":message_id,"role":"assistant","stop_reason":stop_reason,"content":content}});
+        if let Some(model) = model {
+            record["message"]["model"] = json!(model);
+        }
+        if let Some(effort) = effort {
+            record["effort"] = json!(effort);
+        }
+        record
+    }
+
+    fn text_blocks(text: &str) -> Value {
+        json!([{"type":"text","text":text}])
+    }
+
+    fn text_and_call(text: &str, call_id: &str) -> Value {
+        json!([{"type":"text","text":text},{"type":"tool_use","id":call_id,"name":"Read","input":{"file_path":"src/lib.rs"}}])
+    }
+
+    fn settings_of(index: &SessionTimelineIndex, event_id: &str) -> SessionMessageSettings {
+        index
+            .events
+            .iter()
+            .find(|entry| entry.event_id == event_id)
+            .unwrap_or_else(|| panic!("no event {event_id}"))
+            .settings
+            .clone()
+    }
+
+    fn recorded(
+        model: Option<&str>,
+        effort: Option<&str>,
+        source: SessionMessageSettingsSource,
+    ) -> SessionMessageSettings {
+        SessionMessageSettings::recorded(
+            model.map(ToOwned::to_owned),
+            effort.map(ToOwned::to_owned),
+            source,
+        )
+    }
+
+    #[test]
+    fn replies_carry_their_recorded_settings_and_an_input_wears_its_first_reply() {
+        use SessionMessageSettingsSource::{Linked, Reply};
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                claude_user(
+                    "u-1",
+                    None,
+                    "session-1",
+                    "2026-08-07T00:00:00Z",
+                    "Check upload failures.",
+                ),
+                claude_assistant(
+                    "a-1",
+                    "u-1",
+                    "session-1",
+                    "2026-08-07T00:00:01Z",
+                    "msg-1",
+                    Some("claude-opus-4-6"),
+                    Some("low"),
+                    "tool_use",
+                    text_and_call("Looking.", "tool-1"),
+                ),
+                claude_tool_result("r-1", "a-1", "session-1", "2026-08-07T00:00:02Z", "tool-1"),
+                claude_assistant(
+                    "a-2",
+                    "r-1",
+                    "session-1",
+                    "2026-08-07T00:00:03Z",
+                    "msg-2",
+                    Some("claude-opus-4-6"),
+                    Some("low"),
+                    "end_turn",
+                    text_blocks("A timeout can occur."),
+                ),
+                claude_user(
+                    "u-2",
+                    Some("a-2"),
+                    "session-1",
+                    "2026-08-07T00:00:04Z",
+                    "Add a test.",
+                ),
+                claude_assistant(
+                    "a-3",
+                    "u-2",
+                    "session-1",
+                    "2026-08-07T00:00:05Z",
+                    "msg-3",
+                    Some("claude-sonnet-4-6"),
+                    Some("high"),
+                    "end_turn",
+                    text_blocks("Added."),
+                ),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(
+            settings_of(&index, "claude:prompt:u-1"),
+            recorded(Some("claude-opus-4-6"), Some("low"), Linked)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:message:msg-1"),
+            recorded(Some("claude-opus-4-6"), Some("low"), Reply)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:message:msg-2"),
+            recorded(Some("claude-opus-4-6"), Some("low"), Reply)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:prompt:u-2"),
+            recorded(Some("claude-sonnet-4-6"), Some("high"), Linked)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:message:msg-3"),
+            recorded(Some("claude-sonnet-4-6"), Some("high"), Reply)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:tool:tool-1"),
+            SessionMessageSettings::none()
+        );
+
+        // The page carries them on inputs and replies; a step wears none.
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([
+                SessionTimelineEventKind::Prompt,
+                SessionTimelineEventKind::Response,
+                SessionTimelineEventKind::IntermediateStep,
+            ]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
+        let on_page = |event_id: &str| {
+            page.events
+                .iter()
+                .find(|event| event.event_id == event_id)
+                .unwrap()
+                .settings
+                .clone()
+        };
+        assert_eq!(
+            on_page("claude:prompt:u-1"),
+            Some(recorded(Some("claude-opus-4-6"), Some("low"), Linked))
+        );
+        assert_eq!(on_page("claude:message:msg-1"), None);
+        assert_eq!(
+            on_page("claude:message:msg-2"),
+            Some(recorded(Some("claude-opus-4-6"), Some("low"), Reply))
+        );
+    }
+
+    #[test]
+    fn missing_settings_read_unknown_and_an_input_wears_its_first_recorded_reply() {
+        use SessionMessageSettingsSource::{Linked, Reply};
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                // A reply that recorded neither field.
+                claude_user("u-1", None, "session-1", "2026-08-07T00:00:00Z", "First."),
+                claude_assistant(
+                    "a-1",
+                    "u-1",
+                    "session-1",
+                    "2026-08-07T00:00:01Z",
+                    "msg-1",
+                    None,
+                    None,
+                    "end_turn",
+                    text_blocks("No fields."),
+                ),
+                // Two replies to one input that differ: the input wears the first.
+                claude_user(
+                    "u-2",
+                    Some("a-1"),
+                    "session-1",
+                    "2026-08-07T00:00:02Z",
+                    "Second.",
+                ),
+                claude_assistant(
+                    "a-2",
+                    "u-2",
+                    "session-1",
+                    "2026-08-07T00:00:03Z",
+                    "msg-2",
+                    Some("claude-opus-4-6"),
+                    Some("low"),
+                    "tool_use",
+                    text_and_call("Looking.", "tool-2"),
+                ),
+                claude_tool_result("r-2", "a-2", "session-1", "2026-08-07T00:00:04Z", "tool-2"),
+                claude_assistant(
+                    "a-3",
+                    "r-2",
+                    "session-1",
+                    "2026-08-07T00:00:05Z",
+                    "msg-3",
+                    Some("claude-sonnet-4-6"),
+                    Some("high"),
+                    "end_turn",
+                    text_blocks("Done."),
+                ),
+                // Two replies that differ in effort only: again the first.
+                claude_user(
+                    "u-3",
+                    Some("a-3"),
+                    "session-1",
+                    "2026-08-07T00:00:06Z",
+                    "Third.",
+                ),
+                claude_assistant(
+                    "a-4",
+                    "u-3",
+                    "session-1",
+                    "2026-08-07T00:00:07Z",
+                    "msg-4",
+                    Some("claude-opus-4-6"),
+                    Some("low"),
+                    "tool_use",
+                    text_and_call("Again.", "tool-4"),
+                ),
+                claude_tool_result("r-4", "a-4", "session-1", "2026-08-07T00:00:08Z", "tool-4"),
+                claude_assistant(
+                    "a-5",
+                    "r-4",
+                    "session-1",
+                    "2026-08-07T00:00:09Z",
+                    "msg-5",
+                    Some("claude-opus-4-6"),
+                    Some("high"),
+                    "end_turn",
+                    text_blocks("Done again."),
+                ),
+                // An API error's synthetic model is no model, and lends nothing.
+                claude_assistant(
+                    "a-6",
+                    "r-4",
+                    "session-1",
+                    "2026-08-07T00:00:10Z",
+                    "msg-6",
+                    Some("<synthetic>"),
+                    None,
+                    "stop_sequence",
+                    text_blocks("API error."),
+                ),
+                // Another session's record never reaches this session's input.
+                claude_assistant(
+                    "a-7",
+                    "a-5",
+                    "session-2",
+                    "2026-08-07T00:00:11Z",
+                    "msg-7",
+                    Some("claude-sonnet-4-6"),
+                    Some("max"),
+                    "end_turn",
+                    text_blocks("Elsewhere."),
+                ),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        assert_eq!(
+            settings_of(&index, "claude:prompt:u-1"),
+            SessionMessageSettings::none()
+        );
+        assert_eq!(
+            settings_of(&index, "claude:message:msg-1"),
+            SessionMessageSettings::none()
+        );
+        assert_eq!(
+            settings_of(&index, "claude:prompt:u-2"),
+            recorded(Some("claude-opus-4-6"), Some("low"), Linked)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:prompt:u-3"),
+            recorded(Some("claude-opus-4-6"), Some("low"), Linked)
+        );
+        assert_eq!(
+            settings_of(&index, "claude:message:msg-6"),
+            SessionMessageSettings::none()
+        );
+        assert_eq!(
+            settings_of(&index, "claude:message:msg-7"),
+            recorded(Some("claude-sonnet-4-6"), Some("max"), Reply)
+        );
     }
 
     #[test]

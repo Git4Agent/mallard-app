@@ -324,7 +324,7 @@ test("a non-Git project's Pull and Push badges count its files and hold on both 
 
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   // On the overview, scanned files add to the project action counts.
-  assert.match(workspace, /const pullCount = pullThreadCount \+ projectFileCounts\.pull;/);
+  assert.match(workspace, /const pullFileCount = storedSession \? 0 : projectFileCounts\.pull;\n\s*const pullCount = pullThreadCount \+ pullFileCount;/);
   assert.match(workspace, /const pushCount = pushThreadCount \+ pushFileCount;/);
   assert.match(workspace, /projectFileSyncCounts\(projectFilesScan\.inventory\)/);
 
@@ -398,7 +398,7 @@ test("the path bar hangs the branch on the project crumb and keeps one overflow"
   assert.match(workspace, /\{showPushCount && <span className="sync-path-count" aria-hidden="true">\{pushCount\}<\/span>\}/);
   // The number is decorative only because the button's own name already says
   // it — never let the badge become the only place the count is spoken.
-  assert.match(workspace, /`Pull \$\{projectSyncCountPhrase\(pullThreadCount, projectFileCounts\.pull\)\} from /);
+  assert.match(workspace, /`Pull \$\{projectSyncCountPhrase\(pullThreadCount, pullFileCount\)\} from /);
   assert.match(workspace, /`Push \$\{projectSyncCountPhrase\(pushThreadCount, pushFileCount\)\} to /);
 
   // One overflow, at the end of the row. Two `⋯` in one bar was the reason a
@@ -4310,4 +4310,53 @@ test("the scope bar is drawn only where it can narrow something", () => {
   );
   assert.ok(flat.indexOf("view-switch-probe") < flat.indexOf("sync-status-scopes"));
   assert.ok(flat.indexOf("sync-status-scopes") < flat.indexOf("sync-history-thread-card"));
+});
+
+test("a stored row opens its page through the storage the list shows", () => {
+  const storedId = "cloudthread-01k6zq2b7m8x4y9pelbell01";
+  const storedSession = {
+    ...codexSession,
+    resource_id: `codex:conversation:${storedId}`,
+    provider_session_id: null,
+    logical_thread_id: storedId,
+    transcript_path: null,
+    source: "remote_only" as const,
+    title: "Add a bell to the pelican bicycle",
+    working_directory: null,
+    recorded_sha: null,
+    actions: [],
+  };
+  const render = (storageId: string | null) => renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      onOpenSessionDetail={() => undefined}
+      storageId={storageId}
+      activeStorageName="Local storage 1"
+      activity={{
+        ...activity,
+        sessions: [codexSession, storedSession],
+        unmapped: [{ resource_id: storedSession.resource_id, reason: "No subsequent commit" }],
+      }}
+    />,
+  );
+  const storedList = (html: string) => html.slice(html.indexOf('id="storage-only-list"'), html.indexOf('class="sync-history-timeline'));
+
+  // The title is the row's link and the chevron is there, as on a local row.
+  const html = storedList(render("storage-1"));
+  assert.match(html, /class="sync-history-session-title-button"[^>]*>Add a bell to the pelican bicycle</);
+  assert.match(html, /aria-label="View session details"[^>]*>\s*<svg[^>]*data-icon="chevron-right"/);
+  // Nothing opens a stored session in Codex, and nothing local can be deleted.
+  assert.match(html, /sync-history-provider-inert/);
+  assert.doesNotMatch(html, /Delete local session/);
+
+  // Without a storage to read through, the row stays plain.
+  const plain = storedList(render(null));
+  assert.match(plain, /<strong[^>]*>Add a bell to the pelican bicycle<\/strong>/);
+  assert.doesNotMatch(plain, /sync-history-session-title-button|View session details/);
+
+  // The rule, and the request that carries the storage.
+  const source = readFileSync("src/components/project-sync/ProjectActivityPage.tsx", "utf8");
+  assert.match(source, /\? storageId != null && session\.access !== "unsupported"\n\s*: session\.access === "bound_ready"\);/);
+  assert.match(source, /\.\.\.\(stored && storageId \? \{ storageId \} : \{\}\),/);
+  assert.match(source, /storageId=\{activeStorageId\}/);
 });

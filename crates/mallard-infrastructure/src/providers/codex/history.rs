@@ -12,9 +12,10 @@ use crate::codex_subagents::{RolloutLookup, SubagentActivity, SubagentActivityKi
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
     agent_resource_id, attach_turn_tool_summaries, most_specific_project_relative_path,
-    timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
-    SessionAgentStatus, SessionCount, SessionCountQuality, SessionDetailWarning,
-    SessionEventCounts, SessionEventDetail, SessionFileSummary, SessionSourceSpan,
+    setting_token, timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode,
+    SessionAgentPreview, SessionAgentStatus, SessionCount, SessionCountQuality,
+    SessionDetailWarning, SessionEventCounts, SessionEventDetail, SessionFileSummary,
+    SessionMessageSettings, SessionMessageSettingsSource, SessionSourceSpan,
     SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
@@ -750,10 +751,24 @@ struct PendingTimelineEvent {
     assistant_phase: AssistantPhase,
 }
 
+/// One `turn_context` record: the turn's model and effort, at its place in
+/// the file.
+#[derive(Clone, Debug)]
+struct TurnContext {
+    offset: u64,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
 #[derive(Default)]
 struct TimelineBuilder {
     events: Vec<PendingTimelineEvent>,
     tool_positions: BTreeMap<String, usize>,
+    /// `turn_context` records by the turn they describe, in file order; and
+    /// all of them in file order, for the legacy stream whose items name no
+    /// turn.
+    turn_contexts: BTreeMap<String, Vec<TurnContext>>,
+    contexts_in_order: Vec<TurnContext>,
     /// Agent rows by the child's thread id, for the lifecycle events that
     /// name the thread rather than the call.
     agent_positions: BTreeMap<String, usize>,
@@ -819,6 +834,27 @@ impl TimelineBuilder {
             .unwrap_or_else(|| "codex:turn:orphan".to_string())
     }
 
+    /// A turn's recorded settings, bounded as the events are.
+    fn observe_turn_context(&mut self, payload: &Value, source: SessionSourceSpan) {
+        if self.contexts_in_order.len() >= MAX_TIMELINE_EVENTS {
+            return;
+        }
+        let context = TurnContext {
+            offset: source.offset,
+            model: setting_token(string_alias(payload, &["model"])),
+            effort: setting_token(string_alias(payload, &["effort"])),
+        };
+        if let Some(turn_id) =
+            string_alias(payload, &["turn_id", "turnId"]).filter(|turn_id| !turn_id.is_empty())
+        {
+            self.turn_contexts
+                .entry(format!("codex:turn:{turn_id}"))
+                .or_default()
+                .push(context.clone());
+        }
+        self.contexts_in_order.push(context);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_visible(
         &mut self,
@@ -872,6 +908,7 @@ impl TimelineBuilder {
                 source,
                 tool: None,
                 agent: None,
+                settings: SessionMessageSettings::none(),
             },
             order: (source.offset, 0),
             text_key: Some(text),
@@ -970,6 +1007,7 @@ impl TimelineBuilder {
                 turn_tool_summary: None,
                 parent_event_id,
                 source,
+                settings: SessionMessageSettings::none(),
                 tool: Some(SessionToolIndexEntry {
                     provider_call_id: call_id,
                     native_name,
@@ -1032,6 +1070,7 @@ impl TimelineBuilder {
                                 turn_tool_summary: None,
                                 parent_event_id: parent,
                                 source,
+                                settings: SessionMessageSettings::none(),
                                 tool: Some(SessionToolIndexEntry {
                                     provider_call_id: activity.event_id.clone(),
                                     native_name: SPAWN_AGENT_TOOL.to_string(),
@@ -1257,6 +1296,24 @@ impl TimelineBuilder {
             );
         }
 
+        let turn_contexts = std::mem::take(&mut self.turn_contexts);
+        let contexts_in_order = std::mem::take(&mut self.contexts_in_order);
+        for pending in &mut self.events {
+            if matches!(
+                pending.entry.kind,
+                SessionTimelineEventKind::Prompt
+                    | SessionTimelineEventKind::Response
+                    | SessionTimelineEventKind::IntermediateStep
+            ) {
+                pending.entry.settings = message_settings(
+                    &pending.entry,
+                    &turn_contexts,
+                    &contexts_in_order,
+                    self.saw_family,
+                );
+            }
+        }
+
         self.events.sort_by_key(|pending| pending.order);
         for (ordinal, pending) in self.events.iter_mut().enumerate() {
             pending.entry.ordinal = ordinal as u64;
@@ -1292,6 +1349,48 @@ impl TimelineBuilder {
             warnings: self.warnings,
             truncated: self.truncated,
         }
+    }
+}
+
+/// What generated a message: the last context of its own turn written at or
+/// before it, else — for a prompt saved before its turn's context — the turn's
+/// first. Never another turn's; a turn without a context reads as nothing
+/// recorded. The legacy stream names no turn on its items, so there a message
+/// takes the latest context before it, which is its own turn's.
+fn message_settings(
+    entry: &SessionTimelineIndexEntry,
+    turn_contexts: &BTreeMap<String, Vec<TurnContext>>,
+    contexts_in_order: &[TurnContext],
+    canonical: bool,
+) -> SessionMessageSettings {
+    let offset = entry.source.offset;
+    let context = match entry
+        .turn_id
+        .as_ref()
+        .and_then(|turn_id| turn_contexts.get(turn_id))
+    {
+        Some(contexts) => contexts
+            .iter()
+            .rev()
+            .find(|context| context.offset <= offset)
+            .or_else(|| {
+                (entry.kind == SessionTimelineEventKind::Prompt)
+                    .then(|| contexts.first())
+                    .flatten()
+            }),
+        None if canonical => None,
+        None => contexts_in_order
+            .iter()
+            .rev()
+            .find(|context| context.offset <= offset),
+    };
+    match context {
+        Some(context) => SessionMessageSettings::recorded(
+            context.model.clone(),
+            context.effort.clone(),
+            SessionMessageSettingsSource::Turn,
+        ),
+        None => SessionMessageSettings::none(),
     }
 }
 
@@ -2345,6 +2444,10 @@ pub(crate) fn build_timeline_index(
                 "responseitem" => {
                     consume_legacy_response_item(&mut legacy, payload, source, timestamp, context)
                 }
+                "turncontext" => {
+                    canonical.observe_turn_context(payload, source);
+                    legacy.observe_turn_context(payload, source);
+                }
                 _ => {}
             }
         }
@@ -2773,6 +2876,11 @@ pub(crate) fn read_timeline_page(
             tool,
             checkpoint: None,
             agent,
+            settings: matches!(
+                entry.kind,
+                SessionTimelineEventKind::Prompt | SessionTimelineEventKind::Response
+            )
+            .then(|| entry.settings.clone()),
         });
     }
     let next_index = index.events[position..]
@@ -3797,6 +3905,248 @@ mod tests {
         assert_eq!(tool.status, SessionToolCallStatus::Completed);
     }
 
+    fn turn_context(
+        timestamp: &str,
+        turn_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Value {
+        let mut payload = json!({"turn_id": turn_id, "cwd": "/tmp/project"});
+        if let Some(model) = model {
+            payload["model"] = json!(model);
+        }
+        if let Some(effort) = effort {
+            payload["effort"] = json!(effort);
+        }
+        json!({"timestamp": timestamp, "type": "turn_context", "payload": payload})
+    }
+
+    fn turn_item(timestamp: &str, turn_id: &str, item: Value) -> Value {
+        json!({"timestamp":timestamp,"type":"event_msg","payload":{"type":"item_completed","turn_id":turn_id,"item":item}})
+    }
+
+    fn user_item(id: &str, text: &str) -> Value {
+        json!({"type":"UserMessage","id":id,"content":[{"type":"text","text":text}]})
+    }
+
+    fn final_item(id: &str, text: &str) -> Value {
+        json!({"type":"AgentMessage","id":id,"phase":"final_answer","content":[{"type":"text","text":text}]})
+    }
+
+    fn settings_of(index: &SessionTimelineIndex, event_id: &str) -> SessionMessageSettings {
+        index
+            .events
+            .iter()
+            .find(|entry| entry.event_id == event_id)
+            .unwrap_or_else(|| panic!("no event {event_id}"))
+            .settings
+            .clone()
+    }
+
+    fn turn_settings(model: Option<&str>, effort: Option<&str>) -> SessionMessageSettings {
+        SessionMessageSettings::recorded(
+            model.map(ToOwned::to_owned),
+            effort.map(ToOwned::to_owned),
+            SessionMessageSettingsSource::Turn,
+        )
+    }
+
+    #[test]
+    fn turn_context_stamps_each_turns_messages_with_its_model_and_effort() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                turn_context(
+                    "2026-08-07T00:00:00Z",
+                    "turn-1",
+                    Some("gpt-5.6-luna"),
+                    Some("low"),
+                ),
+                turn_item(
+                    "2026-08-07T00:00:01Z",
+                    "turn-1",
+                    user_item("u-1", "Check upload failures."),
+                ),
+                turn_item(
+                    "2026-08-07T00:00:02Z",
+                    "turn-1",
+                    json!({"type":"CommandExecution","id":"call-1","command":["rg","upload"],"status":"completed","stdout":"","stderr":""}),
+                ),
+                turn_item(
+                    "2026-08-07T00:00:03Z",
+                    "turn-1",
+                    final_item("m-1", "A timeout can occur."),
+                ),
+                turn_context(
+                    "2026-08-07T00:00:10Z",
+                    "turn-2",
+                    Some("gpt-5.6-sol"),
+                    Some("high"),
+                ),
+                turn_item(
+                    "2026-08-07T00:00:11Z",
+                    "turn-2",
+                    user_item("u-2", "Add a test."),
+                ),
+                turn_item(
+                    "2026-08-07T00:00:12Z",
+                    "turn-2",
+                    final_item("m-2", "Added."),
+                ),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let luna = turn_settings(Some("gpt-5.6-luna"), Some("low"));
+        let sol = turn_settings(Some("gpt-5.6-sol"), Some("high"));
+        assert_eq!(settings_of(&index, "codex:item:u-1"), luna);
+        assert_eq!(settings_of(&index, "codex:item:m-1"), luna);
+        assert_eq!(settings_of(&index, "codex:item:u-2"), sol);
+        assert_eq!(settings_of(&index, "codex:item:m-2"), sol);
+        assert_eq!(
+            settings_of(&index, "codex:tool:call-1"),
+            SessionMessageSettings::none()
+        );
+
+        // The page carries them on prompts and replies, never on a call.
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([
+                SessionTimelineEventKind::Prompt,
+                SessionTimelineEventKind::Response,
+                SessionTimelineEventKind::ToolCall,
+            ]),
+            included_tool_categories: BTreeSet::from([SessionToolCategory::Shell]),
+            turn_id: None,
+        };
+        let page =
+            read_timeline_page(&transcript, &index, &query, &context(&project_root)).unwrap();
+        let on_page = |event_id: &str| {
+            page.events
+                .iter()
+                .find(|event| event.event_id == event_id)
+                .unwrap()
+                .settings
+                .clone()
+        };
+        assert_eq!(on_page("codex:item:u-2"), Some(sol.clone()));
+        assert_eq!(on_page("codex:item:m-2"), Some(sol));
+        assert_eq!(on_page("codex:tool:call-1"), None);
+    }
+
+    #[test]
+    fn a_prompt_before_its_context_takes_the_turns_first_and_a_turn_without_one_reads_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                // The input is saved before its turn's context, which records no effort.
+                turn_item("2026-08-07T00:00:01Z", "turn-1", user_item("u-1", "First.")),
+                turn_context("2026-08-07T00:00:02Z", "turn-1", Some("gpt-5.6-luna"), None),
+                turn_item("2026-08-07T00:00:03Z", "turn-1", final_item("m-1", "One.")),
+                // A later context of the same turn reaches only what follows it.
+                turn_context(
+                    "2026-08-07T00:00:04Z",
+                    "turn-1",
+                    Some("gpt-5.6-sol"),
+                    Some("high"),
+                ),
+                turn_item("2026-08-07T00:00:05Z", "turn-1", final_item("m-1b", "Two.")),
+                // A turn with no context borrows nothing from its neighbours.
+                turn_item(
+                    "2026-08-07T00:00:06Z",
+                    "turn-2",
+                    user_item("u-2", "Second."),
+                ),
+                turn_item(
+                    "2026-08-07T00:00:07Z",
+                    "turn-2",
+                    final_item("m-2", "Three."),
+                ),
+                // Values that are not short tokens are not recorded.
+                turn_context(
+                    "2026-08-07T00:00:08Z",
+                    "turn-3",
+                    Some("bad model"),
+                    Some(&"x".repeat(129)),
+                ),
+                turn_item("2026-08-07T00:00:09Z", "turn-3", user_item("u-3", "Third.")),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let luna = turn_settings(Some("gpt-5.6-luna"), None);
+        assert_eq!(settings_of(&index, "codex:item:u-1"), luna);
+        assert_eq!(settings_of(&index, "codex:item:m-1"), luna);
+        assert_eq!(
+            settings_of(&index, "codex:item:m-1b"),
+            turn_settings(Some("gpt-5.6-sol"), Some("high"))
+        );
+        for event_id in ["codex:item:u-2", "codex:item:m-2", "codex:item:u-3"] {
+            assert_eq!(
+                settings_of(&index, event_id),
+                SessionMessageSettings::none(),
+                "{event_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legacy_stream_takes_the_latest_turn_context_before_each_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":project_root}}),
+                turn_context(
+                    "2026-08-07T00:00:00Z",
+                    "t-1",
+                    Some("gpt-5.6-luna"),
+                    Some("low"),
+                ),
+                json!({"timestamp":"2026-08-07T00:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Read the file"}}),
+                json!({"timestamp":"2026-08-07T00:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"It is complete.","phase":"final_answer"}}),
+                turn_context(
+                    "2026-08-07T00:00:03Z",
+                    "t-2",
+                    Some("gpt-5.6-sol"),
+                    Some("high"),
+                ),
+                json!({"timestamp":"2026-08-07T00:00:04Z","type":"event_msg","payload":{"type":"user_message","message":"Add a test"}}),
+                json!({"timestamp":"2026-08-07T00:00:05Z","type":"event_msg","payload":{"type":"agent_message","message":"Added.","phase":"final_answer"}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let of_kind = |kind: SessionTimelineEventKind| {
+            index
+                .events
+                .iter()
+                .filter(|entry| entry.kind == kind)
+                .map(|entry| entry.settings.clone())
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![
+            turn_settings(Some("gpt-5.6-luna"), Some("low")),
+            turn_settings(Some("gpt-5.6-sol"), Some("high")),
+        ];
+        assert_eq!(of_kind(SessionTimelineEventKind::Prompt), expected);
+        assert_eq!(of_kind(SessionTimelineEventKind::Response), expected);
+    }
+
     #[test]
     fn a_call_without_output_is_an_incomplete_note_not_a_warning() {
         let temp = tempfile::tempdir().unwrap();
@@ -3946,6 +4296,7 @@ mod tests {
                         result_source: None,
                     }),
                     agent: None,
+                    settings: SessionMessageSettings::none(),
                 },
                 order,
                 text_key: None,

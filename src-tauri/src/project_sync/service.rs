@@ -115,6 +115,7 @@ use mallard_infrastructure::storage_core::{
 };
 pub use mallard_infrastructure::storage_providers::StorageProviderDescriptor;
 use mallard_infrastructure::storage_providers::StorageProviderRegistry;
+use mallard_infrastructure::stored_session::{self, StoredSessionTranscript};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -452,6 +453,55 @@ impl<'a> ProjectSyncService<'a> {
         get_project_session_event_detail_with_repository(
             self.repository,
             local_project_id,
+            resource_id.as_str(),
+            snapshot_id,
+            event_id,
+        )
+    }
+
+    /// A stored session's page, read from `storage_id` without a Pull.
+    pub fn get_stored_session_detail(
+        &self,
+        local_project_id: &LocalProjectId,
+        storage_id: &StorageId,
+        resource_id: &ResourceId,
+    ) -> Result<ProjectSessionDetail, SessionDetailError> {
+        get_stored_session_detail_with_repository(
+            self.repository,
+            local_project_id,
+            storage_id,
+            resource_id.as_str(),
+        )
+    }
+
+    pub fn get_stored_session_timeline_page(
+        &self,
+        local_project_id: &LocalProjectId,
+        storage_id: &StorageId,
+        resource_id: &ResourceId,
+        request: ProjectSessionTimelineRequest,
+    ) -> Result<ProjectSessionTimelinePage, SessionDetailError> {
+        get_stored_session_timeline_page_with_repository(
+            self.repository,
+            local_project_id,
+            storage_id,
+            resource_id.as_str(),
+            request,
+        )
+    }
+
+    pub fn get_stored_session_event_detail(
+        &self,
+        local_project_id: &LocalProjectId,
+        storage_id: &StorageId,
+        resource_id: &ResourceId,
+        snapshot_id: &str,
+        event_id: &str,
+    ) -> Result<SessionEventDetail, SessionDetailError> {
+        get_stored_session_event_detail_with_repository(
+            self.repository,
+            local_project_id,
+            storage_id,
             resource_id.as_str(),
             snapshot_id,
             event_id,
@@ -1768,6 +1818,167 @@ fn load_project_session_views(
         }
     }
     Ok(matching)
+}
+
+/// A stored session, read for its page without a Pull: the storage the row
+/// sits under is opened, the selected publication's manifest names the
+/// transcript object, the object is fetched and verified against the
+/// manifest, and the bytes are prepared as a Pull would install them, into a
+/// private temporary home that lives for this one request. Nothing is kept
+/// between commands and nothing is written under a provider home
+/// (docs/PLAN_STORED_SESSION_DETAIL.md).
+fn read_stored_session(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    resource_id: &str,
+) -> Result<StoredSessionTranscript, SessionDetailError> {
+    let (provider, cloud_thread_id) =
+        mallard_domain::parse_cloud_conversation_resource_id(resource_id).map_err(|_| {
+            session_detail_error(
+                SessionDetailErrorCode::InvalidRequest,
+                "The stored session resource ID is invalid.",
+            )
+        })?;
+    let state = repository.load_project_state_snapshot().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not read its local state.",
+        )
+    })?;
+    let link = state
+        .config
+        .links
+        .iter()
+        .find(|link| &link.local_project_id == local_project_id && &link.storage_id == storage_id)
+        .ok_or_else(|| {
+            session_detail_error(
+                SessionDetailErrorCode::NotFound,
+                "This project is not linked to that storage.",
+            )
+        })?;
+    let project = project_activity::resolve_activity_project_from_state(
+        &state.config,
+        &state.bindings,
+        local_project_id,
+    )
+    .map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::OwnershipChanged,
+            "The project or its provider profile changed; open Project Settings.",
+        )
+    })?;
+    let (storage, engine) =
+        storage_engine_from_state(repository, &state.config, &state.bindings, storage_id).map_err(
+            |error| {
+                session_detail_error(
+                    SessionDetailErrorCode::ProviderError,
+                    format!("Mallard could not open the storage: {error}"),
+                )
+            },
+        )?;
+    let snapshot = engine
+        .inspect_optional(&link.bundle_id)
+        .map_err(|error| {
+            session_detail_error(
+                SessionDetailErrorCode::ProviderError,
+                format!("Mallard could not read {}: {error}", storage.name),
+            )
+        })?
+        .ok_or_else(|| {
+            session_detail_error(
+                SessionDetailErrorCode::NotFound,
+                format!("{} holds no publication of this project.", storage.name),
+            )
+        })?;
+    let thread = snapshot
+        .manifest
+        .all_conversations()
+        .find(|(scope, thread_id, _)| {
+            matches!(scope, SyncScopeKey::Provider(key) if *key == provider)
+                && **thread_id == cloud_thread_id
+        })
+        .map(|(_, _, thread)| thread)
+        .ok_or_else(|| {
+            session_detail_error(
+                SessionDetailErrorCode::NotFound,
+                format!("This session is not in {}.", storage.name),
+            )
+        })?;
+    let transcript = thread
+        .files
+        .iter()
+        .find(|file| file.role == ConversationFileRole::Transcript)
+        .ok_or_else(|| {
+            session_detail_error(
+                SessionDetailErrorCode::NotFound,
+                "The stored session has no transcript.",
+            )
+        })?;
+    let mut objects = engine.byte_source(&snapshot, None);
+    let wire_bytes = objects
+        .read_bounded(
+            &transcript.logical_path,
+            conversation_file_limit_bytes(),
+            "stored conversation transcript",
+        )
+        .map_err(|error| {
+            session_detail_error(
+                SessionDetailErrorCode::ProviderError,
+                format!("Mallard could not read the stored transcript: {error}"),
+            )
+        })?;
+    stored_session::prepare_stored_session(
+        provider_registry(),
+        &project,
+        resource_id,
+        thread,
+        &wire_bytes,
+    )
+    .map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            mallard_infrastructure::pull_transcript::STORED_SESSION_UNREADABLE,
+        )
+    })
+}
+
+pub(super) fn get_stored_session_detail_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    resource_id: &str,
+) -> Result<ProjectSessionDetail, SessionDetailError> {
+    let stored = read_stored_session(repository, local_project_id, storage_id, resource_id)?;
+    session_detail::get_stored_session_detail(provider_registry(), &stored)
+}
+
+pub(super) fn get_stored_session_timeline_page_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    resource_id: &str,
+    request: ProjectSessionTimelineRequest,
+) -> Result<ProjectSessionTimelinePage, SessionDetailError> {
+    let stored = read_stored_session(repository, local_project_id, storage_id, resource_id)?;
+    session_detail::get_stored_session_timeline_page(provider_registry(), &stored, request)
+}
+
+pub(super) fn get_stored_session_event_detail_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    storage_id: &StorageId,
+    resource_id: &str,
+    snapshot_id: &str,
+    event_id: &str,
+) -> Result<SessionEventDetail, SessionDetailError> {
+    let stored = read_stored_session(repository, local_project_id, storage_id, resource_id)?;
+    session_detail::get_stored_session_event_detail(
+        provider_registry(),
+        &stored,
+        snapshot_id,
+        event_id,
+    )
 }
 
 pub(super) fn get_project_session_detail_with_repository(

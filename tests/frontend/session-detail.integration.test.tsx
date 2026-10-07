@@ -5,9 +5,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type {
   ProjectSessionDetail,
   ProjectSessionTimelinePage,
+  SessionMessageSettings,
   SessionTimelineEvent,
 } from "../../src/types";
 import { SessionDetailMarkdown } from "../../src/components/project-sync/session-detail/SessionDetailEvent";
+import { sessionModelLabel, sessionModelNotes } from "../../src/components/project-sync/session-detail/SessionModel";
 import { mermaidSourceProblem, readMermaidResult } from "../../src/components/mermaid/mermaidModel";
 import type { SessionBackTarget } from "../../src/components/project-sync/session-detail/SessionDetailBack";
 import SessionDetailHeader from "../../src/components/project-sync/session-detail/SessionDetailHeader";
@@ -324,7 +326,12 @@ test("Codex and Claude session prompts, replies, and steps use the same math ren
 
 function renderTimeline(
   timelineEvents: SessionTimelineEvent[],
-  overrides?: { provider?: string; providerDisplayName?: string; repositoryUrl?: string | null },
+  overrides?: {
+    provider?: string;
+    providerDisplayName?: string;
+    repositoryUrl?: string | null;
+    startSettings?: SessionMessageSettings | null;
+  },
 ): string {
   return renderToStaticMarkup(
     <SessionDetailTimeline
@@ -346,6 +353,7 @@ function renderTimeline(
       projectRoot="/Users/example/HorrorGame"
       repositoryUrl={overrides?.repositoryUrl ?? null}
       hasFilterToggles
+      startSettings={overrides?.startSettings}
     />,
   );
 }
@@ -419,6 +427,7 @@ test("the toolbar states one count, with the denominator the page never had", ()
 test("the header is one strip: hidden h1, the way back, facts as chips, verbs on the right", () => {
   const html = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={{ ...detail, summary: detail.title }}
       back={back}
       headingRef={{ current: null }}
@@ -465,6 +474,7 @@ test("the header is one strip: hidden h1, the way back, facts as chips, verbs on
 
   const distinct = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={back}
       headingRef={{ current: null }}
@@ -485,6 +495,7 @@ test("the header is one strip: hidden h1, the way back, facts as chips, verbs on
 test("a Push hold and the transcript notes are chips, never boxes", () => {
   const html = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={back}
       headingRef={{ current: null }}
@@ -518,6 +529,7 @@ test("a Push hold and the transcript notes are chips, never boxes", () => {
 
   const quiet = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={back}
       headingRef={{ current: null }}
@@ -546,6 +558,7 @@ test("a Push hold and the transcript notes are chips, never boxes", () => {
 test("the page's way back leads the strip and both entry states, one level up the trail", () => {
   const header = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={back}
       headingRef={{ current: null }}
@@ -566,6 +579,7 @@ test("the page's way back leads the strip and both entry states, one level up th
   // the parent session: a title, so it leaves the app's display face.
   const waiting = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={{ ...back, disabled: true }}
       headingRef={{ current: null }}
@@ -579,6 +593,7 @@ test("the page's way back leads the strip and both entry states, one level up th
   assert.match(waiting, /class="btn session-detail-back" disabled=""/);
   const child = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={{ kind: "session", label: "Plan the release", onActivate: () => undefined }}
       headingRef={{ current: null }}
@@ -595,6 +610,7 @@ test("the page's way back leads the strip and both entry states, one level up th
   // scaffold holds back for its first 150ms.
   const opening = renderToStaticMarkup(
     <SessionDetailPage
+      source={{ kind: "local" }}
       localProjectId="project-1"
       projectRoot="/tmp/project"
       resourceId={detail.resource_id}
@@ -722,6 +738,7 @@ test("a run that is not simply done prints its status, and the tile takes its co
 test("agents open with the conversation and count on the header", () => {
   const header = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={detail}
       back={back}
       headingRef={{ current: null }}
@@ -738,6 +755,7 @@ test("agents open with the conversation and count on the header", () => {
   // A child page states what it was, and offers no verbs of its own.
   const childHeader = renderToStaticMarkup(
     <SessionDetailHeader
+      source={{ kind: "local" }}
       detail={{
         ...detail,
         actions: [],
@@ -794,6 +812,60 @@ test("the timeline is a column of tiles for turns and punches for calls, no spea
   // The eyebrow that restated the heading, and the count that contradicted the
   // filter panel, are both gone.
   assert.doesNotMatch(html, /Chronological record|session-detail-section-heading|loaded<\/code>/);
+});
+
+test("the model is a header fact, and the transcript notes only its changes", () => {
+  const settings = (
+    model: string | null,
+    effort: string | null,
+    source: SessionMessageSettings["source"],
+  ): SessionMessageSettings => ({ model, effort, source });
+  const start = settings("gpt-5.6-luna", "low", "turn");
+  const header = (withSettings: SessionMessageSettings | null | undefined) => renderToStaticMarkup(
+    <SessionDetailHeader
+      source={{ kind: "local" }}
+      detail={{ ...detail, settings: withSettings }}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+
+  // The chip: what the session started with, as recorded, opening the facts.
+  assert.match(header(start), /<button type="button" class="session-detail-chip session-detail-model-chip" aria-haspopup="dialog" aria-expanded="false" aria-label="Model and thinking: gpt-5.6-luna · low"><code>gpt-5.6-luna<\/code> · low<\/button>/);
+  // No model on record anywhere: no chip. Recorded only later: Unknown.
+  assert.doesNotMatch(header(null), /session-detail-model-chip/);
+  assert.match(header(settings(null, null, "none")), /aria-label="Model and thinking: Unknown">Unknown<\/button>/);
+
+  // The notes: the walk starts from the session's start. A message that
+  // differs gets one, a step or a message that recorded nothing says nothing,
+  // and the level reads exactly as recorded.
+  const stamped: SessionTimelineEvent[] = [
+    { ...events[0], settings: start },
+    { ...events[2], settings: settings("gpt-5.6-sol", "xhigh", "turn") },
+    { ...events[3], settings: settings("claude-opus-4-6", "low", "reply") },
+    { ...events[0], event_id: "prompt-2", ordinal: 6, timestamp: START + 400, settings: settings(null, null, "none") },
+    { ...events[2], event_id: "response-2", ordinal: 7, timestamp: START + 500, settings: settings("gpt-5.6-sol", "xhigh", "turn") },
+  ];
+  const notes = sessionModelNotes(stamped, start);
+  assert.deepEqual([...notes.keys()], ["response-1"]);
+  assert.equal(sessionModelLabel(notes.get("response-1")!), "gpt-5.6-sol · xhigh");
+  assert.deepEqual([...sessionModelNotes(stamped, settings(null, null, "none")).keys()], ["prompt-1", "response-1"]);
+  assert.equal(sessionModelLabel(settings("a", null, "turn")), "a · Unknown");
+  assert.equal(sessionModelLabel(settings(null, "high", "turn")), "Unknown · high");
+  assert.equal(sessionModelLabel(settings(null, null, "none")), "Unknown");
+
+  // On the rail before the reply it applies from, in the band's mono; the
+  // cards' bands are untouched, and a transcript without changes has none.
+  const html = renderTimeline(stamped, { startSettings: start });
+  assert.equal(html.split('class="session-detail-model-note"').length - 1, 1);
+  assert.match(html, /<div class="session-detail-model-note"><span class="sync-path-popover"><button type="button" class="session-detail-model-note-chip" aria-haspopup="dialog" aria-expanded="false" aria-label="Model and thinking from here: gpt-5.6-sol · xhigh">gpt-5.6-sol · xhigh<\/button><\/span><\/div><article id="[^"]+" class="session-detail-event event-response"/);
+  assert.doesNotMatch(html, /session-detail-model-chip|gpt-5.6-luna|claude-opus-4-6/);
+  assert.doesNotMatch(renderTimeline(events, { startSettings: start }), /session-detail-model-note/);
 });
 
 test("the wait between turns is a chip in the node column, and ticks never carry one", () => {
@@ -1408,6 +1480,11 @@ test("workspace navigation lazy-loads detail and preserves the mounted Activity 
   assert.match(apiSource, /"get_project_session_detail"/);
   assert.match(apiSource, /"get_project_session_timeline_page"/);
   assert.match(apiSource, /"get_project_session_event_detail"/);
+  // Every read of a session takes the storage a stored row is read from,
+  // and passes it on as `storageId`; a local read passes none.
+  assert.match(apiSource, /getProjectSessionDetail: \(localProjectId: string, resourceId: string, storageId: string \| null = null\) => \{\n\s*const request = \{ localProjectId, resourceId, storageId \};/);
+  assert.match(apiSource, /query: ProjectSessionTimelineQuery,\n\s*storageId: string \| null = null,/);
+  assert.match(apiSource, /eventId: string,\n\s*storageId: string \| null = null,\n\s*\) => \{\n\s*const request = \{ localProjectId, resourceId, snapshotId, eventId, storageId \};/);
   assert.match(apiSource, /"open_project_markdown_path"/);
   assert.doesNotMatch(apiSource, /"get_project_session_details"/);
 });
@@ -1440,4 +1517,63 @@ test("the session page reports its counts in the fields its Push row prints", ()
     [unstamped.metrics.started_at, unstamped.metrics.ended_at, unstamped.metrics.total_tokens, unstamped.metrics.metrics_complete],
     [0, 0, null, true],
   );
+});
+
+// A row that is only in a storage opens the shipped page on the storage's
+// copy (docs/PLAN_STORED_SESSION_DETAIL.md). The page says so once, the way
+// the row does, and offers no launch verb: nothing here opens in Codex.
+test("a stored session's page carries the row's badge as its first fact and no launch verbs", () => {
+  const stored = renderToStaticMarkup(
+    <SessionDetailHeader
+      source={{ kind: "stored", storageId: "storage-1", storageName: "rikaqu0223-arch" }}
+      detail={{ ...detail, actions: [] }}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+  // The row's glyph and sentence lead the facts; the face names the fact,
+  // not the storage, which is the bar's root crumb.
+  assert.match(
+    stored,
+    /<div class="session-detail-chips" aria-label="Session facts"><span class="session-detail-chip" title="Only in rikaqu0223-arch\. Pull to download it here\."><span[^>]*data-thread-status="cloud-outstanding"[\s\S]*?Not on this computer<\/span>/,
+  );
+  assert.doesNotMatch(stored, /session-detail-launch/);
+  assert.doesNotMatch(stored, />rikaqu0223-arch</);
+
+  const local = renderToStaticMarkup(
+    <SessionDetailHeader
+      source={{ kind: "local" }}
+      detail={detail}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+    />,
+  );
+  assert.doesNotMatch(local, /Not on this computer|cloud-outstanding/);
+
+  // The page hands its source's storage to every read, and the shell keeps
+  // the storage on the subview the row opened.
+  const page = readFileSync("src/components/project-sync/session-detail/SessionDetailPage.tsx", "utf8");
+  assert.match(page, /const storageId = source\.kind === "stored" \? source\.storageId : null;/);
+  assert.match(page, /getProjectSessionDetail\(localProjectId, resourceId, storageId\)/);
+  assert.match(page, /turn_id: null,\n\s*\},\n\s*storageId,\n\s*\);/);
+  assert.match(page, /detail\.snapshot_id,\n\s*eventId,\n\s*storageId,\n\s*\);/);
+  const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  assert.match(shell, /\.\.\.\(request\.storageId \? \{ storageId: request\.storageId \} : \{\}\),/);
+  // On a stored page the bar's Pull is this one session's, and Push has
+  // nothing local to send.
+  const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
+  assert.match(workspace, /const storedSession = sessionDetailSubview\?\.storageId \?\? null;/);
+  assert.match(workspace, /: storedSession \? "No local session to push\."/);
+  assert.match(workspace, /const pullThreadCount = storedSession \? 1 : activityHeader\?\.counts\.pull \?\? 0;/);
+  assert.match(workspace, /\? \{ kind: "session", resource_id: sessionDetailSubview\.resourceId \}/);
 });

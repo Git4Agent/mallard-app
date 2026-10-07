@@ -1,7 +1,8 @@
-import type { SessionTimelineEvent } from "../../../types";
+import type { SessionMessageSettings, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import Notice from "../../notice/Notice";
 import SessionDetailEvent from "./SessionDetailEvent";
+import { SessionModelNote, sessionModelNotes } from "./SessionModel";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   formatSessionGap,
@@ -34,6 +35,8 @@ interface Props {
   hasFilterToggles: boolean;
   /** Opens an agent's transcript as its own session page. */
   onOpenSession?: (resourceId: string) => void;
+  /** What the session started with; a message that differs gets a note. */
+  startSettings?: SessionMessageSettings | null;
 }
 
 export default function SessionDetailTimeline({
@@ -56,9 +59,11 @@ export default function SessionDetailTimeline({
   repositoryUrl,
   hasFilterToggles,
   onOpenSession,
+  startSettings,
 }: Props) {
   const days = groupSessionEventsByDay(events);
   const spans = sessionTurnSpans(events);
+  const modelNotes = sessionModelNotes(events, startSettings);
 
   return (
     <section className="session-detail-timeline" aria-label="Session timeline">
@@ -135,6 +140,11 @@ export default function SessionDetailTimeline({
                 >
                   {gap && (
                     <div className="session-detail-event-gap"><span>{gap}</span></div>
+                  )}
+                  {/* A change of model or thinking level, before the message
+                      it applies from. */}
+                  {modelNotes.has(event.event_id) && (
+                    <SessionModelNote eventId={event.event_id} settings={modelNotes.get(event.event_id)!} />
                   )}
                   <SessionDetailEvent
                     onOpenSession={onOpenSession}

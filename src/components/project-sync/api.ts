@@ -605,8 +605,11 @@ export const projectSyncApi = {
   onProjectGitChanged: (handler: (event: ProjectGitChangedEvent) => void) =>
     listen<ProjectGitChangedEvent>("project-git-changed", (event) => handler(event.payload)),
 
-  getProjectSessionDetail: (localProjectId: string, resourceId: string) => {
-    const request = { localProjectId, resourceId };
+  /** `storageId` names the storage a stored row (`…:cloudthread-…`) is read
+   *  from; a local session passes none. The two reads below take it the
+   *  same way. */
+  getProjectSessionDetail: (localProjectId: string, resourceId: string, storageId: string | null = null) => {
+    const request = { localProjectId, resourceId, storageId };
     return projectSyncSingleFlight(
       JSON.stringify(["get_project_session_detail", request]),
       () => invoke<ProjectSessionDetail>("get_project_session_detail", request),
@@ -617,10 +620,12 @@ export const projectSyncApi = {
     localProjectId: string,
     resourceId: string,
     query: ProjectSessionTimelineQuery,
+    storageId: string | null = null,
   ) => {
     const request = {
       localProjectId,
       resourceId,
+      storageId,
       snapshotId: query.snapshot_id,
       cursor: query.cursor ?? null,
       limit: query.limit,
@@ -639,8 +644,9 @@ export const projectSyncApi = {
     resourceId: string,
     snapshotId: string,
     eventId: string,
+    storageId: string | null = null,
   ) => {
-    const request = { localProjectId, resourceId, snapshotId, eventId };
+    const request = { localProjectId, resourceId, snapshotId, eventId, storageId };
     return projectSyncSingleFlight(
       JSON.stringify(["get_project_session_event_detail", request]),
       () => invoke<SessionEventDetail>("get_project_session_event_detail", request),

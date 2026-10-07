@@ -878,6 +878,7 @@ function SessionPage({ zone, summary, session }: { zone: NoticeZoneProps; summar
       />
       <main className="sync-main sync-project-links-page sync-project-workspace-page sync-project-combined-page">
         <SessionDetailPage
+          source={{ kind: "local" }}
           localProjectId={summary.local_project_id}
           projectRoot={summary.project_root ?? ""}
           resourceId={session.detail.resource_id}

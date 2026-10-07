@@ -244,7 +244,7 @@ impl InstalledChildPayload {
 pub(crate) mod agent_card_fixtures {
     use crate::providers::traits::{
         SessionAgentIndexEntry, SessionCount, SessionCountQuality, SessionEventCounts,
-        SessionSourceSpan, SessionTimelineEventKind, SessionTimelineIndex,
+        SessionMessageSettings, SessionSourceSpan, SessionTimelineEventKind, SessionTimelineIndex,
         SessionTimelineIndexEntry, SessionTimelineSource, SessionToolCallStatus,
         SessionToolCategory, SessionToolIndexEntry,
     };
@@ -279,6 +279,7 @@ pub(crate) mod agent_card_fixtures {
                 provider_agent_id: agent.map(ToOwned::to_owned),
                 ..Default::default()
             }),
+            settings: SessionMessageSettings::none(),
         }
     }
 

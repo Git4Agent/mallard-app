@@ -45,6 +45,7 @@ pub mod session_path_map;
 pub mod session_path_origins;
 mod session_scan_memo;
 pub mod storage_core;
+pub mod stored_session;
 mod storage_names;
 pub mod storage_providers;
 pub mod sync_metrics;
