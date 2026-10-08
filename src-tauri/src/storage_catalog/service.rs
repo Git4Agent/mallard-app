@@ -39,7 +39,10 @@ use super::adapters::{
 use super::apply::{
     apply_resource_fork, execute_scope_pull_item, recover_catalog_operations, PullApplyEnvironment,
 };
-use super::codec::{CapturedResource, CatalogDetailPluginListing, CatalogResourceDetail};
+use super::codec::{
+    detail_text, read_detail_payload, CapturedResource, CatalogDetailPluginListing,
+    CatalogResourceDetail, CatalogResourceFile, PayloadReader, MAX_DETAIL_FILE_BYTES,
+};
 use super::domain::{
     CatalogActionOutcome, CatalogActionResult, CatalogCapturedWith, CatalogCoordinate,
     CatalogCoordinateLabels, CatalogFormatKey, CatalogLinkId, CatalogLinkState,
@@ -643,6 +646,25 @@ impl StorageCatalogService {
             scope_id,
             storage_id,
             resource_id,
+            &self.user_home,
+        )
+    }
+
+    pub fn resource_file(
+        &self,
+        scope_id: &CatalogScopeId,
+        storage_id: Option<&StorageId>,
+        resource_id: &CatalogResourceId,
+        path: &str,
+    ) -> Result<CatalogResourceFile, String> {
+        get_catalog_resource_file_with_repositories(
+            &self.registry,
+            &self.state,
+            &self.catalog,
+            scope_id,
+            storage_id,
+            resource_id,
+            path,
             &self.user_home,
         )
     }
@@ -2131,12 +2153,29 @@ fn stored_scope_resource(
     Ok((workspace, repository_id, resource))
 }
 
-/// A resource's page. This Mac's copy when the inventory holds one, read
-/// from the capture the inventory already made — no storage is asked;
-/// otherwise the storage's copy, fetched and verified as a stored-only
-/// preview is. A plugin installed here adds the version the provider
-/// observed and what its own manifest says about it.
-fn get_catalog_resource_detail_with_repositories(
+/// The copy a resource's page reads, and the reader for its payload files.
+struct PageCopy<'a> {
+    capability: &'a CatalogCapability,
+    resource: &'a CatalogResourceEnvelope,
+    read_payload: &'a PayloadReader<'a>,
+    /// Present when the copy is this Mac's.
+    local: Option<LocalPageCopy<'a>>,
+}
+
+/// What this Mac adds to its own copy: the folder the resource lives in,
+/// and the profile and provider inventory a plugin's page reads beside it.
+struct LocalPageCopy<'a> {
+    folder: Option<&'a Path>,
+    context: &'a ResolvedCatalogContext,
+    native: Option<&'a ProviderInventory>,
+}
+
+/// Reads a resource's page from one copy. This Mac's copy when the inventory
+/// holds one, read from the capture the inventory already made — no storage
+/// is asked; otherwise the storage's copy, fetched and verified as a
+/// stored-only preview is.
+#[allow(clippy::too_many_arguments)]
+fn read_page_copy<T>(
     registry: &CatalogRegistry,
     state: &LocalStateRepository,
     catalog: &CatalogStateRepository,
@@ -2144,7 +2183,8 @@ fn get_catalog_resource_detail_with_repositories(
     storage_id: Option<&StorageId>,
     resource_id: &CatalogResourceId,
     user_home: &Path,
-) -> Result<CatalogResourceDetail, String> {
+    read: impl FnOnce(PageCopy<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let ResolvedScope { scope, .. } = resolve_scope(catalog, scope_id)?;
     let capability = require_capability(registry, &scope)?;
     let context = resolve_profile_context(
@@ -2163,51 +2203,23 @@ fn get_catalog_resource_detail_with_repositories(
             .as_ref()
             .map(CapturedResource::payloads)
             .unwrap_or_default();
-        let mut detail = record
-            .capability
-            .codec
-            .detail(&record.resource, &|sha256, size| {
-                payloads
-                    .get(sha256)
-                    .filter(|bytes| bytes.len() as u64 == size)
-                    .map(|bytes| bytes.to_vec())
-                    .ok_or_else(|| "the captured payload is missing".to_string())
-            })?;
-        fill_install_lines(&mut detail, &record.capability, &record.resource);
-        if let (
-            CatalogResourceDetail::Install {
-                plugin_id,
-                installed_version,
-                listing,
-                ..
-            },
-            Some(native),
-        ) = (&mut detail, inventory.native.as_ref())
-        {
-            let profile = &context.profile;
-            *installed_version = native
-                .observation(plugin_id)
-                .filter(|observation| observation.installed)
-                .and_then(|observation| observation.observed_version.clone());
-            *listing = super::plugin_listing::installed_listing(
-                profile.provider.as_str(),
-                &profile.canonical_home,
-                native,
-                plugin_id,
-            )
-            .map(|listing| {
-                Box::new(CatalogDetailPluginListing {
-                    display_name: listing.display_name,
-                    developer: listing.developer,
-                    description: listing.description,
-                    category: listing.category,
-                    website_url: listing.website_url,
-                    privacy_url: listing.privacy_url,
-                    terms_url: listing.terms_url,
-                })
-            });
-        }
-        return Ok(detail);
+        let read_payload = |sha256: &str, size: u64| {
+            payloads
+                .get(sha256)
+                .filter(|bytes| bytes.len() as u64 == size)
+                .map(|bytes| bytes.to_vec())
+                .ok_or_else(|| "the captured payload is missing".to_string())
+        };
+        return read(PageCopy {
+            capability: &record.capability,
+            resource: &record.resource,
+            read_payload: &read_payload,
+            local: Some(LocalPageCopy {
+                folder: record.target_path.as_deref(),
+                context: &context,
+                native: inventory.native.as_ref(),
+            }),
+        });
     }
     let storage_id = storage_id.ok_or("this resource is not on this Mac")?;
     let (workspace, repository_id, resource) = stored_scope_resource(
@@ -2220,14 +2232,134 @@ fn get_catalog_resource_detail_with_repositories(
         user_home,
     )?;
     let engine = workspace.engine.as_ref().expect("a storage has an engine");
-    let mut detail = workspace
-        .capability
-        .codec
-        .detail(&resource, &|sha256, size| {
-            engine.fetch_payload(&repository_id, sha256, size)
-        })?;
-    fill_install_lines(&mut detail, &workspace.capability, &resource);
-    Ok(detail)
+    let read_payload = |sha256: &str, size: u64| engine.fetch_payload(&repository_id, sha256, size);
+    read(PageCopy {
+        capability: &workspace.capability,
+        resource: &resource,
+        read_payload: &read_payload,
+        local: None,
+    })
+}
+
+/// A resource's page, from the copy `read_page_copy` picks. A plugin
+/// installed here adds the version the provider observed and what its own
+/// manifest says about it.
+fn get_catalog_resource_detail_with_repositories(
+    registry: &CatalogRegistry,
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    scope_id: &CatalogScopeId,
+    storage_id: Option<&StorageId>,
+    resource_id: &CatalogResourceId,
+    user_home: &Path,
+) -> Result<CatalogResourceDetail, String> {
+    read_page_copy(
+        registry,
+        state,
+        catalog,
+        scope_id,
+        storage_id,
+        resource_id,
+        user_home,
+        |copy| {
+            let mut detail = copy
+                .capability
+                .codec
+                .detail(copy.resource, copy.read_payload)?;
+            fill_install_lines(&mut detail, copy.capability, copy.resource);
+            if let (
+                CatalogResourceDetail::Install {
+                    plugin_id,
+                    installed_version,
+                    listing,
+                    ..
+                },
+                Some(LocalPageCopy {
+                    context,
+                    native: Some(native),
+                    ..
+                }),
+            ) = (&mut detail, copy.local.as_ref())
+            {
+                let profile = &context.profile;
+                *installed_version = native
+                    .observation(plugin_id)
+                    .filter(|observation| observation.installed)
+                    .and_then(|observation| observation.observed_version.clone());
+                *listing = super::plugin_listing::installed_listing(
+                    profile.provider.as_str(),
+                    &profile.canonical_home,
+                    native,
+                    plugin_id,
+                )
+                .map(|listing| {
+                    Box::new(CatalogDetailPluginListing {
+                        display_name: listing.display_name,
+                        developer: listing.developer,
+                        description: listing.description,
+                        category: listing.category,
+                        website_url: listing.website_url,
+                        privacy_url: listing.privacy_url,
+                        terms_url: listing.terms_url,
+                    })
+                });
+            }
+            Ok(detail)
+        },
+    )
+}
+
+/// One file of a resource, as its page opens it, from the copy
+/// `read_page_copy` picks. The file is found by its exact path among the
+/// envelope's files — a path is never joined onto a directory to be read —
+/// and its bytes are checked against the envelope's size and digest.
+#[allow(clippy::too_many_arguments)]
+fn get_catalog_resource_file_with_repositories(
+    registry: &CatalogRegistry,
+    state: &LocalStateRepository,
+    catalog: &CatalogStateRepository,
+    scope_id: &CatalogScopeId,
+    storage_id: Option<&StorageId>,
+    resource_id: &CatalogResourceId,
+    path: &str,
+    user_home: &Path,
+) -> Result<CatalogResourceFile, String> {
+    read_page_copy(
+        registry,
+        state,
+        catalog,
+        scope_id,
+        storage_id,
+        resource_id,
+        user_home,
+        |copy| {
+            let file = copy
+                .resource
+                .file(path)
+                .ok_or("this file is not part of the resource")?;
+            let bytes = read_detail_payload(file, MAX_DETAIL_FILE_BYTES, copy.read_payload)?;
+            // Reveal's target: the envelope's validated relative path, one
+            // component at a time, under the folder this Mac's copy lives in.
+            let local_path = copy
+                .local
+                .as_ref()
+                .and_then(|local| local.folder)
+                .map(|folder| {
+                    file.path
+                        .split('/')
+                        .fold(folder.to_path_buf(), |joined, part| joined.join(part))
+                        .to_string_lossy()
+                        .to_string()
+                });
+            Ok(CatalogResourceFile {
+                path: file.path.clone(),
+                size: file.size,
+                executable: file.mode & 0o111 != 0,
+                text: detail_text(bytes),
+                local_path,
+            })
+        },
+    )
 }
 
 /// An install intent's page carries the lines that install it by hand: its
@@ -6857,6 +6989,130 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "SKILL.md");
         assert!(!files[0].executable);
+    }
+
+    fn open_file(
+        fixture: &LibraryFixture,
+        scope_id: &CatalogScopeId,
+        storage_id: Option<&StorageId>,
+        resource_id: &CatalogResourceId,
+        path: &str,
+    ) -> Result<CatalogResourceFile, String> {
+        get_catalog_resource_file_with_repositories(
+            &fixture.registry,
+            &fixture.state,
+            &fixture.catalog,
+            scope_id,
+            storage_id,
+            resource_id,
+            path,
+            &fixture.user_home,
+        )
+    }
+
+    #[test]
+    fn a_skill_file_opens_by_its_exact_path_from_this_macs_copy() {
+        let fixture = library_fixture();
+        fs::create_dir_all(fixture.skill_path.join("scripts")).unwrap();
+        fs::write(
+            fixture.skill_path.join("scripts/run.sh"),
+            b"#!/bin/sh\necho ok\n",
+        )
+        .unwrap();
+        fs::write(fixture.skill_path.join("notes.bin"), [0xff, 0xfe, 0x41]).unwrap();
+        fs::write(fixture.skill_path.join("nul.txt"), b"a\0b").unwrap();
+        let skills = skill_scope(&fixture);
+        let scope_id = skills.scope.scope_id.clone();
+        let listed = page(&fixture, &scope_id, None).unwrap();
+        let resource_id = listed.rows[0].resource_id.clone().unwrap();
+        // The storage is gone; this Mac's copy is all the page needs.
+        fs::remove_dir_all(&fixture.storage_path).unwrap();
+        let storage = Some(&fixture.storage.id);
+
+        let script =
+            open_file(&fixture, &scope_id, storage, &resource_id, "scripts/run.sh").unwrap();
+        assert_eq!(script.path, "scripts/run.sh");
+        assert_eq!(script.size, b"#!/bin/sh\necho ok\n".len() as u64);
+        assert!(script.executable);
+        assert_eq!(script.text.as_deref(), Some("#!/bin/sh\necho ok\n"));
+        assert_eq!(
+            script.local_path.map(PathBuf::from),
+            Some(
+                fs::canonicalize(&fixture.skill_path)
+                    .unwrap()
+                    .join("scripts")
+                    .join("run.sh")
+            )
+        );
+        // Invalid UTF-8 and a NUL byte are not text.
+        let binary = open_file(&fixture, &scope_id, storage, &resource_id, "notes.bin").unwrap();
+        assert_eq!((binary.size, binary.text), (3, None));
+        let nul = open_file(&fixture, &scope_id, storage, &resource_id, "nul.txt").unwrap();
+        assert_eq!(nul.text, None);
+        // Only an exact path among the envelope's files opens.
+        for path in [
+            "../review/SKILL.md",
+            "/SKILL.md",
+            "./SKILL.md",
+            "skill.md",
+            "scripts//run.sh",
+            "scripts/missing.sh",
+            "",
+        ] {
+            assert!(
+                open_file(&fixture, &scope_id, storage, &resource_id, path).is_err(),
+                "{path:?} opened"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_only_skill_file_opens_from_the_storage_verified() {
+        let fixture = library_fixture();
+        fs::create_dir_all(fixture.skill_path.join("scripts")).unwrap();
+        fs::write(
+            fixture.skill_path.join("scripts/run.sh"),
+            b"#!/bin/sh\necho ok\n",
+        )
+        .unwrap();
+        let skills = skill_scope(&fixture);
+        let scope_id = skills.scope.scope_id.clone();
+        link_scope(&fixture, &scope_id, &fixture.storage.id, 3);
+        push_all(&fixture, &scope_id, &fixture.storage.id);
+        let listed = page(&fixture, &scope_id, Some(&fixture.storage.id)).unwrap();
+        let resource_id = listed.rows[0].resource_id.clone().unwrap();
+        // This Mac's copy is gone; the storage's is the page's.
+        fs::remove_dir_all(&fixture.skill_path).unwrap();
+
+        let script = open_file(
+            &fixture,
+            &scope_id,
+            Some(&fixture.storage.id),
+            &resource_id,
+            "scripts/run.sh",
+        )
+        .unwrap();
+        assert_eq!(script.text.as_deref(), Some("#!/bin/sh\necho ok\n"));
+        assert!(script.executable);
+        assert_eq!(script.local_path, None);
+        assert!(open_file(&fixture, &scope_id, None, &resource_id, "scripts/run.sh").is_err());
+
+        // A payload that no longer matches its digest is refused.
+        let digest = super::super::domain::sha256_hex(b"#!/bin/sh\necho ok\n");
+        let payload = walkdir::WalkDir::new(&fixture.storage_path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_type().is_file() && entry.file_name() == digest.as_str())
+            .expect("the published script payload exists in the storage");
+        fs::write(payload.path(), b"#!/bin/sh\necho no\n").unwrap();
+        assert!(open_file(
+            &fixture,
+            &scope_id,
+            Some(&fixture.storage.id),
+            &resource_id,
+            "scripts/run.sh",
+        )
+        .is_err());
     }
 
     #[test]

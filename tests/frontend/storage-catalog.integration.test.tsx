@@ -15,12 +15,15 @@ import {
   catalogDoors,
   catalogKindCardFoot,
   catalogKindCards,
+  catalogMatchingRows,
   catalogNoun,
   catalogPresentation,
   catalogProviderList,
   catalogScopeLabel,
   catalogScopeViews,
   catalogPullRecommendation,
+  catalogStatusScope,
+  catalogStatusScopeCounts,
   catalogStorageHint,
   catalogStorageRepositoryViews,
   filterCatalogPullReviewItems,
@@ -29,6 +32,7 @@ import {
   unambiguousProfile,
 } from "../../src/components/storage-catalog/model";
 import { formatRelativeTime } from "../../src/clock";
+import type { StatusScope } from "../../src/components/sync-review/statusScopes";
 import type {
   CatalogCapabilityDescriptor,
   CatalogCloudRepository,
@@ -54,6 +58,7 @@ const commandNames = [
   "delete_catalog_scope",
   "finish_catalog_unfinished_push",
   "get_catalog_resource_detail",
+  "get_catalog_resource_file",
   "get_catalog_resource_preview",
   "inspect_catalog_resource_profile",
   "link_catalog_scope_storage",
@@ -208,6 +213,7 @@ test("the Catalog API exposes only the scope-level command surface", () => {
     readFileSync("src/components/storage-catalog/CatalogHomeStep.tsx", "utf8"),
     readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8"),
     readFileSync("src/components/storage-catalog/CatalogItemPage.tsx", "utf8"),
+    readFileSync("src/components/storage-catalog/CatalogFileView.tsx", "utf8"),
   ].join("\n");
   const invoked = [...source.matchAll(/invoke(?:<[^>]+>)?\("([^"]+)"/g)]
     .map((match) => match[1])
@@ -219,7 +225,7 @@ test("the Catalog API exposes only the scope-level command surface", () => {
   );
   for (const method of [
     "listCapabilities", "listProfiles", "saveProfile", "renameProfile", "probeProfile", "inspectProfile",
-    "createScope", "listScopeResources", "getPreview", "getDetail", "linkScopeStorage",
+    "createScope", "listScopeResources", "getPreview", "getDetail", "getFile", "linkScopeStorage",
     "unlinkScopeStorage", "openProfileApp", "openProfileTerminal",
     "preparePush", "applyPush", "finishUnfinishedPush", "preparePull", "applyPull",
     "prepareFork", "applyFork",
@@ -1672,6 +1678,8 @@ const itemActions = {
   onReveal: () => {},
 };
 
+const itemFiles = { open: null, onOpen: () => {}, onReveal: () => {} };
+
 test("an item's page holds its body and what only this Mac knows, each said once", async () => {
   const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
   const text = [
@@ -1694,6 +1702,7 @@ test("an item's page holds its body and what only this Mac knows, each said once
         { path: "scripts/range.sh", size: 2_444, executable: true },
       ] } }}
       actions={itemActions}
+      files={itemFiles}
       onOpenExternal={() => {}}
     />,
   );
@@ -1702,7 +1711,7 @@ test("an item's page holds its body and what only this Mac knows, each said once
   assert.match(html, /<p class="catalog-item-lede">Drafts release notes from the commits since the last tag\.<\/p>/);
   assert.match(html, /<h1>Release notes<\/h1>/);
   assert.doesNotMatch(html, /allowed-tools|<script/);
-  assert.match(html, /<code>scripts\/range\.sh<\/code><span class="catalog-item-exec" title="Executable"/);
+  assert.match(html, /<button type="button" class="catalog-item-file">.*?<code>scripts\/range\.sh<\/code><\/button><span class="catalog-item-exec" title="Executable"/);
   // An image in a skill is never fetched.
   assert.match(html, /markdown-image-placeholder/);
   assert.doesNotMatch(html, /<img/);
@@ -1740,7 +1749,7 @@ test("a plugin's page is the store hero with this Mac's install state and the ad
     ...overrides,
   });
   const render = (row: CatalogScopeRow, detail: ReturnType<typeof plugin>) => renderToStaticMarkup(
-    <CatalogItemPage row={row} detail={{ status: "ready", detail }} actions={{ ...itemActions, onFork: undefined }} onOpenExternal={() => {}} />,
+    <CatalogItemPage row={row} detail={{ status: "ready", detail }} actions={{ ...itemActions, onFork: undefined }} files={itemFiles} onOpenExternal={() => {}} />,
   );
   const installed = render(itemRow({ display_name: "lint-buddy@acme-tools", local_files: null, local_bytes: null }), plugin());
   assert.match(installed, /<b>Lint Buddy<\/b> by Acme Tools · Code quality/);
@@ -1768,6 +1777,7 @@ test("a pet's page plays its atlas on the desk, with Pause, and says what it is 
       row={itemRow({ display_name: "Mossy", resource_id: "mossy" })}
       detail={{ status: "ready", detail: { kind: "sprite", atlas: "data:image/webp;base64,AAAA", columns: 8, rows: 11, description: "A mallard who naps." } }}
       actions={{ ...itemActions, provider: "codex", providerLabel: "Codex", forkTitle: "Fork Mossy" }}
+      files={itemFiles}
       onOpenExternal={() => {}}
     />,
   );
@@ -1789,7 +1799,7 @@ test("off Mallard Cloud, a blocked item's page says why it can't be synced", () 
 });
 
 test("SKILL.md's frontmatter splits the way Mallard Cloud's skill page splits it", async () => {
-  const { splitSkillFrontmatter } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  const { splitSkillFrontmatter } = await import("../../src/components/storage-catalog/skillFiles");
   const split = splitSkillFrontmatter("---\nname: 'it''s'\ndescription: >\n  Two\n  lines.\nmetadata:\n  nested: skipped\n---\nBody\n");
   assert.deepEqual(split.fields, { name: "it's", description: "Two lines." });
   assert.equal(split.body, "Body\n");
@@ -1810,7 +1820,10 @@ test("an item's rail sits beside its body from 880px of page, and is one line ab
 test("the app's one Markdown renderer belongs to neither feature", () => {
   const renderer = readFileSync("src/components/markdown/MarkdownText.tsx", "utf8");
   assert.match(renderer, /skipHtml/);
-  assert.match(renderer, /urlTransform=\{safeMarkdownUrl\}/);
+  // Every destination passes `safeMarkdownUrl`, except an href the page
+  // itself resolves to one of its own files.
+  assert.match(renderer, /\(url: string\) => \(fileLink\?\.resolve\(url\) \? url : safeMarkdownUrl\(url\)\)/);
+  assert.match(renderer, /urlTransform=\{urlTransform\}/);
   assert.match(renderer, /img: \(\{ alt \}\) => <MarkdownImagePlaceholder label=\{alt \|\| "image"\} \/>/);
   for (const file of ["src/components/markdown/MarkdownText.tsx", "src/components/markdown/markdownUrl.ts", "src/components/markdown/remarkLatexMath.ts"]) {
     assert.doesNotMatch(readFileSync(file, "utf8"), /project-sync|storage-catalog/, file);
@@ -1880,4 +1893,200 @@ test("plugin removal uses uninstall copy and refreshes after success or failure"
     else assert.equal((await work)?.removed, true);
     assert.equal(refreshed, 1);
   }
+});
+
+/* ——— the list's status scopes ——— */
+
+const SCOPED_ROWS: CatalogScopeRow[] = ([
+  ["release-notes", "local_changed", true, true],
+  ["pr-review", "new", true, false],
+  ["changelog-voice", "remote_missing", true, false],
+  ["sql-helper", "storage_changed", true, true],
+  ["figma-to-code", "local_missing", false, true],
+  ["ghost-notes", "local_missing", false, false],
+  ["api-docs", "diverged", true, true],
+  ["onboarding", "unreviewed_remote", true, true],
+  ["secrets-scan", "blocked", true, true],
+  ["commit-message", "in_sync", true, true],
+] as const).map(([name, state, local, remote]) => itemRow({
+  row_id: `row-${name}`, display_name: name, resource_id: name, state, local_present: local, remote_present: remote,
+}));
+
+test("a Library row's status scope is the badge it wears", () => {
+  const expected: Record<string, StatusScope> = {
+    "release-notes": "push",
+    "pr-review": "push",
+    "changelog-voice": "push",
+    "sql-helper": "pull",
+    "figma-to-code": "pull",
+    "ghost-notes": "pull",
+    "api-docs": "attention",
+    "onboarding": "attention",
+    "secrets-scan": "attention",
+    "commit-message": "synced",
+  };
+  for (const row of SCOPED_ROWS) {
+    assert.equal(catalogStatusScope(row), expected[row.display_name], row.display_name);
+  }
+  // No storage chosen: every row is uncompared, so the strip has one scope
+  // and is not drawn.
+  const uncompared = SCOPED_ROWS.map((row) => ({ ...row, state: null }));
+  assert.deepEqual([...catalogStatusScopeCounts(uncompared)], [["unknown", SCOPED_ROWS.length]]);
+});
+
+test("each Library status scope counts the rows it draws, as the bar does", () => {
+  const counts = catalogStatusScopeCounts(SCOPED_ROWS);
+  assert.deepEqual(Object.fromEntries(counts), { push: 3, pull: 3, attention: 3, synced: 1 });
+  for (const [scope, count] of counts) {
+    assert.equal(catalogMatchingRows(SCOPED_ROWS, "", scope).length, count, scope);
+  }
+  assert.equal(catalogMatchingRows(SCOPED_ROWS, "", null).length, SCOPED_ROWS.length);
+  // The bar's Push, Pull and attention numbers read the same scopes.
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(
+    page,
+    /const scope = catalogStatusScope\(row\);\s*if \(scope === "push" \|\| scope === "pull" \|\| scope === "attention"\) totals\[scope\] \+= 1;/,
+  );
+});
+
+test("a status scope and the name search narrow the Library list together", () => {
+  const names = (rows: CatalogScopeRow[]) => rows.map((row) => row.display_name);
+  assert.deepEqual(names(catalogMatchingRows(SCOPED_ROWS, "re", "push")), ["release-notes", "pr-review"]);
+  assert.deepEqual(names(catalogMatchingRows(SCOPED_ROWS, "notes", "pull")), ["ghost-notes"]);
+  // A scope can empty the list while the name alone still matches: that is
+  // the one case the empty box offers Clear filter.
+  assert.deepEqual(catalogMatchingRows(SCOPED_ROWS, "release", "attention"), []);
+  assert.equal(catalogMatchingRows(SCOPED_ROWS, "release", null).length, 1);
+});
+
+test("the Library list wears the project faces' status strip", () => {
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // Under the list's own search, which counts "3 of 13" while a scope holds.
+  assert.match(
+    page,
+    /narrowed=\{statusScope !== null\} count=\{!managedCloud\} trailing=\{addFromCloud\} \/>\s*\{scopeBarShown && \([\s\S]*?<StatusScopeBar\s+label=\{`Show \$\{plural\} by status`\}/,
+  );
+  // The list only: no strip in a review or on an item's page.
+  assert.equal(page.match(/<StatusScopeBar/g)?.length, 1);
+  // Drawn with two scopes, or while one is chosen; the chosen one stays at 0.
+  assert.match(page, /const scopeBarShown = rows\.length > 0 && \(scopeCounts\.size > 1 \|\| chosenStatusScope !== null\);/);
+  assert.match(page, /\(scopeCounts\.get\(each\.id\) \?\? 0\) > 0 \|\| each\.id === statusScope/);
+  assert.match(page, /const matchingRows = catalogMatchingRows\(rows, searchQuery, statusScope\);/);
+  // Clear filter only when releasing the scope brings rows back.
+  assert.match(
+    page,
+    /const scopeEmptiedList = statusScope !== null && matchingRows\.length === 0\s*&& rows\.some\(\(row\) => nameMatchesSearch\(row\.display_name, searchQuery\)\);/,
+  );
+  assert.match(page, /\{scopeEmptiedList && \(\s*<button type="button" className="btn btn-ghost" onClick=\{clearStatusScope\}>Clear filter<\/button>/);
+  // The scope lives and resets with the search.
+  assert.match(
+    page,
+    /setSearchQuery\(""\);\s*setChosenStatusScope\(null\);\s*\}, \[scope\.scope\.scope_id, chosenStorageId, mode\.kind\]\);/,
+  );
+});
+
+/* ——— a skill's files, each opened as its own page ——— */
+
+const skillFile = (overrides: Partial<import("../../src/components/storage-catalog/types").CatalogResourceFile> = {}) => ({
+  path: "scripts/range.sh",
+  size: 31,
+  executable: true,
+  text: "#!/bin/sh\nset -eu\necho range\n",
+  local_path: "/Users/you/.claude/skills/release-notes/scripts/range.sh",
+  ...overrides,
+});
+
+const openFilePage = async (file: ReturnType<typeof skillFile>, row = itemRow()) => {
+  const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  return renderToStaticMarkup(
+    <CatalogItemPage
+      row={row}
+      detail={{ status: "ready", detail: { kind: "document", path: "SKILL.md", text: "# Release notes\n", files: [
+        { path: "SKILL.md", size: 16, executable: false },
+        { path: "references/voice.md", size: 40, executable: false },
+        { path: "scripts/range.sh", size: 31, executable: true },
+      ] } }}
+      actions={itemActions}
+      files={{ ...itemFiles, open: { path: file.path, state: { status: "ready", file } } }}
+      onOpenExternal={() => {}}
+    />,
+  );
+};
+
+test("an open file is the page: numbered lines, Copy and Reveal, and nothing of the item's", async () => {
+  const html = await openFilePage(skillFile());
+  assert.equal(html.match(/<span class="catalog-file-line">/g)?.length, 3);
+  assert.match(html, /style="--catalog-file-gutter:2ch"/);
+  assert.match(html, /<span class="catalog-item-exec" title="Executable — shown, never run" aria-label="Executable">/);
+  assert.match(html, /<span>3 lines · 31 B<\/span>/);
+  assert.match(html, /aria-label="Copy the contents of scripts\/range\.sh"/);
+  assert.match(html, /title="Reveal \/Users\/you\/\.claude\/skills\/release-notes\/scripts\/range\.sh in Finder"/);
+  // The bar's last crumb names the file, and the file page is the file alone.
+  assert.doesNotMatch(html, /catalog-item-rail|catalog-item-line|catalog-item-files|>scripts\/range\.sh</);
+  // The storage's copy has nothing on this Mac to reveal.
+  const stored = await openFilePage(skillFile({ local_path: null }));
+  assert.match(stored, /disabled="" title="Not on this Mac" aria-label="Reveal scripts\/range\.sh in Finder"/);
+});
+
+test("a file that is not text says so, and Markdown opens in Preview except SKILL.md", async () => {
+  const binary = await openFilePage(skillFile({ path: "scripts/__pycache__/range.pyc", executable: false, size: 2_048, text: null }));
+  assert.match(binary, /Binary file · not shown/);
+  assert.doesNotMatch(binary, /catalog-file-code|Copy the contents/);
+  assert.match(binary, /<span>2\.0 KB<\/span>/);
+
+  const notes = await openFilePage(skillFile({ path: "references/voice.md", executable: false, text: "---\nname: voice\n---\n# Voice\n\nSee [the script](../scripts/range.sh).\n" }));
+  assert.match(notes, /aria-pressed="true" class="active">Preview</);
+  assert.match(notes, /<h1>Voice<\/h1>/);
+  assert.doesNotMatch(notes, /name: voice/);
+  // A relative link resolves against the open file's own folder.
+  assert.match(notes, /<a href="scripts\/range\.sh">the script<\/a>/);
+
+  const skillMd = await openFilePage(skillFile({ path: "SKILL.md", executable: false, text: "---\nname: release-notes\n---\n# Release notes\n" }));
+  assert.match(skillMd, /aria-pressed="true" class="active">Source</);
+  assert.match(skillMd, /<span class="catalog-file-line">name: release-notes\n<\/span>/);
+});
+
+test("a skill's relative links name its own files and stay inside it", async () => {
+  const { resolveSkillLink } = await import("../../src/components/storage-catalog/skillFiles");
+  const listed = new Set(["SKILL.md", "references/a.md", "scripts/x.py"]);
+  // The same vectors as Mallard Cloud's skill page.
+  assert.equal(resolveSkillLink("SKILL.md", "references/a.md", listed), "references/a.md");
+  assert.equal(resolveSkillLink("SKILL.md", "./references/a.md", listed), "references/a.md");
+  assert.equal(resolveSkillLink("references/a.md", "../scripts/x.py", listed), "scripts/x.py");
+  assert.equal(resolveSkillLink("references/a.md", "../../x", listed), null);
+  assert.equal(resolveSkillLink("SKILL.md", "missing.md", listed), null);
+  assert.equal(resolveSkillLink("SKILL.md", "https://e.com/x", listed), null);
+  assert.equal(resolveSkillLink("SKILL.md", "#top", listed), null);
+  assert.equal(resolveSkillLink("SKILL.md", "/etc/passwd", listed), null);
+  assert.equal(resolveSkillLink("SKILL.md", "references%2Fa.md", listed), "references/a.md");
+  assert.equal(resolveSkillLink("SKILL.md", "references/a.md?raw=1", listed), null);
+  assert.equal(resolveSkillLink("SKILL.md", "%E0%A4%A", listed), null);
+});
+
+test("the item's rows and SKILL.md's links open its files; without a file link Markdown keeps them text", async () => {
+  const { default: MarkdownText } = await import("../../src/components/markdown/MarkdownText");
+  const text = "Read [the notes](references/a.md) and [this](../outside.md).";
+  const plain = renderToStaticMarkup(<MarkdownText text={text} />);
+  assert.doesNotMatch(plain, /<a /);
+  const listed = new Set(["references/a.md"]);
+  const { resolveSkillLink } = await import("../../src/components/storage-catalog/skillFiles");
+  const linked = renderToStaticMarkup(
+    <MarkdownText text={text} fileLink={{ resolve: (href) => resolveSkillLink("SKILL.md", href, listed), open: () => {} }} />,
+  );
+  assert.match(linked, /<a href="references\/a\.md">the notes<\/a>/);
+  assert.match(linked, /<span>this<\/span>/);
+  // Neither link carries react-markdown's syntax tree as an attribute.
+  const external = renderToStaticMarkup(<MarkdownText text="[x](https://example.com)" onOpenExternal={() => {}} />);
+  assert.equal(external, '<p><a href="https://example.com/" rel="noopener noreferrer">x</a></p>');
+  assert.doesNotMatch(linked, /node=/);
+
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  // The open file belongs to the scope, storage and item it was opened on.
+  assert.match(page, /const itemFileOwner = `\$\{scope\.scope\.scope_id\}\\u0000\$\{storageId \?\? ""\}\\u0000\$\{itemId \?\? ""\}`;/);
+  assert.match(page, /if \(itemFileFor !== itemFileOwner\) \{\s*setItemFileFor\(itemFileOwner\);\s*setItemFile\(null\);\s*\}/);
+  assert.match(page, /const openFilePath = itemFileFor === itemFileOwner \? itemFile : null;/);
+  // The item crumb is the way back; the file is the leaf, its menu the other files.
+  assert.match(page, /onActivate: openFilePath \? \(\) => setItemFile\(null\) : undefined,/);
+  assert.match(page, /id: "file",\s*label: baseName\(openFilePath\),\s*title: openFilePath,/);
+  assert.match(page, /items: itemFiles\.filter\(\(file\) => file\.path !== openFilePath\)/);
 });

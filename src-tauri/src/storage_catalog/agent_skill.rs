@@ -19,8 +19,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::codec::{
-    content_warnings, detail_files, read_detail_payload, read_directory_tree, CapturedFile,
-    CapturedResource, CatalogFormatCodec, CatalogResourceDetail, PayloadReader, TreeLimits,
+    content_warnings, detail_files, detail_text, read_detail_payload, read_directory_tree,
+    CapturedFile, CapturedResource, CatalogFormatCodec, CatalogResourceDetail, PayloadReader,
+    TreeLimits,
 };
 use super::domain::{
     validate_component_name, validate_root_class, BoundedPortableObject, CatalogResourceEnvelope,
@@ -276,7 +277,7 @@ impl CatalogFormatCodec for AgentSkillCodec {
         let bytes = read_detail_payload(skill_md, MAX_SKILL_MD_BYTES, read_payload)?;
         Ok(CatalogResourceDetail::Document {
             path: skill_md.path.clone(),
-            text: String::from_utf8(bytes).ok(),
+            text: detail_text(bytes),
             files: detail_files(envelope),
         })
     }

@@ -5,7 +5,9 @@ import ManagedCloudChip from "../managed-cloud/ManagedCloudChip";
 import { cloudStatusNotice, cloudSyncBlocked, discardCloudDraft } from "../managed-cloud/managedCloudLink";
 import { nameRefusal, predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
 import { useItemCloudStatus } from "./itemCloudStatus";
-import CatalogItemPage, { useCatalogItemDetail } from "./CatalogItemPage";
+import CatalogItemPage, { useCatalogItemDetail, type CatalogItemFiles } from "./CatalogItemPage";
+import { useCatalogItemFile } from "./CatalogFileView";
+import { baseName } from "./skillFiles";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import type { SyncOutcomeView } from "../sync-review/outcome";
 import { cloudPullOutcome, cloudPushOutcome, pushOutcome, pullOutcome, type CatalogOutcomeAction } from "./outcomes";
@@ -30,15 +32,20 @@ import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-r
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
 import NameSearchField from "../sync-review/NameSearchField";
 import { nameMatchesSearch, replaceSearchSelection } from "../sync-review/nameSearch";
+import StatusScopeBar from "../sync-review/StatusScopeBar";
+import { STATUS_SCOPES, type StatusScope } from "../sync-review/statusScopes";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { storageCatalogApi } from "./api";
 import {
   actionLabel,
+  catalogMatchingRows,
   catalogNoun,
   catalogPresentation,
   catalogPullRecommendation,
   catalogScopeIcon,
   catalogScopeLabel,
+  catalogStatusScope,
+  catalogStatusScopeCounts,
   filterCatalogPullReviewItems,
   rowPullable,
   rowPushable,
@@ -861,7 +868,14 @@ export default function StorageCatalogPage({
   const [mode, setMode] = useState<Mode>({ kind: "list" });
   const [searchQuery, setSearchQuery] = useState("");
   const searchActive = searchQuery.trim().length > 0;
-  useEffect(() => { setSearchQuery(""); }, [scope.scope.scope_id, chosenStorageId, mode.kind]);
+  /* The list's status scope; null is All. It lives and resets with the
+     search: kept across an item's page, cleared by a review or a switch. */
+  const [chosenStatusScope, setChosenStatusScope] = useState<StatusScope | null>(null);
+  useEffect(() => {
+    setSearchQuery("");
+    setChosenStatusScope(null);
+  }, [scope.scope.scope_id, chosenStorageId, mode.kind]);
+  const listRef = useRef<HTMLElement>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -1017,6 +1031,30 @@ export default function StorageCatalogPage({
     readKey: page,
   });
   const itemDetail = useCatalogItemDetail(scope.scope.scope_id, storageId ?? null, itemRow);
+  /* A skill's file open as its own page belongs to the item, the storage and
+     the scope it was opened on: changing any of them closes it, the way back
+     to the list included, so reopening the item shows the item. */
+  const itemFileOwner = `${scope.scope.scope_id}\u0000${storageId ?? ""}\u0000${itemId ?? ""}`;
+  const [itemFile, setItemFile] = useState<string | null>(null);
+  const [itemFileFor, setItemFileFor] = useState(itemFileOwner);
+  if (itemFileFor !== itemFileOwner) {
+    setItemFileFor(itemFileOwner);
+    setItemFile(null);
+  }
+  const openFilePath = itemFileFor === itemFileOwner ? itemFile : null;
+  const itemFileState = useCatalogItemFile(scope.scope.scope_id, storageId ?? null, itemRow, openFilePath);
+  const itemFiles = useMemo(
+    () => (itemDetail?.status === "ready" && itemDetail.detail.kind === "document" ? itemDetail.detail.files : []),
+    [itemDetail],
+  );
+  const openItemFile = useCallback((path: string) => setItemFile(path), []);
+  /* Opening a file, or going back to the item, is a new page: it starts at
+     its top, as a session's page does. */
+  const pageScrollRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => pageScrollRef.current?.scrollTo({ top: 0, left: 0 }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [openFilePath]);
   /* An item that left the page (switched storage, removed) closes its page. */
   useEffect(() => {
     if (itemId && page && !loading && !rowByResource.has(itemId)) setItemId(null);
@@ -1057,13 +1095,12 @@ export default function StorageCatalogPage({
   const pushRows = useMemo(() => barRows.filter(rowPushable), [barRows]);
   const pullRows = useMemo(() => barRows.filter(rowPullable), [barRows]);
 
-  /* The bar's three numbers are read off the same rows the list draws — the
-     project derives its own header tally the same way. */
+  /* The bar's three numbers are read off the same rows the list draws, in
+     the list's own scopes — the project derives its header tally the same
+     way, so a scope's count on the strip is the bar's number. */
   const counts = useMemo(() => barRows.reduce((totals, row) => {
-    const status = rowStatus(row);
-    if (status === "local-outstanding") totals.push += 1;
-    else if (status === "cloud-outstanding") totals.pull += 1;
-    else if (status !== "synced" && status !== "untracked") totals.attention += 1;
+    const scope = catalogStatusScope(row);
+    if (scope === "push" || scope === "pull" || scope === "attention") totals[scope] += 1;
     return totals;
   }, { push: 0, pull: 0, attention: 0 }), [barRows]);
 
@@ -1138,6 +1175,14 @@ export default function StorageCatalogPage({
     if (!row.local_path) return;
     void revealItemInDir(row.local_path).catch((reason) => setError(errorMessage(reason)));
   }, []);
+  const revealFile = useCallback((localPath: string) => {
+    void revealItemInDir(localPath).catch((reason) => setError(errorMessage(reason)));
+  }, []);
+  const itemPageFiles = useMemo<CatalogItemFiles>(() => ({
+    open: openFilePath ? { path: openFilePath, state: itemFileState } : null,
+    onOpen: openItemFile,
+    onReveal: revealFile,
+  }), [openFilePath, itemFileState, openItemFile, revealFile]);
 
   /** The session card's launch pair, profile-scoped: open the provider
    * desktop app or the provider CLI on this row's configured home, at the
@@ -1576,11 +1621,34 @@ export default function StorageCatalogPage({
     ...(itemRow ? [{
       id: "item",
       label: itemRow.display_name,
+      ariaLabel: openFilePath ? `${itemRow.display_name}. Back to its page` : undefined,
       /* The item's own preview at a leaf's size, where a session leaf wears
          its provider's mark. */
       leading: artwork && (itemRow.preview_png ?? remotePreviews[itemRow.row_id])
         ? <img className="catalog-leaf-mark" src={itemRow.preview_png ?? remotePreviews[itemRow.row_id]} alt="" />
         : <Icon name={glyph.icon} size={14} />,
+      /* With one of its files open, the item is the way back. */
+      onActivate: openFilePath ? () => setItemFile(null) : undefined,
+    }] : []),
+    /* A skill's open file is the leaf, named by its base name; its menu
+       switches to the item's other files. */
+    ...(itemRow && openFilePath ? [{
+      id: "file",
+      label: baseName(openFilePath),
+      title: openFilePath,
+      icon: "file" as const,
+      menuLabel: "Files",
+      menuHeader: { label: openFilePath, icon: "file" as const },
+      menu: [{
+        label: "Files",
+        items: itemFiles.filter((file) => file.path !== openFilePath).map((file) => ({
+          id: file.path,
+          label: file.path,
+          detail: formatBytes(file.size),
+          icon: "file" as const,
+          onSelect: () => openItemFile(file.path),
+        })),
+      }],
     }] : []),
   ];
 
@@ -2308,7 +2376,23 @@ export default function StorageCatalogPage({
      cannot say row by row, so it gets said by position. A row that is nowhere
      at all (a link whose content vanished on both sides) stays in the kind's
      own section — "not in the storage" would be the wrong heading for it. */
-  const matchingRows = rows.filter((row) => nameMatchesSearch(row.display_name, searchQuery));
+  const scopeCounts = catalogStatusScopeCounts(rows);
+  /* The project faces' rule: the strip is drawn when it can narrow something
+     — rows in two scopes — or while a scope is chosen, so it can be
+     released. A scope chosen before its rows went away is not applied
+     behind the reader's back. */
+  const scopeBarShown = rows.length > 0 && (scopeCounts.size > 1 || chosenStatusScope !== null);
+  const statusScope = scopeBarShown ? chosenStatusScope : null;
+  const matchingRows = catalogMatchingRows(rows, searchQuery, statusScope);
+  /* Releasing the scope brings rows back only if the name alone matches some. */
+  const scopeEmptiedList = statusScope !== null && matchingRows.length === 0
+    && rows.some((row) => nameMatchesSearch(row.display_name, searchQuery));
+  /* The button leaves with the box it sits in, so focus goes to the field
+     first, as the field's own clear does. */
+  const clearStatusScope = () => {
+    listRef.current?.querySelector<HTMLInputElement>(".sync-name-search input")?.focus();
+    setChosenStatusScope(null);
+  };
   const cloudRows = matchingRows.filter((row) => !row.local_present && row.remote_present);
   const localRows = matchingRows.filter((row) => row.local_present || !row.remote_present);
 
@@ -2415,43 +2499,38 @@ export default function StorageCatalogPage({
       <section className="profile-links-section" aria-label={name}>
         {outcomeCard}
         {managedCloud && !itemRepository && itemRow.state !== "blocked" && !pageCloud && (
-          <>
-            <div className="sync-history-section-heading">
-              <h2><Icon name="cloud" size={14} />Repository</h2>
-            </div>
-            <div className="sync-history-thread-list">
-              <article className="sync-history-thread-card catalog-card" aria-label={`${name} repository`}>
-                <div className="sync-history-thread-topline">
-                  <div className="sync-history-thread-title">
-                    <span
-                      className="sync-thread-sync-indicator untracked"
-                      data-tooltip={`Not in ${storageName ?? "Mallard Cloud"} yet`}
-                      aria-label={`Not in ${storageName ?? "Mallard Cloud"} yet`}
-                      tabIndex={0}
-                    >
-                      <Icon name="cloud" size={18} />
-                    </span>
-                    <strong title={address}>{address}</strong>
-                    <span className="sync-history-branch-state current" title="Your first Push creates it">New</span>
-                    <span className="sync-history-branch-state current" title="Only you and your collaborators can see it">Private</span>
-                  </div>
-                  <div className="sync-history-thread-actions">
-                    <button
-                      type="button"
-                      className="btn"
-                      aria-haspopup="dialog"
-                      aria-label="Change repository"
-                      disabled={busy || !storageId}
-                      onClick={() => setConnectReason({ kind: "connect", resourceId, name })}
-                    >
-                      <Icon name="link" size={13} />
-                      Change…
-                    </button>
-                  </div>
+          <div className="sync-history-thread-list">
+            <article className="sync-history-thread-card catalog-card" aria-label={`${name} repository`}>
+              <div className="sync-history-thread-topline">
+                <div className="sync-history-thread-title">
+                  <span
+                    className="sync-thread-sync-indicator untracked"
+                    data-tooltip={`Not in ${storageName ?? "Mallard Cloud"} yet`}
+                    aria-label={`Not in ${storageName ?? "Mallard Cloud"} yet`}
+                    tabIndex={0}
+                  >
+                    <Icon name="cloud" size={18} />
+                  </span>
+                  <strong title={address}>{address}</strong>
+                  <span className="sync-history-branch-state current" title="Your first Push creates it">New</span>
+                  <span className="sync-history-branch-state current" title="Only you and your collaborators can see it">Private</span>
                 </div>
-              </article>
-            </div>
-          </>
+                <div className="sync-history-thread-actions">
+                  <button
+                    type="button"
+                    className="btn"
+                    aria-haspopup="dialog"
+                    aria-label="Change repository"
+                    disabled={busy || !storageId}
+                    onClick={() => setConnectReason({ kind: "connect", resourceId, name })}
+                  >
+                    <Icon name="link" size={13} />
+                    Change…
+                  </button>
+                </div>
+              </div>
+            </article>
+          </div>
         )}
         {/* Off Mallard Cloud, a blocked item says why here: its page wears
             no badge, and Pull and Push have nothing to take. Mallard Cloud's
@@ -2464,6 +2543,7 @@ export default function StorageCatalogPage({
         <CatalogItemPage
           row={itemRow}
           detail={itemDetail ?? { status: "loading" }}
+          files={itemPageFiles}
           actions={{
             removal: removalAction(itemRow),
             provider: scope.scope.provider,
@@ -2544,7 +2624,7 @@ export default function StorageCatalogPage({
   return (
     <>
       {bar}
-      <main className="sync-main sync-project-links-page sync-git-info-page sync-history-page">
+      <main ref={pageScrollRef} className="sync-main sync-project-links-page sync-git-info-page sync-history-page">
         {dialog}
         {managedCloud ? rows.length === 0 && !itemPage && outcomeCard : outcomeNotice}
 
@@ -2658,15 +2738,37 @@ export default function StorageCatalogPage({
             {addFromCloud}
           </div>
         ) : (
-          <section className="profile-links-section" aria-label={label}>
+          <section ref={listRef} className="profile-links-section" aria-label={label}>
             {outcomeCard}
             {/* On Mallard Cloud the head gains Add from Mallard Cloud…
                 beside the search, outside its rule, and holds the count
                 back. Any other storage keeps today's head. */}
             <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
               matches={matchingRows.length} total={rows.length} noun={noun} disabled={busy}
-              count={!managedCloud} trailing={addFromCloud} />
-            {searchActive && matchingRows.length === 0 && <div className="sync-history-state">No matching {plural}.</div>}
+              narrowed={statusScope !== null} count={!managedCloud} trailing={addFromCloud} />
+            {scopeBarShown && (
+              /* The project faces' strip, under the field it narrows with. A
+                 scope no row falls in has no place on it — unless it is the
+                 one in force, which stays, at zero, so it can be released. */
+              <StatusScopeBar
+                label={`Show ${plural} by status`}
+                noun={noun}
+                total={rows.length}
+                active={statusScope}
+                onChange={setChosenStatusScope}
+                scopes={STATUS_SCOPES
+                  .filter((each) => (scopeCounts.get(each.id) ?? 0) > 0 || each.id === statusScope)
+                  .map((each) => ({ ...each, count: scopeCounts.get(each.id) ?? 0 }))}
+              />
+            )}
+            {matchingRows.length === 0 && (
+              <div className="sync-history-state">
+                No matching {plural}.
+                {scopeEmptiedList && (
+                  <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>Clear filter</button>
+                )}
+              </div>
+            )}
             {/* Two plain sections, one list broken in two: the same heading
                 shape at the same weight, the same cards at the same rhythm.
                 No counts on either heading — every row already wears the same

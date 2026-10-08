@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use mallard_domain::StorageId;
 
-use super::codec::CatalogResourceDetail;
+use super::codec::{CatalogResourceDetail, CatalogResourceFile};
 use super::domain::{
     CatalogActionResult, CatalogFormatKey, CatalogLinkId, CatalogPlanActionId, CatalogPlanId,
     CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey, CatalogScopeId,
@@ -173,6 +173,26 @@ pub async fn get_catalog_resource_detail(
             &scope_id,
             storage_id.as_ref(),
             &resource_id,
+        )
+    })
+    .await
+}
+
+/// One file of a resource's page, by its exact path: this Mac's copy when it
+/// is here, else the storage's.
+#[tauri::command]
+pub async fn get_catalog_resource_file(
+    scope_id: CatalogScopeId,
+    storage_id: Option<StorageId>,
+    resource_id: CatalogResourceId,
+    path: String,
+) -> Result<CatalogResourceFile, String> {
+    run_blocking(move || {
+        StorageCatalogService::from_user_home()?.resource_file(
+            &scope_id,
+            storage_id.as_ref(),
+            &resource_id,
+            &path,
         )
     })
     .await

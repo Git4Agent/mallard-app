@@ -234,6 +234,33 @@ pub enum CatalogResourceDetail {
     },
 }
 
+/// The largest file a resource's page opens: an Agent Skill's own per-file
+/// capture cap, so every captured skill file fits.
+pub const MAX_DETAIL_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// One payload file as a resource's page opens it. Display only, like
+/// `CatalogResourceDetail`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CatalogResourceFile {
+    pub path: String,
+    pub size: u64,
+    pub executable: bool,
+    /// Absent when the bytes are not text (`detail_text`).
+    pub text: Option<String>,
+    /// This Mac's copy of the file, for Reveal in Finder; absent when the
+    /// page reads the storage's copy.
+    pub local_path: Option<String>,
+}
+
+/// Bytes as a page shows them: text when they are strict UTF-8 holding no
+/// NUL byte, else nothing — the page says the file is not text.
+pub fn detail_text(bytes: Vec<u8>) -> Option<String> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
 /// One payload file's bytes for a page, checked against the envelope's size
 /// and digest whatever the reader is, and refused above `max_bytes`.
 pub fn read_detail_payload(
@@ -469,6 +496,23 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_page_shows_strict_utf8_without_nul_as_text() {
+        assert_eq!(
+            detail_text(b"def run():\n".to_vec()).as_deref(),
+            Some("def run():\n")
+        );
+        assert_eq!(
+            detail_text("名前\n".as_bytes().to_vec()).as_deref(),
+            Some("名前\n")
+        );
+        assert_eq!(detail_text(Vec::new()).as_deref(), Some(""));
+        assert_eq!(detail_text(b"a\0b".to_vec()), None);
+        assert_eq!(detail_text(vec![0xff, 0xfe, 0x41]), None);
+        // Every captured skill file fits the page's cap.
+        assert!(super::super::agent_skill::MAX_SKILL_FILE_BYTES <= MAX_DETAIL_FILE_BYTES);
     }
 
     #[test]

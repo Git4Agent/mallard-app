@@ -8711,6 +8711,141 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   color: var(--warning-text);
 }
 
+/* A file row opens the file as its own page; its path underlines on hover
+   and focus, as a link does. */
+.catalog-item-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.catalog-item-file code {
+  color: var(--text-0);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+
+.catalog-item-file:hover code,
+.catalog-item-file:focus-visible code {
+  text-decoration-color: currentColor;
+}
+
+.catalog-item-file:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A skill's file as its own page (CatalogFileView): a head with its size
+   and tools, then the file. The bar's last crumb names it. */
+.catalog-file-view {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.catalog-file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.catalog-file-facts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: var(--type-xs);
+  white-space: nowrap;
+}
+
+.catalog-file-tools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* One framed box with its own horizontal scroll; the line numbers are
+   generated content, so a copy leaves them out. */
+.catalog-file-code {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 8px 0;
+  overflow-x: auto;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--retro-panel-radius-inner);
+  background: var(--surface-row);
+  color: var(--text-0);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  counter-reset: catalog-file-line;
+  tab-size: 4;
+}
+
+.catalog-file-code:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.catalog-file-code code {
+  display: block;
+  min-width: max-content;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  white-space: pre;
+}
+
+.catalog-file-line {
+  display: block;
+  padding-right: 14px;
+  counter-increment: catalog-file-line;
+}
+
+.catalog-file-line::before {
+  content: counter(catalog-file-line);
+  display: inline-block;
+  box-sizing: content-box;
+  width: var(--catalog-file-gutter, 4ch);
+  margin-right: 14px;
+  padding: 0 10px 0 6px;
+  border-right: 1px solid var(--border);
+  color: var(--text-2);
+  text-align: right;
+  user-select: none;
+}
+
+.catalog-file-none {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 18px 14px;
+  border: 1px dashed var(--border-mid);
+  border-radius: var(--retro-panel-radius-inner);
+  color: var(--text-2);
+  font-size: var(--type-sm);
+}
+
 .catalog-item-plugin p {
   margin: 0;
 }

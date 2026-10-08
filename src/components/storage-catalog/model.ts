@@ -3,6 +3,8 @@ import { clockOptions, formatRelativeTime } from "../../clock";
 import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { isPullReviewStatus } from "../sync-review/pullReviewStatus";
+import { nameMatchesSearch } from "../sync-review/nameSearch";
+import type { StatusScope } from "../sync-review/statusScopes";
 import type {
   CatalogCapabilityDescriptor,
   CatalogCoordinate,
@@ -202,6 +204,47 @@ export function rowStatus(row: CatalogScopeRow): ThreadStatusIconName {
     case "blocked":
       return "unavailable";
   }
+}
+
+/** The part of the list a row falls in: the badge it wears, in the scope
+ * bar's words. The path bar's Push, Pull and attention counts read the same
+ * scopes, so the strip and the bar always agree. */
+export function catalogStatusScope(row: CatalogScopeRow): StatusScope {
+  switch (rowStatus(row)) {
+    case "local-outstanding":
+      return "push";
+    case "cloud-outstanding":
+      return "pull";
+    case "synced":
+      return "synced";
+    case "untracked":
+      return "unknown";
+    default:
+      return "attention";
+  }
+}
+
+/** How many rows each scope holds; a scope no row falls in is absent. */
+export function catalogStatusScopeCounts(rows: readonly CatalogScopeRow[]): Map<StatusScope, number> {
+  const counts = new Map<StatusScope, number>();
+  for (const row of rows) {
+    const scope = catalogStatusScope(row);
+    counts.set(scope, (counts.get(scope) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** The rows the list draws: those in the scope (null is every row) whose
+ * name matches the search. */
+export function catalogMatchingRows(
+  rows: readonly CatalogScopeRow[],
+  query: string,
+  scope: StatusScope | null,
+): CatalogScopeRow[] {
+  return rows.filter((row) => (
+    (scope === null || catalogStatusScope(row) === scope)
+    && nameMatchesSearch(row.display_name, query)
+  ));
 }
 
 /** The badge's sentence: what this row's state means for this storage, said

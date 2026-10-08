@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useCallback, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -69,24 +69,57 @@ const REHYPE_PLUGINS: PluggableList = [[rehypeKatex, {
   maxSize: 25,
 }]];
 
+/** A relative link the page can open itself: `resolve` names the file a
+ *  link's href points at, or nothing, and `open` shows it. */
+export interface MarkdownFileLink {
+  resolve: (href: string) => string | null;
+  open: (path: string) => void;
+}
+
 /* Parsing is the most expensive thing a Markdown page does, and its page
    re-renders for reasons that never change the text. Memoized on its own
-   inputs, each body is parsed once; a caller keeps `components` stable. */
+   inputs, each body is parsed once; a caller keeps `components` and
+   `fileLink` stable. */
 const MarkdownText = memo(function MarkdownText({
   text,
   components,
   onOpenExternal,
+  fileLink,
 }: {
   text: string;
   /** Replaces the default renderers by tag, e.g. a page's own `img` or `a`. */
   components?: Components;
   /** Opens an http(s) or mailto link outside the app; without it a link is text. */
   onOpenExternal?: (url: string) => void;
+  /** Opens a relative link to one of the page's own files; without it such a link is text. */
+  fileLink?: MarkdownFileLink;
 }) {
+  /* `safeMarkdownUrl` keeps no `..`, so an href the page resolves to its own
+     file is kept as written and only ever reaches `fileLink.open`. */
+  const urlTransform = useCallback(
+    (url: string) => (fileLink?.resolve(url) ? url : safeMarkdownUrl(url)),
+    [fileLink],
+  );
   const merged = useMemo<Components>(() => ({
     pre: makeMermaidPre(writeClipboardText),
     img: ({ alt }) => <MarkdownImagePlaceholder label={alt || "image"} />,
-    a: ({ href, children, ...props }) => {
+    // `node` is react-markdown's syntax tree, not an attribute.
+    a: ({ href, children, node: _node, ...props }) => {
+      const file = href && fileLink ? fileLink.resolve(href) : null;
+      if (file && fileLink) {
+        return (
+          <a
+            href={file}
+            title={props.title}
+            onClick={(event) => {
+              event.preventDefault();
+              fileLink.open(file);
+            }}
+          >
+            {children}
+          </a>
+        );
+      }
       const safeHref = href ? safeMarkdownUrl(href) : "";
       if (!onOpenExternal || !isSafeExternalMarkdownUrl(safeHref)) return <span>{children}</span>;
       return (
@@ -104,13 +137,13 @@ const MarkdownText = memo(function MarkdownText({
       );
     },
     ...components,
-  }), [components, onOpenExternal]);
+  }), [components, onOpenExternal, fileLink]);
   return (
     <ReactMarkdown
       remarkPlugins={REMARK_PLUGINS}
       rehypePlugins={REHYPE_PLUGINS}
       skipHtml
-      urlTransform={safeMarkdownUrl}
+      urlTransform={urlTransform}
       components={merged}
     >
       {text}

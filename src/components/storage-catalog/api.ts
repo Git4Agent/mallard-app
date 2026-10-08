@@ -11,6 +11,7 @@ import type {
   CatalogProfileInspection,
   CatalogProfileProbe,
   CatalogResourceDetail,
+  CatalogResourceFile,
   CatalogResourceForkPlan,
   CatalogScopeDto,
   CatalogScopeLinkOutcome,
@@ -154,6 +155,11 @@ export const storageCatalogApi = {
    * per page and content, never in the list path. */
   getDetail: (scopeId: string, storageId: string | null, resourceId: string) =>
     invoke<CatalogResourceDetail>("get_catalog_resource_detail", { scopeId, storageId, resourceId }),
+
+  /** One file of an item's page, by its exact path, from the same copy the
+   * page reads. Asked when the file is opened. */
+  getFile: (scopeId: string, storageId: string | null, resourceId: string, path: string) =>
+    invoke<CatalogResourceFile>("get_catalog_resource_file", { scopeId, storageId, resourceId, path }),
 
   /** The scope links to the storage once; every resource of this coordinate
    * syncs through that one pairing. Linking is configuration only. */

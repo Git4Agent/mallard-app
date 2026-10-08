@@ -526,6 +526,18 @@ export interface CatalogDetailFile {
   executable: boolean;
 }
 
+/** `CatalogResourceFile`: one payload file as an item's page opens it, read
+ *  from the same copy as the page and checked against its digest. */
+export interface CatalogResourceFile {
+  path: string;
+  size: number;
+  executable: boolean;
+  /** Absent when the bytes are not text: invalid UTF-8, or a NUL byte. */
+  text: string | null;
+  /** This Mac's copy of the file, for Reveal in Finder; absent for the storage's. */
+  local_path: string | null;
+}
+
 /** The display words an installed plugin's own manifest gives it. */
 export interface CatalogDetailPluginListing {
   display_name: string | null;

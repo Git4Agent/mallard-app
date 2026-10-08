@@ -97,7 +97,7 @@ Write release notes for the range the user names, or for everything since the ne
 
 1. Find the range: \`git describe --tags --abbrev=0\` names the last tag.
 2. Read \`git log --no-merges <tag>..HEAD\` and group the commits by area.
-3. Draft one line per change in the house voice (see \`voice.md\`).
+3. Draft one line per change in the [house voice](voice.md), from [the template](templates/notes.md).
 
 | Section | What goes in it |
 | --- | --- |
@@ -114,6 +114,7 @@ const detailOf = (kind: Kind, local: boolean): CatalogResourceDetail => {
       { path: "voice.md", size: 3_120, executable: false },
       { path: "templates/notes.md", size: 2_204, executable: false },
       { path: "scripts/range.sh", size: 2_444, executable: true },
+      { path: "scripts/__pycache__/range.cpython-312.pyc", size: 1_208, executable: false },
     ] };
   }
   if (kind === "plugin") {
@@ -175,6 +176,24 @@ storageCatalogApi.listScopeResources = async (scopeId, storageId) => {
     cloud_repositories: cloud && connected ? { [ITEM[kind].id]: `repo_${kind}` } : {},
     cloud_connections: cloud && connected ? { [ITEM[kind].id]: `repo_${kind}` } : {},
     cloud_status: null,
+  };
+};
+/* A skill's files, as `get_catalog_resource_file` serves them: text, or
+   nothing for bytes that are not text. */
+const SKILL_FILES: Record<string, string | null> = {
+  "SKILL.md": SKILL_MD,
+  "voice.md": "# House voice\n\nShort sentences. Lead with the verb: *Adds*, *Fixes*, *Removes*.\n\nThe [range script](scripts/range.sh) finds what to cover.\n",
+  "templates/notes.md": "# Release {{version}}\n\n## Breaking\n\n## Fixed\n\nSee [the voice](../voice.md).\n",
+  "scripts/range.sh": "#!/bin/sh\nset -eu\n# The newest tag, else the first commit.\ntag=$(git describe --tags --abbrev=0 2>/dev/null || true)\nif [ -n \"$tag\" ]; then\n  echo \"$tag\"\nelse\n  git rev-list --max-parents=0 HEAD | tail -n 1\nfi\n",
+  "scripts/__pycache__/range.cpython-312.pyc": null,
+};
+storageCatalogApi.getFile = async (_scopeId, _storageId, _resourceId, path) => {
+  await wait(120);
+  if (!(path in SKILL_FILES)) throw new Error("this file is not part of the resource");
+  const text = SKILL_FILES[path]!;
+  return {
+    path, size: text === null ? 1_208 : new TextEncoder().encode(text).length, executable: path.endsWith(".sh"), text,
+    local_path: local ? `${ITEM.skill.folder}/${path}` : null,
   };
 };
 storageCatalogApi.getDetail = async (scopeId) => {

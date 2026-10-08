@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Library status filter — mockup</title>
+    <style>
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; background: var(--bg-0) !important; }
+      #root { height: 100%; overflow-y: auto !important; }
+      .cf-page { display: grid; gap: 28px; padding: 16px 20px 48px; font-family: var(--font-sans); color: var(--text-1); }
+      .cf-top { display: flex; align-items: center; gap: 8px; }
+      .cf-top strong { margin-right: 8px; font-size: 15px; }
+      .cf-part { display: grid; gap: 8px; justify-items: start; }
+      .cf-part h2 { margin: 0; font-size: 14px; color: var(--text-0); }
+      .cf-frame { display: flex; overflow: hidden; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--retro-frame-gutter); }
+      .cf-frame-inner { display: flex; flex-direction: column; flex: 1; min-width: 0; height: 100%; }
+      .cf-frame .sync-main { overflow-y: auto; padding-inline: var(--live-pad); }
+    </style>
+  </head>
+  <body>
+    <!-- Library status filter, shipped (L1). ?theme=light|dark  ?only=vault|cloud|empty|narrow -->
+    <div id="root"></div>
+    <script type="module" src="/mockups/catalog-filter-mockup.tsx"></script>
+  </body>
+</html>

@@ -5,12 +5,14 @@ import { formatBytes } from "../../format";
 import { errorMessage } from "../../storageError";
 import Icon, { type IconName } from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
-import MarkdownText from "../markdown/MarkdownText";
+import MarkdownText, { type MarkdownFileLink } from "../markdown/MarkdownText";
 import Notice from "../notice/Notice";
 import { writeClipboardText } from "../sync-review/clipboard";
 import ProviderMark from "../sync-review/ProviderMark";
 import { storageCatalogApi } from "./api";
+import CatalogFileView, { type CatalogItemFileState } from "./CatalogFileView";
 import CatalogPetDesk from "./CatalogPetDesk";
+import { resolveSkillLink, splitSkillFrontmatter } from "./skillFiles";
 import type { CatalogDetailFile, CatalogResourceDetail, CatalogScopeRow } from "./types";
 
 /*
@@ -21,7 +23,8 @@ import type { CatalogDetailFile, CatalogResourceDetail, CatalogScopeRow } from "
  * leaf), its kind and provider (the scope crumb), its sync state (Push and
  * Pull) and, on Mallard Cloud, its repository (the Cloud chip), so the page
  * repeats none of them. Under 880px of page the rail becomes one line above
- * the panel.
+ * the panel. A skill's file opens as its own page: the bar's last crumb names
+ * it, and the panel holds the file alone.
  */
 
 export type CatalogItemDetailState =
@@ -51,37 +54,6 @@ export function useCatalogItemDetail(scopeId: string, storageId: string | null, 
     return () => { current = false; };
   }, [scopeId, storageId, resourceId, content, localPresent]);
   return state;
-}
-
-/** The agentskills.io frontmatter, split off SKILL.md as Mallard Cloud's
- *  skill page does: top-level `key: value` lines, indented continuations
- *  folded in (block scalars included), nested maps and lists skipped. Without
- *  a leading `---` and a closing one, the whole file is the body. */
-export function splitSkillFrontmatter(text: string): { fields: Record<string, string>; body: string } {
-  const lines = text.split(/\r?\n/);
-  const close = lines[0] === "---" ? lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---") : -1;
-  if (close === -1) return { fields: {}, body: text };
-  const fields: Record<string, string> = {};
-  for (let index = 1; index < close; index++) {
-    const match = /^([A-Za-z0-9_-]+):(.*)$/.exec(lines[index]!);
-    if (!match) continue;
-    const continuation: string[] = [];
-    while (index + 1 < close && /^(\s|$)/.test(lines[index + 1]!)) {
-      const line = lines[++index]!.trim();
-      if (line) continuation.push(line);
-    }
-    const value = match[2]!.trim();
-    if (/^[|>][+-]?$/.test(value)) fields[match[1]!] = continuation.join(value.startsWith("|") ? "\n" : " ");
-    else if (value) fields[match[1]!] = unquote([value, ...continuation].join(" "));
-  }
-  return { fields, body: lines.slice(close + 1).join("\n") };
-}
-
-function unquote(value: string): string {
-  const quote = value[0];
-  if (value.length < 2 || (quote !== '"' && quote !== "'") || !value.endsWith(quote)) return value;
-  const inner = value.slice(1, -1);
-  return quote === "'" ? inner.replace(/''/g, "'") : inner.replace(/\\(["\\])/g, "$1");
 }
 
 /* ——— the facts and the actions ——— */
@@ -161,15 +133,17 @@ function Actions({ row, actions }: { row: CatalogScopeRow; actions: CatalogItemA
 
 /* ——— the bodies ——— */
 
-function FileList({ files }: { files: CatalogDetailFile[] }) {
+function FileList({ files, onOpenFile }: { files: CatalogDetailFile[]; onOpenFile: (path: string) => void }) {
   return (
     <table className="catalog-item-files" aria-label="Files">
       <tbody>
         {files.map((file) => (
           <tr key={file.path}>
             <td>
-              <Icon name="file" size={13} />
-              <code>{file.path}</code>
+              <button type="button" className="catalog-item-file" onClick={() => onOpenFile(file.path)}>
+                <Icon name="file" size={13} />
+                <code>{file.path}</code>
+              </button>
               {file.executable && <span className="catalog-item-exec" title="Executable" aria-label="Executable"><Icon name="terminal" size={12} /></span>}
             </td>
             <td>{formatBytes(file.size)}</td>
@@ -180,10 +154,12 @@ function FileList({ files }: { files: CatalogDetailFile[] }) {
   );
 }
 
-function SkillBody({ text, path, files, onOpenExternal }: {
+function SkillBody({ text, path, files, fileLink, onOpenFile, onOpenExternal }: {
   text: string | null;
   path: string;
   files: CatalogDetailFile[];
+  fileLink: MarkdownFileLink;
+  onOpenFile: (path: string) => void;
   onOpenExternal: (url: string) => void;
 }) {
   const skill = useMemo(() => (text == null ? null : splitSkillFrontmatter(text)), [text]);
@@ -194,12 +170,12 @@ function SkillBody({ text, path, files, onOpenExternal }: {
         <p className="catalog-item-muted">{path} is not UTF-8 text.</p>
       ) : skill.body.trim() ? (
         <div className="catalog-item-document markdown-copy">
-          <MarkdownText text={skill.body} onOpenExternal={onOpenExternal} />
+          <MarkdownText text={skill.body} fileLink={fileLink} onOpenExternal={onOpenExternal} />
         </div>
       ) : (
         <p className="catalog-item-muted">{path} has nothing beyond its frontmatter.</p>
       )}
-      <FileList files={files} />
+      <FileList files={files} onOpenFile={onOpenFile} />
     </div>
   );
 }
@@ -282,9 +258,11 @@ function PluginBody({ detail, installedHere, onOpenExternal }: {
   );
 }
 
-function Body({ row, detail, onOpenExternal }: {
+function Body({ row, detail, fileLink, onOpenFile, onOpenExternal }: {
   row: CatalogScopeRow;
   detail: CatalogItemDetailState;
+  fileLink: MarkdownFileLink;
+  onOpenFile: (path: string) => void;
   onOpenExternal: (url: string) => void;
 }) {
   if (detail.status === "loading") return <LoadingScaffold shape="detail" label={`Loading ${row.display_name}`} />;
@@ -296,7 +274,9 @@ function Body({ row, detail, onOpenExternal }: {
     );
   }
   const shown = detail.detail;
-  if (shown.kind === "document") return <SkillBody text={shown.text} path={shown.path} files={shown.files} onOpenExternal={onOpenExternal} />;
+  if (shown.kind === "document") {
+    return <SkillBody text={shown.text} path={shown.path} files={shown.files} fileLink={fileLink} onOpenFile={onOpenFile} onOpenExternal={onOpenExternal} />;
+  }
   if (shown.kind === "install") return <PluginBody detail={shown} installedHere={row.local_present} onOpenExternal={onOpenExternal} />;
   return (
     <div className="catalog-item-pet">
@@ -308,14 +288,52 @@ function Body({ row, detail, onOpenExternal }: {
 
 /* ——— the page ——— */
 
-export default function CatalogItemPage({ row, detail, actions, onOpenExternal, footer }: {
+/** A skill's files: the one open as its own page, if any, and how to open
+ *  and reveal one. */
+export interface CatalogItemFiles {
+  open: { path: string; state: CatalogItemFileState | null } | null;
+  /** Stable across renders: the page's Markdown keeps its parse while it is. */
+  onOpen: (path: string) => void;
+  onReveal: (localPath: string) => void;
+}
+
+export default function CatalogItemPage({ row, detail, actions, files, onOpenExternal, footer }: {
   row: CatalogScopeRow;
   detail: CatalogItemDetailState;
   actions: CatalogItemActions;
+  files: CatalogItemFiles;
   onOpenExternal: (url: string) => void;
   /** The inline fork form, while Fork is open. */
   footer?: ReactNode;
 }) {
+  const { open, onOpen } = files;
+  const listed = useMemo(
+    () => new Set(detail.status === "ready" && detail.detail.kind === "document" ? detail.detail.files.map((file) => file.path) : []),
+    [detail],
+  );
+  // A relative link resolves against the file it is written in: SKILL.md on
+  // the item's page, the open file on its own.
+  const from = open?.path ?? "SKILL.md";
+  const fileLink = useMemo<MarkdownFileLink>(
+    () => ({ resolve: (href) => resolveSkillLink(from, href, listed), open: onOpen }),
+    [from, listed, onOpen],
+  );
+  if (open) {
+    return (
+      <div className="catalog-item-page">
+        <section className="catalog-item-panel" aria-label={open.path}>
+          <CatalogFileView
+            key={open.path}
+            path={open.path}
+            state={open.state ?? { status: "loading" }}
+            fileLink={fileLink}
+            onOpenExternal={onOpenExternal}
+            onReveal={files.onReveal}
+          />
+        </section>
+      </div>
+    );
+  }
   const shown = facts(row);
   return (
     <div className="catalog-item-page">
@@ -332,7 +350,7 @@ export default function CatalogItemPage({ row, detail, actions, onOpenExternal, 
       {footer}
       <div className="catalog-item-hub">
         <section className="catalog-item-panel" aria-label={row.display_name}>
-          <Body row={row} detail={detail} onOpenExternal={onOpenExternal} />
+          <Body row={row} detail={detail} fileLink={fileLink} onOpenFile={onOpen} onOpenExternal={onOpenExternal} />
         </section>
         <aside className="catalog-item-rail" aria-label={`${row.display_name} on this Mac`}>
           {shown.length > 0 && (

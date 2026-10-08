@@ -332,6 +332,7 @@ pub fn run() {
             storage_catalog::resource_commands::list_catalog_storage_repositories,
             storage_catalog::resource_commands::get_catalog_resource_preview,
             storage_catalog::resource_commands::get_catalog_resource_detail,
+            storage_catalog::resource_commands::get_catalog_resource_file,
             storage_catalog::resource_commands::link_catalog_scope_storage,
             storage_catalog::resource_commands::unlink_catalog_scope_storage,
             storage_catalog::resource_commands::open_catalog_profile_in_app,
