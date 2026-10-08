@@ -8,6 +8,7 @@ import LoadingScaffold from "../LoadingScaffold";
 import MarkdownText, { type MarkdownFileLink } from "../markdown/MarkdownText";
 import Notice from "../notice/Notice";
 import { writeClipboardText } from "../sync-review/clipboard";
+import PageBack, { type PageBackTarget } from "../sync-review/PageBack";
 import ProviderMark from "../sync-review/ProviderMark";
 import { storageCatalogApi } from "./api";
 import CatalogFileView, { type CatalogItemFileState } from "./CatalogFileView";
@@ -22,9 +23,10 @@ import type { CatalogDetailFile, CatalogResourceDetail, CatalogScopeRow } from "
  * beside it. Each fact is said once: the bar already names the item (its
  * leaf), its kind and provider (the scope crumb), its sync state (Push and
  * Pull) and, on Mallard Cloud, its repository (the Cloud chip), so the page
- * repeats none of them. Under 880px of page the rail becomes one line above
- * the panel. A skill's file opens as its own page: the bar's last crumb names
- * it, and the panel holds the file alone.
+ * repeats none of them. The page's first row is its way back, one level up
+ * the trail; under 880px of page the rail's facts and launch run join that
+ * row. A skill's file opens as its own page: the bar's last crumb names it,
+ * the way back returns to the item, and the panel holds the file alone.
  */
 
 export type CatalogItemDetailState =
@@ -297,8 +299,10 @@ export interface CatalogItemFiles {
   onReveal: (localPath: string) => void;
 }
 
-export default function CatalogItemPage({ row, detail, actions, files, onOpenExternal, footer }: {
+export default function CatalogItemPage({ row, back, detail, actions, files, onOpenExternal, footer }: {
   row: CatalogScopeRow;
+  /** One level up: the item from its open file, the list from the item. */
+  back: PageBackTarget;
   detail: CatalogItemDetailState;
   actions: CatalogItemActions;
   files: CatalogItemFiles;
@@ -321,6 +325,9 @@ export default function CatalogItemPage({ row, detail, actions, files, onOpenExt
   if (open) {
     return (
       <div className="catalog-item-page">
+        <div className="catalog-item-line">
+          <PageBack target={back} />
+        </div>
         <section className="catalog-item-panel" aria-label={open.path}>
           <CatalogFileView
             key={open.path}
@@ -338,6 +345,7 @@ export default function CatalogItemPage({ row, detail, actions, files, onOpenExt
   return (
     <div className="catalog-item-page">
       <div className="catalog-item-line">
+        <PageBack target={back} />
         <div className="catalog-item-facts-line">
           {shown.map((fact) => (
             <span key={fact.label} className="catalog-item-fact" title={fact.title ?? fact.label}>

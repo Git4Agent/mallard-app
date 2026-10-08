@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useRef, useState, type ReactNode, type RefObject
 import { createRoot } from "react-dom/client";
 import Icon, { type IconName } from "../src/components/Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../src/components/notice/Notice";
-import SessionDetailBack, { type SessionBackTarget } from "../src/components/project-sync/session-detail/SessionDetailBack";
+import PageBack, { type PageBackTarget } from "../src/components/sync-review/PageBack";
 import ProviderMark from "../src/components/sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../src/components/sync-review/SyncPathBar";
 import type { NoticeSeverity } from "../src/types";
@@ -445,9 +445,9 @@ function StatusChip({ push }: { push: PushState }) {
 function SessionPage({ dir, knobs, scene, push, toolsOn, onShowTools, onToggleTools }: PageModel) {
   const before = dir === "before";
   const agent = knobs.page === "agent";
-  const back: SessionBackTarget = agent
-    ? { kind: "session", label: TITLE, onActivate: noop }
-    : { kind: "section", label: "Git history", onActivate: noop };
+  const back: PageBackTarget = agent
+    ? { voice: "name", label: TITLE, onActivate: noop }
+    : { voice: "app", label: "Git history", onActivate: noop };
 
   /* What the transcript caveats say, in the frame's words. The proposal drops
      the incomplete-call note while the session runs: the last call is in
@@ -494,7 +494,7 @@ function SessionPage({ dir, knobs, scene, push, toolsOn, onShowTools, onToggleTo
       <header className="session-detail-header">
         <div className="session-detail-strip">
           <div className="session-detail-lead">
-            <SessionDetailBack target={back} />
+            <PageBack target={back} />
             <div className="session-detail-chips" aria-label="Session facts">
               <span className="session-detail-chip"><Icon name="git-branch" size={12} /><code>HEAD</code></span>
               <span className="session-detail-chip"><time>Oct 1, 2026 · 12:10</time></span>

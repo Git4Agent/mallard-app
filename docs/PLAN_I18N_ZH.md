@@ -38,7 +38,9 @@ user-visible strings live in the desktop frontend and 1,650 in the website.
 - **One added language: Simplified Chinese (zh-CN).** English stays the
   default and the source.
 - **Terms:** Push = 上传, Pull = 下载. *Version* stays English (Version 2,
-  发布 Version, 最新 Version). Credential redaction = 密钥隐藏; its hint
+  发布 Version, 最新 Version). *Skill* stays English too, singular as
+  Chinese has no plural, spaced from the Han around it (Skill · Claude,
+  9 个 Skill, 搜索 Skill…, 复刻 Skill; on the website 项目、Skill 和桌面宠物). Credential redaction = 密钥隐藏; its hint
   names the scope (密钥、令牌和密码 — the rules cover API keys, tokens,
   private keys, JWTs and passwords). Landing headline: 为 [Codex/Claude
   marks] 打造的Git.
@@ -61,6 +63,7 @@ user-visible strings live in the desktop frontend and 1,650 in the website.
 |---|---|---|
 | Push / Pull | 上传 / 下载 | decided |
 | Version | Version | decided: stays English |
+| Skill / Skills | Skill | decided: stays English, never 技能 |
 | Credential redaction | 密钥隐藏 | decided |
 | Mallard, Mallard Cloud, Codex, Claude, GitHub | unchanged | product names |
 | Session | 会话 | to confirm |

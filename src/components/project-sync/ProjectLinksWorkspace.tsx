@@ -47,7 +47,7 @@ import { sessionPushDisabledReason, sessionPushGate } from "./session-detail/ses
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import ProjectPicker from "./ProjectPicker";
-import SessionDetailBack, { type SessionBackTarget } from "./session-detail/SessionDetailBack";
+import PageBack, { type PageBackTarget } from "../sync-review/PageBack";
 import type { SessionHeaderModel } from "./session-detail/SessionDetailPage";
 import type { PullRequiredCopy } from "./PushResourceWorkspace";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
@@ -2435,10 +2435,10 @@ export default function ProjectLinksWorkspace({
   // crumbs do: an agent's page returns to the session that delegated to it,
   // and a session returns to the project's page, waiting where its crumb waits.
   const sessionParent = sessionHeader?.state === "ready" ? sessionHeader.parent ?? null : null;
-  const sessionBack: SessionBackTarget | null = !sessionDetailSubview ? null
+  const sessionBack: PageBackTarget | null = !sessionDetailSubview ? null
     : sessionParent
       ? {
-        kind: "session",
+        voice: "name",
         label: sessionParent.title,
         onActivate: () => onOpenSessionDetail(sessionDetailSubview.localProjectId, {
           resourceId: sessionParent.resourceId,
@@ -2446,7 +2446,7 @@ export default function ProjectLinksWorkspace({
         }),
       }
       : {
-        kind: "section",
+        voice: "app",
         label: workspaceSectionLabel,
         onActivate: closeSessionDetail,
         disabled: busy || !!inlineStorageReview,
@@ -3244,7 +3244,7 @@ export default function ProjectLinksWorkspace({
              text is simply what this view renders with while the chunk
              loads. */
           <section className="session-detail-page session-detail-entry-state">
-            <SessionDetailBack target={sessionBack} />
+            <PageBack target={sessionBack} />
             <span className="status-loader" />
             <strong>Opening session detail…</strong>
           </section>

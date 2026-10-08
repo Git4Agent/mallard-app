@@ -883,7 +883,7 @@ function SessionPage({ zone, summary, session }: { zone: NoticeZoneProps; summar
           projectRoot={summary.project_root ?? ""}
           resourceId={session.detail.resource_id}
           occurrenceKey={session.detail.resource_id}
-          back={{ kind: "section", label: summary.is_git_repository ? "Git history" : "Sessions", onActivate: noop }}
+          back={{ voice: "app", label: summary.is_git_repository ? "Git history" : "Sessions", onActivate: noop }}
           onHeaderChange={noop}
           pushGate={null}
         />

@@ -5,7 +5,7 @@ import Icon from "../src/components/Icons";
 import LoadingScaffold from "../src/components/LoadingScaffold";
 import ManagedCloudChip from "../src/components/managed-cloud/ManagedCloudChip";
 import type { ManagedCloudStatus } from "../src/components/managed-cloud/types";
-import SessionDetailBack, { type SessionBackTarget } from "../src/components/project-sync/session-detail/SessionDetailBack";
+import PageBack, { type PageBackTarget } from "../src/components/sync-review/PageBack";
 import ProviderMark from "../src/components/sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../src/components/sync-review/SyncPathBar";
 import "../src/App.css";
@@ -20,7 +20,7 @@ import "../src/App.css";
  *   Before  the project crumb's label is the only way back
  *   A       a back button leads the path bar, ahead of the trail
  *   B       a back button leads the page's fact strip (picked 2026-10-02 and
- *           shipped: this frame mounts the shipped `SessionDetailBack`)
+ *           shipped: this frame mounts the shipped `PageBack`)
  *   C       no new control: the project crumb is drawn as the back button
  *
  * `npm run dev`, then /mockups/session-back-mockup.html
@@ -131,9 +131,9 @@ const APP_MENU: PathBarMenuGroup[] = [
 ];
 
 /** Where the button lands, in the trail's own words. */
-function backTarget(knobs: Knobs): SessionBackTarget {
-  if (knobs.page === "agent") return { kind: "session", label: TITLE, onActivate: noop };
-  return { kind: "section", label: knobs.project === "git" ? "Git history" : "Sessions", onActivate: noop };
+function backTarget(knobs: Knobs): PageBackTarget {
+  if (knobs.page === "agent") return { voice: "name", label: TITLE, onActivate: noop };
+  return { voice: "app", label: knobs.project === "git" ? "Git history" : "Sessions", onActivate: noop };
 }
 
 function leafMark(active: boolean) {
@@ -266,7 +266,7 @@ function SessionPage({ dir, knobs }: { dir: Dir; knobs: Knobs }) {
   if (knobs.page === "opening") {
     return (
       <section className="session-detail-page session-detail-entry-state" aria-label="Loading session detail">
-        {dir === "b" && <SessionDetailBack target={backTarget(knobs)} />}
+        {dir === "b" && <PageBack target={backTarget(knobs)} />}
         <LoadingScaffold shape="detail" label="Loading session detail" />
       </section>
     );
@@ -274,7 +274,7 @@ function SessionPage({ dir, knobs }: { dir: Dir; knobs: Knobs }) {
   if (knobs.page === "failed") {
     return (
       <section className="session-detail-page session-detail-entry-state" aria-label="Session detail unavailable">
-        {dir === "b" && <SessionDetailBack target={backTarget(knobs)} />}
+        {dir === "b" && <PageBack target={backTarget(knobs)} />}
         <div className="session-detail-state error">
           <Icon name="alert-triangle" size={24} />
           <strong>Session detail unavailable</strong>
@@ -309,7 +309,7 @@ function SessionPage({ dir, knobs }: { dir: Dir; knobs: Knobs }) {
       <header className="session-detail-header">
         <div className="session-detail-strip">
           {dir === "b"
-            ? <div className="session-detail-lead"><SessionDetailBack target={backTarget(knobs)} />{chips}</div>
+            ? <div className="session-detail-lead"><PageBack target={backTarget(knobs)} />{chips}</div>
             : chips}
           <div className="session-detail-header-actions" aria-label="Session actions">
             <button type="button" className="btn btn-ghost session-detail-launch" aria-label={`Open in ${PROVIDER_NAME}`}>

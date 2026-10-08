@@ -620,7 +620,7 @@ function PageFrame({ dir, head }: { dir: Dir; head: boolean }) {
             source={dir === "a" || dir === "c"
               ? { kind: "stored", storageId: "storage-cloud", storageName: STORAGE }
               : { kind: "local" }}
-            back={{ kind: "section", label: "Git history", onActivate: noop }}
+            back={{ voice: "app", label: "Git history", onActivate: noop }}
             onHeaderChange={noop}
             onOpenSession={noop}
             pushGate={null}

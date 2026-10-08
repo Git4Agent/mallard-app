@@ -14,7 +14,7 @@ import Icon from "../../Icons";
 import { NoticeZone, type NoticeItem } from "../../notice/Notice";
 import { projectSyncApi } from "../api";
 import LoadingScaffold from "../../LoadingScaffold";
-import SessionDetailBack, { type SessionBackTarget } from "./SessionDetailBack";
+import PageBack, { type PageBackTarget } from "../../sync-review/PageBack";
 import SessionDetailHeader from "./SessionDetailHeader";
 import SessionDetailTimeline from "./SessionDetailTimeline";
 import SessionDetailToolbar from "./SessionDetailToolbar";
@@ -70,7 +70,7 @@ interface Props {
   resourceId: string;
   occurrenceKey: string;
   /** The page's back button, in every state the page has. */
-  back: SessionBackTarget;
+  back: PageBackTarget;
   /**
    * Reports the loaded session's identity and refresh handle for the path bar.
    * Called with null while the detail is still loading or has failed, and once
@@ -95,8 +95,8 @@ function mergeWarnings(...groups: SessionDetailWarning[][]): SessionDetailWarnin
 }
 
 type SessionDetailEntryStateProps =
-  | { state: "loading"; back: SessionBackTarget }
-  | { state: "failed"; back: SessionBackTarget; error: string; onRetry: () => void };
+  | { state: "loading"; back: PageBackTarget }
+  | { state: "failed"; back: PageBackTarget; error: string; onRetry: () => void };
 
 function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
   if (props.state === "loading") {
@@ -104,14 +104,14 @@ function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
     // scaffold is a quiet named region.
     return (
       <section className="session-detail-page session-detail-entry-state" aria-label="Loading session detail">
-        <SessionDetailBack target={props.back} />
+        <PageBack target={props.back} />
         <LoadingScaffold shape="detail" label="Loading session detail" />
       </section>
     );
   }
   return (
     <section className="session-detail-page session-detail-entry-state" aria-labelledby="session-detail-entry-heading">
-      <SessionDetailBack target={props.back} />
+      <PageBack target={props.back} />
       <div className="session-detail-state error" role="alert">
         <Icon name="alert-triangle" size={24} />
         <h1 id="session-detail-entry-heading">Session detail unavailable</h1>

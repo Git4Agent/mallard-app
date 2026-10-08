@@ -112,8 +112,8 @@ function FrameView({ frame }: { frame: Frame }) {
         source={{ kind: "local" }}
         detail={frame.detail}
         back={frame.id === "agent"
-          ? { kind: "session", label: "Plan the release", onActivate: () => undefined }
-          : { kind: "section", label: "Git history", onActivate: () => undefined }}
+          ? { voice: "name", label: "Plan the release", onActivate: () => undefined }
+          : { voice: "app", label: "Git history", onActivate: () => undefined }}
         headingRef={{ current: null }}
         actionBusyId={null}
         onAction={() => undefined}

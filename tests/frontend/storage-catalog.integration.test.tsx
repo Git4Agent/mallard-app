@@ -1365,7 +1365,7 @@ test("Catalog Pull keeps preserved, skipped and failed results distinct", async 
 });
 
 test("Cloud repository and review components are shared without feature imports", () => {
-  for (const file of ["managed-cloud/ManagedCloudChip.tsx", "managed-cloud/managedCloudLink.ts", "managed-cloud/RepositoryLookupField.tsx", "sync-review/SyncOutcomeNotice.tsx", "sync-review/reviewPreparationLifecycle.ts"]) {
+  for (const file of ["managed-cloud/ManagedCloudChip.tsx", "managed-cloud/managedCloudLink.ts", "managed-cloud/RepositoryLookupField.tsx", "sync-review/SyncOutcomeNotice.tsx", "sync-review/reviewPreparationLifecycle.ts", "sync-review/PageBack.tsx"]) {
     const source = readFileSync(`src/components/${file}`, "utf8");
     assert.doesNotMatch(source, /project-sync|storage-catalog|from ["'].*ipc["']/);
   }
@@ -1680,6 +1680,9 @@ const itemActions = {
 
 const itemFiles = { open: null, onOpen: () => {}, onReveal: () => {} };
 
+/* From an item, the way back is its list, named as its row is: the app's own word. */
+const itemBack = { voice: "app" as const, label: "Skills", onActivate: () => {} };
+
 test("an item's page holds its body and what only this Mac knows, each said once", async () => {
   const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
   const text = [
@@ -1697,6 +1700,7 @@ test("an item's page holds its body and what only this Mac knows, each said once
   const html = renderToStaticMarkup(
     <CatalogItemPage
       row={itemRow()}
+      back={itemBack}
       detail={{ status: "ready", detail: { kind: "document", path: "SKILL.md", text, files: [
         { path: "SKILL.md", size: 1_644, executable: false },
         { path: "scripts/range.sh", size: 2_444, executable: true },
@@ -1716,7 +1720,8 @@ test("an item's page holds its body and what only this Mac knows, each said once
   assert.match(html, /markdown-image-placeholder/);
   assert.doesNotMatch(html, /<img/);
   // The bar names the item, its kind, provider and sync state; the page
-  // repeats none of them.
+  // repeats none of them. Its way back names the row it returns to — the one
+  // crumb the page says again, as a session's page names its section.
   assert.doesNotMatch(html, />release-notes</);
   assert.doesNotMatch(html, /sync-history-branch-state|thread-status-icon|>Skill<|>Claude</);
   // This Mac's facts, then the launch run with Reveal in Finder last, once in
@@ -1730,6 +1735,36 @@ test("an item's page holds its body and what only this Mac knows, each said once
     assert.deepEqual(labels, ["Open in Claude", "Open in Terminal", "Fork release-notes", "Reveal release-notes in Finder"]);
   }
   assert.doesNotMatch(html, /\/Users\/you\/\.claude\/skills\/release-notes<\//);
+});
+
+// The session page's way back, on a Catalog item: the first item in the page's
+// facts line, so it leads the page at every width, and one level up the trail
+// as the crumbs walk it.
+test("an item's page leads its facts line with the way back to its list", async () => {
+  const { default: CatalogItemPage } = await import("../../src/components/storage-catalog/CatalogItemPage");
+  const html = renderToStaticMarkup(
+    <CatalogItemPage
+      row={itemRow({ display_name: "Tracebit", resource_id: "tracebit" })}
+      back={{ ...itemBack, label: "Pets v1" }}
+      detail={{ status: "loading" }}
+      actions={itemActions}
+      files={itemFiles}
+      onOpenExternal={() => {}}
+    />,
+  );
+  // Before the body has loaded, and ahead of the facts: the way out never
+  // waits on the read.
+  assert.match(html, /^<div class="catalog-item-page"><div class="catalog-item-line"><button type="button" class="btn sync-page-back" title="Back to Pets v1" aria-label="Back to Pets v1"><svg[^>]*data-icon="chevron-left"[\s\S]*?<\/svg><span>Pets v1<\/span><\/button><div class="catalog-item-facts-line">/);
+  assert.doesNotMatch(html, /sync-page-back[^>]*disabled/);
+  assert.equal(html.match(/sync-page-back/g)?.length, 1);
+
+  // The page and the crumbs share one way up: an open file returns to its
+  // item, named as the user named it; the item returns to its row's list.
+  const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
+  assert.match(page, /const closeItemFile = \(\) => setItemFile\(null\);\s*const closeItem = \(\) => \{\s*setMode\(\{ kind: "list" \}\);\s*setItemId\(null\);\s*\};/);
+  assert.match(page, /onActivate: itemRow \? closeItem : undefined,/);
+  assert.match(page, /onActivate: openFilePath \? closeItemFile : undefined,/);
+  assert.match(page, /back=\{openFilePath\s*\? \{ voice: "name", label: name, onActivate: closeItemFile \}\s*: \{ voice: "app", label: scope\.label, onActivate: closeItem \}\}/);
 });
 
 test("a plugin's page is the store hero with this Mac's install state and the adapter's lines", async () => {
@@ -1749,7 +1784,7 @@ test("a plugin's page is the store hero with this Mac's install state and the ad
     ...overrides,
   });
   const render = (row: CatalogScopeRow, detail: ReturnType<typeof plugin>) => renderToStaticMarkup(
-    <CatalogItemPage row={row} detail={{ status: "ready", detail }} actions={{ ...itemActions, onFork: undefined }} files={itemFiles} onOpenExternal={() => {}} />,
+    <CatalogItemPage row={row} back={{ ...itemBack, label: "Plugins" }} detail={{ status: "ready", detail }} actions={{ ...itemActions, onFork: undefined }} files={itemFiles} onOpenExternal={() => {}} />,
   );
   const installed = render(itemRow({ display_name: "lint-buddy@acme-tools", local_files: null, local_bytes: null }), plugin());
   assert.match(installed, /<b>Lint Buddy<\/b> by Acme Tools · Code quality/);
@@ -1775,6 +1810,7 @@ test("a pet's page plays its atlas on the desk, with Pause, and says what it is 
   const html = renderToStaticMarkup(
     <CatalogItemPage
       row={itemRow({ display_name: "Mossy", resource_id: "mossy" })}
+      back={{ ...itemBack, label: "Pets v1" }}
       detail={{ status: "ready", detail: { kind: "sprite", atlas: "data:image/webp;base64,AAAA", columns: 8, rows: 11, description: "A mallard who naps." } }}
       actions={{ ...itemActions, provider: "codex", providerLabel: "Codex", forkTitle: "Fork Mossy" }}
       files={itemFiles}
@@ -1806,7 +1842,7 @@ test("SKILL.md's frontmatter splits the way Mallard Cloud's skill page splits it
   assert.deepEqual(splitSkillFrontmatter("No frontmatter."), { fields: {}, body: "No frontmatter." });
 });
 
-test("an item's rail sits beside its body from 880px of page, and is one line above it under that", () => {
+test("an item's rail sits beside its body from 880px of page, and joins the way back's line under that", () => {
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.catalog-item-page \{[^}]*container: catalog-item \/ inline-size;/);
   assert.match(css, /\.catalog-item-rail \{[^}]*display: none;/);
@@ -1814,7 +1850,8 @@ test("an item's rail sits beside its body from 880px of page, and is one line ab
   // outcome, a blocked note) keeps a heading's space from it; nothing above,
   // no space.
   assert.match(css, /\.profile-links-section > \* \+ \.catalog-item-page \{\s*margin-top: 18px;\s*\}/);
-  assert.match(css, /@container catalog-item \(min-width: 880px\) \{\s*\.catalog-item-line \{\s*display: none;\s*\}\s*\.catalog-item-hub \{\s*grid-template-columns: minmax\(0, 1fr\) 260px;\s*\}\s*\.catalog-item-rail \{\s*display: flex;\s*\}/);
+  assert.match(css, /@container catalog-item \(min-width: 880px\) \{\s*\.catalog-item-line > \.catalog-item-facts-line,\s*\.catalog-item-line > \.catalog-item-actions \{\s*display: none;\s*\}\s*\.catalog-item-hub \{\s*grid-template-columns: minmax\(0, 1fr\) 260px;\s*\}\s*\.catalog-item-rail \{\s*display: flex;\s*\}/);
+  assert.doesNotMatch(css, /\.catalog-item-line \{\s*display: none;/);
 });
 
 test("the app's one Markdown renderer belongs to neither feature", () => {
@@ -2001,6 +2038,7 @@ const openFilePage = async (file: ReturnType<typeof skillFile>, row = itemRow())
   return renderToStaticMarkup(
     <CatalogItemPage
       row={row}
+      back={{ voice: "name", label: row.display_name, onActivate: () => {} }}
       detail={{ status: "ready", detail: { kind: "document", path: "SKILL.md", text: "# Release notes\n", files: [
         { path: "SKILL.md", size: 16, executable: false },
         { path: "references/voice.md", size: 40, executable: false },
@@ -2021,8 +2059,10 @@ test("an open file is the page: numbered lines, Copy and Reveal, and nothing of 
   assert.match(html, /<span>3 lines · 31 B<\/span>/);
   assert.match(html, /aria-label="Copy the contents of scripts\/range\.sh"/);
   assert.match(html, /title="Reveal \/Users\/you\/\.claude\/skills\/release-notes\/scripts\/range\.sh in Finder"/);
-  // The bar's last crumb names the file, and the file page is the file alone.
-  assert.doesNotMatch(html, /catalog-item-rail|catalog-item-line|catalog-item-files|>scripts\/range\.sh</);
+  // The bar's last crumb names the file, and the file page is the file alone
+  // under its way back to the item.
+  assert.match(html, /^<div class="catalog-item-page"><div class="catalog-item-line"><button type="button" class="btn sync-page-back named" title="Back to release-notes" aria-label="Back to release-notes"><svg[^>]*data-icon="chevron-left"[\s\S]*?<\/svg><span>release-notes<\/span><\/button><\/div><section class="catalog-item-panel"/);
+  assert.doesNotMatch(html, /catalog-item-rail|catalog-item-facts-line|catalog-item-files|>scripts\/range\.sh</);
   // The storage's copy has nothing on this Mac to reveal.
   const stored = await openFilePage(skillFile({ local_path: null }));
   assert.match(stored, /disabled="" title="Not on this Mac" aria-label="Reveal scripts\/range\.sh in Finder"/);
@@ -2085,8 +2125,8 @@ test("the item's rows and SKILL.md's links open its files; without a file link M
   assert.match(page, /const itemFileOwner = `\$\{scope\.scope\.scope_id\}\\u0000\$\{storageId \?\? ""\}\\u0000\$\{itemId \?\? ""\}`;/);
   assert.match(page, /if \(itemFileFor !== itemFileOwner\) \{\s*setItemFileFor\(itemFileOwner\);\s*setItemFile\(null\);\s*\}/);
   assert.match(page, /const openFilePath = itemFileFor === itemFileOwner \? itemFile : null;/);
-  // The item crumb is the way back; the file is the leaf, its menu the other files.
-  assert.match(page, /onActivate: openFilePath \? \(\) => setItemFile\(null\) : undefined,/);
+  // The item crumb is a way back; the file is the leaf, its menu the other files.
+  assert.match(page, /onActivate: openFilePath \? closeItemFile : undefined,/);
   assert.match(page, /id: "file",\s*label: baseName\(openFilePath\),\s*title: openFilePath,/);
   assert.match(page, /items: itemFiles\.filter\(\(file\) => file\.path !== openFilePath\)/);
 });

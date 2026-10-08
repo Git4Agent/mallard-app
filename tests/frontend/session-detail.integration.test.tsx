@@ -11,7 +11,7 @@ import type {
 import { SessionDetailMarkdown } from "../../src/components/project-sync/session-detail/SessionDetailEvent";
 import { sessionModelLabel, sessionModelNotes } from "../../src/components/project-sync/session-detail/SessionModel";
 import { mermaidSourceProblem, readMermaidResult } from "../../src/components/mermaid/mermaidModel";
-import type { SessionBackTarget } from "../../src/components/project-sync/session-detail/SessionDetailBack";
+import type { PageBackTarget } from "../../src/components/sync-review/PageBack";
 import SessionDetailHeader from "../../src/components/project-sync/session-detail/SessionDetailHeader";
 import SessionDetailPage from "../../src/components/project-sync/session-detail/SessionDetailPage";
 import SessionDetailTimeline from "../../src/components/project-sync/session-detail/SessionDetailTimeline";
@@ -196,7 +196,7 @@ test("Mermaid source bounds use UTF-8 bytes and parser replies must keep the iso
 const START = 1_786_000_000;
 
 // Where a session's page returns to: the project's page, in the trail's word.
-const back: SessionBackTarget = { kind: "section", label: "Git history", onActivate: () => undefined };
+const back: PageBackTarget = { voice: "app", label: "Git history", onActivate: () => undefined };
 
 const detail: ProjectSessionDetail = {
   resource_id: "codex:conversation:session-1",
@@ -574,9 +574,9 @@ test("the page's way back leads the strip and both entry states, one level up th
   );
   assert.match(
     header,
-    /<div class="session-detail-strip"><div class="session-detail-lead"><button type="button" class="btn session-detail-back" title="Back to Git history" aria-label="Back to Git history"><svg[^>]*data-icon="chevron-left"[\s\S]*?<\/svg><span>Git history<\/span><\/button><div class="session-detail-chips" aria-label="Session facts">/,
+    /<div class="session-detail-strip"><div class="session-detail-lead"><button type="button" class="btn sync-page-back" title="Back to Git history" aria-label="Back to Git history"><svg[^>]*data-icon="chevron-left"[\s\S]*?<\/svg><span>Git history<\/span><\/button><div class="session-detail-chips" aria-label="Session facts">/,
   );
-  assert.doesNotMatch(header, /session-detail-back[^>]*disabled/);
+  assert.doesNotMatch(header, /sync-page-back[^>]*disabled/);
 
   // It waits where the project crumb waits, and from an agent's page it names
   // the parent session: a title, so it leaves the app's display face.
@@ -593,12 +593,12 @@ test("the page's way back leads the strip and both entry states, one level up th
       onShowToolCalls={null}
     />,
   );
-  assert.match(waiting, /class="btn session-detail-back" disabled=""/);
+  assert.match(waiting, /class="btn sync-page-back" disabled=""/);
   const child = renderToStaticMarkup(
     <SessionDetailHeader
       source={{ kind: "local" }}
       detail={detail}
-      back={{ kind: "session", label: "Plan the release", onActivate: () => undefined }}
+      back={{ voice: "name", label: "Plan the release", onActivate: () => undefined }}
       headingRef={{ current: null }}
       actionBusyId={null}
       onAction={() => undefined}
@@ -607,7 +607,7 @@ test("the page's way back leads the strip and both entry states, one level up th
       onShowToolCalls={null}
     />,
   );
-  assert.match(child, /class="btn session-detail-back to-session" title="Back to Plan the release" aria-label="Back to Plan the release"/);
+  assert.match(child, /class="btn sync-page-back named" title="Back to Plan the release" aria-label="Back to Plan the release"/);
 
   // A page that is still opening renders the button and nothing else yet: the
   // scaffold holds back for its first 150ms.
@@ -625,25 +625,26 @@ test("the page's way back leads the strip and both entry states, one level up th
   );
   assert.match(
     opening,
-    /^<section class="session-detail-page session-detail-entry-state" aria-label="Loading session detail"><button type="button" class="btn session-detail-back" title="Back to Git history"/,
+    /^<section class="session-detail-page session-detail-entry-state" aria-label="Loading session detail"><button type="button" class="btn sync-page-back" title="Back to Git history"/,
   );
   const pageSource = readFileSync("src/components/project-sync/session-detail/SessionDetailPage.tsx", "utf8");
-  assert.equal(pageSource.split("<SessionDetailBack target={props.back} />").length - 1, 2);
+  assert.equal(pageSource.split("<PageBack target={props.back} />").length - 1, 2);
 
   // The workspace hands the page one target: the parent session from an
   // agent's page, otherwise the project's page through the close that restores
   // the list's scroll position and focus. The chunk's own fallback has it too.
   const workspaceSource = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(workspaceSource, /kind: "session",\s*label: sessionParent\.title,\s*onActivate: \(\) => onOpenSessionDetail\(/);
-  assert.match(workspaceSource, /kind: "section",\s*label: workspaceSectionLabel,\s*onActivate: closeSessionDetail,\s*disabled: busy \|\| !!inlineStorageReview,/);
-  assert.match(workspaceSource, /<section className="session-detail-page session-detail-entry-state">\s*<SessionDetailBack target=\{sessionBack\} \/>/);
+  assert.match(workspaceSource, /voice: "name",\s*label: sessionParent\.title,\s*onActivate: \(\) => onOpenSessionDetail\(/);
+  assert.match(workspaceSource, /voice: "app",\s*label: workspaceSectionLabel,\s*onActivate: closeSessionDetail,\s*disabled: busy \|\| !!inlineStorageReview,/);
+  assert.match(workspaceSource, /<section className="session-detail-page session-detail-entry-state">\s*<PageBack target=\{sessionBack\} \/>/);
   assert.match(workspaceSource, /back=\{sessionBack\}/);
 
-  // 26px clears the 24px minimum target; the margins give the 4px back, so
-  // the strip keeps the chips' height.
+  // 26px clears the 24px minimum target; on the strip the margins give the
+  // 4px back, so the row keeps the chips' height.
   const css = readFileSync("src/App.css", "utf8");
-  assert.match(css, /\.btn\.session-detail-back \{\s*min-height: 26px;\s*flex: 0 0 auto;\s*gap: 3px;\s*margin: -2px 0;/);
-  assert.match(css, /\.session-detail-entry-state > \.btn\.session-detail-back \{\s*justify-self: start;\s*margin: -1px 0;/);
+  assert.match(css, /\.btn\.sync-page-back \{\s*min-height: 26px;\s*flex: 0 0 auto;\s*gap: 3px;/);
+  assert.match(css, /\.session-detail-lead > \.sync-page-back \{\s*margin: -2px 0;/);
+  assert.match(css, /\.session-detail-entry-state > \.btn\.sync-page-back \{\s*justify-self: start;\s*margin: -1px 0;/);
 });
 
 const agentEvent: SessionTimelineEvent = {

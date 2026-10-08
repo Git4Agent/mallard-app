@@ -8530,7 +8530,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
    Cloud: the item's body in a panel, and what only this Mac knows — edited,
    size, warnings, and the card's launch run — in a rail beside it. Each fact
    is said once; the bar names the item, its kind, its sync state and its
-   repository. Under 880px of page the rail becomes one line above the panel. */
+   repository. The page's first row is the line: the way back, then, under
+   880px of page, the rail's facts and launch run. */
 .catalog-item-page {
   container: catalog-item / inline-size;
   display: grid;
@@ -8610,8 +8611,11 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   box-shadow: var(--shadow-card);
 }
 
+/* The rail takes the facts and the launch run; the line keeps the way back,
+   so the button stays the page's first row at every width. */
 @container catalog-item (min-width: 880px) {
-  .catalog-item-line {
+  .catalog-item-line > .catalog-item-facts-line,
+  .catalog-item-line > .catalog-item-actions {
     display: none;
   }
 
@@ -9294,30 +9298,35 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   gap: 12px;
 }
 
-/* The page's way back is a `.btn` at the strip's scale: 26px, above the 24px
-   minimum target (WCAG 2.2 AA 2.5.8). The 2px it stands past a 22px chip on
-   each side come off its margins, so the row keeps the chips' height and the
-   button centres on their first line when they wrap. */
-.btn.session-detail-back {
+/* A page's way back (PageBack), shared by the session page's strip and a
+   Catalog item's facts line: a `.btn` at a fact strip's scale, 26px, above
+   the 24px minimum target (WCAG 2.2 AA 2.5.8). */
+.btn.sync-page-back {
   min-height: 26px;
   flex: 0 0 auto;
   gap: 3px;
-  margin: -2px 0;
   padding: 0 11px 0 6px;
 }
 
-.session-detail-back > span {
+.sync-page-back > span {
   max-width: 28ch;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* From an agent's page the label is the parent session's title: the user's
-   data, so it speaks in the sans face the title's own crumb uses. */
-.btn.session-detail-back.to-session {
+/* A label that is the user's data — a parent session's title, an item's
+   name — speaks in the sans face that name's own crumb uses. */
+.btn.sync-page-back.named {
   font-family: var(--font-sans);
   font-weight: var(--weight-semibold);
   letter-spacing: -0.01em;
+}
+
+/* On the session strip, the 2px it stands past a 22px chip on each side come
+   off its margins, so the row keeps the chips' height and the button centres
+   on their first line when they wrap. */
+.session-detail-lead > .sync-page-back {
+  margin: -2px 0;
 }
 
 /* Facts state themselves — a branch after the branch glyph, a bare sha — so
@@ -10705,7 +10714,7 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 /* While the page opens, or fails to, the way back is the grid's first row,
    where the loaded strip will seat it: a 24px row, the height the launch
    verbs give the strip, so the button does not move when the page lands. */
-.session-detail-entry-state > .btn.session-detail-back {
+.session-detail-entry-state > .btn.sync-page-back {
   justify-self: start;
   margin: -1px 0;
 }

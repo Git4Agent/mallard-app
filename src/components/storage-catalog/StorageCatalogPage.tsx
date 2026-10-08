@@ -1048,6 +1048,13 @@ export default function StorageCatalogPage({
     [itemDetail],
   );
   const openItemFile = useCallback((path: string) => setItemFile(path), []);
+  /* One level up, the way both the crumbs and the page's back button walk
+     it: an open file returns to its item, an item to the list. */
+  const closeItemFile = () => setItemFile(null);
+  const closeItem = () => {
+    setMode({ kind: "list" });
+    setItemId(null);
+  };
   /* Opening a file, or going back to the item, is a new page: it starts at
      its top, as a session's page does. */
   const pageScrollRef = useRef<HTMLElement>(null);
@@ -1548,10 +1555,7 @@ export default function StorageCatalogPage({
       title: `${label}\n${scope.profile.configured_home}`,
       ariaLabel: itemRow ? `${label}. Back to the list` : `${label}. Catalog row menu`,
       /* On an item's page the row is the way back, and keeps its menu. */
-      onActivate: itemRow ? () => {
-        setMode({ kind: "list" });
-        setItemId(null);
-      } : undefined,
+      onActivate: itemRow ? closeItem : undefined,
       menuLabel: "Catalog row",
       menuHeader: {
         label,
@@ -1628,7 +1632,7 @@ export default function StorageCatalogPage({
         ? <img className="catalog-leaf-mark" src={itemRow.preview_png ?? remotePreviews[itemRow.row_id]} alt="" />
         : <Icon name={glyph.icon} size={14} />,
       /* With one of its files open, the item is the way back. */
-      onActivate: openFilePath ? () => setItemFile(null) : undefined,
+      onActivate: openFilePath ? closeItemFile : undefined,
     }] : []),
     /* A skill's open file is the leaf, named by its base name; its menu
        switches to the item's other files. */
@@ -2542,6 +2546,9 @@ export default function StorageCatalogPage({
         )}
         <CatalogItemPage
           row={itemRow}
+          back={openFilePath
+            ? { voice: "name", label: name, onActivate: closeItemFile }
+            : { voice: "app", label: scope.label, onActivate: closeItem }}
           detail={itemDetail ?? { status: "loading" }}
           files={itemPageFiles}
           actions={{

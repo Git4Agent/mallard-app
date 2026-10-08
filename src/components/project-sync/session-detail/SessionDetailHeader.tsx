@@ -3,7 +3,7 @@ import type { ProjectSessionDetail, SessionActionDescriptor, SessionDetailWarnin
 import Icon, { type IconName } from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
 import ThreadStatusIcon from "../../sync-review/ThreadStatusIcon";
-import SessionDetailBack, { type SessionBackTarget } from "./SessionDetailBack";
+import PageBack, { type PageBackTarget } from "../../sync-review/PageBack";
 import SessionDetailNotes from "./SessionDetailNotes";
 import { SessionModelChip } from "./SessionModel";
 import {
@@ -40,7 +40,7 @@ export default function SessionDetailHeader({
   source,
 }: {
   detail: ProjectSessionDetail;
-  back: SessionBackTarget;
+  back: PageBackTarget;
   headingRef: RefObject<HTMLHeadingElement | null>;
   actionBusyId: string | null;
   onAction: (action: SessionActionDescriptor) => void;
@@ -77,7 +77,7 @@ export default function SessionDetailHeader({
       <div className="session-detail-strip">
         {/* The way back leads the row, and the facts wrap beside it. */}
         <div className="session-detail-lead">
-          <SessionDetailBack target={back} />
+          <PageBack target={back} />
           {/* Facts state themselves: a branch after the branch glyph and a
               7-char sha need no caption. Only the token count keeps a word. */}
           <div className="session-detail-chips" aria-label="Session facts">
