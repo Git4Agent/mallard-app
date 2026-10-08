@@ -1,5 +1,6 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { createContext, memo, useContext, useEffect, useMemo, useState } from "react";
 import type { Components } from "react-markdown";
+import type { Element } from "hast";
 import MarkdownText, { MarkdownImagePlaceholder } from "../../markdown/MarkdownText";
 import { isSafeExternalMarkdownUrl, safeMarkdownUrl, safeRelativeMarkdownPath } from "../../markdown/markdownUrl";
 import type { SessionAgentPreview, SessionCount, SessionTimelineEvent } from "../../../types";
@@ -19,8 +20,10 @@ import {
   formatSessionCount,
   formatSessionDetailClock,
   formatSessionDuration,
+  markdownMediaFailureMessage,
+  markdownPlayerKind,
   projectMarkdownDisplayPath,
-  type ProjectMarkdownImageState,
+  type ProjectMarkdownMediaState,
   SESSION_AGENT_STATUS_LABELS,
   SESSION_EVENT_KIND_LABELS,
   sessionDetailDateTime,
@@ -36,8 +39,8 @@ interface Props {
   toolDetails: Readonly<Record<string, SessionToolDetailState>>;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
   onOpenProjectPath: (relativePath: string) => void;
-  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
-  onLoadProjectImage?: (relativePath: string) => void;
+  projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
+  onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot: string;
   /** The project's GitHub remote, when it has one: a checkpoint sha links there. */
   repositoryUrl?: string | null;
@@ -45,30 +48,99 @@ interface Props {
   onOpenSession?: (resourceId: string) => void;
 }
 
+/* The page-level cache reaches each picture and player through context, not
+   the renderers: a renderer rebuilt whenever one file settles is a new
+   component type to ReactMarkdown, which would remount every player under it
+   and stop a playing track. */
+const ProjectMediaContext = createContext<Readonly<Record<string, ProjectMarkdownMediaState>> | undefined>(undefined);
+
 /** Requests one validated in-project image on mount, rendering the loading
  * chip until the page-level cache resolves it. */
 function ProjectMarkdownImage({
   relativePath,
   alt,
-  state,
-  onLoadProjectImage,
+  onLoadProjectMedia,
 }: {
   relativePath: string;
   alt: string;
-  state: ProjectMarkdownImageState | undefined;
-  onLoadProjectImage: (relativePath: string) => void;
+  onLoadProjectMedia: (relativePath: string) => void;
 }) {
+  const state = useContext(ProjectMediaContext)?.[relativePath];
   const settled = state != null;
   useEffect(() => {
-    if (!settled) onLoadProjectImage(relativePath);
-  }, [settled, relativePath, onLoadProjectImage]);
+    if (!settled) onLoadProjectMedia(relativePath);
+  }, [settled, relativePath, onLoadProjectMedia]);
   if (state?.status === "loaded") {
     return <img className="session-detail-markdown-image" src={state.src} alt={alt} />;
   }
   if (state?.status === "failed") {
-    return <MarkdownImagePlaceholder label={alt || relativePath} detail={state.message} />;
+    return <MarkdownImagePlaceholder label={alt || relativePath} detail={state.message} showDetail />;
   }
   return <MarkdownImagePlaceholder label={alt || relativePath} loading />;
+}
+
+/** A track or a clip: the webview's own player where a picture would be, bare
+ * as pictures are drawn, read once through the validated command. A file the
+ * player refuses after loading says so in the chip. */
+function ProjectMarkdownPlayer({
+  relativePath,
+  kind,
+  alt,
+  onLoadProjectMedia,
+}: {
+  relativePath: string;
+  kind: "audio" | "video";
+  alt: string;
+  onLoadProjectMedia: (relativePath: string) => void;
+}) {
+  const state = useContext(ProjectMediaContext)?.[relativePath];
+  const settled = state != null;
+  const [refused, setRefused] = useState<string | null>(null);
+  useEffect(() => {
+    if (!settled) onLoadProjectMedia(relativePath);
+  }, [settled, relativePath, onLoadProjectMedia]);
+  const label = alt || relativePath;
+  if (state?.status === "loaded" && state.src !== refused) {
+    const refuse = () => setRefused(state.src);
+    return kind === "video"
+      ? <video className="session-detail-markdown-video" controls playsInline preload="metadata" src={state.src} aria-label={label} onError={refuse} />
+      : <audio className="session-detail-markdown-audio" controls preload="metadata" src={state.src} aria-label={label} onError={refuse} />;
+  }
+  if (state) {
+    const message = state.status === "failed"
+      ? state.message
+      : markdownMediaFailureMessage(kind, relativePath, { code: "invalid_request", message: "" });
+    return <MarkdownImagePlaceholder label={label} kind={kind} detail={message} showDetail />;
+  }
+  return <MarkdownImagePlaceholder label={label} kind={kind} loading />;
+}
+
+const BLOCKS = new Set(["p", "ul", "ol", "li", "blockquote", "pre", "table", "div", "h1", "h2", "h3", "h4", "h5", "h6"]);
+
+/** The project tracks and clips a line links to, once each, that the line does
+ * not already embed: Claude links what it made, and the player goes under the
+ * line. Nested blocks keep their own links; a link around a picture is that
+ * picture. */
+function linkedPlayers(node: Element | undefined): string[] {
+  if (!node) return [];
+  const linked = new Set<string>();
+  const embedded = new Set<string>();
+  const visit = (parent: Element) => {
+    for (const child of parent.children) {
+      if (child.type !== "element" || BLOCKS.has(child.tagName)) continue;
+      if (child.tagName === "img" && typeof child.properties.src === "string") {
+        const path = safeRelativeMarkdownPath(child.properties.src);
+        if (path) embedded.add(path);
+      } else if (child.tagName === "a" && typeof child.properties.href === "string") {
+        const picture = child.children.some((inner) => inner.type === "element" && inner.tagName === "img");
+        const path = picture ? null : safeRelativeMarkdownPath(child.properties.href);
+        if (path && markdownPlayerKind(path)) linked.add(path);
+        visit(child);
+      } else visit(child);
+    }
+  };
+  visit(node);
+  return [...linked].filter((path) => !embedded.has(path));
 }
 
 /* Parsing a markdown body is the most expensive thing this page does, and the
@@ -78,17 +150,35 @@ function ProjectMarkdownImage({
 export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   text,
   onOpenProjectPath,
-  projectImages,
-  onLoadProjectImage,
+  projectMedia,
+  onLoadProjectMedia,
   projectRoot = "",
 }: {
   text: string;
   onOpenProjectPath?: (relativePath: string) => void;
-  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
-  onLoadProjectImage?: (relativePath: string) => void;
+  projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
+  onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot?: string;
 }) {
-  const components = useMemo<Components>(() => ({
+  const components = useMemo<Components>(() => {
+    const players = (node: Element | undefined) => onLoadProjectMedia
+      ? linkedPlayers(node).map((path) => (
+        <ProjectMarkdownPlayer
+          key={path}
+          relativePath={path}
+          kind={markdownPlayerKind(path)!}
+          alt={path.slice(path.lastIndexOf("/") + 1)}
+          onLoadProjectMedia={onLoadProjectMedia}
+        />
+      ))
+      : [];
+    return {
+        p: ({ node, children, ...props }) => {
+          const linked = players(node);
+          if (linked.length === 0) return <p {...props}>{children}</p>;
+          return <><p {...props}>{children}</p><p className="session-detail-markdown-linked">{linked}</p></>;
+        },
+        li: ({ node, children, ...props }) => <li {...props}>{children}{players(node)}</li>,
         img: ({ src, alt }) => {
           const url = typeof src === "string" ? src : "";
           const label = alt ?? "";
@@ -108,13 +198,25 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
           // Absolute paths, traversal, and foreign schemes arrive here as
           // "" from the shared urlTransform and fall to the plain chip.
           const projectPath = url ? safeRelativeMarkdownPath(url) : null;
-          if (!projectPath || !onLoadProjectImage) {
+          if (!projectPath || !onLoadProjectMedia) {
             return (
               <MarkdownImagePlaceholder
                 label={label || "image"}
+                kind={(projectPath && markdownPlayerKind(projectPath)) || "image"}
                 detail={projectPath
                   ? undefined
                   : "Only images inside the project can be embedded."}
+              />
+            );
+          }
+          const player = markdownPlayerKind(projectPath);
+          if (player) {
+            return (
+              <ProjectMarkdownPlayer
+                relativePath={projectPath}
+                kind={player}
+                alt={label}
+                onLoadProjectMedia={onLoadProjectMedia}
               />
             );
           }
@@ -122,8 +224,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
             <ProjectMarkdownImage
               relativePath={projectPath}
               alt={label}
-              state={projectImages?.[projectPath]}
-              onLoadProjectImage={onLoadProjectImage}
+              onLoadProjectMedia={onLoadProjectMedia}
             />
           );
         },
@@ -168,10 +269,13 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
             </a>
           );
         },
-  }), [onOpenProjectPath, projectImages, onLoadProjectImage, projectRoot]);
+    };
+  }, [onOpenProjectPath, onLoadProjectMedia, projectRoot]);
 
   return (
-    <MarkdownText text={text} components={components} />
+    <ProjectMediaContext.Provider value={projectMedia}>
+      <MarkdownText text={text} components={components} />
+    </ProjectMediaContext.Provider>
   );
 });
 
@@ -391,15 +495,15 @@ function PromptCard({
   event,
   turnDuration,
   onOpenProjectPath,
-  projectImages,
-  onLoadProjectImage,
+  projectMedia,
+  onLoadProjectMedia,
   projectRoot,
 }: {
   event: SessionTimelineEvent;
   turnDuration?: string | null;
   onOpenProjectPath: (relativePath: string) => void;
-  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
-  onLoadProjectImage?: (relativePath: string) => void;
+  projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
+  onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot: string;
 }) {
   const callCount = speakableCount(event.turn_tool_summary?.tool_calls);
@@ -420,8 +524,8 @@ function PromptCard({
           <SessionDetailMarkdown
             text={event.text}
             onOpenProjectPath={onOpenProjectPath}
-            projectImages={projectImages}
-            onLoadProjectImage={onLoadProjectImage}
+            projectMedia={projectMedia}
+            onLoadProjectMedia={onLoadProjectMedia}
             projectRoot={projectRoot}
           />
         ) : (
@@ -436,14 +540,14 @@ function PromptCard({
 function ReplyCard({
   event,
   onOpenProjectPath,
-  projectImages,
-  onLoadProjectImage,
+  projectMedia,
+  onLoadProjectMedia,
   projectRoot,
 }: {
   event: SessionTimelineEvent;
   onOpenProjectPath: (relativePath: string) => void;
-  projectImages?: Readonly<Record<string, ProjectMarkdownImageState>>;
-  onLoadProjectImage?: (relativePath: string) => void;
+  projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
+  onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot: string;
 }) {
   const clock = event.timestamp != null ? formatSessionDetailClock(event.timestamp) : null;
@@ -459,8 +563,8 @@ function ReplyCard({
           <SessionDetailMarkdown
             text={event.text}
             onOpenProjectPath={onOpenProjectPath}
-            projectImages={projectImages}
-            onLoadProjectImage={onLoadProjectImage}
+            projectMedia={projectMedia}
+            onLoadProjectMedia={onLoadProjectMedia}
             projectRoot={projectRoot}
           />
         ) : (
@@ -529,8 +633,8 @@ export default function SessionDetailEvent({
   toolDetails,
   onToolExpandedChange,
   onOpenProjectPath,
-  projectImages,
-  onLoadProjectImage,
+  projectMedia,
+  onLoadProjectMedia,
   projectRoot,
   repositoryUrl,
   onOpenSession,
@@ -582,16 +686,16 @@ export default function SessionDetailEvent({
             event={event}
             turnDuration={turnDuration}
             onOpenProjectPath={onOpenProjectPath}
-            projectImages={projectImages}
-            onLoadProjectImage={onLoadProjectImage}
+            projectMedia={projectMedia}
+            onLoadProjectMedia={onLoadProjectMedia}
             projectRoot={projectRoot}
           />
         ) : event.kind === "response" ? (
           <ReplyCard
             event={event}
             onOpenProjectPath={onOpenProjectPath}
-            projectImages={projectImages}
-            onLoadProjectImage={onLoadProjectImage}
+            projectMedia={projectMedia}
+            onLoadProjectMedia={onLoadProjectMedia}
             projectRoot={projectRoot}
           />
         ) : (
@@ -600,8 +704,8 @@ export default function SessionDetailEvent({
               <SessionDetailMarkdown
                 text={event.text}
                 onOpenProjectPath={onOpenProjectPath}
-                projectImages={projectImages}
-                onLoadProjectImage={onLoadProjectImage}
+                projectMedia={projectMedia}
+                onLoadProjectMedia={onLoadProjectMedia}
                 projectRoot={projectRoot}
               />
             ) : (

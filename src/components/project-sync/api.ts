@@ -660,6 +660,10 @@ export const projectSyncApi = {
   readProjectMarkdownImage: (localProjectId: string, relativePath: string) =>
     invoke<ProjectMarkdownImage>("read_project_markdown_image", { localProjectId, relativePath }),
 
+  /** A project track or clip for an inline player, as raw bytes. */
+  readProjectMarkdownMedia: (localProjectId: string, relativePath: string) =>
+    invoke<ArrayBuffer>("read_project_markdown_media", { localProjectId, relativePath }),
+
   deleteLocalProjectSession: (localProjectId: string, resourceId: string) =>
     invoke<LocalSessionDeleteResult>("delete_local_project_session", { localProjectId, resourceId }),
   executeProjectSessionAction: (localProjectId: string, resourceId: string, actionId: string) =>

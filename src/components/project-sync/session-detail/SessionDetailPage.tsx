@@ -23,9 +23,12 @@ import {
   ALL_SESSION_TOOL_CATEGORIES,
   createDefaultSessionDetailFilters,
   includedSessionEventKinds,
+  markdownMediaFailureMessage,
+  markdownPlayerKind,
+  markdownPlayerType,
   mergeSessionTimelinePages,
   normalizeSessionDetailFailure,
-  type ProjectMarkdownImageState,
+  type ProjectMarkdownMediaState,
   sessionDetailFilterFingerprint,
   sessionDetailFilterToggles,
   type SessionDetailFilters,
@@ -369,31 +372,62 @@ export default function SessionDetailPage({
     }
   }, [localProjectId]);
 
-  // Markdown-referenced project images, embedded as bounded data: URIs.
-  // The cache is settled outcomes only; the ref dedupes in-flight loads so
-  // one path is read at most once per page, whatever re-renders happen.
-  const [projectImages, setProjectImages] = useState<
-    Readonly<Record<string, ProjectMarkdownImageState>>
+  // Markdown-referenced project pictures, embedded as bounded data: URIs, and
+  // tracks and clips, played from blob: URLs this page owns until the project
+  // changes or the page closes. The cache is settled outcomes only; the ref
+  // dedupes in-flight loads so one path is read at most once per page,
+  // whatever re-renders happen.
+  const [projectMedia, setProjectMedia] = useState<
+    Readonly<Record<string, ProjectMarkdownMediaState>>
   >({});
-  const requestedProjectImages = useRef(new Set<string>());
+  const requestedProjectMedia = useRef(new Set<string>());
+  const mediaProject = useRef(localProjectId);
+  const mediaUrls = useRef<string[]>([]);
   useEffect(() => {
-    requestedProjectImages.current = new Set();
-    setProjectImages({});
+    mediaProject.current = localProjectId;
+    requestedProjectMedia.current = new Set();
+    setProjectMedia({});
+    return () => {
+      for (const url of mediaUrls.current.splice(0)) URL.revokeObjectURL(url);
+    };
   }, [localProjectId]);
-  const loadProjectImage = useCallback(async (relativePath: string) => {
-    if (requestedProjectImages.current.has(relativePath)) return;
-    requestedProjectImages.current.add(relativePath);
-    let state: ProjectMarkdownImageState;
+  const loadProjectMedia = useCallback(async (relativePath: string) => {
+    if (requestedProjectMedia.current.has(relativePath)) return;
+    requestedProjectMedia.current.add(relativePath);
+    const player = markdownPlayerKind(relativePath);
+    const type = markdownPlayerType(relativePath);
+    let state: ProjectMarkdownMediaState;
     try {
-      const image = await projectSyncApi.readProjectMarkdownImage(localProjectId, relativePath);
-      state = {
-        status: "loaded",
-        src: `data:${image.mime_type};base64,${image.base64_data}`,
-      };
+      if (!player || !type) {
+        const image = await projectSyncApi.readProjectMarkdownImage(localProjectId, relativePath);
+        state = {
+          status: "loaded",
+          src: `data:${image.mime_type};base64,${image.base64_data}`,
+        };
+      } else if (!document.createElement(player).canPlayType(type)) {
+        // A format the webview cannot decode is never read at all.
+        state = {
+          status: "failed",
+          message: markdownMediaFailureMessage(player, relativePath, { code: "invalid_request", message: "" }),
+        };
+      } else {
+        const bytes = await projectSyncApi.readProjectMarkdownMedia(localProjectId, relativePath);
+        const url = URL.createObjectURL(new Blob([bytes], { type }));
+        if (mediaProject.current !== localProjectId) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        mediaUrls.current.push(url);
+        state = { status: "loaded", src: url };
+      }
     } catch (reason) {
-      state = { status: "failed", message: normalizeSessionDetailFailure(reason).message };
+      state = {
+        status: "failed",
+        message: markdownMediaFailureMessage(player ?? "image", relativePath, normalizeSessionDetailFailure(reason)),
+      };
     }
-    setProjectImages((previous) => ({ ...previous, [relativePath]: state }));
+    if (mediaProject.current !== localProjectId) return;
+    setProjectMedia((previous) => ({ ...previous, [relativePath]: state }));
   }, [localProjectId]);
 
   /* The timeline hands these straight down to every event body, and the
@@ -404,9 +438,9 @@ export default function SessionDetailPage({
     void openProjectPath(relativePath);
   }, [openProjectPath]);
 
-  const handleLoadProjectImage = useCallback((relativePath: string) => {
-    void loadProjectImage(relativePath);
-  }, [loadProjectImage]);
+  const handleLoadProjectMedia = useCallback((relativePath: string) => {
+    void loadProjectMedia(relativePath);
+  }, [loadProjectMedia]);
 
   const runAction = async (action: SessionActionDescriptor) => {
     if (!action.enabled || actionBusyId) return;
@@ -505,8 +539,8 @@ export default function SessionDetailPage({
             onLoadMore={loadMoreEvents}
             onToolExpandedChange={handleToolExpandedChange}
             onOpenProjectPath={handleOpenProjectPath}
-            projectImages={projectImages}
-            onLoadProjectImage={handleLoadProjectImage}
+            projectMedia={projectMedia}
+            onLoadProjectMedia={handleLoadProjectMedia}
             projectRoot={projectRoot}
             repositoryUrl={detail.github_repository_url}
             hasFilterToggles={sessionDetailFilterToggles(detail.event_counts).length > 0}

@@ -142,8 +142,8 @@ function Mockup() {
           onLoadMore={() => undefined}
           onToolExpandedChange={() => undefined}
           onOpenProjectPath={() => undefined}
-          projectImages={{}}
-          onLoadProjectImage={() => undefined}
+          projectMedia={{}}
+          onLoadProjectMedia={() => undefined}
           projectRoot="/Users/example/project"
           hasFilterToggles
           startSettings={start}

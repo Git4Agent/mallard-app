@@ -12,7 +12,7 @@ import type {
   ThreadSyncEntry,
 } from "../../types";
 import Icon from "../Icons";
-import { NoticeZone, SEVERITY_ICON, type NoticeItem, type NoticeTiming } from "../notice/Notice";
+import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type PushGitHistory, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, {
   projectFileReviewCards,
@@ -662,21 +662,6 @@ function pushBudgetBreakdown(total: PushBudget): string {
   return `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
 }
 
-/** Both reviews that push say this while Settings › Privacy › Credential
- *  redaction is off. The header's flag already names the setting, and Off is
- *  the default, so a warning box over the list repeated it on every review.
- *  This is a muted line by Push instead: what the push sends, said where it
- *  is sent. It is the setting's consequence rather than an event, so it has
- *  no close control, like the footer's other notes. */
-export function CredentialRedactionOffNote() {
-  return (
-    <p className="sync-review-footer-note redaction-off">
-      <Icon name={SEVERITY_ICON.warning} size={12} />
-      <span>Not redacted: API keys, tokens, and passwords push as written.</span>
-    </p>
-  );
-}
-
 /** The commit of both reviews that push. It wears the wait while the rows
  *  load and the folder is walked, and the transfer's own readout while it
  *  runs. */
@@ -1258,7 +1243,6 @@ export default function PushResourceWorkspace({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        {!busy && !credentialRedactionEnabled && <CredentialRedactionOffNote />}
         {overLimitSentence && (
           /* The refusal takes a row of its own above the button cluster, where
              the gauge that caused it and the button it stops both sit. It does

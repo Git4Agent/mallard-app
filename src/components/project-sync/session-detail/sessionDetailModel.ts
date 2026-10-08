@@ -703,13 +703,54 @@ export function projectMarkdownDisplayPath(projectRoot: string, relativePath: st
 }
 
 /**
- * One project image's settled embed outcome in the page-level cache: a
- * ready `data:` URI, or a terminal failure (rejected format, size cap,
+ * One project picture's, track's or clip's settled outcome in the page-level
+ * cache: a ready `data:` URI (a picture) or `blob:` URL (a track or a clip),
+ * or a terminal failure in words for the chip (rejected format, size cap,
  * missing file). An absent entry means the load has not settled yet.
  */
-export type ProjectMarkdownImageState =
+export type ProjectMarkdownMediaState =
   | { status: "loaded"; src: string }
   | { status: "failed"; message: string };
+
+const MARKDOWN_AUDIO_TYPES: Readonly<Record<string, string>> = {
+  wav: "audio/wav", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
+  ogg: "audio/ogg", oga: "audio/ogg", opus: "audio/ogg", flac: "audio/flac",
+};
+const MARKDOWN_VIDEO_TYPES: Readonly<Record<string, string>> = {
+  mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
+  webm: "video/webm", mkv: "video/x-matroska", ogv: "video/ogg",
+};
+
+export type MarkdownMediaKind = "image" | "audio" | "video";
+
+function markdownExtension(path: string): string {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+/** A project path a session plays in place: a track or a clip, by extension. */
+export function markdownPlayerKind(path: string): "audio" | "video" | null {
+  const extension = markdownExtension(path);
+  return MARKDOWN_AUDIO_TYPES[extension] ? "audio" : MARKDOWN_VIDEO_TYPES[extension] ? "video" : null;
+}
+
+/** The type a track's or a clip's `Blob` carries, so the webview's player takes it. */
+export function markdownPlayerType(path: string): string | null {
+  const extension = markdownExtension(path);
+  return MARKDOWN_AUDIO_TYPES[extension] ?? MARKDOWN_VIDEO_TYPES[extension] ?? null;
+}
+
+/** Why a picture does not show or a track or a clip does not play, in the file's own words. */
+export function markdownMediaFailureMessage(kind: MarkdownMediaKind, path: string, failure: SessionDetailFailure): string {
+  const format = markdownExtension(path).toUpperCase() || "This file";
+  switch (failure.code) {
+    case "not_found": return `The linked ${kind} no longer exists.`;
+    case "response_too_large": return kind === "image" ? "Too large to show here." : "Too large to play here.";
+    case "invalid_request": return kind === "image" ? `${format} can't show in Mallard.` : `${format} can't play in Mallard.`;
+    default: return failure.message;
+  }
+}
 
 export interface SessionDetailFailure {
   code: string | null;

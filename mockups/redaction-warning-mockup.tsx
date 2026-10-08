@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useLayoutEffect, useRef, useState, type ReactNod
 import { createRoot } from "react-dom/client";
 import Icon from "../src/components/Icons";
 import Notice, { NoticeChip, NoticeZone, SEVERITY_ICON, type NoticeItem } from "../src/components/notice/Notice";
-import { CredentialRedactionOffNote, PushApplyButton } from "../src/components/project-sync/PushResourceWorkspace";
+import { PushApplyButton } from "../src/components/project-sync/PushResourceWorkspace";
 import { projectReviewTabs } from "../src/components/project-sync/reviewSteps";
 import { ReviewBudgetGauge, ReviewBudgetGlance } from "../src/components/sync-review/ReviewBudgetMeter";
 import { PathBarPopover } from "../src/components/sync-review/SyncPathBar";
@@ -15,11 +15,11 @@ import "../src/App.css";
 /**
  * Mockup: a quieter way to say that credential redaction is off.
  *
- * Owner picked C on 2026-10-05 and it shipped: the C frame mounts the shipped
- * `CredentialRedactionOffNote`. The Before frame re-enacts the removed box
- * with a local copy of `CREDENTIAL_REDACTION_OFF_NOTICE`.
+ * C shipped on 2026-10-05. Its footer note was removed on 2026-10-07.
+ * The C frame now keeps only the header flag. The Before frame re-enacts
+ * the removed box with a local copy of `CREDENTIAL_REDACTION_OFF_NOTICE`.
  *
- * Shipped, both Push reviews say it twice while Settings › Privacy ›
+ * Before C, both Push reviews said it twice while Settings › Privacy ›
  * Credential redaction is off: the header's `.sync-settings-flag` reads
  * "Credential redaction: Off", and `CREDENTIAL_REDACTION_OFF_NOTICE` adds a
  * closable warning box at the top of the review scroll. The setting is off by
@@ -30,7 +30,7 @@ import "../src/App.css";
  *   A       the header pill carries it: the warning chip, sentence in its title
  *   B       A as a button: the pill opens a small panel with the sentence and
  *           the way to the setting (the session page's notes chip)
- *   C       the neutral pill stays; one muted line by Push states the consequence
+ *   C       the neutral pill stays; the footer note has been removed
  *   D       the box becomes a strip flush under the tabs
  *   E       the review says only the neutral pill; the sentence lives at the switch
  *   F       the box once, then remembered closed until the setting changes
@@ -93,7 +93,7 @@ const DIR_LABEL: Record<Dir, string> = {
   before: "Before (shipped)",
   a: "A · The pill carries it",
   b: "B · The pill opens a note",
-  c: "C · A line by Push",
+  c: "C · Footer note removed",
   d: "D · A strip under the tabs",
   e: "E · Said at the switch only",
   f: "F · Once, until the setting changes",
@@ -103,7 +103,7 @@ const DIR_NOTE: Record<Dir, ReactNode> = {
   before: <>The header pill says <i>Credential redaction: Off</i>, then a warning box says it again under the tabs, on every review. Its × lasts until the review is opened again. Next to a Pull hold or a failed comparison it becomes one line in a shared box, and that box&rsquo;s count goes up by one.</>,
   a: <>No box. While redaction is off, the header pill becomes the app&rsquo;s warning chip (<code>NoticeChip</code>: tint, glyph, two words). Chips are labels, so it has no ×. The sentence goes in its title and, for screen readers, in a visually hidden span. The face is short enough that <i>off</i> is never the word that gets cut; below 480 px the review keeps only the glyph. A title tooltip can&rsquo;t be reached by keyboard or touch, so a sighted keyboard user only sees the two words.</>,
   b: <>A, but the pill is a button: the session page&rsquo;s notes chip (outlined, warning ink, opens a <code>PathBarPopover</code> panel). The panel says what <i>off</i> means, as a fact rather than a warning, and offers <b>Open Privacy settings</b>. Keyboard and touch can reach the sentence, and the warning can be acted on. The pill becomes a control, so it gains <code>aria-expanded</code>. Below 480 px it keeps only the glyph, and its accessible name still says what it is.</>,
-  c: <>The header pill stays as shipped, a neutral fact. The consequence moves to the commit: one muted line in the footer&rsquo;s note row, over the Push button, with no box and no ×. It costs the footer one line on every review while redaction is off.</>,
+  c: <>The footer note was removed on 2026-10-07. The header pill still shows the selected redaction mode.</>,
   d: <>Still a message, but flush under the tab bar: the <code>.notice-strip</code> tier (one line, top edge only, no corners). It keeps its × and comes back when the review reopens. It leaves the shared box, so a Pull hold and this strip become two separate elements.</>,
   e: <>The review keeps only the neutral pill. Settings › Privacy says the consequence once, under the switch, where the choice is made (second frame). It is the quietest option, and nothing on the review points back to Settings.</>,
   f: <>The shipped box, but its × is remembered (machine-local) until the setting changes, and from then on only the neutral pill shows. <b>This breaks the owner rule from 2026-09-24</b> that a closed message comes back when the screen reopens. Use the switch above the frame to see a later review.</>,
@@ -304,7 +304,6 @@ function Review({ dir, scenario, review, startOpen, later }: {
     ...(boxed ? [CREDENTIAL_REDACTION_OFF_NOTICE] : []),
   ];
   const strip = off && dir === "d";
-  const footerLine = off && dir === "c";
 
   return (
     <section
@@ -365,7 +364,6 @@ function Review({ dir, scenario, review, startOpen, later }: {
         </div>
       </div>
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        {footerLine && <CredentialRedactionOffNote />}
         {review === "project" && (
           <button type="button" className="btn btn-ghost" title="Review project files next">
             Project files

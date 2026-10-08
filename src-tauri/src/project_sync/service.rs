@@ -1688,6 +1688,14 @@ pub(super) fn read_project_markdown_image_with_repository(
     session_detail::read_project_markdown_image(repository, local_project_id, relative_path)
 }
 
+pub(super) fn read_project_markdown_media_with_repository(
+    repository: &LocalStateRepository,
+    local_project_id: &LocalProjectId,
+    relative_path: &str,
+) -> Result<Vec<u8>, SessionDetailError> {
+    session_detail::read_project_markdown_media(repository, local_project_id, relative_path)
+}
+
 pub(super) fn delete_local_project_session_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,

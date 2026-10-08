@@ -7,7 +7,7 @@ import type { SessionToolDetailState } from "./SessionDetailToolCall";
 import {
   formatSessionGap,
   groupSessionEventsByDay,
-  type ProjectMarkdownImageState,
+  type ProjectMarkdownMediaState,
   sessionTurnDurationLabel,
   sessionTurnSpans,
 } from "./sessionDetailModel";
@@ -26,8 +26,8 @@ interface Props {
   onLoadMore: () => void;
   onToolExpandedChange: (eventId: string, expanded: boolean) => void;
   onOpenProjectPath: (relativePath: string) => void;
-  projectImages: Readonly<Record<string, ProjectMarkdownImageState>>;
-  onLoadProjectImage: (relativePath: string) => void;
+  projectMedia: Readonly<Record<string, ProjectMarkdownMediaState>>;
+  onLoadProjectMedia: (relativePath: string) => void;
   projectRoot: string;
   repositoryUrl?: string | null;
   /** False when the session holds no events at all, so the empty state can
@@ -53,8 +53,8 @@ export default function SessionDetailTimeline({
   onLoadMore,
   onToolExpandedChange,
   onOpenProjectPath,
-  projectImages,
-  onLoadProjectImage,
+  projectMedia,
+  onLoadProjectMedia,
   projectRoot,
   repositoryUrl,
   hasFilterToggles,
@@ -158,8 +158,8 @@ export default function SessionDetailTimeline({
                     toolDetails={toolDetails}
                     onToolExpandedChange={onToolExpandedChange}
                     onOpenProjectPath={onOpenProjectPath}
-                    projectImages={projectImages}
-                    onLoadProjectImage={onLoadProjectImage}
+                    projectMedia={projectMedia}
+                    onLoadProjectMedia={onLoadProjectMedia}
                     projectRoot={projectRoot}
                     repositoryUrl={repositoryUrl}
                   />

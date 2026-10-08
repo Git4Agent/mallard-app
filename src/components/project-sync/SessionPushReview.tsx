@@ -5,7 +5,6 @@ import { ReviewBudgetGauge } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
 import { SessionPushRow, type PushSessionFacts, type SessionPushHistory } from "./ProjectActivityPage";
 import {
-  CredentialRedactionOffNote,
   PushApplyButton,
   pushBudgetTotal,
   pushReviewDisabledReason,
@@ -117,7 +116,6 @@ export default function SessionPushReview({
       </div>
 
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        {!busy && !credentialRedactionEnabled && <CredentialRedactionOffNote />}
         {overLimit && (
           /* The refusal takes a row of its own above the gauge that caused it
              and the button it stops. It does not announce: the gauge is the

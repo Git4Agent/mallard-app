@@ -6,7 +6,6 @@ import Icon from "../src/components/Icons";
 import { SessionPushRow, type PushSessionFacts } from "../src/components/project-sync/ProjectActivityPage";
 import SessionPushReview from "../src/components/project-sync/SessionPushReview";
 import {
-  CredentialRedactionOffNote,
   PushApplyButton,
   pushBudgetTotal,
   pushReviewDisabledReason,
@@ -360,7 +359,6 @@ function Shell({ headerExtra, body, gauge, button }: {
         </div>
       </div>
       <footer className="sync-inline-action-footer sync-push-resource-footer sync-sync-review-footer">
-        <CredentialRedactionOffNote />
         {gauge ?? (budget && (
           <ReviewBudgetGauge budget={budget} verb="push" breakdown={`Session ${formatBytes(budget.sessions)} · Requirements ${formatBytes(budget.reserved)}`} />
         ))}

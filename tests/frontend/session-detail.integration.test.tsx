@@ -28,6 +28,9 @@ import {
   formatSessionStart,
   groupSessionEventsByDay,
   includedSessionEventKinds,
+  markdownMediaFailureMessage,
+  markdownPlayerKind,
+  markdownPlayerType,
   mergeSessionTimelinePages,
   projectMarkdownDisplayPath,
   readableToolPayload,
@@ -348,8 +351,8 @@ function renderTimeline(
       onLoadMore={() => undefined}
       onToolExpandedChange={() => undefined}
       onOpenProjectPath={() => undefined}
-      projectImages={{}}
-      onLoadProjectImage={() => undefined}
+      projectMedia={{}}
+      onLoadProjectMedia={() => undefined}
       projectRoot="/Users/example/HorrorGame"
       repositoryUrl={overrides?.repositoryUrl ?? null}
       hasFilterToggles
@@ -1326,8 +1329,8 @@ test("Markdown project images embed through the validated loader only", () => {
   const loaded = renderToStaticMarkup(
     <SessionDetailMarkdown
       text={"![GIF](./animation.gif)"}
-      onLoadProjectImage={() => undefined}
-      projectImages={{
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{
         "animation.gif": { status: "loaded", src: "data:image/gif;base64,R0lGODlh" },
       }}
     />,
@@ -1340,8 +1343,8 @@ test("Markdown project images embed through the validated loader only", () => {
   const failed = renderToStaticMarkup(
     <SessionDetailMarkdown
       text={"![GIF](./animation.gif)"}
-      onLoadProjectImage={() => undefined}
-      projectImages={{
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{
         "animation.gif": { status: "failed", message: "too large" },
       }}
     />,
@@ -1353,12 +1356,90 @@ test("Markdown project images embed through the validated loader only", () => {
   const pending = renderToStaticMarkup(
     <SessionDetailMarkdown
       text={"![GIF](./animation.gif)"}
-      onLoadProjectImage={() => undefined}
-      projectImages={{}}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{}}
     />,
   );
   assert.doesNotMatch(pending, /<img/);
   assert.match(pending, /markdown-image-placeholder is-loading/);
+});
+
+test("Markdown project tracks and clips play bare through the validated loader", () => {
+  // Codex embeds what it made: a loaded cache entry plays from its blob: URL
+  // in the webview's own player, bare as pictures are drawn.
+  const loaded = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"Created a track.\n\n![Peaceful instrumental music](./peaceful_music.wav)\n\n![Demo](clips/demo.mp4)"}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{
+        "peaceful_music.wav": { status: "loaded", src: "blob:mallard/track" },
+        "clips/demo.mp4": { status: "loaded", src: "blob:mallard/clip" },
+      }}
+    />,
+  );
+  assert.match(loaded, /<audio class="session-detail-markdown-audio" controls="" preload="metadata" src="blob:mallard\/track" aria-label="Peaceful instrumental music"/);
+  assert.match(loaded, /<video class="session-detail-markdown-video" controls="" playsInline="" preload="metadata" src="blob:mallard\/clip" aria-label="Demo"/);
+  assert.doesNotMatch(loaded, /<img|markdown-image-placeholder|Open/);
+
+  // Still loading, and failed with the reason written out in the file's words.
+  const waiting = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"![Track](peaceful_music.wav) ![Clip](gone.mp4)"}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{ "gone.mp4": { status: "failed", message: "The linked video no longer exists." } }}
+    />,
+  );
+  assert.match(waiting, /markdown-image-placeholder is-loading[^>]*aria-label="Track — audio loading…"/);
+  assert.match(waiting, /aria-label="Clip — The linked video no longer exists\."/);
+  assert.match(waiting, /markdown-image-placeholder-state">The linked video no longer exists\.</);
+  assert.doesNotMatch(waiting, /<audio|<video/);
+});
+
+test("Markdown links to project tracks and clips play under their line, once", () => {
+  // Claude links what it made. The link stays in the sentence and the player
+  // goes under the line; a list item keeps its player inside the item, a
+  // picture link stays a link, and a file the line also embeds plays once.
+  const media = {
+    "peaceful_music.wav": { status: "loaded", src: "blob:mallard/track" },
+    "clips/demo.mp4": { status: "loaded", src: "blob:mallard/clip" },
+  } as const;
+  const html = renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={[
+        "Made a track: [peaceful_music.wav](peaceful_music.wav), also [here](./peaceful_music.wav).",
+        "- [demo.mp4](clips/demo.mp4)\n- [shot.png](shot.png)",
+        "![Track](peaceful_music.wav) [peaceful_music.wav](peaceful_music.wav)",
+      ].join("\n\n")}
+      onOpenProjectPath={() => undefined}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={media}
+      projectRoot="/Users/example/测试文件"
+    />,
+  );
+  assert.match(html, /\.<\/p><p class="session-detail-markdown-linked"><audio class="session-detail-markdown-audio"/);
+  assert.match(html, /href="peaceful_music\.wav"[^>]*>peaceful_music\.wav<\/a>/);
+  assert.match(html, /<li><a [^>]*href="clips\/demo\.mp4"[^>]*>demo\.mp4<\/a><video class="session-detail-markdown-video"/);
+  assert.equal(html.match(/<audio /g)?.length, 2);
+  assert.equal(html.match(/<video /g)?.length, 1);
+  assert.doesNotMatch(html, /<img/);
+
+  // Without the loader (plain markdown contexts) a link stays only a link.
+  const plain = renderToStaticMarkup(
+    <SessionDetailMarkdown text={"[peaceful_music.wav](peaceful_music.wav)"} onOpenProjectPath={() => undefined} />,
+  );
+  assert.doesNotMatch(plain, /<audio|session-detail-markdown-linked/);
+});
+
+test("Markdown media name the file's kind and say why it did not show or play", () => {
+  assert.deepEqual(["a.wav", "b.MP3", "c.m4a", "d.mp4", "e.mov", "f.webm", "g.png", "h"].map(markdownPlayerKind), ["audio", "audio", "audio", "video", "video", "video", null, null]);
+  assert.equal(markdownPlayerType("music/peaceful_music.wav"), "audio/wav");
+  assert.equal(markdownPlayerType("clips/demo.mp4"), "video/mp4");
+  assert.equal(markdownMediaFailureMessage("audio", "peaceful_music.wav", { code: "not_found", message: "" }), "The linked audio no longer exists.");
+  assert.equal(markdownMediaFailureMessage("video", "long.mp4", { code: "response_too_large", message: "" }), "Too large to play here.");
+  assert.equal(markdownMediaFailureMessage("image", "huge.png", { code: "response_too_large", message: "" }), "Too large to show here.");
+  assert.equal(markdownMediaFailureMessage("audio", "loop.ogg", { code: "invalid_request", message: "" }), "OGG can't play in Mallard.");
+  assert.equal(markdownMediaFailureMessage("image", "shot.heic", { code: "invalid_request", message: "" }), "HEIC can't show in Mallard.");
+  assert.equal(markdownMediaFailureMessage("audio", "a.wav", { code: "ownership_changed", message: "The project binding changed." }), "The project binding changed.");
 });
 
 test("Markdown images outside the project never reach the webview as requests", () => {
@@ -1374,8 +1455,8 @@ test("Markdown images outside the project never reach the webview as requests", 
         "![Scheme](file:///tmp/animation.gif)",
         "![Remote](https://example.com/chart.png)",
       ].join(" ")}
-      onLoadProjectImage={() => undefined}
-      projectImages={{}}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{}}
     />,
   );
   const images = html.match(/<img[^>]*>/g) ?? [];

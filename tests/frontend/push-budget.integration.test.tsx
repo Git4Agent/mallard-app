@@ -239,16 +239,13 @@ test("a session's own review draws that session's row and nothing to select", ()
   assert.match(footer, /class="btn btn-primary sync-pull-apply-button"(?![^>]*disabled)[^>]*>[\s\S]*?Push<\/button>/);
 });
 
-test("a session's own review says by Push that credential redaction is off", () => {
-  const line = "Not redacted: API keys, tokens, and passwords push as written.";
-  assert.doesNotMatch(sessionReview(fits), /Not redacted/);
-  const off = sessionReview(fits, { credentialRedactionEnabled: false });
-  assert.match(off, /Credential redaction: Off/);
-  // A muted line in the footer, not a message box over the row.
-  const footer = off.slice(off.indexOf("<footer"));
-  assert.match(footer, /class="sync-review-footer-note redaction-off"/);
-  assert.ok(footer.includes(line));
-  assert.doesNotMatch(off, /class="notice |sync-review-banners/);
+test("a session's own review shows the redaction mode without the footer warning", () => {
+  for (const enabled of [true, false]) {
+    const html = sessionReview(fits, { credentialRedactionEnabled: enabled });
+    assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
+    assert.doesNotMatch(html, /Not redacted:|redaction-off/);
+    assert.doesNotMatch(html, /class="notice |sync-review-banners/);
+  }
 });
 
 test("a session's own review names its row from the comparison when the page had not loaded", () => {
@@ -868,14 +865,13 @@ test("five stored 96 MiB sessions do not expand a selected 40 MiB capture", () =
 });
 
 
-test("Push review shows the selected redaction mode and, while Off, a line by Push", () => {
+test("Push review shows the selected redaction mode without the footer warning", () => {
   for (const enabled of [true, false]) {
     const html = renderToStaticMarkup(
       <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled={enabled} resources={[]} selected={new Set()} projectDefaults={new Set()} busy={false} onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
     );
     assert.match(html, new RegExp(`Credential redaction: ${enabled ? "On" : "Off"}`));
-    const footer = html.slice(html.indexOf("<footer"));
-    assert.equal(footer.includes("Not redacted: API keys, tokens, and passwords push as written."), !enabled);
+    assert.doesNotMatch(html, /Not redacted:|redaction-off/);
     // The setting is not a message: nothing joins the banner zone over the list.
     assert.doesNotMatch(html, /sync-review-banners/);
   }

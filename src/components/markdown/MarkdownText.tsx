@@ -23,23 +23,29 @@ import { remarkLatexMath } from "./remarkLatexMath";
 
 /** Alt text (or the path) inside a bordered chip: the still-loading and
  * cannot-embed states share one calm shape instead of the webview's
- * broken-image glyph. */
+ * broken-image glyph. A track or a clip names itself, and a page that knows
+ * why a file did not show prints the reason in place of "not shown". */
 export function MarkdownImagePlaceholder({
   label,
   detail,
   loading,
+  kind = "image",
+  showDetail = false,
 }: {
   label: string;
   detail?: string;
   loading?: boolean;
+  kind?: "image" | "audio" | "video";
+  showDetail?: boolean;
 }) {
   /* A tint is not a text alternative, and a tooltip on a non-interactive span
      is not keyboard-reachable. Print the state as a word and repeat it in the
      accessible name because `role="img"` replaces the subtree. */
-  const state = loading ? "loading…" : "not shown";
-  const accessibleName = detail
-    ? `${label} — image ${state}. ${detail}`
-    : `${label} — image ${state}`;
+  const reason = showDetail && !loading && detail ? detail : null;
+  const state = loading ? "loading…" : reason ?? "not shown";
+  const accessibleName = reason
+    ? `${label} — ${reason}`
+    : detail ? `${label} — ${kind} ${state}. ${detail}` : `${label} — ${kind} ${state}`;
   return (
     <span
       className={`markdown-image-placeholder${loading ? " is-loading" : ""}`}

@@ -23,17 +23,17 @@ use super::service::{
     load_project_sync_config_with_repository, probe_project_folder_with_repository,
     probe_provider_profile_with_repository, project_open_commands, project_storage_log_context,
     pull_action_resource_label, pull_plan_action_counts, pull_review_resource_labels,
-    read_project_markdown_image_with_repository, recover_startup_state_with_repository,
-    refresh_project_activity_with_progress, remove_local_project_with_repository,
-    remove_project_link_with_repository, remove_storage_with_repository,
-    rename_local_project_with_repository, rename_storage_with_repository, repository,
-    resolve_project_markdown_path_with_repository, reveal_storage_secret_with_repository,
-    save_project_binding_with_repository, save_project_link_with_repository, session_detail_error,
-    should_log_history_scan, sibling_bundle_status_with_repository,
-    start_project_session_with_repository, storage_log_label, storage_provider_descriptors,
-    test_storage_setup_draft_with_repository, test_storage_with_repository,
-    update_storage_setup_draft_with_repository, AgentFolderList, BundleReadiness,
-    BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
+    read_project_markdown_image_with_repository, read_project_markdown_media_with_repository,
+    recover_startup_state_with_repository, refresh_project_activity_with_progress,
+    remove_local_project_with_repository, remove_project_link_with_repository,
+    remove_storage_with_repository, rename_local_project_with_repository,
+    rename_storage_with_repository, repository, resolve_project_markdown_path_with_repository,
+    reveal_storage_secret_with_repository, save_project_binding_with_repository,
+    save_project_link_with_repository, session_detail_error, should_log_history_scan,
+    sibling_bundle_status_with_repository, start_project_session_with_repository,
+    storage_log_label, storage_provider_descriptors, test_storage_setup_draft_with_repository,
+    test_storage_with_repository, update_storage_setup_draft_with_repository, AgentFolderList,
+    BundleReadiness, BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
     CreateSetupDraftResult, HostIdentityStatus, NewSessionSurface, ProjectActivity,
     ProjectActivityRefreshEvent, ProjectContentInventory, ProjectDetail, ProjectFolderProbe,
     ProjectMarkdownImage, ProjectOperationResult, ProjectSessionTimelineRequest,
@@ -897,6 +897,26 @@ pub async fn read_project_markdown_image(
         read_project_markdown_image_with_repository(&repository, &local_project_id, &relative_path)
     })
     .await
+}
+
+/// A project track or clip for an inline player, as raw bytes: the webview
+/// wraps them in a `blob:` URL rather than a base64 `data:` string.
+#[tauri::command]
+pub async fn read_project_markdown_media(
+    local_project_id: LocalProjectId,
+    relative_path: String,
+) -> Result<tauri::ipc::Response, SessionDetailError> {
+    let repository = repository().map_err(|_| {
+        session_detail_error(
+            SessionDetailErrorCode::ProviderError,
+            "Mallard could not open its local state repository.",
+        )
+    })?;
+    let bytes = run_session_detail_blocking(move || {
+        read_project_markdown_media_with_repository(&repository, &local_project_id, &relative_path)
+    })
+    .await?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
