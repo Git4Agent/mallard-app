@@ -1,5 +1,6 @@
 import { homeDir } from "@tauri-apps/api/path";
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "../../i18n";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -9,6 +10,7 @@ import CatalogHomeStep from "./CatalogHomeStep";
 import CatalogScopeSetupStep from "./CatalogScopeSetupStep";
 import { useCloudRepositoryChoice } from "./CloudRepositoryChoice";
 import {
+  capabilityLabel,
   catalogCapabilityFor,
   catalogPresentation,
   catalogScopeLabel,
@@ -76,6 +78,7 @@ function CloudSource({ accounts, scopes, profiles, capabilities, working, initia
   onSetUpCloud: () => void;
   onChosen: (choice: CloudChoice | null) => void;
 }) {
+  const { t } = useTranslation("library");
   const [accountId, setAccountId] = useState<string | null>(() => (
     initial && accounts.some((candidate) => candidate.id === initial.accountId) ? initial.accountId : accounts[0]?.id ?? null
   ));
@@ -83,21 +86,21 @@ function CloudSource({ accounts, scopes, profiles, capabilities, working, initia
   return (
     <>
       <section className="sync-setup-section">
-        <div className="sync-card-heading"><div><strong>Storage</strong></div></div>
+        <div className="sync-card-heading"><div><strong>{t("bar.storage")}</strong></div></div>
         {accounts.length === 0 ? (
           <div className="r2-step-list">
             <div className="storage-found-empty" role="status">
               <Icon name="storage-mallard" size={24} />
-              <strong>No Mallard Cloud account yet.</strong>
+              <strong>{t("add.noAccount")}</strong>
               <span className="storage-found-empty-verbs">
                 <button type="button" className="btn btn-primary" onClick={onSetUpCloud} disabled={working}>
-                  <Icon name="link" size={13} /> Set up Mallard Cloud
+                  <Icon name="link" size={13} /> {t("add.setUpCloud")}
                 </button>
               </span>
             </div>
           </div>
         ) : (
-          <div className="setup-pill-row" role="radiogroup" aria-label="Storage">
+          <div className="setup-pill-row" role="radiogroup" aria-label={t("bar.storage")}>
             {accounts.map((candidate) => (
               <SetupPill key={candidate.id} active={candidate.id === accountId} disabled={working}
                 mark={<Icon name="storage-mallard" size={12} />} label={`${candidate.name || "Mallard Cloud"} · ${candidate.account_login}`}
@@ -138,6 +141,7 @@ function CloudRepositoryBands({ account, scopes, profiles, capabilities, working
   initialAddress: string | null;
   onChosen: (choice: CloudChoice | null) => void;
 }) {
+  const { t } = useTranslation("library");
   const choice = useCloudRepositoryChoice({
     storageId: account.id,
     scopeId: null,
@@ -176,36 +180,36 @@ function CloudRepositoryBands({ account, scopes, profiles, capabilities, working
   return (
     <>
       <section className="sync-setup-section repo-connect cloud-project-repository">
-        <div className="sync-card-heading"><div><strong>Repository</strong></div></div>
+        <div className="sync-card-heading"><div><strong>{t("add.repository")}</strong></div></div>
         {choice.field}
         {choice.found}
         {choice.list}
       </section>
       <section className="sync-setup-section">
-        <div className="sync-card-heading"><div><strong>Catalog row</strong></div></div>
+        <div className="sync-card-heading"><div><strong>{t("bar.row")}</strong></div></div>
         {!chosen || !capability ? (
-          <small className="sync-setup-hint">Choose a repository first.</small>
+          <small className="sync-setup-hint">{t("add.chooseRepository")}</small>
         ) : rowsOfKind.length > 0 ? (
-          <div className="setup-pill-row" role="radiogroup" aria-label="Catalog row">
+          <div className="setup-pill-row" role="radiogroup" aria-label={t("bar.row")}>
             {rowsOfKind.map((scope) => (
               <SetupPill key={scope.scope.scope_id} active={scope.scope.scope_id === row?.scope.scope_id} disabled={working}
-                mark={<Icon name={glyph} size={12} />} label={catalogScopeLabel(scope)}
+                mark={<Icon name={glyph} size={12} />} label={catalogScopeLabel({ ...scope, capability })}
                 onClick={() => setRowId(scope.scope.scope_id)} />
             ))}
           </div>
         ) : providerProfiles.length > 0 ? (
           <>
-            <div className="setup-pill-row" role="radiogroup" aria-label="Agent profile">
+            <div className="setup-pill-row" role="radiogroup" aria-label={t("add.agentProfile")}>
               {providerProfiles.map((candidate) => (
                 <SetupPill key={candidate.profile_id} active={candidate.profile_id === profile?.profile_id} disabled={working}
                   mark={<ProviderMark provider={candidate.provider} displayName={candidate.provider_label} size={12} />}
                   label={candidate.display_name} onClick={() => setProfileId(candidate.profile_id)} />
               ))}
             </div>
-            <small className="sync-setup-hint">Add creates {capability.label} · {profile?.display_name}.</small>
+            <small className="sync-setup-hint">{t("add.creates", { label: capabilityLabel(capability), profile: profile?.display_name })}</small>
           </>
         ) : (
-          <small className="sync-setup-hint">Add a {capability.provider_label} home first, on this computer.</small>
+          <small className="sync-setup-hint">{t("add.homeFirst", { provider: capability.provider_label })}</small>
         )}
       </section>
     </>
@@ -236,6 +240,7 @@ export default function AddCatalogScopeWorkspace({
   onCreated,
   onAdded,
 }: Props) {
+  const { t } = useTranslation(["library", "common"]);
   const [source, setSource] = useState<"local" | "cloud">(initialCloud ? "cloud" : "local");
   const [stage, setStage] = useState<Stage>({ kind: "home" });
   const [cloudChoice, setCloudChoice] = useState<CloudChoice | null>(null);
@@ -317,7 +322,7 @@ export default function AddCatalogScopeWorkspace({
         scope,
         storageId,
         resourceId: repository.resource_id,
-        note: `${repository.display_name} added from ${repository.address}.`,
+        note: t("cloud.added", { name: repository.display_name, address: repository.address }),
       }, workflowEpoch);
     } catch (reason) {
       if (workflowIsActive()) setError(errorMessage(reason));
@@ -349,10 +354,10 @@ export default function AddCatalogScopeWorkspace({
   }
 
   const doors = (
-    <div className="storage-mode-doors" role="radiogroup" aria-label="Where the resource comes from">
-      <SourceDoor icon="computer" title="On this computer" detail="An agent home you have."
+    <div className="storage-mode-doors" role="radiogroup" aria-label={t("add.source")}>
+      <SourceDoor icon="computer" title={t("add.local")} detail={t("add.localDetail")}
         checked={source === "local"} disabled={submitting} onChoose={() => { setSource("local"); setError(null); }} />
-      <SourceDoor icon="storage-mallard" title="From Mallard Cloud" detail="A repository shared with you."
+      <SourceDoor icon="storage-mallard" title={t("add.cloud")} detail={t("add.cloudDetail")}
         checked={source === "cloud"} disabled={submitting} onChoose={() => { setSource("cloud"); setError(null); }} />
     </div>
   );
@@ -374,14 +379,14 @@ export default function AddCatalogScopeWorkspace({
         >
           <header className="sync-modal-header">
             <div>
-              <h1 id="catalog-add-scope-title">Add Catalog resource</h1>
+              <h1 id="catalog-add-scope-title">{t("add.title")}</h1>
             </div>
             <button
               type="button"
               className="btn btn-ghost"
               onClick={onClose}
               disabled={submitting}
-              aria-label="Close without adding a resource"
+              aria-label={t("add.close")}
             >
               <Icon name="x" size={17} />
             </button>
@@ -397,10 +402,10 @@ export default function AddCatalogScopeWorkspace({
               </div>
               <footer className="sync-modal-footer sync-setup-footer">
                 {/* An added item keeps its repository; said before Add. */}
-                {cloudChoice && <span className="sync-setup-save-state">Can’t be changed later.</span>}
+                {cloudChoice && <span className="sync-setup-save-state">{t("add.fixed")}</span>}
                 <div>
                   <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
-                    Cancel
+                    {t("common:cancel")}
                   </button>
                   <button
                     type="button"
@@ -409,7 +414,7 @@ export default function AddCatalogScopeWorkspace({
                     onClick={() => void addFromCloud()}
                   >
                     <Icon name="plus" size={13} />
-                    {submitting ? "Adding…" : "Add"}
+                    {submitting ? t("add.adding") : t("add.add")}
                   </button>
                 </div>
               </footer>

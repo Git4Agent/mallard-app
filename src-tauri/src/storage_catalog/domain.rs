@@ -2712,6 +2712,23 @@ pub struct CatalogActionResult {
     pub outcome: CatalogActionOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// A fixed message's code, for the interface to translate by, with the
+    /// name it carries in `message_name`. Errors and planning details have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_code: Option<CatalogActionMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogActionMessage {
+    /// Skipped; local content was left unchanged.
+    Skipped,
+    /// Forked from the source named in `message_name`.
+    Forked,
+    /// Your version was kept as the copy named in `message_name`.
+    KeptAs,
 }
 
 /// A typed catalog blocker. Native contracts that cannot be verified fail

@@ -4,6 +4,7 @@ import { PathBarMenu, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import { providerMarkIcon } from "../sync-review/ProviderMark";
 import { focusMenuEdge } from "../sync-review/menuKeyboard";
 import type { NewSessionSurface, ProviderActivityState, ProviderKey } from "../../types";
+import { t, useTranslation } from "../../i18n";
 
 /** The agents a new session can start with: the ones this project binds. A
  *  stored-only provider is listed by the activity too, but nothing local
@@ -29,7 +30,7 @@ export function newSessionMenuGroups(
           label: provider.display_name,
           icon: mark,
           disabled: true,
-          disabledReason: "Can’t read its profile · Agent profile…",
+          disabledReason: t("projects:newSession.unreadable"),
           onSelect: () => undefined,
         }],
       };
@@ -39,13 +40,13 @@ export function newSessionMenuGroups(
       items: [
         {
           id: `${provider.provider}-app`,
-          label: `${provider.display_name} app`,
+          label: t("projects:newSession.app", { agent: provider.display_name }),
           icon: mark,
           onSelect: () => onStart(provider.provider, "app"),
         },
         {
           id: `${provider.provider}-terminal`,
-          label: "Terminal",
+          label: t("projects:newSession.terminal"),
           icon: "terminal" as const,
           onSelect: () => onStart(provider.provider, "terminal"),
         },
@@ -75,6 +76,7 @@ export default function NewSessionMenu({
   align?: "start" | "end";
   onStart: (provider: ProviderKey, surface: NewSessionSurface) => void;
 }) {
+  const { t } = useTranslation("projects");
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -132,8 +134,8 @@ export default function NewSessionMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
-        aria-label="New session"
-        title="Start a new session in this project"
+        aria-label={t("newSession.label")}
+        title={t("newSession.title")}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {
           // The menu-button contract: the arrows open the menu on its first
@@ -145,13 +147,13 @@ export default function NewSessionMenu({
         }}
       >
         {busy ? <Icon name="refresh" size={13} className="icon-spin" /> : <Icon name="plus" size={13} />}
-        <span className="sync-new-session-label">New session</span>
+        <span className="sync-new-session-label">{t("newSession.label")}</span>
         <Icon name="chevron-down" size={13} />
       </button>
       <PathBarMenu
         id={menuId}
         groups={newSessionMenuGroups(providers, onStart)}
-        label="New session"
+        label={t("newSession.label")}
         align={align}
         open={open}
         registerRef={(node) => { panelRef.current = node; }}

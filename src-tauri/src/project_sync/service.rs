@@ -830,6 +830,12 @@ pub struct ThreadSyncEntry {
     pub storage_present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
+    /// The detail's code and the value it names (a provider), for the
+    /// interface to translate the English by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_detail_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_detail_value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1028,12 +1034,20 @@ pub struct RestoreResult {
 pub struct BundleReadinessIssue {
     pub issue_id: String,
     pub category: String,
+    /// The title and detail are English; the interface translates them by
+    /// `issue_id` and `severity`, with `count` and `provider_name`.
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub severity: String,
+    /// How many conversations or changes a counted title names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderKey>,
+    /// The provider's display name a provider-home title names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<ResourceId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3844,23 +3858,76 @@ fn provider_session_id_from_resource(resource_id: &str) -> Option<&str> {
         .filter(|session_id| !session_id.is_empty())
 }
 
-fn thread_capture_unavailable_detail(blocked_reason: Option<&str>) -> String {
-    let Some(reason) = blocked_reason else {
-        return "Session could not be read safely during this scan.".to_string();
+/// A Mallard Cloud row's status beside the draft, by code and in English.
+fn cloud_draft_status(state: ThreadSyncState) -> Option<(&'static str, &'static str)> {
+    match state {
+        ThreadSyncState::Synced => Some(("cloud_draft_synced", "Synced to the Cloud draft.")),
+        ThreadSyncState::LocalOnly => Some((
+            "cloud_draft_local_only",
+            "Not in the Cloud draft. Push to save it there.",
+        )),
+        ThreadSyncState::LocalAhead => Some((
+            "cloud_draft_local_ahead",
+            "Changes to push. Push to update the Cloud draft.",
+        )),
+        ThreadSyncState::StorageOnly => Some((
+            "cloud_draft_storage_only",
+            "In the Cloud draft. Pull to download it here.",
+        )),
+        ThreadSyncState::StorageAhead => Some((
+            "cloud_draft_storage_ahead",
+            "Changes to pull from the Cloud draft.",
+        )),
+        _ => None,
+    }
+}
+
+/// A sync row's detail: its English, and the code and value it is worded by.
+struct StatusDetail {
+    code: Option<&'static str>,
+    text: String,
+    value: Option<String>,
+}
+
+impl StatusDetail {
+    fn coded(code: &'static str, text: String, value: Option<String>) -> Self {
+        Self {
+            code: Some(code),
+            text,
+            value,
+        }
+    }
+}
+
+/// Why a session could not be captured, in English and by code.
+fn thread_capture_unavailable_detail(blocked_reason: Option<&str>) -> (&'static str, String) {
+    let (code, detail) = match blocked_reason {
+        None => (
+            "capture_unreadable",
+            "Session could not be read safely during this scan.",
+        ),
+        Some(reason)
+            if reason.contains(&format!(
+                "exceeds {} bytes",
+                conversation_file_limit_bytes()
+            )) =>
+        {
+            ("capture_size_limit", "size limit exceeded.")
+        }
+        Some(reason) if reason.contains("hard-linked") => (
+            "capture_hard_linked",
+            "Session file is hard-linked and cannot be synced safely.",
+        ),
+        Some(reason) if reason.contains("not a regular no-follow file") => (
+            "capture_not_regular",
+            "Session path is not a regular file and cannot be synced safely.",
+        ),
+        Some(_) => (
+            "capture_unavailable",
+            "Session is unavailable for safe capture.",
+        ),
     };
-    if reason.contains(&format!(
-        "exceeds {} bytes",
-        conversation_file_limit_bytes()
-    )) {
-        return "size limit exceeded.".to_string();
-    }
-    if reason.contains("hard-linked") {
-        return "Session file is hard-linked and cannot be synced safely.".to_string();
-    }
-    if reason.contains("not a regular no-follow file") {
-        return "Session path is not a regular file and cannot be synced safely.".to_string();
-    }
-    "Session is unavailable for safe capture.".to_string()
+    (code, detail.to_string())
 }
 
 fn count_thread_sync_state(counts: &mut ThreadSyncCounts, state: ThreadSyncState) {
@@ -6960,12 +7027,12 @@ fn provider_thread_review(
                 .as_ref()
                 .is_some_and(|tree| tree.missing().is_empty());
         let push = if push.selectable && outgoing_child_failure {
-            let mut blocked = mallard_domain::blocked_conversation_decision(
-                ConversationBlocker::ObservationFailed,
-            );
-            blocked.blocked_reason =
-                Some("Child conversations could not be verified for Push.".into());
-            blocked
+            mallard_domain::blocked_conversation_decision(ConversationBlocker::ObservationFailed)
+                .reworded(
+                    "children_unverified",
+                    "Child conversations could not be verified for Push.".into(),
+                    None,
+                )
         } else {
             push
         };
@@ -7007,18 +7074,19 @@ fn provider_thread_review(
         // parsed blocks both directions with its own error. The row stays
         // visible, the message names the cause, and no other thread is
         // affected.
-        let observation_detail = observation_failure.map(|message| {
-            format!(
-                "This conversation's local session could not be read for review: {}",
-                message
-            )
-        });
-        let (push, pull) = match &observation_detail {
-            Some(detail) => {
-                let mut blocked = mallard_domain::blocked_conversation_decision(
+        let (push, pull) = match observation_failure {
+            Some(message) => {
+                let blocked = mallard_domain::blocked_conversation_decision(
                     ConversationBlocker::ObservationFailed,
+                )
+                .reworded(
+                    "local_session_unreadable",
+                    format!(
+                        "This conversation's local session could not be read for review: {}",
+                        message
+                    ),
+                    Some(message.to_string()),
                 );
-                blocked.blocked_reason = Some(detail.clone());
                 (blocked.clone(), blocked)
             }
             None => (push, pull),
@@ -7052,9 +7120,15 @@ fn provider_thread_review(
         };
         let mut pull = pull;
         if pull.action == ConversationReviewAction::KeepBoth && missing_child_recovery {
-            pull.blocked_reason = child_observation.as_ref().err().map(|message| {
-                format!("{message} Keep both restores the cloud copy and retains the local files.")
-            });
+            if let Err(message) = child_observation.as_ref() {
+                pull = pull.reworded(
+                    "keep_both_restores_cloud_copy",
+                    format!(
+                        "{message} Keep both restores the cloud copy and retains the local files."
+                    ),
+                    Some(message.to_string()),
+                );
+            }
         }
         let display_name = thread
             .and_then(|thread| thread.display_title.clone())
@@ -7074,6 +7148,93 @@ fn provider_thread_review(
             Some(resource_id) => resource_id,
             None => conversation_id.clone(),
         };
+        // What the row says beside its state, first reason first: English,
+        // with the code (and the value it names) the interface words it by.
+        // A child observation's own error carries no code.
+        let status_detail = (capabilities.operation_state == ConversationOperationState::Pending)
+            .then(|| {
+                StatusDetail::coded(
+                    "operation_pending",
+                    format!(
+                        "A {} sync operation is still pending for this conversation. \
+                         Finish or recover it first.",
+                        provider_label
+                    ),
+                    Some(provider_label.to_string()),
+                )
+            })
+            .or_else(|| {
+                physical_detached.then(|| {
+                    StatusDetail::coded(
+                        "detached_requires_pull",
+                        "This conversation's local mapping was replaced. Pull to \
+                         re-establish it."
+                            .to_string(),
+                        None,
+                    )
+                })
+            })
+            .or_else(|| {
+                observation_failure.map(|message| {
+                    StatusDetail::coded(
+                        "local_session_unreadable",
+                        format!(
+                            "This conversation's local session could not be read for review: {}",
+                            message
+                        ),
+                        Some(message.clone()),
+                    )
+                })
+            })
+            .or_else(|| {
+                outgoing_child_failure.then(|| {
+                    StatusDetail::coded(
+                        "children_unverified",
+                        "Child conversations could not be verified for Push.".to_string(),
+                        None,
+                    )
+                })
+            })
+            .or_else(|| {
+                (export_settings_changed && push.action == ConversationReviewAction::Publish).then(
+                    || {
+                        StatusDetail::coded(
+                            "export_settings_changed",
+                            "Export settings changed".to_string(),
+                            None,
+                        )
+                    },
+                )
+            })
+            .or_else(|| {
+                child_observation.as_ref().err().map(|message| {
+                    if missing_child_recovery {
+                        StatusDetail::coded(
+                            "pull_keep_both_to_restore",
+                            format!(
+                                "{message} Pull with Keep both to restore the cloud copy and \
+                                 retain local files."
+                            ),
+                            Some(message.clone()),
+                        )
+                    } else {
+                        StatusDetail {
+                            code: None,
+                            text: message.clone(),
+                            value: None,
+                        }
+                    }
+                })
+            })
+            .or_else(|| {
+                evidence_blocker.is_some().then(|| {
+                    StatusDetail::coded(
+                        "evidence_unproven",
+                        "Conversation state could not be proven safely.".to_string(),
+                        None,
+                    )
+                })
+            });
 
         entries.push(ThreadSyncEntry {
             subagent_selection: subagent_selection.clone(),
@@ -7095,35 +7256,9 @@ fn provider_thread_review(
             pull_bytes: thread.and_then(|thread| {
                 snapshot.map(|snapshot| snapshot.manifest.conversation_bytes(thread))
             }),
-            status_detail: capabilities
-                .operation_state
-                .eq(&ConversationOperationState::Pending)
-                .then(|| {
-                    format!(
-                        "A {} sync operation is still pending for this conversation. \
-                         Finish or recover it first.",
-                        provider_label
-                    )
-                })
-                .or_else(|| {
-                    physical_detached.then(|| {
-                        "This conversation's local mapping was replaced. Pull to \
-                         re-establish it."
-                            .to_string()
-                    })
-                })
-                .or_else(|| observation_detail.clone())
-                .or_else(|| outgoing_child_failure.then(|| "Child conversations could not be verified for Push.".to_string()))
-                .or_else(|| (export_settings_changed && push.action == ConversationReviewAction::Publish).then(|| "Export settings changed".to_string()))
-                .or_else(|| child_observation.as_ref().err().map(|message| {
-                    if missing_child_recovery { format!("{message} Pull with Keep both to restore the cloud copy and retain local files.") }
-                    else { message.clone() }
-                }))
-                .or_else(|| {
-                    evidence_blocker
-                        .is_some()
-                        .then(|| "Conversation state could not be proven safely.".to_string())
-                }),
+            status_detail: status_detail.as_ref().map(|detail| detail.text.clone()),
+            status_detail_code: status_detail.as_ref().and_then(|detail| detail.code),
+            status_detail_value: status_detail.and_then(|detail| detail.value),
             local_updated_at: local.map(|local| local.source_mtime),
             storage_updated_at: thread.map(|thread| thread.updated_at),
             // The unit's honest mapping is `None` for local-only rows.
@@ -8075,13 +8210,11 @@ fn build_thread_sync_comparison(
         {
             continue;
         }
-        let detail = thread_capture_unavailable_detail(candidate.blocked_reason.as_deref());
-        let blocked = ConversationDecision {
-            action: ConversationReviewAction::Blocked,
-            blocker: Some(ConversationBlocker::CodecUnsupported),
-            selectable: false,
-            blocked_reason: Some(detail.clone()),
-        };
+        let (detail_code, detail) =
+            thread_capture_unavailable_detail(candidate.blocked_reason.as_deref());
+        let blocked =
+            mallard_domain::blocked_conversation_decision(ConversationBlocker::CodecUnsupported)
+                .reworded(detail_code, detail.clone(), None);
         let provider_display_name = provider_registry()
             .get(&provider)
             .map(|adapter| adapter.descriptor().display_name)
@@ -8153,6 +8286,8 @@ fn build_thread_sync_comparison(
             local_present: true,
             storage_present: false,
             status_detail: Some(detail),
+            status_detail_code: Some(detail_code),
+            status_detail_value: None,
             local_updated_at: None,
             storage_updated_at: None,
             cloud_thread_id: None,
@@ -8189,21 +8324,26 @@ fn build_thread_sync_comparison(
             } else {
                 ProviderAccessState::Unsupported
             };
-            let view_only = ConversationDecision {
-                action: ConversationReviewAction::Blocked,
-                blocker: Some(ConversationBlocker::MissingBinding),
-                selectable: false,
-                blocked_reason: Some(if registered {
+            let view_only =
+                mallard_domain::blocked_conversation_decision(ConversationBlocker::MissingBinding);
+            let view_only = if registered {
+                view_only.reworded(
+                    "view_only_connect_profile",
                     format!(
                         "View only — connect a {} profile to sync this session.",
                         provider_display_name
-                    )
-                } else {
+                    ),
+                    Some(provider_display_name.clone()),
+                )
+            } else {
+                view_only.reworded(
+                    "view_only_no_provider",
                     format!(
                         "View only — this Mallard build has no '{}' provider.",
                         provider
-                    )
-                }),
+                    ),
+                    Some(provider.to_string()),
+                )
             };
             for (thread_id, thread) in &scope.conversations {
                 review.entries.push(ThreadSyncEntry {
@@ -8225,6 +8365,8 @@ fn build_thread_sync_comparison(
                     local_present: false,
                     storage_present: true,
                     status_detail: view_only.blocked_reason.clone(),
+                    status_detail_code: view_only.reason_code,
+                    status_detail_value: view_only.reason_value.clone(),
                     local_updated_at: None,
                     storage_updated_at: Some(thread.updated_at),
                     cloud_thread_id: Some(thread_id.clone()),
@@ -8280,21 +8422,9 @@ fn build_thread_sync_comparison(
     if link.managed_cloud_repository_id.is_some() {
         for entry in &mut review.entries {
             if entry.status_detail.is_none() {
-                entry.status_detail = match entry.state {
-                    ThreadSyncState::Synced => Some("Synced to the Cloud draft."),
-                    ThreadSyncState::LocalOnly => {
-                        Some("Not in the Cloud draft. Push to save it there.")
-                    }
-                    ThreadSyncState::LocalAhead => {
-                        Some("Changes to push. Push to update the Cloud draft.")
-                    }
-                    ThreadSyncState::StorageOnly => {
-                        Some("In the Cloud draft. Pull to download it here.")
-                    }
-                    ThreadSyncState::StorageAhead => Some("Changes to pull from the Cloud draft."),
-                    _ => None,
-                }
-                .map(str::to_owned);
+                let label = cloud_draft_status(entry.state);
+                entry.status_detail_code = label.map(|(code, _)| code);
+                entry.status_detail = label.map(|(_, text)| text.to_owned());
             }
         }
     }
@@ -15324,7 +15454,9 @@ fn bundle_readiness_for_snapshot(
                         .to_string(),
                 ),
                 severity: "warning".to_string(),
+                count: None,
                 provider: None,
+                provider_name: None,
                 resource_id: None,
                 action: Some("plan_restore".to_string()),
             }),
@@ -15396,7 +15528,9 @@ fn add_partial_materialization_issues(
                     .to_string(),
             ),
             severity: "warning".to_string(),
+            count: Some(count),
             provider,
+            provider_name: None,
             resource_id,
             action: Some("resolve_conflict".to_string()),
         });
@@ -15448,7 +15582,9 @@ fn add_partial_materialization_issues(
                 "Review this change separately before applying it on this machine.".to_string()
             }),
             severity: if failed { "error" } else { "warning" }.to_string(),
+            count: Some(count),
             provider: None,
+            provider_name: None,
             resource_id: (count == 1)
                 .then(|| resource_ids.iter().next().cloned())
                 .flatten(),
@@ -15693,7 +15829,9 @@ fn add_provider_home_issue(
             name
         )),
         severity: "error".to_string(),
+        count: None,
         provider: Some(provider),
+        provider_name: Some(name),
         resource_id: None,
         action: Some("edit_binding".to_string()),
     });
@@ -18992,7 +19130,14 @@ mod tests {
         );
         assert_eq!(
             thread_capture_unavailable_detail(Some(&reason)),
-            "size limit exceeded."
+            ("capture_size_limit", "size limit exceeded.".to_string())
+        );
+        assert_eq!(
+            thread_capture_unavailable_detail(None),
+            (
+                "capture_unreadable",
+                "Session could not be read safely during this scan.".to_string()
+            )
         );
 
         let mut counts = ThreadSyncCounts::default();
@@ -19030,6 +19175,28 @@ mod tests {
         let (_, engine) = storage_engine(repo, storage_id).unwrap();
         let snapshot = engine.inspect(bundle_id).unwrap();
         bundle_readiness_for_snapshot(repo, &resolved, &snapshot).unwrap()
+    }
+
+    #[test]
+    fn a_provider_home_issue_names_its_provider_beside_the_english() {
+        let mut issues = Vec::new();
+        let codex = ProviderKey::parse("codex").unwrap();
+        add_provider_home_issue(&mut issues, codex.clone(), false, None);
+        assert!(issues.is_empty());
+        add_provider_home_issue(&mut issues, codex, true, None);
+        let issue = &issues[0];
+        assert_eq!(issue.issue_id, "provider-home-codex");
+        assert_eq!(issue.severity, "error");
+        assert_eq!(issue.title, "Codex home is not mapped");
+        assert_eq!(
+            issue.detail.as_deref(),
+            Some("Choose an existing Codex home before restoring provider state.")
+        );
+        assert_eq!(issue.provider_name.as_deref(), Some("Codex"));
+        assert_eq!(issue.count, None);
+        let value = serde_json::to_value(issue).unwrap();
+        assert_eq!(value["provider_name"], "Codex");
+        assert!(value.get("count").is_none());
     }
 
     /// Direct project registration. Production registers through the setup
@@ -26576,6 +26743,24 @@ mod tests {
             "blocked detail comes from the discovery mapping: {:?}",
             row.status_detail
         );
+        assert_eq!(row.status_detail_code, Some("capture_size_limit"));
+        assert_eq!(row.push_decision.reason_code, Some("capture_size_limit"));
+    }
+
+    #[test]
+    fn cloud_draft_rows_carry_their_code_beside_the_english() {
+        assert_eq!(
+            cloud_draft_status(ThreadSyncState::Synced),
+            Some(("cloud_draft_synced", "Synced to the Cloud draft."))
+        );
+        assert_eq!(
+            cloud_draft_status(ThreadSyncState::StorageAhead),
+            Some((
+                "cloud_draft_storage_ahead",
+                "Changes to pull from the Cloud draft."
+            ))
+        );
+        assert_eq!(cloud_draft_status(ThreadSyncState::Diverged), None);
     }
 
     struct PushReuseFixture {

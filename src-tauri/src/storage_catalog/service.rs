@@ -322,7 +322,46 @@ pub struct CatalogSyncProgress {
     pub plan_id: CatalogPlanId,
     pub completed: usize,
     pub total: usize,
+    /// The English line; the interface translates by `stage`, with `name`.
     pub message: String,
+    pub stage: CatalogSyncStage,
+    /// The item a `pushing` or `pulling` stage names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogSyncStage {
+    Publishing,
+    Pushing,
+    PushFinished,
+    Pulling,
+}
+
+impl CatalogSyncProgress {
+    fn new(
+        plan_id: &CatalogPlanId,
+        completed: usize,
+        total: usize,
+        stage: CatalogSyncStage,
+        name: Option<&str>,
+    ) -> Self {
+        let named = name.unwrap_or_default();
+        Self {
+            plan_id: plan_id.clone(),
+            completed,
+            total,
+            message: match stage {
+                CatalogSyncStage::Publishing => "Publishing reviewed items…".to_string(),
+                CatalogSyncStage::Pushing => format!("Pushing {named}…"),
+                CatalogSyncStage::PushFinished => "Push finished".to_string(),
+                CatalogSyncStage::Pulling => format!("Pulling {named}…"),
+            },
+            stage,
+            name: name.map(str::to_string),
+        }
+    }
 }
 type ProgressReporter = dyn Fn(CatalogSyncProgress) + Send + Sync;
 
@@ -3216,12 +3255,13 @@ fn apply_push_with_repositories(
         .expect("a linked workspace has its engine");
     let repository_id = link.repository_id.clone();
     let host = state.load_or_create_host_identity()?;
-    report(CatalogSyncProgress {
-        plan_id: plan.plan_id.clone(),
-        completed: 0,
-        total: selected_records.len(),
-        message: "Publishing reviewed items…".to_string(),
-    });
+    report(CatalogSyncProgress::new(
+        &plan.plan_id,
+        0,
+        selected_records.len(),
+        CatalogSyncStage::Publishing,
+        None,
+    ));
     let published = engine
         .publish(PublishLibraryResourceRequest {
             repository_id: repository_id.clone(),
@@ -3406,12 +3446,13 @@ fn apply_push_items(
             revision: None,
         };
         if stopped.is_none() {
-            report(CatalogSyncProgress {
-                plan_id: plan.plan_id.clone(),
-                completed: results.len(),
-                total: selected_records.len(),
-                message: format!("Pushing {}…", row.row.display_name),
-            });
+            report(CatalogSyncProgress::new(
+                &plan.plan_id,
+                results.len(),
+                selected_records.len(),
+                CatalogSyncStage::Pushing,
+                Some(&row.row.display_name),
+            ));
             let stream = workspace.stream_for(resource_id);
             let attempt = (|| {
                 let _publication = catalog.acquire_publication_lock(&plan.storage_id, &stream)?;
@@ -3514,12 +3555,13 @@ fn apply_push_items(
         }
     }
     plan_store::discard(catalog.root(), &plan.plan_id);
-    report(CatalogSyncProgress {
-        plan_id: plan.plan_id.clone(),
-        completed: results.len(),
-        total: results.len(),
-        message: "Push finished".to_string(),
-    });
+    report(CatalogSyncProgress::new(
+        &plan.plan_id,
+        results.len(),
+        results.len(),
+        CatalogSyncStage::PushFinished,
+        None,
+    ));
     Ok(CatalogScopePushOutcomeDto {
         plan_id: plan.plan_id.clone(),
         published,
@@ -3795,6 +3837,8 @@ fn apply_pull_with_repositories(
         display_name: item.display_name.clone(),
         outcome: CatalogActionOutcome::Failed,
         message: Some(NOT_PULLED.to_string()),
+        message_code: None,
+        message_name: None,
     };
     for selection in &selections {
         if stopped.is_some() {
@@ -3802,12 +3846,13 @@ fn apply_pull_with_repositories(
             all_accepted = false;
             continue;
         }
-        report(CatalogSyncProgress {
-            plan_id: plan.plan_id.clone(),
-            completed: results.len(),
-            total: selections.len(),
-            message: format!("Pulling {}…", selection.item.item.display_name),
-        });
+        report(CatalogSyncProgress::new(
+            &plan.plan_id,
+            results.len(),
+            selections.len(),
+            CatalogSyncStage::Pulling,
+            Some(&selection.item.item.display_name),
+        ));
         // Payloads come from the stream the item was published on: its
         // own on a per-item storage, the coordinate's repository otherwise.
         let stream = workspace.stream_for(&selection.item.item.resource_id);
@@ -4257,6 +4302,14 @@ mod tests {
         let links_before = fixture.catalog.load_scope_links().unwrap();
         let result = service.apply_removal(&plan.plan_id).unwrap();
         assert!(result.removed, "{}", result.message);
+        assert_eq!(
+            result.message,
+            format!(
+                "{} removed from this provider home. Copies in storage are kept.",
+                result.display_name
+            )
+        );
+        assert_eq!(result.display_name, plan.display_name);
         assert!(!fixture.skill_path.exists());
         assert!(service.apply_removal(&plan.plan_id).is_err());
         assert_eq!(
@@ -4501,6 +4554,28 @@ mod tests {
             Box::new(PanicRunner),
         )
         .is_err());
+    }
+
+    #[test]
+    fn progress_lines_keep_their_english_beside_the_stage_and_name() {
+        let plan = CatalogPlanId::parse("catplan-000000000000000000000000").unwrap();
+        let line = |stage, name| CatalogSyncProgress::new(&plan, 1, 3, stage, name);
+        let pushing = line(CatalogSyncStage::Pushing, Some("tidal-notes"));
+        assert_eq!(pushing.message, "Pushing tidal-notes…");
+        assert_eq!(pushing.name.as_deref(), Some("tidal-notes"));
+        assert_eq!(
+            line(CatalogSyncStage::Pulling, Some("tidal-notes")).message,
+            "Pulling tidal-notes…"
+        );
+        assert_eq!(
+            line(CatalogSyncStage::Publishing, None).message,
+            "Publishing reviewed items…"
+        );
+        let finished = line(CatalogSyncStage::PushFinished, None);
+        assert_eq!(finished.message, "Push finished");
+        let value = serde_json::to_value(&finished).unwrap();
+        assert_eq!(value["stage"], "push_finished");
+        assert!(value.get("name").is_none());
     }
 
     #[test]

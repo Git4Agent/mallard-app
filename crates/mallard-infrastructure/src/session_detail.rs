@@ -18,10 +18,11 @@ use crate::provider_capture::LocalSessionView;
 use crate::providers::traits::{timeline_tool_detail_budgets, SessionMessageSettings};
 use crate::providers::{
     AgentProviderRegistry, SessionActionContext, SessionActionDescriptor, SessionAgentPreview,
-    SessionCheckpoint, SessionChildIdentity, SessionCount, SessionCountQuality,
-    SessionDetailWarning, SessionEventCounts, SessionEventDetail, SessionFileSummary,
-    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
-    SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory, AGENT_RESOURCE_SEGMENT,
+    SessionCheckpoint, SessionChildIdentity, SessionCount, SessionCountExplanation,
+    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
+    SessionFileSummary, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
+    SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory,
+    AGENT_RESOURCE_SEGMENT,
 };
 use crate::stored_session::StoredSessionTranscript;
 use mallard_domain::{
@@ -1709,19 +1710,29 @@ fn with_checkpoint_count(
     checkpoint: &CheckpointSupport,
 ) -> SessionEventCounts {
     counts.checkpoints = match checkpoint {
-        CheckpointSupport::Unsupported => SessionCount::unsupported(
-            "Git checkpoints are unavailable because this project is not a Git worktree.",
+        CheckpointSupport::Unsupported => {
+            SessionCount::unsupported(SessionCountExplanation::CheckpointsNotGitWorktree)
+        }
+        CheckpointSupport::Supported(value) => SessionCount::explained(
+            u64::from(value.is_some()),
+            SessionCountQuality::Inferred,
+            Some(SessionCountExplanation::CheckpointsInferred),
         ),
-        CheckpointSupport::Supported(value) => SessionCount {
-            value: Some(u64::from(value.is_some())),
-            quality: SessionCountQuality::Inferred,
-            explanation: Some(
-                "Checkpoints are inferred from the first successor commit on the provider-recorded branch."
-                    .to_string(),
-            ),
-        },
     };
     counts
+}
+
+/// The session's token total, and why it may be short or missing.
+pub(crate) fn token_count(summary: &SessionFileSummary) -> SessionCount {
+    match summary.total_tokens {
+        Some(value) if summary.metrics_complete => SessionCount::exact(value),
+        Some(value) => SessionCount::explained(
+            value,
+            SessionCountQuality::LowerBound,
+            Some(SessionCountExplanation::TokensMayBeIncomplete),
+        ),
+        None => SessionCount::unsupported(SessionCountExplanation::TokensUnavailable),
+    }
 }
 
 fn append_unique_warnings(
@@ -2102,21 +2113,7 @@ fn session_detail_body(
         )?
     };
     let event_counts = with_checkpoint_count(index.counts.clone(), &checkpoint);
-    let tokens = match summary.total_tokens {
-        Some(value) => SessionCount {
-            value: Some(value),
-            quality: if summary.metrics_complete {
-                SessionCountQuality::Exact
-            } else {
-                SessionCountQuality::LowerBound
-            },
-            explanation: (!summary.metrics_complete)
-                .then(|| "The provider transcript may contain additional token usage.".to_string()),
-        },
-        None => SessionCount::unsupported(
-            "This provider transcript does not expose a reliable token total.",
-        ),
-    };
+    let tokens = token_count(&summary);
     sanitize_actions(&mut actions, session)?;
     let mut warnings = timeline_warnings(index, cache_warnings);
     sanitize_warnings(&mut warnings, session);
@@ -2704,7 +2701,9 @@ mod tests {
             prompts: SessionCount::exact(1),
             responses: SessionCount::exact(1),
             intermediate_steps: SessionCount::exact(0),
-            checkpoints: SessionCount::unsupported("common Git layer"),
+            checkpoints: SessionCount::unsupported(
+                SessionCountExplanation::CodexCheckpointsOutsideTranscript,
+            ),
             tool_calls: SessionCount::exact(1),
             file_edits: SessionCount::exact(1),
             shell_calls: SessionCount::exact(0),
@@ -2727,7 +2726,11 @@ mod tests {
                 turn_id: Some("turn-1".to_string()),
                 turn_tool_summary: Some(crate::providers::SessionTurnToolSummary {
                     turn_id: "turn-1".to_string(),
-                    tool_calls: SessionCount::exact(1),
+                    tool_calls: crate::providers::SessionTurnToolCount {
+                        value: Some(1),
+                        quality: SessionCountQuality::Exact,
+                        explanation: None,
+                    },
                 }),
                 parent_event_id: None,
                 source: SessionSourceSpan {
@@ -2905,6 +2908,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["timeline_cache_ignored"]
         );
+    }
+
+    #[test]
+    fn a_cache_entry_without_count_codes_is_outdated_and_rebuilt() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let path = |key: &str| {
+            repository
+                .root()
+                .join("session_timeline_cache")
+                .join(format!("{key}.json"))
+        };
+        // Every count is written with its code, `null` when it has none.
+        for (key, count) in [("e".repeat(64), "checkpoints"), ("f".repeat(64), "prompts")] {
+            write_timeline_cache(&repository, &key, &cache_entry_fixture(), 1024 * 1024).unwrap();
+            assert!(load_timeline_cache(&repository, &key).0.is_some());
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path(&key)).unwrap()).unwrap();
+            assert!(value["index"]["counts"][count]
+                .as_object()
+                .unwrap()
+                .contains_key("explanation_code"));
+
+            // The shape before codes: the same schema and parser numbers, no
+            // code beside the explanation (or beside nothing).
+            value["index"]["counts"][count]
+                .as_object_mut()
+                .unwrap()
+                .remove("explanation_code")
+                .unwrap();
+            std::fs::write(path(&key), serde_json::to_vec(&value).unwrap()).unwrap();
+
+            let (entry, warnings) = load_timeline_cache(&repository, &key);
+            assert!(entry.is_none(), "{count}");
+            assert_eq!(
+                warnings
+                    .iter()
+                    .map(|warning| warning.code.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["timeline_cache_ignored"]
+            );
+        }
     }
 
     #[test]

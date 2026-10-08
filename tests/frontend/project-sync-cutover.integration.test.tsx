@@ -4,16 +4,31 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Icon from "../../src/components/Icons";
+import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import SyncPathBar from "../../src/components/sync-review/SyncPathBar";
 import {
   CODEX_DELETE_ERROR,
-  CODEX_DELETE_CLOSE_NOTICE,
+  codexDeleteCloseNotice,
+  offersCloseCodex,
   localSessionDeleteError,
   orderStorages,
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
 } from "../../src/components/project-sync/model";
+import { i18n } from "../../src/i18n";
+import { en } from "../../src/i18n/en";
+import ProjectLinksWorkspace, {
+  CatalogStorageRepositoryRow,
+  projectPullActionLabel,
+  projectPushActionLabel,
+  projectSyncCountPhrase,
+  publishVersionHolds,
+  StorageRepositoryDetails,
+  StorageRepositoryRow,
+} from "../../src/components/project-sync/ProjectLinksWorkspace";
+import { StorageDraftSaveQueue } from "../../src/components/project-sync/storageDraftSaveQueue";
+import type { CatalogStorageRepositoryView } from "../../src/components/storage-catalog/types";
 import { expandHomePath, profilePathHint } from "../../src/profilePath";
 import { PROJECT_SYNC_SCHEMA, type ProjectSetupDraft, type StorageProviderDescriptor } from "../../src/types";
 import {
@@ -332,6 +347,81 @@ test("the path bar stands storage marks on the rail's tile", () => {
   assert.match(markup, /class="sync-path-menu-item target"[^>]*><svg[^>]*data-storage-provider="local"/);
 });
 
+test("the sidebar names its roots, rows and actions in the interface language; names and paths stay as given", () => {
+  const noop = () => undefined;
+  const project = (overrides: object) => ({
+    local_project_id: "p-git", bundle_id: "b", display_name: "repo-one", local_alias: null, revision: 1,
+    project_root: "/Users/me/code/repo-one", profile_ids: { codex: "profile-codex" }, linked_storage_ids: [], is_git_repository: true,
+    ...overrides,
+  });
+  const props = {
+    projects: [
+      project({}),
+      project({ local_project_id: "p-plain", display_name: "plain", local_alias: "我的笔记", profile_ids: {}, is_git_repository: false }),
+    ],
+    drafts: [{ draft_id: "d1", display_name: "draft repo", project_root: "/tmp/draft", updated_at: 1, revision: 1, status: "attention", last_error: "disk full" }],
+    activeDraftId: null,
+    storages: [
+      { storage_id: "s-attic", name: "Attic", provider: "local", provider_label: "Local folder", icon: "drive", available: true, summary: [] },
+      { storage_id: "s-old", name: "", provider: "webdav", provider_label: "WebDAV", icon: "drive", available: false, summary: [] },
+    ],
+    storageDrafts: [{ draft_id: "sd", storage_id: "s-new", name: "", provider: "r2", config_version: 1 }],
+    storageProviders: [], storageUsage: { "s-attic": 2 }, activeProjectId: "p-git", activeStorageId: null,
+    catalogScopes: [], activeCatalogScopeId: null, addingProject: false, addingCatalogScope: false, addingStorage: false,
+    catalogIndexOpen: false, storageIndexOpen: false, settingsOpen: false, loading: false, busy: false, activityOpen: false, unreadLogs: 3,
+    onOpenProjects: noop, onSelectProject: noop, onRemoveProject: noop, onSelectDraft: noop, onDiscardDraft: noop, onToggleActivity: noop,
+    onAddProject: noop, onOpenStorage: noop, onOpenStorageDraft: noop, onDiscardStorageDraft: noop, onRemoveStorage: noop, onAddStorage: noop,
+    onOpenCatalogIndex: noop, onOpenCatalogScope: noop, onAddCatalogScope: noop, onRemoveCatalogScope: noop, onOpenStorageIndex: noop, onOpenSettings: noop,
+  } as unknown as Parameters<typeof ProjectSidebar>[0];
+  const render = (overrides: Partial<Parameters<typeof ProjectSidebar>[0]> = {}) => renderToStaticMarkup(<ProjectSidebar {...props} {...overrides} />);
+
+  const english = render();
+  assert.match(english, /aria-label="Projects" title="Projects"/);
+  assert.match(english, /aria-label="Logs, 3 unread"/);
+  assert.match(english, /<span class="sidebar-section-title">Projects<\/span>/);
+  assert.match(english, /aria-label="repo-one, Git repository"/);
+  assert.match(english, /aria-label="我的笔记\. Project issue: No agent profile is assigned"/);
+  assert.match(english, /title="\/tmp\/draft — last attempt failed: disk full"/);
+  assert.match(english, /aria-label="Mallard version \d+\.\d+\.\d+"/);
+
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = render();
+    assert.match(html, /<nav class="sidebar-root-tabs" aria-label="项目同步导航">/);
+    for (const name of ["项目", "资源库", "存储", "设置"]) assert.match(html, new RegExp(`aria-label="${name}" title="${name}"`));
+    assert.match(html, /aria-label="日志，3 条未读" title="日志"/);
+    assert.match(html, /<span class="sidebar-section-title">项目<\/span>/);
+    assert.match(html, /aria-label="添加项目"/);
+    // The user's names and paths, and the backend's error, are never translated.
+    assert.match(html, /aria-label="repo-one，Git 仓库"/);
+    assert.match(html, /<span>我的笔记<\/span>/);
+    assert.match(html, /aria-label="我的笔记。项目问题：未分配代理配置"/);
+    assert.match(html, /title="Git 仓库\n\/Users\/me\/code\/repo-one"/);
+    assert.match(html, /title="仓库：plain\n\/Users\/me\/code\/repo-one"/);
+    assert.match(html, /title="\/tmp\/draft — 上次尝试失败：disk full"/);
+    assert.match(html, /<span class="sync-draft-badge attention">.*?草稿<\/span>/);
+    assert.match(html, /aria-label="从 Mallard 中移除 repo-one"/);
+    assert.match(html, /<strong>Mallard<\/strong>/);
+    assert.match(html, /aria-label="Mallard v\d+\.\d+\.\d+"/);
+    assert.doesNotMatch(html, /Project sync navigation|Add project|Git repository|resumable|Remove /);
+
+    const storages = render({ storageIndexOpen: true });
+    assert.match(storages, /<span class="sidebar-section-title">存储<\/span>/);
+    assert.match(storages, /<span>Attic<\/span>/);
+    assert.match(storages, /title="Attic 关联了 2 个项目；请先取消关联再移除"/);
+    assert.match(storages, /<span>（未命名）<\/span>/);
+    assert.match(storages, /aria-label="打开存储。存储问题：当前构建的 Mallard 没有 WebDAV 适配器"/);
+    assert.match(storages, /aria-label="继续设置 （未命名） — 可继续的存储草稿"/);
+    assert.match(storages, /aria-label="添加存储"/);
+
+    const loading = render({ loading: true, projects: [], drafts: [] });
+    assert.match(loading, /<div class="sidebar-msg">正在载入项目…<\/div>/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(render(), english, "back in English, the sidebar is the English one again");
+});
+
 test("top-level navigation opens stable index pages", () => {
   const sidebar = readFileSync("src/components/project-sync/ProjectSidebar.tsx", "utf8");
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
@@ -339,7 +429,8 @@ test("top-level navigation opens stable index pages", () => {
 
   // The strip names each root once, in rail order, and each tab carries the
   // destination in its own accessible name because it draws no text.
-  assert.match(sidebar, /aria-label="Projects"[\s\S]*?aria-label="Catalog"[\s\S]*?aria-label="Storages"/);
+  assert.match(sidebar, /aria-label=\{t\("roots\.projects"\)\}[\s\S]*?aria-label=\{t\("roots\.catalog"\)\}[\s\S]*?aria-label=\{t\("roots\.storages"\)\}/);
+  assert.deepEqual([en.shell.roots.projects, en.shell.roots.catalog, en.shell.roots.storages], ["Projects", "Catalog", "Storages"]);
   assert.match(sidebar, /onClick=\{onOpenProjects\}/);
   assert.match(sidebar, /onClick=\{onOpenCatalogIndex\}/);
   assert.match(sidebar, /onClick=\{onOpenStorageIndex\}/);
@@ -351,7 +442,8 @@ test("top-level navigation opens stable index pages", () => {
   assert.match(shell, /storageIndexOpen \? \(\s*<StorageIndexPage/);
   assert.doesNotMatch(shell, /const openCatalogMenu/);
 
-  assert.match(workspace, /className="sync-storage-index-list" aria-label="Projects"/);
+  assert.match(workspace, /className="sync-storage-index-list" aria-label=\{t\("links\.projectsLabel"\)\}/);
+  assert.equal(en.projectPage.links.projectsLabel, "Projects");
   assert.match(workspace, /onClick=\{\(\) => onSelectProject\(project\.local_project_id\)\}/);
 });
 
@@ -380,7 +472,9 @@ test("the shell notice reports its own tone from the shared severity ladder", ()
   assert.match(workspace, /type SyncNoticeTone = "ok" \| "note" \| "attention"/);
   assert.match(workspace, /severity: notice\.tone === "attention" \? "warning" : notice\.tone === "note" \? "info" : "success"/);
   // An unconfirmed binding is a stop, not a success.
-  assert.match(workspace, /before pulling\.",\s*"attention"\)/);
+  assert.match(workspace, /notify\(t\(nextDetail\.binding \? "notices\.confirmBinding" : "notices\.chooseBinding"\), "attention"\)/);
+  assert.match(en.shell.notices.confirmBinding, /before pulling\.$/);
+  assert.match(en.shell.notices.chooseBinding, /before pulling\.$/);
   // Every other call site stays a one-argument confirmation.
   assert.match(workspace, /const notify = \(message: string, tone: SyncNoticeTone = "ok"\) => setNotice\(\{ message, tone \}\)/);
 
@@ -418,8 +512,9 @@ test("the titlebar stays silent for a project and names the screens without a tr
   // not named here either. Every screen without a trail still says what it is.
   assert.match(
     workspace,
-    /const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(choosingProjectFolder \? "New project" : null\)\s*\?\? \(addingCatalogScope \? "Add Catalog resource" : null\)\s*\?\? \(activeSummary \? null : "Projects"\);/,
+    /const onProjectsLanding = !activeDraftSummary && !choosingProjectFolder && !addingCatalogScope && !activeSummary;\s*const workspaceTitle = activeDraftSummary\?\.display_name\s*\?\? \(choosingProjectFolder \? t\("pages\.newProject"\) : null\)\s*\?\? \(addingCatalogScope \? t\("pages\.addCatalog"\) : null\)\s*\?\? \(onProjectsLanding \? t\("roots\.projects"\) : null\);/,
   );
+  assert.deepEqual([en.shell.pages.newProject, en.shell.pages.addCatalog, en.shell.roots.projects], ["New project", "Add Catalog resource", "Projects"]);
   assert.match(workspace, /\{workspaceTitle && \(/);
   assert.match(workspace, /<Icon name=\{workspaceIcon\} size=\{16\} \/>/);
 });
@@ -432,7 +527,8 @@ test("the shell verifies host identity and relies on backend auto-registration",
 
   assert.match(workspace, /projectSyncApi\.getHostIdentityStatus\(\)/);
   assert.match(workspace, /!hostIdentityStatus && hostIdentityError/);
-  assert.match(workspace, /Host identity unavailable/);
+  assert.match(workspace, /<h1 id="sync-host-recovery-title">\{t\("load\.hostTitle"\)\}<\/h1>/);
+  assert.equal(en.shell.load.hostTitle, "Host identity unavailable");
   assert.match(workspace, /if \(!hostIdentityReady\) return/);
   const shellRefreshes = [...workspace.matchAll(/const \{([^}]*)\} = await loadShell\(\);/g)];
   assert.ok(shellRefreshes.length > 0);
@@ -464,7 +560,8 @@ test("the shell verifies host identity and relies on backend auto-registration",
   );
   assert.match(workspace, /if \(!hostIdentityShellReady\) \{/);
   assert.match(workspace, /<StartupLoadingScreen stage=\{startupStage\} \/>/);
-  assert.match(startupScreen, /Checking installation…/);
+  assert.match(startupScreen, /const status = t\(`startup\.\$\{currentStage\.id\}`\);/);
+  assert.match(renderToStaticMarkup(<StartupLoadingScreen stage="installation" />), /role="status"[^>]*>Checking installation…<\/p>/);
   assert.match(workspace, /nextDetail\.binding\.state !== "active"/);
   assert.match(workspace, /expected_revision: nextDetail\.binding\?\.revision \?\? null/);
   assert.match(workspace, /nextDetail\.binding\?\.state === "active"/);
@@ -473,6 +570,7 @@ test("the shell verifies host identity and relies on backend auto-registration",
   assert.doesNotMatch(workspace, /origin_key_available/);
   assert.doesNotMatch(workspace, /registerAsNewHost/);
   assert.doesNotMatch(workspace, /"Register as new host"/);
+  assert.doesNotMatch(JSON.stringify(en.shell), /Register as new host|Host settings/, "nor in the shell's catalog");
   assert.ok(
     workspace.indexOf("if (!hostIdentityShellReady)") < workspace.indexOf("className={`sync-app"),
     "the ordinary shell must remain behind the completed identity refresh gate",
@@ -528,6 +626,19 @@ test("startup overlaps independent reads", () => {
 
   assert.ok(shellReady >= 0);
   assert.doesNotMatch(loadShell, /PreSync|preSync/);
+});
+
+test("in Chinese the startup screen says each stage in Chinese and keeps the product's name", () => {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderToStaticMarkup(<StartupLoadingScreen stage="repair" />);
+    assert.match(html, /<h1 id="sync-startup-title">Mallard<\/h1>/);
+    assert.match(html, /aria-label="Mallard 启动进度"/);
+    assert.match(html, /aria-valuetext="正在完成中断的工作…"/);
+    assert.match(html, /role="status"[^>]*>正在完成中断的工作…<\/p>/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });
 
 test("the startup screen communicates minimal, staged loading progress", () => {
@@ -622,7 +733,8 @@ test("host-scoped workflows keep their originating epoch across async continuati
   const clearStorage = section(workspace, "clearStorageData", "removeStorage");
   capturesBefore(clearStorage, "await confirm(");
   assert.match(clearStorage, /await projectSyncApi\.clearStorageData\(/);
-  assert.match(clearStorage, /Permanently clear all Mallard data/);
+  assert.match(clearStorage, /await confirm\(t\("confirm\.clearStorage", \{ name: storageName \}\)/);
+  assert.match(en.shell.confirm.clearStorage, /^Permanently clear all Mallard data/);
 
   const removeStorage = section(workspace, "removeStorage", "openNewStorageConfiguration");
   capturesBefore(removeStorage, "await confirm(");
@@ -645,9 +757,12 @@ test("path bar menus keep one home per scope", () => {
 
   // Storage crumb: header block, settings + unlink beside their noun, and the
   // link row that stays put at zero candidates with its reason spelled out.
-  assert.match(workspace, /menuHeader: \{\s*label: workspaceStorage\.name \|\| "\(unnamed\)",/);
-  assert.match(workspace, /label: "Storage details…"/);
-  assert.match(workspace, /label: `Unlink from \$\{projectLabel\(workspaceProject\)\}…`/);
+  assert.match(workspace, /menuHeader: \{\s*label: workspaceStorage\.name \|\| t\("fallback\.unnamed"\),/);
+  assert.equal(en.projectPage.fallback.unnamed, "(unnamed)");
+  assert.match(workspace, /label: t\("storageMenu\.details"\)/);
+  assert.equal(en.projectPage.storageMenu.details, "Storage details…");
+  assert.match(workspace, /label: t\("storageMenu\.unlink", \{ project: projectLabel\(workspaceProject\) \}\)/);
+  assert.equal(en.projectPage.storageMenu.unlink, "Unlink from {{project}}…");
   assert.match(workspace, /icon: "link-off" as const/);
   assert.match(workspace, /disabledReason: workspaceAvailableStorages\.length === 0/);
   // Link storage… opens the chooser outright; the old toggle belonged to an
@@ -658,13 +773,14 @@ test("path bar menus keep one home per scope", () => {
   assert.match(workspace, /<StorageLinkDialog[\s\S]*onCancel=\{\(\) => setLinkingProjectId\(null\)\}/);
   assert.doesNotMatch(workspace, /storage-link-picker/);
   assert.doesNotMatch(workspace, /checked: storage\.id === workspaceStorage\.id/);
-  assert.doesNotMatch(workspace, /label: "Unlink storage"/);
+  assert.doesNotMatch(JSON.stringify(en.projectPage), /"Unlink storage"/);
 
   // The workspace ⋯ holds app scope alone: Settings, the theme switch, and
   // the full reload. The checked item exposes the current theme state.
   assert.match(workspace, /const pathOverflow: PathBarMenuGroup\[\] = workspaceProject \? appActions : \[\];/);
-  assert.match(sync, /label: "Settings",\s*icon: "settings" as const,\s*onSelect: openSettings,/);
-  assert.match(sync, /label: "Dark theme",\s*icon: "moon" as const,\s*checked: theme === "dark",/);
+  assert.match(sync, /label: t\("common:settings"\),\s*icon: "settings" as const,\s*onSelect: openSettings,/);
+  assert.match(sync, /label: t\("window\.darkTheme"\),\s*icon: "moon" as const,\s*checked: theme === "dark",/);
+  assert.equal(en.shell.window.darkTheme, "Dark theme");
 
   // The bar renders no radio items anywhere, and inert rows stay focusable.
   assert.doesNotMatch(bar, /menuitemradio/);
@@ -679,11 +795,13 @@ test("refocus reconciles external changes narrowly and the full reload lives in 
   // The sidebar no longer carries an always-visible refresh icon; full reload is a
   // labeled recovery action in the titlebar overflow menu.
   assert.doesNotMatch(sidebar, /onRefresh|Refresh projects/);
-  assert.match(workspace, /Reload app data/);
+  assert.doesNotMatch(JSON.stringify(en.shell.sidebar), /Refresh projects/);
+  assert.match(workspace, /label: t\("window\.reload"\),\s*detail: t\("window\.reloadDetail"\),/);
+  assert.equal(en.shell.window.reload, "Reload app data");
   assert.match(workspace, /className="sync-titlebar-actions"/);
   // The Projects landing and New project reach the theme through the app
   // menu's Dark theme item only.
-  assert.match(workspace, /workspaceTitle === "Projects" \|\| choosingProjectFolder \? null : \(\s*<button[\s\S]*?className="sync-theme-button"/);
+  assert.match(workspace, /onProjectsLanding \|\| choosingProjectFolder \? null : \(\s*<button[\s\S]*?className="sync-theme-button"/);
   assert.match(workspace, /<PathBarMenu\s+id="sync-app-actions-menu"\s+groups=\{appActions\}/);
   // Its items sit at tabIndex -1, so opening must move focus in and closing
   // must hand it back — a no-op registerRef left the menu unreachable by key.
@@ -881,22 +999,25 @@ test("only the log folder is opened with openPath; everything else reveals", () 
 test("the empty storage slot is named, not marked as a fault", () => {
   const setupWorkspace = readFileSync("src/components/project-sync/ProjectSetupWorkspace.tsx", "utf8");
   const band = setupWorkspace.slice(
-    setupWorkspace.indexOf("<div><strong>Storage</strong></div>"),
+    setupWorkspace.indexOf("<div><strong>{t(\"sections.storage\")}</strong></div>"),
     setupWorkspace.indexOf("{storageSection?.message && storageSection.state === \"blocked\""),
   );
   assert.ok(band.length > 0, "missing the Storage band");
+  assert.equal(en.projectSetup.sections.storage, "Storage");
 
   // "Local only" was a mode standing among proper nouns, so the row read as
   // two answers to two different questions. The slot is named the way the
   // rest of the app names it — the projects landing card says "No storage
   // linked", the catalog crumb "No storage" — and `yet` carries the fact that
   // Link storage… is on the project's own menu afterwards.
-  assert.match(band, /<span className="setup-pill-label">None yet<\/span>/);
+  assert.match(band, /<span className="setup-pill-label">\{t\("setup\.noneYet"\)\}<\/span>/);
+  assert.equal(en.projectSetup.setup.noneYet, "None yet");
   assert.doesNotMatch(setupWorkspace, /Local only/);
+  assert.doesNotMatch(JSON.stringify(en.projectSetup), /Local only/);
 
   // The glyph still says where the sessions live, which is why the label does
   // not have to.
-  assert.match(band, /<Icon name="computer" size=\{12\} \/>\s*<span className="setup-pill-label">None yet/);
+  assert.match(band, /<Icon name="computer" size=\{12\} \/>\s*<span className="setup-pill-label">\{t\("setup\.noneYet"\)\}/);
 
   // A section message prints only when the state is `blocked`, so an
   // `attention` badge here could never say what it wanted — and `attention`
@@ -941,6 +1062,7 @@ test("Connect completes without preparing or applying Pull", async () => {
         if (scenario === "host-changed") epoch.current += 1;
       },
       notify: (message: string) => { assert.equal(message, "Storage linked."); calls.push("notify"); },
+      t: i18n.getFixedT(null, ["shell", "common"]),
       errorMessage: (reason: unknown) => String(reason),
       planRestore: unexpectedPull,
       projectSyncApi: {
@@ -1022,6 +1144,7 @@ test("link reloads skip sibling metadata checks and later project loads check ag
       setSiblingNotice: (value: unknown) => { siblingNotice = value; },
       loadShell: async () => ({ nextConfig: config, hostIdentityReady: true }),
       notify: (message: string) => assert.equal(message, "Storage linked."),
+      t: i18n.getFixedT(null, ["shell", "common"]),
       errorMessage: (reason: unknown) => String(reason),
       planRestore: () => assert.fail("Link must not prepare Pull"),
       projectSyncApi: {
@@ -1060,13 +1183,20 @@ test("the connection flow has no separate Finish step or persisted schema change
   const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   const dialog = readFileSync("src/components/project-sync/BundleConnectionDialog.tsx", "utf8");
   assert.doesNotMatch(workspace + dialog, /ConnectionCheckBody|continueConnection|retryConnectionCheck|Finish connection|requireReview/);
-  assert.match(dialog, /"Connect"/);
+  assert.doesNotMatch(JSON.stringify(en.shell), /Finish connection/, "nor in the shell's catalog");
+  assert.match(dialog, /t\("connect\.connect"\)/);
+  assert.match(readFileSync("src/i18n/en/reviews.ts", "utf8"), /\n {4}connect: "Connect",\n/);
   assert.match(workspace, /await connectStorageBundle\(projectId, storageId, project\.bundle_id\)/, "same-bundle local storage links use the same connection flow");
   assert.equal(PROJECT_SYNC_SCHEMA, 1);
 });
 
 test("only a Codex deletion rejected with -32600 offers Close Codex", () => {
-  assert.equal(localSessionDeleteError("codex", { provider_error: CODEX_DELETE_ERROR, metadata_error: null }), CODEX_DELETE_CLOSE_NOTICE);
+  assert.equal(localSessionDeleteError("codex", { provider_error: CODEX_DELETE_ERROR, metadata_error: null }), codexDeleteCloseNotice());
+  assert.equal(codexDeleteCloseNotice(), "Delete failed. Close Codex, then try Delete again.");
+  // The notice's Close Codex button follows it in either language.
+  assert.equal(offersCloseCodex(`Deleted 2 of 3 sessions. ${codexDeleteCloseNotice()}`), true);
+  assert.equal(offersCloseCodex("删除失败。请关闭 Codex，然后再点一次“删除”。"), true);
+  assert.equal(offersCloseCodex("Session files: disk full"), false);
   assert.equal(localSessionDeleteError("claude", { provider_error: CODEX_DELETE_ERROR, metadata_error: null }), `Session files: ${CODEX_DELETE_ERROR}`);
   assert.equal(localSessionDeleteError("codex", { provider_error: "Codex provider request failed (code -32601).", metadata_error: "Disk full" }),
     "Session files: Codex provider request failed (code -32601). Mallard binding: Disk full");
@@ -1081,13 +1211,15 @@ test("project session deletion requires warning approval and replaces metadata-o
   const approval = action.indexOf("if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;");
   const request = action.indexOf("await projectSyncApi.deleteLocalProjectSessions(");
   assert.ok(action.indexOf("await confirm(") < approval && approval < request);
-  assert.match(action, /kind: "warning", okLabel: "Delete all", cancelLabel: "Cancel"/);
-  assert.match(action, /Project files and cloud copies are kept. This cannot be undone./);
+  assert.match(action, /kind: "warning", okLabel: t\("confirm\.deleteSessionsOk"\), cancelLabel: t\("common:cancel"\)/);
+  assert.equal(en.shell.confirm.deleteSessionsOk, "Delete all");
+  assert.match(en.shell.confirm.deleteSessions, /Project files and cloud copies are kept\. This cannot be undone\.$/);
   assert.match(action, /result\.provider_errors/);
   assert.match(action, /result\.metadata_error/);
-  assert.ok(action.indexOf("await refresh(workflowEpoch)") < action.indexOf("setError(`${outcome}"));
+  assert.ok(action.indexOf("await refresh(workflowEpoch)") < action.indexOf("setError(["));
   const menu = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
-  assert.match(menu, /label: "Delete all local sessions…"/);
+  assert.match(menu, /label: t\("projectMenu\.deleteSessions"\)/);
+  assert.equal(en.projectPage.projectMenu.deleteSessions, "Delete all local sessions…");
   const api = readFileSync("src/components/project-sync/api.ts", "utf8");
   const commands = readFileSync("src-tauri/src/lib.rs", "utf8");
   assert.match(api, /invoke<ProjectSessionsDeleteResult>\("delete_local_project_sessions"/);
@@ -1131,4 +1263,167 @@ test("setup pages list storages Mallard Cloud first, then the other clouds, then
     /let descriptors = storage_provider_descriptors\(\);[\s\S]*?\.min_by\(\|left, right\| \{[\s\S]*?\.cmp\(&right\.0\)[\s\S]*?then_with\(\|\| left\.1\.name\.cmp\(&right\.1\.name\)\)/,
   );
   assert.doesNotMatch(rust, /config\.storages\.len\(\) == 1/);
+});
+
+/** The project page with a Git project on an R2 storage whose Push just
+ *  failed: the path bar, both crumb menus (rendered closed, so present in the
+ *  markup), Pull and Push, and the storage card's notice. */
+function renderProjectPage(): string {
+  const noop = () => undefined;
+  const project = (overrides: object) => ({
+    local_project_id: "p-git", bundle_id: "b", display_name: "repo-one", local_alias: null, revision: 1,
+    project_root: "/Users/me/code/repo-one", profile_ids: { codex: "profile-codex" }, linked_storage_ids: ["s-attic"],
+    is_git_repository: true, ...overrides,
+  });
+  const props = {
+    projects: [
+      project({}),
+      project({ local_project_id: "p-notes", display_name: "潮汐笔记", project_root: "/Users/me/notes", is_git_repository: false }),
+    ],
+    activeProjectId: "p-git", activeStorageId: "s-attic", rememberedStorageByProject: {},
+    activeProjectSubview: { kind: "overview" },
+    bindings: [{
+      host_id: "h", replica_id: "r", local_project_id: "p-git", bundle_id: "b", project_root: "/Users/me/code/repo-one",
+      canonical_project_root: "/Users/me/code/repo-one", profile_ids: { codex: "profile-codex" }, state: "active", revision: 1, updated_at: 1,
+    }],
+    profiles: [{
+      profile_id: "profile-codex", provider: "codex", display_name: "Work Codex", path: "/Users/me/.codex", canonical_path: "/Users/me/.codex",
+      revision: 1, created_at: 1, updated_at: 1, available: true, readable: true, writable: true, used_by_projects: ["p-git"],
+    }],
+    storageProviders: [],
+    storages: [
+      { storage_id: "s-attic", name: "Attic", provider: "r2", config_version: 1, provider_label: "Cloudflare R2", icon: "cloud", available: true, summary: [], settings: {}, secrets: [] },
+      { storage_id: "s-drive", name: "Backup drive", provider: "local", config_version: 1, provider_label: "Local folder", icon: "drive", available: true, summary: [], settings: {}, secrets: [] },
+    ],
+    storageSetupDrafts: [],
+    links: [{
+      local_project_id: "p-git", storage_id: "s-attic", bundle_id: "b", project_content_preferences: {},
+      conversation_checkpoints: {}, pinned: false, created_at: 1,
+    }],
+    loading: false, busy: false,
+    onSelectStorage: noop, onOpenSessionDetail: noop, onSessionActionError: noop, onNotify: noop, onCloseSessionDetail: noop,
+    onLinkStorage: noop, onUnlinkStorage: noop, onPush: noop, onPull: noop, onConfigureBinding: noop,
+    onRenameProject: () => ({ ok: true, message: null }), onDeleteProjectSessions: noop, onRefresh: noop, onAddProject: noop,
+    onAddCloudProject: noop, onSelectProject: noop, appActions: [], onAddStorage: noop, onCreateStorageDraft: async () => undefined,
+    onOpenStorage: noop, onOpenStorageIndex: noop, onClearStorage: noop, onRemoveStorage: noop, onRenameStorage: async () => true,
+    onCommitStorageDraft: async () => null, onTestStorageDraft: async () => true, onTestStorage: async () => true,
+    storageDraftSaveQueue: new StorageDraftSaveQueue(),
+    storageNotice: {
+      projectId: "p-git", storageId: "s-attic", kind: "action_failed", action: "push",
+      scope: { kind: "project" }, message: "HTTP 503: upstream unavailable",
+    },
+  } as unknown as Parameters<typeof ProjectLinksWorkspace>[0];
+  return renderToStaticMarkup(<ProjectLinksWorkspace {...props} />);
+}
+
+test("the project page's menus and storage card speak Chinese; names, paths and the backend's sentence stay as given", () => {
+  const english = renderProjectPage();
+  assert.match(english, /aria-label="Attic\. Storage menu"/);
+  assert.match(english, /aria-label="Unlink from repo-one…"/);
+  assert.match(english, /aria-label="repo-one\. Project menu"/);
+  assert.match(english, /aria-label="Rename project…"/);
+  assert.match(english, /title="\/Users\/me\/code\/repo-one\nCodex agent home: \/Users\/me\/\.codex"/);
+  assert.match(english, /aria-label="Pull from Attic"/);
+  assert.match(english, /aria-label="Push to Attic"/);
+  assert.match(english, /Push couldn&#x27;t start/);
+
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderProjectPage();
+    assert.match(html, /<ol class="sync-path" aria-label="repo-one 路径"/);
+    // The storage crumb and its menu.
+    assert.match(html, /title="Attic · Cloudflare R2" aria-label="Attic。存储菜单"/);
+    assert.match(html, /role="menu" aria-label="存储"/);
+    assert.match(html, /aria-label="存储详情…"/);
+    assert.match(html, /aria-label="取消与 repo-one 的关联…"/);
+    assert.match(html, /title="停止同步此关联；存储中已有的文件会保留"/);
+    assert.match(html, /关联存储…/);
+    assert.match(html, /添加存储…/);
+    // The project crumb and its menu; the other project's name is its own.
+    assert.match(html, /aria-label="repo-one。项目菜单"/);
+    assert.match(html, /title="\/Users\/me\/code\/repo-one\nCodex 代理主目录：\/Users\/me\/\.codex"/);
+    assert.match(html, /role="menu" aria-label="项目"/);
+    for (const label of ["在访达中显示", "代理配置…", "重命名项目…", "删除所有本地会话…", "切换到"]) {
+      assert.match(html, new RegExp(`aria-label="${label}"`));
+    }
+    assert.match(html, /title="删除此项目在本机的会话和子代理，并清除其会话绑定和本地同步状态"/);
+    assert.match(html, /添加项目…/);
+    assert.match(html, /潮汐笔记/);
+    assert.match(html, /Work Codex/);
+    // Pull and Push.
+    assert.match(html, /role="group" aria-label="同步操作"/);
+    assert.match(html, /title="先检查下载内容，再应用" aria-label="从 Attic 下载"/);
+    assert.match(html, /title="选择要上传到此存储的内容" aria-label="上传到 Attic"/);
+    assert.match(html, /<span class="sync-path-sync-label">下载<\/span>/);
+    assert.match(html, /<span class="sync-path-sync-label">上传<\/span>/);
+    // The storage card: Chinese frame, the backend's sentence unchanged.
+    assert.match(html, /aria-label="repo-one 的存储"/);
+    assert.match(html, /上传未能开始/);
+    assert.match(html, /HTTP 503: upstream unavailable/);
+    assert.match(html, />重试<\/button>/);
+    assert.doesNotMatch(html, /Storage menu|Project menu|Storage details|Unlink from|Rename project|Agent profile…|Delete all local sessions|Reveal in Finder|Sync actions|Pull from|Push to|couldn&#x27;t start|>Retry</);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(renderProjectPage(), english, "back in English, the page is the English one again");
+});
+
+test("a storage's repository rows and the project page's phrases speak Chinese; repository and backend names stay as given", () => {
+  const bundle = {
+    bundle_id: "bundle-1", display_name: "mallard-app", revision: 3, resource_count: 9,
+    updated_at: Date.now() - 29 * 60 * 1000, providers: ["codex", "claude"], repository_fingerprint: "3f9c1a77",
+  } as unknown as Parameters<typeof StorageRepositoryRow>[0]["bundle"];
+  const repo = {
+    repository_id: "library-1", provider: "codex", provider_label: "Codex", kind_label: "Skills",
+    revision: null, updated_at: null, resource_names: [], error: "library tag does not match", capability: null,
+  } as unknown as CatalogStorageRepositoryView;
+  const englishRow = renderToStaticMarkup(<StorageRepositoryRow bundle={bundle} />);
+  assert.match(englishRow, /aria-label="Show details for mallard-app"/);
+
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const row = renderToStaticMarkup(<StorageRepositoryRow bundle={bundle} />);
+    assert.match(row, /<strong class="sync-storage-repository-name">mallard-app<\/strong>/);
+    assert.match(row, /<span>Version<\/span><b>3<\/b>/);
+    assert.match(row, /<span>更新时间<\/span><b>29分钟前<\/b>/);
+    assert.match(row, /aria-label="显示 mallard-app 的详情" title="显示 mallard-app 的详情"/);
+    const unnamed = renderToStaticMarkup(<StorageRepositoryRow bundle={{ ...bundle, display_name: "" }} />);
+    assert.match(unnamed, /<strong class="sync-storage-repository-name">未命名仓库<\/strong>/);
+    assert.match(unnamed, /aria-label="显示未命名仓库的详情"/);
+
+    const details = renderToStaticMarkup(<StorageRepositoryDetails bundle={bundle} />);
+    for (const term of ["仓库 ID", "更新时间", "资源", "代理", "指纹"]) assert.match(details, new RegExp(`<dt>${term}</dt>`));
+    assert.match(details, /<dd>Codex · Claude<\/dd>/);
+
+    // The kind and agent labels arrive from the backend and stay as they are.
+    const unreadable = renderToStaticMarkup(<CatalogStorageRepositoryRow repo={repo} />);
+    assert.match(unreadable, /Skills · Codex/);
+    assert.match(unreadable, /sync-storage-repo-unreadable[^>]*>无法读取</);
+    assert.match(unreadable, /aria-label="显示 Skills · Codex 的详情"/);
+
+    assert.equal(projectSyncCountPhrase(2, 0), "2 个较新的会话");
+    assert.equal(projectSyncCountPhrase(0, 1), "1 个已更改的文件");
+    assert.equal(projectPushActionLabel({ preparing: false, publishing: true }), "正在上传…");
+    assert.equal(projectPullActionLabel({ preparing: true, applying: false }), "正在准备…");
+    assert.equal(projectPullActionLabel({ preparing: false, applying: false }), "下载");
+    const comparison = { entries: [{ storage_present: true }, { storage_present: true }] } as unknown as Parameters<typeof publishVersionHolds>[0];
+    const publication = { latest_version: 3, draft_ahead: 2 } as unknown as Parameters<typeof publishVersionHolds>[2];
+    assert.deepEqual(publishVersionHolds(comparison, null, publication).map((fact) => fact.word), ["2 个会话", "Version 3 之后有 2 次上传"]);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(renderToStaticMarkup(<StorageRepositoryRow bundle={bundle} />), englishRow);
+});
+
+test("the app menu switches language beside the theme, naming the other language in itself", () => {
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+  const menu = workspace.slice(workspace.indexOf("const appActions: PathBarMenuGroup[]"), workspace.indexOf("const windowActions"));
+  // After Dark theme, before Reload: the other offered language, named in
+  // itself with its own `lang`, picked outright (stepping out of System).
+  assert.ok(menu.indexOf('id: "theme"') < menu.indexOf('id: "language"') && menu.indexOf('id: "language"') < menu.indexOf('id: "reload"'));
+  assert.match(menu, /OFFERED_LANGUAGES\.filter\(\(language\) => language !== uiLanguage\(\)\)/);
+  assert.match(menu, /label: LANGUAGE_NAMES\[language\],\s*lang: language,\s*icon: "language" as const,/);
+  assert.match(menu, /onSelect: \(\) => \{ setLanguageChoice\(language\); \}/);
+  assert.match(readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8"), /<span lang=\{item\.lang\}>\{item\.label\}<\/span>/);
+  assert.equal(en.shell.window.switchLanguage, "Switch the interface to {{language}}");
 });

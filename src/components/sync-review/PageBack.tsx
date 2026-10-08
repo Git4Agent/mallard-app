@@ -1,4 +1,5 @@
 import Icon from "../Icons";
+import { useTranslation } from "../../i18n";
 
 /**
  * Where a page's back button lands: one level up the trail, named as the
@@ -21,13 +22,15 @@ export interface PageBackTarget {
  * never waits on the load.
  */
 export default function PageBack({ target }: { target: PageBackTarget }) {
+  const { t } = useTranslation("syncReview");
+  const name = t("back", { label: target.label });
   return (
     <button
       type="button"
       className={`btn sync-page-back${target.voice === "name" ? " named" : ""}`}
       disabled={target.disabled}
-      title={`Back to ${target.label}`}
-      aria-label={`Back to ${target.label}`}
+      title={name}
+      aria-label={name}
       onClick={target.onActivate}
     >
       <Icon name="chevron-left" size={13} />

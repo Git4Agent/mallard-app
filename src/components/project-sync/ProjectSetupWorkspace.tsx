@@ -18,6 +18,8 @@ import type {
   StorageSummary,
 } from "../../types";
 import Icon, { storageIconName } from "../Icons";
+import { t as translate, useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
 import {
@@ -34,6 +36,7 @@ import {
   repositoryFingerprintsRequireAcknowledgement,
 } from "./model";
 import ProjectFolderField from "./ProjectFolderField";
+import { storageProviderName } from "./storageText";
 import {
   compactFolderPath,
   folderVerdict,
@@ -193,15 +196,17 @@ function sectionState(sections: SetupSectionStatus[], id: string): SetupSectionS
 
 function sectionBadge(section: SetupSectionStatus | null) {
   if (section?.state === "attention") {
+    const label = translate("projectSetup:setup.needsReview");
     return (
-      <span className="sync-setup-state attention" aria-label="Needs review" title="Needs review">
+      <span className="sync-setup-state attention" aria-label={label} title={label}>
         <Icon name="alert-triangle" size={14} />
       </span>
     );
   }
   if (section?.state === "blocked") {
+    const label = translate("projectSetup:setup.actionRequired");
     return (
-      <span className="sync-setup-state blocked" aria-label="Action required" title="Action required">
+      <span className="sync-setup-state blocked" aria-label={label} title={label}>
         <Icon name="alert-triangle" size={14} />
       </span>
     );
@@ -222,6 +227,7 @@ export default function ProjectSetupWorkspace({
   onDiscard,
   onFinalized,
 }: Props) {
+  const { t } = useTranslation(["projectSetup", "common"]);
   const [draft, setDraft] = useState<ProjectSetupDraft | null>(null);
   const [inspection, setInspection] = useState<SetupDraftInspection | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -269,7 +275,7 @@ export default function ProjectSetupWorkspace({
         const loaded = await projectSyncApi.getSetupDraft(draftId);
         if (cancelled || !workflowIsActive()) return;
         if (!loaded) {
-          setError("This setup draft no longer exists.");
+          setError(t("setup.draftGone"));
           return;
         }
         const selectedKeys = Object.keys(loaded.profiles);
@@ -510,7 +516,7 @@ export default function ProjectSetupWorkspace({
 
   if (!draft) {
     return (
-      <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-label="Project setup">
+      <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-label={t("setup.region")}>
         {error
           ? (
             /* Nothing the user just did can reach this branch: the draft is
@@ -520,13 +526,13 @@ export default function ProjectSetupWorkspace({
             <Notice
               severity="danger"
               timing="standing"
-              label="Problems with this setup draft"
+              label={t("setup.problems")}
               className="sync-setup-system-error"
             >
               {error}
             </Notice>
           )
-          : <div className="sync-storage-repository-state"><span className="status-loader" /> Loading setup draft…</div>}
+          : <div className="sync-storage-repository-state"><span className="status-loader" /> {t("setup.loading")}</div>}
       </section>
     );
   }
@@ -545,9 +551,9 @@ export default function ProjectSetupWorkspace({
   const profileNeedsSelection = setupEnabled.size === 0 || incompleteProviders.length > 0;
   const profileBlocked = profilesSection?.state === "blocked";
   const profileErrorMessage = setupEnabled.size === 0
-    ? "Turn on at least one agent to continue."
+    ? t("agents.noneOn")
     : incompleteProviders.length > 0
-      ? `Choose a profile for ${incompleteProviders.map((descriptor) => descriptor.display_name).join(", ")}.`
+      ? t("agents.chooseFor", { providers: incompleteProviders.map((descriptor) => descriptor.display_name).join(t("shared.separator")) })
       : profileBlocked
         ? profilesSection?.message
         : null;
@@ -616,7 +622,7 @@ export default function ProjectSetupWorkspace({
           <select
             value={value}
             disabled={working}
-            aria-label={`${label} profile`}
+            aria-label={t("agents.profile", { provider: label })}
             aria-invalid={profileBlocked || rowIncomplete || undefined}
             aria-describedby={(profileBlocked || rowIncomplete) && profileErrorMessage ? "sync-setup-error-agent" : undefined}
             onChange={(event) => {
@@ -649,17 +655,19 @@ export default function ProjectSetupWorkspace({
               });
             }}
           >
-            <option value="">Choose profile</option>
+            <option value="">{t("agents.chooseProfile")}</option>
             {options.map((profile) => {
               const unavailable = !profile.available || !profile.readable;
               const claimedBy = claimedProfiles.get(profile.profile_id);
               return (
                 <option key={profile.profile_id} value={profile.profile_id} disabled={unavailable || Boolean(claimedBy)}>
-                  {profile.display_name}{unavailable ? " (unavailable)" : claimedBy ? ` (used by ${claimedBy})` : ""}
+                  {unavailable ? t("shared.unavailable", { name: profile.display_name })
+                    : claimedBy ? t("agents.usedBy", { name: profile.display_name, project: claimedBy })
+                      : profile.display_name}
                 </option>
               );
             })}
-            <option value="__pending">Custom path…</option>
+            <option value="__pending">{t("agents.customPath")}</option>
           </select>
         </span>
         {selection?.kind === "pending" && (
@@ -668,13 +676,13 @@ export default function ProjectSetupWorkspace({
           <input
             value={path}
             disabled={working}
-            aria-label={`${label} custom profile path`}
+            aria-label={t("agents.customPathLabel", { provider: label })}
             aria-invalid={hint?.tone === "bad" || undefined}
             aria-describedby={[
               (profileBlocked || rowIncomplete) && profileErrorMessage ? "sync-setup-error-agent" : null,
               hintId,
             ].filter(Boolean).join(" ") || undefined}
-            placeholder={`${label} profile path`}
+            placeholder={t("agents.pathPlaceholder", { provider: label })}
             spellCheck={false}
             autoFocus
             onChange={(event) => {
@@ -690,7 +698,7 @@ export default function ProjectSetupWorkspace({
           />
         )}
         <button type="button" className="btn" onClick={() => void chooseProfileFolder(provider)} disabled={working}>
-          <Icon name="folder" size={13} /> Browse
+          <Icon name="folder" size={13} /> {t("agents.browse")}
         </button>
         {hint && (
           /* Polite, not an alert: this changes on a debounce while the field
@@ -715,9 +723,9 @@ export default function ProjectSetupWorkspace({
     <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-labelledby="sync-setup-title">
       <header className="sync-modal-header">
         <div>
-          <h1 id="sync-setup-title">Set up {draft.display_name || "project"}</h1>
+          <h1 id="sync-setup-title">{draft.display_name ? t("setup.title", { name: draft.display_name }) : t("setup.titleUnnamed")}</h1>
         </div>
-        <button type="button" className="btn btn-ghost" onClick={onClose} disabled={finalizing} aria-label="Close setup; the draft is kept">
+        <button type="button" className="btn btn-ghost" onClick={onClose} disabled={finalizing} aria-label={t("setup.close")}>
           <Icon name="x" size={17} />
         </button>
       </header>
@@ -732,20 +740,20 @@ export default function ProjectSetupWorkspace({
           <Notice
             severity="warning"
             timing="standing"
-            label="Notes about this setup draft"
+            label={t("setup.notes")}
           >
-            The last finish attempt failed: {draft.last_error}
+            {t("setup.lastError", { error: draft.last_error })}
           </Notice>
         )}
 
         <section className="sync-setup-section">
           <div className="sync-card-heading">
-            <div><strong>Project</strong></div>
+            <div><strong>{t("sections.project")}</strong></div>
             {sectionBadge(projectSection)}
           </div>
           <div className="sync-field-grid sync-setup-project-fields">
             <label>
-              <span>Name</span>
+              <span>{t("sections.name")}</span>
               <input
                 value={draft.display_name}
                 disabled={working || usesExistingRepo}
@@ -776,16 +784,16 @@ export default function ProjectSetupWorkspace({
             <FieldMessage id={projectErrorId}>{projectSection.message}</FieldMessage>
           )}
           {usesExistingRepo && (
-            <small className="sync-setup-hint">The project name follows the connected remote repo.</small>
+            <small className="sync-setup-hint">{t("setup.followsRemote")}</small>
           )}
         </section>
 
         <section className="sync-setup-section">
           <div className="sync-card-heading">
-            <div><strong>Agent</strong></div>
+            <div><strong>{t("sections.agent")}</strong></div>
             {sectionBadge(profilesSection)}
           </div>
-          <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+          <div className="sync-provider-cards" role="group" aria-label={t("agents.group")}>
             {providers.map((descriptor) => {
               const enabled = setupEnabled.has(descriptor.key);
               return (
@@ -795,19 +803,19 @@ export default function ProjectSetupWorkspace({
                       type="checkbox"
                       checked={enabled}
                       disabled={working || (enabled && setupEnabled.size === 1)}
-                      aria-label={`Use ${descriptor.display_name} in this project`}
+                      aria-label={t("agents.use", { provider: descriptor.display_name })}
                       onChange={() => toggleSetupProvider(descriptor.key)}
                     />
                     <ProviderMark provider={descriptor.key} displayName={descriptor.display_name} size={12} />
                     <strong>{descriptor.display_name}</strong>
-                    <span>{descriptor.profile_label}</span>
+                    <span>{backendText(`agentProfile.${descriptor.key}`, descriptor.profile_label)}</span>
                   </label>
                   {enabled ? (
                     <div className="sync-agent-profile-list">
                       {profileRow(descriptor)}
                     </div>
                   ) : (
-                    <small>Not used by this project on this machine.</small>
+                    <small>{t("agents.notUsed")}</small>
                   )}
                 </div>
               );
@@ -820,7 +828,7 @@ export default function ProjectSetupWorkspace({
 
         <section className="sync-setup-section">
           <div className="sync-card-heading">
-            <div><strong>Storage</strong></div>
+            <div><strong>{t("sections.storage")}</strong></div>
             {/* `attention` on this section means one thing — no storage is
                 linked — and the row below already says so as its own answer.
                 A chosen "None yet" is not something to review, and the badge
@@ -840,7 +848,7 @@ export default function ProjectSetupWorkspace({
           <div
             className="setup-pill-row"
             role="radiogroup"
-            aria-label="Storage"
+            aria-label={t("sections.storage")}
             aria-describedby={storageErrorId}
           >
             <button
@@ -853,18 +861,18 @@ export default function ProjectSetupWorkspace({
                  the empty slot means, in the sentence Activity already uses
                  for the same state. "Computer", not "Mac": this build ships
                  for every desktop target. */
-              title="No storage linked yet — sessions stay on this computer"
+              title={t("setup.noneYetTitle")}
               onClick={() => chooseStorage(null)}
             >
               <Icon name="computer" size={12} />
-              <span className="setup-pill-label">None yet</span>
+              <span className="setup-pill-label">{t("setup.noneYet")}</span>
               <span className="setup-pill-check" aria-hidden="true">
                 {!chosenStorageId && <Icon name="check" size={12} />}
               </span>
             </button>
             {storages.map((storage) => {
               const active = chosenStorageId === storage.storage_id;
-              const name = storage.name || "(unnamed)";
+              const name = storage.name || t("shared.unnamed");
               return (
                 <button
                   key={storage.storage_id}
@@ -874,14 +882,14 @@ export default function ProjectSetupWorkspace({
                   /* The name alone is the visible label; the provider it runs
                      on stays in the accessible name and the tooltip, where the
                      select used to spell it out on every row. */
-                  aria-label={`${name} · ${storage.provider_label}`}
-                  title={`${name} · ${storage.provider_label}`}
+                  aria-label={`${name} · ${storageProviderName(storage)}`}
+                  title={`${name} · ${storageProviderName(storage)}`}
                   className={`setup-pill${active ? " active" : ""}`}
                   disabled={working || !storage.available}
                   onClick={() => chooseStorage(storage.storage_id)}
                 >
                   <Icon name={storageIconName(storage.provider, storage.icon)} size={12} />
-                  <span className="setup-pill-label">{name}{storage.available ? "" : " (unavailable)"}</span>
+                  <span className="setup-pill-label">{storage.available ? name : t("shared.unavailable", { name })}</span>
                   <span className="setup-pill-check" aria-hidden="true">
                     {active && <Icon name="check" size={12} />}
                   </span>
@@ -893,14 +901,14 @@ export default function ProjectSetupWorkspace({
             <FieldMessage id={storageErrorId}>{storageSection.message}</FieldMessage>
           )}
           {bundlesLoading && (
-            <small className="sync-setup-inline-status"><span className="status-loader" /> Checking repositories…</small>
+            <small className="sync-setup-inline-status"><span className="status-loader" /> {t("setup.checkingRepositories")}</small>
           )}
         </section>
 
         {showRepositoryChoice && (
           <section className={`sync-setup-section${managedStorage ? " repo-connect" : ""}`}>
             <div className="sync-card-heading">
-              <div><strong>Repository</strong></div>
+              <div><strong>{t("sections.repository")}</strong></div>
               {sectionBadge(repositorySection)}
             </div>
             {repositorySection?.message && repositorySection.state === "blocked" && (
@@ -913,6 +921,8 @@ export default function ProjectSetupWorkspace({
                  the New row previews the address it makes. */
               <RepositoryAddressPicker
                 storage={selectedStorage}
+                /* i18n-ignore: the New row's address preview falls back to this
+                   repository name; it is a name, not copy. */
                 projectName={draft.display_name || "project"}
                 localFingerprint={repositoryFingerprint}
                 listing={managedListing}
@@ -950,7 +960,7 @@ export default function ProjectSetupWorkspace({
               /* An empty storage renders the same option card, alone and
                  selected: the user sees the claim Finish is about to make in
                  the section's own language, never a silent default. */
-              <div className="sync-bundle-match-options" role="radiogroup" aria-label="Repo identity for this project" aria-describedby={repositoryErrorId}>
+              <div className="sync-bundle-match-options" role="radiogroup" aria-label={t("setup.repoIdentity")} aria-describedby={repositoryErrorId}>
                 <button
                   type="button"
                   role="radio"
@@ -967,11 +977,13 @@ export default function ProjectSetupWorkspace({
                       kept independently. */}
                   <span className="setup-choice-mark" aria-hidden="true"><Icon name="git-fork" size={24} /></span>
                   <span className="sync-bundle-match-copy">
-                    <strong>New repository</strong>
+                    <strong>{t("shared.newRepository")}</strong>
                     <span>
                       {remoteBundles.length === 0
-                        ? `Creates “${draft.display_name}” in ${selectedStorage?.name ?? "the selected storage"} — machines joining this repository later will find it there`
-                        : "Keep this project separate"}
+                        ? selectedStorage
+                          ? t("setup.createsIn", { name: draft.display_name, storage: selectedStorage.name })
+                          : t("setup.createsInSelected", { name: draft.display_name })
+                        : t("setup.keepSeparate")}
                     </span>
                   </span>
                 </button>
@@ -1011,7 +1023,7 @@ export default function ProjectSetupWorkspace({
                         <Icon name={bundle.repository_fingerprint ? "git-folder" : "folder"} size={24} />
                       </span>
                       <span className="sync-bundle-match-copy">
-                        <strong>{bundle.display_name}{recommended && <small className="sync-bundle-recommended">Git match</small>}</strong>
+                        <strong>{bundle.display_name}{recommended && <small className="sync-bundle-recommended">{t("setup.gitMatch")}</small>}</strong>
                         <span>{bundle.bundle_id}</span>
                       </span>
                       <span className="sync-bundle-match-meta">{formatRelativeTime(bundle.updated_at)}</span>
@@ -1032,7 +1044,7 @@ export default function ProjectSetupWorkspace({
                   ? { ...current, repository: { ...current.repository, mismatch_acknowledged: checked } }
                   : current)}
               >
-                This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity.
+                {t("shared.unverified")}
               </Acknowledgement>
             )}
           </section>
@@ -1048,19 +1060,19 @@ export default function ProjectSetupWorkspace({
       <footer className="sync-modal-footer sync-setup-footer">
         {(saveState === "saving" || saveState === "error") ? (
           <span className="sync-setup-save-state" aria-live="polite">
-            {saveState === "saving" ? "Saving…" : "Not saved"}
+            {saveState === "saving" ? t("common:saving") : t("common:notSaved")}
           </span>
         ) : folderUncommitted && (
           <span className="sync-setup-save-state" aria-live="polite">
-            Press Enter to use the new folder
+            {t("setup.pressEnter")}
           </span>
         )}
         <div>
           <button type="button" className="btn btn-ghost" onClick={() => onDiscard(draftId)} disabled={finalizing}>
-            Discard
+            {t("setup.discard")}
           </button>
           <button type="button" className="btn btn-primary" disabled={!canFinalize} onClick={() => void finalize()}>
-            {finalizing ? "Finishing…" : selectedStorage ? "Finish" : "Finish locally"}
+            {finalizing ? t("setup.finishing") : selectedStorage ? t("setup.finish") : t("setup.finishLocally")}
           </button>
         </div>
       </footer>

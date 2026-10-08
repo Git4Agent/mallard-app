@@ -392,16 +392,29 @@ export interface MaintenanceActionResult {
   provider: ProviderKey;
   action_id: string;
   ready: boolean;
+  /** English. A finished action's is translated by `summary_code`, with
+   *  `app_name` and `home_path`; a failed one's is an error and has none. */
   summary: string;
+  summary_code?: "close_requested" | "app_already_closed" | "app_restarted" | "app_restarted_with_home" | null;
+  app_name?: string | null;
+  home_path?: string | null;
   facts: Record<string, unknown>;
 }
+
+/** What an after-Pull offer says. Mirrors `AfterPullOfferCode`. */
+export type AfterPullOfferCode = "restart_app" | "restart_app_with_home" | "restart_app_manually";
 
 /** One action a completed Pull offers, declared by the provider adapter. */
 export interface AfterPullActionOffer {
   provider: ProviderKey;
   action_id: string;
+  /** English label and message; translated by `message_code`, with
+   *  `app_name` and `home_path`. */
   label: string;
   message: string;
+  message_code?: AfterPullOfferCode;
+  app_name?: string;
+  home_path?: string | null;
   /** The action can run now; otherwise the message explains what to do
    *  by hand. */
   available: boolean;
@@ -836,10 +849,38 @@ export interface StorageProviderDescriptor {
  *  written by a newer layout. */
 export type StorageDiscoveryMarker = "storage" | "missing" | "unsupported" | "invalid" | "unreadable";
 
-/** One provider fact a candidate row shows as a chip. */
+/** One provider fact a candidate row shows as a chip. The label and value
+ *  are the backend's English; the interface translates by `key` and
+ *  `value_code`, and formats `at`. Mirrors `DiscoveryFact`/`Fact`. */
 export interface StorageDiscoveryFact {
+  key?: StorageDiscoveryFactKey;
   label: string;
   value: string;
+  /** A jurisdiction (`eu`), a Dropbox access tag (`viewer`), or a location
+   *  (`in_dropbox`, `not_mounted`). */
+  value_code?: string | null;
+  /** A date value in epoch seconds: when a bucket was created. */
+  at?: number | null;
+}
+
+export type StorageDiscoveryFactKey = "jurisdiction" | "created" | "access" | "location";
+
+/** What a marker read's detail is: the layout it declares (with
+ *  `marker_layout_version`), or the fixed reason it could not be read.
+ *  Mirrors `MarkerDetailCode`. */
+export type StorageMarkerDetailCode =
+  | "layout"
+  | "timed_out"
+  | "read_failed"
+  | "access_denied"
+  | "could_not_read"
+  | "scan_timed_out";
+
+/** One thing a partial scan skipped, by code: `unreadable_buckets` (with its
+ *  count), `listing_cut`, `folders_partial`. */
+export interface StorageDiscoveryIssue {
+  code: string;
+  count?: number | null;
 }
 
 /** One destination a scan checked. `candidate_id` is a reference inside its
@@ -853,11 +894,16 @@ export interface StorageDiscoveryCandidate {
    *  (a namespace ID); null when the name is the identity within the scope. */
   identity?: string | null;
   marker: StorageDiscoveryMarker;
-  /** The layout version found, or the fixed read error. */
+  /** The layout version found, or the fixed read error, in English. */
   marker_detail?: string | null;
+  marker_detail_code?: StorageMarkerDetailCode | null;
+  /** The version a `layout` detail names. */
+  marker_layout_version?: number | null;
   facts: StorageDiscoveryFact[];
   /** Access limits the row states: a share not mounted, a role that cannot Push. */
   cautions: string[];
+  /** Each caution's code, in `cautions` order: `read_only`. */
+  caution_codes?: string[];
   /** The configured storage that already points at this destination. */
   connected_storage_id?: string | null;
 }
@@ -869,10 +915,16 @@ export interface StorageDiscoveryResult {
   /** Who and where was looked at: the account and jurisdictions, or the
    *  signed-in user and the shares covered. */
   scope: string;
+  /** `jurisdictions`: the scope is `jurisdictions`, in scan order;
+   *  `dropbox_shared_folders`: the shared folders the account can reach. */
+  scope_code?: "jurisdictions" | "dropbox_shared_folders";
+  jurisdictions?: R2Jurisdiction[];
   /** `partial` when a page, a read, or a limit stopped the scan short: the
    *  candidates found still stand, and `issues` says what was skipped. */
   status: "complete" | "partial";
   issues: string[];
+  /** Each issue's code and count, in `issues` order. */
+  issue_codes?: StorageDiscoveryIssue[];
   candidates: StorageDiscoveryCandidate[];
 }
 
@@ -1360,10 +1412,15 @@ export interface RestoreResult {
 export interface BundleReadinessIssue {
   issue_id: string;
   category: "conversations" | "project_files" | "sessions";
+  /** English title and detail; translated by `issue_id` and `severity`,
+   *  with `count` and `provider_name`. */
   title: string;
   detail?: string | null;
   severity: "warning" | "error";
+  count?: number | null;
   provider?: ProviderKey | null;
+  /** The provider's display name a provider-home issue names. */
+  provider_name?: string | null;
   resource_id?: string | null;
   action?: string | null;
 }
@@ -1444,8 +1501,25 @@ export type SessionCountQuality = "exact" | "lower_bound" | "inferred" | "unsupp
 export interface SessionCount {
   value?: number | null;
   quality: SessionCountQuality;
+  /** English; translated by `explanation_code`. */
   explanation?: string | null;
+  explanation_code?: SessionCountExplanation | null;
 }
+
+/** Why a count is not exact. Mirrors `SessionCountExplanation`. */
+export type SessionCountExplanation =
+  | "codex_records_unindexed"
+  | "codex_tool_activity_incomplete"
+  | "codex_phases_inferred"
+  | "codex_checkpoints_outside_transcript"
+  | "claude_records_unindexed"
+  | "claude_tool_activity_incomplete"
+  | "claude_end_turn_missing"
+  | "claude_checkpoints_outside_transcript"
+  | "checkpoints_not_git_worktree"
+  | "checkpoints_inferred"
+  | "tokens_may_be_incomplete"
+  | "tokens_unavailable";
 
 export interface SessionEventCounts {
   prompts: SessionCount;
@@ -1571,7 +1645,15 @@ export interface SessionToolCallPreview {
 
 export interface SessionTurnToolSummary {
   turn_id: string;
-  tool_calls: SessionCount;
+  tool_calls: SessionTurnToolCount;
+}
+
+/** A turn's tool count: spoken, never explained on screen, so it carries no
+ *  explanation code. Mirrors `SessionTurnToolCount`. */
+export interface SessionTurnToolCount {
+  value?: number | null;
+  quality: SessionCountQuality;
+  explanation?: string | null;
 }
 
 /** Where a message's model and thinking level were read from: the Codex
@@ -1687,7 +1769,11 @@ export interface ThreadSyncDecision {
   action: ConversationReviewAction;
   blocker?: ConversationBlocker | null;
   selectable: boolean;
+  /** English: the blocker's own sentence, or one the service words itself,
+   *  whose code and named value (a provider, a read error) are below. */
   blocked_reason?: string | null;
+  reason_code?: string | null;
+  reason_value?: string | null;
 }
 
 export type ConversationWireChildren = "on" | "off";
@@ -1711,7 +1797,10 @@ export interface ThreadSyncEntry {
   state: ThreadSyncState;
   local_present: boolean;
   storage_present: boolean;
+  /** English; translated by `status_detail_code`, with the value it names. */
   status_detail?: string | null;
+  status_detail_code?: string | null;
+  status_detail_value?: string | null;
   local_updated_at?: number | null;
   storage_updated_at?: number | null;
   /**

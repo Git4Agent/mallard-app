@@ -1,6 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import type { ParseKeys } from "i18next";
 import type { ActivityLogLevel, ActivityLogType, LogLine } from "../types";
 import { clockOptions } from "../clock";
+import { t, uiLocale, useTranslation } from "../i18n";
 import { usePreference } from "../preferences";
 import { userFacingRepoTerms } from "../terminology";
 import Icon, { type IconName } from "./Icons";
@@ -25,23 +27,24 @@ interface Props {
   onClose: () => void;
 }
 
-const LOG_TYPES: Array<{ value: ActivityLogType; label: string }> = [
-  { value: "push", label: "Push" },
-  { value: "pull", label: "Pull" },
-  { value: "repair", label: "Repair" },
-  { value: "storage", label: "Storage" },
-  { value: "configuration", label: "Configuration" },
-  { value: "history", label: "History" },
-  { value: "system", label: "System" },
+/* Labels are read when the filter renders, in the language of that moment. */
+const LOG_TYPES: Array<{ value: ActivityLogType; label: () => string }> = [
+  { value: "push", label: () => t("common:push") },
+  { value: "pull", label: () => t("common:pull") },
+  { value: "repair", label: () => t("logs:types.repair") },
+  { value: "storage", label: () => t("logs:types.storage") },
+  { value: "configuration", label: () => t("logs:types.configuration") },
+  { value: "history", label: () => t("logs:types.history") },
+  { value: "system", label: () => t("logs:types.system") },
 ];
 
 export const ACTIVITY_LOG_TYPES = LOG_TYPES.map((option) => option.value);
 
-const LOG_LEVELS: Array<{ value: ActivityLogLevel; label: string }> = [
-  { value: "info", label: "Info" },
-  { value: "success", label: "Success" },
-  { value: "warning", label: "Warning" },
-  { value: "error", label: "Error" },
+const LOG_LEVELS: Array<{ value: ActivityLogLevel; label: ParseKeys<"logs"> }> = [
+  { value: "info", label: "levels.info" },
+  { value: "success", label: "levels.success" },
+  { value: "warning", label: "levels.warning" },
+  { value: "error", label: "levels.error" },
 ];
 
 /** A little over one line: a tail that lags by one arrival is still a tail. */
@@ -73,12 +76,13 @@ export function nextFollowTail(following: boolean, metrics: TailMetrics): boolea
 
 
 function typeSelectionLabel(selected: ActivityLogType[]): string {
-  if (selected.length === LOG_TYPES.length) return "All";
-  if (selected.length === 0) return "None";
+  if (selected.length === LOG_TYPES.length) return t("logs:panel.allTypes");
+  if (selected.length === 0) return t("logs:panel.noTypes");
   if (selected.length === 1) {
-    return LOG_TYPES.find((option) => option.value === selected[0])?.label ?? "1 selected";
+    return LOG_TYPES.find((option) => option.value === selected[0])?.label()
+      ?? t("logs:panel.typesSelected", { count: 1 });
   }
-  return `${selected.length} selected`;
+  return t("logs:panel.typesSelected", { count: selected.length });
 }
 
 /* A log level needs a shape as well as colour (WCAG 1.4.1). Error takes the
@@ -92,15 +96,16 @@ function typeSelectionLabel(selected: ActivityLogType[]): string {
    duplicate, and a glyph on every ordinary row would be noise over the whole
    log. Its slot is still rendered, empty, so the columns beside it stay
    straight whichever level a row happens to be. */
-const LEVEL_MARKS: Partial<Record<ActivityLogLevel, { icon: IconName; label: string }>> = {
-  success: { icon: "check-circle", label: "Success" },
-  warning: { icon: "alert-triangle", label: "Warning" },
-  error: { icon: "octagon-x", label: "Error" },
+const LEVEL_MARKS: Partial<Record<ActivityLogLevel, { icon: IconName; label: ParseKeys<"logs"> }>> = {
+  success: { icon: "check-circle", label: "levels.success" },
+  warning: { icon: "alert-triangle", label: "levels.warning" },
+  error: { icon: "octagon-x", label: "levels.error" },
 };
 
 /* Memoized so an incoming line reconciles one new row instead of every
    retained one. Both props are stable: the formatter is memoized on the clock
-   preference, and each line object is immutable once emitted. */
+   preference and the language, and each line object is immutable once
+   emitted. The row's own hook re-renders it when the language changes. */
 const LogRow = memo(function LogRow({
   line,
   formatter,
@@ -108,7 +113,9 @@ const LogRow = memo(function LogRow({
   line: LogLine;
   formatter: Intl.DateTimeFormat;
 }) {
+  const { t } = useTranslation("logs");
   const mark = LEVEL_MARKS[line.level];
+  const type = line.type ?? "system";
   return (
     <div className={`log-line log-${line.level}`}>
       <span className="log-ts">{formatter.format(line.ts)}</span>
@@ -117,11 +124,13 @@ const LogRow = memo(function LogRow({
           <>
             <Icon name={mark.icon} size={12} />
             {/* The glyph is decorative; the hidden word carries the level. */}
-            <span className="sync-visually-hidden">{mark.label}</span>
+            <span className="sync-visually-hidden">{t(mark.label)}</span>
           </>
         )}
       </span>
-      <span className={`log-type log-type-${line.type ?? "system"}`}>{line.type ?? "system"}</span>
+      {/* The type's word, by its key; a type this build has no word for
+          prints as the backend named it. */}
+      <span className={`log-type log-type-${type}`}>{t(`tag.${type}`, { defaultValue: type })}</span>
       <span className="log-msg">{userFacingRepoTerms(line.message)}</span>
     </div>
   );
@@ -145,6 +154,7 @@ export default function LogPanel({
   onClear,
   onClose,
 }: Props) {
+  const { t, i18n } = useTranslation(["logs", "common"]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const followTailRef = useRef(true);
   const pinnedScrollTopRef = useRef(-1);
@@ -154,13 +164,16 @@ export default function LogPanel({
   // flips the clock preference, and the stamps must follow without waiting
   // for the next log event.
   const clock24 = usePreference("clock24");
+  const language = i18n.language;
   // One formatter for the whole list, not one per line per render.
   // `toLocaleTimeString` builds and throws away an Intl.DateTimeFormat on every
   // call, and this list re-renders on every incoming log event while open.
+  // Rebuilt when the clock preference or the interface language changes.
   const formatter = useMemo(() => {
     void clock24;
-    return new Intl.DateTimeFormat(undefined, clockOptions(true));
-  }, [clock24]);
+    void language;
+    return new Intl.DateTimeFormat(uiLocale(), clockOptions(true));
+  }, [clock24, language]);
 
   const pinToTail = useCallback(() => {
     const body = bodyRef.current;
@@ -237,29 +250,29 @@ export default function LogPanel({
     <div className="log-panel">
       <div className="log-panel-header">
         <div className="log-panel-heading">
-          <span className="log-panel-title">log</span>
+          <span className="log-panel-title">{t("panel.title")}</span>
           {onTypeFiltersChange && (
             <details className="log-type-filter" ref={typeFilterRef}>
-              <summary aria-label={`Filter log by types: ${typeSelectionLabel(typeFilters)}`}>
-                <span className="log-type-filter-key">Type</span>
+              <summary aria-label={t("panel.typeFilter", { selection: typeSelectionLabel(typeFilters) })}>
+                <span className="log-type-filter-key">{t("panel.type")}</span>
                 <span className="log-type-filter-value">{typeSelectionLabel(typeFilters)}</span>
                 <Icon name="chevron-down" size={12} />
               </summary>
-              <div className="log-type-filter-menu" role="group" aria-label="Log types">
+              <div className="log-type-filter-menu" role="group" aria-label={t("panel.types")}>
                 <div className="log-type-filter-bulk-actions">
                   <button
                     type="button"
                     onClick={() => onTypeFiltersChange([...ACTIVITY_LOG_TYPES])}
                     disabled={typeFilters.length === ACTIVITY_LOG_TYPES.length}
                   >
-                    Select all
+                    {t("panel.selectAll")}
                   </button>
                   <button
                     type="button"
                     onClick={() => onTypeFiltersChange([])}
                     disabled={typeFilters.length === 0}
                   >
-                    Deselect all
+                    {t("panel.deselectAll")}
                   </button>
                 </div>
                 {LOG_TYPES.map((option) => (
@@ -274,7 +287,7 @@ export default function LogPanel({
                         onTypeFiltersChange(ACTIVITY_LOG_TYPES.filter((value) => next.has(value)));
                       }}
                     />
-                    <span>{option.label}</span>
+                    <span>{option.label()}</span>
                   </label>
                 ))}
               </div>
@@ -282,14 +295,14 @@ export default function LogPanel({
           )}
           {onLevelFilterChange && (
             <label className="log-filter-control">
-              <span>Level</span>
+              <span>{t("panel.level")}</span>
               <select
-                aria-label="Filter log by level"
+                aria-label={t("panel.levelFilter")}
                 value={levelFilter}
                 onChange={(event) => onLevelFilterChange(event.target.value as ActivityLogLevel | "all")}
               >
-                <option value="all">All</option>
-                {LOG_LEVELS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                <option value="all">{t("panel.allLevels")}</option>
+                {LOG_LEVELS.map((option) => <option key={option.value} value={option.value}>{t(option.label)}</option>)}
               </select>
             </label>
           )}
@@ -298,8 +311,8 @@ export default function LogPanel({
               <input
                 type="search"
                 value={search}
-                placeholder="Search logs"
-                aria-label="Search log"
+                placeholder={t("panel.searchPlaceholder")}
+                aria-label={t("panel.search")}
                 onChange={(event) => onSearchChange(event.target.value)}
                 /* The drawer can sit over an open Push/Pull review, whose own
                    Escape listener would discard it. Clearing the field is what
@@ -317,15 +330,15 @@ export default function LogPanel({
         <div className="log-panel-actions">
           {onManage && (
             <button className="btn btn-ghost log-manage-btn" onClick={onManage}>
-              Manage logs
+              {t("panel.manage")}
             </button>
           )}
           {!onManage && onClear && (
-            <button className="btn btn-ghost log-clear-btn" onClick={onClear} aria-label="Clear log">
-              clear
+            <button className="btn btn-ghost log-clear-btn" onClick={onClear} aria-label={t("panel.clearLabel")}>
+              {t("panel.clear")}
             </button>
           )}
-          <button className="btn btn-ghost" onClick={onClose} title="Close" aria-label="Close log">
+          <button className="btn btn-ghost" onClick={onClose} title={t("common:close")} aria-label={t("panel.closeLabel")}>
             <Icon name="x" size={13} />
           </button>
         </div>
@@ -341,7 +354,7 @@ export default function LogPanel({
             }}
             disabled={loadingOlder}
           >
-            {loadingOlder ? "Loading…" : "Load older logs"}
+            {loadingOlder ? t("common:loading") : t("panel.loadOlder")}
           </button>
         )}
         {error && (
@@ -349,13 +362,13 @@ export default function LogPanel({
              sitting as a named region. Polite, not assertive: a failed read
              does not block the rest of the application. */
           <Notice severity="danger" timing="progress" className="log-load-error">
-            Could not load retained logs: {error}
+            {t("panel.loadFailed", { error })}
           </Notice>
         )}
         {loading && lines.length === 0 ? (
-          <div className="log-empty"><span className="status-loader" /> Loading retained logs…</div>
+          <div className="log-empty"><span className="status-loader" /> {t("panel.loadingRetained")}</div>
         ) : lines.length === 0 ? (
-          <div className="log-empty">No entries match these filters.</div>
+          <div className="log-empty">{t("panel.noMatches")}</div>
         ) : (
           lines.map((line, i) => (
             <LogRow key={line.id ?? `${line.ts}:${i}`} line={line} formatter={formatter} />

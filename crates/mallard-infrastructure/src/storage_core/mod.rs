@@ -23,7 +23,10 @@ pub use connection::{
 };
 pub(crate) use local_store::open_read_only_no_follow;
 pub use local_store::LocalObjectStore;
-pub use marker::{ensure_storage_marker, StorageMarker, MarkerState, classify_storage_marker};
+pub use marker::{
+    classify_storage_marker, ensure_storage_marker, MarkerDetail, MarkerDetailCode, MarkerState,
+    StorageMarker,
+};
 pub(crate) use object_store::sha256_reader;
 pub use object_store::{
     ClaimOutcome, DeleteOutcome, ExpectedObject, ImmutablePutOutcome, ListedObject, ObjectQuery,

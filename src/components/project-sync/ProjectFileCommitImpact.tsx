@@ -1,3 +1,6 @@
+import type { ParseKeys } from "i18next";
+import { useTranslation } from "../../i18n";
+
 export interface ProjectFileCommitImpactCounts {
   add: number;
   replace: number;
@@ -24,31 +27,38 @@ export default function ProjectFileCommitImpact({
   disabled,
   onDeletionApprovedChange,
 }: Props) {
+  const { t } = useTranslation("projects");
   const total = counts.add + counts.replace + projectFileDeletionCount(counts);
   if (total === 0) return null;
 
   const deletionCount = projectFileDeletionCount(counts);
   const deletionCopy = deletionTarget === "storage"
-    ? `Approve removal of ${counts.deleteFile} file${counts.deleteFile === 1 ? "" : "s"} and ${counts.deleteDirectory} folder${counts.deleteDirectory === 1 ? "" : "s"} from storage.`
-    : `Approve deletion of ${counts.deleteFile} local file${counts.deleteFile === 1 ? "" : "s"} and ${counts.deleteDirectory} empty local folder${counts.deleteDirectory === 1 ? "" : "s"}. Files are backed up.`;
+    ? t("impact.approveRemoval", {
+      files: t("impact.files", { count: counts.deleteFile }),
+      folders: t("impact.folders", { count: counts.deleteDirectory }),
+    })
+    : t("impact.approveDeletion", {
+      files: t("impact.localFiles", { count: counts.deleteFile }),
+      folders: t("impact.emptyFolders", { count: counts.deleteDirectory }),
+    });
 
   /* Only the operations this commit performs: a zero says nothing, and four
      of them took the footer's room from the buttons. */
-  const operations: [number, string][] = [
-    [counts.add, "Add"],
-    [counts.replace, "Replace"],
-    [counts.deleteFile, "Delete files"],
-    [counts.deleteDirectory, "Delete folders"],
+  const operations: [number, ParseKeys<"projects">][] = [
+    [counts.add, "impact.add"],
+    [counts.replace, "impact.replace"],
+    [counts.deleteFile, "impact.deleteFiles"],
+    [counts.deleteDirectory, "impact.deleteFolders"],
   ];
 
   return (
     <div
       className={`sync-project-file-commit-impact${deletionCount > 0 ? " with-approval" : ""}`}
-      aria-label="Selected project file impact"
+      aria-label={t("impact.label")}
     >
       <div className="sync-project-file-impact-counts">
         {operations.filter(([count]) => count > 0).map(([count, label]) => (
-          <span key={label}><strong>{count}</strong>{` ${label}`}</span>
+          <span key={label}><strong>{count}</strong>{` ${t(label)}`}</span>
         ))}
       </div>
       {deletionCount > 0 && (
@@ -58,8 +68,8 @@ export default function ProjectFileCommitImpact({
               type="checkbox"
               checked={deletionApproved}
               disabled={disabled}
-              aria-label="Approve the selected project file deletions"
-              title="Approve the selected project file deletions"
+              aria-label={t("impact.approve")}
+              title={t("impact.approve")}
               onChange={(event) => onDeletionApprovedChange(event.target.checked)}
             />
           </span>

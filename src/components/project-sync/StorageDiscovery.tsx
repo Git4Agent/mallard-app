@@ -2,12 +2,17 @@ import { useState, type ReactNode } from "react";
 import type {
   StorageDiscoveryCandidate,
   StorageDiscoveryDescriptor,
+  StorageDiscoveryFact,
+  StorageDiscoveryIssue,
   StorageDiscoveryResult,
   StorageProviderDescriptor,
   StorageSummary,
 } from "../../types";
 import Icon, { storageIconName, type IconName } from "../Icons";
 import Notice from "../notice/Notice";
+import { t, uiLocale, useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
+import { joinAnd } from "../../format";
 
 /**
  * The Use-existing half of a new storage draft: the look into the account,
@@ -37,19 +42,77 @@ export function candidateSelectable(
   return candidate.marker === "storage" && !candidate.connected_storage_id;
 }
 
+/* The scan's sentences are the backend's English; each carries a code (and
+   the values it was built from) that the interface translates by. */
+
+/** The marker read's detail: "layout 1", "access denied". */
+function markerDetail(
+  candidate: Pick<StorageDiscoveryCandidate, "marker_detail" | "marker_detail_code" | "marker_layout_version">,
+): string | undefined {
+  const detail = candidate.marker_detail?.trim();
+  if (!detail || !candidate.marker_detail_code) return detail;
+  return backendText(`discovery.markerDetail.${candidate.marker_detail_code}`, detail, {
+    version: candidate.marker_layout_version ?? "",
+  });
+}
+
+/** A fact chip's label and value. A date is the backend's own in English
+ *  and formatted for the interface's locale otherwise. */
+export function discoveryFact(fact: StorageDiscoveryFact): { label: string; value: string } {
+  if (!fact.key) return fact;
+  const label = backendText(`discovery.fact.${fact.key}`, fact.label);
+  const locale = uiLocale();
+  if (fact.key === "created") {
+    // Cloudflare stamps creation in UTC, which is the day the backend prints.
+    const value = fact.at != null && locale
+      ? new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })
+        .format(fact.at * 1000)
+      : fact.value;
+    return { label, value };
+  }
+  return {
+    label,
+    value: fact.value_code ? backendText(`discovery.${fact.key}.${fact.value_code}`, fact.value) : fact.value,
+  };
+}
+
+/** Where the scan looked: the jurisdictions it read, or the shares. */
+export function discoveryScope(
+  result: Pick<StorageDiscoveryResult, "scope" | "scope_code" | "jurisdictions">,
+): string {
+  if (result.scope_code === "jurisdictions" && result.jurisdictions?.length && uiLocale()) {
+    return joinAnd(result.jurisdictions.map((code) => backendText(`discovery.jurisdiction.${code}`, code)));
+  }
+  return result.scope_code ? backendText(`discovery.scope.${result.scope_code}`, result.scope) : result.scope;
+}
+
+/** The descriptor's discovery words in the interface's language. */
+export function discoveryWords(provider: string, discovery: StorageDiscoveryDescriptor): StorageDiscoveryDescriptor {
+  const word = (field: keyof StorageDiscoveryDescriptor) => backendText(`discovery.${provider}.${field}`, discovery[field]);
+  return {
+    unit: word("unit"),
+    unit_plural: word("unit_plural"),
+    place: word("place"),
+    find_label: word("find_label"),
+    access_hint: word("access_hint"),
+    scanning_hint: word("scanning_hint"),
+    prepare_hint: word("prepare_hint"),
+  };
+}
+
 /** The marker's word for the row and the rung it reads at. The glyph and the
  *  sentence carry the meaning; the colour only seconds them. */
 export function candidateVerdict(
-  candidate: Pick<StorageDiscoveryCandidate, "marker" | "marker_detail">,
+  candidate: Pick<StorageDiscoveryCandidate, "marker" | "marker_detail" | "marker_detail_code" | "marker_layout_version">,
 ): { tone: "ok" | "mute" | "warn" | "bad"; icon: IconName; text: string } {
-  const detail = candidate.marker_detail?.trim();
+  const detail = markerDetail(candidate);
   const withDetail = (text: string) => (detail ? `${text} · ${detail}` : text);
   switch (candidate.marker) {
-    case "storage": return { tone: "ok", icon: "check-circle", text: withDetail("Mallard storage") };
-    case "missing": return { tone: "mute", icon: "ban", text: "No Mallard data" };
-    case "unsupported": return { tone: "warn", icon: "alert-triangle", text: withDetail("Needs a newer Mallard") };
-    case "invalid": return { tone: "bad", icon: "alert-triangle", text: withDetail("Marker is not valid") };
-    case "unreadable": return { tone: "bad", icon: "alert-triangle", text: withDetail("Could not read the marker") };
+    case "storage": return { tone: "ok", icon: "check-circle", text: withDetail(t("storage:discovery.verdict.storage")) };
+    case "missing": return { tone: "mute", icon: "ban", text: t("storage:discovery.verdict.missing") };
+    case "unsupported": return { tone: "warn", icon: "alert-triangle", text: withDetail(t("storage:discovery.verdict.unsupported")) };
+    case "invalid": return { tone: "bad", icon: "alert-triangle", text: withDetail(t("storage:discovery.verdict.invalid")) };
+    case "unreadable": return { tone: "bad", icon: "alert-triangle", text: withDetail(t("storage:discovery.verdict.unreadable")) };
   }
 }
 
@@ -59,15 +122,14 @@ export function discoveryTally(result: Pick<StorageDiscoveryResult, "candidates"
   const count = (marker: StorageDiscoveryCandidate["marker"]) => (
     result.candidates.filter((candidate) => candidate.marker === marker).length
   );
-  const storages = count("storage");
-  const parts = [
-    `${storages} Mallard storage${storages === 1 ? "" : "s"}`,
-    `${count("missing")} without Mallard data`,
+  const parts: string[] = [
+    t("storage:discovery.tally.storages", { count: count("storage") }),
+    t("storage:discovery.tally.missing", { count: count("missing") }),
   ];
   const unsupported = count("unsupported");
-  if (unsupported > 0) parts.push(`${unsupported} unsupported`);
+  if (unsupported > 0) parts.push(t("storage:discovery.tally.unsupported", { count: unsupported }));
   const failed = count("invalid") + count("unreadable");
-  if (failed > 0) parts.push(`${failed} could not be read`);
+  if (failed > 0) parts.push(t("storage:discovery.tally.failed", { count: failed }));
   return parts.join(" · ");
 }
 
@@ -105,6 +167,7 @@ export function CandidateRow({ descriptor, candidate, disabled, connectedName, c
   verb?: ReactNode;
   onOpenStorage: (storageId: string) => void;
 }) {
+  const { t } = useTranslation(["storage", "common"]);
   const verdict = candidateVerdict(candidate);
   const classes = [
     "storage-found-row",
@@ -122,7 +185,7 @@ export function CandidateRow({ descriptor, candidate, disabled, connectedName, c
           checked={choice.selected}
           disabled={disabled || !candidateSelectable(candidate)}
           onChange={() => choice.onSelect(candidate.candidate_id)}
-          aria-label={`Use ${candidate.name}`}
+          aria-label={t("discovery.use", { name: candidate.name })}
         />
       )}
       <span className="sync-storage-repository-icon"><Icon name={storageIconName(descriptor.key, descriptor.icon)} size={14} /></span>
@@ -136,24 +199,30 @@ export function CandidateRow({ descriptor, candidate, disabled, connectedName, c
         </span>
       </span>
       <span className="storage-found-facts">
-        {candidate.facts.map((fact) => (
-          <span key={fact.label} className="sync-storage-repo-chip"><span>{fact.label}</span><b>{fact.value}</b></span>
-        ))}
-        {candidate.cautions.map((caution) => (
-          <span key={caution} className="storage-found-caution"><Icon name="alert-triangle" size={12} /> {caution}</span>
-        ))}
+        {candidate.facts.map((fact) => {
+          const { label, value } = discoveryFact(fact);
+          return <span key={fact.label} className="sync-storage-repo-chip"><span>{label}</span><b>{value}</b></span>;
+        })}
+        {candidate.cautions.map((caution, index) => {
+          const code = candidate.caution_codes?.[index];
+          return (
+            <span key={caution} className="storage-found-caution">
+              <Icon name="alert-triangle" size={12} /> {code ? backendText(`discovery.caution.${code}`, caution) : caution}
+            </span>
+          );
+        })}
       </span>
       <span className="storage-found-verb">
         {candidate.connected_storage_id ? (
           <>
-            <span className="storage-found-connected"><Icon name="check" size={12} /> Connected · {connectedName ?? "another storage"}</span>
+            <span className="storage-found-connected"><Icon name="check" size={12} /> {t("discovery.connected", { name: connectedName ?? t("discovery.anotherStorage") })}</span>
             <button
               type="button"
               className="btn btn-ghost"
               disabled={disabled}
               onClick={() => onOpenStorage(candidate.connected_storage_id!)}
             >
-              Open
+              {t("common:open")}
             </button>
           </>
         ) : verb}
@@ -176,6 +245,7 @@ export function CandidateGroups({ result, unitPlural, choice, row }: {
   choice: boolean;
   row: (candidate: StorageDiscoveryCandidate) => ReactNode;
 }) {
+  const { t } = useTranslation("storage");
   const [othersOpen, setOthersOpen] = useState(false);
   const found = result.candidates.filter((candidate) => candidate.marker === "storage");
   const newer = result.candidates.filter((candidate) => candidate.marker === "unsupported");
@@ -183,23 +253,23 @@ export function CandidateGroups({ result, unitPlural, choice, row }: {
   const failed = result.candidates.filter((candidate) => candidate.marker === "invalid" || candidate.marker === "unreadable");
   if (result.candidates.length === 0) return null;
   return (
-    <div className="storage-found-list" role={choice ? "radiogroup" : undefined} aria-label={`${unitPlural} found`}>
+    <div className="storage-found-list" role={choice ? "radiogroup" : undefined} aria-label={t("discovery.found", { units: unitPlural })}>
       {found.length > 0 && (
         <>
-          <GroupHead label="Mallard storages" count={found.length} />
+          <GroupHead label={t("discovery.group.storages")} count={found.length} />
           {found.map(row)}
         </>
       )}
       {newer.length > 0 && (
         <>
-          <GroupHead label="Needs a newer Mallard" count={newer.length} />
+          <GroupHead label={t("discovery.group.newer")} count={newer.length} />
           {newer.map(row)}
         </>
       )}
       {others.length > 0 && (
         <>
           <GroupHead
-            label={`Other ${unitPlural} — no Mallard data`}
+            label={t("discovery.group.others", { units: unitPlural })}
             count={others.length}
             open={othersOpen}
             onToggle={() => setOthersOpen((open) => !open)}
@@ -209,7 +279,7 @@ export function CandidateGroups({ result, unitPlural, choice, row }: {
       )}
       {failed.length > 0 && (
         <>
-          <GroupHead label="Could not be checked" count={failed.length} />
+          <GroupHead label={t("discovery.group.failed")} count={failed.length} />
           {failed.map(row)}
         </>
       )}
@@ -220,10 +290,21 @@ export function CandidateGroups({ result, unitPlural, choice, row }: {
 /** A short list is not an empty one: the box says what the scan skipped so
  *  a storage that would have been listed is not taken for absent. The verb
  *  that scans again lives on the line above it, not here. */
-export function ScanIncompleteNotice({ issues }: { issues: string[] }) {
+export function ScanIncompleteNotice({ issues, codes }: {
+  issues: string[];
+  /** Each issue's code and count, in `issues` order. */
+  codes?: StorageDiscoveryIssue[];
+}) {
+  const { t } = useTranslation("storage");
+  const sentences = issues.map((issue, index) => {
+    const code = codes?.[index];
+    return code ? backendText(`discovery.issue.${code.code}`, issue, { count: code.count ?? "" }) : issue;
+  });
+  // English sentences are spaced; Chinese ones end in 。 and run on.
+  const gap = uiLocale() ? "" : " ";
   return (
-    <Notice severity="warning" timing="blocking" className="storage-found-notice" title="Scan incomplete.">
-      {issues.join(" ")} A Mallard storage there would not be listed.
+    <Notice severity="warning" timing="blocking" className="storage-found-notice" title={t("discovery.scanIncomplete")}>
+      {[...sentences, t("discovery.scanIncompleteTail")].join(gap)}
     </Notice>
   );
 }
@@ -238,14 +319,15 @@ export function DiscoveryEmpty({ place, unit, sentence, disabled, onCreateInstea
   /** The empty scan's way on: back to the Create-new door. */
   onCreateInstead: () => void;
 }) {
+  const { t } = useTranslation("storage");
   return (
     <div className="storage-found-empty">
       <Icon name="search" size={24} />
-      <strong>No Mallard storage in {place}.</strong>
+      <strong>{t("discovery.emptyTitle", { place })}</strong>
       <span>{sentence}</span>
       <span className="storage-found-empty-verbs">
         <button type="button" className="btn btn-primary" onClick={onCreateInstead} disabled={disabled}>
-          Create a new {unit} instead
+          {t("discovery.createInstead", { unit })}
         </button>
       </span>
     </div>
@@ -259,17 +341,18 @@ export function ManualEntryRow({ manualEntry, disabled, onToggle }: {
   disabled: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation("storage");
   return (
     <div className="storage-setup-route-row" role="note">
       <Icon name="info" size={13} />
-      <span className="storage-setup-route-label">By hand</span>
-      <span className="storage-setup-guide-copy">Already hold the connection values? Paste them instead.</span>
+      <span className="storage-setup-route-label">{t("discovery.byHand")}</span>
+      <span className="storage-setup-guide-copy">{t("discovery.byHandHint")}</span>
       <button
         type="button"
         className="btn storage-manual-toggle"
         aria-expanded={manualEntry}
-        aria-label={manualEntry ? "Hide fields" : "Enter by hand"}
-        title={manualEntry ? "Hide fields" : "Enter by hand"}
+        aria-label={manualEntry ? t("shared.hideFields") : t("shared.enterByHand")}
+        title={manualEntry ? t("shared.hideFields") : t("shared.enterByHand")}
         onClick={onToggle}
         disabled={disabled}
       >
@@ -291,24 +374,27 @@ function DiscoveryResults({ descriptor, discovery, result, selectedId, storages,
   onOpenStorage: (storageId: string) => void;
   onCreateInstead: () => void;
 }) {
+  const { t } = useTranslation("storage");
+  const words = discoveryWords(descriptor.key, discovery);
   const checked = result.candidates.length;
+  const nouns = { count: checked, unit: words.unit, units: words.unit_plural };
   const found = result.candidates.filter((candidate) => candidate.marker === "storage").length;
   return (
     <>
       <div className="storage-found-scope" role="status">
         <Icon name="search" size={13} />
         <span className="storage-found-scope-text">
-          <span>{result.scope} · {checked} {checked === 1 ? discovery.unit : discovery.unit_plural} checked, read-only.</span>
+          <span>{t("discovery.checked", { ...nouns, scope: discoveryScope(result) })}</span>
           <code>{discoveryTally(result)}</code>
         </span>
         <button type="button" className="btn-link" onClick={onScan} disabled={disabled}>
-          <Icon name="refresh" size={11} /> Scan again
+          <Icon name="refresh" size={11} /> {t("shared.scanAgain")}
         </button>
       </div>
-      {result.status === "partial" && <ScanIncompleteNotice issues={result.issues} />}
+      {result.status === "partial" && <ScanIncompleteNotice issues={result.issues} codes={result.issue_codes} />}
       <CandidateGroups
         result={result}
-        unitPlural={discovery.unit_plural}
+        unitPlural={words.unit_plural}
         choice
         row={(candidate) => (
           <CandidateRow
@@ -326,9 +412,9 @@ function DiscoveryResults({ descriptor, discovery, result, selectedId, storages,
       />
       {found === 0 && (
         <DiscoveryEmpty
-          place={discovery.place}
-          unit={discovery.unit}
-          sentence={`${checked} ${checked === 1 ? discovery.unit : discovery.unit_plural} checked; none holds Mallard data. Nothing was changed.`}
+          place={words.place}
+          unit={words.unit}
+          sentence={t("discovery.noneFound", nouns)}
           disabled={disabled}
           onCreateInstead={onCreateInstead}
         />
@@ -371,24 +457,26 @@ export function StorageDiscoveryPanel({
   /** The empty scan's way on: back to the Create-new door. */
   onCreateInstead: () => void;
 }) {
+  const { t } = useTranslation(["storage", "common"]);
+  const words = discoveryWords(descriptor.key, discovery);
   return (
     <>
       {state.kind === "scanning" ? (
         <div className="storage-setup-guide" role="status">
-          <span className="storage-setup-guide-wait"><span className="status-loader" /> {discovery.scanning_hint}</span>
-          <button type="button" className="btn-link" onClick={onCancelScan}>Cancel</button>
+          <span className="storage-setup-guide-wait"><span className="status-loader" /> {words.scanning_hint}</span>
+          <button type="button" className="btn-link" onClick={onCancelScan}>{t("common:cancel")}</button>
         </div>
       ) : state.kind === "preparing" ? (
         <div className="storage-setup-guide" role="status">
           <span className="storage-setup-guide-wait">
-            <span className="status-loader" /> Approve access to {state.candidate.name} in your browser. {discovery.prepare_hint}
+            <span className="status-loader" /> {t("discovery.approveAccess", { name: state.candidate.name })} {words.prepare_hint}
           </span>
         </div>
       ) : (
         <div className="storage-setup-route-row" role="note">
           <Icon name="search" size={13} />
-          <span className="storage-setup-route-label">Existing storage</span>
-          <span className="storage-setup-guide-copy">{discovery.access_hint}</span>
+          <span className="storage-setup-route-label">{t("discovery.existing")}</span>
+          <span className="storage-setup-guide-copy">{words.access_hint}</span>
           {state.kind === "idle" && (
             <button
               type="button"
@@ -396,7 +484,7 @@ export function StorageDiscoveryPanel({
               onClick={onScan}
               disabled={disabled}
             >
-              <Icon name="search" size={13} /> {discovery.find_label}
+              <Icon name="search" size={13} /> {words.find_label}
             </button>
           )}
         </div>
@@ -406,12 +494,12 @@ export function StorageDiscoveryPanel({
           <Icon name="alert-triangle" size={13} className="notice-mark" />
           <div className="notice-body">
             <p className="notice-line">
-              <strong className="notice-type">Error ·</strong>{" "}
-              <strong className="notice-lead">Could not look in {discovery.place}.</strong>{" "}
+              <strong className="notice-type">{t("shared.errorType")}</strong>{" "}
+              <strong className="notice-lead">{t("discovery.lookFailed", { place: words.place })}</strong>{" "}
               {state.message}
             </p>
           </div>
-          <button type="button" className="btn btn-primary" onClick={onScan} disabled={disabled}>Try again</button>
+          <button type="button" className="btn btn-primary" onClick={onScan} disabled={disabled}>{t("common:tryAgain")}</button>
         </div>
       )}
       {(state.kind === "result" || state.kind === "preparing") && (

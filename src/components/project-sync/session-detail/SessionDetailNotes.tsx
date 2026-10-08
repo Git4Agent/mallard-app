@@ -1,11 +1,16 @@
 import type { SessionDetailWarning } from "../../../types";
 import Icon from "../../Icons";
-import { highestSeverity, SEVERITY_ICON, SEVERITY_LABEL } from "../../notice/Notice";
+import { highestSeverity, SEVERITY_ICON, severityLabel } from "../../notice/Notice";
 import { PathBarPopover } from "../../sync-review/SyncPathBar";
+import { useTranslation } from "../../../i18n";
+import { backendText } from "../../../i18n/backend";
 
 /* Tool calls are off by default, so the note about calls that never recorded
    a result offers to show them. */
 const TOOL_CALL_NOTE = "incomplete_tool_call";
+
+/** A note's sentence: the backend's English, translated by its code. */
+const noteText = (note: SessionDetailWarning) => backendText(`sessionWarning.${note.code}`, note.message);
 
 /**
  * How the transcript was read, as one chip at the end of the facts: the
@@ -21,26 +26,27 @@ export default function SessionDetailNotes({
   /** Null while tool calls are already shown. */
   onShowToolCalls: (() => void) | null;
 }) {
+  const { t } = useTranslation("session");
   const rung = highestSeverity(notes.map((note) => note.severity));
   if (rung === null) return null;
-  const count = `${notes.length} ${notes.length === 1 ? "note" : "notes"}`;
+  const count = notes.length;
   return (
     <>
       <PathBarPopover
         id="session-notes"
-        label="Notes on this session"
+        label={t("notes.title")}
         className={`session-detail-chip session-detail-notes-chip ${rung}`}
-        ariaLabel={`${count} on this session`}
-        face={<><Icon name={SEVERITY_ICON[rung]} size={12} />{count}</>}
+        ariaLabel={t("notes.onSession", { count })}
+        face={<><Icon name={SEVERITY_ICON[rung]} size={12} />{t("notes.count", { count })}</>}
       >
         {(close) => (
           <div className="session-detail-notes">
-            <p className="session-detail-notes-title">Notes on this session</p>
+            <p className="session-detail-notes-title">{t("notes.title")}</p>
             {notes.map((note) => (
               <p key={`${note.code}:${note.message}`} className={`session-detail-note ${note.severity}`}>
                 <Icon name={SEVERITY_ICON[note.severity]} size={12} />
                 <span>
-                  <b>{SEVERITY_LABEL[note.severity]} ·</b> {note.message}
+                  <b>{severityLabel(note.severity)} ·</b> {noteText(note)}
                   {note.code === TOOL_CALL_NOTE && onShowToolCalls && (
                     <button
                       type="button"
@@ -49,7 +55,7 @@ export default function SessionDetailNotes({
                         onShowToolCalls();
                         close(true);
                       }}
-                    >Show tool calls</button>
+                    >{t("notes.showToolCalls")}</button>
                   )}
                 </span>
               </p>
@@ -62,7 +68,7 @@ export default function SessionDetailNotes({
           printed here in flow, hidden visually, so a screen reader meets them
           where the chip stands without opening anything. */}
       <span className="sync-visually-hidden">
-        {notes.map((note) => `${SEVERITY_LABEL[note.severity]}: ${note.message}`).join(" ")}
+        {notes.map((note) => t("notes.spoken", { severity: severityLabel(note.severity), message: noteText(note) })).join(" ")}
       </span>
     </>
   );

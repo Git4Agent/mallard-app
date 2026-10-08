@@ -2,6 +2,8 @@ import type { SyncOutcomeView, SyncOutcomeRow, SyncOutcomeStat, OutcomeActionPre
 import type {
   AfterPullActionOffer,
   BundleReadiness,
+  BundleReadinessIssue,
+  MaintenanceActionResult,
   ProjectOperationResult,
   PullReview,
   RestoreResult,
@@ -10,6 +12,8 @@ import type {
 import { compactThreadTitle, syncHoldDetail } from "./ProjectActivityPage";
 import { pushReviewPullHolds } from "./PushResourceWorkspace";
 import { pullActionResourceIds, type PullReviewItem } from "./pullReviewModel";
+import { t } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 
 export type SyncOutcomeAction =
   /** A follow-up the provider declared for a finished Pull. Available offers
@@ -29,12 +33,52 @@ export interface SyncOutcome extends SyncOutcomeView<SyncOutcomeAction> {
   storageId: string;
 }
 
-function plural(count: number, one: string, many = `${one}s`): string {
-  return count === 1 ? one : many;
+/* An outcome is built once, when its Push or Pull lands, in the language
+   active then; its titles and reasons from the backend stay as written. */
+
+/* Readiness issues, after-Pull offers and maintenance results are the
+   backend's English, each with a code and the values it was built from. */
+
+/** The `readiness.<key>` an issue is worded by, or null when the values
+ *  its sentence needs are missing. */
+function readinessKey(issue: BundleReadinessIssue): string | null {
+  if (issue.issue_id === `provider-home-${issue.provider}`) return issue.provider_name ? "provider-home" : null;
+  if (issue.issue_id === "conversation-conflicts" || issue.issue_id === "restore-project-data") {
+    return issue.count == null ? null : issue.issue_id;
+  }
+  return issue.issue_id;
+}
+
+export function readinessIssueText(issue: BundleReadinessIssue): { title: string; detail?: string | null } {
+  const key = readinessKey(issue);
+  if (!key) return { title: issue.title, detail: issue.detail };
+  const values = { count: issue.count ?? "", provider: issue.provider_name ?? "" };
+  const detail = key === "restore-project-data" ? `detail.${issue.severity}` : "detail";
+  return {
+    title: backendText(`readiness.${key}.title`, issue.title, values),
+    detail: issue.detail ? backendText(`readiness.${key}.${detail}`, issue.detail, values) : issue.detail,
+  };
+}
+
+function offerText(offer: AfterPullActionOffer, part: "label" | "message"): string {
+  return offer.message_code && offer.app_name
+    ? backendText(`afterPull.${offer.message_code}.${part}`, offer[part], { app: offer.app_name, path: offer.home_path ?? "" })
+    : offer[part];
+}
+
+/** What a maintenance action did. A failed one's summary is an error and
+ *  stays as the backend wrote it. */
+export function maintenanceSummary(result: MaintenanceActionResult): string {
+  return result.summary_code
+    ? backendText(`maintenanceResult.${result.summary_code}`, result.summary, {
+      app: result.app_name ?? "",
+      path: result.home_path ?? "",
+    })
+    : result.summary;
 }
 
 function displayThreadTitle(value: string): string {
-  return compactThreadTitle(value).trim() || "Untitled session";
+  return compactThreadTitle(value).trim() || t("reviews:review.untitledSession");
 }
 
 export function buildPushOutcome({
@@ -121,13 +165,13 @@ export function buildPushOutcome({
     {
       icon: "upload",
       value: String(pushedCount),
-      label: attention > 0 ? "pushed" : plural(pushedCount, "session"),
+      label: attention > 0 ? t("reviews:outcome.pushed") : t("reviews:nouns.session", { count: pushedCount }),
     },
     ...(heldCount > 0
-      ? [{ icon: "git-compare-arrows" as const, value: String(heldCount), label: "held for Pull" }]
+      ? [{ icon: "git-compare-arrows" as const, value: String(heldCount), label: t("reviews:outcome.heldForPull") }]
       : []),
     ...(failed.length > 0
-      ? [{ icon: "octagon-x" as const, value: String(failed.length), label: "not pushed" }]
+      ? [{ icon: "octagon-x" as const, value: String(failed.length), label: t("reviews:outcome.notPushed") }]
       : []),
     ...(result.revision != null
       ? [{ icon: "git-branch" as const, label: "Version", value: String(result.revision), lead: true }]
@@ -139,17 +183,17 @@ export function buildPushOutcome({
     storageId,
     tone: attention > 0 ? "warning" : "success",
     title: attention > 0
-      ? `Pushed ${pushedCount} of ${pushedCount + attention} sessions`
-      : "Push complete",
+      ? t("reviews:outcome.pushedSome", { pushed: pushedCount, total: pushedCount + attention })
+      : t("reviews:outcome.pushComplete"),
     stats,
     rows,
     actions: heldCount > 0
-      ? [{ kind: "open_pull", label: "Open Pull review" }]
+      ? [{ kind: "open_pull", label: t("reviews:review.openPull") }]
       : [],
     defaultOpen: attention > 0,
     technical: [
-      ...(result.message ? [{ label: "Message", value: result.message }] : []),
-      ...(result.operation_id ? [{ label: "Operation", value: result.operation_id }] : []),
+      ...(result.message ? [{ label: t("reviews:outcome.message"), value: result.message }] : []),
+      ...(result.operation_id ? [{ label: t("reviews:outcome.operation"), value: result.operation_id }] : []),
     ],
   };
 }
@@ -222,7 +266,7 @@ export function buildPullOutcome({
       // Use the preserved marker title shown in the provider's session list.
       title: displayThreadTitle(thread.preserved_display_title),
       status: "preserved" as const,
-      reason: "Storage history was restored and the previous local history was kept as an independent session.",
+      reason: t("reviews:outcome.preservedReason"),
       threadId: thread.preserved_thread_id,
     })),
     ...failures.map((failure) => {
@@ -231,25 +275,28 @@ export function buildPullOutcome({
         key: failure.action_id,
         title: displayThreadTitle(resourceId
           ? nameFor(resourceId)
-          : failure.display_name ?? "Restore action"),
+          : failure.display_name ?? t("reviews:outcome.restoreAction")),
         status: "failed" as const,
         reason: failure.message,
         threadId: resourceId ? threadByResource.get(resourceId) : undefined,
       };
     }),
-    ...readinessProblems.map((issue) => ({
-      key: issue.issue_id,
-      title: issue.title,
-      status: "failed" as const,
-      reason: issue.detail,
-    })),
+    ...readinessProblems.map((issue) => {
+      const text = readinessIssueText(issue);
+      return {
+        key: issue.issue_id,
+        title: text.title,
+        status: "failed" as const,
+        reason: text.detail,
+      };
+    }),
     ...notPulled.map((actionId) => {
       const resourceId = resourceByAction.get(actionId);
       return {
         key: actionId,
         title: resourceId
           ? displayThreadTitle(nameFor(resourceId))
-          : fileTitle(actionId) ?? "Restore action",
+          : fileTitle(actionId) ?? t("reviews:outcome.restoreAction"),
         status: "not_pulled" as const,
         threadId: resourceId ? threadByResource.get(resourceId) : undefined,
       };
@@ -262,9 +309,9 @@ export function buildPullOutcome({
   if (baselineStalled) {
     rows.push({
       key: `${result.plan_id ?? "plan"}:baseline`,
-      title: "Push is still blocked",
+      title: t("reviews:outcome.stillBlocked"),
       status: "held",
-      reason: "Required changes were not applied. Pull them to unblock Push.",
+      reason: t("reviews:outcome.stillBlockedReason"),
     });
   }
 
@@ -275,29 +322,29 @@ export function buildPullOutcome({
   const afterPullActions: SyncOutcomeAction[] = !needsAttention
     ? result.after_pull_actions.map((offer) => ({
       kind: "after_pull_action",
-      label: offer.label,
-      title: offer.message,
+      label: offerText(offer, "label"),
+      title: offerText(offer, "message"),
       offer,
     }))
     : [];
 
   const stats: SyncOutcomeStat[] = [
-    { icon: "download", value: String(restored.length), label: "restored" },
+    { icon: "download", value: String(restored.length), label: t("reviews:outcome.restored") },
     ...(preserved.length > 0
-      ? [{ icon: "git-fork" as const, value: String(preserved.length), label: "kept independently" }]
+      ? [{ icon: "git-fork" as const, value: String(preserved.length), label: t("reviews:outcome.keptIndependently") }]
       : []),
     ...(failures.length > 0
       ? [{
         icon: "octagon-x" as const,
         value: String(failures.length),
-        label: "failed",
+        label: t("reviews:outcome.failed"),
       }]
       : []),
     ...(notPulled.length > 0
       ? [{
         icon: "git-compare-arrows" as const,
         value: String(notPulled.length),
-        label: "not pulled",
+        label: t("reviews:outcome.notPulled"),
       }]
       : []),
     { icon: "git-branch", label: "Version", value: String(plan.revision), lead: true },
@@ -310,9 +357,9 @@ export function buildPullOutcome({
       && stopped === null
       && (readinessProblems.length > 0 || error)
       && result.plan_id
-      ? [{ kind: "recheck", label: "Recheck" }]
+      ? [{ kind: "recheck", label: t("reviews:outcome.recheck") }]
       : needsAttention
-        ? [{ kind: "open_pull", label: "Open Pull review" }]
+        ? [{ kind: "open_pull", label: t("reviews:review.openPull") }]
         : [];
 
   // A session's Pull names the session. Its reviewed baseline never moves,
@@ -328,27 +375,27 @@ export function buildPullOutcome({
     tone: needsAttention ? "warning" : "success",
     message: stopped ?? undefined,
     title: stopped !== null
-      ? "Pull stopped"
+      ? t("reviews:outcome.pullStopped")
       : problemCount > 0
-      ? `${problemCount} ${plural(problemCount, "change")} ${problemCount === 1 ? "needs" : "need"} attention`
+      ? t("reviews:outcome.needsAttention", { count: problemCount })
       : baselineStalled
-        ? "Pull complete — Push still blocked"
+        ? t("reviews:outcome.pullBlocked")
         : pulledSession
-          ? `Pulled “${displayThreadTitle(nameFor(pulledSession.resource_id))}”`
+          ? t("reviews:outcome.pulledSession", { title: displayThreadTitle(nameFor(pulledSession.resource_id)) })
         : restored.length + preserved.length === 0
           // The acknowledge-only apply: nothing was taken, the reviewed
           // baseline moved. "Pull complete · 0 restored" would claim a Pull
           // that never happened.
-          ? "Nothing pulled — storage marked as reviewed"
-          : "Pull complete",
+          ? t("reviews:outcome.markedReviewed")
+          : t("reviews:outcome.pullComplete"),
     stats,
     rows,
     actions,
     defaultOpen: needsAttention,
     technical: [
-      ...(error ? [{ label: "Error", value: error }] : []),
-      ...(result.message ? [{ label: "Message", value: result.message }] : []),
-      ...(result.plan_id ? [{ label: "Plan", value: result.plan_id }] : []),
+      ...(error ? [{ label: t("reviews:outcome.error"), value: error }] : []),
+      ...(result.message ? [{ label: t("reviews:outcome.message"), value: result.message }] : []),
+      ...(result.plan_id ? [{ label: t("reviews:outcome.plan"), value: result.plan_id }] : []),
     ],
   };
 }

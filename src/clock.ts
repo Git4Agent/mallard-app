@@ -1,3 +1,4 @@
+import { t, uiLocale } from "./i18n";
 import { getPreference } from "./preferences";
 
 /**
@@ -27,19 +28,25 @@ export function toEpochMilliseconds(value: number): number {
   return value > 10_000_000_000 ? value : value * 1_000;
 }
 
+/** Under a day, how long ago: `just now`, `5m ago`, `3h ago`; null past
+ *  that, where callers print a date instead. */
+export function formatElapsed(milliseconds: number): string | null {
+  if (milliseconds < 60_000) return t("format:justNow");
+  if (milliseconds < 3_600_000) return t("format:minutesAgo", { value: Math.floor(milliseconds / 60_000) });
+  if (milliseconds < 86_400_000) return t("format:hoursAgo", { value: Math.floor(milliseconds / 3_600_000) });
+  return null;
+}
+
 /** How long ago, coarsely: `just now`, `5m ago`, `3h ago`, then the date.
  *  Seconds or milliseconds, as `toEpochMilliseconds` reads them. */
 export function formatRelativeTime(epoch?: number): string {
-  if (!epoch) return "Unknown";
-  const delta = Date.now() - toEpochMilliseconds(epoch);
-  if (delta < 60_000) return "just now";
-  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
-  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
-  return new Date(toEpochMilliseconds(epoch)).toLocaleDateString();
+  if (!epoch) return t("format:unknown");
+  return formatElapsed(Date.now() - toEpochMilliseconds(epoch))
+    ?? new Date(toEpochMilliseconds(epoch)).toLocaleDateString(uiLocale());
 }
 
 export function formatDateTime(milliseconds: number): string {
-  return new Date(milliseconds).toLocaleString(undefined, {
+  return new Date(milliseconds).toLocaleString(uiLocale(), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -47,23 +54,27 @@ export function formatDateTime(milliseconds: number): string {
   });
 }
 
-let fullDateFormatter: Intl.DateTimeFormat | null = null;
-let fullClockFormatter: Intl.DateTimeFormat | null = null;
-let fullClockFormatterIs24Hour: boolean | null = null;
+/* Built once per locale and clock setting: constructing an Intl formatter
+   costs far more than formatting with one. */
+const fullDateFormatters = new Map<string, Intl.DateTimeFormat>();
+const fullClockFormatters = new Map<string, Intl.DateTimeFormat>();
 
 export function formatFullDateTime(seconds: number): string {
   const when = new Date(seconds * 1_000);
-  fullDateFormatter ??= new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  const clock24 = getPreference("clock24");
-  if (fullClockFormatter === null || fullClockFormatterIs24Hour !== clock24) {
-    fullClockFormatter = new Intl.DateTimeFormat(undefined, clockOptions());
-    fullClockFormatterIs24Hour = clock24;
+  const locale = uiLocale();
+  const dateKey = locale ?? "";
+  let dateFormatter = fullDateFormatters.get(dateKey);
+  if (!dateFormatter) {
+    dateFormatter = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", year: "numeric" });
+    fullDateFormatters.set(dateKey, dateFormatter);
   }
-  return `${fullDateFormatter.format(when)} at ${fullClockFormatter.format(when)}`;
+  const clockKey = `${dateKey}|${getPreference("clock24")}`;
+  let clockFormatter = fullClockFormatters.get(clockKey);
+  if (!clockFormatter) {
+    clockFormatter = new Intl.DateTimeFormat(locale, clockOptions());
+    fullClockFormatters.set(clockKey, clockFormatter);
+  }
+  return t("format:dateAtTime", { date: dateFormatter.format(when), time: clockFormatter.format(when) });
 }
 
 /**
@@ -77,13 +88,17 @@ export function formatDuration(from: number, to: number): string | null {
     Math.round((toEpochMilliseconds(to) - toEpochMilliseconds(from)) / 1_000),
   );
   if (seconds === 0) return null;
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return t("format:seconds", { value: seconds });
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return t("format:minutes", { value: minutes });
   const hours = Math.floor(minutes / 60);
   const restMinutes = minutes % 60;
-  if (hours < 24) return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`;
+  if (hours < 24) {
+    return restMinutes
+      ? t("format:hoursMinutes", { hours, minutes: restMinutes })
+      : t("format:hours", { value: hours });
+  }
   const days = Math.floor(hours / 24);
   const restHours = hours % 24;
-  return restHours ? `${days}d ${restHours}h` : `${days}d`;
+  return restHours ? t("format:daysHours", { days, hours: restHours }) : t("format:days", { value: days });
 }

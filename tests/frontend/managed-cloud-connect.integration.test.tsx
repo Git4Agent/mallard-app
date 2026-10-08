@@ -15,6 +15,13 @@ import RepositoryAddressPicker, {
   repositoryVerdict,
 } from "../../src/components/project-sync/RepositoryAddressPicker";
 import { deriveRepositoryName, nameRefusal, predictRepositoryAddress, type AddressPrediction } from "../../src/components/managed-cloud/repositoryAddress";
+import { en } from "../../src/i18n/en";
+import { i18n } from "../../src/i18n";
+import ManagedCloudChip, { ManagedCloudPanel } from "../../src/components/managed-cloud/ManagedCloudChip";
+import ManagedCloudAddress from "../../src/components/managed-cloud/ManagedCloudAddress";
+import PublishVersionSheet from "../../src/components/managed-cloud/PublishVersionSheet";
+import { discardDraftQuestion } from "../../src/components/managed-cloud/managedCloudLink";
+import type { ManagedCloudLink, ManagedCloudStatus } from "../../src/components/managed-cloud/types";
 
 /* Connecting a project to a Mallard Cloud repository by its website
    address, or by a private repository's invitation code. The picker never
@@ -305,11 +312,17 @@ test("linking a Mallard Cloud storage always opens the address dialog, and setup
   const card = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   const cloud = readFileSync("src/components/managed-cloud/managedCloudLink.ts", "utf8");
   assert.match(cloud, /link\.role === null && link\.visibility === "public" && link\.can_push/);
-  assert.match(cloud, /"Contributor"/);
+  assert.match(cloud, /link\.role === null \? t\("cloud:role\.contributor"\)/);
+  assert.equal(en.cloud.role.contributor, "Contributor");
   assert.doesNotMatch(card, /Read-only/);
+  assert.doesNotMatch(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /read-only/i);
   assert.doesNotMatch(cloud, /Read-only/);
+  // The chip's and panel's words live in the cloud catalog now.
+  assert.doesNotMatch(readFileSync("src/i18n/en/cloud.ts", "utf8"), /read-only/i);
   const dialog = readFileSync("src/components/project-sync/BundleConnectionDialog.tsx", "utf8");
   assert.doesNotMatch(dialog, /read-only/i);
+  // The dialog's words live in the reviews catalog now.
+  assert.doesNotMatch(readFileSync("src/i18n/en/reviews.ts", "utf8"), /read-only/i);
 });
 
 test("a saved folder name reaches the preview without replacing newer name or folder edits", () => {
@@ -382,4 +395,81 @@ test("rows carry the description and the stars, and the one field knows words fr
   assert.equal(listingRoleWord({ role: null, visibility: "public" }), "Public");
   assert.equal(listingRoleWord({ role: "member", visibility: "private" }), "Member");
   assert.equal(listingRoleWord({ role: "member", visibility: "public" }), "Public · Member");
+});
+
+/* Chinese: the Cloud chip in two states, its panel, the address band and
+   Publish version. Version stays English; addresses, logins and the
+   service's own sentences stay as given. */
+test("in Chinese the Cloud chip, its panel and Publish version speak Chinese, and what the service said stays as given", () => {
+  const link: ManagedCloudLink = {
+    repository_id: "repo_one", visibility: "private", can_pull: true, can_push: true,
+    website_url: "https://mallard-ai.com/rika/portal", owner_login: "rika", name: "portal",
+    repository_revision: 7, can_request_release: true, can_publish_version: true, can_discard_draft: true, role: "owner",
+    release: { kind: "private" },
+  };
+  const ready: ManagedCloudStatus = {
+    repository_id: "repo_one", state: "ready", message: null, link,
+    publication: { draft: "pushed", latest_version: 2, next_version: 3, draft_ahead: 3, public_version: null, review_version: null },
+  };
+  const signedOut: ManagedCloudStatus = { repository_id: "repo_one", state: "sign_in_required", link: null, message: "Mallard Cloud rejected the saved sign-in." };
+  const actions = { onOpenUrl: () => {}, onPublishVersion: () => {}, onDiscardDraft: () => {}, onRetry: () => {}, onStorageSettings: () => {} };
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const chip = renderToStaticMarkup(<ManagedCloudChip status={ready} storageName="Mallard Cloud Rika" busy={false} refreshing={false} {...actions} />);
+    assert.match(chip, /<b>私有<\/b>/);
+    assert.match(chip, /aria-label="Mallard Cloud：私有。草稿比 Version 2 多 3 次上传。"/);
+    // Signed out: the chip's word is Chinese, the service's sentence is not.
+    const out = renderToStaticMarkup(<ManagedCloudChip status={signedOut} storageName="Mallard Cloud Rika" busy={false} refreshing={false} {...actions} />);
+    assert.match(out, /<b>登录<\/b>/);
+    assert.match(out, /aria-label="Mallard Cloud：登录。Mallard Cloud rejected the saved sign-in\."/);
+
+    const panel = renderToStaticMarkup(<ManagedCloudPanel status={ready} storageName="Mallard Cloud Rika" busy={false} refreshing={false} close={() => {}} {...actions} />);
+    assert.match(panel, /<span>私有<\/span><small>rika\/portal<\/small>/);
+    assert.match(panel, /<dt>草稿<\/dt><dd>多 3 次上传<\/dd>[^]*?<dt>Version<\/dt><dd>2<\/dd>[^]*?<dt>公开<\/dt><dd>私有<\/dd>[^]*?<dt>你<\/dt><dd>所有者<\/dd>/);
+    assert.match(panel, /发布 Version 3…[^]*?申请公开发布[^]*?查看草稿[^]*?Version 列表[^]*?丢弃草稿…/);
+    assert.match(panel, /aria-label="复制草稿链接" title="复制草稿链接\nhttps:\/\/mallard-ai\.com\/rika\/portal\?version=draft"/);
+    assert.match(panel, /title="丢弃草稿… · 回到 Version 2"/);
+    assert.match(panel, /role="group" aria-label="Mallard Cloud 操作"/);
+    const outPanel = renderToStaticMarkup(<ManagedCloudPanel status={signedOut} storageName="Mallard Cloud Rika" busy={false} refreshing={false} close={() => {}} {...actions} />);
+    assert.match(outPanel, /登录[^]*?Mallard Cloud Rika[^]*?Mallard Cloud rejected the saved sign-in\.[^]*?存储设置/);
+
+    // Discard draft asks in Chinese around the address as it is.
+    const question = discardDraftQuestion(link, ready.publication);
+    assert.equal(question.title, "丢弃草稿？");
+    assert.match(question.message, /^丢弃“rika\/portal”的草稿？\n\n从 Mallard Cloud 删除 Version 2 之后的每一次上传。/);
+    assert.equal(question.kept, "Version 2");
+    assert.deepEqual([question.okLabel, question.cancelLabel], ["丢弃", "取消"]);
+
+    const sheet = renderToStaticMarkup(
+      <PublishVersionSheet version={3} holds={[{ icon: "message", word: "8 个会话" }]} sessionsToPush={2} busy={false} onPublish={() => {}} onClose={() => {}} />,
+    );
+    assert.match(sheet, /<h1 id="[^"]+">发布 Version 3<\/h1>/);
+    assert.match(sheet, /aria-label="关闭，不发布"/);
+    assert.match(sheet, /<span class="app-link-here">本机有 2 个会话尚未上传，不会包含在内<\/span>/);
+    assert.match(sheet, /placeholder="名称（可选）"/);
+    assert.match(sheet, /<button type="button" class="btn">取消<\/button><button type="button" class="btn btn-primary">发布 Version 3<\/button>/);
+    assert.doesNotMatch(sheet, /版本/);
+
+    const band = renderToStaticMarkup(
+      <ManagedCloudAddress account={{ login: "octocat", origin: "https://mallard-ai.com", host: "mallard-ai.com" }} onOpenUrl={() => {}} />,
+    );
+    assert.match(band, /已登录：<b>octocat<\/b>/);
+    assert.match(band, /title="在浏览器中打开 https:\/\/mallard-ai\.com"[^]*?打开网站<\/button>/);
+
+    // The picker's field and tabs; the rows' addresses and roles as words.
+    const picker = renderToStaticMarkup(
+      <RepositoryAddressPicker storage={cloud} projectName="HorrorGame" localFingerprint={CHECKOUT}
+        listing={{ state: "ready", repositories: [repository({})] }} selection={{ kind: "new" }}
+        rows="match-option" offerNew disabled={false} onSelect={() => undefined} />,
+    );
+    assert.match(picker, /placeholder="搜索，或粘贴链接、owner\/name 或邀请码"/);
+    assert.match(picker, /查找<\/button>/);
+    assert.match(picker, /role="tablist" aria-label="查找范围"[^]*?你的<small>1<\/small>[^]*?已加星标[^]*?公开/);
+    assert.match(picker, /<strong>新仓库<\/strong>[^]*?class="repo-new-address">Rika321\/HorrorGame-2<\/span><span>HorrorGame 已被使用。<\/span>/);
+    assert.match(picker, /私有 · 所有者/);
+    assert.equal(listingRoleWord({ role: "member", visibility: "public" }), "公开 · 成员");
+    assert.equal(nameRefusal("project"), "名称需要包含字母或数字；请先重命名项目。");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });

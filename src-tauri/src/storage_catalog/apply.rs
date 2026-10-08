@@ -22,13 +22,13 @@ use sha2::{Digest, Sha256};
 use super::adapters::{redact, PluginProcessRunner};
 use super::codec::{read_directory_tree, CapturedFile, CapturedResource, TreeLimits};
 use super::domain::{
-    CatalogActionOutcome, CatalogActionResult, CatalogClaim, CatalogCoordinate, CatalogOperationId,
-    CatalogOperationJournalEntry, CatalogOperationKind, CatalogOperationPhase, CatalogPlanActionId,
-    CatalogPlanId, CatalogPreservationPin, CatalogPreservationWitness, CatalogPullAction,
-    CatalogPullActionKind, CatalogPullDisposition, CatalogPullItem, CatalogResourceEnvelope,
-    CatalogResourceForkPlan, CatalogResourceId, CatalogTargetConfig, CatalogTargetExpectation,
-    NativePluginPlan, PluginApplyMode, MAX_CATALOG_FILES, MAX_CATALOG_FILE_BYTES,
-    MAX_REVISION_PAYLOAD_BYTES,
+    CatalogActionMessage, CatalogActionOutcome, CatalogActionResult, CatalogClaim,
+    CatalogCoordinate, CatalogOperationId, CatalogOperationJournalEntry, CatalogOperationKind,
+    CatalogOperationPhase, CatalogPlanActionId, CatalogPlanId, CatalogPreservationPin,
+    CatalogPreservationWitness, CatalogPullAction, CatalogPullActionKind, CatalogPullDisposition,
+    CatalogPullItem, CatalogResourceEnvelope, CatalogResourceForkPlan, CatalogResourceId,
+    CatalogTargetConfig, CatalogTargetExpectation, NativePluginPlan, PluginApplyMode,
+    MAX_CATALOG_FILES, MAX_CATALOG_FILE_BYTES, MAX_REVISION_PAYLOAD_BYTES,
 };
 use super::inventory::classify_directory;
 use super::persistence::CatalogStateRepository;
@@ -952,6 +952,8 @@ pub fn apply_resource_fork(
             "Forked from '{}'; local-only until you push it",
             plan.source_display_name
         )),
+        message_code: Some(CatalogActionMessage::Forked),
+        message_name: Some(plan.source_display_name.clone()),
     })
 }
 
@@ -1174,6 +1176,8 @@ pub fn execute_scope_pull_item(
             display_name,
             outcome,
             message,
+            message_code: None,
+            message_name: None,
         };
     }
     let Some(action) = approved else {
@@ -1183,6 +1187,8 @@ pub fn execute_scope_pull_item(
             display_name,
             outcome: CatalogActionOutcome::Skipped,
             message: Some("Skipped; local content was left unchanged".to_string()),
+            message_code: Some(CatalogActionMessage::Skipped),
+            message_name: None,
         };
     };
     match execute_one_action(
@@ -1193,22 +1199,28 @@ pub fn execute_scope_pull_item(
         action,
         now,
     ) {
-        Ok(outcome) => CatalogActionResult {
-            resource_id: item.resource_id.clone(),
-            action_id: Some(action.action_id.clone()),
-            display_name,
-            outcome,
-            message: action
-                .kind
-                .preservation()
-                .map(|pin| format!("Kept your version as '{}'", pin.copy_name)),
-        },
+        Ok(outcome) => {
+            let kept = action.kind.preservation().map(|pin| pin.copy_name.clone());
+            CatalogActionResult {
+                resource_id: item.resource_id.clone(),
+                action_id: Some(action.action_id.clone()),
+                display_name,
+                outcome,
+                message: kept
+                    .as_ref()
+                    .map(|copy| format!("Kept your version as '{copy}'")),
+                message_code: kept.as_ref().map(|_| CatalogActionMessage::KeptAs),
+                message_name: kept,
+            }
+        }
         Err(message) => CatalogActionResult {
             resource_id: item.resource_id.clone(),
             action_id: Some(action.action_id.clone()),
             display_name,
             outcome: CatalogActionOutcome::Failed,
             message: Some(message),
+            message_code: None,
+            message_name: None,
         },
     }
 }

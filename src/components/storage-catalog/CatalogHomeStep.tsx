@@ -1,5 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useTranslation } from "../../i18n";
 import Icon from "../Icons";
 import { FieldMessage } from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -113,6 +114,7 @@ export default function CatalogHomeStep({
   onClose,
   onChosen,
 }: Props) {
+  const { t } = useTranslation(["library", "common"]);
   /* Every registered provider, in the backend's order, with its label. */
   const providers: { key: string; label: string }[] = [];
   for (const capability of capabilities) {
@@ -130,7 +132,7 @@ export default function CatalogHomeStep({
   const [submitting, setSubmitting] = useState(false);
 
   const provider = chosen?.provider ?? null;
-  const label = providers.find((candidate) => candidate.key === provider)?.label ?? provider ?? "Agent";
+  const label = providers.find((candidate) => candidate.key === provider)?.label ?? provider ?? t("home.agent");
   const selection: Selection = chosen?.selection ?? { kind: "none" };
   const pending = selection.kind === "pending";
   const expandedPath = pending ? expandHomePath(selection.path, homePath) : "";
@@ -196,13 +198,13 @@ export default function CatalogHomeStep({
         {doors}
         <section className="sync-setup-section">
           <div className="sync-card-heading">
-            <div><strong>Agent</strong></div>
+            <div><strong>{t("home.agent")}</strong></div>
             {attentionBadge(!ready)}
           </div>
           {/* The project's provider cards. One row per pass, so the toggle
               is a radio: the card you choose opens its profile row; the
               other is just its name. */}
-          <div className="sync-provider-cards" role="radiogroup" aria-label="Agent home for this resource">
+          <div className="sync-provider-cards" role="radiogroup" aria-label={t("home.group")}>
             {providers.map((candidate) => {
               const active = provider === candidate.key;
               const candidateProfiles = profiles.filter((profile) => profile.provider === candidate.key);
@@ -214,7 +216,7 @@ export default function CatalogHomeStep({
                       name="catalog-home-provider"
                       checked={active}
                       disabled={busy}
-                      aria-label={`Set up a ${candidate.label} home`}
+                      aria-label={t("home.setUpHome", { provider: candidate.label })}
                       onChange={() => chooseProvider(candidate.key)}
                     />
                     <ProviderMark provider={candidate.key} displayName={candidate.label} size={12} />
@@ -227,7 +229,7 @@ export default function CatalogHomeStep({
                           <select
                             value={existing ? existing.profile_id : pending ? "__pending" : ""}
                             disabled={busy}
-                            aria-label={`${candidate.label} profile`}
+                            aria-label={t("home.profile", { provider: candidate.label })}
                             aria-invalid={incomplete || undefined}
                             aria-describedby={incomplete ? errorId : undefined}
                             onChange={(event) => {
@@ -240,28 +242,28 @@ export default function CatalogHomeStep({
                               }
                             }}
                           >
-                            <option value="">Choose profile</option>
+                            <option value="">{t("home.chooseProfile")}</option>
                             {candidateProfiles.map((profile) => (
                               <option key={profile.profile_id} value={profile.profile_id}>{profile.display_name}</option>
                             ))}
-                            <option value="__pending">Custom path…</option>
+                            <option value="__pending">{t("home.customPath")}</option>
                           </select>
                         </span>
                         {pending && (
                           <input
                             value={selection.path}
                             disabled={busy}
-                            aria-label={`${candidate.label} custom profile path`}
+                            aria-label={t("home.customPathLabel", { provider: candidate.label })}
                             aria-invalid={hint?.tone === "bad" || undefined}
                             aria-describedby={[incomplete ? errorId : null, hintId].filter(Boolean).join(" ")}
-                            placeholder={`${candidate.label} profile path`}
+                            placeholder={t("home.pathPlaceholder", { provider: candidate.label })}
                             spellCheck={false}
                             autoFocus
                             onChange={(event) => choose({ provider: candidate.key, selection: { kind: "pending", path: event.target.value } })}
                           />
                         )}
                         <button type="button" className="btn" disabled={busy} onClick={() => void browse()}>
-                          <Icon name="folder" size={13} /> Browse
+                          <Icon name="folder" size={13} /> {t("home.browse")}
                         </button>
                         {hint && (
                           /* Polite: it changes on a debounce while the field keeps focus. */
@@ -272,7 +274,7 @@ export default function CatalogHomeStep({
                         )}
                         {existing && (
                           <p className="sync-setup-path-hint ok spans-row">
-                            {candidate.label} profile ·<code>{existing.configured_home}</code>
+                            {t("home.existing", { provider: candidate.label })}<code>{existing.configured_home}</code>
                           </p>
                         )}
                       </div>
@@ -282,17 +284,17 @@ export default function CatalogHomeStep({
               );
             })}
           </div>
-          {incomplete && provider && <FieldMessage id={errorId}>Choose a profile for {label}.</FieldMessage>}
+          {incomplete && provider && <FieldMessage id={errorId}>{t("home.chooseFor", { provider: label })}</FieldMessage>}
         </section>
         {error}
       </div>
       <footer className="sync-modal-footer sync-setup-footer">
         <div>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common:cancel")}
           </button>
           <button type="button" className="btn btn-primary" disabled={!ready || busy} onClick={() => void setUp()}>
-            {submitting ? "Setting up…" : homeName ? `Set up ${homeName}` : "Set up"}
+            {submitting ? t("home.settingUp") : homeName ? t("home.setUpNamed", { name: homeName }) : t("home.setUp")}
           </button>
         </div>
       </footer>

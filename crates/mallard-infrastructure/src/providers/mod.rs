@@ -19,7 +19,8 @@ pub mod traits;
 
 pub use registry::AgentProviderRegistry;
 pub use traits::{
-    agent_resource_id, shell_quote, AfterPullActionOffer, DiscoveredProviderState,
+    agent_resource_id, shell_quote, AfterPullActionOffer, AfterPullOfferCode,
+    DiscoveredProviderState,
     DiscoveredSession, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
     SessionAgentStatus, SessionChildIdentity, AGENT_RESOURCE_SEGMENT,
     DiscoveredSidecar, DiscoveredStateFile, MaintenanceActionDescriptor, MaintenanceActionScope,
@@ -27,10 +28,11 @@ pub use traits::{
     ProjectOpenCommand, ProviderCli,
     ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionKind,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAnalysis, SessionCheckpoint,
-    SessionCount, SessionCountQuality, SessionDetailWarning, SessionDiscovery,
+    SessionCount, SessionCountExplanation, SessionCountQuality, SessionDetailWarning,
+    SessionDiscovery,
     SessionDiscoveryContext, SessionEventCounts, SessionEventDetail, SessionFileMetadata,
     SessionFileSummary, SessionHomeSighting, SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent,
     SessionTimelineEventKind, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus,
-    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolSummary,
+    SessionToolCategory, SessionToolIndexEntry, SessionTurnToolCount, SessionTurnToolSummary,
 };

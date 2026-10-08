@@ -16,6 +16,7 @@ import {
   type ReceiptsState,
 } from "../../src/components/project-sync/settingsReceipts";
 import { getPreference, getThemeChoice, setPreference, setThemeChoice } from "../../src/preferences";
+import { i18n, OFFERED_LANGUAGES } from "../../src/i18n";
 
 const appActions = [{
   label: "Mallard",
@@ -79,6 +80,8 @@ test("Settings saves as you go and says so: a status line and Done in the bar, n
   const rows = [...html.matchAll(/id="settings-row-([A-Za-z_0-9]+)"/g)].map((match) => match[1]);
   assert.deepEqual(rows, [
     "theme",
+    // Language stands under Theme once there is a second language to pick.
+    ...(OFFERED_LANGUAGES.length > 1 ? ["language"] : []),
     "credential_redaction_enabled",
     "update_check_enabled",
     "push_codex_children",
@@ -99,8 +102,9 @@ test("Settings saves as you go and says so: a status line and Done in the bar, n
   const shell = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
   assert.match(
     shell,
-    /onDone=\{\(\) => void closeWorkspaceSettings\(\)\}\s*doneTarget=\{activeSummary \? projectLabel\(activeSummary\) : "Projects"\}/,
+    /onDone=\{\(\) => void closeWorkspaceSettings\(\)\}\s*doneTarget=\{activeSummary \? projectLabel\(activeSummary\) : t\("roots\.projects"\)\}/,
   );
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /roots: \{\s*projects: "Projects",/);
 
   // The receipt words are closed vocabulary: the display face, from its one list.
   const css = readFileSync("src/App.css", "utf8");
@@ -167,6 +171,26 @@ test("receipts: a slow write says Saving…, and a failure stands until its stor
   // and a stamp is gone within three seconds.
   assert.equal(SLOW_MS, 400);
   assert.ok(RECEIPT_MS + FADE_MS < 3_000);
+});
+
+test("the status line speaks the interface language, counting in Chinese without a plural", () => {
+  const saved = run(
+    { type: "settled", key: "clock24", ok: true, at: 1_000, seq: 1, announce: null },
+    { type: "settled", key: "theme", ok: true, at: 1_100, seq: 2, announce: null },
+  );
+  const failed = run({ type: "settled", key: "clock24", ok: false, at: 1_000, seq: 1, announce: null });
+  void i18n.changeLanguage("zh-CN");
+  try {
+    assert.equal(statusLine(EMPTY_RECEIPTS).text, "更改自动保存");
+    assert.equal(statusLine(saved).text, "已保存 2 项更改");
+    assert.equal(statusLine(failed).text, "1 项更改未保存");
+    assert.equal(statusLine(run({ type: "begin", store: [] }, { type: "slow", key: "theme" })).text, "正在保存…");
+    const html = renderPage("项目");
+    assert.match(html, /title="关闭设置，返回项目">完成<\/button>/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(statusLine(saved).text, "2 changes saved");
 });
 
 test("preference writes report whether they stuck, and a refused theme keeps the stored one", () => {

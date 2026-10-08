@@ -38,6 +38,7 @@ import {
   IconGitFork,
   IconHexagon,
   IconInfoCircle,
+  IconLanguage,
   IconLayoutGrid,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
@@ -107,6 +108,7 @@ export type IconName =
   | "git-fork"
   | "git-folder"
   | "info"
+  | "language"
   | "lightbulb"
   | "link"
   | "link-off"
@@ -220,6 +222,7 @@ const LIBRARY_ICONS: Record<LibraryIconName, TablerIcon> = {
   "git-fork": IconGitFork,
   "git-folder": IconFolderCode,
   info: IconInfoCircle,
+  language: IconLanguage,
   lightbulb: IconBulb,
   link: IconLink,
   "link-off": IconLinkOff,

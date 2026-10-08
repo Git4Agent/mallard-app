@@ -10,8 +10,10 @@ import Notice, {
   forgetResolved,
   highestSeverity,
   noticeIdentity,
+  severityLabel,
   type NoticeItem,
 } from "../../src/components/notice/Notice";
+import { i18n } from "../../src/i18n";
 
 /* The notice system exists to hold three published rules that the app broke in
  * 44 places: one box per zone (GOV.UK), the severity named in the text (USWDS),
@@ -217,4 +219,53 @@ test("the stylesheet has one recipe per tier, and the eleven one-off treatments 
     css,
     /\.notice\.sync-project-file-conflict|\.notice\.sync-storage-notice|\.sync-path-menu-banner|\.sync-setup-field-error|\.sync-setup-acknowledge|\.catalog-card-ack|\.sync-storage-index-warning|\.sync-project-file-warning/,
   );
+});
+
+test("in Chinese a zone counts in its subject's measure word, and every name keeps the message as given", () => {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    assert.deepEqual(
+      (["danger", "warning", "info", "success"] as const).map(severityLabel),
+      ["错误", "警告", "提示", "完成"],
+    );
+    const zone = renderToStaticMarkup(
+      <NoticeZone
+        items={[
+          { key: "a", severity: "info", message: "Mallard 重建了本地时间线缓存。" },
+          { key: "b", severity: "warning", title: "扫描未完成", message: "1 bucket was skipped." },
+          { key: "c", severity: "warning", message: "Storage unavailable" },
+        ]}
+        subject="条关于此记录的提示"
+        timing="standing"
+        label="提示"
+      />,
+    );
+    // The count line: our frame, the caller's subject, its measure word first.
+    assert.match(zone, /<strong class="notice-type">警告 ·<\/strong> <strong class="notice-lead">3 条关于此记录的提示<\/strong>/);
+    assert.match(zone, /aria-label="关闭：全部 3 条关于此记录的提示"/);
+    assert.match(zone, /title="关闭"/);
+    // A mixed zone names each rung; spoken names end each part with 。, never a
+    // second stop, and the backend's English rides inside unchanged.
+    assert.match(zone, /<strong class="notice-type">提示 ·<\/strong> Mallard 重建了本地时间线缓存。/);
+    assert.match(zone, /aria-label="关闭：提示。Mallard 重建了本地时间线缓存。"/);
+    assert.match(zone, /aria-label="关闭：警告。扫描未完成。1 bucket was skipped\."/);
+    assert.match(zone, /aria-label="关闭：警告。Storage unavailable。"/);
+    // After an English stop the next part keeps its space; after 。 none.
+    const titled = renderToStaticMarkup(<Notice severity="warning" timing="inline" title="Scan incomplete.">已跳过 1 个存储桶</Notice>);
+    assert.match(titled, /aria-label="关闭：警告。Scan incomplete\. 已跳过 1 个存储桶。"/);
+
+    const field = renderToStaticMarkup(<FieldMessage>This folder no longer exists.</FieldMessage>);
+    assert.match(field, /<span class="sync-visually-hidden">错误：<\/span>This folder no longer exists\./);
+    assert.match(field, /aria-label="关闭：错误。This folder no longer exists\."/);
+
+    const ack = renderToStaticMarkup(
+      <Acknowledgement checked={false} onChange={() => undefined} title="可执行内容" verbs={["标记为已检查", "已检查"]}>
+        — scripts/install.sh
+      </Acknowledgement>,
+    );
+    assert.match(ack, /警告 ·<\/strong> <strong class="notice-lead">可执行内容<\/strong> — scripts\/install\.sh/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(severityLabel("info"), "Note");
 });

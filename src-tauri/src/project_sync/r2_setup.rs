@@ -2,7 +2,9 @@
 use mallard_application::storage_setup::begin_storage_draft_operation;
 use mallard_domain::{now_secs, StorageSetupDraftId};
 use mallard_infrastructure::persistence::LocalStateRepository;
-use mallard_infrastructure::r2_setup::discovery::{BucketScan, DiscoveredBucket, MarkerState};
+use mallard_infrastructure::r2_setup::discovery::{
+    BucketScan, DiscoveredBucket, MarkerDetailCode, MarkerState,
+};
 use mallard_infrastructure::r2_setup::{destination, propose_bucket_name};
 use mallard_infrastructure::storage_providers::r2::{
     provider_key, valid_bucket_name, R2Jurisdiction,
@@ -272,29 +274,58 @@ struct SavedScan {
     buckets: Vec<DiscoveredBucket>,
 }
 
+/// Every sentence here is the English the setup screens print; a code
+/// travels beside each one, with the values it was built from, for the
+/// interface to translate by.
 #[derive(Serialize)]
 pub struct DiscoveryCandidate {
     candidate_id: String,
     name: String,
     marker: MarkerState,
     marker_detail: Option<String>,
+    marker_detail_code: Option<MarkerDetailCode>,
+    /// The version a `layout` detail names.
+    marker_layout_version: Option<u32>,
     facts: Vec<DiscoveryFact>,
     cautions: Vec<String>,
+    /// Each caution's code, in `cautions` order. A bucket has none.
+    caution_codes: Vec<&'static str>,
     connected_storage_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 struct DiscoveryFact {
+    /// `jurisdiction` or `created`.
+    key: &'static str,
     label: String,
     value: String,
+    /// The jurisdiction's identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value_code: Option<&'static str>,
+    /// The creation date in epoch seconds, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<u64>,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct DiscoveryIssue {
+    /// `unreadable_buckets` (with its count) or `listing_cut`.
+    code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
 }
 
 #[derive(Serialize)]
 pub struct DiscoveryResult {
     scan_id: String,
     scope: String,
+    /// `jurisdictions`: the scope is the jurisdictions read, listed below.
+    scope_code: &'static str,
+    jurisdictions: Vec<&'static str>,
     status: String,
     issues: Vec<String>,
+    /// Each issue's code and count, in `issues` order.
+    issue_codes: Vec<DiscoveryIssue>,
     candidates: Vec<DiscoveryCandidate>,
 }
 
@@ -342,22 +373,17 @@ pub(super) async fn discover(
             .map_err(|_| R2SetupFailure::failed())?
             .api_url()
             .to_string();
+        let detail = bucket.marker_detail.as_ref();
         candidates.push(DiscoveryCandidate {
             candidate_id: index.to_string(),
             name: bucket.name.clone(),
             marker: bucket.marker.clone(),
-            marker_detail: bucket.marker_detail.clone(),
-            facts: vec![
-                DiscoveryFact {
-                    label: "Jurisdiction".into(),
-                    value: jurisdiction.label().into(),
-                },
-                DiscoveryFact {
-                    label: "Created".into(),
-                    value: creation_label(&bucket.creation_date),
-                },
-            ],
+            marker_detail: detail.map(|detail| detail.text.clone()),
+            marker_detail_code: detail.map(|detail| detail.code),
+            marker_layout_version: detail.and_then(|detail| detail.layout_version),
+            facts: bucket_facts(jurisdiction, &bucket.creation_date),
             cautions: vec![],
+            caution_codes: vec![],
             connected_storage_id: config
                 .storages
                 .iter()
@@ -374,17 +400,8 @@ pub(super) async fn discover(
         .iter()
         .filter(|bucket| bucket.marker == MarkerState::Unreadable)
         .count();
-    let mut issues = Vec::new();
-    if unreadable > 0 {
-        issues.push(format!(
-            "{unreadable} bucket{} could not be checked.",
-            if unreadable == 1 { "" } else { "s" }
-        ));
-    }
-    if scan.cut {
-        issues.push("Not every bucket could be listed.".into());
-    }
-    let scope = jurisdiction_phrase(&scan.jurisdictions);
+    let (issues, issue_codes) = scan_issues(unreadable, scan.cut);
+    let jurisdictions = known_jurisdictions(&scan.jurisdictions);
     state.scan = Some(SavedScan {
         draft_id,
         scan_id: scan_id.clone(),
@@ -394,32 +411,81 @@ pub(super) async fn discover(
     });
     Ok(DiscoveryResult {
         scan_id,
-        scope,
+        scope: jurisdiction_phrase(&jurisdictions),
+        scope_code: "jurisdictions",
+        jurisdictions: jurisdictions.iter().map(|value| value.as_str()).collect(),
         status: if scan.partial { "partial" } else { "complete" }.into(),
         issues,
+        issue_codes,
         candidates,
     })
 }
 
-/// "Default, EU, US and FedRAMP": the jurisdictions a scan read, in its order.
-fn jurisdiction_phrase(jurisdictions: &[String]) -> String {
-    let labels: Vec<&str> = jurisdictions
+/// A bucket's row facts: where its data lives and when it was created.
+fn bucket_facts(jurisdiction: R2Jurisdiction, creation_date: &str) -> Vec<DiscoveryFact> {
+    let created = chrono::DateTime::parse_from_rfc3339(creation_date).ok();
+    vec![
+        DiscoveryFact {
+            key: "jurisdiction",
+            label: "Jurisdiction".into(),
+            value: jurisdiction.label().into(),
+            value_code: Some(jurisdiction.as_str()),
+            at: None,
+        },
+        DiscoveryFact {
+            key: "created",
+            label: "Created".into(),
+            // The date as the row prints it; the raw value when it is not one.
+            value: created.map_or_else(
+                || creation_date.to_string(),
+                |date| date.format("%b %-d, %Y").to_string(),
+            ),
+            value_code: None,
+            at: created.and_then(|date| u64::try_from(date.timestamp()).ok()),
+        },
+    ]
+}
+
+/// What a partial scan skipped, as the notice prints it and by code.
+fn scan_issues(unreadable: usize, cut: bool) -> (Vec<String>, Vec<DiscoveryIssue>) {
+    let mut issues = Vec::new();
+    let mut codes = Vec::new();
+    if unreadable > 0 {
+        issues.push(format!(
+            "{unreadable} bucket{} could not be checked.",
+            if unreadable == 1 { "" } else { "s" }
+        ));
+        codes.push(DiscoveryIssue {
+            code: "unreadable_buckets",
+            count: Some(unreadable),
+        });
+    }
+    if cut {
+        issues.push("Not every bucket could be listed.".into());
+        codes.push(DiscoveryIssue {
+            code: "listing_cut",
+            count: None,
+        });
+    }
+    (issues, codes)
+}
+
+/// The jurisdictions a scan read, in its order.
+fn known_jurisdictions(values: &[String]) -> Vec<R2Jurisdiction> {
+    values
         .iter()
         .filter_map(|value| R2Jurisdiction::parse(value))
-        .map(R2Jurisdiction::label)
-        .collect();
+        .collect()
+}
+
+/// "Default, EU, US and FedRAMP".
+fn jurisdiction_phrase(jurisdictions: &[R2Jurisdiction]) -> String {
+    let labels: Vec<&str> = jurisdictions.iter().map(|value| value.label()).collect();
     match labels.split_last() {
         None => String::new(),
         Some((last, [])) => (*last).to_string(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
-}
-
-/// The creation date as the row prints it; the raw value when it is not a date.
-fn creation_label(creation_date: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(creation_date)
-        .map(|date| date.format("%b %-d, %Y").to_string())
-        .unwrap_or_else(|_| creation_date.to_string())
 }
 
 pub(super) async fn prepare_existing(
@@ -875,6 +941,7 @@ fn parse_result(
 mod tests {
     use super::*;
     use mallard_application::storage_setup::create_storage_setup_draft;
+    use mallard_infrastructure::r2_setup::discovery::MarkerDetail;
     use mallard_infrastructure::storage_providers::StorageProviderRegistry;
 
     #[test]
@@ -894,7 +961,7 @@ mod tests {
                 creation_date: "2026-09-10T00:00:00Z".into(),
                 jurisdiction: "eu".into(),
                 marker: MarkerState::Storage,
-                marker_detail: Some("layout 1".into()),
+                marker_detail: Some(MarkerDetail::layout(1)),
             }],
         };
         assert!(selected_bucket(Some(&scan), &draft.draft_id, "scan-1", "0").is_ok());
@@ -1112,17 +1179,61 @@ mod tests {
 
     #[test]
     fn scan_results_become_rows_with_jurisdiction_and_creation_facts() {
+        let all =
+            known_jurisdictions(&["default".into(), "eu".into(), "us".into(), "fedramp".into()]);
+        assert_eq!(jurisdiction_phrase(&all), "Default, EU, US and FedRAMP");
         assert_eq!(
-            jurisdiction_phrase(&["default".into(), "eu".into(), "us".into(), "fedramp".into()]),
-            "Default, EU, US and FedRAMP"
-        );
-        assert_eq!(
-            jurisdiction_phrase(&["default".into(), "eu".into()]),
+            jurisdiction_phrase(&known_jurisdictions(&["default".into(), "eu".into()])),
             "Default and EU"
         );
-        assert_eq!(jurisdiction_phrase(&["default".into()]), "Default");
-        assert_eq!(creation_label("2026-09-02T10:11:12.123Z"), "Sep 2, 2026");
-        assert_eq!(creation_label("not a date"), "not a date");
+        assert_eq!(
+            jurisdiction_phrase(&known_jurisdictions(&["default".into()])),
+            "Default"
+        );
+        // The English stays as printed; the code and the epoch seconds travel
+        // beside it for the interface to word and format.
+        assert_eq!(
+            bucket_facts(R2Jurisdiction::Eu, "2026-09-02T10:11:12.123Z"),
+            [
+                DiscoveryFact {
+                    key: "jurisdiction",
+                    label: "Jurisdiction".into(),
+                    value: "EU".into(),
+                    value_code: Some("eu"),
+                    at: None,
+                },
+                DiscoveryFact {
+                    key: "created",
+                    label: "Created".into(),
+                    value: "Sep 2, 2026".into(),
+                    value_code: None,
+                    at: Some(1_788_343_872),
+                },
+            ]
+        );
+        let raw = &bucket_facts(R2Jurisdiction::Default, "not a date")[1];
+        assert_eq!((raw.value.as_str(), raw.at), ("not a date", None));
+        assert_eq!(
+            scan_issues(1, true),
+            (
+                vec![
+                    "1 bucket could not be checked.".to_string(),
+                    "Not every bucket could be listed.".to_string(),
+                ],
+                vec![
+                    DiscoveryIssue {
+                        code: "unreadable_buckets",
+                        count: Some(1),
+                    },
+                    DiscoveryIssue {
+                        code: "listing_cut",
+                        count: None,
+                    },
+                ],
+            )
+        );
+        assert_eq!(scan_issues(3, false).0, ["3 buckets could not be checked."]);
+        assert_eq!(scan_issues(0, false), (vec![], vec![]));
     }
 
     #[test]

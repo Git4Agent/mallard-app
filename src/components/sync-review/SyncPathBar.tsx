@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
 import Notice, { NoticeZone, type NoticeTiming, type NoticeZoneProps } from "../notice/Notice";
+import { useTranslation } from "../../i18n";
 import { menuOptions, moveMenuFocus } from "./menuKeyboard";
 import TopLayer from "./TopLayer";
 import { useDebugPopoverPlacement } from "./debugPopoverPlacement";
@@ -37,6 +38,9 @@ export interface PathBarMenuItem {
   icon?: IconName;
   /** Renders as a checkable item with a trailing tick — state, not selection. */
   checked?: boolean;
+  /** The label's own language, when it is not the interface's: a language
+   *  named in itself ("English" in a Chinese menu). */
+  lang?: string;
   danger?: boolean;
   /**
    * Inert rather than removed: rendered with `aria-disabled` so the row stays
@@ -160,6 +164,7 @@ export function PathBarMenu({
   /** `returnFocus` hands focus back to the button that opened the menu. */
   onClose: (returnFocus: boolean) => void;
 }) {
+  const { t } = useTranslation("syncReview");
   // Type-ahead per the menu pattern: printable characters accumulate for
   // 500ms and focus the next label with that prefix.
   const typeahead = useRef({ buffer: "", at: 0 });
@@ -214,7 +219,7 @@ export function PathBarMenu({
       >
         {item.icon && <Icon name={item.icon} size={14} />}
         <span className="sync-path-menu-copy">
-          <span>{item.label}</span>
+          <span lang={item.lang}>{item.label}</span>
           {detail && (
             <small className={detailIsPath ? undefined : "phrase"}>{detail}</small>
           )}
@@ -382,8 +387,8 @@ export function PathBarMenu({
           <input
             type="search"
             className="sync-path-menu-search"
-            placeholder={`Switch ${label.toLowerCase()}…`}
-            aria-label={`Filter ${label.toLowerCase()} list`}
+            placeholder={t("pathBar.switchPlaceholder", { label: label.toLowerCase() })}
+            aria-label={t("pathBar.filter", { label: label.toLowerCase() })}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -399,7 +404,7 @@ export function PathBarMenu({
                 return (
                   <div key={group.label} className="sync-path-menu-group" aria-label={group.label}>
                     {shown.map((item) => renderItem(item, true))}
-                    {shown.length === 0 && <p className="sync-path-menu-empty">No match.</p>}
+                    {shown.length === 0 && <p className="sync-path-menu-empty">{t("pathBar.noMatch")}</p>}
                   </div>
                 );
               })}
@@ -580,13 +585,16 @@ export function PathBarPopover({
 export default function SyncPathBar({
   crumbs,
   overflow,
-  overflowLabel = "More actions",
+  overflowLabel: overflowLabelProp,
   overflowDisabled,
   openMenuRequest,
   actions,
-  ariaLabel = "Workspace path",
+  ariaLabel: ariaLabelProp,
   notices,
 }: Props) {
+  const { t } = useTranslation("syncReview");
+  const overflowLabel = overflowLabelProp ?? t("pathBar.more");
+  const ariaLabel = ariaLabelProp ?? t("pathBar.label");
   const baseId = useId().replace(/[^a-zA-Z0-9_-]/g, "-");
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -683,7 +691,7 @@ export default function SyncPathBar({
     ? { timing: "blocking" }
     : noticeGroups.some((group) => group?.timing === "progress")
       ? { timing: "progress" }
-      : { timing: "standing", label: "Messages from Mallard" };
+      : { timing: "standing", label: t("pathBar.messagesLabel") };
 
   /* Stable, so a popover's mount effect runs once rather than every render. */
   const popoverControls = useRef({
@@ -760,8 +768,8 @@ export default function SyncPathBar({
                     type="button"
                     className="sync-path-crumb-toggle"
                     disabled={crumb.disabled}
-                    title={crumb.menuLabel ?? "Switch"}
-                    aria-label={crumb.menuLabel ?? "Switch"}
+                    title={crumb.menuLabel ?? t("pathBar.switch")}
+                    aria-label={crumb.menuLabel ?? t("pathBar.switch")}
                     aria-haspopup="menu"
                     aria-expanded={open}
                     aria-controls={open ? menuId : undefined}
@@ -897,7 +905,7 @@ export default function SyncPathBar({
     </header>
     <NoticeZone
       items={[...(below?.items ?? []), ...(notices?.items ?? [])]}
-      subject="messages from Mallard"
+      subject={t("pathBar.messages")}
       className="sync-backend-banner"
       {...noticeTiming}
     />

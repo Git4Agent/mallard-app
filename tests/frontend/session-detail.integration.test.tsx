@@ -16,7 +16,8 @@ import SessionDetailHeader from "../../src/components/project-sync/session-detai
 import SessionDetailPage from "../../src/components/project-sync/session-detail/SessionDetailPage";
 import SessionDetailTimeline from "../../src/components/project-sync/session-detail/SessionDetailTimeline";
 import SessionDetailToolbar from "../../src/components/project-sync/session-detail/SessionDetailToolbar";
-import SessionDetailToolCall from "../../src/components/project-sync/session-detail/SessionDetailToolCall";
+import SessionDetailToolCall, { PayloadSection } from "../../src/components/project-sync/session-detail/SessionDetailToolCall";
+import { i18n } from "../../src/i18n";
 import {
   createDefaultSessionDetailFilters,
   eventAnchorId,
@@ -36,7 +37,9 @@ import {
   readableToolPayload,
   sessionDetailFilterToggles,
   sessionEventCoverage,
+  sessionPushDisabledReason,
   sessionPushFacts,
+  sessionPushGate,
   sessionToolDescriptor,
   sessionTurnDurationLabel,
   sessionTurnSpans,
@@ -549,6 +552,7 @@ test("a Push hold and the transcript notes are chips, never boxes", () => {
   // Push status box is gone, and the page's own box holds only events.
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.doesNotMatch(workspace, /Session Push status/);
+  assert.doesNotMatch(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /Session Push status/);
   assert.match(workspace, /pushGate=\{workspaceReviewOpen \? null : sessionPushHold\}/);
   assert.match(workspace, /sessionPushGate\(sessionPushEntry, managedCloudKey \? null : sessionComparison\.comparisonError\)/);
   const page = readFileSync("src/components/project-sync/session-detail/SessionDetailPage.tsx", "utf8");
@@ -1655,7 +1659,264 @@ test("a stored session's page carries the row's badge as its first fact and no l
   // nothing local to send.
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /const storedSession = sessionDetailSubview\?\.storageId \?\? null;/);
-  assert.match(workspace, /: storedSession \? "No local session to push\."/);
+  assert.match(workspace, /: storedSession \? t\("session\.noLocal"\)/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /noLocal: "No local session to push\.",/);
   assert.match(workspace, /const pullThreadCount = storedSession \? 1 : activityHeader\?\.counts\.pull \?\? 0;/);
   assert.match(workspace, /\? \{ kind: "session", resource_id: sessionDetailSubview\.resourceId \}/);
+});
+
+/** Runs `render` with the interface in Simplified Chinese, then puts English back. */
+function inChinese<T>(render: () => T): T {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    return render();
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+}
+
+function renderHeader(overrides: Partial<Parameters<typeof SessionDetailHeader>[0]> = {}): string {
+  return renderToStaticMarkup(
+    <SessionDetailHeader
+      source={{ kind: "local" }}
+      detail={detail}
+      back={back}
+      headingRef={{ current: null }}
+      actionBusyId={null}
+      onAction={() => undefined}
+      pushGate={null}
+      notes={[]}
+      onShowToolCalls={null}
+      {...overrides}
+    />,
+  );
+}
+
+test("in Chinese the toolbar, header chips and an agent row speak Chinese around the record", () => {
+  const filters = createDefaultSessionDetailFilters(detail.event_counts);
+  const toolbar = inChinese(() => renderToStaticMarkup(
+    <SessionDetailToolbar counts={detail.event_counts} filters={filters} loadedCount={5} onFiltersChange={() => undefined} />,
+  ));
+  assert.match(toolbar, /id="session-detail-filter-label">显示</);
+  assert.match(toolbar, /<span class="session-detail-filter-name">提示词<\/span>/);
+  assert.match(toolbar, /<span class="session-detail-filter-name">回复<\/span>/);
+  assert.match(toolbar, /<span class="session-detail-filter-name">步骤<\/span>/);
+  assert.match(toolbar, /<span class="session-detail-filter-name">工具调用<\/span><span class="session-detail-filter-count quality-exact">4<\/span>/);
+  assert.match(toolbar, /<span class="session-detail-filter-name">代理<\/span>/);
+  assert.match(toolbar, />5 \/ 11\+ 个事件<\/output>/);
+  // A count the transcript explains keeps the backend's English sentence.
+  assert.match(toolbar, /title="One legacy phase may be missing\."/);
+  assert.doesNotMatch(toolbar, /Prompts|Replies|Tool calls| events|>Show</);
+
+  const header = inChinese(() => renderHeader({
+    pushGate: sessionPushGate(undefined, "Mallard couldn't read the storage."),
+    notes: [{ code: "incomplete_tool_call", severity: "info", message: "Tool calls marked incomplete never recorded a result." }],
+    onShowToolCalls: () => undefined,
+    detail: { ...detail, settings: { model: "gpt-5.6-luna", effort: "low", source: "turn" } },
+  }));
+  // The session's own words stay as recorded: title, branch, model and level.
+  assert.match(header, /<h1 [^>]*>Build provider-neutral session detail<\/h1>/);
+  assert.match(header, /aria-label="会话信息"/);
+  assert.match(header, /aria-label="会话操作"/);
+  assert.match(header, /class="session-detail-chip" title="记录的分支 main"/);
+  assert.match(header, /<time [^>]*>2026年8月\d+日 · \d{2}:\d{2}<\/time>/);
+  assert.match(header, /title="运行 11分钟，结束于 \d{2}:\d{2}"><svg[^>]*data-icon="clock"[\s\S]*?<b>11分钟<\/b>/);
+  // Counts in 万, and the backend's explanation stays English.
+  assert.match(header, /title="Some usage records were absent\.">.*?<code class="quality-lower_bound">106\.3万\+<\/code> Token/);
+  assert.match(header, /<code class="quality-exact">1<\/code>个代理<\/span>/);
+  assert.match(header, /aria-label="模型和思考强度：gpt-5\.6-luna · low"><code>gpt-5\.6-luna<\/code> · low<\/button>/);
+  // A hold the frontend names in Chinese around the backend's English sentence.
+  assert.match(header, /title="Mallard couldn&#x27;t read the storage\."><svg[^>]*data-icon="octagon-x"[\s\S]*?<\/svg>无法比较/);
+  assert.match(header, /aria-label="此会话有 1 条提示"[^>]*><svg[\s\S]*?<\/svg>1 条提示<\/button>/);
+  // A note is the backend's English, translated by its code.
+  assert.match(header, /：标记为未完成的工具调用从未记录结果，很可能是被中断了。<\/span>/);
+  assert.doesNotMatch(header, / tokens|>agent<|Session facts|Recorded branch|Ran 11m|Model and thinking/);
+
+  const stored = inChinese(() => renderHeader({
+    source: { kind: "stored", storageId: "storage-1", storageName: "rikaqu0223-arch" },
+    detail: { ...detail, actions: [] },
+  }));
+  assert.match(stored, /title="仅在 rikaqu0223-arch 中。下载后才会出现在本机。"[\s\S]*?不在本机<\/span>/);
+
+  const child = inChinese(() => renderHeader({
+    detail: {
+      ...detail,
+      actions: [],
+      event_counts: { ...detail.event_counts, agent_calls: exact(0) },
+      agent: { parent_resource_id: detail.resource_id, parent_title: detail.title, preview: agentEvent.agent! },
+    },
+  }));
+  assert.match(child, /title="代理角色 general-purpose"/);
+  assert.match(child, /title="模型 claude-opus-5"><code>claude-opus-5<\/code>/);
+  assert.match(child, /title="异步运行">异步</);
+
+  const row = inChinese(() => renderTimeline([events[0], agentEvent]));
+  assert.match(row, /aria-label="你 · \d{2}:\d{2}"/);
+  assert.match(row, /aria-label="代理 · Research term marking · \d{2}:\d{2}"/);
+  assert.match(row, /session-detail-agent-stamp">代理</);
+  assert.match(row, /class="session-detail-agent-pill">general-purpose</);
+  assert.match(row, /class="session-detail-agent-pill mode">异步</);
+  assert.match(row, /class="session-detail-agent-length">14分钟</);
+  assert.match(row, /<h2 class="session-detail-day-divider"><span>2026年8月\d+日<\/span><\/h2>/);
+  assert.match(row, /<span>2 次调用<\/span>/);
+  assert.doesNotMatch(row, />Agent<|>async<| calls<|You · /);
+
+  for (const [status, label] of [["failed", "失败"], ["running", "运行中"], ["unavailable", "无对话记录"]] as const) {
+    const html = inChinese(() => renderTimeline([{ ...agentEvent, agent: { ...agentEvent.agent!, status } }]));
+    assert.match(html, new RegExp(`class="session-detail-agent-status status-${status}">${label}</span>`));
+  }
+  const failedTool = inChinese(() => renderToStaticMarkup(
+    <SessionDetailToolCall event={failedToolEvent} expanded={false} onExpandedChange={() => undefined} />,
+  ));
+  assert.match(failedTool, /<span class="session-detail-tool-status status-failed">失败<\/span>/);
+  // Waits, counts and the page's sentences follow the language; English is untouched after.
+  inChinese(() => {
+    assert.equal(formatSessionGap(START, START + 300), "+5分钟");
+    assert.equal(formatSessionGap(START, START + 7_200), "+2小时");
+    assert.equal(formatSessionCount({ value: 12_345, quality: "lower_bound" }), "12,345+");
+    assert.equal(formatSessionCount({ quality: "unsupported" }), "不可用");
+    assert.equal(sessionPushDisabledReason(undefined), "此会话无法单独上传。");
+    assert.equal(markdownMediaFailureMessage("audio", "loop.ogg", { code: "invalid_request", message: "" }), "Mallard 无法播放 OGG 文件。");
+    assert.equal(markdownMediaFailureMessage("audio", "a.wav", { code: "ownership_changed", message: "The project binding changed." }), "The project binding changed.");
+  });
+  assert.equal(formatSessionGap(START, START + 300), "+5m");
+});
+
+// A transcript that reads like the page's own words is still the agent's: with
+// Chinese on, every transcript container holds exactly what English shows.
+test("an English transcript renders unchanged with Chinese on", () => {
+  const record: SessionTimelineEvent[] = [
+    { ...events[0], text: "Pull first", turn_tool_summary: undefined },
+    { ...toolEvent, tool: { ...toolEvent.tool!, native_name: "Bash", category: "shell", summary: "failed", status: "failed" } },
+    { ...events[2], text: "Replies" },
+    { ...events[3], text: "Prompts and **Tool calls**", quality: "exact" },
+    { ...agentEvent, ordinal: 6, agent: { ...agentEvent.agent!, label: "Agent", task: "async", role: "Report" } },
+    { ...checkpointEvent, ordinal: 7, checkpoint: { ...checkpointEvent.checkpoint!, subject: "Checkpoint", branch: "Steps" } },
+  ];
+  const transcript = (html: string) => [
+    ...[...html.matchAll(/<div class="session-detail-event-copy markdown-copy[^"]*">([\s\S]*?)<\/div>/g)].map((match) => match[1]),
+    ...[...html.matchAll(/class="session-detail-tool-summary" title="([^"]*)">([^<]*)</g)].flatMap((match) => [match[1], match[2]]),
+    ...[...html.matchAll(/class="session-detail-agent-(?:label|task)" title="([^"]*)">([^<]*)</g)].flatMap((match) => [match[1], match[2]]),
+    ...[...html.matchAll(/class="session-detail-agent-pill">([^<]*)</g)].map((match) => match[1]),
+    ...[...html.matchAll(/class="session-detail-checkpoint-(?:subject|branch)"[^>]*>([^<]*)</g)].map((match) => match[1]),
+  ];
+  const english = transcript(renderTimeline(record));
+  const chinese = transcript(inChinese(() => renderTimeline(record)));
+  assert.deepEqual(chinese, english);
+  assert.deepEqual(english, [
+    "<p>Pull first</p>",
+    "<p>Replies</p>",
+    "<p>Prompts and <strong>Tool calls</strong></p>",
+    "failed", "failed",
+    "Agent", "Agent", "async", "async",
+    "Report",
+    "Checkpoint", "Steps",
+  ]);
+  // The chrome around it did change: nothing of the page's own English is left.
+  const zh = inChinese(() => renderTimeline(record));
+  assert.match(zh, /session-detail-agent-stamp">代理</);
+  assert.match(zh, /status-failed">失败<\/span>/);
+  assert.doesNotMatch(zh, /session-detail-agent-stamp">Agent<|agent-pill mode">async<|status-failed">failed<|You · |Checkpoint · /);
+
+  // The brief, the report and a tool's payloads: labels in Chinese, text as recorded.
+  const brief = inChinese(() => renderToStaticMarkup(<PayloadSection kind="brief" value="Brief" truncated />));
+  assert.match(brief, /session-detail-payload-label">任务说明</);
+  assert.match(brief, /aria-label="复制任务说明到剪贴板"/);
+  assert.match(brief, /<code>Brief<\/code>/);
+  assert.match(brief, /部分预览 · 其余内容已省略/);
+  const report = inChinese(() => renderToStaticMarkup(<PayloadSection kind="report" value="Report: Pull first, then Push." truncated={false} />));
+  assert.match(report, /session-detail-payload-label">报告</);
+  assert.match(report, /<code>Report: Pull first, then Push\.<\/code>/);
+  const payload = inChinese(() => renderToStaticMarkup(
+    <SessionDetailToolCall
+      event={toolEvent}
+      expanded
+      detailState={{
+        loading: false,
+        error: null,
+        detail: {
+          event_id: toolEvent.event_id,
+          arguments: "Arguments",
+          arguments_truncated: false,
+          result: "Result",
+          result_truncated: false,
+          affected_paths: ["Paths/main.tsx"],
+        },
+      }}
+      onExpandedChange={() => undefined}
+    />,
+  ));
+  assert.match(payload, /session-detail-payload-label">参数<[\s\S]*<code>Arguments<\/code>[\s\S]*session-detail-payload-label">结果<[\s\S]*<code>Result<\/code>[\s\S]*session-detail-payload-label">路径<[\s\S]*<code>Paths\/main\.tsx<\/code>/);
+  assert.match(payload, /aria-label="复制参数到剪贴板"/);
+
+  // Markdown chrome follows the language; the link text and path do not.
+  const markdown = inChinese(() => renderToStaticMarkup(
+    <SessionDetailMarkdown
+      text={"Created [Open story.md](./story.md). ![Escape](/tmp/animation.gif)"}
+      onOpenProjectPath={() => undefined}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={{}}
+      projectRoot="/Users/example/HorrorGame"
+    />,
+  ));
+  assert.match(markdown, /aria-label="打开 \/Users\/example\/HorrorGame\/story\.md"[^>]*>Open story\.md<\/a>/);
+  assert.match(markdown, /title="只能嵌入项目内的图片。"/);
+  assert.match(markdown, /<p>Created /);
+});
+
+/* D7: count explanations and notes are the backend's English with a code
+   beside each; the session page translates by the code. */
+test("count tooltips, notes and actions keep the backend's English and are worded by code in Chinese", () => {
+  const coded: ProjectSessionDetail = {
+    ...detail,
+    tokens: {
+      value: 1_063_252,
+      quality: "lower_bound",
+      explanation: "The provider transcript may contain additional token usage.",
+      explanation_code: "tokens_may_be_incomplete",
+    },
+    event_counts: {
+      ...detail.event_counts,
+      tool_calls: {
+        value: 4,
+        quality: "lower_bound",
+        explanation: "Some Codex tool activity may be absent because the durable rollout was incomplete.",
+        explanation_code: "codex_tool_activity_incomplete",
+      },
+    },
+    actions: [{
+      action_id: "codex.open-in-app",
+      kind: "open_in_app",
+      label: "Open in Codex",
+      enabled: false,
+      disabled_reason: "This session is not materialized locally.",
+    }],
+  };
+  const notes = [
+    { code: "malformed_record", severity: "warning" as const, message: "Some lines of the session file couldn't be read and are left out." },
+    { code: "future_note", severity: "info" as const, message: "A note this build has no Chinese for." },
+  ];
+  const filters = createDefaultSessionDetailFilters(coded.event_counts);
+  const toolbar = () => renderToStaticMarkup(
+    <SessionDetailToolbar counts={coded.event_counts} filters={filters} loadedCount={5} onFiltersChange={() => undefined} />,
+  );
+  const header = () => renderHeader({ detail: coded, notes, onShowToolCalls: () => undefined });
+
+  // English: the backend's sentences, byte for byte.
+  assert.match(toolbar(), /title="Some Codex tool activity may be absent because the durable rollout was incomplete\."/);
+  assert.match(header(), /title="The provider transcript may contain additional token usage\."/);
+  assert.match(header(), /Warning: Some lines of the session file couldn&#x27;t be read and are left out\./);
+  assert.match(header(), /title="This session is not materialized locally\." aria-label="Open in Codex"/);
+
+  const zhToolbar = inChinese(toolbar);
+  assert.match(zhToolbar, /title="持久化的 rollout 不完整，可能缺少部分 Codex 工具活动。"/);
+  // A count the backend explains without a code keeps its English.
+  assert.match(zhToolbar, /title="One legacy phase may be missing\."/);
+  const zhHeader = inChinese(header);
+  assert.match(zhHeader, /title="对话记录中可能还有更多 Token 用量。"/);
+  assert.match(zhHeader, /会话文件中的部分行无法读取，未显示。/);
+  assert.match(zhHeader, /A note this build has no Chinese for\./);
+  assert.match(zhHeader, /title="此会话不在本机上。" aria-label="在 Codex 中打开"/);
+  // The session's own words stay as recorded.
+  assert.match(zhHeader, /<h1 [^>]*>Build provider-neutral session detail<\/h1>/);
 });

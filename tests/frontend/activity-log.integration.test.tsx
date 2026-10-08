@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import LogPanel, { nextFollowTail } from "../../src/components/LogPanel";
+import ActivityLogDrawer from "../../src/components/project-sync/ActivityLogDrawer";
+import { i18n } from "../../src/i18n";
+import { en } from "../../src/i18n/en";
 
 test("log bar keeps the multi-type filter and Manage logs in the header", () => {
   const html = renderToStaticMarkup(
@@ -146,7 +149,8 @@ test("closed Logs remove their controls and explicit open manages focus", () => 
   assert.match(sidebarSource, /id="activity-log-trigger"/);
   assert.match(sidebarSource, /aria-controls="activity-log-drawer"/);
   assert.match(sidebarSource, /aria-expanded=\{activityOpen\}/);
-  assert.match(drawerSource, /id="activity-log-drawer"[\s\S]*?role="region"[\s\S]*?aria-label="Logs"[\s\S]*?tabIndex=\{-1\}/);
+  assert.match(drawerSource, /id="activity-log-drawer"[\s\S]*?role="region"[\s\S]*?aria-label=\{t\("drawer\.label"\)\}[\s\S]*?tabIndex=\{-1\}/);
+  assert.equal(en.logs.drawer.label, "Logs");
   assert.match(drawerSource, /\{open && \(\s*<LogPanel/);
   assert.match(syncSource, /requestAnimationFrame\(\(\) => logDrawerRef\.current\?\.focus\(\)\)/);
   assert.match(syncSource, /document\.getElementById\("activity-log-trigger"\)\?\.focus\(\)/);
@@ -185,4 +189,77 @@ test("the log tail is not dropped by the scroll events its own pinning queues", 
     nextFollowTail(false, { scrollHeight: 2000, clientHeight: 193, pinnedScrollTop, scrollTop: 1000 }),
     false,
   );
+});
+
+test("the Logs drawer in Chinese: its chrome translated, every line as the backend wrote it", () => {
+  const lines = [
+    { schema: 1, id: "one", ts: Date.UTC(2026, 9, 7, 13, 5, 9), level: "success" as const, type: "push" as const, event: "push.completed", message: "Pushed 3 sessions to Attic R2" },
+    { schema: 1, id: "two", ts: Date.UTC(2026, 9, 7, 13, 6, 0), level: "error" as const, type: "configuration" as const, event: "config.failed", message: "Could not read settings.json" },
+  ];
+  const panel = () => renderToStaticMarkup(
+    <LogPanel
+      lines={lines}
+      typeFilters={["push", "pull"]}
+      levelFilter="all"
+      error="Activity log store is unavailable"
+      onTypeFiltersChange={() => undefined}
+      onLevelFilterChange={() => undefined}
+      onSearchChange={() => undefined}
+      onManage={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  const drawer = () => renderToStaticMarkup(
+    <ActivityLogDrawer
+      open={false}
+      height={240}
+      refreshEpoch={0}
+      scrollToBottomEpoch={0}
+      drawerRef={() => undefined}
+      onStartResize={() => undefined}
+      onResetHeight={() => undefined}
+      onManage={() => undefined}
+      onClose={() => undefined}
+      readLiveLines={() => []}
+      subscribeToLiveLines={() => () => undefined}
+    />,
+  );
+
+  // English first: the type tag is the type's own lowercase word.
+  const english = panel();
+  assert.match(english, /<span class="log-type log-type-push">push<\/span>/);
+  assert.match(english, /<span class="log-type log-type-configuration">configuration<\/span>/);
+  assert.match(english, /<span class="sync-visually-hidden">Success<\/span>/);
+  assert.match(english, /placeholder="Search logs"/);
+
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = panel();
+    assert.match(html, /<span class="log-panel-title">日志<\/span>/);
+    assert.match(html, /aria-label="按类型筛选日志：已选 2 个"/);
+    assert.match(html, /<span class="log-type-filter-key">类型<\/span>/);
+    assert.match(html, />全选</);
+    assert.match(html, />全不选</);
+    assert.match(html, /<span>上传<\/span>/);
+    assert.match(html, /<span>配置<\/span>/);
+    assert.match(html, /aria-label="按级别筛选日志"/);
+    assert.match(html, /<option value="all" selected="">全部<\/option>/);
+    assert.match(html, /<option value="error">错误<\/option>/);
+    // Search matches the English lines, and its placeholder says so.
+    assert.match(html, /placeholder="搜索日志（仅匹配英文）" aria-label="搜索日志"/);
+    assert.match(html, />管理日志</);
+    assert.match(html, /title="关闭" aria-label="关闭日志"/);
+    // Each line keeps the backend's words; the tag and the hidden level are ours.
+    assert.match(html, /<span class="log-type log-type-push">上传<\/span><span class="log-msg">Pushed 3 sessions to Attic R2<\/span>/);
+    assert.match(html, /<span class="log-type log-type-configuration">配置<\/span><span class="log-msg">Could not read settings\.json<\/span>/);
+    assert.match(html, /<span class="sync-visually-hidden">成功<\/span>/);
+    // A failed read: our lead-in, the backend's sentence as it came.
+    assert.match(html, /无法载入保留的日志：Activity log store is unavailable/);
+    assert.match(html, /aria-label="关闭：错误。无法载入保留的日志：Activity log store is unavailable。"/);
+    assert.match(drawer(), /role="region" aria-label="日志"/);
+    assert.match(renderToStaticMarkup(<LogPanel lines={[]} onClose={() => undefined} />), />没有符合筛选条件的记录。</);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.match(drawer(), /role="region" aria-label="Logs"/);
 });

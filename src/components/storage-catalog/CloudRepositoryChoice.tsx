@@ -19,10 +19,19 @@ import {
 import { nameRefusal, predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
 import Notice, { FieldMessage } from "../notice/Notice";
 import { formatRelativeTime } from "../../clock";
+import { t as translate, useTranslation } from "../../i18n";
 import { errorMessage } from "../../storageError";
 import type { ManagedCloudListingRow } from "../managed-cloud/types";
 import { storageCatalogApi } from "./api";
-import { catalogCapabilityFor, catalogPresentation, sameCatalogCoordinate } from "./model";
+import {
+  capabilityLabel,
+  capabilitySingular,
+  catalogCapabilityFor,
+  catalogNouns,
+  catalogPresentation,
+  sameCatalogCoordinate,
+  type CatalogNouns,
+} from "./model";
 import type {
   CatalogCapabilityDescriptor,
   CatalogCloudRepository,
@@ -49,8 +58,8 @@ export type CloudChoiceTarget =
   | {
     kind: "item";
     coordinate: CatalogCoordinate;
-    /** The kind's singular noun, lowercased: "pet v2", "skill". */
-    noun: string;
+    /** The kind's words: "pet v2", "skill". */
+    nouns: CatalogNouns;
     resourceId: string;
     name: string;
     offerNew: boolean;
@@ -59,7 +68,7 @@ export type CloudChoiceTarget =
   | {
     kind: "add";
     coordinate: CatalogCoordinate;
-    noun: string;
+    nouns: CatalogNouns;
     /** "Pets v2 · Codex home", for "already has". */
     rowLabel: string;
     /** The items this row lists already. */
@@ -84,11 +93,27 @@ type Listing =
 
 const capitalize = (value: string) => (value ? `${value[0].toUpperCase()}${value.slice(1)}` : value);
 
+/** A role the service names, in the interface's words; one this build has
+ *  none for shows as the service wrote it. */
+function roleName(role: string): string {
+  switch (role) {
+    case "owner":
+      return translate("library:role.owner");
+    case "admin":
+      return translate("library:role.admin");
+    case "member":
+      return translate("library:role.member");
+    default:
+      return capitalize(role);
+  }
+}
+
 /** A repository's standing in a word or two: its role, and Public when
  *  anyone signed in can push to it. */
 export function cloudRoleWord(repository: Pick<CatalogCloudRepository, "role" | "visibility">): string {
-  if (repository.role === null) return "Public · Contributor";
-  return `${repository.visibility === "public" ? "Public · " : ""}${capitalize(repository.role)}`;
+  if (repository.role === null) return translate("library:role.public", { role: translate("library:role.contributor") });
+  const role = roleName(repository.role);
+  return repository.visibility === "public" ? translate("library:role.public", { role }) : role;
 }
 
 /** Why a repository does not fit the chooser, in one sentence; `null` when
@@ -99,28 +124,32 @@ export function cloudRepositoryMisfit(
   capabilities: readonly CatalogCapabilityDescriptor[],
 ): string | null {
   const own = repository.role === "owner";
+  const address = repository.address;
   if (target.kind === "door") {
-    if (!repository.available) return `${repository.address} is a ${repository.kind_label} repository this app can't open.`;
-    return own ? `${repository.address} is yours — already listed.` : null;
+    if (!repository.available) return translate("library:misfit.cantOpen", { address, kind: repository.kind_label });
+    return own ? translate("library:misfit.yours", { address }) : null;
   }
   if (!sameCatalogCoordinate(repository, target.coordinate)) {
     const theirs = catalogCapabilityFor(capabilities, repository);
     if (repository.resource_kind !== target.coordinate.resource_kind) {
-      const noun = (theirs?.singular_label ?? repository.kind_label).toLowerCase();
-      return `${repository.address} is a ${noun}, not a ${target.noun}.`;
+      const nouns = catalogNouns(theirs, {
+        plural: theirs?.label ?? repository.kind_label,
+        singular: theirs?.singular_label ?? repository.kind_label,
+      });
+      return target.nouns.say((wanted) => nouns.say((noun) => translate("library:misfit.kind", { address, noun, wanted }), 1), 1);
     }
     if (repository.provider !== target.coordinate.provider) {
-      return `${repository.address} is for ${repository.provider_label}.`;
+      return translate("library:misfit.provider", { address, provider: repository.provider_label });
     }
-    return `${repository.address} is a ${theirs?.label ?? repository.format_label} repository.`;
+    return translate("library:misfit.format", { address, format: theirs ? capabilityLabel(theirs) : repository.format_label });
   }
   if (target.kind === "item") {
     return repository.resource_id === target.resourceId
       ? null
-      : `${repository.address} holds ${repository.display_name}, not ${target.name}.`;
+      : translate("library:misfit.holds", { address, held: repository.display_name, name: target.name });
   }
-  if (own) return `${repository.address} is yours — already listed.`;
-  if (target.listed.has(repository.resource_id)) return `${target.rowLabel} already has ${repository.display_name}.`;
+  if (own) return translate("library:misfit.yours", { address });
+  if (target.listed.has(repository.resource_id)) return translate("library:misfit.alreadyHas", { row: target.rowLabel, name: repository.display_name });
   return null;
 }
 
@@ -128,17 +157,31 @@ export function cloudRepositoryMisfit(
 function resolutionMessage(resolution: Exclude<CatalogCloudResolution, { kind: "found" } | { kind: "not_found" }>, target: CloudChoiceTarget): string {
   switch (resolution.kind) {
     case "wrong_service":
-      return `That’s ${resolution.host}, not this account.`;
+      return translate("library:misfit.wrongService", { host: resolution.host });
     case "github":
-      return "That’s a GitHub address.";
+      return translate("library:misfit.github");
     case "invalid":
-      return "Paste a link, owner/name, or an invitation code.";
+      return translate("library:misfit.invalid");
     case "not_catalog":
-      return `${resolution.address} is a project, not a ${target.kind === "door" ? "Catalog resource" : target.noun}.`;
+      return target.kind === "door"
+        ? translate("library:misfit.projectNotResource", { address: resolution.address })
+        : target.nouns.say((noun) => translate("library:misfit.projectNotKind", { address: resolution.address, noun }), 1);
   }
 }
 
-const SCOPE_LABEL: Record<ScopeId, string> = { yours: "Yours", shared: "Shared with you", starred: "Starred", public: "Public" };
+/** A listing scope's name, as its tab says it. */
+function scopeLabel(scope: ScopeId): string {
+  switch (scope) {
+    case "yours":
+      return translate("library:scope.yours");
+    case "shared":
+      return translate("library:scope.shared");
+    case "starred":
+      return translate("library:scope.starred");
+    case "public":
+      return translate("library:scope.public");
+  }
+}
 const EMPTY_PAGE = { rows: [], next_cursor: null };
 
 export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, target, working, capabilities = [], list: read, listKey, initialAddress = null }: {
@@ -160,6 +203,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
   list: () => Promise<CatalogCloudRepository[]>;
   listKey: string;
 }) {
+  const { t } = useTranslation(["library", "common"]);
   const adding = target.kind !== "item";
   const [listing, setListing] = useState<Listing>({ state: "loading" });
   const [entry, setEntry] = useState(initialAddress ?? "");
@@ -316,11 +360,16 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
 
   const markFor = (repository: CatalogCloudRepository) =>
     catalogPresentation(catalogCapabilityFor(capabilities, repository)).icon;
-  const kindFor = (repository: CatalogCloudRepository) =>
-    catalogCapabilityFor(capabilities, repository)?.singular_label ?? repository.kind_label;
+  const kindFor = (repository: CatalogCloudRepository) => {
+    const capability = catalogCapabilityFor(capabilities, repository);
+    return capability ? capabilitySingular(capability) : repository.kind_label;
+  };
   const listedCapability = (row: ManagedCloudListingRow) => (row.catalog ? catalogCapabilityFor(capabilities, row.catalog) : null);
   const listedMark = (row: ManagedCloudListingRow): IconName => catalogPresentation(listedCapability(row)).icon;
-  const listedKind = (row: ManagedCloudListingRow) => listedCapability(row)?.singular_label ?? row.catalog?.resource_kind ?? null;
+  const listedKind = (row: ManagedCloudListingRow) => {
+    const capability = listedCapability(row);
+    return capability ? capabilitySingular(capability) : row.catalog?.resource_kind ?? null;
+  };
   const door = target.kind === "door";
   const skin = door ? "match" : "choice";
 
@@ -336,7 +385,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
   let found: ReactNode = null;
   if (lookup.kind === "resolving") {
     /* The verb's own busy label is the progress; this only announces it. */
-    found = <span className="sync-visually-hidden" role="status">Looking up {lookup.address}…</span>;
+    found = <span className="sync-visually-hidden" role="status">{t("lookup.looking", { address: lookup.address })}</span>;
   } else if (lookup.kind === "error") {
     found = <FieldMessage blocking>{lookup.message}</FieldMessage>;
   } else if (lookup.kind === "not_found") {
@@ -344,11 +393,11 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
       <div className="r2-step-list">
         <div className="storage-found-empty" role="status">
           <Icon name="search" size={24} />
-          <strong>Nothing at {lookup.address}.</strong>
-          <span>Check the spelling, or paste the link from its page.</span>
+          <strong>{t("lookup.nothingAt", { address: lookup.address })}</strong>
+          <span>{t("lookup.checkSpelling")}</span>
           {offerNew && (
             <span className="storage-found-empty-verbs">
-              <button type="button" className="btn btn-primary" disabled={working} onClick={() => choose("new")}>Use a new repository</button>
+              <button type="button" className="btn btn-primary" disabled={working} onClick={() => choose("new")}>{t("lookup.useNew")}</button>
             </span>
           )}
         </div>
@@ -358,7 +407,9 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
     const holder = scopeHolding(lookup.repository.repository_id)!;
     found = (
       <small className="repo-answer-line" role="status">
-        <Icon name="check-circle" size={13} /> {lookup.joined ? `Joined ${lookup.repository.address}. Selected below.` : `${adding ? `In ${SCOPE_LABEL[holder]}. ` : ""}Selected below.`}
+        <Icon name="check-circle" size={13} /> {lookup.joined
+          ? t("lookup.joined", { address: lookup.repository.address })
+          : adding ? t("lookup.inScope", { scope: scopeLabel(holder) }) : t("lookup.selectedBelow")}
       </small>
     );
   } else if (lookup.kind === "found") {
@@ -366,7 +417,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
     const selected = chosen?.repository_id === repository.repository_id;
     found = (
       <div className="r2-step-list">
-        <div className="storage-found-list" aria-label="Repository at this address">
+        <div className="storage-found-list" aria-label={t("lookup.atAddress")}>
           <div className={`storage-found-row with-verb${selected ? " selected" : ""}`}>
             <span className="sync-storage-repository-icon"><Icon name={markFor(repository)} size={14} /></span>
             <span className="storage-found-text">
@@ -377,8 +428,8 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
             </span>
             <span className="storage-found-verb">
               {selected
-                ? <span className="storage-found-connected"><Icon name="check" size={12} /> Selected</span>
-                : <button type="button" className="btn btn-primary" disabled={working} onClick={() => setSelection(repository)}>Use this</button>}
+                ? <span className="storage-found-connected"><Icon name="check" size={12} /> {t("lookup.selected")}</span>
+                : <button type="button" className="btn btn-primary" disabled={working} onClick={() => setSelection(repository)}>{t("lookup.useThis")}</button>}
             </span>
           </div>
         </div>
@@ -407,13 +458,13 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
   if (!adding) {
     /* An item's own chooser: the repositories that hold it, a new one first. */
     choices = listing.state === "loading" ? (
-      <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> Loading repositories…</small>
+      <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> {t("choice.loading")}</small>
     ) : listing.state === "error" ? (
       <Notice severity="danger" timing="blocking">{listing.message}</Notice>
     ) : !offerNew && shownRows.length === 0 ? (
-      <p className="repo-list-empty">{filtering ? `No match for “${needle}”.` : "No repositories yet."}</p>
+      <p className="repo-list-empty">{filtering ? t("choice.noMatch", { needle }) : t("choice.none")}</p>
     ) : (
-      <div className="sync-bundle-choice-list repo-rows" role="radiogroup" aria-label={`Repositories for ${target.name}`}>
+      <div className="sync-bundle-choice-list repo-rows" role="radiogroup" aria-label={t("choice.repositoriesFor", { name: target.name })}>
         {offerNew && prediction && !filtering && (
           <button type="button" role="radio" aria-checked={selection === "new"}
             className={`sync-bundle-choice separate${selection === "new" ? " active" : ""}`} disabled={working}
@@ -422,17 +473,17 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
             <span className="sync-bundle-choice-copy">
               {prediction.kind === "address" ? (
                 <>
-                  <strong>{prediction.address}<small className="sync-bundle-recommended">New</small></strong>
-                  {prediction.suffixed && <span>{prediction.base} is taken.</span>}
+                  <strong>{prediction.address}<small className="sync-bundle-recommended">{t("item.new")}</small></strong>
+                  {prediction.suffixed && <span>{t("choice.taken", { base: prediction.base })}</span>}
                 </>
               ) : (
                 <>
-                  <strong>New repository<small className="sync-bundle-recommended">New</small></strong>
+                  <strong>{t("card.newRepository")}<small className="sync-bundle-recommended">{t("item.new")}</small></strong>
                   <span className="repo-new-refusal">{nameRefusal("item")}</span>
                 </>
               )}
             </span>
-            <span className="sync-bundle-choice-meta"><small>Private</small></span>
+            <span className="sync-bundle-choice-meta"><small>{t("item.private")}</small></span>
           </button>
         )}
         {shownRows.map((row) => {
@@ -448,7 +499,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
               </span>
               <span className="sync-bundle-choice-meta">
                 {!row.registration_only && <strong>v{row.revision}</strong>}
-                <small>{row.registration_only ? "not pushed yet" : formatRelativeTime(row.updated_at)}</small>
+                <small>{row.registration_only ? t("choice.notPushed") : formatRelativeTime(row.updated_at)}</small>
               </span>
             </button>
           );
@@ -457,15 +508,17 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
     );
   } else {
     const tabs: ScopeTab[] = [
-      { id: "shared", label: "Shared with you", icon: "cloud-user", count: ready ? shownRows.length : null },
-      { id: "starred", label: "Starred", icon: "star", count: listings.starred.state === "ready" ? starredRows.length : null },
-      { id: "public", label: "Public", icon: "cloud", count: filtering && listings.public.state === "ready" ? publicRows.length : null },
+      { id: "shared", label: scopeLabel("shared"), icon: "cloud-user", count: ready ? shownRows.length : null },
+      { id: "starred", label: scopeLabel("starred"), icon: "star", count: listings.starred.state === "ready" ? starredRows.length : null },
+      { id: "public", label: scopeLabel("public"), icon: "cloud", count: filtering && listings.public.state === "ready" ? publicRows.length : null },
     ];
     const elsewhere = (except: ScopeId) => tabs
       .filter((candidate) => candidate.id !== except && (candidate.count ?? 0) > 0)
       .map((candidate) => ({ id: candidate.id, label: candidate.label, count: candidate.count ?? 0 }));
-    const noMatch = (where: ScopeId) => `No match for “${needle}” in ${SCOPE_LABEL[where]}.`;
-    const noun = target.kind === "add" ? target.noun : "Catalog resource";
+    const noMatch = (where: ScopeId) => t("choice.noMatchIn", { needle, scope: scopeLabel(where) });
+    const noPublic = target.kind === "add"
+      ? target.nouns.say((noun) => t("choice.noPublicKind", { noun }), 1)
+      : t("choice.noPublicResources");
     const selectedListedId = chosen?.repository_id ?? null;
     let panel: ReactNode;
     if (tab === "shared") {
@@ -475,13 +528,13 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
         panel = <Notice severity="danger" timing="blocking">{listing.message}</Notice>;
       } else if (shownRows.length === 0) {
         panel = (
-          <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud-user"} words={filtering ? noMatch("shared") : "Nothing shared with you yet."}
+          <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud-user"} words={filtering ? noMatch("shared") : t("choice.nothingShared")}
             elsewhere={filtering ? elsewhere("shared") : undefined} onJump={setTab}
             onBrowsePublic={filtering ? undefined : () => setTab("public")} disabled={working} />
         );
       } else {
         panel = (
-          <div className={`${skin === "choice" ? "sync-bundle-choice-list" : "sync-bundle-match-options"} repo-rows`} role="radiogroup" aria-label="Shared with you">
+          <div className={`${skin === "choice" ? "sync-bundle-choice-list" : "sync-bundle-match-options"} repo-rows`} role="radiogroup" aria-label={scopeLabel("shared")}>
             {shownRows.map(ownRow)}
           </div>
         );
@@ -491,28 +544,28 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
         panel = <ListingStatus listing={listings.starred} />;
       } else if (starredRows.length === 0) {
         panel = (
-          <ScopeEmpty skin={skin} icon={filtering ? "search" : "star"} words={filtering ? noMatch("starred") : "Nothing starred yet."}
+          <ScopeEmpty skin={skin} icon={filtering ? "search" : "star"} words={filtering ? noMatch("starred") : t("choice.nothingStarred")}
             elsewhere={filtering ? elsewhere("starred") : undefined} onJump={setTab}
             onBrowsePublic={filtering ? undefined : () => setTab("public")} disabled={working} />
         );
       } else {
         panel = (
           <ListingRows rows={starredRows} skin={skin} selectedId={selectedListedId} resolvingId={resolvingRow} disabled={working}
-            ariaLabel="Starred" markFor={listedMark} kindFor={door ? listedKind : undefined} onPick={pickListed} />
+            ariaLabel={scopeLabel("starred")} markFor={listedMark} kindFor={door ? listedKind : undefined} onPick={pickListed} />
         );
       }
     } else if (listings.public.state !== "ready") {
       panel = <ListingStatus listing={listings.public} onRetry={listings.retryPublic} />;
     } else if (publicRows.length === 0) {
       panel = (
-        <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud"} words={filtering ? noMatch("public") : `No public ${noun}s yet.`}
+        <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud"} words={filtering ? noMatch("public") : noPublic}
           elsewhere={filtering ? elsewhere("public") : undefined} onJump={setTab} disabled={working} />
       );
     } else {
       panel = (
         <>
           <ListingRows rows={publicRows} skin={skin} selectedId={selectedListedId} resolvingId={resolvingRow} disabled={working}
-            ariaLabel="Public" markFor={listedMark} kindFor={door ? listedKind : undefined} onPick={pickListed} />
+            ariaLabel={scopeLabel("public")} markFor={listedMark} kindFor={door ? listedKind : undefined} onPick={pickListed} />
           {!filtering && <ListingFoot listing={listings.public} onMore={listings.loadMore} disabled={working} />}
         </>
       );

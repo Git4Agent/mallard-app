@@ -6,6 +6,8 @@ import type {
   ProviderProfileSummary,
 } from "../../types";
 import Icon from "../Icons";
+import { Trans, useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import Notice, { FieldMessage } from "../notice/Notice";
 import { expandHomePath, isAbsoluteProfilePath, profilePathHint } from "../../profilePath";
 import { compactProjectPath } from "./model";
@@ -74,6 +76,7 @@ export default function ProjectBindingEditor({
   onCancel,
   onSubmit,
 }: Props) {
+  const { t } = useTranslation(["projectSetup", "common"]);
   const [projectRoot, setProjectRoot] = useState(binding.project_root);
   const [selections, setSelections] = useState<Partial<Record<ProviderKey, BindingProfileSelection | null>>>(() => {
     const initial: Partial<Record<ProviderKey, BindingProfileSelection | null>> = {};
@@ -115,9 +118,9 @@ export default function ProjectBindingEditor({
     return !selection || (selection.kind === "pending" && !selection.path.trim());
   });
   const agentError = enabledDescriptors.length === 0
-    ? "Turn on at least one agent to continue."
+    ? t("agents.noneOn")
     : unchosen.length > 0
-      ? `Choose a profile for ${unchosen.map((descriptor) => descriptor.display_name).join(", ")}.`
+      ? t("agents.chooseFor", { providers: unchosen.map((descriptor) => descriptor.display_name).join(t("shared.separator")) })
       : null;
   // A typed path speaks through its own hint line; the save gate waits for
   // the probe to answer in the success tone.
@@ -186,7 +189,7 @@ export default function ProjectBindingEditor({
           <select
             value={value}
             disabled={busy}
-            aria-label={`${descriptor.display_name} profile`}
+            aria-label={t("agents.profile", { provider: descriptor.display_name })}
             aria-invalid={rowIncomplete || undefined}
             aria-describedby={rowIncomplete && agentError ? "sync-binding-error-agent" : undefined}
             onChange={(event) => {
@@ -199,29 +202,29 @@ export default function ProjectBindingEditor({
               }));
             }}
           >
-            <option value="">Choose profile</option>
+            <option value="">{t("agents.chooseProfile")}</option>
             {options.map((profile) => {
               const unavailable = !profile.available || !profile.readable;
               return (
                 <option key={profile.profile_id} value={profile.profile_id} disabled={unavailable}>
-                  {profile.display_name}{unavailable ? " (unavailable)" : ""}
+                  {unavailable ? t("shared.unavailable", { name: profile.display_name }) : profile.display_name}
                 </option>
               );
             })}
-            <option value="__pending">Custom path…</option>
+            <option value="__pending">{t("agents.customPath")}</option>
           </select>
         </span>
         {selection?.kind === "pending" && (
           <input
             value={path}
             disabled={busy}
-            aria-label={`${descriptor.display_name} custom profile path`}
+            aria-label={t("agents.customPathLabel", { provider: descriptor.display_name })}
             aria-invalid={hint?.tone === "bad" || undefined}
             aria-describedby={[
               rowIncomplete && agentError ? "sync-binding-error-agent" : null,
               hintId,
             ].filter(Boolean).join(" ") || undefined}
-            placeholder={`${descriptor.display_name} profile path`}
+            placeholder={t("agents.pathPlaceholder", { provider: descriptor.display_name })}
             spellCheck={false}
             autoFocus
             onChange={(event) => {
@@ -234,7 +237,7 @@ export default function ProjectBindingEditor({
           />
         )}
         <button type="button" className="btn" onClick={() => void chooseProfileFolder(provider)} disabled={busy}>
-          <Icon name="folder" size={13} /> Browse
+          <Icon name="folder" size={13} /> {t("agents.browse")}
         </button>
         {hint && (
           /* Polite, not an alert: this changes on a debounce while the field
@@ -259,10 +262,10 @@ export default function ProjectBindingEditor({
     >
         <header className="sync-modal-header">
           <div>
-            <span className="sync-eyebrow">Machine-local binding</span>
+            <span className="sync-eyebrow">{t("binding.eyebrow")}</span>
             <h1 id="sync-binding-title">{title}</h1>
           </div>
-          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} aria-label="Close binding editor">
+          <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy} aria-label={t("binding.close")}>
             <Icon name="x" size={17} />
           </button>
         </header>
@@ -270,55 +273,62 @@ export default function ProjectBindingEditor({
           <section className="sync-setup-section">
             <div className="sync-card-heading">
               <div>
-                <strong>Project</strong>
-                <span>Only this machine changes — repo identity and cloud paths stay the same.</span>
+                <strong>{t("sections.project")}</strong>
+                <span>{t("binding.onlyThisMachine")}</span>
               </div>
             </div>
             <div className="sync-field-grid">
               <label>
-                <span>Folder</span>
+                <span>{t("sections.folder")}</span>
                 {binding.locked ? (
                   <input value={compactProjectPath(projectRoot)} readOnly title={projectRoot} />
                 ) : (
                   <div className="sync-profile-select-row">
                     <input value={compactProjectPath(projectRoot)} readOnly title={projectRoot} />
                     <button type="button" className="btn" onClick={() => void chooseProjectFolder()} disabled={busy}>
-                      Choose folder
+                      {t("binding.chooseFolder")}
                     </button>
                   </div>
                 )}
               </label>
             </div>
             <dl className="sync-fact-grid compact">
-              <div><dt>Local project</dt><dd><code>{binding.local_project_id ?? "created after confirmation"}</code></dd></div>
-              <div><dt>Repo</dt><dd><code>{binding.bundle_id}</code></dd></div>
+              <div><dt>{t("binding.localProject")}</dt><dd><code>{binding.local_project_id ?? t("binding.afterConfirmation")}</code></dd></div>
+              <div><dt>{t("binding.repo")}</dt><dd><code>{binding.bundle_id}</code></dd></div>
             </dl>
           </section>
           <section className="sync-setup-section">
             <div className="sync-card-heading">
-              <div><strong>Agents</strong></div>
+              <div><strong>{t("sections.agents")}</strong></div>
             </div>
             {binding.locked ? (
               /* The profiles this project uses on this machine, as facts:
                  the name it was registered under and where it lives. */
-              <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+              <div className="sync-provider-cards" role="group" aria-label={t("agents.group")}>
                 {providers.flatMap((descriptor) => {
                   const selection = selections[descriptor.key];
                   if (selection?.kind !== "existing") return [];
                   const profile = profiles.find((candidate) => candidate.profile_id === selection.profile_id) ?? null;
-                  const markers = profile
-                    ? !profile.available || !profile.readable ? " · Unavailable" : !profile.writable ? " · Read only" : ""
-                    : "";
+                  const fact = profile
+                    ? !profile.available || !profile.readable ? "binding.profileUnavailable" as const
+                      : !profile.writable ? "binding.profileReadOnly" as const : "binding.profile" as const
+                    : null;
                   return [(
                     <div key={descriptor.key} className="sync-provider-card enabled">
                       <div className="sync-provider-name">
                         <strong>{descriptor.display_name}</strong>
-                        <span>{descriptor.profile_label}</span>
+                        <span>{backendText(`agentProfile.${descriptor.key}`, descriptor.profile_label)}</span>
                       </div>
                       <small title={profile?.error ?? profile?.path}>
-                        {profile
-                          ? <>{profile.display_name} · <code>{compactProjectPath(profile.path)}</code>{markers}</>
-                          : <>Profile missing on this machine · <code>{selection.profile_id}</code></>}
+                        {profile && fact
+                          ? (
+                            <Trans t={t} i18nKey={fact} components={{
+                              name: <>{profile.display_name}</>,
+                              code: <code />,
+                              path: <>{compactProjectPath(profile.path)}</>,
+                            }} />
+                          )
+                          : <Trans t={t} i18nKey="binding.profileMissing" components={{ code: <code />, id: <>{selection.profile_id}</> }} />}
                       </small>
                     </div>
                   )];
@@ -326,7 +336,7 @@ export default function ProjectBindingEditor({
               </div>
             ) : (
               <>
-                <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+                <div className="sync-provider-cards" role="group" aria-label={t("agents.group")}>
                   {providers.map((descriptor) => {
                     const enabled = selections[descriptor.key] !== undefined;
                     return (
@@ -336,11 +346,11 @@ export default function ProjectBindingEditor({
                             type="checkbox"
                             checked={enabled}
                             disabled={busy || (enabled && enabledDescriptors.length === 1)}
-                            aria-label={`Use ${descriptor.display_name} in this project`}
+                            aria-label={t("agents.use", { provider: descriptor.display_name })}
                             onChange={() => toggleProvider(descriptor.key)}
                           />
                           <strong>{descriptor.display_name}</strong>
-                          <span>{descriptor.profile_label}</span>
+                          <span>{backendText(`agentProfile.${descriptor.key}`, descriptor.profile_label)}</span>
                         </label>
                         {enabled && (
                           <div className="sync-agent-profile-list">
@@ -372,12 +382,12 @@ export default function ProjectBindingEditor({
         <footer className="sync-modal-footer">
           <div>
             {binding.locked ? (
-              <button type="button" className="btn" onClick={onCancel} disabled={busy}>Done</button>
+              <button type="button" className="btn" onClick={onCancel} disabled={busy}>{t("binding.done")}</button>
             ) : (
               <>
-                <button type="button" className="btn" onClick={onCancel} disabled={busy}>Cancel</button>
+                <button type="button" className="btn" onClick={onCancel} disabled={busy}>{t("common:cancel")}</button>
                 <button type="button" className="btn btn-primary" disabled={!canSave} onClick={submit}>
-                  {busy ? "Saving…" : actionLabel}
+                  {busy ? t("common:saving") : actionLabel}
                 </button>
               </>
             )}

@@ -36,6 +36,7 @@ import {
   includeRequiredPullProjectDirectories,
   recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
+import { i18n } from "../../src/i18n";
 
 /* A scanned entry carries the bare portable descriptor, as the backend's
    `ProjectContentEntry` does; the review row is built from the entry. */
@@ -1200,4 +1201,82 @@ test("stored project files stay visible but locked when the binding is Git-manag
   assert.match(html, /a\.md/);
   assert.doesNotMatch(html, /aria-label="Apply a\.md"/);
   assert.doesNotMatch(html, /sync-project-file-selection-placeholder|type="checkbox"/);
+});
+
+/* The Files review in Chinese: the review's own words translate; paths and
+   the backend's blocked reason stay exactly as given. */
+test("the Files review speaks Chinese around the user's paths", () => {
+  const pullRows: ProjectFileReviewRow[] = [
+    {
+      resourceId: "file-notes",
+      relativePath: "notes/outline.md",
+      entryType: "file",
+      state: "diverged",
+      size: 18,
+      sourceMtime: 1,
+      localPresent: true,
+      storagePresent: true,
+      operation: "replace",
+      preservedCopyPath: "notes/outline (local).md",
+    },
+    {
+      resourceId: "file-readme",
+      relativePath: "README.md",
+      entryType: "file",
+      state: "storage_only",
+      size: 18,
+      localPresent: false,
+      storagePresent: true,
+      operation: "add",
+    },
+  ];
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const pull = renderToStaticMarkup(
+      <ProjectFilesReviewPage
+        mode="pull"
+        projectRoot="/tmp/project-a"
+        eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+        rows={pullRows}
+        selectedIds={new Set(["file-notes"])}
+        onScan={() => undefined}
+        onToggle={() => undefined}
+      />,
+    );
+    assert.match(pull, /aria-label="项目文件"/);
+    assert.match(pull, /重新扫描<\/button>/);
+    assert.match(pull, />替换文件 · 保留本地副本</);
+    assert.match(pull, />添加文件</);
+    assert.match(pull, /aria-label="本机和存储中都有更改。应用时会先将本地文件保留为 notes\/outline \(local\)\.md，再写入存储中的内容。"/);
+    assert.match(pull, /title="排除“notes\/outline\.md”"/);
+    assert.match(pull, /aria-label="应用“README\.md”"/);
+    assert.match(pull, /aria-label="应用项目根目录中的所有文件"/);
+    assert.match(pull, /aria-label="项目根目录中已选 0\/1"/);
+    assert.match(pull, /aria-label="排除 notes 中的所有文件"/);
+    assert.match(pull, /aria-label="notes 中已选 1\/1"/);
+    assert.match(pull, />项目根目录</);
+    assert.match(pull, /data-tooltip="存储中 · 18 B"/);
+
+    const blocked = renderToStaticMarkup(
+      <ProjectFilesReviewPage
+        mode="push"
+        eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+        rows={[{
+          resourceId: "file-key",
+          relativePath: "keys/id_rsa",
+          entryType: "blocked",
+          state: "blocked",
+          localPresent: true,
+          storagePresent: false,
+          blockedReason: "Symlinks are not synced.",
+        }]}
+        selectedIds={new Set()}
+        onToggle={() => undefined}
+      />,
+    );
+    assert.match(blocked, /aria-label="无法同步：Symlinks are not synced\."/);
+    assert.match(blocked, />已阻止</);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });

@@ -3,6 +3,7 @@ import type { SessionEventDetail, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import Notice from "../../notice/Notice";
 import { writeClipboardText } from "../../sync-review/clipboard";
+import { t as translate, useTranslation } from "../../../i18n";
 import { readableToolPayload, sessionToolDescriptor, toolCommandLabel } from "./sessionDetailModel";
 
 export interface SessionToolDetailState {
@@ -18,20 +19,24 @@ interface Props {
   onExpandedChange: (eventId: string, expanded: boolean) => void;
 }
 
+/** What a payload box holds; it names the box and its copy key. */
+export type PayloadKind = "arguments" | "result" | "brief" | "report";
+
 /**
  * One labelled, bounded box per payload. Each keeps its own raw toggle and copy
  * key so what you copy is always what the box you are looking at shows.
  * Agent rows reuse it for the brief and the report.
  */
 export function PayloadSection({
-  label,
+  kind,
   value,
   truncated,
 }: {
-  label: string;
+  kind: PayloadKind;
   value: string;
   truncated: boolean;
 }) {
+  const { t } = useTranslation("session");
   const view = useMemo(() => readableToolPayload(value), [value]);
   const [showRaw, setShowRaw] = useState(false);
   const body = showRaw && view.transformed ? view.raw : view.text;
@@ -39,7 +44,7 @@ export function PayloadSection({
   return (
     <section className="session-detail-payload-section">
       <div className="session-detail-payload-head">
-        <span className="session-detail-payload-label">{label}</span>
+        <span className="session-detail-payload-label">{payloadLabel(kind)}</span>
         <span className="session-detail-payload-tools">
           {/* Deliberately not `.btn`: that class carries the rounded ghost
               treatment, and these sit in a squared-off panel. */}
@@ -48,7 +53,7 @@ export function PayloadSection({
               type="button"
               className={`session-detail-payload-action${showRaw ? " is-on" : ""}`}
               aria-pressed={showRaw}
-              title={showRaw ? "Show readable text" : "Show the stored value"}
+              title={showRaw ? t("payload.showReadable") : t("payload.showStored")}
               onClick={() => setShowRaw((raw) => !raw)}
             >
               <Icon name="code" size={12} />
@@ -57,8 +62,8 @@ export function PayloadSection({
           <button
             type="button"
             className="session-detail-payload-action"
-            aria-label={`Copy ${label.toLowerCase()} to clipboard`}
-            title="Copy to clipboard"
+            aria-label={payloadCopyLabel(kind)}
+            title={t("payload.copy")}
             onClick={() => void writeClipboardText(body)}
           >
             <Icon name="copy" size={12} />
@@ -67,10 +72,29 @@ export function PayloadSection({
       </div>
       <pre className="session-detail-payload-body"><code>{body}</code></pre>
       {truncated && (
-        <p className="session-detail-truncation">Bounded preview · additional content omitted</p>
+        <p className="session-detail-truncation">{t("payload.truncated")}</p>
       )}
     </section>
   );
+}
+
+/** A payload box's name, and the head of a section that holds a note instead. */
+export function payloadLabel(kind: PayloadKind): string {
+  switch (kind) {
+    case "arguments": return translate("session:payload.arguments");
+    case "result": return translate("session:payload.result");
+    case "brief": return translate("session:payload.brief");
+    case "report": return translate("session:payload.report");
+  }
+}
+
+function payloadCopyLabel(kind: PayloadKind): string {
+  switch (kind) {
+    case "arguments": return translate("session:payload.copyArguments");
+    case "result": return translate("session:payload.copyResult");
+    case "brief": return translate("session:payload.copyBrief");
+    case "report": return translate("session:payload.copyReport");
+  }
 }
 
 /**
@@ -91,22 +115,23 @@ function ToolPayload({
   resultTruncated: boolean;
   affectedPaths: string[];
 }) {
+  const { t } = useTranslation("session");
   if (!argumentsValue && !resultValue && affectedPaths.length === 0) {
-    return <p className="session-detail-tool-empty">No text argument or result is available for this call.</p>;
+    return <p className="session-detail-tool-empty">{t("tool.empty")}</p>;
   }
 
   return (
     <div className="session-detail-tool-payload">
       {argumentsValue && (
-        <PayloadSection label="Arguments" value={argumentsValue} truncated={argumentsTruncated} />
+        <PayloadSection kind="arguments" value={argumentsValue} truncated={argumentsTruncated} />
       )}
       {resultValue && (
-        <PayloadSection label="Result" value={resultValue} truncated={resultTruncated} />
+        <PayloadSection kind="result" value={resultValue} truncated={resultTruncated} />
       )}
       {affectedPaths.length > 0 && (
         <section className="session-detail-payload-section">
           <div className="session-detail-payload-head">
-            <span className="session-detail-payload-label">Paths</span>
+            <span className="session-detail-payload-label">{t("payload.paths")}</span>
           </div>
           <ul className="session-detail-tool-paths">
             {affectedPaths.map((path) => <li key={path}><code>{path}</code></li>)}
@@ -123,12 +148,13 @@ export default function SessionDetailToolCall({
   detailState,
   onExpandedChange,
 }: Props) {
+  const { t } = useTranslation("session");
   const tool = event.tool;
   if (!tool) {
     return (
       <div className="session-detail-tool-malformed" role="note">
         <Icon name="alert-triangle" size={12} />
-        This tool call could not be projected safely.
+        {t("tool.malformed")}
       </div>
     );
   }
@@ -163,7 +189,7 @@ export default function SessionDetailToolCall({
           {toolCommandLabel(tool.summary)}
         </span>
         {tool.status !== "completed" && (
-          <span className={`session-detail-tool-status status-${tool.status}`}>{tool.status}</span>
+          <span className={`session-detail-tool-status status-${tool.status}`}>{t(`toolStatus.${tool.status}`)}</span>
         )}
         <span className="session-detail-tool-chevron" aria-hidden="true">
           <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
@@ -178,7 +204,7 @@ export default function SessionDetailToolCall({
       <div className="session-detail-tool-body" aria-busy={detailState?.loading || undefined}>
         {detailState?.loading && (
           <div className="session-detail-local-state" role="status">
-            <span className="status-loader" /> Loading bounded tool detail…
+            <span className="status-loader" /> {t("tool.loading")}
           </div>
         )}
         {/* The fetch this reports is started by the row being expanded, so the

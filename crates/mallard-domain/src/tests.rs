@@ -45,6 +45,8 @@ fn conversation_decision_wire_shape_matches_the_review_contract() {
         blocker: None,
         selectable: true,
         blocked_reason: None,
+        reason_code: None,
+        reason_value: None,
     };
     assert_eq!(
         serde_json::to_value(selectable).unwrap(),
@@ -59,14 +61,34 @@ fn conversation_decision_wire_shape_matches_the_review_contract() {
         blocker: Some(ConversationBlocker::MissingBinding),
         selectable: false,
         blocked_reason: Some("Connect the provider profile.".to_string()),
+        reason_code: None,
+        reason_value: None,
     };
     assert_eq!(
-        serde_json::to_value(blocked).unwrap(),
+        serde_json::to_value(blocked.clone()).unwrap(),
         serde_json::json!({
             "action": "blocked",
             "blocker": "missing_binding",
             "selectable": false,
             "blocked_reason": "Connect the provider profile.",
+        })
+    );
+    // A reason the service words itself carries its code and value beside
+    // the English.
+    assert_eq!(
+        serde_json::to_value(blocked.reworded(
+            "view_only_connect_profile",
+            "View only — connect a Codex profile to sync this session.".to_string(),
+            Some("Codex".to_string()),
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "action": "blocked",
+            "blocker": "missing_binding",
+            "selectable": false,
+            "blocked_reason": "View only — connect a Codex profile to sync this session.",
+            "reason_code": "view_only_connect_profile",
+            "reason_value": "Codex",
         })
     );
 }

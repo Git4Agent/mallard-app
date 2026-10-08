@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import type { ParseKeys } from "i18next";
 import { confirm, open as openFile } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
@@ -17,13 +18,18 @@ import { formatBytes } from "../../format";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import {
   clearStoredUiState,
+  setLanguageChoice,
   setPreference,
   setThemeChoice,
+  useLanguageChoice,
   usePreference,
   useThemeChoice,
   type BooleanPreferenceName,
+  type LanguageChoice,
   type ThemeChoice,
+  type UiLanguage,
 } from "../../preferences";
+import { LANGUAGE_NAMES, OFFERED_LANGUAGES, t, Trans, uiLanguage, uiLocale, useTranslation } from "../../i18n";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { LoadingBone } from "../LoadingScaffold";
@@ -67,11 +73,26 @@ const PREVIEW_OPTIONS_KB = [256, 512, 1_024, 2_048];
 const WORKER_OPTIONS = [1, 2, 4, 6, 8];
 const TRANSFER_OPTIONS = [1, 2, 4, 6, 8, 12];
 
-const THEME_CHOICES: Array<{ value: ThemeChoice; label: string }> = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+const THEME_CHOICES: Array<{ value: ThemeChoice; label: ParseKeys<"settings"> }> = [
+  { value: "system", label: "appearance.system" },
+  { value: "light", label: "appearance.light" },
+  { value: "dark", label: "appearance.dark" },
 ];
+
+export interface LanguageOption {
+  value: LanguageChoice;
+  label: string;
+  /** The language the label is written in; System speaks the interface's. */
+  lang?: UiLanguage;
+}
+
+/** The Language row's choices: System, then each offered language. */
+export function languageOptions(offered: readonly UiLanguage[]): LanguageOption[] {
+  return [
+    { value: "system", label: t("settings:appearance.system") },
+    ...offered.map((language) => ({ value: language, label: LANGUAGE_NAMES[language], lang: language })),
+  ];
+}
 
 /* A new write to a store clears that store's failures, the way the section's
    error clears when its next apply starts. */
@@ -91,37 +112,35 @@ const POLICY_KEYS = ["retention_days", "max_total_bytes"] as const;
 
 type TuningKey = (typeof TUNING_KEYS)[number];
 type PolicyKey = (typeof POLICY_KEYS)[number];
-type LocalKey = "theme" | BooleanPreferenceName;
+type LocalKey = "theme" | "language" | BooleanPreferenceName;
 type SettingKey = LocalKey | TuningKey | PolicyKey;
 
-/** What the status region calls a setting once it saves: its row's label. */
-const SETTING_LABELS: Record<SettingKey, string> = {
-  theme: "Theme",
-  credential_redaction_enabled: "Credential redaction",
-  update_check_enabled: "Automatic updates",
-  push_codex_children: "Push Codex subagents",
-  push_claude_children: "Push Claude subagents",
-  codex_cli_path: "Codex CLI",
-  claude_cli_path: "Claude CLI",
-  openLogsOnSync: "Open Logs on Push and Pull",
-  refreshOnFocus: "Refresh on window focus",
-  conversation_file_limit_bytes: "Thread size limit",
-  timeline_preview_limit_bytes: "Preview size limit",
-  comparison_workers: "Comparison workers",
-  cloud_transfer_concurrency: "Cloud transfers",
-  retention_days: "Keep events for",
-  max_total_bytes: "Size cap",
-  clock24: "24-hour clock",
+/** What the status region calls a setting once it saves: its row's label,
+ *  worded when the setting settles. */
+const SETTING_LABELS: Record<SettingKey, () => string> = {
+  theme: () => t("settings:appearance.theme"),
+  language: () => t("settings:appearance.language"),
+  credential_redaction_enabled: () => t("settings:privacy.redaction"),
+  update_check_enabled: () => t("settings:privacy.updates"),
+  push_codex_children: () => t("settings:sync.codexChildren"),
+  push_claude_children: () => t("settings:sync.claudeChildren"),
+  codex_cli_path: () => t("settings:cli.label", { provider: "Codex" }),
+  claude_cli_path: () => t("settings:cli.label", { provider: "Claude" }),
+  openLogsOnSync: () => t("settings:sync.openLogs"),
+  refreshOnFocus: () => t("settings:sync.refreshOnFocus"),
+  conversation_file_limit_bytes: () => t("settings:performance.threadLimit"),
+  timeline_preview_limit_bytes: () => t("settings:performance.previewLimit"),
+  comparison_workers: () => t("settings:performance.workers"),
+  cloud_transfer_concurrency: () => t("settings:performance.transfers"),
+  retention_days: () => t("settings:logs.retention"),
+  max_total_bytes: () => t("settings:logs.sizeCap"),
+  clock24: () => t("settings:display.clock24"),
 };
 
-/* Local preferences have no section error to explain a refused write, so the
-   stamp carries the reason. */
-const LOCAL_WRITE_REFUSED = "This machine refused to store the change, so the previous value stays.";
-
-const RECEIPT_TEXT: Record<RowReceipt["kind"], string> = {
-  saving: "Saving…",
-  saved: "Saved",
-  failed: "Not saved",
+const RECEIPT_TEXT: Record<RowReceipt["kind"], ParseKeys<"common">> = {
+  saving: "saving",
+  saved: "saved",
+  failed: "notSaved",
 };
 
 const rowId = (key: SettingKey) => `settings-row-${key}`;
@@ -135,21 +154,21 @@ export function cliStatusLine(
   status: ProviderCliStatus | null | undefined,
   test: CliTestResult | undefined,
 ): string {
-  const mode = status?.selected_path ? "Selected" : "Automatic";
+  const mode = status?.selected_path ? t("settings:cli.selected") : t("settings:cli.automatic");
   const where = !status
-    ? "Detecting…"
+    ? t("settings:cli.detecting")
     : status.error
       ? `${mode} · ${status.error}`
       : `${mode} · ${status.launcher}`;
   if (!test) return where;
-  return `${where} · ${test.kind === "version" ? `Version ${test.text}` : `Test failed: ${test.text}`}`;
+  return `${where} · ${test.kind === "version" ? t("common:version", { version: test.text }) : t("settings:cli.testFailed", { message: test.text })}`;
 }
 
 type CliTestResult = { kind: "version" | "failed"; text: string };
 
 function formatOldest(timestamp?: number | null): string | null {
   if (!timestamp) return null;
-  return new Date(timestamp).toLocaleDateString([], {
+  return new Date(timestamp).toLocaleDateString(uiLocale(), {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -162,6 +181,7 @@ function formatOldest(timestamp?: number | null): string | null {
  * technology: the page's status region speaks for every stamp.
  */
 function SettingReceipt({ receipt, failureHint }: { receipt: RowReceipt | null; failureHint?: string }) {
+  const { t } = useTranslation("common");
   if (!receipt) return null;
   const fading = receipt.kind === "saved" && receipt.fading;
   return (
@@ -175,7 +195,7 @@ function SettingReceipt({ receipt, failureHint }: { receipt: RowReceipt | null; 
         size={12}
         className={receipt.kind === "saving" ? "icon-spin" : undefined}
       />
-      {RECEIPT_TEXT[receipt.kind]}
+      {t(RECEIPT_TEXT[receipt.kind])}
     </span>
   );
 }
@@ -225,6 +245,7 @@ function SettingSwitch({
   disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const { t } = useTranslation("settings");
   return (
     <label className="sync-settings-toggle">
       <input
@@ -236,7 +257,7 @@ function SettingSwitch({
         onChange={(event) => onChange(event.target.checked)}
         aria-label={label}
       />
-      <span className="sync-settings-state" aria-hidden="true">{checked ? "On" : "Off"}</span>
+      <span className="sync-settings-state" aria-hidden="true">{checked ? t("switch.on") : t("switch.off")}</span>
     </label>
   );
 }
@@ -249,12 +270,14 @@ export function appVersionLine(
 ): string {
   const installed = appVersion ? `Mallard ${appVersion}` : "Mallard";
   if (updates.readyVersion) {
-    return `Mallard ${updates.readyVersion} is ready to install.${appVersion ? ` You have ${appVersion}.` : ""}`;
+    return appVersion
+      ? t("settings:version.readyHave", { ready: updates.readyVersion, installed: appVersion })
+      : t("settings:version.ready", { ready: updates.readyVersion });
   }
   if (updates.lastCheckedAt) {
-    return `${installed} is the newest release. Checked ${formatRelativeTime(updates.lastCheckedAt)}.`;
+    return t("settings:version.newest", { installed, when: formatRelativeTime(updates.lastCheckedAt) });
   }
-  return `${installed}.`;
+  return t("settings:version.installed", { installed });
 }
 
 /** A boolean preference as a switch; state lives in preferences.ts. */
@@ -284,6 +307,7 @@ function PreferenceSwitch({
  * finds the row.
  */
 function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailure: () => void }) {
+  const { t } = useTranslation("settings");
   if (line.tone === "failed") {
     return (
       <span className="sync-settings-status" data-state="failed" data-tauri-drag-region>
@@ -291,7 +315,7 @@ function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailu
           type="button"
           className="sync-settings-status-jump"
           onClick={onFindFailure}
-          title="Show the setting that didn’t save"
+          title={t("status.findFailure")}
         >
           <Icon name="alert-triangle" size={12} />
           <span>{line.text}</span>
@@ -309,7 +333,7 @@ function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailu
       {line.at !== null && " "}
       {line.at !== null && (
         <time dateTime={new Date(line.at).toISOString()} data-tauri-drag-region>
-          {new Date(line.at).toLocaleTimeString([], clockOptions())}
+          {new Date(line.at).toLocaleTimeString(uiLocale(), clockOptions())}
         </time>
       )}
     </span>
@@ -317,7 +341,12 @@ function SettingsStatus({ line, onFindFailure }: { line: StatusLine; onFindFailu
 }
 
 export default function SettingsPage({ appActions, appUpdates, onLogsChanged, onDone, doneTarget }: Props) {
+  const { t } = useTranslation(["settings", "common"]);
   const themeChoice = useThemeChoice();
+  const languageChoice = useLanguageChoice();
+  /* Local preferences have no section error to explain a refused write, so
+     the stamp carries the reason. */
+  const localWriteRefused = t("receipt.refused");
   const receipts = useSettingsReceipts();
   const { version: appVersion, supported: updatesSupported } = useInstalledVersion();
   const [stats, setStats] = useState<ActivityLogStats | null>(null);
@@ -433,7 +462,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     const picked = await openFile({
       multiple: false,
       directory: false,
-      title: `Choose the ${provider.display_name} executable`,
+      title: t("cli.pickerTitle", { provider: provider.display_name }),
     });
     if (typeof picked !== "string") return;
     await applyTuning({ [cliSettingKey(provider)]: picked });
@@ -495,7 +524,10 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
 
   /** Local preferences write synchronously; the receipt is the write's own answer. */
   const settleLocal = (key: LocalKey, saved: boolean) => {
-    receipts.settle(key, saved, `${SETTING_LABELS[key]} ${saved ? "saved" : "not saved"}`);
+    const label = SETTING_LABELS[key]();
+    // A language change takes effect before this handler's next render.
+    const values = { label, lng: uiLanguage() };
+    receipts.settle(key, saved, saved ? t("receipt.saved", values) : t("receipt.notSaved", values));
   };
 
   /** Selects apply on change; the returned stats keep the readout current. */
@@ -510,7 +542,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     receipts.begin(key, POLICY_KEYS);
     try {
       setStats(await projectSyncApi.updateActivityLogPolicy({ ...stats.policy, ...patch }));
-      receipts.settle(key, true, `${SETTING_LABELS[key]} saved`);
+      receipts.settle(key, true, t("receipt.saved", { label: SETTING_LABELS[key]() }));
     } catch (reason) {
       setLogsError(errorMessage(reason));
       // The group's alert announces the failure; the status region stays quiet.
@@ -535,7 +567,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     receipts.begin(key, TUNING_KEYS);
     try {
       setTuning(await projectSyncApi.updateAppSettings({ ...tuning, ...patch }));
-      receipts.settle(key, true, `${SETTING_LABELS[key]} saved`);
+      receipts.settle(key, true, t("receipt.saved", { label: SETTING_LABELS[key]() }));
     } catch (reason) {
       setTuningError(errorMessage(reason));
       // The section's alert announces the failure; the status region stays quiet.
@@ -561,11 +593,15 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     if (!stats) return;
     const approved = await confirm(
       deleteAll
-        ? "Delete all retained activity logs?\n\nMallard configuration, backups, local files, and cloud versions will not be changed."
-        : `Remove retained logs older than ${stats.policy.retention_days} days?\n\n${stats.file_count} log file${stats.file_count === 1 ? "" : "s"} (${formatBytes(stats.total_bytes)}) ${stats.file_count === 1 ? "is" : "are"} currently retained. Removed logs cannot be recovered.`,
+        ? t("logs.deleteAllMessage")
+        : t("logs.cleanUpMessage", {
+          count: stats.file_count,
+          days: stats.policy.retention_days,
+          size: formatBytes(stats.total_bytes),
+        }),
       deleteAll
-        ? { title: "Delete activity logs", kind: "warning", okLabel: "Delete logs", cancelLabel: "Cancel" }
-        : { title: "Clean up logs", kind: "warning", okLabel: "Clean up", cancelLabel: "Cancel" },
+        ? { title: t("logs.deleteAllTitle"), kind: "warning", okLabel: t("logs.deleteAllOk"), cancelLabel: t("common:cancel") }
+        : { title: t("logs.cleanUpTitle"), kind: "warning", okLabel: t("logs.cleanUpOk"), cancelLabel: t("common:cancel") },
     );
     if (!approved) return;
     setLogsBusy(true);
@@ -577,10 +613,10 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
       setStats(result.stats);
       setLogsNotice(
         deleteAll
-          ? "Retained activity logs deleted"
+          ? t("logs.deleted")
           : result.removed_files
-            ? `Removed ${result.removed_files} log file${result.removed_files === 1 ? "" : "s"} · ${formatBytes(result.reclaimed_bytes)} reclaimed`
-            : "No old logs needed cleanup",
+            ? t("logs.removed", { count: result.removed_files, size: formatBytes(result.reclaimed_bytes) })
+            : t("logs.nothingRemoved"),
       );
       onLogsChanged();
     } catch (reason) {
@@ -604,12 +640,16 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
      local state is too broken to measure is exactly who needs the reset. The
      confirm simply omits the size line then. */
   const resetMallard = async () => {
-    const sizeLine = localSummary
-      ? ` (${formatBytes(localSummary.total_bytes)} across ${localSummary.file_count} file${localSummary.file_count === 1 ? "" : "s"}, including ${formatBytes(localSummary.backups_bytes)} of backups)`
-      : "";
+    const message = localSummary
+      ? t("reset.messageSized", {
+        count: localSummary.file_count,
+        total: formatBytes(localSummary.total_bytes),
+        backups: formatBytes(localSummary.backups_bytes),
+      })
+      : t("reset.message");
     const approved = await confirm(
-      `Permanently delete all of Mallard's local data and restart?\n\nEverything in ~/.mallard is deleted${sizeLine} — sync metadata, activity logs, and the only local backups of files Pull has replaced — and Mallard's settings return to their defaults. This cannot be undone.\n\nCloud versions and your project files are not touched. Mallard will restart as a fresh install.`,
-      { title: "Reset Mallard", kind: "warning", okLabel: "Reset Mallard", cancelLabel: "Cancel" },
+      message,
+      { title: t("reset.title"), kind: "warning", okLabel: t("reset.ok"), cancelLabel: t("common:cancel") },
     );
     if (!approved) return;
     setResetPhase("working");
@@ -652,11 +692,11 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     logsNotices.push({
       key: "logs-error",
       severity: "danger",
-      message: stats ? logsError : `Couldn’t read the log policy. ${logsError}`,
+      message: stats ? logsError : t("logs.readFailed", { error: logsError }),
       action: stats ? undefined : (
         <button type="button" className="btn" disabled={statsLoading} onClick={() => void loadStats(true)}>
           <Icon name="refresh" size={14} className={statsLoading ? "icon-spin" : undefined} />
-          {statsLoading ? "Retrying…" : "Retry"}
+          {statsLoading ? t("retrying") : t("retry")}
         </button>
       ),
     });
@@ -670,7 +710,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
      or an Open folder it is an answer — assertive while the failure stands,
      polite for a receipt. */
   const logsTiming: NoticeTiming = !logsFromAction
-    ? { timing: "standing", label: "Problems with activity logs" }
+    ? { timing: "standing", label: t("logs.problems") }
     : logsError
       ? { timing: "blocking" }
       : { timing: "progress" };
@@ -682,11 +722,11 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     tuningNotices.push({
       key: "tuning-error",
       severity: "danger",
-      message: tuning ? tuningError : `Couldn’t read the app settings. ${tuningError}`,
+      message: tuning ? tuningError : t("tuning.readFailed", { error: tuningError }),
       action: tuning ? undefined : (
         <button type="button" className="btn" disabled={tuningLoading} onClick={() => void loadTuning(true)}>
           <Icon name="refresh" size={14} className={tuningLoading ? "icon-spin" : undefined} />
-          {tuningLoading ? "Retrying…" : "Retry"}
+          {tuningLoading ? t("retrying") : t("retry")}
         </button>
       ),
     });
@@ -694,7 +734,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
   /* Same reading as the Logs group: the mount load's failure is standing
      content; after a Retry or a select it is an answer. */
   const tuningTiming: NoticeTiming = !tuningFromAction
-    ? { timing: "standing", label: "Problems with app settings" }
+    ? { timing: "standing", label: t("tuning.problems") }
     : tuningError
       ? { timing: "blocking" }
       : { timing: "progress" };
@@ -708,7 +748,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
       action: localSummary ? undefined : (
         <button type="button" className="btn" disabled={summaryLoading} onClick={() => void loadLocalSummary(true)}>
           <Icon name="refresh" size={14} className={summaryLoading ? "icon-spin" : undefined} />
-          {summaryLoading ? "Retrying…" : "Retry"}
+          {summaryLoading ? t("retrying") : t("retry")}
         </button>
       ),
     });
@@ -717,14 +757,14 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     localDataNotices.push({
       key: "local-data-reloading",
       severity: "success",
-      message: "Local data deleted — starting fresh…",
+      message: t("reset.deleted"),
     });
   }
   /* Same reading as the Logs group: the measurement walk runs on mount, so its
      failure is standing content, while a failed Reset — or a retried walk — is
      an event this box has to announce. */
   const localDataTiming: NoticeTiming = !localDataFromAction
-    ? { timing: "standing", label: "Problems with local data" }
+    ? { timing: "standing", label: t("reset.problems") }
     : resetError
       ? { timing: "blocking" }
       : { timing: "progress" };
@@ -732,7 +772,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
   return (
     <>
       <SyncPathBar
-        crumbs={[{ id: "settings", label: "Settings", icon: "settings", tone: "root" }]}
+        crumbs={[{ id: "settings", label: t("common:settings"), icon: "settings", tone: "root" }]}
         actions={(
           <>
             <SettingsStatus line={statusLine(receipts.state)} onFindFailure={findFailure} />
@@ -740,15 +780,15 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
               type="button"
               className="sync-path-sync"
               onClick={onDone}
-              title={`Close Settings — back to ${doneTarget}`}
+              title={t("page.doneTitle", { target: doneTarget })}
             >
-              Done
+              {t("page.done")}
             </button>
           </>
         )}
         overflow={appActions}
-        overflowLabel="App actions"
-        ariaLabel="Settings path"
+        overflowLabel={t("page.appActions")}
+        ariaLabel={t("page.path")}
       />
       <main className="sync-main sync-project-links-page sync-settings-page">
         {/* One polite region speaks for every stamp. Keyed by the save, so the
@@ -756,20 +796,20 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
         <p className="sync-visually-hidden" role="status">
           {announcement && <span key={announcement.seq}>{announcement.text}</span>}
         </p>
-        <section className="profile-links-section" aria-label="Settings">
+        <section className="profile-links-section" aria-label={t("common:settings")}>
 
           <section className="sync-settings-group" aria-labelledby="settings-appearance">
             <h2 className="settings-section-title" id="settings-appearance">
-              <SettingsSectionIcon name="appearance" /> Appearance
+              <SettingsSectionIcon name="appearance" /> {t("sections.appearance")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Theme"
+                label={t("appearance.theme")}
                 setting="theme"
                 receipt={receiptFor("theme")}
-                failureHint={LOCAL_WRITE_REFUSED}
+                failureHint={localWriteRefused}
                 control={(
-                  <div className="sync-settings-segment" role="radiogroup" aria-label="Theme">
+                  <div className="sync-settings-segment" role="radiogroup" aria-label={t("appearance.theme")}>
                     {THEME_CHOICES.map((choice) => (
                       <button
                         key={choice.value}
@@ -782,67 +822,96 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                           settleLocal("theme", setThemeChoice(choice.value));
                         }}
                       >
-                        {choice.label}
+                        {t(choice.label)}
                       </button>
                     ))}
                   </div>
                 )}
               >
-                System uses your macOS theme.
+                {t("appearance.themeHint")}
               </SettingsRow>
+              {/* A choice only once there is more than one language to make it
+                  between; until then the row would offer English or English. */}
+              {OFFERED_LANGUAGES.length > 1 && (
+                <SettingsRow
+                  label={t("appearance.language")}
+                  setting="language"
+                  receipt={receiptFor("language")}
+                  failureHint={localWriteRefused}
+                  control={(
+                    <div className="sync-settings-segment" role="radiogroup" aria-label={t("appearance.language")}>
+                      {languageOptions(OFFERED_LANGUAGES).map((choice) => (
+                        <button
+                          key={choice.value}
+                          type="button"
+                          role="radio"
+                          lang={choice.lang}
+                          aria-checked={languageChoice === choice.value}
+                          className={languageChoice === choice.value ? "active" : undefined}
+                          onClick={() => {
+                            if (languageChoice === choice.value) return;
+                            settleLocal("language", setLanguageChoice(choice.value));
+                          }}
+                        >
+                          {choice.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                >
+                  {t("appearance.languageHint")}
+                </SettingsRow>
+              )}
             </div>
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-privacy">
             <h2 className="settings-section-title" id="settings-privacy">
-              <SettingsSectionIcon name="privacy" /> Privacy
+              <SettingsSectionIcon name="privacy" /> {t("sections.privacy")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Credential redaction"
+                label={t("privacy.redaction")}
                 setting="credential_redaction_enabled"
                 receipt={receiptFor("credential_redaction_enabled")}
                 control={(
                   <SettingSwitch
-                    label="Credential redaction"
+                    label={t("privacy.redaction")}
                     checked={shownTuning?.credential_redaction_enabled ?? false}
                     disabled={tuningBusy || !tuning}
                     onChange={(checked) => void applyTuning({ credential_redaction_enabled: checked })}
                   />
                 )}
               >
-                Hide detected credentials in pushed sessions. Changing it re-uploads synced
-                sessions on the next Push. Earlier copies stay in storage history.
+                {t("privacy.redactionHint")}
               </SettingsRow>
               <SettingsRow
-                label="Automatic updates"
+                label={t("privacy.updates")}
                 setting="update_check_enabled"
                 receipt={receiptFor("update_check_enabled")}
                 control={(
                   <SettingSwitch
-                    label="Automatic updates"
+                    label={t("privacy.updates")}
                     checked={shownTuning?.update_check_enabled ?? true}
                     disabled={tuningBusy || !tuning}
                     onChange={(checked) => void applyTuning({ update_check_enabled: checked })}
                   />
                 )}
               >
-                Checks GitHub at startup and every {AUTO_CHECK_INTERVAL_HOURS} hours. Downloads new
-                releases in the background and installs on restart or quit. Sends no personal or
-                project data.
+                {t("privacy.updatesHint", { hours: AUTO_CHECK_INTERVAL_HOURS })}
               </SettingsRow>
               <SettingsRow
-                label="App version"
+                label={t("version.label")}
                 control={appUpdates.readyVersion ? (
                   <button
                     type="button"
                     className="btn btn-primary"
                     disabled={appUpdates.operationRunning || appUpdates.restarting}
                     onClick={appUpdates.restart}
-                    title={appUpdates.operationRunning ? "Finish the current operation first" : undefined}
+                    title={appUpdates.operationRunning ? t("version.busy") : undefined}
                   >
                     <Icon name="refresh" size={14} />
-                    {appUpdates.restarting ? "Restarting…" : "Restart to update"}
+                    {appUpdates.restarting ? t("version.restarting") : t("version.restart")}
                   </button>
                 ) : (
                   <button
@@ -850,92 +919,90 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                     className="btn"
                     disabled={!updatesSupported || appUpdates.checking}
                     onClick={appUpdates.checkNow}
-                    title={updatesSupported ? "Check GitHub for a newer Mallard release" : "Update checks are available in the desktop app"}
+                    title={updatesSupported ? t("version.checkTitle") : t("version.desktopOnly")}
                   >
-                    {appUpdates.checking ? "Checking…" : "Check for updates"}
+                    {appUpdates.checking ? t("version.checking") : t("version.check")}
                   </button>
                 )}
               >
                 {appVersionLine(appVersion, appUpdates)}
               </SettingsRow>
             </div>
-            {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
+            {tuningSection === "privacy" && <NoticeZone items={tuningNotices} subject={t("tuning.subject")} {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-sync">
             <h2 className="settings-section-title" id="settings-sync">
-              <SettingsSectionIcon name="sync" /> Sync
+              <SettingsSectionIcon name="sync" /> {t("sections.sync")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Push Codex subagents"
+                label={t("sync.codexChildren")}
                 setting="push_codex_children"
                 receipt={receiptFor("push_codex_children")}
                 control={
                   <SettingSwitch
-                    label="Push Codex subagents"
+                    label={t("sync.codexChildren")}
                     checked={shownTuning?.push_codex_children ?? false}
                     disabled={tuningLoading || tuningBusy || !tuning}
                     onChange={(checked) => void applyTuning({ push_codex_children: checked })}
                   />
                 }
               >
-                Include subagent conversations. Changing it re-uploads synced Codex sessions
-                on the next Push.
+                {t("sync.codexChildrenHint")}
               </SettingsRow>
               <SettingsRow
-                label="Push Claude subagents"
+                label={t("sync.claudeChildren")}
                 setting="push_claude_children"
                 receipt={receiptFor("push_claude_children")}
                 control={
                   <SettingSwitch
-                    label="Push Claude subagents"
+                    label={t("sync.claudeChildren")}
                     checked={shownTuning?.push_claude_children ?? false}
                     disabled={tuningLoading || tuningBusy || !tuning}
                     onChange={(checked) => void applyTuning({ push_claude_children: checked })}
                   />
                 }
               >
-                Include subagent conversations. Changing it re-uploads synced Claude sessions
-                on the next Push.
+                {t("sync.claudeChildrenHint")}
               </SettingsRow>
               <SettingsRow
-                label="Open Logs on Push and Pull"
+                label={t("sync.openLogs")}
                 setting="openLogsOnSync"
                 receipt={receiptFor("openLogsOnSync")}
-                failureHint={LOCAL_WRITE_REFUSED}
+                failureHint={localWriteRefused}
                 control={(
                   <PreferenceSwitch
                     name="openLogsOnSync"
-                    label="Open Logs on Push and Pull"
+                    label={t("sync.openLogs")}
                     onSaved={(saved) => settleLocal("openLogsOnSync", saved)}
                   />
                 )}
               >
-                Open Logs when Push or Pull starts.
+                {t("sync.openLogsHint")}
               </SettingsRow>
               <SettingsRow
-                label="Refresh on window focus"
+                label={t("sync.refreshOnFocus")}
                 setting="refreshOnFocus"
                 receipt={receiptFor("refreshOnFocus")}
-                failureHint={LOCAL_WRITE_REFUSED}
+                failureHint={localWriteRefused}
                 control={(
                   <PreferenceSwitch
                     name="refreshOnFocus"
-                    label="Refresh on window focus"
+                    label={t("sync.refreshOnFocus")}
                     onSaved={(saved) => settleLocal("refreshOnFocus", saved)}
                   />
                 )}
               >
-                Refresh projects and storage when you come back to Mallard.
+                {t("sync.refreshOnFocusHint")}
               </SettingsRow>
             </div>
-            {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
+            {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject={t("tuning.subject")} {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-cli">
             <h2 className="settings-section-title" id="settings-cli">
-              <SettingsSectionIcon name="cli" /> Agent CLIs
+              <SettingsSectionIcon name="cli" /> {t("sections.cli")}
             </h2>
             <div className="sync-settings-card">
               {(cliProviders ?? []).map((provider) => {
@@ -944,7 +1011,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                 return (
                   <SettingsRow
                     key={provider.key}
-                    label={`${provider.display_name} CLI`}
+                    label={t("cli.label", { provider: provider.display_name })}
                     setting={key}
                     receipt={receiptFor(key)}
                     control={(
@@ -956,7 +1023,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                             disabled={tuningBusy || !tuning}
                             onClick={() => void useAutomaticCli(provider)}
                           >
-                            Use automatic
+                            {t("cli.useAutomatic")}
                           </button>
                         )}
                         <button
@@ -964,18 +1031,18 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                           className="btn"
                           disabled={tuningBusy || !tuning}
                           onClick={() => void chooseCli(provider)}
-                          title={`Pick the ${provider.display_name} executable this computer runs`}
+                          title={t("cli.chooseTitle", { provider: provider.display_name })}
                         >
-                          Choose…
+                          {t("cli.choose")}
                         </button>
                         <button
                           type="button"
                           className="btn"
                           disabled={cliBusy || !status?.executable}
                           onClick={() => void testCli(provider)}
-                          title="Run --version against a throwaway home"
+                          title={t("cli.testTitle")}
                         >
-                          Test
+                          {t("cli.test")}
                         </button>
                       </>
                     )}
@@ -985,7 +1052,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                 );
               })}
               <SettingsRow
-                label="Detection"
+                label={t("cli.detection")}
                 control={(
                   <button
                     type="button"
@@ -994,24 +1061,23 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                     onClick={() => void refreshCliDetection()}
                   >
                     <Icon name="refresh" size={14} />
-                    Refresh detection
+                    {t("cli.refresh")}
                   </button>
                 )}
               >
-                Looks in Mallard's PATH, then the PATH your shell sets, then the usual
-                install folders. On Windows a changed PATH needs a Mallard restart.
+                {t("cli.detectionHint")}
               </SettingsRow>
             </div>
-            {tuningSection === "cli" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
+            {tuningSection === "cli" && <NoticeZone items={tuningNotices} subject={t("tuning.subject")} {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-performance">
             <h2 className="settings-section-title" id="settings-performance">
-              <SettingsSectionIcon name="performance" /> Performance
+              <SettingsSectionIcon name="performance" /> {t("sections.performance")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Thread size limit"
+                label={t("performance.threadLimit")}
                 setting="conversation_file_limit_bytes"
                 receipt={receiptFor("conversation_file_limit_bytes")}
                 control={(
@@ -1022,7 +1088,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       onChange={(event) => void applyTuning({
                         conversation_file_limit_bytes: Number(event.target.value) * 1024 * 1024,
                       })}
-                      aria-label="Thread size limit"
+                      aria-label={t("performance.threadLimit")}
                     >
                       {shownTuning && !THREAD_CAP_OPTIONS_MB.includes(Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024))) && (
                         <option value={Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024))}>
@@ -1034,10 +1100,10 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                   </div>
                 )}
               >
-                Skip transcripts above this limit in compare, Push, and Pull.
+                {t("performance.threadLimitHint")}
               </SettingsRow>
               <SettingsRow
-                label="Preview size limit"
+                label={t("performance.previewLimit")}
                 setting="timeline_preview_limit_bytes"
                 receipt={receiptFor("timeline_preview_limit_bytes")}
                 control={(
@@ -1048,7 +1114,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       onChange={(event) => void applyTuning({
                         timeline_preview_limit_bytes: Number(event.target.value) * 1024,
                       })}
-                      aria-label="Preview size limit"
+                      aria-label={t("performance.previewLimit")}
                     >
                       {shownTuning && !PREVIEW_OPTIONS_KB.includes(Math.round(shownTuning.timeline_preview_limit_bytes / 1024)) && (
                         <option value={Math.round(shownTuning.timeline_preview_limit_bytes / 1024)}>
@@ -1064,10 +1130,10 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                   </div>
                 )}
               >
-                Limit message and tool call previews. Full transcripts stay unchanged.
+                {t("performance.previewLimitHint")}
               </SettingsRow>
               <SettingsRow
-                label="Comparison workers"
+                label={t("performance.workers")}
                 setting="comparison_workers"
                 receipt={receiptFor("comparison_workers")}
                 control={(
@@ -1076,24 +1142,24 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       value={shownTuning?.comparison_workers ?? 4}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({ comparison_workers: Number(event.target.value) })}
-                      aria-label="Comparison workers"
+                      aria-label={t("performance.workers")}
                     >
                       {shownTuning && !WORKER_OPTIONS.includes(shownTuning.comparison_workers) && (
                         <option value={shownTuning.comparison_workers}>
-                          {shownTuning.comparison_workers} worker{shownTuning.comparison_workers === 1 ? "" : "s"}
+                          {t("performance.workerCount", { count: shownTuning.comparison_workers })}
                         </option>
                       )}
                       {WORKER_OPTIONS.map((count) => (
-                        <option key={count} value={count}>{count} worker{count === 1 ? "" : "s"}</option>
+                        <option key={count} value={count}>{t("performance.workerCount", { count })}</option>
                       ))}
                     </select>
                   </div>
                 )}
               >
-                Parallel session comparisons, limited by CPU cores.
+                {t("performance.workersHint")}
               </SettingsRow>
               <SettingsRow
-                label="Cloud transfers"
+                label={t("performance.transfers")}
                 setting="cloud_transfer_concurrency"
                 receipt={receiptFor("cloud_transfer_concurrency")}
                 control={(
@@ -1102,33 +1168,33 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       value={shownTuning?.cloud_transfer_concurrency ?? 6}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({ cloud_transfer_concurrency: Number(event.target.value) })}
-                      aria-label="Parallel cloud transfers"
+                      aria-label={t("performance.transfersLabel")}
                     >
                       {shownTuning && !TRANSFER_OPTIONS.includes(shownTuning.cloud_transfer_concurrency) && (
                         <option value={shownTuning.cloud_transfer_concurrency}>
-                          {shownTuning.cloud_transfer_concurrency} transfer{shownTuning.cloud_transfer_concurrency === 1 ? "" : "s"}
+                          {t("performance.transferCount", { count: shownTuning.cloud_transfer_concurrency })}
                         </option>
                       )}
                       {TRANSFER_OPTIONS.map((count) => (
-                        <option key={count} value={count}>{count} transfer{count === 1 ? "" : "s"}</option>
+                        <option key={count} value={count}>{t("performance.transferCount", { count })}</option>
                       ))}
                     </select>
                   </div>
                 )}
               >
-                Parallel Push and Pull transfers. Use fewer on slow or metered connections.
+                {t("performance.transfersHint")}
               </SettingsRow>
             </div>
-            {tuningSection === "performance" && <NoticeZone items={tuningNotices} subject="notes about app settings" {...tuningTiming} />}
+            {tuningSection === "performance" && <NoticeZone items={tuningNotices} subject={t("tuning.subject")} {...tuningTiming} />}
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-logs">
             <h2 className="settings-section-title" id="settings-logs">
-              <SettingsSectionIcon name="logs" /> Logs
+              <SettingsSectionIcon name="logs" /> {t("sections.logs")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Keep events for"
+                label={t("logs.retention")}
                 setting="retention_days"
                 receipt={receiptFor("retention_days")}
                 control={(
@@ -1137,20 +1203,20 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       value={shownPolicy?.retention_days ?? 30}
                       disabled={logsBusy || !stats}
                       onChange={(event) => void applyPolicy({ retention_days: Number(event.target.value) })}
-                      aria-label="Keep log events for"
+                      aria-label={t("logs.retentionLabel")}
                     >
                       {shownPolicy && !RETENTION_OPTIONS.includes(shownPolicy.retention_days) && (
-                        <option value={shownPolicy.retention_days}>{shownPolicy.retention_days} days</option>
+                        <option value={shownPolicy.retention_days}>{t("logs.days", { count: shownPolicy.retention_days })}</option>
                       )}
-                      {RETENTION_OPTIONS.map((days) => <option key={days} value={days}>{days} days</option>)}
+                      {RETENTION_OPTIONS.map((days) => <option key={days} value={days}>{t("logs.days", { count: days })}</option>)}
                     </select>
                   </div>
                 )}
               >
-                Automatically delete older events.
+                {t("logs.retentionHint")}
               </SettingsRow>
               <SettingsRow
-                label="Size cap"
+                label={t("logs.sizeCap")}
                 setting="max_total_bytes"
                 receipt={receiptFor("max_total_bytes")}
                 control={(
@@ -1161,44 +1227,44 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       onChange={(event) => void applyPolicy({
                         max_total_bytes: Number(event.target.value) * 1024 * 1024,
                       })}
-                      aria-label="Log size cap"
+                      aria-label={t("logs.sizeCapLabel")}
                     >
                       {shownPolicy && !SIZE_OPTIONS_MB.includes(Math.round(shownPolicy.max_total_bytes / (1024 * 1024))) && (
                         <option value={Math.round(shownPolicy.max_total_bytes / (1024 * 1024))}>
                           {formatBytes(shownPolicy.max_total_bytes)}
                         </option>
                       )}
-                      {SIZE_OPTIONS_MB.map((size) => <option key={size} value={size}>{size.toLocaleString()} MB</option>)}
+                      {SIZE_OPTIONS_MB.map((size) => <option key={size} value={size}>{size.toLocaleString(uiLocale())} MB</option>)}
                     </select>
                   </div>
                 )}
               >
-                Delete the oldest log files when this limit is exceeded.
+                {t("logs.sizeCapHint")}
               </SettingsRow>
               <SettingsRow
-                label="Log files"
+                label={t("logs.files")}
                 control={(
                   <>
                     <span
                       className="sync-settings-readout"
-                      title={oldest ? `Oldest entry ${oldest}` : undefined}
+                      title={oldest ? t("logs.oldest", { date: oldest }) : undefined}
                     >
-                      {stats ? `${stats.file_count} file${stats.file_count === 1 ? "" : "s"} · ${formatBytes(stats.total_bytes)}` : "…"}
+                      {stats ? t("logs.readout", { count: stats.file_count, size: formatBytes(stats.total_bytes) }) : "…"}
                     </span>
                     <button type="button" className="btn" onClick={() => void openLogsFolder()} disabled={logsBusy}>
-                      <Icon name="folder" size={12} /> Open folder
+                      <Icon name="folder" size={12} /> {t("logs.openFolder")}
                     </button>
                   </>
                 )}
               >
-                Logs stay on this machine in <code>~/.mallard/logs</code>.
+                <Trans t={t} i18nKey="logs.filesHint" components={{ code: <code /> }} />
               </SettingsRow>
               <SettingsRow
-                label="Clean up"
+                label={t("logs.cleanUp")}
                 control={(
                   <>
                     <button type="button" className="btn" onClick={() => void cleanupLogs(false)} disabled={logsBusy || !stats}>
-                      <Icon name="trash" size={12} /> Clean up now
+                      <Icon name="trash" size={12} /> {t("logs.cleanUpNow")}
                     </button>
                     <button
                       type="button"
@@ -1206,56 +1272,56 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       onClick={() => void cleanupLogs(true)}
                       disabled={logsBusy || !stats || stats.file_count === 0}
                     >
-                      Delete all
+                      {t("logs.deleteAll")}
                     </button>
                   </>
                 )}
               >
-                Delete expired log events. Keep sync state, backups, and cloud data.
+                {t("logs.cleanUpHint")}
               </SettingsRow>
             </div>
             <NoticeZone
               items={logsNotices}
-              subject="notes about activity logs"
+              subject={t("logs.subject")}
               {...logsTiming}
             />
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-display">
             <h2 className="settings-section-title" id="settings-display">
-              <SettingsSectionIcon name="display" /> Display
+              <SettingsSectionIcon name="display" /> {t("sections.display")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="24-hour clock"
+                label={t("display.clock24")}
                 setting="clock24"
                 receipt={receiptFor("clock24")}
-                failureHint={LOCAL_WRITE_REFUSED}
+                failureHint={localWriteRefused}
                 control={(
                   <PreferenceSwitch
                     name="clock24"
-                    label="24-hour clock"
+                    label={t("display.clock24")}
                     onSaved={(saved) => settleLocal("clock24", saved)}
                   />
                 )}
               >
-                Use 24-hour time throughout Mallard. Off uses the system locale.
+                {t("display.clock24Hint")}
               </SettingsRow>
             </div>
           </section>
 
           <section className="sync-settings-group" aria-labelledby="settings-local-data">
             <h2 className="settings-section-title" id="settings-local-data">
-              <SettingsSectionIcon name="local-data" /> Local data
+              <SettingsSectionIcon name="local-data" /> {t("sections.localData")}
             </h2>
             <div className="sync-settings-card">
               <SettingsRow
-                label="Reset Mallard"
+                label={t("reset.label")}
                 control={(
                   <>
                     <span className="sync-settings-readout" title={localSummary?.root_path}>
                       {localSummary
-                        ? `${localSummary.file_count} file${localSummary.file_count === 1 ? "" : "s"} · ${formatBytes(localSummary.total_bytes)}`
+                        ? t("logs.readout", { count: localSummary.file_count, size: formatBytes(localSummary.total_bytes) })
                         : summaryLoading
                           // A bone, not a plausible-looking placeholder: the
                           // value is being read, and only a failed read shows
@@ -1269,18 +1335,17 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                       onClick={() => void resetMallard()}
                       disabled={resetPhase !== "idle"}
                     >
-                      Reset Mallard
+                      {t("reset.label")}
                     </button>
                   </>
                 )}
               >
-                Permanently delete <code>~/.mallard</code> (sync metadata, logs, Pull backups,
-                preferences) and restart. Cloud versions and project files stay.
+                <Trans t={t} i18nKey="reset.hint" components={{ code: <code /> }} />
               </SettingsRow>
             </div>
             <NoticeZone
               items={localDataNotices}
-              subject="notes about local data"
+              subject={t("reset.subject")}
               {...localDataTiming}
             />
           </section>

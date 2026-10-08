@@ -41,7 +41,10 @@
       "signingIdentity": "-",
       "hardenedRuntime": true,
       "entitlements": "Entitlements.plist",
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "files": {
+        "Resources/zh-Hans.lproj/InfoPlist.strings": "macos/zh-Hans.lproj/InfoPlist.strings"
+      }
     },
     "icon": [
       "icons/32x32.png",

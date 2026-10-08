@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
+import { useTranslation } from "../../i18n";
 
 /**
  * The review's own frame while the review is still being prepared: the
@@ -28,6 +29,7 @@ export default function ReviewPreparing({
   onCancel: () => void;
   cancelDisabled: boolean;
 }) {
+  const { t } = useTranslation("syncReview");
   useEffect(() => {
     const cancelOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !cancelDisabled) onCancel();
@@ -54,8 +56,8 @@ export default function ReviewPreparing({
             className="btn btn-ghost sync-inline-action-close"
             onClick={onCancel}
             disabled={cancelDisabled}
-            title={cancelDisabled ? "Changes are being written; this can't be stopped now" : "Cancel — nothing has changed"}
-            aria-label={`Cancel preparing the ${title}`}
+            title={cancelDisabled ? t("preparing.writing") : t("preparing.cancel")}
+            aria-label={t("preparing.cancelLabel", { title })}
           >
             <Icon name="x" size={15} />
           </button>
@@ -73,9 +75,9 @@ export default function ReviewPreparing({
       </div>
 
       <footer className={`${pull ? "sync-pull-apply-bar " : "sync-push-resource-footer "}sync-inline-action-footer sync-sync-review-footer`}>
-        <button type="button" className="btn btn-primary sync-pull-apply-button" disabled title="Preparing…">
+        <button type="button" className="btn btn-primary sync-pull-apply-button" disabled title={t("preparing.label")}>
           <Icon name="refresh" size={16} className="icon-spin" />
-          Preparing…
+          {t("preparing.label")}
         </button>
       </footer>
     </section>

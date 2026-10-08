@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ProjectPicker from "../../src/components/project-sync/ProjectPicker";
+import { i18n } from "../../src/i18n";
 import { pickWelcomeRide, WELCOME_RIDE_MS, WELCOME_RIDES } from "../../src/components/project-sync/ProjectsWelcome";
 import type { LocalProjectSummary, ProviderProfileSummary, StorageSummary } from "../../src/types";
 
@@ -166,4 +167,44 @@ test("every box in a landing row stands as tall as the row", () => {
   assert.match(css, /\.landing-picker-grid > li \{\s*display: flex;\s*\}/);
   assert.match(css, /\.landing-picker-card \{\s*width: 100%;/);
   assert.match(css, /\.landing-picker-door \{\s*width: 100%;/);
+});
+
+test("in Chinese the landing and the welcome speak Chinese; names, paths and storages stay as given", () => {
+  const stacked = [
+    ...storages,
+    { storage_id: "storage-r2", name: "R2 team", provider: "r2", provider_label: "Cloudflare R2", icon: "cloud", available: true, summary: [],
+      connection: { state: "reconnect_required", code: "reconnect_required", message: "", observed_at: 0 } },
+    { storage_id: "storage-gone", name: "旧共享", provider: "webdav", provider_label: "WebDAV", icon: "drive", available: false, summary: [] },
+  ] as unknown as StorageSummary[];
+  const picker = (list: LocalProjectSummary[], remembered: Record<string, string> = {}) => renderToStaticMarkup(
+    <ProjectPicker projects={list} profiles={profiles} storages={stacked} rememberedStorageByProject={remembered} onAddProject={() => {}} onAddCloudProject={() => {}} onSelectProject={() => {}} />,
+  );
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = picker(projects);
+    assert.match(html, /<h1 id="landing-picker-title" class="settings-section-title">项目<\/h1>/);
+    assert.match(html, /本机 2 个/);
+    assert.match(html, /class="btn btn-primary"[^>]*>.*添加项目…/);
+    assert.match(html, /<strong>mallard-app \(Claude\)<\/strong>/, "the alias is the user's");
+    assert.match(html, /~\/Desktop\/project\/mallard-app/);
+    assert.match(html, /aria-label="mallard-app \(Claude\)，Git 仓库。存储：Local storage 1"/);
+    assert.match(html, /aria-label="testProjectNonGit。未关联存储"/);
+    assert.match(html, /landing-picker-storages none"><svg[^>]*>.*未关联存储/);
+    assert.doesNotMatch(html, /on this machine|No storage linked|Git repository|Add project/);
+
+    const stack = picker([{ ...projects[0], linked_storage_ids: ["storage-local", "storage-cloud", "storage-r2", "storage-gone"] }], { "project-a": "storage-cloud" });
+    assert.match(stack, /aria-label="mallard-app \(Claude\)，Git 仓库。存储：Cloud storage 2，默认打开；Local storage 1；R2 team，需重新连接；旧共享，不可用"/);
+    assert.match(stack, /\+3<\/span><span class="notice-chip warning">.*1 个不可用<\/span>/);
+    const reconnect = picker([{ ...projects[0], linked_storage_ids: ["storage-local", "storage-r2"] }]);
+    assert.match(reconnect, /<span class="notice-chip warning">.*1 个需重新连接<\/span>/);
+
+    const welcome = picker([]);
+    assert.match(welcome, /<h1 id="projects-welcome-title">添加你的第一个项目<\/h1>/);
+    assert.match(welcome, /class="btn btn-primary"[^>]*>.*添加项目…/);
+    assert.match(welcome, /class="btn btn-ghost"[^>]*>.*data-icon="cloud".*从 Mallard Cloud 添加…/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  // Back in English, the same render is the English one.
+  assert.match(picker(projects), /2 on this machine/);
 });

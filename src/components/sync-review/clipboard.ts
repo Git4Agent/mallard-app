@@ -1,3 +1,5 @@
+import { t } from "../../i18n";
+
 /**
  * Resource-neutral clipboard path for both feature modules. Some WebViews
  * expose Clipboard but reject writes, so this uses a document fallback and
@@ -16,7 +18,7 @@ export async function writeClipboardText(
       // document fallback while this user gesture is active.
     }
   }
-  if (typeof document === "undefined") throw new Error("Clipboard access is unavailable");
+  if (typeof document === "undefined") throw new Error(t("syncReview:clipboard.unavailable"));
   const field = document.createElement("textarea");
   field.value = value;
   field.readOnly = true;
@@ -35,7 +37,7 @@ export async function writeClipboardText(
     field.remove();
     previousFocus?.focus();
   }
-  if (!copied) throw new Error("Clipboard access is unavailable");
+  if (!copied) throw new Error(t("syncReview:clipboard.unavailable"));
 }
 
 /**

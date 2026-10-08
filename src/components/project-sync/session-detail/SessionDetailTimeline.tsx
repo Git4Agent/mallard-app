@@ -1,6 +1,7 @@
 import type { SessionMessageSettings, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import Notice from "../../notice/Notice";
+import { useTranslation } from "../../../i18n";
 import SessionDetailEvent from "./SessionDetailEvent";
 import { SessionModelNote, sessionModelNotes } from "./SessionModel";
 import type { SessionToolDetailState } from "./SessionDetailToolCall";
@@ -61,12 +62,13 @@ export default function SessionDetailTimeline({
   onOpenSession,
   startSettings,
 }: Props) {
+  const { t } = useTranslation(["session", "common"]);
   const days = groupSessionEventsByDay(events);
   const spans = sessionTurnSpans(events);
   const modelNotes = sessionModelNotes(events, startSettings);
 
   return (
-    <section className="session-detail-timeline" aria-label="Session timeline">
+    <section className="session-detail-timeline" aria-label={t("timeline.label")}>
       {/* Both of these land after the view's first commit — the first page
           request fires from an effect once the detail has resolved — so they
           are events, not content the timeline renders with, and live regions
@@ -75,8 +77,8 @@ export default function SessionDetailTimeline({
       {loading && (
         <div className="session-detail-state" role="status">
           <span className="status-loader" />
-          <strong>Loading the filtered timeline…</strong>
-          <span>Conversation text and tool bodies are read only when needed.</span>
+          <strong>{t("timeline.loading")}</strong>
+          <span>{t("timeline.loadingHint")}</span>
         </div>
       )}
 
@@ -87,8 +89,8 @@ export default function SessionDetailTimeline({
         <Notice
           severity="danger"
           timing="blocking"
-          title="Timeline unavailable"
-          action={<button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>}
+          title={t("timeline.unavailable")}
+          action={<button type="button" className="btn btn-ghost" onClick={onRetry}>{t("common:tryAgain")}</button>}
         >
           {error}
         </Notice>
@@ -99,13 +101,13 @@ export default function SessionDetailTimeline({
           <Icon name="message" size={24} />
           {hasFilterToggles ? (
             <>
-              <strong>No events match these filters.</strong>
-              <span>Turn another kind back on in the row above.</span>
+              <strong>{t("timeline.noMatch")}</strong>
+              <span>{t("timeline.noMatchHint")}</span>
             </>
           ) : (
             <>
-              <strong>This session recorded no events.</strong>
-              <span>Nothing was captured for it, so there is nothing to filter.</span>
+              <strong>{t("timeline.empty")}</strong>
+              <span>{t("timeline.emptyHint")}</span>
             </>
           )}
         </div>
@@ -179,7 +181,7 @@ export default function SessionDetailTimeline({
           onClick={onLoadMore}
         >
           {loadingMore ? <span className="status-loader" /> : <Icon name="chevron-down" size={12} />}
-          {loadingMore ? "Loading more…" : "Load 50 more"}
+          {loadingMore ? t("timeline.loadingMore") : t("timeline.loadMore", { value: 50 })}
         </button>
       )}
     </section>

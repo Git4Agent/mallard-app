@@ -1,5 +1,6 @@
 import { useRef, type ReactNode } from "react";
 import Icon from "../Icons";
+import { Trans, useTranslation } from "../../i18n";
 
 export default function NameSearchField({
   query, onChange, label, matches, total, noun, narrowed = false, hiddenSelected = 0, disabled = false, leading, trailing, count = true,
@@ -9,7 +10,8 @@ export default function NameSearchField({
   label: string;
   matches: number;
   total: number;
-  /** What the count counts, in the count's number: "1 file", "8 files". */
+  /** What the count counts, in the count's number: "file", "files"; in
+   *  Chinese it opens on its measure word, 个文件. */
   noun: (count: number) => string;
   /** The list is narrowed by something other than the query — a status
    *  scope — so the count reads "3 of 12" with the field empty. */
@@ -26,6 +28,7 @@ export default function NameSearchField({
    *  reaches a screen reader. */
   count?: boolean;
 }) {
+  const { t } = useTranslation("syncReview");
   const input = useRef<HTMLInputElement>(null);
   const filtering = narrowed || query.trim().length > 0;
   const field = (
@@ -36,7 +39,7 @@ export default function NameSearchField({
           ref={input}
           type="search"
           value={query}
-          placeholder={`${label}…`}
+          placeholder={t("search.placeholder", { label })}
           aria-label={label}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
@@ -48,7 +51,7 @@ export default function NameSearchField({
           }}
         />
         {query && (
-          <button type="button" className="sync-name-search-clear" aria-label="Clear search" title="Clear search"
+          <button type="button" className="sync-name-search-clear" aria-label={t("search.clear")} title={t("search.clear")}
             disabled={disabled} onClick={() => { onChange(""); input.current?.focus(); }}>
             <Icon name="x" size={13} />
           </button>
@@ -60,18 +63,18 @@ export default function NameSearchField({
               announcement: "8 files", or "2 of 8 files" while filtering. */}
           <span className="sync-name-search-count">
             {filtering
-              ? <><b>{matches}</b><span> of {total} {noun(total)}</span></>
-              : <>{total} {noun(total)}</>}
+              ? <Trans t={t} i18nKey="search.matches" values={{ matches, total, noun: noun(total) }} components={{ b: <b />, span: <span /> }} />
+              : t("search.total", { total, noun: noun(total) })}
           </span>
           {hiddenSelected > 0 && (
-            <span className="sync-name-search-hidden">{hiddenSelected} selected hidden by search</span>
+            <span className="sync-name-search-hidden">{t("search.hiddenSelected", { count: hiddenSelected })}</span>
           )}
         </div>
       ) : (
         /* Off the page, not off the air: a filter that hides rows still
            says how many it kept. */
         <span className="sync-visually-hidden" role="status">
-          {filtering ? `${matches} of ${total} ${noun(total)}` : ""}
+          {filtering ? t("search.matchesSpoken", { matches, total, noun: noun(total) }) : ""}
         </span>
       )}
     </div>

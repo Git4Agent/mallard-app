@@ -2,6 +2,7 @@ import CatalogRemoveButton, { type CatalogRemovalAction } from "./CatalogRemoveB
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
+import { t as translate, useTranslation } from "../../i18n";
 import { errorMessage } from "../../storageError";
 import Icon, { type IconName } from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
@@ -62,17 +63,18 @@ export function useCatalogItemDetail(scopeId: string, storageId: string | null, 
 
 /** What only this Mac knows about the item: when it changed and its size,
  *  and the warnings its capture raised. */
-function facts(row: CatalogScopeRow): Array<{ icon: IconName; label: string; value: ReactNode; title?: string }> {
+function facts(row: CatalogScopeRow): Array<{ id: string; icon: IconName; label: string; value: ReactNode; title?: string }> {
   const edited = row.local_present ? row.local_modified_at ?? null : null;
   const stored = edited == null ? row.remote_updated_at ?? null : null;
-  const list: Array<{ icon: IconName; label: string; value: ReactNode; title?: string }> = [];
-  if (edited != null) list.push({ icon: "clock", label: "Edited", value: <time dateTime={new Date(edited * 1000).toISOString()}>{formatFullDateTime(edited)}</time> });
-  if (stored != null) list.push({ icon: "clock", label: "Stored", value: <time dateTime={new Date(stored * 1000).toISOString()}>{formatFullDateTime(stored)}</time> });
-  if (row.local_bytes != null) list.push({ icon: "drive", label: "Size", value: formatBytes(row.local_bytes) });
+  const list: Array<{ id: string; icon: IconName; label: string; value: ReactNode; title?: string }> = [];
+  if (edited != null) list.push({ id: "edited", icon: "clock", label: translate("library:item.edited"), value: <time dateTime={new Date(edited * 1000).toISOString()}>{formatFullDateTime(edited)}</time> });
+  if (stored != null) list.push({ id: "stored", icon: "clock", label: translate("library:item.stored"), value: <time dateTime={new Date(stored * 1000).toISOString()}>{formatFullDateTime(stored)}</time> });
+  if (row.local_bytes != null) list.push({ id: "size", icon: "drive", label: translate("library:item.size"), value: formatBytes(row.local_bytes) });
   if (row.warnings.length > 0) {
     list.push({
+      id: "warnings",
       icon: "alert-triangle",
-      label: "Warnings",
+      label: translate("library:item.warnings"),
       value: String(row.warnings.length),
       title: row.warnings.map((warning) => warning.message).join("\n"),
     });
@@ -96,14 +98,15 @@ export interface CatalogItemActions {
 /** The card's launch run, right-aligned: the provider app, Terminal, Fork,
  *  Reveal in Finder last. */
 function Actions({ row, actions }: { row: CatalogScopeRow; actions: CatalogItemActions }) {
+  const { t } = useTranslation("library");
   const canFork = row.local_present && !!row.resource_id;
   return (
     <div className="sync-history-thread-actions catalog-item-actions">
       <CatalogRemoveButton row={row} action={actions.removal} />
-      <button type="button" className="btn btn-ghost sync-history-launch-action" title={`Open in ${actions.providerLabel}`} aria-label={`Open in ${actions.providerLabel}`} onClick={actions.onOpenApp}>
+      <button type="button" className="btn btn-ghost sync-history-launch-action" title={t("card.openIn", { provider: actions.providerLabel })} aria-label={t("card.openIn", { provider: actions.providerLabel })} onClick={actions.onOpenApp}>
         <ProviderMark provider={actions.provider} displayName={actions.providerLabel} />
       </button>
-      <button type="button" className="btn btn-ghost sync-history-launch-action" title="Open in Terminal" aria-label="Open in Terminal" onClick={actions.onOpenTerminal}>
+      <button type="button" className="btn btn-ghost sync-history-launch-action" title={t("card.openInTerminal")} aria-label={t("card.openInTerminal")} onClick={actions.onOpenTerminal}>
         <Icon name="terminal" size={14} />
       </button>
       {actions.onFork && (
@@ -111,8 +114,8 @@ function Actions({ row, actions }: { row: CatalogScopeRow; actions: CatalogItemA
           type="button"
           className="btn btn-ghost sync-history-launch-action"
           disabled={!canFork}
-          title={canFork ? actions.forkTitle : "Not on this Mac, so there is nothing to fork"}
-          aria-label={canFork ? actions.forkTitle : `Cannot fork ${row.display_name}: not on this Mac`}
+          title={canFork ? actions.forkTitle : t("card.nothingToFork")}
+          aria-label={canFork ? actions.forkTitle : t("card.cannotFork", { name: row.display_name })}
           aria-expanded={canFork ? !!actions.forkOpen : undefined}
           onClick={actions.onFork}
         >
@@ -123,8 +126,8 @@ function Actions({ row, actions }: { row: CatalogScopeRow; actions: CatalogItemA
         type="button"
         className="btn btn-ghost sync-history-launch-action"
         disabled={!row.local_path}
-        title={row.local_path ? `Reveal ${row.local_path} in Finder` : "Not on this Mac"}
-        aria-label={`Reveal ${row.display_name} in Finder`}
+        title={row.local_path ? t("card.reveal", { target: row.local_path }) : t("card.notOnMac")}
+        aria-label={t("card.reveal", { target: row.display_name })}
         onClick={actions.onReveal}
       >
         <Icon name="folder" size={14} />
@@ -136,8 +139,9 @@ function Actions({ row, actions }: { row: CatalogScopeRow; actions: CatalogItemA
 /* ——— the bodies ——— */
 
 function FileList({ files, onOpenFile }: { files: CatalogDetailFile[]; onOpenFile: (path: string) => void }) {
+  const { t } = useTranslation("library");
   return (
-    <table className="catalog-item-files" aria-label="Files">
+    <table className="catalog-item-files" aria-label={t("item.files")}>
       <tbody>
         {files.map((file) => (
           <tr key={file.path}>
@@ -146,7 +150,7 @@ function FileList({ files, onOpenFile }: { files: CatalogDetailFile[]; onOpenFil
                 <Icon name="file" size={13} />
                 <code>{file.path}</code>
               </button>
-              {file.executable && <span className="catalog-item-exec" title="Executable" aria-label="Executable"><Icon name="terminal" size={12} /></span>}
+              {file.executable && <span className="catalog-item-exec" title={t("item.executable")} aria-label={t("item.executable")}><Icon name="terminal" size={12} /></span>}
             </td>
             <td>{formatBytes(file.size)}</td>
           </tr>
@@ -164,18 +168,19 @@ function SkillBody({ text, path, files, fileLink, onOpenFile, onOpenExternal }: 
   onOpenFile: (path: string) => void;
   onOpenExternal: (url: string) => void;
 }) {
+  const { t } = useTranslation("library");
   const skill = useMemo(() => (text == null ? null : splitSkillFrontmatter(text)), [text]);
   return (
     <div className="catalog-item-skill">
       {skill?.fields.description && <p className="catalog-item-lede">{skill.fields.description}</p>}
       {skill == null ? (
-        <p className="catalog-item-muted">{path} is not UTF-8 text.</p>
+        <p className="catalog-item-muted">{t("item.notText", { path })}</p>
       ) : skill.body.trim() ? (
         <div className="catalog-item-document markdown-copy">
           <MarkdownText text={skill.body} fileLink={fileLink} onOpenExternal={onOpenExternal} />
         </div>
       ) : (
-        <p className="catalog-item-muted">{path} has nothing beyond its frontmatter.</p>
+        <p className="catalog-item-muted">{t("item.onlyFrontmatter", { path })}</p>
       )}
       <FileList files={files} onOpenFile={onOpenFile} />
     </div>
@@ -198,6 +203,7 @@ function PluginBody({ detail, installedHere, onOpenExternal }: {
   installedHere: boolean;
   onOpenExternal: (url: string) => void;
 }) {
+  const { t } = useTranslation(["library", "common"]);
   const listing = detail.listing;
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -206,9 +212,13 @@ function PluginBody({ detail, installedHere, onOpenExternal }: {
     return () => window.clearTimeout(timer);
   }, [copied]);
   const source = githubPage(detail.location);
-  const links: Array<[string, string]> = [];
-  for (const [label, href] of [["Website", listing?.website_url], ["Privacy", listing?.privacy_url], ["Terms", listing?.terms_url]] as const) {
-    if (href) links.push([label, href]);
+  const links: Array<{ id: string; label: string; href: string }> = [];
+  for (const [id, label, href] of [
+    ["website", t("item.website"), listing?.website_url],
+    ["privacy", t("item.privacy"), listing?.privacy_url],
+    ["terms", t("item.terms"), listing?.terms_url],
+  ] as const) {
+    if (href) links.push({ id, label, href });
   }
   const link = (href: string, children: ReactNode) => (
     <a href={href} rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); onOpenExternal(href); }}>
@@ -221,27 +231,27 @@ function PluginBody({ detail, installedHere, onOpenExternal }: {
       {(listing?.display_name || listing?.developer || listing?.category) && (
         <p className="catalog-item-by">
           {listing.display_name && <b>{listing.display_name}</b>}
-          {listing.developer && <> by {listing.developer}</>}
+          {listing.developer && <> {t("item.by", { developer: listing.developer })}</>}
           {listing.category && <>{listing.display_name || listing.developer ? " · " : ""}{listing.category}</>}
         </p>
       )}
       {listing?.description && <p className="catalog-item-lede">{listing.description}</p>}
       {detail.installed_version ? (
-        <p className="catalog-item-here"><Icon name="check-circle" size={14} />Installed · {detail.installed_version}</p>
+        <p className="catalog-item-here"><Icon name="check-circle" size={14} />{t("item.installed", { version: detail.installed_version })}</p>
       ) : !installedHere && (
-        <p className="catalog-item-here is-absent"><Icon name="download" size={14} />Pull installs it</p>
+        <p className="catalog-item-here is-absent"><Icon name="download" size={14} />{t("item.pullInstalls")}</p>
       )}
       {detail.install.length > 0 && (
         <div className="catalog-item-install">
           <div className="catalog-item-install-head">
-            <span className="catalog-item-install-name">Terminal</span>
+            <span className="catalog-item-install-name">{t("item.terminal")}</span>
             <button
               type="button"
               className="btn catalog-item-copy"
-              aria-label={`Copy ${copy}`}
+              aria-label={t("item.copyLines", { lines: copy })}
               onClick={() => void writeClipboardText(copy).then(() => setCopied(true), () => undefined)}
             >
-              <Icon name={copied ? "check" : "copy"} size={13} />{copied ? "Copied" : "Copy"}
+              <Icon name={copied ? "check" : "copy"} size={13} />{copied ? t("common:copied") : t("common:copy")}
             </button>
           </div>
           <pre className="catalog-item-lines"><code>
@@ -254,7 +264,7 @@ function PluginBody({ detail, installedHere, onOpenExternal }: {
       <p className="catalog-item-links">
         {source ? link(source, <><Icon name="link" size={12} />{source.slice("https://github.com/".length)}</>)
           : <code>{detail.location ?? detail.marketplace}</code>}
-        {links.map(([label, href]) => <Fragment key={label}>{link(href, label)}</Fragment>)}
+        {links.map(({ id, label, href }) => <Fragment key={id}>{link(href, label)}</Fragment>)}
       </p>
     </div>
   );
@@ -267,10 +277,11 @@ function Body({ row, detail, fileLink, onOpenFile, onOpenExternal }: {
   onOpenFile: (path: string) => void;
   onOpenExternal: (url: string) => void;
 }) {
-  if (detail.status === "loading") return <LoadingScaffold shape="detail" label={`Loading ${row.display_name}`} />;
+  const { t } = useTranslation("library");
+  if (detail.status === "loading") return <LoadingScaffold shape="detail" label={t("page.loading", { label: row.display_name })} />;
   if (detail.status === "failed") {
     return (
-      <Notice severity="warning" timing="standing" label={`Why ${row.display_name} could not be shown`} title={`Couldn’t read ${row.display_name}.`}>
+      <Notice severity="warning" timing="standing" label={t("item.whyUnreadable", { name: row.display_name })} title={t("item.unreadable", { name: row.display_name })}>
         {detail.message}
       </Notice>
     );
@@ -310,6 +321,7 @@ export default function CatalogItemPage({ row, back, detail, actions, files, onO
   /** The inline fork form, while Fork is open. */
   footer?: ReactNode;
 }) {
+  const { t } = useTranslation("library");
   const { open, onOpen } = files;
   const listed = useMemo(
     () => new Set(detail.status === "ready" && detail.detail.kind === "document" ? detail.detail.files.map((file) => file.path) : []),
@@ -348,7 +360,7 @@ export default function CatalogItemPage({ row, back, detail, actions, files, onO
         <PageBack target={back} />
         <div className="catalog-item-facts-line">
           {shown.map((fact) => (
-            <span key={fact.label} className="catalog-item-fact" title={fact.title ?? fact.label}>
+            <span key={fact.id} className="catalog-item-fact" title={fact.title ?? fact.label}>
               <Icon name={fact.icon} size={13} />{fact.value}
             </span>
           ))}
@@ -360,11 +372,11 @@ export default function CatalogItemPage({ row, back, detail, actions, files, onO
         <section className="catalog-item-panel" aria-label={row.display_name}>
           <Body row={row} detail={detail} fileLink={fileLink} onOpenFile={onOpen} onOpenExternal={onOpenExternal} />
         </section>
-        <aside className="catalog-item-rail" aria-label={`${row.display_name} on this Mac`}>
+        <aside className="catalog-item-rail" aria-label={t("item.onThisMac", { name: row.display_name })}>
           {shown.length > 0 && (
             <dl className="catalog-item-facts">
               {shown.map((fact) => (
-                <Fragment key={fact.label}>
+                <Fragment key={fact.id}>
                   <dt>{fact.label}</dt>
                   <dd title={fact.title}>{fact.value}</dd>
                 </Fragment>

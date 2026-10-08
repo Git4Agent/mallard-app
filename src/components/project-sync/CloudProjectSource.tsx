@@ -15,11 +15,14 @@ import type {
   StorageSummary,
 } from "../../types";
 import Icon from "../Icons";
+import { t as translate, useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import Notice, { Acknowledgement, FieldMessage } from "../notice/Notice";
 import ProviderMark from "../sync-review/ProviderMark";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { repositoryFingerprintsRequireAcknowledgement } from "./model";
+import { storageProviderName } from "./storageText";
 import ProjectFolderField from "./ProjectFolderField";
 import {
   compactFolderPath,
@@ -44,10 +47,10 @@ export interface CloneFallback {
 /** Why the folder is empty, in a few words. */
 export function cloneFailureText(reason: CloneFailureReason): string {
   switch (reason) {
-    case "missing_source": return "The repository URL is missing.";
-    case "refused": return "GitHub said no.";
-    case "unreachable": return "GitHub couldn’t be reached.";
-    case "failed": return "The clone failed.";
+    case "missing_source": return translate("projectSetup:clone.missingSource");
+    case "refused": return translate("projectSetup:clone.refused");
+    case "unreachable": return translate("projectSetup:clone.unreachable");
+    case "failed": return translate("projectSetup:clone.failed");
   }
 }
 
@@ -90,7 +93,9 @@ type Run =
   | { phase: "idle" }
   | { phase: "folder"; progress: CloudProjectFolderProgress | null }
   | { phase: "connect" }
-  | { phase: "failed"; title: string; message: string };
+  /** What failed, said when it is drawn; the backend's sentence, or none
+   *  when the folder only changed under the line. */
+  | { phase: "failed"; failure: "changed" | "connect" | "folder"; message: string | null };
 
 const probeKey = (path: string, fingerprint: string | null, round: number) => `${path}\n${fingerprint ?? ""}\n${round}`;
 
@@ -189,7 +194,7 @@ export function destinationVerdict(
   mode: FolderMode,
 ): FolderVerdict | null {
   if (input.kind === "empty") return null;
-  if (input.kind === "search") return { tone: "bad", message: "Enter a full path." };
+  if (input.kind === "search") return { tone: "bad", message: translate("projectSetup:destination.fullPath") };
   if (state.status === "error" && state.key === key) return { tone: "bad", message: state.message };
   if (state.status !== "done" || state.key !== key) return null;
   const { folder, can_clone: canClone } = state.probe;
@@ -198,21 +203,30 @@ export function destinationVerdict(
     case "refused":
       return { tone: "bad", message: folder.message };
     case "project":
-      return { tone: "bad", message: "Already a project here.", actions: [{ label: "Open it", run: "open-project" }] };
+      return {
+        tone: "bad",
+        message: translate("projectSetup:destination.alreadyProject"),
+        actions: [{ label: translate("projectSetup:destination.openIt"), run: "open-project" }],
+      };
     case "checkout":
-      return { tone: "ok", message: "Already its checkout. Nothing to clone." };
+      return { tone: "ok", message: translate("projectSetup:destination.checkout") };
   }
   if (mode === "existing") {
     switch (folder.kind) {
       case "new":
-        return { tone: "bad", message: "No folder here." };
+        return { tone: "bad", message: translate("projectSetup:destination.noFolder") };
       case "empty":
-        return { tone: "ok", message: "Empty. Nothing is cloned." };
+        return { tone: "ok", message: translate("projectSetup:destination.emptyNoClone") };
       case "occupied":
-        if (!needsTick(mode, folder, repository)) return { tone: "ok", message: "Used as it is." };
-        if (!folder.local_fingerprint) return { tone: "warn", message: "No Git remote to check." };
-        if (!git) return { tone: "warn", message: `A Git checkout; ${repository.name} has no Git.` };
-        return { tone: "warn", message: folder.git_remote ? `Git remote: ${folder.git_remote}.` : "Another Git remote." };
+        if (!needsTick(mode, folder, repository)) return { tone: "ok", message: translate("projectSetup:destination.asIs") };
+        if (!folder.local_fingerprint) return { tone: "warn", message: translate("projectSetup:destination.noRemote") };
+        if (!git) return { tone: "warn", message: translate("projectSetup:destination.noGit", { name: repository.name }) };
+        return {
+          tone: "warn",
+          message: folder.git_remote
+            ? translate("projectSetup:destination.remote", { remote: folder.git_remote })
+            : translate("projectSetup:destination.otherRemote"),
+        };
     }
   }
   const source = clonesFrom(repository, canClone);
@@ -220,22 +234,23 @@ export function destinationVerdict(
     case "occupied":
       return {
         tone: "warn",
-        message: "Holds files.",
+        message: translate("projectSetup:destination.holdsFiles"),
         actions: [
-          { label: "Use it as it is", run: "use-as-is" },
-          ...(folder.suggestion ? [{ label: `Use ${compact(folder.suggestion)}`, value: compact(folder.suggestion) }] : []),
+          { label: translate("projectSetup:destination.useAsIs"), run: "use-as-is" },
+          ...(folder.suggestion
+            ? [{ label: translate("projectSetup:folder.use", { path: compact(folder.suggestion) }), value: compact(folder.suggestion) }]
+            : []),
         ],
       };
     case "new":
-      if (source) return { tone: "ok", message: `Clones ${source}; keeps an empty Git repository if cloning fails.` };
-      if (git && !canClone) return { tone: "bad", message: "Install Git to create this Git project." };
-      if (git) return { tone: "warn", message: "Creates an empty Git repository. The repository URL is missing." };
-      return { tone: "ok", message: "New, empty folder." };
     case "empty":
-      if (source) return { tone: "ok", message: `Clones ${source}; keeps an empty Git repository if cloning fails.` };
-      if (git && !canClone) return { tone: "bad", message: "Install Git to create this Git project." };
-      if (git) return { tone: "warn", message: "Creates an empty Git repository. The repository URL is missing." };
-      return { tone: "ok", message: "Empty folder." };
+      if (source) return { tone: "ok", message: translate("projectSetup:destination.clones", { source }) };
+      if (git && !canClone) return { tone: "bad", message: translate("projectSetup:destination.installGit") };
+      if (git) return { tone: "warn", message: translate("projectSetup:destination.emptyGit") };
+      return {
+        tone: "ok",
+        message: folder.kind === "new" ? translate("projectSetup:destination.newEmpty") : translate("projectSetup:destination.emptyFolder"),
+      };
   }
 }
 
@@ -352,6 +367,7 @@ export default function CloudProjectSource({
   onOpenProject,
   onDone,
 }: Props) {
+  const { t } = useTranslation(["projectSetup", "common"]);
   const homePath = useHomePath();
   const compact = (path: string) => compactFolderPath(path, homePath);
   const accounts = storages.filter(isManagedCloudStorage);
@@ -423,13 +439,16 @@ export default function CloudProjectSource({
   const enabledProviders = providers.filter((descriptor) => agents.enabled[descriptor.key]);
   const incomplete = enabledProviders.filter((descriptor) => !agents.chosen[descriptor.key]);
   const agentMessage = enabledProviders.length === 0
-    ? "Turn on at least one agent to continue."
-    : incomplete.length > 0 ? `Choose a profile for ${incomplete.map((descriptor) => descriptor.display_name).join(", ")}.` : null;
+    ? t("agents.noneOn")
+    : incomplete.length > 0
+      ? t("agents.chooseFor", { providers: incomplete.map((descriptor) => descriptor.display_name).join(t("shared.separator")) })
+      : null;
 
   // Named for what the click will do, once the folder's verdict says it.
   const verb = existing || !repository || !probe || folderKind === "checkout"
-    ? "Connect"
-    : willClone ? "Clone and connect" : repository.repository_class === "git_project" ? "Create Git project" : "Create folder and connect";
+    ? t("cloudSource.connect")
+    : willClone ? t("cloudSource.cloneConnect")
+      : repository.repository_class === "git_project" ? t("cloudSource.createGit") : t("cloudSource.createFolder");
   const connectable = existing
     ? folderKind === "empty" || folderKind === "checkout" || (folderKind === "occupied" && (!tick || ticked))
     : folderKind === "new" || folderKind === "empty" || folderKind === "checkout";
@@ -479,7 +498,7 @@ export default function CloudProjectSource({
         const detail = await connectExistingFolder(destination, probe.folder, ticked, choices);
         if (!isActive()) return;
         if (!detail) {
-          setRun({ phase: "failed", title: "The folder changed.", message: "Check it, then connect again." });
+          setRun({ phase: "failed", failure: "changed", message: null });
           setProbeRound((round) => round + 1);
           return;
         }
@@ -487,7 +506,7 @@ export default function CloudProjectSource({
         onDone(detail, null, workflowEpoch);
       } catch (reason) {
         if (!isActive()) return;
-        setRun({ phase: "failed", title: "Not connected.", message: errorMessage(reason) });
+        setRun({ phase: "failed", failure: "connect", message: errorMessage(reason) });
         setProbeRound((round) => round + 1);
       }
       return;
@@ -513,7 +532,7 @@ export default function CloudProjectSource({
       if (!isActive()) return;
       setRun(cancelledRef.current
         ? { phase: "idle" }
-        : { phase: "failed", title: "Folder not made.", message: errorMessage(reason) });
+        : { phase: "failed", failure: "folder", message: errorMessage(reason) });
       setProbeRound((round) => round + 1);
       return;
     }
@@ -531,7 +550,7 @@ export default function CloudProjectSource({
       onDone(detail, fallback, workflowEpoch);
     } catch (reason) {
       if (!isActive()) return;
-      setRun({ phase: "failed", title: "Not connected.", message: errorMessage(reason) });
+      setRun({ phase: "failed", failure: "connect", message: errorMessage(reason) });
       setProbeRound((round) => round + 1);
     }
   };
@@ -545,18 +564,24 @@ export default function CloudProjectSource({
     onCancel();
   };
 
+  const cloning = source ?? repository?.address ?? "";
   const status = run.phase === "folder"
     ? run.progress?.stage === "creating"
-      ? repository?.repository_class === "git_project" ? "Initializing the Git repository…" : "Making the folder…"
-      : `Cloning ${source ?? repository?.address ?? ""}${run.progress?.stage === "cloning" && run.progress.percent !== null ? ` · ${run.progress.percent}%` : "…"}`
-    : run.phase === "connect" && repository ? `Connecting to ${repository.address}…` : null;
+      ? repository?.repository_class === "git_project" ? t("cloudSource.initializing") : t("cloudSource.making")
+      : run.progress?.stage === "cloning" && run.progress.percent !== null
+        ? t("cloudSource.cloningPercent", { source: cloning, percent: run.progress.percent })
+        : t("cloudSource.cloning", { source: cloning })
+    : run.phase === "connect" && repository ? t("cloudSource.connectingTo", { address: repository.address }) : null;
   const primaryLabel = run.phase === "folder"
-    ? run.progress?.stage === "creating" || !willClone ? "Creating…" : "Cloning…"
-    : run.phase === "connect" ? "Connecting…" : run.phase === "failed" ? "Try again" : verb;
+    ? run.progress?.stage === "creating" || !willClone ? t("cloudSource.creating") : t("cloudSource.cloningShort")
+    : run.phase === "connect" ? t("cloudSource.connecting") : run.phase === "failed" ? t("common:tryAgain") : verb;
+  const failureTitle = run.phase !== "failed" ? null
+    : run.failure === "changed" ? t("cloudSource.folderChanged")
+      : run.failure === "connect" ? t("cloudSource.notConnected") : t("cloudSource.notMade");
 
   /* What kind of folder the field names; Browse follows it. */
   const folderSwitch = (
-    <div className="setup-pill-row" role="radiogroup" aria-label="Folder">
+    <div className="setup-pill-row" role="radiogroup" aria-label={t("sections.folder")}>
       {(["new", "existing"] as const).map((option) => {
         const active = mode === option;
         return (
@@ -570,7 +595,7 @@ export default function CloudProjectSource({
             onClick={() => setMode(option)}
           >
             <Icon name={option === "new" ? "plus" : "folder"} size={12} />
-            <span className="setup-pill-label">{option === "new" ? "New folder" : "Existing folder"}</span>
+            <span className="setup-pill-label">{option === "new" ? t("cloudSource.newFolder") : t("cloudSource.existingFolder")}</span>
             <span className="setup-pill-check" aria-hidden="true">{active && <Icon name="check" size={12} />}</span>
           </button>
         );
@@ -584,39 +609,39 @@ export default function CloudProjectSource({
         {doors}
 
         <section className="sync-setup-section">
-          <div className="sync-card-heading"><div><strong>Storage</strong></div></div>
+          <div className="sync-card-heading"><div><strong>{t("sections.storage")}</strong></div></div>
           {accounts.length === 0 ? (
             <div className="r2-step-list">
               <div className="storage-found-empty" role="status">
                 <Icon name="storage-mallard" size={24} />
-                <strong>No Mallard Cloud account yet.</strong>
+                <strong>{t("cloudSource.noAccount")}</strong>
                 <span className="storage-found-empty-verbs">
                   <button type="button" className="btn btn-primary" onClick={onAddAccount} disabled={working}>
-                    <Icon name="link" size={13} /> Set up Mallard Cloud
+                    <Icon name="link" size={13} /> {t("cloudSource.setUpCloud")}
                   </button>
                 </span>
               </div>
             </div>
           ) : (
             <>
-              <div className="setup-pill-row" role="radiogroup" aria-label="Storage">
+              <div className="setup-pill-row" role="radiogroup" aria-label={t("sections.storage")}>
                 {accounts.map((account) => {
                   const active = account.storage_id === storageId;
-                  const name = account.name || "(unnamed)";
+                  const name = account.name || t("shared.unnamed");
                   return (
                     <button
                       key={account.storage_id}
                       type="button"
                       role="radio"
                       aria-checked={active}
-                      aria-label={`${name} · ${account.provider_label}`}
-                      title={`${name} · ${account.provider_label}`}
+                      aria-label={`${name} · ${storageProviderName(account)}`}
+                      title={`${name} · ${storageProviderName(account)}`}
                       className={`setup-pill${active ? " active" : ""}`}
                       disabled={working || !account.available}
                       onClick={() => chooseStorage(account.storage_id)}
                     >
                       <Icon name="storage-mallard" size={12} />
-                      <span className="setup-pill-label">{name}{account.available ? "" : " (unavailable)"}</span>
+                      <span className="setup-pill-label">{account.available ? name : t("shared.unavailable", { name })}</span>
                       <span className="setup-pill-check" aria-hidden="true">{active && <Icon name="check" size={12} />}</span>
                     </button>
                   );
@@ -624,7 +649,7 @@ export default function CloudProjectSource({
               </div>
               {!storage && (
                 <small className="sync-setup-hint">
-                  {initialAddress ? `Choose an account for ${initialAddress}.` : "Choose an account first."}
+                  {initialAddress ? t("cloudSource.chooseAccountFor", { address: initialAddress }) : t("cloudSource.chooseAccount")}
                 </small>
               )}
             </>
@@ -633,7 +658,7 @@ export default function CloudProjectSource({
 
         {storage && (
           <section className="sync-setup-section repo-connect cloud-project-repository">
-            <div className="sync-card-heading"><div><strong>Repository</strong></div></div>
+            <div className="sync-card-heading"><div><strong>{t("sections.repository")}</strong></div></div>
             <RepositoryAddressPicker
               storage={storage}
               projectName=""
@@ -652,10 +677,10 @@ export default function CloudProjectSource({
 
         {storage && repository && (
           <section className="sync-setup-section">
-            <div className="sync-card-heading"><div><strong>Project</strong></div></div>
+            <div className="sync-card-heading"><div><strong>{t("sections.project")}</strong></div></div>
             <div className="sync-field-grid sync-setup-project-fields">
               <label>
-                <span>Name</span>
+                <span>{t("sections.name")}</span>
                 <input value={repository.name} readOnly disabled />
               </label>
               <ProjectFolderField
@@ -678,7 +703,7 @@ export default function CloudProjectSource({
                 disabled={working}
                 onChange={(checked) => setTickedFor(checked ? tickFor : null)}
               >
-                Can’t verify this is {repository.name}. Connect it anyway.
+                {t("cloudSource.cantVerify", { name: repository.name })}
               </Acknowledgement>
             )}
           </section>
@@ -686,8 +711,8 @@ export default function CloudProjectSource({
 
         {storage && repository && (
           <section className="sync-setup-section">
-            <div className="sync-card-heading"><div><strong>Agent</strong></div></div>
-            <div className="sync-provider-cards" role="group" aria-label="Agents used by this project">
+            <div className="sync-card-heading"><div><strong>{t("sections.agent")}</strong></div></div>
+            <div className="sync-provider-cards" role="group" aria-label={t("agents.group")}>
               {providers.map((descriptor) => {
                 const options = usableProfiles(profiles, descriptor.key);
                 const on = !!agents.enabled[descriptor.key];
@@ -699,7 +724,7 @@ export default function CloudProjectSource({
                         type="checkbox"
                         checked={on}
                         disabled={working || options.length === 0 || (on && enabledProviders.length === 1)}
-                        aria-label={`Use ${descriptor.display_name} in this project`}
+                        aria-label={t("agents.use", { provider: descriptor.display_name })}
                         onChange={() => setAgents((current) => ({
                           ...current,
                           enabled: { ...current.enabled, [descriptor.key]: !on },
@@ -707,7 +732,7 @@ export default function CloudProjectSource({
                       />
                       <ProviderMark provider={descriptor.key} displayName={descriptor.display_name} size={12} />
                       <strong>{descriptor.display_name}</strong>
-                      <span>{descriptor.profile_label}</span>
+                      <span>{backendText(`agentProfile.${descriptor.key}`, descriptor.profile_label)}</span>
                     </label>
                     {on ? (
                       <div className="sync-agent-profile-list">
@@ -716,14 +741,14 @@ export default function CloudProjectSource({
                             <select
                               value={value}
                               disabled={working}
-                              aria-label={`${descriptor.display_name} profile`}
+                              aria-label={t("agents.profile", { provider: descriptor.display_name })}
                               aria-invalid={!value || undefined}
                               onChange={(event) => {
                                 const next = event.target.value;
                                 setAgents((current) => ({ ...current, chosen: { ...current.chosen, [descriptor.key]: next } }));
                               }}
                             >
-                              <option value="">Choose profile</option>
+                              <option value="">{t("agents.chooseProfile")}</option>
                               {options.map((option) => (
                                 <option key={option.profile_id} value={option.profile_id}>{option.display_name}</option>
                               ))}
@@ -732,7 +757,7 @@ export default function CloudProjectSource({
                         </div>
                       </div>
                     ) : (
-                      <small>Not used by this project on this machine.</small>
+                      <small>{t("agents.notUsed")}</small>
                     )}
                   </div>
                 );
@@ -743,8 +768,8 @@ export default function CloudProjectSource({
         )}
 
         {run.phase === "failed" && (
-          <Notice severity="danger" timing="blocking" title={run.title} className="sync-setup-system-error">
-            {run.message}
+          <Notice severity="danger" timing="blocking" title={failureTitle ?? undefined} className="sync-setup-system-error">
+            {run.message ?? t("cloudSource.checkAgain")}
           </Notice>
         )}
       </div>
@@ -753,7 +778,7 @@ export default function CloudProjectSource({
         {status && <span className="sync-setup-save-state" aria-live="polite">{status}</span>}
         <div>
           <button type="button" className="btn btn-ghost" onClick={cancel} disabled={run.phase === "connect"}>
-            Cancel
+            {t("common:cancel")}
           </button>
           <button type="button" className="btn btn-primary" disabled={!ready || working} onClick={() => void start()}>
             {primaryLabel}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useTranslation } from "../../i18n";
 
 /*
  * A desktop pet on its page, played the way the Codex app plays it — the
@@ -32,13 +33,14 @@ const STATES: Readonly<Record<StateKey, { row: number; durations: readonly numbe
   review: { row: 8, durations: steady(6, 150, 280) },
 };
 
-const MOMENTS: ReadonlyArray<{ state: PetMoment; label: string }> = [
-  { state: "idle", label: "Idle" },
-  { state: "running", label: "Working" },
-  { state: "waiting", label: "Needs you" },
-  { state: "review", label: "Review" },
-  { state: "failed", label: "Failed" },
-];
+/** The moments in the order the buttons show them, each by its label's key. */
+const MOMENTS = [
+  { state: "idle", label: "pet.idle" },
+  { state: "running", label: "pet.working" },
+  { state: "waiting", label: "pet.waiting" },
+  { state: "review", label: "pet.review" },
+  { state: "failed", label: "pet.failed" },
+] as const satisfies ReadonlyArray<{ state: PetMoment; label: string }>;
 
 /** The look direction (0 = up, clockwise, 0–15) nearest the bearing to a point. */
 function lookIndex(dx: number, dy: number): number {
@@ -74,6 +76,7 @@ function useFrame(key: StateKey, playing: boolean): number {
 
 /** A Codex window drawn in blocks; only the approval it asks for has words. */
 function CodexWindow({ moment }: { moment: PetMoment }) {
+  const { t } = useTranslation("library");
   return (
     <div className="catalog-pet-window" aria-hidden="true">
       <div className="catalog-pet-window-bar"><i /><i /><i /></div>
@@ -82,7 +85,7 @@ function CodexWindow({ moment }: { moment: PetMoment }) {
         <span className="catalog-pet-window-line" style={{ width: "74%" }} />
         <span className="catalog-pet-window-line" style={{ width: "36%" }} />
         {moment === "running" && <span className="catalog-pet-window-dots"><i /><i /><i /></span>}
-        {moment === "waiting" && <span className="catalog-pet-window-ask"><span className="catalog-pet-window-buttons"><b>Allow</b><b>Deny</b></span></span>}
+        {moment === "waiting" && <span className="catalog-pet-window-ask"><span className="catalog-pet-window-buttons"><b>{t("pet.allow")}</b><b>{t("pet.deny")}</b></span></span>}
         {moment === "review" && <span className="catalog-pet-window-diff"><i className="is-del" /><i className="is-add" /><i className="is-add" /></span>}
         {moment === "failed" && <span className="catalog-pet-window-fail"><b>!</b></span>}
       </div>
@@ -98,6 +101,7 @@ function Desk({ atlas, name, columns, rows, moment, playing }: {
   moment: PetMoment;
   playing: boolean;
 }) {
+  const { t } = useTranslation("library");
   const desk = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [x, setX] = useState<number | null>(null);
@@ -173,7 +177,9 @@ function Desk({ atlas, name, columns, rows, moment, playing }: {
     width: CELL_WIDTH,
     height: CELL_HEIGHT,
     backgroundImage: `url(${atlas})`,
+    // i18n-ignore: CSS value
     backgroundSize: `${columns * CELL_WIDTH}px ${rows * CELL_HEIGHT}px`,
+    // i18n-ignore: CSS value
     backgroundPosition: `${-cell.column * CELL_WIDTH}px ${-cell.row * CELL_HEIGHT}px`,
   };
   return (
@@ -194,7 +200,7 @@ function Desk({ atlas, name, columns, rows, moment, playing }: {
           type="button"
           className={`catalog-pet-desk-pet${run ? " is-running" : ""}`}
           style={{ left: center - HALF }}
-          aria-label={`${name}. Drag it, or press the left and right arrow keys, to make it run.`}
+          aria-label={t("pet.deskLabel", { name })}
           onPointerDown={onPointerDown}
           onPointerUp={release}
           onKeyDown={onKeyDown}
@@ -213,6 +219,7 @@ export default function CatalogPetDesk({ atlas, name, columns, rows }: {
   columns: number;
   rows: number;
 }) {
+  const { t } = useTranslation("library");
   const reduced = useReducedMotion();
   const [moment, setMoment] = useState<PetMoment>("idle");
   const [paused, setPaused] = useState<boolean | null>(null);
@@ -222,7 +229,7 @@ export default function CatalogPetDesk({ atlas, name, columns, rows }: {
     <div className="catalog-pet">
       <Desk atlas={atlas} name={name} columns={columns} rows={rows} moment={moment} playing={playing} />
       <div className="catalog-pet-tools">
-        <div className="catalog-pet-moments" role="group" aria-label="Codex moments">
+        <div className="catalog-pet-moments" role="group" aria-label={t("pet.moments")}>
           {MOMENTS.map((entry) => (
             <button
               key={entry.state}
@@ -234,12 +241,12 @@ export default function CatalogPetDesk({ atlas, name, columns, rows }: {
                 setPaused(false);
               }}
             >
-              {entry.label}
+              {t(entry.label)}
             </button>
           ))}
         </div>
         <button type="button" className="btn btn-ghost catalog-pet-play" aria-pressed={!playing} onClick={() => setPaused(playing)}>
-          {playing ? "Pause" : "Play"}
+          {playing ? t("pet.pause") : t("pet.play")}
         </button>
       </div>
     </div>

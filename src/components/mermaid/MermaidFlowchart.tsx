@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Components } from "react-markdown";
+import { useTranslation } from "../../i18n";
 import { renderMermaid } from "./mermaidClient";
 import { mermaidImageSource, mermaidSourceProblem } from "./mermaidModel";
 import { useSessionTheme, type SessionTheme } from "../sessionTheme";
@@ -12,13 +13,17 @@ export default function MermaidFlowchart({ code, complete, onCopy }: {
   complete: boolean;
   onCopy: CopySource;
 }) {
+  const { t, i18n } = useTranslation("shell");
+  const language = i18n.language;
   const target = useRef<HTMLElement>(null);
   const theme = useSessionTheme();
   const [active, setActive] = useState(false);
-  const [state, setState] = useState<{ code: string; theme: SessionTheme; src?: string; error?: string } | null>(null);
+  /* A drawn result belongs to its source, theme and language: an error is
+     worded when the render settles. */
+  const [state, setState] = useState<{ code: string; theme: SessionTheme; language: string; src?: string; error?: string } | null>(null);
   const [sourceOpen, setSourceOpen] = useState(false);
-  const [copied, setCopied] = useState<{ code: string; message: string } | null>(null);
-  const inputError = complete ? mermaidSourceProblem(code) : "The Mermaid fence is incomplete. The source is available below.";
+  const [copied, setCopied] = useState<{ code: string; ok: boolean } | null>(null);
+  const inputError = complete ? mermaidSourceProblem(code) : t("mermaid.incomplete");
   useEffect(() => {
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) setActive(true);
@@ -32,32 +37,32 @@ export default function MermaidFlowchart({ code, complete, onCopy }: {
     void renderMermaid(code, theme).then((result) => {
       if (cancelled) return;
       try {
-        setState(result.svg ? { code, theme, src: mermaidImageSource(result.svg) } : { code, theme, error: result.error });
+        setState(result.svg ? { code, theme, language, src: mermaidImageSource(result.svg) } : { code, theme, language, error: result.error });
       } catch {
-        setState({ code, theme, error: "This flowchart contains unsupported image content. The source is available below." });
+        setState({ code, theme, language, error: t("mermaid.unsupportedImage") });
       }
     }).catch(() => {
-      if (!cancelled) setState({ code, theme, error: "The flowchart could not be rendered. The source is available below." });
+      if (!cancelled) setState({ code, theme, language, error: t("mermaid.notRendered") });
     });
     return () => { cancelled = true; };
-  }, [active, code, inputError, theme]);
-  const current = state?.code === code && state.theme === theme ? state : null;
+  }, [active, code, inputError, theme, language, t]);
+  const current = state?.code === code && state.theme === theme && state.language === language ? state : null;
   const error = inputError ?? current?.error;
   return (
-    <section ref={target} className="mermaid-flowchart" aria-label="Mermaid flowchart" data-status={error ? "error" : current?.src ? "ready" : "loading"}>
-      <div className="mermaid-flowchart-head">Flowchart</div>
+    <section ref={target} className="mermaid-flowchart" aria-label={t("mermaid.label")} data-status={error ? "error" : current?.src ? "ready" : "loading"}>
+      <div className="mermaid-flowchart-head">{t("mermaid.head")}</div>
       {error ? <p className="mermaid-flowchart-note" role="note">{error}</p> : current?.src ? (
         <div className="mermaid-flowchart-image">
-          <img src={current.src} alt="Flowchart from the session message" decoding="async" onError={() => setState({ code, theme, error: "The flowchart image could not be displayed. The source is available below." })} />
+          <img src={current.src} alt={t("mermaid.alt")} decoding="async" onError={() => setState({ code, theme, language, error: t("mermaid.notDisplayed") })} />
         </div>
-      ) : <p className="mermaid-flowchart-note" role="status">Loading flowchart…</p>}
+      ) : <p className="mermaid-flowchart-note" role="status">{t("mermaid.loading")}</p>}
       <details className="mermaid-flowchart-source" open={sourceOpen} onToggle={(event) => setSourceOpen(event.currentTarget.open)}>
-        <summary>Source</summary>
+        <summary>{t("diagram.source")}</summary>
         {sourceOpen && <div>
           <button type="button" onClick={() => {
-            void onCopy(code).then(() => setCopied({ code, message: "Copied." })).catch(() => setCopied({ code, message: "Select the source to copy it." }));
-          }}>Copy source</button>
-          <span role="status">{copied?.code === code ? copied.message : ""}</span>
+            void onCopy(code).then(() => setCopied({ code, ok: true })).catch(() => setCopied({ code, ok: false }));
+          }}>{t("diagram.copySource")}</button>
+          <span role="status">{copied?.code === code ? t(copied.ok ? "diagram.copied" : "diagram.selectToCopy") : ""}</span>
           <pre><code>{code}</code></pre>
         </div>}
       </details>

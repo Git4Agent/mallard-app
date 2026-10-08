@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import Icon from "../Icons";
+import { Trans, useTranslation } from "../../i18n";
 
 /**
  * The shared selected/total count, recommended-selection, and clear controls
@@ -42,8 +43,10 @@ export default function SyncReviewSelectionBar({
     onClose: () => void;
   };
 }) {
+  const { t } = useTranslation("syncReview");
   const unselect = recommendedDisabled && recommendedCount > 0 && !clearDisabled;
-  const clearTitle = searchActive ? "Clear matching selection" : "Clear current selection";
+  const clearTitle = searchActive ? t("selection.clearMatching") : t("selection.clearCurrent");
+  const selected = t("selection.count", { count, total });
 
   return (
     <div className="sync-push-resource-actions">
@@ -53,8 +56,8 @@ export default function SyncReviewSelectionBar({
             className="sync-sync-review-selected"
             style={{ "--review-count-digits": String(total).length } as CSSProperties}
             aria-live="polite"
-            aria-label={`${count} of ${total} selected`}
-            title={`${count} of ${total} selected`}
+            aria-label={selected}
+            title={selected}
           >
             <b>{count}</b>/{total}
           </span>
@@ -70,8 +73,9 @@ export default function SyncReviewSelectionBar({
             <Icon name="check-circle" size={14} />
             {/* The space keeps the accessible name "Select 3", not "Select3";
                 a flex item's trailing space draws nothing. */}
-            {unselect ? "Unselect " : "Select "}
-            <span className="sync-path-count">{recommendedCount}</span>
+            {unselect
+              ? <Trans t={t} i18nKey="selection.unselect" values={{ count: recommendedCount }} components={{ n: <span className="sync-path-count" /> }} />
+              : <Trans t={t} i18nKey="selection.select" values={{ count: recommendedCount }} components={{ n: <span className="sync-path-count" /> }} />}
           </button>
           <button
             type="button"

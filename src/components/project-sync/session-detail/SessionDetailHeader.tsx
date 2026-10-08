@@ -1,11 +1,14 @@
 import type { ReactNode, RefObject } from "react";
-import type { ProjectSessionDetail, SessionActionDescriptor, SessionDetailWarning } from "../../../types";
+import type { ProjectSessionDetail, SessionActionDescriptor, SessionAgentMode, SessionDetailWarning } from "../../../types";
 import Icon, { type IconName } from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
 import ThreadStatusIcon from "../../sync-review/ThreadStatusIcon";
 import PageBack, { type PageBackTarget } from "../../sync-review/PageBack";
 import SessionDetailNotes from "./SessionDetailNotes";
 import { SessionModelChip } from "./SessionModel";
+import { sessionCountExplanation } from "./SessionDetailToolbar";
+import { t as translate, Trans, useTranslation } from "../../../i18n";
+import { backendText } from "../../../i18n/backend";
 import {
   formatCompactCount,
   formatSessionCount,
@@ -26,6 +29,15 @@ const ACTION_ICONS: Record<Exclude<SessionActionDescriptor["kind"], "open_in_app
 
 function FactChip({ children, title }: { children: ReactNode; title?: string }) {
   return <span className="session-detail-chip" title={title}>{children}</span>;
+}
+
+/** How the parent ran this child, as one sentence per mode. */
+function runModeTitle(mode: SessionAgentMode): string {
+  switch (mode) {
+    case "sync": return translate("session:header.runSync");
+    case "async": return translate("session:header.runAsync");
+    case "spawn": return translate("session:header.runSpawn");
+  }
 }
 
 export default function SessionDetailHeader({
@@ -57,7 +69,8 @@ export default function SessionDetailHeader({
   // sticky, so it survives scrolling in a way an in-page poster never did. The
   // h1 keeps the page's structure: it is what the section labels itself by and
   // where focus lands on open, so it stays in the DOM, visually hidden.
-  const title = detail.title || "Untitled session";
+  const { t } = useTranslation("session");
+  const title = detail.title || t("untitled");
   const start = formatSessionStart(detail.started_at);
   const length = formatSessionDuration(detail.started_at, detail.ended_at);
   const tokensKnown = detail.tokens.quality !== "unsupported" && detail.tokens.value != null;
@@ -80,19 +93,19 @@ export default function SessionDetailHeader({
           <PageBack target={back} />
           {/* Facts state themselves: a branch after the branch glyph and a
               7-char sha need no caption. Only the token count keeps a word. */}
-          <div className="session-detail-chips" aria-label="Session facts">
+          <div className="session-detail-chips" aria-label={t("header.facts")}>
             {/* A stored session's one difference from a local one, said the
                 way its row says it: the row's glyph, with the row's sentence
                 as the tooltip. The face names the fact, not the storage,
                 which is the bar's root crumb. */}
             {source.kind === "stored" && (
-              <FactChip title={`Only in ${source.storageName}. Pull to download it here.`}>
+              <FactChip title={t("header.storedOnly", { storage: source.storageName })}>
                 <ThreadStatusIcon status="cloud-outstanding" size={14} />
-                Not on this computer
+                {t("header.notOnComputer")}
               </FactChip>
             )}
             {detail.branch && (
-              <FactChip title={`Recorded branch ${detail.branch}`}>
+              <FactChip title={t("header.branch", { branch: detail.branch })}>
                 <Icon name="git-branch" size={12} />
                 <code>{detail.branch}</code>
               </FactChip>
@@ -116,37 +129,49 @@ export default function SessionDetailHeader({
                 <b>{length}</b>
               </FactChip>
             )}
-            <FactChip title={detail.tokens.explanation ?? formatSessionCount(detail.tokens)}>
+            <FactChip title={sessionCountExplanation(detail.tokens) ?? formatSessionCount(detail.tokens)}>
               {tokensKnown
-                ? <><code className={`quality-${detail.tokens.quality}`}>{formatCompactCount(detail.tokens)}</code> tokens</>
-                : "Tokens unavailable"}
+                ? (
+                  <Trans
+                    t={t}
+                    i18nKey="header.tokens"
+                    values={{ value: formatCompactCount(detail.tokens) }}
+                    components={{ code: <code className={`quality-${detail.tokens.quality}`} /> }}
+                  />
+                )
+                : t("header.tokensUnavailable")}
             </FactChip>
             {/* What the session started with: `model · level`; the transcript
                 notes where it changed. */}
             {detail.settings && <SessionModelChip settings={detail.settings} />}
             {/* How many agents this session delegated to; the rows say which. */}
             {agentsKnown && (
-              <FactChip title={agents.explanation ?? `${formatSessionCount(agents)} agents spawned in this session`}>
+              <FactChip title={sessionCountExplanation(agents) ?? t("header.agentsSpawned", { value: formatSessionCount(agents) })}>
                 <Icon name="git-fork" size={12} />
-                <code className={`quality-${agents.quality}`}>{formatSessionCount(agents)}</code>
-                {agents.value === 1 ? "agent" : "agents"}
+                <Trans
+                  t={t}
+                  i18nKey="header.agents"
+                  count={agents.value ?? 0}
+                  values={{ value: formatSessionCount(agents) }}
+                  components={{ code: <code className={`quality-${agents.quality}`} /> }}
+                />
               </FactChip>
             )}
             {/* A child page states what it was: its role, model, and how the
                 parent ran it. The parent itself is the crumb before the title. */}
             {agent?.role && (
-              <FactChip title={`Agent role ${agent.role}`}>
+              <FactChip title={t("header.agentRole", { role: agent.role })}>
                 <Icon name="git-fork" size={12} />
                 <code>{agent.role}</code>
               </FactChip>
             )}
-            {agent?.model && !detail.settings && <FactChip title={`Model ${agent.model}`}><code>{agent.model}</code></FactChip>}
-            {agent && <FactChip title={`Run ${agent.mode}`}>{agent.mode}</FactChip>}
+            {agent?.model && !detail.settings && <FactChip title={t("header.model", { model: agent.model })}><code>{agent.model}</code></FactChip>}
+            {agent && <FactChip title={runModeTitle(agent.mode)}>{t(`agentMode.${agent.mode}`)}</FactChip>}
             <SessionDetailNotes notes={notes} onShowToolCalls={onShowToolCalls} />
           </div>
         </div>
 
-        <div className="session-detail-header-actions" aria-label="Session actions">
+        <div className="session-detail-header-actions" aria-label={t("header.actions")}>
           {/* Right under Push in the bar: why it is held, when the user can
               clear it. The sentence is the tooltip, and printed for a screen
               reader. */}
@@ -159,6 +184,10 @@ export default function SessionDetailHeader({
           )}
           {detail.actions.map((action) => {
             const pending = actionBusyId === action.action_id;
+            const label = backendText(`sessionAction.${action.action_id}`, action.label);
+            const disabledReason = action.disabled_reason
+              ? backendText(`sessionAction.${action.action_id}.disabledReason`, action.disabled_reason)
+              : null;
             return (
               <button
                 key={action.action_id}
@@ -166,9 +195,9 @@ export default function SessionDetailHeader({
                 className="btn btn-ghost session-detail-launch"
                 disabled={!action.enabled || actionBusyId !== null}
                 title={!action.enabled
-                  ? action.disabled_reason ?? action.label
-                  : pending ? `${action.label}…` : action.label}
-                aria-label={action.label}
+                  ? disabledReason ?? label
+                  : pending ? `${label}…` : label}
+                aria-label={label}
                 onClick={() => onAction(action)}
               >
                 {pending

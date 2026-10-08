@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PushResourceWorkspace, {
+  pullRequiredCopy,
   pushBlockerPillLabel,
   pushBlockerSentence,
   pushBudgetTotal,
@@ -12,6 +13,7 @@ import PushResourceWorkspace, {
   recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
+import { i18n } from "../../src/i18n";
 
 test("a reviewed Git-only change can be pushed without a session selection", () => {
   assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, gitHistoryChanged: true }), null);
@@ -1108,4 +1110,63 @@ test("the blocker pill opens its card: the step switches and the files page scro
   assert.match(page, /scrollIntoView\(\{ block: "nearest" \}\)/);
   // Focus goes to Mark reviewed first, the row's tick only without one.
   assert.match(page, /querySelector<HTMLInputElement>\(".notice-ack input"\)\s*\?\? card\.querySelector<HTMLInputElement>\("\.sync-sync-row-choice input"\)/);
+});
+
+/* The Push review in Chinese: the review's own words translate, and what the
+   user named — sessions, files, storages — stays exactly as given. */
+test("the Push review header and footer speak Chinese around the user's names", () => {
+  const run = flaggedFile("scripts/run.sh", "executable", "e".repeat(64));
+  const inventory: ProjectContentInventory = { ...projectFiles, entries: [run.inventoryEntry] };
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderWorkspace(new Set([fits.resource_id]));
+    const header = html.match(/<header\b[\s\S]*?<\/header>/)?.[0] ?? "";
+    const footer = html.match(/<footer\b[\s\S]*?<\/footer>/)?.[0] ?? "";
+    assert.match(header, /<h2 id="sync-push-resource-title">上传检查<\/h2>/);
+    assert.match(header, /<span class="sync-settings-flag">密钥隐藏：开<\/span>/);
+    assert.match(header, /aria-label="关闭上传检查"/);
+    assert.match(header, /title="会话 96 MB · 依赖 3\.0 MB · 项目文件 0 B"/);
+    assert.match(footer, /title="会话 96 MB · 依赖 3\.0 MB · 项目文件 0 B"/);
+    assert.match(footer, /<\/span>上传<\/button>/);
+    assert.match(html, /<strong>会话<\/strong><span>此项目的代理会话<\/span>/);
+    // The session's own title is never translated.
+    assert.match(html, /<strong>Refine sync review UX<\/strong>/);
+    assert.match(html, /aria-label="选择“Refine sync review UX”"/);
+    assert.doesNotMatch(html, />Push review<|Credential redaction|>Push<\/button>/);
+
+    // The footer's refusals, and the blocker that names a file as it is.
+    assert.equal(pushReviewDisabledReason({ selected: new Set(), deletionApproved: true }), "未选择任何内容");
+    assert.equal(
+      pushReviewDisabledReason({ selected: new Set(), deletionApproved: true, listState: "loading" }),
+      "正在载入会话…",
+    );
+    assert.equal(
+      pushReviewDisabledReason({ selected: new Set([fits.resource_id, run.descriptor.resource_id]), threadComparison: comparison(), projectContentInventory: inventory, deletionApproved: true }),
+      "run.sh 是可执行文件——请标为已检查或将其排除。",
+    );
+    assert.equal(pushBlockerPillLabel([{ kind: "local", step: "project_files", resourceId: run.descriptor.resource_id, state: "warning_unacknowledged" }]), "1 个需检查");
+    // A session is quoted inside its sentence; one the review cannot name
+    // reads as "a selected session".
+    const lost = entry("lost", { display_name: "修复登录跳转", state: "unavailable" });
+    const unreadable = { kind: "local" as const, step: "history" as const, resourceId: lost.resource_id, state: "unavailable" };
+    assert.equal(pushBlockerSentence([unreadable], comparison({ entries: [lost] }), inventory), "“修复登录跳转”无法读取——请将其排除后再上传。");
+    assert.equal(pushBlockerSentence([unreadable], comparison({ entries: [] }), inventory), "所选会话无法读取——请将其排除后再上传。");
+
+    // The banner a storage that moved on raises: its name stays as given.
+    const copy = pullRequiredCopy("remote_advanced", "Backup drive", 7, 5, 2);
+    assert.equal(copy.title, "存储中有更新的更改");
+    assert.equal(copy.body, "Backup drive 中有 2 个会话较新。请在下载中检查——之后它们仍会暂缓，你的其他会话照常上传。");
+    assert.equal(copy.detail, "Version 7 · 已检查 5");
+    assert.equal(pullRequiredCopy("remote_without_base", "  ", 7, null).body, "从此连接上传前，请先检查此存储中已有的数据。");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  // English is back the moment the language is.
+  assert.match(renderWorkspace(new Set([fits.resource_id])), /<h2 id="sync-push-resource-title">Push review<\/h2>/);
+  assert.equal(
+    pullRequiredCopy("remote_advanced", "Backup drive", 7, 5, 1).body,
+    "1 conversation is newer in Backup drive. Review it in Pull — it stays held afterwards while your other sessions push.",
+  );
+  assert.equal(pullRequiredCopy("remote_advanced", null, 7, null).body, "this storage changed after this computer last synced. Review it in Pull before pushing.");
+  assert.equal(pullRequiredCopy("remote_advanced", null, 7, null).detail, "Version 7 · review required");
 });

@@ -409,7 +409,11 @@ export interface CatalogActionResult {
   action_id?: string | null;
   display_name: string;
   outcome: CatalogActionOutcome;
+  /** English. A fixed message is translated by `message_code`, with the
+   *  name it carries (a fork's source, the kept copy) in `message_name`. */
   message?: string | null;
+  message_code?: "skipped" | "forked" | "kept_as" | null;
+  message_name?: string | null;
 }
 
 export interface CatalogScopePullOutcome {
@@ -471,7 +475,10 @@ export interface CatalogSyncProgress {
   plan_id: string;
   completed: number;
   total: number;
+  /** English; translated by `stage`, with `name` for `pushing`/`pulling`. */
   message: string;
+  stage?: "publishing" | "pushing" | "push_finished" | "pulling";
+  name?: string | null;
 }
 /** One Mallard Cloud repository of a Catalog item, as Connect and Add list
  *  or resolve it. */
@@ -594,5 +601,8 @@ export interface CatalogResourceRemovalPlan {
 
 export interface CatalogRemovalResult {
   removed: boolean;
+  /** English. A finished removal is translated by `removed`, with
+   *  `display_name`; a failed one's message is an error. */
   message: string;
+  display_name?: string;
 }

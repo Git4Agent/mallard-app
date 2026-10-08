@@ -13,9 +13,9 @@ use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
     agent_resource_id, attach_turn_tool_summaries, most_specific_project_relative_path,
     setting_token, timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode,
-    SessionAgentPreview, SessionAgentStatus, SessionCount, SessionCountQuality,
-    SessionDetailWarning, SessionEventCounts, SessionEventDetail, SessionFileSummary,
-    SessionMessageSettings, SessionMessageSettingsSource, SessionSourceSpan,
+    SessionAgentPreview, SessionAgentStatus, SessionCount, SessionCountExplanation,
+    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
+    SessionFileSummary, SessionMessageSettings, SessionMessageSettingsSource, SessionSourceSpan,
     SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
     SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
     SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
@@ -40,7 +40,7 @@ const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
 /// 6: timeline spans cover retained historical sources and the current rollout.
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 6;
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 /// The head and tail of a child rollout its row is read from: the
 /// `session_meta` naming the agent, and the final message.
 const CHILD_WINDOW_BYTES: u64 = 256 * 1024;
@@ -1332,7 +1332,7 @@ impl TimelineBuilder {
         attach_turn_tool_summaries(
             &mut entries,
             tool_quality,
-            tool_count_explanation(tool_quality),
+            tool_count_explanation(tool_quality).map(SessionCountExplanation::text),
         );
         let counts = counts_for_entries(
             &entries,
@@ -1412,19 +1412,14 @@ fn merge_tool_status(
 fn count_with_quality(
     value: u64,
     quality: SessionCountQuality,
-    explanation: Option<&str>,
+    explanation: Option<SessionCountExplanation>,
 ) -> SessionCount {
-    SessionCount {
-        value: Some(value),
-        quality,
-        explanation: explanation.map(ToOwned::to_owned),
-    }
+    SessionCount::explained(value, quality, explanation)
 }
 
-fn tool_count_explanation(quality: SessionCountQuality) -> Option<&'static str> {
-    (quality == SessionCountQuality::LowerBound).then_some(
-        "Some Codex tool activity may be absent because the durable rollout was incomplete.",
-    )
+fn tool_count_explanation(quality: SessionCountQuality) -> Option<SessionCountExplanation> {
+    (quality == SessionCountQuality::LowerBound)
+        .then_some(SessionCountExplanation::CodexToolActivityIncomplete)
 }
 
 fn counts_for_entries(
@@ -1470,10 +1465,8 @@ fn counts_for_entries(
         SessionCountQuality::Exact
     };
     let visible_explanation = (visible_quality == SessionCountQuality::LowerBound)
-        .then_some("Some Codex records could not be safely indexed.");
-    let phase_explanation = Some(
-        "The rollout did not record authoritative assistant phases; placement was inferred from surrounding tool activity.",
-    );
+        .then_some(SessionCountExplanation::CodexRecordsUnindexed);
+    let phase_explanation = Some(SessionCountExplanation::CodexPhasesInferred);
     SessionEventCounts {
         agent_calls: count_with_quality(
             count_kind(SessionTimelineEventKind::AgentCall),
@@ -1504,7 +1497,7 @@ fn counts_for_entries(
             },
         ),
         checkpoints: SessionCount::unsupported(
-            "Git checkpoints are correlated by Mallard outside the Codex transcript.",
+            SessionCountExplanation::CodexCheckpointsOutsideTranscript,
         ),
         tool_calls: count_with_quality(
             count_kind(SessionTimelineEventKind::ToolCall),

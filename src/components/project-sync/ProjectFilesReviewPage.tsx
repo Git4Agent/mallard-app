@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import type { ParseKeys } from "i18next";
 import type { ProjectFileSyncEligibility } from "../../types";
+import { t, useTranslation } from "../../i18n";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
 import Notice, { Acknowledgement, NoticeChip } from "../notice/Notice";
@@ -87,13 +89,14 @@ function fileName(path: string): string {
 /** The pull row's operation chip. Push rows carry no state chip at all —
  * their tick and status mark already say it. */
 function pullOperationLabel(row: ProjectFileReviewRow): string {
-  if (row.operation === "delete_file") return "Delete file";
-  if (row.operation === "delete_directory") return "Delete folder";
-  if (row.operation === "create_directory") return "Create folder";
-  if (row.operation === "add") return "Add file";
+  if (row.operation === "delete_file") return t("projects:files.op.deleteFile");
+  if (row.operation === "delete_directory") return t("projects:files.op.deleteFolder");
+  if (row.operation === "create_directory") return t("projects:files.op.createFolder");
+  if (row.operation === "add") return t("projects:files.op.addFile");
   if (row.operation === "replace") {
-    return row.preservedCopyPath ? "Replace file · keeps local copy" : "Replace file";
+    return row.preservedCopyPath ? t("projects:files.op.replaceKeep") : t("projects:files.op.replace");
   }
+  // A state no operation names prints as the backend wrote it.
   return row.state.replace(/_/g, " ");
 }
 
@@ -107,64 +110,62 @@ function rowPresentation(
     return {
       icon: "unavailable",
       tone: "unavailable",
-      sentence: `Unavailable for sync. ${row.blockedReason ?? ""}`.trim(),
+      sentence: row.blockedReason
+        ? t("projects:status.unavailableWithReason", { reason: row.blockedReason })
+        : t("projects:status.unavailable"),
     };
   }
   if (mode === "pull") {
     switch (row.operation) {
       case "add":
-        return { icon: "cloud-outstanding", tone: "storage", sentence: "Only in storage. Applying downloads it here." };
+        return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:statusInStorage.pullAdd") };
       case "create_directory":
-        return { icon: "cloud-outstanding", tone: "storage", sentence: "Applying creates this folder." };
+        return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:statusInStorage.pullCreateFolder") };
       case "replace":
         return row.preservedCopyPath
           ? {
             icon: "divergent",
             tone: "diverged",
-            sentence: `Changed here and in storage. Applying keeps the local version as ${row.preservedCopyPath}, then writes the storage version.`,
+            sentence: t("projects:statusInStorage.pullReplaceKeep", { path: row.preservedCopyPath }),
           }
-          : { icon: "cloud-outstanding", tone: "storage", sentence: "Newer in storage. Applying updates this computer." };
+          : { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:statusInStorage.pullReplace") };
       case "delete_file":
-        return { icon: "conflict", tone: "conflict", sentence: "Removed in storage. Applying deletes the local file (a backup is kept)." };
+        return { icon: "conflict", tone: "conflict", sentence: t("projects:statusInStorage.pullDeleteFile") };
       case "delete_directory":
-        return { icon: "conflict", tone: "conflict", sentence: "Removed in storage. Applying deletes the empty local folder." };
+        return { icon: "conflict", tone: "conflict", sentence: t("projects:statusInStorage.pullDeleteFolder") };
       default:
         break;
     }
   }
   switch (row.state) {
     case "synced":
-      return { icon: "synced", tone: "synced", sentence: "Up to date here and in storage." };
+      return { icon: "synced", tone: "synced", sentence: t("projects:statusInStorage.synced") };
     case "local_only":
-      return { icon: "local-outstanding", tone: "local", sentence: "Only on this computer. Push to save it in storage." };
+      return { icon: "local-outstanding", tone: "local", sentence: t("projects:statusInStorage.localOnly") };
     case "local_ahead":
-      return { icon: "local-outstanding", tone: "local", sentence: "Newer on this computer. Push to update storage." };
+      return { icon: "local-outstanding", tone: "local", sentence: t("projects:statusInStorage.localAhead") };
     case "storage_only":
-      return { icon: "cloud-outstanding", tone: "storage", sentence: "Only in storage. Pull to download it here." };
+      return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:statusInStorage.storageOnly") };
     case "storage_ahead":
-      return { icon: "cloud-outstanding", tone: "storage", sentence: "Newer in storage. Pull to update this computer." };
+      return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:statusInStorage.storageAhead") };
     case "diverged":
-      return { icon: "divergent", tone: "diverged", sentence: "Changed here and in storage. Review before syncing." };
+      return { icon: "divergent", tone: "diverged", sentence: t("projects:statusInStorage.diverged") };
     case "missing":
-      return {
-        icon: "cloud-outstanding",
-        tone: "storage",
-        sentence: "Not in this folder. It remains in storage. Pull to download it here, or remove it during Push.",
-      };
+      return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:statusInStorage.missing") };
     default:
-      return { icon: "unknown", tone: "unknown", sentence: "State unknown. Rescan to compare." };
+      return { icon: "unknown", tone: "unknown", sentence: t("projects:status.unknown") };
   }
 }
 
 /** The acknowledgement chip's lead, the Catalog's vocabulary for the same
  * scanner findings. An unknown code keeps a plain generic lead. */
-const WARNING_LEADS: Record<string, string> = {
-  executable: "Executable content",
-  possible_secret: "Credential-shaped content",
+const WARNING_LEADS: Record<string, ParseKeys<"projects">> = {
+  executable: "files.warningExecutable",
+  possible_secret: "files.warningSecret",
 };
 
 function warningLead(code: string): string {
-  return WARNING_LEADS[code] ?? "Scan warning";
+  return t(WARNING_LEADS[code] ?? "files.warningScan", { ns: "projects" });
 }
 
 function formatMode(mode?: number | null): string | null {
@@ -185,16 +186,17 @@ export function ProjectFilesLockedNotice({
   eligibility: ProjectFileSyncEligibility;
   withDetectedRoot?: boolean;
 }) {
+  const { t } = useTranslation("projects");
   return (
     <Notice
       severity="danger"
       timing="standing"
-      label="Why project files are locked"
-      title="Project files are locked."
+      label={t("files.lockedLabel")}
+      title={t("files.locked")}
       className="sync-project-files-locked"
     >
       {eligibility.reason}
-      {withDetectedRoot && eligibility.detected_root ? ` Git root: ${eligibility.detected_root}` : ""}
+      {withDetectedRoot && eligibility.detected_root ? ` ${t("files.gitRoot", { root: eligibility.detected_root })}` : ""}
     </Notice>
   );
 }
@@ -274,6 +276,7 @@ export default function ProjectFilesReviewPage({
   onReviewPull,
   reveal = null,
 }: Props) {
+  const { t } = useTranslation(["projects", "common"]);
   const [search, setSearch] = useState("");
   const pageRef = useRef<HTMLElement>(null);
   const [revealed, setRevealed] = useState<ProjectFileReveal | null>(null);
@@ -378,8 +381,9 @@ export default function ProjectFilesReviewPage({
   const groupFacts = (directory: string): string => {
     const files = subtreeRows(directory).filter((row) => row.entryType !== "directory");
     const bytes = files.reduce((sum, row) => sum + (row.size ?? 0), 0);
-    const count = `${files.length} file${files.length === 1 ? "" : "s"}`;
-    return bytes > 0 ? `${count} · ${formatBytes(bytes)}` : count;
+    return bytes > 0
+      ? t("files.groupFactsSize", { count: files.length, size: formatBytes(bytes) })
+      : t("files.groupFacts", { count: files.length });
   };
 
   const renderCard = (row: ProjectFileReviewRow) => {
@@ -403,11 +407,11 @@ export default function ProjectFilesReviewPage({
             {selectable && !required && (
               <label
                 className="sync-sync-row-choice"
-                title={`${selected ? "Exclude" : mode === "pull" ? "Apply" : "Include"} ${row.relativePath}`}
+                title={t(selected ? "select.exclude" : mode === "pull" ? "select.apply" : "select.include", { name: row.relativePath })}
               >
                 <input
                   type="checkbox"
-                  aria-label={`${mode === "pull" ? "Apply" : "Include"} ${row.relativePath}`}
+                  aria-label={t(mode === "pull" ? "select.apply" : "select.include", { name: row.relativePath })}
                   checked={selected}
                   disabled={disabled}
                   onChange={() => onToggle(row.resourceId)}
@@ -431,22 +435,22 @@ export default function ProjectFilesReviewPage({
             {(row.blockedReason || mode === "pull" || (mode === "push" && required)) && (
               <span className="sync-history-branch-state history-only" title={presentation.sentence}>
                 {row.blockedReason
-                  ? "Blocked"
+                  ? t("files.blocked")
                   : mode === "pull"
                     ? pullOperationLabel(row)
-                    : "Required folder"}
+                    : t("files.requiredFolder")}
               </span>
             )}
             {removed && (
-              <span className="sync-history-branch-state history-only">Removes from storage</span>
+              <span className="sync-history-branch-state history-only">{t("files.removesFromStorage")}</span>
             )}
             {/* Why the row opened unticked: nobody has chosen for it yet. */}
             {mode === "push" && row.undecided && (
               <span
                 className="sync-history-branch-state current"
-                title="New to this storage. It travels once you tick it."
+                title={t("files.newTitle")}
               >
-                New
+                {t("files.new")}
               </span>
             )}
             {row.warningCode && (
@@ -459,8 +463,10 @@ export default function ProjectFilesReviewPage({
                 type="button"
                 className="btn btn-ghost sync-history-launch-action"
                 disabled={disabled || !eligible || required}
-                title={removed ? "Keep in storage" : "Remove from storage"}
-                aria-label={removed ? `Keep ${row.relativePath} in storage` : `Remove ${row.relativePath} from storage`}
+                title={removed ? t("files.keepInStorage") : t("files.removeFromStorage")}
+                aria-label={removed
+                  ? t("files.keepPathInStorage", { path: row.relativePath })
+                  : t("files.removePathFromStorage", { path: row.relativePath })}
                 onClick={() => onToggleRemoval(row.resourceId)}
               >
                 <Icon name={removed ? "refresh" : "trash"} size={14} />
@@ -470,20 +476,20 @@ export default function ProjectFilesReviewPage({
         </div>
         <div className="sync-history-session-details">
           <div className="sync-history-session-summary">
-            <div className="sync-history-thread-meta" aria-label={`${row.relativePath} details`}>
+            <div className="sync-history-thread-meta" aria-label={t("files.details", { path: row.relativePath })}>
               <span
                 className="sync-history-thread-metric"
-                data-tooltip={`Kind · ${isDirectory ? "Folder" : fileKindLabel(row.relativePath)}`}
+                data-tooltip={t("files.kind", { kind: isDirectory ? t("files.folder") : fileKindLabel(row.relativePath) })}
                 tabIndex={0}
               >
                 <SessionRowIcon name={isDirectory ? "folder" : "file"} />
-                <b>{isDirectory ? "Folder" : fileKindLabel(row.relativePath)}</b>
+                <b>{isDirectory ? t("files.folder") : fileKindLabel(row.relativePath)}</b>
               </span>
               {size != null
                 ? (
                   <span
                     className="sync-history-thread-metric"
-                    data-tooltip={`${row.localPresent ? "On disk" : "In storage"} · ${size}`}
+                    data-tooltip={row.localPresent ? t("files.onDisk", { size }) : t("files.inStorageUnnamed", { size })}
                     tabIndex={0}
                   >
                     <SessionRowIcon name="size" /><b>{size}</b>
@@ -496,7 +502,9 @@ export default function ProjectFilesReviewPage({
             <ProjectFileDetailsMenu
               relativePath={row.relativePath}
               projectRoot={projectRoot}
-              entryTypeLabel={isDirectory ? "Directory" : row.entryType === "blocked" ? "Blocked entry" : "Regular file"}
+              entryTypeLabel={isDirectory
+                ? t("fileDetails.directory")
+                : row.entryType === "blocked" ? t("fileDetails.blockedEntry") : t("fileDetails.regularFile")}
               mode={displayMode}
               modified={row.sourceMtime == null ? null : formatFullDateTime(row.sourceMtime)}
               preservedCopyPath={row.preservedCopyPath}
@@ -506,7 +514,9 @@ export default function ProjectFilesReviewPage({
             {row.sourceMtime != null && (
               <span
                 className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-                data-tooltip={`${row.localPresent ? "Modified" : "Updated in storage"} · ${formatFullDateTime(row.sourceMtime)}`}
+                data-tooltip={row.localPresent
+                  ? t("files.modified", { when: formatFullDateTime(row.sourceMtime) })
+                  : t("files.updatedInStorage", { when: formatFullDateTime(row.sourceMtime) })}
                 tabIndex={0}
               >
                 <time dateTime={new Date(row.sourceMtime * 1_000).toISOString()}>{formatFullDateTime(row.sourceMtime)}</time>
@@ -519,8 +529,8 @@ export default function ProjectFilesReviewPage({
             title={warningLead(row.warningCode)}
             checked={warningAcknowledged}
             disabled={disabled || !selected}
-            ariaLabel={`Reviewed: ${warningLead(row.warningCode)} — ${row.relativePath}`}
-            verbs={["Mark reviewed", "Reviewed"]}
+            ariaLabel={t("files.reviewedLabel", { lead: warningLead(row.warningCode), path: row.relativePath })}
+            verbs={[t("files.markReviewed"), t("files.reviewed")]}
             onChange={() => onToggleWarning(row.warningDigest!)}
           >
             {`— ${row.relativePath}`}
@@ -536,9 +546,9 @@ export default function ProjectFilesReviewPage({
             severity="warning"
             timing="inline"
             className="sync-project-file-conflict notice-strip"
-            action={<button type="button" className="btn btn-ghost" onClick={onReviewPull}>Open Pull review</button>}
+            action={<button type="button" className="btn btn-ghost" onClick={onReviewPull}>{t("files.openPull")}</button>}
           >
-            Pull required
+            {t("files.pullRequired")}
           </Notice>
         )}
       </article>
@@ -556,22 +566,28 @@ export default function ProjectFilesReviewPage({
     const { directory } = group;
     const { picked, total } = subtreeSelection(directory);
     const all = total > 0 && picked === total;
-    const verb = all ? "Exclude" : mode === "pull" ? "Apply" : "Include";
-    const spoken = directory === "" ? "the project root" : directory;
+    /* "Every file in docs" reads one way and the project root another, so
+       each is its own sentence. */
+    const tileLabel = directory === ""
+      ? t(all ? "select.excludeAllRoot" : mode === "pull" ? "select.applyAllRoot" : "select.includeAllRoot")
+      : t(all ? "select.excludeAll" : mode === "pull" ? "select.applyAll" : "select.includeAll", { folder: directory });
+    const selectedLabel = directory === ""
+      ? t("select.selectedInRoot", { picked, total })
+      : t("select.selectedIn", { picked, total, folder: directory });
     return (
       <ListTile
         key={directory || "(root)"}
         icon="folder"
-        label={directory === "" ? "Project root" : <span>{directory}/</span>}
+        label={directory === "" ? t("files.projectRoot") : <span>{directory}/</span>}
         facts={groupFacts(directory)}
         leading={eligible && (
-          <label className="sync-sync-row-choice" title={`${verb} every file in ${spoken}`}>
+          <label className="sync-sync-row-choice" title={tileLabel}>
             <input
               type="checkbox"
               checked={all}
               ref={(node) => { if (node) node.indeterminate = picked > 0 && picked < total; }}
               disabled={disabled || total === 0}
-              aria-label={`${verb} every file in ${spoken}`}
+              aria-label={tileLabel}
               onChange={() => setSubtree(directory, !all)}
             />
           </label>
@@ -580,8 +596,8 @@ export default function ProjectFilesReviewPage({
           <span
             className="sync-sync-review-selected"
             style={{ "--review-count-digits": String(total).length } as CSSProperties}
-            aria-label={`${picked} of ${total} selected in ${spoken}`}
-            title={`${picked} of ${total} selected in ${spoken}`}
+            aria-label={selectedLabel}
+            title={selectedLabel}
           >
             <b>{picked}</b>/{total}
           </span>
@@ -593,7 +609,7 @@ export default function ProjectFilesReviewPage({
   };
 
   return (
-    <section ref={pageRef} className="sync-project-files-page" aria-label="Project files">
+    <section ref={pageRef} className="sync-project-files-page" aria-label={t("files.label")}>
       {!eligible && <ProjectFilesLockedNotice eligibility={eligibility} withDetectedRoot />}
 
       {/* The shared search row. The review has no path bar, so the step's
@@ -604,7 +620,7 @@ export default function ProjectFilesReviewPage({
       <NameSearchField
         query={search}
         onChange={setSearch}
-        label="Search files"
+        label={t("files.search")}
         matches={matchingCards.length}
         total={cardRows.length}
         noun={fileNoun}
@@ -612,7 +628,7 @@ export default function ProjectFilesReviewPage({
         disabled={rows.length === 0}
         trailing={onScan && (
           <button type="button" className="btn btn-ghost" onClick={onScan} disabled={disabled || loading || !eligible}>
-            <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? "Scanning…" : "Rescan"}
+            <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? t("files.scanningShort") : t("files.rescan")}
           </button>
         )}
       />
@@ -622,25 +638,25 @@ export default function ProjectFilesReviewPage({
           /* The folder walk starts with the review. One that failed leaves
              the parent's error notice on screen; Rescan is the retry. */
           loading
-            ? <LoadingScaffold shape="rows" label="Scanning project files" />
-            : <div className="sync-history-state">Project files were not scanned.</div>
+            ? <LoadingScaffold shape="rows" label={t("files.scanning")} />
+            : <div className="sync-history-state">{t("files.notScanned")}</div>
         ) : (
-          <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No changes</strong></span></div>
+          <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>{t("files.noChanges")}</strong></span></div>
         )
       ) : matchingCards.length === 0 ? (
-        <div className="sync-history-state">No matching files.</div>
+        <div className="sync-history-state">{t("files.noMatches")}</div>
       ) : (
         <>
           {groups.map(renderTile)}
           {matchingCards.length > shownCards.length && (
-            <div className="sync-project-file-limit">First {PROJECT_FILE_CARD_RENDER_LIMIT} shown. Search to narrow the list.</div>
+            <div className="sync-project-file-limit">{t("files.limitShown", { limit: PROJECT_FILE_CARD_RENDER_LIMIT })}</div>
           )}
         </>
       )}
 
       {(ignoredCount > 0 || blockedCount > 0 || warnings.length > 0) && (
         <details className="sync-project-files-scan-summary">
-          <summary>{ignoredCount} ignored · {blockedCount} blocked · {warnings.length} scan warning{warnings.length === 1 ? "" : "s"}</summary>
+          <summary>{t("files.scanSummary", { ignored: ignoredCount, blocked: blockedCount, count: warnings.length })}</summary>
           {warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </details>
       )}

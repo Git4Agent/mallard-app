@@ -1,5 +1,6 @@
 import RepositoryLookupField, { entryKind, isInvitationCodeShaped } from "../managed-cloud/RepositoryLookupField";
 import { nameRefusal, predictRepositoryAddress } from "../managed-cloud/repositoryAddress";
+import { cloudRoleWord, cloudVisibilityWord } from "../managed-cloud/managedCloudLink";
 import {
   CloudScopeTabs,
   ListingFoot,
@@ -17,6 +18,7 @@ import {
 } from "../managed-cloud/CloudScopes";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ManagedCloudListingRow } from "../managed-cloud/types";
+import type { ParseKeys } from "i18next";
 import type {
   ManagedCloudRepository,
   ManagedCloudRepositoryResolution,
@@ -28,6 +30,7 @@ import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { openExternalUrl } from "./externalLink";
 import { repositoryFingerprintsRequireAcknowledgement } from "./model";
+import { t as translate, useTranslation } from "../../i18n";
 
 /**
  * Deciding which Mallard Cloud repository a project connects to, by the
@@ -135,8 +138,6 @@ export function selectionFor(repository: ManagedCloudRepository): RepositorySele
   };
 }
 
-const capitalize = (value: string) => (value ? value[0].toUpperCase() + value.slice(1) : value);
-
 /** The class mark every list of repositories wears. */
 export function repositoryMark(repository: Pick<ManagedCloudRepository, "repository_class">): IconName {
   return repository.repository_class === "git_project" ? "git-folder" : "folder";
@@ -144,7 +145,7 @@ export function repositoryMark(repository: Pick<ManagedCloudRepository, "reposit
 
 /** The class in two words, after the name on the setup page. */
 function classWord(repositoryClass: string): string {
-  return repositoryClass === "git_project" ? "git project" : "project";
+  return repositoryClass === "git_project" ? translate("projectSetup:picker.classGit") : translate("projectSetup:picker.classProject");
 }
 
 /** What the found row says about the repository the address named. A
@@ -154,10 +155,10 @@ export function repositoryVerdict(
   repository: Pick<ManagedCloudRepository, "role" | "git_remote">,
 ): { tone: "ok" | "warn"; icon: IconName; text: string } {
   const text = repository.role === null
-    ? "Public · anyone signed in can push"
+    ? translate("projectSetup:picker.verdictPublic")
     : repository.role === "owner"
-      ? `Yours · ${capitalize(repository.role)}`
-      : `Collaborator · ${capitalize(repository.role)}`;
+      ? translate("projectSetup:picker.verdictYours", { role: cloudRoleWord(repository.role) })
+      : translate("projectSetup:picker.verdictCollaborator", { role: cloudRoleWord(repository.role) });
   return repository.git_remote === "matches"
     ? { tone: "ok", icon: "check-circle", text }
     : { tone: "warn", icon: "alert-triangle", text };
@@ -166,17 +167,17 @@ export function repositoryVerdict(
 /** The Git remote chip's word, against this checkout. */
 export function gitRemoteWord(repository: Pick<ManagedCloudRepository, "git_remote" | "repository_fingerprint">, localFingerprint: string | null): string {
   switch (repository.git_remote) {
-    case "matches": return localFingerprint ? "this checkout's" : "none, like this folder";
-    case "differs": return repository.repository_fingerprint ? "differs" : "none";
-    case "unknown": return "unverified";
+    case "matches": return localFingerprint ? translate("projectSetup:picker.remoteThis") : translate("projectSetup:picker.remoteNoneLikeFolder");
+    case "differs": return repository.repository_fingerprint ? translate("projectSetup:picker.remoteDiffers") : translate("projectSetup:picker.remoteNone");
+    case "unknown": return translate("projectSetup:picker.remoteUnverified");
   }
 }
 
 /** The cautions under the found row: what connecting would not give. */
 export function repositoryCautions(repository: Pick<ManagedCloudRepository, "git_remote">): string[] {
   const cautions: string[] = [];
-  if (repository.git_remote === "differs") cautions.push("Different Git remote than this checkout");
-  if (repository.git_remote === "unknown") cautions.push("Git remote could not be verified");
+  if (repository.git_remote === "differs") cautions.push(translate("projectSetup:picker.cautionDiffers"));
+  if (repository.git_remote === "unknown") cautions.push(translate("projectSetup:picker.cautionUnknown"));
   return cautions;
 }
 
@@ -184,12 +185,12 @@ export function repositoryCautions(repository: Pick<ManagedCloudRepository, "git
  *  it clones, or why it starts as an empty folder. None without Git. */
 export function cloneSourceWord(repository: Pick<ManagedCloudRepository, "repository_class" | "github_url">): string | null {
   if (repository.repository_class !== "git_project") return null;
-  return repository.github_url ? repository.github_url.replace(/^https:\/\//, "") : "GitHub URL missing";
+  return repository.github_url ? repository.github_url.replace(/^https:\/\//, "") : translate("projectSetup:picker.githubMissing");
 }
 
 /** The account's standing in one word. */
 export function roleWord(repository: Pick<ManagedCloudRepository, "role">): string {
-  return repository.role === null ? "Public" : capitalize(repository.role);
+  return repository.role === null ? translate("cloud:scopes.public") : cloudRoleWord(repository.role);
 }
 
 type Lookup =
@@ -212,7 +213,9 @@ export function inListing(
   return !!repository.bundle_id && repositories.some((row) => row.bundle_id === repository.bundle_id);
 }
 
-const SCOPE_LABEL: Record<ScopeId, string> = { yours: "Yours", shared: "Shared with you", starred: "Starred", public: "Public" };
+const SCOPE_LABEL: Record<ScopeId, ParseKeys<"projectSetup">> = {
+  yours: "scope.yours", shared: "scope.shared", starred: "scope.starred", public: "scope.public",
+};
 
 interface Props {
   storage: StorageSummary;
@@ -254,6 +257,7 @@ export default function RepositoryAddressPicker({
   initialAddress = null,
   onSelect,
 }: Props) {
+  const { t } = useTranslation(["projectSetup", "cloud"]);
   const cloning = mode === "clone";
   const skin = rows === "choice" ? "choice" : "match";
   const account = managedCloudAccount(storage);
@@ -438,7 +442,7 @@ export default function RepositoryAddressPicker({
   if (lookup.kind === "resolving" && !resolvingRow) {
     answer = (
       <small className="sync-setup-inline-status" role="status">
-        <span className="status-loader" /> Looking up {lookup.address} on {account.host}…
+        <span className="status-loader" /> {t("picker.lookingUp", { address: lookup.address, host: account.host })}
       </small>
     );
   } else if (lookup.kind === "failed") {
@@ -448,39 +452,35 @@ export default function RepositoryAddressPicker({
     switch (resolution.kind) {
       case "wrong_service":
         answer = fieldError(cloning
-          ? <>That address is on {resolution.host}, not {resolution.expected}.</>
-          : <>That address is on {resolution.host}; this storage is {storage.name} at {resolution.expected}.</>);
+          ? t("picker.wrongServiceClone", { host: resolution.host, expected: resolution.expected })
+          : t("picker.wrongService", { host: resolution.host, storage: storage.name, expected: resolution.expected }));
         break;
       case "github":
-        answer = fieldError(cloning
-          ? "That’s a GitHub address. Paste the Mallard Cloud one."
-          : "That’s a GitHub address. Paste the Mallard Cloud address from the repository’s page.");
+        answer = fieldError(cloning ? t("picker.githubClone") : t("picker.github"));
         break;
       case "invalid":
-        answer = fieldError(cloning
-          ? "Paste a link, owner/name, or an invitation code."
-          : <>Paste the link from the repository’s page on {account.host}, type owner/name, or paste an invitation code.</>);
+        answer = fieldError(cloning ? t("picker.invalidClone") : t("picker.invalid", { host: account.host }));
         break;
       case "not_a_project":
         answer = fieldError(cloning
-          ? <>{resolution.repository.address} isn’t a project.</>
-          : <>{resolution.repository.address} is a skill, plugin intent, or pet, not a project.</>);
+          ? t("picker.notProjectClone", { address: resolution.repository.address })
+          : t("picker.notProject", { address: resolution.repository.address }));
         break;
       case "not_found":
         answer = (
           <div className="r2-step-list">
             <div className="storage-found-empty" role="status">
               <Icon name="search" size={24} />
-              <strong>{cloning ? `${account.login} can’t see ${resolution.address}.` : `Nothing at ${resolution.address} that you can see.`}</strong>
-              <span>
+              <strong>
                 {cloning
-                  ? "Check the spelling, try another account, or paste its invitation code instead."
-                  : "Check the spelling. For a private repository, paste its invitation code instead. The owner or an admin has it."}
-              </span>
+                  ? t("picker.cantSee", { login: account.login, address: resolution.address })
+                  : t("picker.nothingAt", { address: resolution.address })}
+              </strong>
+              <span>{cloning ? t("picker.checkSpellingClone") : t("picker.checkSpelling")}</span>
               {offerNew && (
                 <span className="storage-found-empty-verbs">
                   <button type="button" className="btn btn-primary" onClick={chooseNew} disabled={disabled}>
-                    Create a new repository instead
+                    {t("picker.createNew")}
                   </button>
                 </span>
               )}
@@ -496,7 +496,7 @@ export default function RepositoryAddressPicker({
         if (holder) {
           answer = (
             <small className="repo-answer-line" role="status">
-              <Icon name="check-circle" size={13} /> In {SCOPE_LABEL[holder]}. Selected below.
+              <Icon name="check-circle" size={13} /> {t("picker.inScope", { scope: t(SCOPE_LABEL[holder]) })}
             </small>
           );
           break;
@@ -509,7 +509,7 @@ export default function RepositoryAddressPicker({
         const selected = selection?.kind === "existing" && selection.bundle_id === repository.bundle_id;
         answer = (
           <div className="r2-step-list">
-            <div className="storage-found-list" aria-label="Repository at this address">
+            <div className="storage-found-list" aria-label={t("picker.atAddress")}>
               <div className={`storage-found-row with-verb${selected ? " selected" : ""}`}>
                 <span className="sync-storage-repository-icon"><Icon name={repositoryMark(repository)} size={14} /></span>
                 <span className="storage-found-text">
@@ -522,24 +522,24 @@ export default function RepositoryAddressPicker({
                   </span>
                 </span>
                 <span className="storage-found-facts">
-                  <span className="sync-storage-repo-chip"><span>Visibility</span><b>{capitalize(repository.visibility)}</b></span>
+                  <span className="sync-storage-repo-chip"><span>{t("picker.visibility")}</span><b>{cloudVisibilityWord(repository.visibility)}</b></span>
                   {cloning ? (
                     source && <span className="sync-storage-repo-chip"><span>Git</span><b>{source}</b></span>
                   ) : (
                     <>
-                      <span className="sync-storage-repo-chip"><span>Git remote</span><b>{gitRemoteWord(repository, localFingerprint)}</b></span>
-                      {repositoryCautions(repository).map((caution) => (
-                        <span key={caution} className="storage-found-caution"><Icon name="alert-triangle" size={12} /> {caution}</span>
+                      <span className="sync-storage-repo-chip"><span>{t("picker.gitRemote")}</span><b>{gitRemoteWord(repository, localFingerprint)}</b></span>
+                      {repositoryCautions(repository).map((caution, index) => (
+                        <span key={index} className="storage-found-caution"><Icon name="alert-triangle" size={12} /> {caution}</span>
                       ))}
                     </>
                   )}
                 </span>
                 <span className="storage-found-verb">
                   <button type="button" className="btn-link" onClick={() => void openExternalUrl(repository.website_url)}>
-                    Open on website <Icon name="external-link" size={11} />
+                    {t("picker.openOnWebsite")} <Icon name="external-link" size={11} />
                   </button>
                   {selected ? (
-                    <span className="storage-found-connected"><Icon name="check" size={12} /> Selected</span>
+                    <span className="storage-found-connected"><Icon name="check" size={12} /> {t("picker.selected")}</span>
                   ) : (
                     <button
                       type="button"
@@ -547,7 +547,7 @@ export default function RepositoryAddressPicker({
                       disabled={disabled || !repository.bundle_id}
                       onClick={() => select(selectionFor(repository), repository)}
                     >
-                      Use this
+                      {t("picker.useThis")}
                     </button>
                   )}
                 </span>
@@ -570,8 +570,8 @@ export default function RepositoryAddressPicker({
       onChange={(checked) => onSelect({ ...selection, mismatch_acknowledged: checked }, chosen)}
     >
       {chosen?.git_remote === "unknown" || (!selection.repository_fingerprint && !!localFingerprint)
-        ? "This repository could not be verified for this project. Connect it anyway, then review its stored changes from Activity."
-        : "This repository was pushed from a different Git remote than this checkout’s. Connect it anyway, then review its stored changes from Activity."}
+        ? t("shared.unverified")
+        : t("picker.differentRemote")}
     </Acknowledgement>
   );
 
@@ -586,7 +586,7 @@ export default function RepositoryAddressPicker({
   const ownRow = (repository: ManagedCloudRepository) => {
     const active = selection?.kind === "existing" && selection.bundle_id === repository.bundle_id;
     const gitMatch = !cloning && repository.git_remote === "matches" && !!repository.repository_fingerprint;
-    const role = cloning ? roleWord(repository) : `${capitalize(repository.visibility)} · ${capitalize(repository.role ?? "collaborator")}`;
+    const role = cloning ? roleWord(repository) : `${cloudVisibilityWord(repository.visibility)} · ${cloudRoleWord(repository.role ?? "collaborator")}`;
     return (
       <button
         key={repository.repository_id}
@@ -604,7 +604,7 @@ export default function RepositoryAddressPicker({
           displayName={repository.display_name}
           github={repository.github_url}
           kind={skin === "match" ? classWord(repository.repository_class) : undefined}
-          badge={gitMatch ? <small className="sync-bundle-recommended">Git match</small> : undefined}
+          badge={gitMatch ? <small className="sync-bundle-recommended">{t("setup.gitMatch")}</small> : undefined}
           blurb={repository.description ?? (skin === "match" ? role : null)}
           skin={skin}
         />
@@ -614,14 +614,14 @@ export default function RepositoryAddressPicker({
   };
 
   const tabs: ScopeTab[] = [
-    { id: "yours", label: "Yours", icon: "user", count: listing.state === "ready" ? yoursRows.length : null },
-    { id: "starred", label: "Starred", icon: "star", count: listings.starred.state === "ready" ? starredRows.length : null },
-    { id: "public", label: "Public", icon: "cloud", count: filtering && listings.public.state === "ready" ? publicRows.length : null },
+    { id: "yours", label: t(SCOPE_LABEL.yours), icon: "user", count: listing.state === "ready" ? yoursRows.length : null },
+    { id: "starred", label: t(SCOPE_LABEL.starred), icon: "star", count: listings.starred.state === "ready" ? starredRows.length : null },
+    { id: "public", label: t(SCOPE_LABEL.public), icon: "cloud", count: filtering && listings.public.state === "ready" ? publicRows.length : null },
   ];
   const elsewhere = (except: ScopeId) => tabs
     .filter((candidate) => candidate.id !== except && (candidate.count ?? 0) > 0)
     .map((candidate) => ({ id: candidate.id, label: candidate.label, count: candidate.count ?? 0 }));
-  const noMatch = (where: ScopeId) => `No match for “${needle}” in ${SCOPE_LABEL[where]}.`;
+  const noMatch = (where: ScopeId) => t("picker.noMatch", { needle, scope: t(SCOPE_LABEL[where]) });
   const selectedListedId = selection?.kind === "existing" && chosen && chosen.bundle_id === selection.bundle_id ? chosen.repository_id : null;
   const listedMark = (row: ManagedCloudListingRow): IconName => repositoryMark(row);
   const listedKind = skin === "match" ? (row: ManagedCloudListingRow) => classWord(row.repository_class) : undefined;
@@ -634,13 +634,13 @@ export default function RepositoryAddressPicker({
       panel = <Notice severity="danger" timing="blocking">{listing.message}</Notice>;
     } else if (yoursRows.length === 0 && !offeringNew) {
       panel = (
-        <ScopeEmpty skin={skin} icon={filtering ? "search" : "user"} words={filtering ? noMatch("yours") : "No repositories yet."}
+        <ScopeEmpty skin={skin} icon={filtering ? "search" : "user"} words={filtering ? noMatch("yours") : t("picker.noRepositories")}
           elsewhere={filtering ? elsewhere("yours") : undefined} onJump={setTab}
           onBrowsePublic={filtering ? undefined : () => setTab("public")} disabled={disabled} />
       );
     } else {
       panel = (
-        <div className={`${listClass} repo-rows`} role="radiogroup" aria-label="Repositories you belong to" aria-describedby={describedBy}>
+        <div className={`${listClass} repo-rows`} role="radiogroup" aria-label={t("picker.yours")} aria-describedby={describedBy}>
           {offeringNew && (
             <button
               type="button"
@@ -653,17 +653,17 @@ export default function RepositoryAddressPicker({
               <span className="sync-bundle-radio"><span /></span>
               {rows === "match-option" && <span className="setup-choice-mark" aria-hidden="true"><Icon name="git-fork" size={24} /></span>}
               <span className={copyClass}>
-                <strong>New repository</strong>
+                <strong>{t("shared.newRepository")}</strong>
                 {prediction.kind === "address" ? (
                   <>
                     <span className="repo-new-address">{prediction.address}</span>
-                    {prediction.suffixed && <span>{prediction.base} is already used.</span>}
+                    {prediction.suffixed && <span>{t("picker.alreadyUsed", { name: prediction.base })}</span>}
                   </>
                 ) : (
                   <span className="repo-new-refusal">{nameRefusal("project")}</span>
                 )}
               </span>
-              <span className={metaClass}><small>Private</small></span>
+              <span className={metaClass}><small>{t("cloud:visibility.private")}</small></span>
             </button>
           )}
           {yoursRows.map(ownRow)}
@@ -675,28 +675,28 @@ export default function RepositoryAddressPicker({
       panel = <ListingStatus listing={listings.starred} />;
     } else if (starredRows.length === 0) {
       panel = (
-        <ScopeEmpty skin={skin} icon={filtering ? "search" : "star"} words={filtering ? noMatch("starred") : "Nothing starred yet."}
+        <ScopeEmpty skin={skin} icon={filtering ? "search" : "star"} words={filtering ? noMatch("starred") : t("picker.nothingStarred")}
           elsewhere={filtering ? elsewhere("starred") : undefined} onJump={setTab}
           onBrowsePublic={filtering ? undefined : () => setTab("public")} disabled={disabled} />
       );
     } else {
       panel = (
         <ListingRows rows={starredRows} skin={skin} selectedId={selectedListedId} resolvingId={resolvingRow} disabled={disabled}
-          ariaLabel="Starred repositories" markFor={listedMark} kindFor={listedKind} onPick={pickListed} />
+          ariaLabel={t("picker.starred")} markFor={listedMark} kindFor={listedKind} onPick={pickListed} />
       );
     }
   } else if (listings.public.state !== "ready") {
     panel = <ListingStatus listing={listings.public} onRetry={listings.retryPublic} />;
   } else if (publicRows.length === 0) {
     panel = (
-      <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud"} words={filtering ? noMatch("public") : "No public projects yet."}
+      <ScopeEmpty skin={skin} icon={filtering ? "search" : "cloud"} words={filtering ? noMatch("public") : t("picker.noPublic")}
         elsewhere={filtering ? elsewhere("public") : undefined} onJump={setTab} disabled={disabled} />
     );
   } else {
     panel = (
       <>
         <ListingRows rows={publicRows} skin={skin} selectedId={selectedListedId} resolvingId={resolvingRow} disabled={disabled}
-          ariaLabel="Public repositories" markFor={listedMark} kindFor={listedKind} onPick={pickListed} />
+          ariaLabel={t("picker.public")} markFor={listedMark} kindFor={listedKind} onPick={pickListed} />
         {!filtering && <ListingFoot listing={listings.public} onMore={listings.loadMore} disabled={disabled} />}
       </>
     );

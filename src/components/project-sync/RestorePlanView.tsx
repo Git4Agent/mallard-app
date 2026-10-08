@@ -6,7 +6,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem } from "../notice/Notice";
-import ProjectActivityPage, { compactThreadTitle, REVIEW_LIST_FAILED_REASON, type ReviewListState } from "./ProjectActivityPage";
+import ProjectActivityPage, { compactThreadTitle, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, { type ProjectFileReviewRow } from "./ProjectFilesReviewPage";
 import ProjectFileCommitImpact, {
   type ProjectFileCommitImpactCounts,
@@ -24,6 +24,7 @@ import {
   buildPullReviewItems,
   buildPullReviewSelection,
   fitPullRecommendation,
+  itemKind,
   itemKindLabel,
   includeRequiredPullProjectDirectories,
   pullBudgetTotal,
@@ -35,6 +36,7 @@ import {
 } from "./pullReviewModel";
 import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
+import { useTranslation } from "../../i18n";
 
 interface Props {
   projectName: string;
@@ -111,15 +113,24 @@ export function pullProjectFileCommitImpact(
 
 /** The generic row's operation, in the files review's chip grammar. Rows
  * whose verbs live elsewhere (conversations, manual reviews) return null. */
-function itemOperationChip(item: PullReviewItem): string | null {
+function itemOperationChip(item: PullReviewItem): "replaceFile" | "addFile" | "mergeFile" | null {
   const action = item.restoreActions[0];
   if (!action) return null;
   if (action.kind.kind === "write_file") {
-    return action.expected_target_sha256 ? "Replace file" : "Add file";
+    return action.expected_target_sha256 ? "replaceFile" : "addFile";
   }
-  if (action.kind.kind === "merge_file") return "Merge file";
+  if (action.kind.kind === "merge_file") return "mergeFile";
   return null;
 }
+
+/** A row's status chip: its words, and the class it has always worn. */
+type ItemStatus = "restoring" | "keepBoth" | "needsApproval" | "notSelected";
+const ITEM_STATUS_CLASS: Record<ItemStatus, string> = {
+  restoring: "restoring",
+  keepBoth: "keep-both",
+  needsApproval: "needs-approval",
+  notSelected: "not-selected",
+};
 
 function ItemList({
   items,
@@ -134,6 +145,7 @@ function ItemList({
   disabled: boolean;
   onToggle: (resourceId: string) => void;
 }) {
+  const { t } = useTranslation("reviews");
   const [expandedItems, setExpandedItems] = useState<Set<string>>(() => new Set());
   const toggleDetails = (resourceId: string) => setExpandedItems((current) => {
     const next = new Set(current);
@@ -149,13 +161,14 @@ function ItemList({
         const checked = selected.has(item.resourceId);
         const expanded = expandedItems.has(item.resourceId);
         const activeRestore = phase === "restoring" && checked;
-        const status = activeRestore
-          ? "Restoring"
+        const status: ItemStatus | null = activeRestore
+          ? "restoring"
           : item.conversationReviewRows[0]?.action === "keep_both" && checked
-            ? "Keep both"
+            ? "keepBoth"
             : requiresApproval(item) && !checked
-              ? "Needs approval"
-              : checked ? null : "Not selected";
+              ? "needsApproval"
+              : checked ? null : "notSelected";
+        const chip = itemOperationChip(item);
         return (
           <div
             key={item.resourceId}
@@ -166,7 +179,7 @@ function ItemList({
               <label className="sync-pull-item-select">
                 <input
                   type="checkbox"
-                  aria-label={`Select ${item.title}`}
+                  aria-label={t("item.select", { title: item.title })}
                   checked={checked}
                   disabled={disabled}
                   onChange={() => onToggle(item.resourceId)}
@@ -178,7 +191,7 @@ function ItemList({
               className="sync-pull-item-main"
               onClick={() => toggleDetails(item.resourceId)}
               aria-expanded={expanded}
-              aria-label={`${expanded ? "Hide" : "Show"} details for ${item.title}`}
+              aria-label={expanded ? t("item.hideDetails", { title: item.title }) : t("item.showDetails", { title: item.title })}
             >
               <span className="sync-pull-item-toggle">
                 <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
@@ -197,21 +210,21 @@ function ItemList({
                   {item.pullBytes != null ? ` · ${formatBytes(item.pullBytes)}` : ""}
                 </span>
               </span>
-              {itemOperationChip(item) && (
+              {chip && (
                 <span className="sync-history-branch-state history-only" title={item.detail}>
-                  {itemOperationChip(item)}
+                  {t(`item.${chip}`)}
                 </span>
               )}
-              {status && <span className={`sync-pull-item-status ${status.toLowerCase().replace(/\s+/g, "-")}`}>{status}</span>}
+              {status && <span className={`sync-pull-item-status ${ITEM_STATUS_CLASS[status]}`}>{t(`item.${status}`)}</span>}
             </button>
             {expanded && (
               <div className="sync-pull-item-detail">
                 <p>{item.detail}</p>
                 <div className="sync-pull-item-detail-grid">
-                  <span>Type</span><code>{itemKindLabel(item)}{item.provider ? ` · ${providerLabel(item.provider)}` : ""}</code>
-                  <span>Resource</span><code>{item.resourceId}</code>
+                  <span>{t("item.type")}</span><code>{itemKindLabel(item)}{item.provider ? ` · ${providerLabel(item.provider)}` : ""}</code>
+                  <span>{t("item.resource")}</span><code>{item.resourceId}</code>
                   {item.restoreActions.map((action) => (
-                    <Fragment key={action.action_id}><span>Restore</span><code>{action.action_id}</code></Fragment>
+                    <Fragment key={action.action_id}><span>{t("item.restore")}</span><code>{action.action_id}</code></Fragment>
                   ))}
                 </div>
               </div>
@@ -227,7 +240,7 @@ export default function RestorePlanView({
   projectName,
   onSessionActionError,
   project,
-  storageName = "storage",
+  storageName: storageNameProp,
   plan,
   binding,
   phase,
@@ -240,12 +253,16 @@ export default function RestorePlanView({
   onRefreshPlan,
   onPrimaryChange,
 }: Props) {
+  const { t, i18n } = useTranslation(["reviews", "common", "projects"]);
+  // An absent name reads as the word; a null one stays null.
+  const storageName = storageNameProp === undefined ? t("review.defaultStorage") : storageNameProp;
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
   useEffect(() => { setSearchQuery(""); setSearchResults(null); }, [plan.plan_id]);
-  const items = useMemo(() => buildPullReviewItems(plan), [plan]);
+  // The items carry their words, so a language switch rebuilds them.
+  const items = useMemo(() => buildPullReviewItems(plan), [plan, i18n.language]);
   const conversationItems = useMemo(
-    () => items.filter((item) => itemKindLabel(item) === "Conversation"),
+    () => items.filter((item) => itemKind(item) === "conversation"),
     [items],
   );
   const projectContentItems = useMemo(
@@ -253,7 +270,7 @@ export default function RestorePlanView({
     [items],
   );
   const otherItems = useMemo(() => items.filter((item) => (
-    itemKindLabel(item) !== "Conversation"
+    itemKind(item) !== "conversation"
     && item.category !== "project_content"
   )), [items]);
   // A session's own Pull: the one row, ticked. Its plan holds no file
@@ -289,7 +306,7 @@ export default function RestorePlanView({
     [plan.conversation_review, sessionScope],
   );
   const sessionTitle = sessionScope && conversationItems[0]
-    ? compactThreadTitle(conversationItems[0].threadTitle ?? "").trim() || "Untitled session"
+    ? compactThreadTitle(conversationItems[0].threadTitle ?? "").trim() || t("review.untitledSession")
     : null;
 
   const selection = useMemo(() => buildPullReviewSelection(items, selected), [items, selected]);
@@ -299,7 +316,11 @@ export default function RestorePlanView({
     () => pullBudgetTotal(items, selected, plan.apply_limit_bytes),
     [items, plan.apply_limit_bytes, selected],
   );
-  const budgetBreakdown = `Sessions ${formatBytes(budget.sessions)} · Setup & tools ${formatBytes(budget.other)} · Project files ${formatBytes(budget.projectFiles)}`;
+  const budgetBreakdown = t("pull.breakdown", {
+    sessions: formatBytes(budget.sessions),
+    other: formatBytes(budget.other),
+    projectFiles: formatBytes(budget.projectFiles),
+  });
   const overLimitSentence = budget.total > budget.limit ? reviewBudgetSentence(budget, "pull") : null;
   const approvalItems = items.filter((item) => (
     item.category !== "project_content" && requiresApproval(item) && !selected.has(item.resourceId)
@@ -334,18 +355,20 @@ export default function RestorePlanView({
   // A session's Pull reviews one row of the storage: an empty apply would
   // mark nothing as reviewed, so with the row unticked there is nothing to do.
   const primaryDisabledReason = !busy && listPending
-    ? "Loading sessions…"
+    ? t("review.loadingSessions")
     : !busy && listFailed
-      ? REVIEW_LIST_FAILED_REASON
-      : overLimitSentence ?? (sessionScope && selectedPendingCount === 0 ? "Nothing is selected" : null);
+      ? t("projects:review.listFailed")
+      : overLimitSentence ?? (sessionScope && selectedPendingCount === 0 ? t("review.nothingSelected") : null);
   // A project's empty apply still runs — it marks the storage as reviewed
   // and unblocks Push — so the verb must say so instead of promising a Pull
   // that restores nothing. With rows ticked the button carries their count.
   // Until the rows land the verb is the wait itself, on both buttons.
   const primaryLabel = listPending
-    ? "Loading sessions…"
-    : selectedPendingCount > 0 ? `Pull ${selectedPendingCount}` : sessionScope ? "Pull" : "Mark as reviewed";
-  const primaryBusyLabel = selectedPendingCount > 0 ? "Pulling…" : "Marking as reviewed…";
+    ? t("review.loadingSessions")
+    : selectedPendingCount > 0
+      ? t("pull.pullCount", { count: selectedPendingCount })
+      : sessionScope ? t("common:pull") : t("pull.markReviewed");
+  const primaryBusyLabel = selectedPendingCount > 0 ? t("pull.pulling") : t("pull.markingReviewed");
   /* The green "ready" message is gone from the shell, so the review says it
      itself, once, when its rows land. Set after mount so a review that is
      ready from its first render still changes the region and is heard. */
@@ -393,7 +416,7 @@ export default function RestorePlanView({
     ? projectContentItems
     : [...conversationItems, ...otherItems];
   const searchActive = activeStep === "history" && searchQuery.trim().length > 0;
-  const matchingConversations = conversationItems.filter((item) => nameMatchesSearch(item.threadTitle || "Untitled thread", searchQuery));
+  const matchingConversations = conversationItems.filter((item) => nameMatchesSearch(item.threadTitle || t("pull.untitledThread"), searchQuery));
   const matchingIds = activityHistoryInUse
     ? (searchResults?.query === searchQuery ? searchResults.resourceIds : new Set<string>())
     : new Set(matchingConversations.map((item) => item.resourceId));
@@ -434,7 +457,7 @@ export default function RestorePlanView({
   };
   const warningSteps = new Set<SyncReviewStep>();
   for (const item of approvalItems) {
-    if (itemKindLabel(item) === "Conversation") warningSteps.add("history");
+    if (itemKind(item) === "conversation") warningSteps.add("history");
   }
   if (projectContentItems.length > 0 && !projectContentEligible) {
     warningSteps.add("project_files");
@@ -454,7 +477,7 @@ export default function RestorePlanView({
       action: compareAgainOffered(error) && onRefreshPlan ? (
         <button type="button" className="btn btn-ghost" onClick={onRefreshPlan} disabled={busy}>
           <Icon name="refresh" size={13} />
-          Compare again
+          {t("pull.compareAgain")}
         </button>
       ) : undefined,
       /* The zone draws the close control; closing clears the host's copy,
@@ -488,17 +511,18 @@ export default function RestorePlanView({
       <header className="sync-inline-action-header sync-inline-pull-header sync-sync-review-header">
         <div className="sync-inline-action-heading">
           <div className="sync-sync-review-title">
-            <h2 id="sync-pull-review-title">{sessionTitle ? `Pull session · ${sessionTitle}` : "Pull review"}</h2>
-            <span className="sync-pull-review-meta">Version {plan.revision}</span>
+            <h2 id="sync-pull-review-title">{sessionTitle ? t("pull.sessionTitle", { title: sessionTitle }) : t("pull.title")}</h2>
+            <span className="sync-pull-review-meta">{t("common:version", { version: plan.revision })}</span>
           </div>
           <span className="sync-visually-hidden" role="status">
-            {readyAnnounced ? "Pull review ready — nothing applied yet." : ""}
+            {readyAnnounced ? t("pull.ready") : ""}
           </span>
         </div>
         {/* The meters and the count measure rows; until the rows land they
             would measure nothing anyone can see. The recommend button's own
             count is a property of the plan, not of the selection, so it never
             moves when a row is ticked. */}
+        {/* i18n-ignore: the meter's mode key, not copy */}
         {!listPending && <ReviewBudgetGlance budget={budget} verb="pull" breakdown={budgetBreakdown} />}
         <SyncReviewSelectionBar
           count={selectedIn(pendingStepItems)}
@@ -506,15 +530,17 @@ export default function RestorePlanView({
           busy={busy}
           listPending={listPending}
           recommendedTitle={activeStep === "history"
-            ? `Select the newest ${searchActive ? "matching " : ""}sessions that fit this pull (${pendingRecommendedCount})`
-            : `Restore the recommended safe selection (${pendingRecommendedCount})`}
+            ? (searchActive
+              ? t("pull.recommendNewestMatching", { count: pendingRecommendedCount })
+              : t("pull.recommendNewest", { count: pendingRecommendedCount }))
+            : t("pull.recommendSafe", { count: pendingRecommendedCount })}
           recommendedCount={pendingRecommendedCount}
           recommendedDisabled={pendingSearchItems.length === 0 || stepMatchesRecommended}
           onRecommended={useRecommended}
           searchActive={searchActive}
           clearDisabled={selectedIn(searchStepItems) === 0}
           onClear={clearStep}
-          close={{ ariaLabel: `Close pull review for ${projectName}`, onClose: onBack }}
+          close={{ ariaLabel: t("pull.close", { project: projectName }), onClose: onBack }}
         />
       </header>
 
@@ -543,17 +569,17 @@ export default function RestorePlanView({
                   before it plans, and even the supporting-check failure lands
                   after the plan is handed over), so an error that is present
                   arrived after an action and stops the flow. */}
-              <NoticeZone items={banners} subject="notes about this Pull review" timing="blocking" />
+              <NoticeZone items={banners} subject={t("pull.notesSubject")} timing="blocking" />
             </div>
           )}
           {activeStep === "history" && (
             <>
               {!activityHistoryInUse && conversationItems.length > 0 && (
                 <>
-                  <NameSearchField query={searchQuery} onChange={setSearchQuery} label="Search sessions"
+                  <NameSearchField query={searchQuery} onChange={setSearchQuery} label={t("review.searchSessions")}
                     matches={matchingConversations.length} total={conversationItems.length} noun={sessionNoun}
                     hiddenSelected={selectedIn(conversationItems) - selectedIn(matchingConversations)} />
-                  {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">No matching sessions.</div>}
+                  {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">{t("review.noMatches")}</div>}
                 </>
               )}
               {conversationItems.length > 0 && project ? (
@@ -593,17 +619,17 @@ export default function RestorePlanView({
                   onToggle={toggle}
                 />
               ) : items.length === 0 && !supportLoading ? (
-                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>Nothing to pull</strong><small>This project already matches the selected version.</small></span></div>
+                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>{t("pull.nothingToPull")}</strong><small>{t("pull.nothingToPullDetail")}</small></span></div>
               ) : (
-                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>No session changes</strong><small>Sessions already match this storage.</small></span></div>
+                <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>{t("pull.noSessionChanges")}</strong><small>{t("pull.noSessionChangesDetail")}</small></span></div>
               )}
               {!sessionScope && (otherItems.length > 0 || supportLoading) && (
                 <details className="sync-sync-review-other">
                   <summary>
-                    <span><Icon name="settings" size={15} /><strong>Agent setup &amp; tools</strong></span>
+                    <span><Icon name="settings" size={15} /><strong>{t("pull.setupAndTools")}</strong></span>
                     {/* The count waits on the readiness checks, in the line
                         that is on screen, not inside a closed fold. */}
-                    <span>{supportLoading ? "Checking…" : `${selectedIn(otherItems)} selected`}<Icon name="chevron-right" size={13} /></span>
+                    <span>{supportLoading ? t("pull.checking") : t("pull.selectedCount", { count: selectedIn(otherItems) })}<Icon name="chevron-right" size={13} /></span>
                   </summary>
                   <ItemList items={otherItems} selected={selected} phase={phase} disabled={busy} onToggle={toggle} />
                 </details>
@@ -618,7 +644,7 @@ export default function RestorePlanView({
               onScan={onRefreshPlan}
               eligibility={plan.project_content_eligibility ?? {
                 state: "unknown",
-                reason: "Project-file eligibility was not recorded in this Pull plan.",
+                reason: t("pull.eligibilityUnrecorded"),
               }}
               rows={projectContentRows}
               selectedIds={selected}
@@ -662,14 +688,15 @@ export default function RestorePlanView({
             type="button"
             className="btn btn-ghost"
             disabled={busy}
-            title={activeStep === "history" ? "Review project files next" : "Back to session selection"}
+            title={activeStep === "history" ? t("review.filesNext") : t("review.backToSessions")}
             onClick={() => setActiveStep(activeStep === "history" ? "project_files" : "history")}
           >
             {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
-            {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
+            {activeStep === "history" ? t("review.projectFiles") : historyStepLabel(showProjectFiles)}
             {activeStep === "history" && <Icon name="chevron-right" size={14} />}
           </button>
         )}
+        {/* i18n-ignore: the meter's mode key, not copy */}
         {!listPending && <ReviewBudgetGauge budget={budget} verb="pull" breakdown={budgetBreakdown} />}
         <button
           type="button"

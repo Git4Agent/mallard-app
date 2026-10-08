@@ -129,8 +129,23 @@ mod tests {
         );
         assert_eq!(
             classify_storage_marker(&written),
-            (MarkerState::Storage, Some("layout 1".to_string()))
+            (MarkerState::Storage, Some(MarkerDetail::layout(1)))
         );
+        // The CLI and the setup screens print the English; the code and the
+        // version travel beside it for the interface to word.
+        let detail = MarkerDetail::layout(1);
+        assert_eq!(detail.text, "layout 1");
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap(),
+            serde_json::json!({"code": "layout", "layout_version": 1, "text": "layout 1"})
+        );
+        assert!(detail.is_valid(64));
+        assert!(!MarkerDetail::reason(MarkerDetailCode::Layout, "layout ?").is_valid(64));
+        assert!(!MarkerDetail {
+            layout_version: Some(1),
+            ..MarkerDetail::reason(MarkerDetailCode::TimedOut, "timed out")
+        }
+        .is_valid(64));
         assert_eq!(
             classify_storage_marker(br#"{"format":"mallard-append-storage","layout_version":2}"#).0,
             MarkerState::Unsupported
@@ -152,12 +167,63 @@ pub enum MarkerState {
     Unreadable,
 }
 
+/// What a marker read's detail is, for the interface to word: the layout
+/// the marker declares, or the fixed reason it could not be read.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerDetailCode {
+    Layout,
+    TimedOut,
+    ReadFailed,
+    AccessDenied,
+    CouldNotRead,
+    ScanTimedOut,
+}
 
-pub fn classify_storage_marker(bytes: &[u8]) -> (MarkerState, Option<String>) {
+/// A marker read's detail: the provider's own English, which the CLI and
+/// the setup screens print, beside the code the interface translates it by.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MarkerDetail {
+    pub code: MarkerDetailCode,
+    /// The version a `layout` detail names; no other detail carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_version: Option<u32>,
+    pub text: String,
+}
+
+impl MarkerDetail {
+    pub fn layout(version: u32) -> Self {
+        Self {
+            code: MarkerDetailCode::Layout,
+            layout_version: Some(version),
+            text: format!("layout {version}"),
+        }
+    }
+
+    /// A fixed reason, in the provider's own words.
+    pub fn reason(code: MarkerDetailCode, text: &str) -> Self {
+        Self {
+            code,
+            layout_version: None,
+            text: text.to_string(),
+        }
+    }
+
+    /// A version beside a layout and nowhere else, and one short line.
+    pub fn is_valid(&self, max_chars: usize) -> bool {
+        (self.code == MarkerDetailCode::Layout) == self.layout_version.is_some()
+            && !self.text.is_empty()
+            && self.text.chars().count() <= max_chars
+            && !self.text.chars().any(char::is_control)
+    }
+}
+
+pub fn classify_storage_marker(bytes: &[u8]) -> (MarkerState, Option<MarkerDetail>) {
     let Ok(marker) = serde_json::from_slice::<StorageMarker>(bytes) else {
         return (MarkerState::Invalid, None);
     };
-    let layout = Some(format!("layout {}", marker.layout_version()));
+    let layout = Some(MarkerDetail::layout(marker.layout_version()));
     if marker.validate().is_ok() {
         return (MarkerState::Storage, layout);
     }

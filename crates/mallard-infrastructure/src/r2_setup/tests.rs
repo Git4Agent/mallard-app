@@ -1,4 +1,4 @@
-use super::discovery::MarkerState;
+use super::discovery::{MarkerDetail, MarkerDetailCode, MarkerState};
 use super::*;
 use crate::storage_names::valid_word;
 use bytes::Bytes;
@@ -484,15 +484,26 @@ fn discovery_reads_only_markers_and_revalidates_bucket_identity() {
     assert!(!scan.cut, "an unreadable marker is not a cut listing");
     assert_eq!(scan.jurisdictions, ["default", "eu", "us", "fedramp"]);
     for (name, expected, detail) in [
-        ("known", MarkerState::Storage, Some("layout 1")),
+        ("known", MarkerState::Storage, Some(MarkerDetail::layout(1))),
         ("empty", MarkerState::Missing, None),
-        ("future", MarkerState::Unsupported, Some("layout 2")),
+        (
+            "future",
+            MarkerState::Unsupported,
+            Some(MarkerDetail::layout(2)),
+        ),
         ("broken", MarkerState::Invalid, None),
-        ("denied", MarkerState::Unreadable, Some("access denied")),
+        (
+            "denied",
+            MarkerState::Unreadable,
+            Some(MarkerDetail::reason(
+                MarkerDetailCode::AccessDenied,
+                "access denied",
+            )),
+        ),
     ] {
         let bucket = scan.buckets.iter().find(|b| b.name == name).unwrap();
         assert_eq!(bucket.marker, expected);
-        assert_eq!(bucket.marker_detail.as_deref(), detail);
+        assert_eq!(bucket.marker_detail, detail);
         assert_eq!(bucket.jurisdiction, "default");
     }
     assert!(mock.verify(R2Jurisdiction::Default, "known", DATE));

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import packageMetadata from "../../package.json";
+import { useTranslation } from "../i18n";
 import Icon from "./Icons";
 import { projectSyncApi } from "./project-sync/api";
 import { openExternalUrl } from "./project-sync/externalLink";
@@ -216,18 +217,17 @@ export function useAppUpdates({ busy, autoCheckEnabled }: UseAppUpdatesOptions):
  * Restarting while it installs, What's new on the first launch after an
  * update, and nothing otherwise. */
 export function UpdateCorner({ updates }: { updates: AppUpdates }) {
+  const { t } = useTranslation("shell");
   if (updates.restarting) {
     return (
       <span className="sync-update-pill" role="status">
         <span className="status-loader" aria-hidden="true" />
-        <span>Restarting</span>
+        <span>{t("updater.restarting")}</span>
       </span>
     );
   }
   if (updates.readyVersion) {
-    const title = updates.operationRunning
-      ? `Mallard ${updates.readyVersion} is ready. Finish the current operation, then restart to update.`
-      : `Restart Mallard to install ${updates.readyVersion}`;
+    const title = t(updates.operationRunning ? "updater.readyBusy" : "updater.restart", { version: updates.readyVersion });
     return (
       <button
         type="button"
@@ -238,7 +238,7 @@ export function UpdateCorner({ updates }: { updates: AppUpdates }) {
         aria-label={title}
       >
         <Icon name="refresh" size={13} />
-        <span>Update</span>
+        <span>{t("updater.update")}</span>
       </button>
     );
   }
@@ -248,9 +248,9 @@ export function UpdateCorner({ updates }: { updates: AppUpdates }) {
         type="button"
         className="sync-update-pill receipt"
         onClick={updates.openReceipt}
-        title={`See what changed in Mallard ${updates.receiptVersion}`}
+        title={t("updater.receiptTitle", { version: updates.receiptVersion })}
       >
-        What’s new
+        {t("updater.receipt")}
       </button>
     );
   }

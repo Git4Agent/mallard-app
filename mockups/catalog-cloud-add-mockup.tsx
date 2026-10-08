@@ -8,7 +8,7 @@ import { type NoticeItem } from "../src/components/notice/Notice";
 import ProjectSidebar from "../src/components/project-sync/ProjectSidebar";
 import CatalogConnectDialog from "../src/components/storage-catalog/CatalogConnectDialog";
 import { storageCatalogApi } from "../src/components/storage-catalog/api";
-import { rowStamp, rowStatus, rowStatusLabel } from "../src/components/storage-catalog/model";
+import { catalogNouns, rowStamp, rowStatus, rowStatusLabel } from "../src/components/storage-catalog/model";
 import type {
   CatalogCapabilityDescriptor,
   CatalogCloudRepository,
@@ -853,7 +853,7 @@ function Harness() {
       {dialog && (
         <CatalogConnectDialog
           reason={{ kind: "add" }} scopeId={SCOPE_ID} storageId={STORAGE_ID} accountLogin={LOGIN} coordinate={COORDINATE}
-          noun="pet v2" rowLabel={ROW_LABEL} listed={new Set(listedIds(view))} capabilities={[CAPABILITY]}
+          nouns={catalogNouns(CAPABILITY, { plural: CAPABILITY.label, singular: CAPABILITY.singular_label })} rowLabel={ROW_LABEL} listed={new Set(listedIds(view))} capabilities={[CAPABILITY]}
           onClose={() => setDialog(false)} onConnected={(connected) => added(connected.resourceId, connected.name, connected.address)}
         />
       )}

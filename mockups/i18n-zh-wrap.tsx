@@ -1,4 +1,5 @@
 import { installChineseShim, CJK_FONT_CSS } from "./i18n-zh-shim";
+import { inUi, startsInUi } from "./i18n-ui-lookup";
 
 /**
  * Any live harness in Chinese (2026-10-07). Loads `mockups/<h>.tsx` — the
@@ -33,14 +34,15 @@ async function until<T>(find: () => T | null | undefined, timeout = 5000): Promi
 
 /* A control by the English it had before the shim, its own text, or its label. */
 function byEnglish(text: string): HTMLElement | undefined {
+  const names = inUi(text);
   const hit = [...document.querySelectorAll<HTMLElement>("body *")].find((element) =>
     !element.closest(".harness-controls, .harness-log")
     && (element.getAttribute("data-i18n-en") === text
       || element.getAttribute("data-i18n-en-aria-label") === text
       || element.getAttribute("data-i18n-en-title") === text
-      || element.getAttribute("aria-label") === text
+      || names.includes(element.getAttribute("aria-label") ?? "")
       || ((element.children.length === 0 || element.matches("button, [role=radio], [role=tab], [role=menuitem], a"))
-        && element.textContent?.trim() === text)));
+        && names.includes(element.textContent?.trim() ?? ""))));
   return (hit?.closest("button, [role=radio], [role=tab], [role=menuitem], [role=option], a") as HTMLElement | null) ?? hit;
 }
 
@@ -64,7 +66,8 @@ async function replay(steps: string[]) {
     if (step.startsWith("starts:")) {
       const prefix = step.slice(7);
       (await until(() => [...document.querySelectorAll<HTMLElement>("button, a, [role=tab], [role=radio]")].find((element) =>
-        (element.getAttribute("data-i18n-en-aria-label") ?? element.getAttribute("aria-label") ?? element.getAttribute("data-i18n-en") ?? element.textContent ?? "").trim().startsWith(prefix)))).click();
+        startsInUi((element.getAttribute("data-i18n-en-aria-label") ?? element.getAttribute("aria-label") ?? element.getAttribute("data-i18n-en") ?? element.textContent ?? "").trim(), prefix)
+        || startsInUi(element.textContent?.trim() ?? "", prefix)))).click();
       await wait(450);
       continue;
     }

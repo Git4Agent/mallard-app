@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type {
   SecretOperation,
   StorageConnectionHealth,
+  StorageFieldDescriptor,
   StorageProviderDescriptor,
   StorageProviderKey,
   StorageSettings,
@@ -15,6 +16,16 @@ import { compactProjectPath } from "./model";
 import { formatRelativeTime } from "../../clock";
 import { rowReceipt, useSettingsReceipts } from "./settingsReceipts";
 import { writeClipboardText, writeClipboardTextOf } from "../sync-review/clipboard";
+import { t, useTranslation } from "../../i18n";
+import {
+  fieldText,
+  manualSetupHint,
+  providerName,
+  secretText,
+  setupDoorsText,
+  storageProviderName,
+  summaryLabel,
+} from "./storageText";
 
 /**
  * The storage form, drawn from a provider descriptor: every field, secret,
@@ -177,10 +188,12 @@ export function fieldsSet(
 
 /** The one-line "where is it" every listing shows: the first path-shaped
  *  fact, else the first fact, else the provider's own label. */
-export function storageSubtitle(storage: Pick<StorageSummary, "summary" | "provider_label">): string {
+export function storageSubtitle(
+  storage: Pick<StorageSummary, "summary" | "provider" | "provider_label"> & Partial<Pick<StorageSummary, "available">>,
+): string {
   const path = storage.summary.find((field) => field.is_path);
   if (path) return compactProjectPath(path.value);
-  return storage.summary[0]?.value || storage.provider_label;
+  return storage.summary[0]?.value || storageProviderName(storage);
 }
 
 // A path subtitle keeps the mono face; any other fact reads as prose. The
@@ -201,28 +214,31 @@ export function connectionSuspends(health: StorageConnectionHealth | null | unde
 /** The one-line issue a listing shows for a suspended storage, naming the
  *  provider by its descriptor label; nothing for any other state. */
 export function storageConnectionIssue(
-  storage: Pick<StorageSummary, "provider_label" | "connection">,
+  storage: Pick<StorageSummary, "provider" | "provider_label" | "connection"> & Partial<Pick<StorageSummary, "available">>,
 ): string | null {
   switch (storage.connection?.state) {
     case "reconnect_required":
     case "token_expired":
-      return `${storage.provider_label} needs reconnection`;
+      return t("storage:issue.needsReconnection", { provider: storageProviderName(storage) });
     case "permission_denied":
-      return `${storage.provider_label} denied access`;
+      return t("storage:issue.deniedAccess", { provider: storageProviderName(storage) });
     default:
       return null;
   }
 }
 
 /** The message with its evidence, the way the backend prints it into a
- *  failure: route, status, fixed error identifier, request ID. */
+ *  failure: route, status, fixed error identifier, request ID. The evidence
+ *  stays in the backend's English, like the message it annotates. */
 export function connectionDetail(health: StorageConnectionHealth): string {
   const evidence = health.evidence;
   if (!evidence) return health.message;
   const facts = [
     evidence.endpoint,
+    // i18n-ignore: evidence in the backend's own printed form, beside its English message
     typeof evidence.http_status === "number" ? `HTTP ${evidence.http_status}` : "no response",
     evidence.error_tag ?? null,
+    // i18n-ignore: the backend's printed evidence, as above
     evidence.request_id ? `request ${evidence.request_id}` : null,
   ].filter((fact): fact is string => !!fact);
   return `${health.message} (${facts.join(", ")})`;
@@ -279,17 +295,20 @@ function extraFactsOf(
 /** A settled storage's Copy all, in the card's order: folder, fields,
  *  facts, then the secrets. */
 export function lockedCopyLines(
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  descriptor: Pick<StorageProviderDescriptor, "key" | "fields" | "secrets">,
   storage: Pick<StorageSummary, "settings" | "summary" | "secrets">,
   leadFacts: readonly string[] = [],
 ): StorageCopyLine[] {
-  const value = (field: { label: string; field_id: string }) => ({ label: field.label, value: settingString(storage.settings[field.field_id]) });
+  const value = (field: StorageFieldDescriptor) => ({
+    label: fieldText(descriptor.key, field).label,
+    value: settingString(storage.settings[field.field_id]),
+  });
   return [
     ...descriptor.fields.filter((field) => field.kind === "directory").map(value),
     ...descriptor.fields.filter((field) => field.kind !== "directory").map(value),
-    ...extraFactsOf(descriptor, storage, leadFacts).map((fact) => ({ label: fact.label, value: fact.value })),
+    ...extraFactsOf(descriptor, storage, leadFacts).map((fact) => ({ label: summaryLabel(fact), value: fact.value })),
     ...descriptor.secrets.map((secret) => ({
-      label: secret.label,
+      label: secretText(descriptor.key, secret).label,
       secretId: secret.secret_id,
       present: storage.secrets.some((held) => held.secret_id === secret.secret_id && held.present),
     })),
@@ -300,16 +319,23 @@ export function lockedCopyLines(
  *  setup lane. An empty box, or a stored secret the form never saw, is not
  *  a line. */
 export function editorCopyLines(
-  descriptor: Pick<StorageProviderDescriptor, "fields" | "secrets">,
+  descriptor: Pick<StorageProviderDescriptor, "key" | "fields" | "secrets">,
   form: Pick<StorageEditorForm, "settings" | "typedSecrets">,
 ): { label: string; value: string }[] {
   return [
-    ...descriptor.fields.map((field) => ({ label: field.label, value: form.settings[field.field_id] ?? "" })),
-    ...descriptor.secrets.map((secret) => ({ label: secret.label, value: form.typedSecrets[secret.secret_id] ?? "" })),
+    ...descriptor.fields.map((field) => ({ label: fieldText(descriptor.key, field).label, value: form.settings[field.field_id] ?? "" })),
+    ...descriptor.secrets.map((secret) => ({ label: secretText(descriptor.key, secret).label, value: form.typedSecrets[secret.secret_id] ?? "" })),
   ].filter((line) => line.value.trim().length > 0);
 }
 
-type CopyReceipt = { ok: boolean; text: string };
+/** A copy that landed, or did not; Copy all also counts the saved secrets
+ *  it left out because the storage does not hold them. */
+type CopyReceipt = { ok: boolean; missing?: number };
+
+function copyReceiptText(receipt: CopyReceipt): string {
+  if (!receipt.ok) return t("storage:copy.notCopied");
+  return receipt.missing ? t("storage:copy.copiedMissing", { missing: receipt.missing }) : t("common:copied");
+}
 
 /** Copy receipts by key, each standing for COPIED_MS. */
 function useCopyReceipts() {
@@ -319,9 +345,9 @@ function useCopyReceipts() {
     const standing = timers.current;
     return () => { for (const timer of standing.values()) window.clearTimeout(timer); };
   }, []);
-  const settle = (key: string, ok: boolean, text = ok ? "Copied" : "Not copied") => {
+  const settle = (key: string, ok: boolean, missing = 0) => {
     window.clearTimeout(timers.current.get(key));
-    setReceipts((current) => ({ ...current, [key]: { ok, text } }));
+    setReceipts((current) => ({ ...current, [key]: missing ? { ok, missing } : { ok } }));
     timers.current.set(key, window.setTimeout(() => {
       timers.current.delete(key);
       setReceipts((current) => { const { [key]: _gone, ...rest } = current; return rest; });
@@ -341,14 +367,15 @@ function CopyButton({ label, disabled, receipt, onCopy }: {
   receipt?: CopyReceipt;
   onCopy: () => void;
 }) {
+  const { t } = useTranslation("storage");
   return (
     <button
       type="button"
       className="sync-secret-copy"
       onClick={onCopy}
       disabled={disabled}
-      title={`Copy ${label}`}
-      aria-label={`Copy ${label}`}
+      title={t("copy.field", { label })}
+      aria-label={t("copy.field", { label })}
     >
       <Icon name={receipt?.ok ? "check" : "copy"} size={13} />
     </button>
@@ -360,7 +387,7 @@ function CopyCap({ receipt }: { receipt?: CopyReceipt }) {
   if (!receipt) return null;
   return (
     <span className={`sync-secret-cap ${receipt.ok ? "copied" : "failed"}`} role="status">
-      <Icon name={receipt.ok ? "check" : "alert-triangle"} size={11} /> {receipt.text}
+      <Icon name={receipt.ok ? "check" : "alert-triangle"} size={11} /> {copyReceiptText(receipt)}
     </span>
   );
 }
@@ -373,6 +400,7 @@ function CopyAllButton({ disabled, busy, receipt, onCopy }: {
   receipt?: CopyReceipt;
   onCopy: () => void;
 }) {
+  const { t } = useTranslation("storage");
   return (
     <button
       type="button"
@@ -381,7 +409,7 @@ function CopyAllButton({ disabled, busy, receipt, onCopy }: {
       onClick={onCopy}
     >
       <Icon name={receipt ? (receipt.ok ? "check" : "alert-triangle") : "clipboard-list"} size={12} />
-      {busy ? "Copying…" : receipt ? receipt.text : "Copy all fields"}
+      {busy ? t("copy.copying") : receipt ? copyReceiptText(receipt) : t("copy.all")}
     </button>
   );
 }
@@ -393,10 +421,11 @@ export function setupRouteIcon(route: StorageProviderDescriptor["local_setup"]):
   return route === "managed_cloud" ? "cloud" : route === "dropbox" || route === "feishu" ? "link" : "terminal";
 }
 export function setupRouteLabel(route: StorageProviderDescriptor["local_setup"], verb: "setup" | "sign-in"): string {
-  if (route === "managed_cloud") return `Mallard Cloud ${verb}`;
-  if (route === "dropbox") return `Dropbox ${verb}`;
-  if (route === "feishu") return `Feishu ${verb}`;
-  return "Wrangler automatic setup";
+  const signIn = verb === "sign-in";
+  if (route === "managed_cloud") return signIn ? t("storage:route.managedCloudSignIn") : t("storage:route.managedCloudSetup");
+  if (route === "dropbox") return signIn ? t("storage:route.dropboxSignIn") : t("storage:route.dropboxSetup");
+  if (route === "feishu") return signIn ? t("storage:route.feishuSignIn") : t("storage:route.feishuSetup");
+  return t("storage:route.wrangler");
 }
 
 /** A draft's settings as the naming rule reads them: every value as text,
@@ -611,6 +640,7 @@ export function StorageEditor({
    *  collides takes the next free number. */
   takenNames?: readonly string[];
 }) {
+  const { t } = useTranslation("storage");
   const fieldIdPrefix = useId();
   const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
   const [manualExpanded, setManualExpanded] = useState(descriptor.local_setup === "wrangler");
@@ -643,7 +673,7 @@ export function StorageEditor({
      are the editor's; what each door leads to is the workspace's. Any
      other provider is past the question. */
   const doors = setupMode && descriptor.setup_doors
-    ? { ...setupMode, sentences: descriptor.setup_doors }
+    ? { ...setupMode, sentences: setupDoorsText(descriptor.key, descriptor.setup_doors) }
     : null;
   const usingExisting = doors?.mode === "existing";
   const showLanes = doors === null || doors.mode === "create";
@@ -667,11 +697,11 @@ export function StorageEditor({
           value={form.name}
           onChange={(event) => setName(event.target.value)}
           disabled={disabled}
-          aria-label="Storage name"
-          placeholder="Storage name"
+          aria-label={t("editor.name")}
+          placeholder={t("editor.name")}
         />
         {/* Feishu is temporarily hidden from storage setup. */}
-        <div className="sync-segmented" role="radiogroup" aria-label="Storage type">
+        <div className="sync-segmented" role="radiogroup" aria-label={t("editor.type")}>
           {(providers ?? [descriptor]).filter((provider) => provider.key !== "feishu").map((provider) => {
             const current = provider.key === descriptor.key && provider.config_version === descriptor.config_version;
             return (
@@ -684,7 +714,7 @@ export function StorageEditor({
                 onClick={() => { if (!current) onSwitchProvider?.(provider); }}
                 disabled={disabled || !onSwitchProvider}
               >
-                {provider.display_name}
+                {providerName(provider)}
               </button>
             );
           })}
@@ -692,10 +722,10 @@ export function StorageEditor({
       </header>
 
       {doors && (
-        <div className="storage-mode-doors" role="radiogroup" aria-label="New or existing storage">
+        <div className="storage-mode-doors" role="radiogroup" aria-label={t("editor.doors")}>
           <ModeDoor
             icon="plus"
-            title="Create new"
+            title={t("editor.createNew")}
             detail={doors.sentences.create_hint}
             checked={doors.mode === "create"}
             disabled={disabled}
@@ -703,7 +733,7 @@ export function StorageEditor({
           />
           <ModeDoor
             icon="search"
-            title="Use existing"
+            title={t("editor.useExisting")}
             detail={doors.sentences.existing_hint}
             help={doors.sentences.existing_help}
             checked={doors.mode === "existing"}
@@ -713,29 +743,32 @@ export function StorageEditor({
         </div>
       )}
 
-      {showFields && folderFields.map((field) => (
-        <label key={field.field_id} className="sync-folder-field compact">
-          <span className="sync-field-name">{field.label}</span>
-          <div>
-            <input
-              type="text"
-              value={form.settings[field.field_id] ?? ""}
-              onChange={(event) => setSetting(field.field_id, event.target.value)}
-              placeholder={field.placeholder ?? undefined}
-              disabled={disabled}
-              required={field.required}
-              spellCheck={false}
-              autoCapitalize="none"
-              autoCorrect="off"
-              autoComplete="off"
-            />
-            <button type="button" className="btn" onClick={() => void chooseFolder(field.field_id)} disabled={disabled}>
-              <Icon name="folder" size={13} /> Browse…
-            </button>
-          </div>
-          {field.help && <small>{field.help}</small>}
-        </label>
-      ))}
+      {showFields && folderFields.map((field) => {
+        const words = fieldText(descriptor.key, field);
+        return (
+          <label key={field.field_id} className="sync-folder-field compact">
+            <span className="sync-field-name">{words.label}</span>
+            <div>
+              <input
+                type="text"
+                value={form.settings[field.field_id] ?? ""}
+                onChange={(event) => setSetting(field.field_id, event.target.value)}
+                placeholder={words.placeholder}
+                disabled={disabled}
+                required={field.required}
+                spellCheck={false}
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="off"
+              />
+              <button type="button" className="btn" onClick={() => void chooseFolder(field.field_id)} disabled={disabled}>
+                <Icon name="folder" size={13} /> {t("editor.browse")}
+              </button>
+            </div>
+            {words.help && <small>{words.help}</small>}
+          </label>
+        );
+      })}
       {showFields && destinationConflict && folderFields.length > 0 && (
         /* One folder is one storage. Said the moment the folder settles, in
            the box grammar every other refusal wears, with the only two ways
@@ -744,19 +777,19 @@ export function StorageEditor({
           <Icon name="alert-triangle" size={13} className="notice-mark" />
           <div className="notice-body">
             <p className="notice-line">
-              <strong className="notice-type">Error ·</strong>{" "}
+              <strong className="notice-type">{t("shared.errorType")}</strong>{" "}
               <strong className="notice-lead">
-                This folder is already connected as {destinationConflict.storage.name}.
+                {t("editor.conflictLead", { name: destinationConflict.storage.name })}
               </strong>{" "}
-              A folder can be one storage. Open that storage, or choose another folder for this one.
+              {t("editor.conflictBody")}
             </p>
           </div>
           <div className="storage-destination-conflict-verbs">
             <button type="button" className="btn btn-primary" onClick={destinationConflict.onOpen} disabled={disabled}>
-              Open {destinationConflict.storage.name}
+              {t("shared.openNamed", { name: destinationConflict.storage.name })}
             </button>
             <button type="button" className="btn" onClick={() => void chooseFolder(folderFields[0].field_id)} disabled={disabled}>
-              <Icon name="folder" size={13} /> Choose another…
+              <Icon name="folder" size={13} /> {t("editor.chooseAnother")}
             </button>
           </div>
         </div>
@@ -778,16 +811,16 @@ export function StorageEditor({
 
           <div className="storage-setup-route-row" role="note">
             <Icon name="info" size={13} />
-            <span className="storage-setup-route-label">Manual setup</span>
+            <span className="storage-setup-route-label">{t("editor.manualSetup")}</span>
             <span className="storage-setup-guide-copy">
               {wranglerLane && !showFields
-                ? "Use your own connection credentials."
+                ? t("editor.ownCredentials")
                 : descriptor.local_setup === "wrangler" ? null
-                : descriptor.manual_setup_hint ?? `Enter an existing ${descriptor.display_name} connection in the fields below.`}
+                : manualSetupHint(descriptor) ?? t("editor.enterExisting", { provider: providerName(descriptor) })}
             </span>
             {descriptor.setup_guide_url && (
               <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>
-                Setup guide <Icon name="external-link" size={11} />
+                {t("shared.setupGuide")} <Icon name="external-link" size={11} />
               </button>
             )}
             {showFields && descriptor.key === "r2" && (
@@ -798,8 +831,8 @@ export function StorageEditor({
                 type="button"
                 className="btn storage-manual-toggle"
                 aria-expanded={manualExpanded}
-                aria-label={manualExpanded ? "Hide fields" : "Enter by hand"}
-                title={manualExpanded ? "Hide fields" : "Enter by hand"}
+                aria-label={manualExpanded ? t("shared.hideFields") : t("shared.enterByHand")}
+                title={manualExpanded ? t("shared.hideFields") : t("shared.enterByHand")}
                 disabled={disabled}
                 onClick={() => setManualExpanded((expanded) => !expanded)}
               >
@@ -815,25 +848,26 @@ export function StorageEditor({
            can report. */
         <div className={`storage-setup-guide${descriptor.local_setup ? " r2-lane" : ""}`} role="note">
           <Icon name="check-circle" size={13} />
-          <span className="storage-setup-guide-copy">Access renews automatically. Test the connection to verify it.</span>
+          <span className="storage-setup-guide-copy">{t("editor.managedNote")}</span>
           {descriptor.setup_guide_url && (
-            <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>Setup guide</button>
+            <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>{t("shared.setupGuide")}</button>
           )}
           {setupSlot}
         </div>
       )}
 
       {showFields && (gridFields.length > 0 || descriptor.secrets.length > 0) && (
-        <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
+        <div className="sync-storage-fields storage-provider-fields" aria-label={t("shared.connectionDetails", { provider: providerName(descriptor) })}>
           {gridFields.map((field) => {
+            const words = fieldText(descriptor.key, field);
             const value = form.settings[field.field_id] ?? "";
             const receipt = copies.receipts[`field:${field.field_id}`];
             return (
               <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
                 <span className="form-label-row">
-                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{words.label}</label>
                   {(field.help || field.help_url) && (
-                    <HelpMark text={field.help ?? field.label} url={field.help_url} />
+                    <HelpMark text={words.help ?? words.label} url={field.help_url} />
                   )}
                   <CopyCap receipt={receipt} />
                 </span>
@@ -843,7 +877,7 @@ export function StorageEditor({
                     id={`${fieldIdPrefix}-field-${field.field_id}`}
                     value={value}
                     onChange={(event) => setSetting(field.field_id, event.target.value)}
-                    placeholder={field.placeholder ?? undefined}
+                    placeholder={words.placeholder}
                     disabled={disabled}
                     required={field.required}
                     spellCheck={false}
@@ -852,13 +886,14 @@ export function StorageEditor({
                     autoComplete="off"
                   />
                   <span className="sync-secret-verbs">
-                    <CopyButton label={field.label} disabled={!value.trim()} receipt={receipt} onCopy={() => copies.copyValue(`field:${field.field_id}`, value)} />
+                    <CopyButton label={words.label} disabled={!value.trim()} receipt={receipt} onCopy={() => copies.copyValue(`field:${field.field_id}`, value)} />
                   </span>
                 </span>
               </div>
             );
           })}
           {activeSecrets(descriptor, secretPresence).map((secret) => {
+            const words = secretText(descriptor.key, secret);
             const present = !!secretPresence[secret.secret_id];
             const visible = !!secretVisible[secret.secret_id];
             const value = form.typedSecrets[secret.secret_id] ?? "";
@@ -866,9 +901,9 @@ export function StorageEditor({
             return (
               <div key={secret.secret_id} className="storage-provider-field">
                 <span className="form-label-row">
-                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-secret-${secret.secret_id}`}>{secret.label}</label>
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-secret-${secret.secret_id}`}>{words.label}</label>
                   {(secret.help || secret.help_url) && (
-                    <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />
+                    <HelpMark text={words.help ?? words.label} url={secret.help_url} />
                   )}
                   <CopyCap receipt={receipt} />
                 </span>
@@ -882,14 +917,14 @@ export function StorageEditor({
                     id={`${fieldIdPrefix}-secret-${secret.secret_id}`}
                     value={value}
                     onChange={(event) => setSecret(secret.secret_id, event.target.value)}
-                    placeholder={present ? "Stored — type to replace" : (secret.placeholder ?? undefined)}
+                    placeholder={present ? t("editor.storedReplace") : words.placeholder}
                     disabled={disabled}
                     required={secret.required && !present}
                     autoComplete="new-password"
                   />
                   <span className="sync-secret-verbs">
                     {!(descriptor.key === "dropbox" && secret.secret_id === "refresh_token") && (
-                      <CopyButton label={secret.label} disabled={!value} receipt={receipt} onCopy={() => copies.copyValue(`secret:${secret.secret_id}`, value)} />
+                      <CopyButton label={words.label} disabled={!value} receipt={receipt} onCopy={() => copies.copyValue(`secret:${secret.secret_id}`, value)} />
                     )}
                     <button
                       type="button"
@@ -898,7 +933,7 @@ export function StorageEditor({
                       aria-pressed={visible}
                       disabled={disabled}
                     >
-                      {visible ? "Hide" : "Show"}
+                      {visible ? t("shared.hide") : t("shared.show")}
                     </button>
                   </span>
                 </span>
@@ -970,6 +1005,7 @@ export function StorageLockedForm({
     facts: readonly string[];
   };
 }) {
+  const { t } = useTranslation(["storage", "common"]);
   const fieldIdPrefix = useId();
   const [name, setName] = useState(storage.name);
   const savedName = storage.name;
@@ -989,7 +1025,7 @@ export function StorageLockedForm({
     setSavingName(true);
     receipts.begin("name", ["name"]);
     const ok = await onRename(next);
-    receipts.settle("name", ok, ok ? `Storage renamed to ${next}` : null);
+    receipts.settle("name", ok, ok ? t("locked.renamed", { name: next }) : null);
     setSavingName(false);
   };
   const cancelName = () => setName(savedName);
@@ -1084,7 +1120,7 @@ export function StorageLockedForm({
     })();
     try {
       await writeClipboardTextOf(text);
-      copies.settle("all", true, missing ? `Copied · ${missing} not stored` : "Copied");
+      copies.settle("all", true, missing);
     } catch {
       copies.settle("all", false);
     } finally {
@@ -1104,9 +1140,10 @@ export function StorageLockedForm({
   const suspended = connectionSuspends(storage.connection);
   /* "Connected" is said only after this visit saw a probe succeed; a stored
      credential proves nothing, and a refused one says so in the row. */
-  const guideCopy = verifiedAt !== null
-    ? `Connected · verified ${formatRelativeTime(Math.floor(verifiedAt / 1000))}.${managed ? " Access renews automatically." : ""}`
-    : `Not tested yet.${managed ? " Access renews automatically." : ""}`;
+  const verifiedWhen = verifiedAt !== null ? formatRelativeTime(Math.floor(verifiedAt / 1000)) : null;
+  const guideCopy = verifiedWhen !== null
+    ? (managed ? t("locked.verifiedRenews", { when: verifiedWhen }) : t("locked.verified", { when: verifiedWhen }))
+    : (managed ? t("locked.notTestedRenews") : t("locked.notTested"));
   const showGuide = suspended || descriptor.secrets.length > 0 || !!descriptor.local_setup;
 
   return (
@@ -1128,30 +1165,30 @@ export function StorageLockedForm({
               if (event.key === "Escape") { cancelName(); event.currentTarget.blur(); }
             }}
             disabled={disabled || savingName}
-            aria-label="Storage name"
-            placeholder="Storage name"
+            aria-label={t("editor.name")}
+            placeholder={t("editor.name")}
           />
           {nameDirty && (
             <span className="sync-storage-name-verbs">
               <button type="submit" className="btn btn-primary" disabled={disabled || savingName || !name.trim()}>
-                {savingName ? "Saving…" : "Save"}
+                {savingName ? t("common:saving") : t("common:save")}
               </button>
               <button type="button" className="btn btn-ghost" disabled={disabled || savingName} onClick={cancelName}>
-                Cancel
+                {t("common:cancel")}
               </button>
             </span>
           )}
           {nameReceipt && !nameDirty && (
             <span className={`sync-storage-name-stamp ${nameReceipt.kind}${nameReceipt.kind === "saved" && nameReceipt.fading ? " dim" : ""}`} role="status">
               {nameReceipt.kind === "saving"
-                ? <><Icon name="refresh" size={11} className="icon-spin" /> Saving…</>
+                ? <><Icon name="refresh" size={11} className="icon-spin" /> {t("common:saving")}</>
                 : nameReceipt.kind === "failed"
-                  ? <><Icon name="alert-triangle" size={11} /> Not saved</>
-                  : <><Icon name="check" size={11} /> Saved</>}
+                  ? <><Icon name="alert-triangle" size={11} /> {t("common:notSaved")}</>
+                  : <><Icon name="check" size={11} /> {t("common:saved")}</>}
             </span>
           )}
         </form>
-        <span className="sync-storage-editor-provider">{descriptor.display_name}</span>
+        <span className="sync-storage-editor-provider">{providerName(descriptor)}</span>
       </header>
 
       {showGuide && (
@@ -1162,7 +1199,7 @@ export function StorageLockedForm({
           </span>
           {descriptor.setup_guide_url && (
             <button type="button" className="btn-link" onClick={() => void openExternalUrl(descriptor.setup_guide_url!)}>
-              Setup guide <Icon name="external-link" size={11} />
+              {t("shared.setupGuide")} <Icon name="external-link" size={11} />
             </button>
           )}
           {descriptor.key === "r2" && (
@@ -1170,7 +1207,7 @@ export function StorageLockedForm({
           )}
           {(suspended || descriptor.key === "managed_cloud") && !reconnect.open && (
             <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={reconnect.onOpen}>
-              <Icon name="refresh" size={12} /> Reconnect…
+              <Icon name="refresh" size={12} /> {t("locked.reconnect")}
             </button>
           )}
         </div>
@@ -1179,16 +1216,17 @@ export function StorageLockedForm({
       {lead?.band}
 
       {folderFields.map((field) => {
+        const words = fieldText(descriptor.key, field);
         const key = `field:${field.field_id}`;
         const inputId = `${fieldIdPrefix}-field-${field.field_id}`;
         return (
           <div key={field.field_id} className="sync-folder-field compact">
             <span className="form-label-row">
-              <label className="sync-field-name" htmlFor={inputId}>{field.label}</label>
-              {(field.help || field.help_url) && <HelpMark text={field.help ?? field.label} url={field.help_url} />}
+              <label className="sync-field-name" htmlFor={inputId}>{words.label}</label>
+              {(field.help || field.help_url) && <HelpMark text={words.help ?? words.label} url={field.help_url} />}
               <CopyCap receipt={copies.receipts[key]} />
             </span>
-            {valueBox(key, field.label, settingString(field.field_id), (
+            {valueBox(key, words.label, settingString(field.field_id), (
               <input type="text" id={inputId} value={settingString(field.field_id)} readOnly spellCheck={false} />
             ))}
           </div>
@@ -1196,18 +1234,19 @@ export function StorageLockedForm({
       })}
 
       {(gridFields.length > 0 || extraFacts.length > 0 || descriptor.secrets.length > 0) && (
-        <div className="sync-storage-fields storage-provider-fields" aria-label={`${descriptor.display_name} connection details`}>
+        <div className="sync-storage-fields storage-provider-fields" aria-label={t("shared.connectionDetails", { provider: providerName(descriptor) })}>
           {gridFields.map((field) => {
+            const words = fieldText(descriptor.key, field);
             const key = `field:${field.field_id}`;
             const value = settingString(field.field_id);
             return (
               <div key={field.field_id} className={`storage-provider-field${field.kind === "url" ? " storage-provider-url-field" : ""}`}>
                 <span className="form-label-row">
-                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{field.label}</label>
-                  {(field.help || field.help_url) && <HelpMark text={field.help ?? field.label} url={field.help_url} />}
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-field-${field.field_id}`}>{words.label}</label>
+                  {(field.help || field.help_url) && <HelpMark text={words.help ?? words.label} url={field.help_url} />}
                   <CopyCap receipt={copies.receipts[key]} />
                 </span>
-                {valueBox(key, field.label, value, (
+                {valueBox(key, words.label, value, (
                   <input
                     type={field.kind === "url" ? "url" : "text"}
                     id={`${fieldIdPrefix}-field-${field.field_id}`}
@@ -1220,14 +1259,15 @@ export function StorageLockedForm({
             );
           })}
           {extraFacts.map((fact) => {
+            const label = summaryLabel(fact);
             const key = `fact:${fact.field_id}`;
             return (
               <div key={fact.field_id} className="storage-provider-field storage-provider-fact">
                 <span className="form-label-row">
-                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-fact-${fact.field_id}`}>{fact.label}</label>
+                  <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-fact-${fact.field_id}`}>{label}</label>
                   <CopyCap receipt={copies.receipts[key]} />
                 </span>
-                {valueBox(key, fact.label, fact.value, (
+                {valueBox(key, label, fact.value, (
                   <input type="text" id={`${fieldIdPrefix}-fact-${fact.field_id}`} value={fact.value} readOnly spellCheck={false} />
                 ))}
               </div>
@@ -1240,20 +1280,21 @@ export function StorageLockedForm({
             const error = revealError[secret.secret_id];
             const secondsLeft = shown ? Math.max(0, Math.ceil((shown.hidesAt - now) / 1000)) : 0;
             const inputId = `${fieldIdPrefix}-secret-${secret.secret_id}`;
+            const words = secretText(descriptor.key, secret);
             return (
               <div key={secret.secret_id} className="storage-provider-field">
                 <span className="form-label-row">
-                  <label className="sync-field-name" htmlFor={inputId}>{secret.label}</label>
-                  {(secret.help || secret.help_url) && <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />}
+                  <label className="sync-field-name" htmlFor={inputId}>{words.label}</label>
+                  {(secret.help || secret.help_url) && <HelpMark text={words.help ?? words.label} url={secret.help_url} />}
                   {suspended && present && (
-                    <span className="sync-storage-refused-chip"><Icon name="alert-triangle" size={10} /> Refused</span>
+                    <span className="sync-storage-refused-chip"><Icon name="alert-triangle" size={10} /> {t("locked.refused")}</span>
                   )}
                   {copies.receipts[`secret:${secret.secret_id}`]
                     ? <CopyCap receipt={copies.receipts[`secret:${secret.secret_id}`]} />
                     : busy
-                      ? <span className="sync-secret-cap"><span className="status-loader" /> Reading…</span>
+                      ? <span className="sync-secret-cap"><span className="status-loader" /> {t("locked.reading")}</span>
                       : shown
-                        ? <span className="sync-secret-cap"><Icon name="clock" size={11} /> Hides in {secondsLeft} s</span>
+                        ? <span className="sync-secret-cap"><Icon name="clock" size={11} /> {t("locked.hidesIn", { seconds: secondsLeft })}</span>
                         : null}
                 </span>
                 <span className={`sync-secret-input${present ? " has-copy" : ""}`}>
@@ -1261,7 +1302,7 @@ export function StorageLockedForm({
                     type={shown ? "text" : "password"}
                     id={inputId}
                     value={shown ? shown.value : present ? SECRET_MASK : ""}
-                    placeholder={present ? undefined : "Not stored"}
+                    placeholder={present ? undefined : t("locked.notStored")}
                     readOnly
                     spellCheck={false}
                     autoComplete="off"
@@ -1270,7 +1311,7 @@ export function StorageLockedForm({
                     <span className="sync-secret-verbs">
                       {!(descriptor.key === "dropbox" && secret.secret_id === "refresh_token") && (
                         <CopyButton
-                          label={secret.label}
+                          label={words.label}
                           disabled={disabled || busy}
                           receipt={copies.receipts[`secret:${secret.secret_id}`]}
                           onCopy={() => void copy(secret.secret_id)}
@@ -1283,7 +1324,7 @@ export function StorageLockedForm({
                         aria-pressed={!!shown}
                         disabled={disabled || busy}
                       >
-                        {shown ? "Hide" : "Show"}
+                        {shown ? t("shared.hide") : t("shared.show")}
                       </button>
                     </span>
                   )}
@@ -1300,11 +1341,11 @@ export function StorageLockedForm({
       <footer className="sync-storage-editor-footer">
         <span className="sync-storage-fixed">
           <Icon name="lock" size={12} />
-          Fixed after setup. To sync elsewhere, add a new storage.
+          {t("locked.fixed")}
         </span>
         {verifiedAt !== null && !testing && (
           <span className="storage-setup-verified" role="status">
-            <Icon name="check-circle" size={13} /> Connection verified
+            <Icon name="check-circle" size={13} /> {t("locked.connectionVerified")}
           </span>
         )}
         <button
@@ -1313,7 +1354,7 @@ export function StorageLockedForm({
           disabled={disabled || testing || suspended || reconnect.open}
           onClick={onTest}
         >
-          {testing ? "Testing…" : "Test connection"}
+          {testing ? t("shared.testing") : t("shared.testConnection")}
         </button>
       </footer>
     </article>
@@ -1345,6 +1386,7 @@ export function StorageReconnectBand({
   setupSlot?: ReactNode;
   verbs: ReactNode;
 }) {
+  const { t } = useTranslation("storage");
   const fieldIdPrefix = useId();
   const [secretVisible, setSecretVisible] = useState<Record<string, boolean>>({});
   const setSecret = (secretId: string, value: string) => onChange({
@@ -1352,10 +1394,10 @@ export function StorageReconnectBand({
     typedSecrets: { ...form.typedSecrets, [secretId]: value },
   });
   const replacementPlaceholder = connection?.state === "token_expired"
-    ? "Expired — paste a replacement"
-    : `Rejected by ${descriptor.display_name} — paste a replacement`;
+    ? t("reconnect.expiredPlaceholder")
+    : t("reconnect.rejectedPlaceholder", { provider: providerName(descriptor) });
   return (
-    <div className="sync-storage-reconnect" role="region" aria-label={`Reconnect ${descriptor.display_name}`}>
+    <div className="sync-storage-reconnect" role="region" aria-label={t("reconnect.region", { provider: providerName(descriptor) })}>
       {setupSlot && (
         <div className="storage-setup-route-row agent r2-lane" role="note">
           <Icon name={setupRouteIcon(descriptor.local_setup)} size={13} />
@@ -1364,13 +1406,14 @@ export function StorageReconnectBand({
         </div>
       )}
       {activeSecrets(descriptor, secretPresence).map((secret) => {
+        const words = secretText(descriptor.key, secret);
         const present = !!secretPresence[secret.secret_id];
         const visible = !!secretVisible[secret.secret_id];
         return (
           <div key={secret.secret_id} className="storage-provider-field">
             <span className="form-label-row">
-              <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-secret-${secret.secret_id}`}>{secret.label}</label>
-              {(secret.help || secret.help_url) && <HelpMark text={secret.help ?? secret.label} url={secret.help_url} />}
+              <label className="sync-field-name" htmlFor={`${fieldIdPrefix}-secret-${secret.secret_id}`}>{words.label}</label>
+              {(secret.help || secret.help_url) && <HelpMark text={words.help ?? words.label} url={secret.help_url} />}
             </span>
             <span className="sync-secret-input">
               <input
@@ -1378,7 +1421,7 @@ export function StorageReconnectBand({
                 id={`${fieldIdPrefix}-secret-${secret.secret_id}`}
                 value={form.typedSecrets[secret.secret_id] ?? ""}
                 onChange={(event) => setSecret(secret.secret_id, event.target.value)}
-                placeholder={present && connectionSuspends(connection) ? replacementPlaceholder : (secret.placeholder ?? undefined)}
+                placeholder={present && connectionSuspends(connection) ? replacementPlaceholder : words.placeholder}
                 disabled={disabled}
                 autoComplete="new-password"
               />
@@ -1389,7 +1432,7 @@ export function StorageReconnectBand({
                 aria-pressed={visible}
                 disabled={disabled}
               >
-                {visible ? "Hide" : "Show"}
+                {visible ? t("shared.hide") : t("shared.show")}
               </button>
             </span>
           </div>
@@ -1397,7 +1440,7 @@ export function StorageReconnectBand({
       })}
       <span className="sync-storage-fixed">
         <Icon name="info" size={12} />
-        Same destination — only the credential changes.
+        {t("reconnect.sameDestination")}
       </span>
       <div className="sync-storage-reconnect-verbs">{verbs}</div>
     </div>

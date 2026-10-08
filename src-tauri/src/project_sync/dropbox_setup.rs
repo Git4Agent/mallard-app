@@ -6,10 +6,10 @@ use mallard_infrastructure::{
         AuthError, AuthorizationGrant, AuthorizationRequest, DropboxClient, CALLBACK_PORT,
         DISCOVERY_SCOPES, DROPBOX_CALLBACK, SETUP_SCOPES, STORAGE_SCOPES,
     },
-    dropbox_setup::discovery::{self, Account, Scan},
+    dropbox_setup::discovery::{self, Account, Folder, Scan},
     loopback_browser,
     persistence::LocalStateRepository,
-    storage_core::MarkerState,
+    storage_core::{MarkerDetailCode, MarkerState},
     storage_providers::{dropbox::provider_key, StorageProviderRegistry},
 };
 use serde::{Deserialize, Serialize};
@@ -325,28 +325,92 @@ pub fn propose_dropbox_folder_name() -> Result<String, Failure> {
         .map_err(|e| Failure::code(e.code()))
 }
 
+/// Every sentence here is the English the setup screens print; a code
+/// travels beside each one for the interface to translate by.
 #[derive(Serialize)]
 pub struct DiscoveryResult {
     scan_id: String,
     scope: String,
+    /// `dropbox_shared_folders`.
+    scope_code: &'static str,
     status: String,
     issues: Vec<String>,
+    /// Each issue's code, in `issues` order.
+    issue_codes: Vec<Issue>,
     candidates: Vec<Candidate>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct Issue {
+    code: &'static str,
+}
+#[derive(Serialize, Debug, PartialEq, Eq)]
 struct Candidate {
     candidate_id: String,
     name: String,
     marker: MarkerState,
     marker_detail: Option<String>,
+    marker_detail_code: Option<MarkerDetailCode>,
+    /// The version a `layout` detail names.
+    marker_layout_version: Option<u32>,
     facts: Vec<Fact>,
     cautions: Vec<String>,
+    /// Each caution's code, in `cautions` order.
+    caution_codes: Vec<&'static str>,
     connected_storage_id: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 struct Fact {
+    /// `access` or `location`.
+    key: &'static str,
     label: String,
     value: String,
+    /// The access level's Dropbox tag, or `in_dropbox` / `not_mounted`.
+    value_code: String,
+}
+
+/// One shared folder's row: what the marker said, the folder's access and
+/// whether it is mounted, and that read access cannot Push.
+fn folder_candidate(
+    index: usize,
+    folder: &Folder,
+    connected_storage_id: Option<String>,
+) -> Candidate {
+    let detail = folder.detail.as_ref();
+    let read_only = folder.access.starts_with("viewer");
+    let location = if folder.mounted {
+        ("In Dropbox", "in_dropbox")
+    } else {
+        ("Not mounted", "not_mounted")
+    };
+    Candidate {
+        candidate_id: index.to_string(),
+        name: folder.name.clone(),
+        marker: folder.marker.clone(),
+        marker_detail: detail.map(|detail| detail.text.clone()),
+        marker_detail_code: detail.map(|detail| detail.code),
+        marker_layout_version: detail.and_then(|detail| detail.layout_version),
+        facts: vec![
+            Fact {
+                key: "access",
+                label: "Access".into(),
+                value: folder.access.clone(),
+                value_code: folder.access.clone(),
+            },
+            Fact {
+                key: "location",
+                label: "Location".into(),
+                value: location.0.into(),
+                value_code: location.1.into(),
+            },
+        ],
+        cautions: if read_only {
+            vec!["Read access does not permit Push.".into()]
+        } else {
+            vec![]
+        },
+        caution_codes: if read_only { vec!["read_only"] } else { vec![] },
+        connected_storage_id,
+    }
 }
 
 #[tauri::command]
@@ -379,9 +443,17 @@ pub async fn discover_dropbox_storage(
     let result = DiscoveryResult {
         scan_id: scan_id.clone(),
         scope: "Accessible Dropbox shared folders".into(),
+        scope_code: "dropbox_shared_folders",
         status: if scan.partial { "partial" } else { "complete" }.into(),
         issues: if scan.partial {
             vec!["Some folders could not be listed or checked. Scan again to retry.".into()]
+        } else {
+            vec![]
+        },
+        issue_codes: if scan.partial {
+            vec![Issue {
+                code: "folders_partial",
+            }]
         } else {
             vec![]
         },
@@ -389,32 +461,8 @@ pub async fn discover_dropbox_storage(
             .folders
             .iter()
             .enumerate()
-            .map(|(index, folder)| Candidate {
-                candidate_id: index.to_string(),
-                name: folder.name.clone(),
-                marker: folder.marker.clone(),
-                marker_detail: folder.detail.clone(),
-                facts: vec![
-                    Fact {
-                        label: "Access".into(),
-                        value: folder.access.clone(),
-                    },
-                    Fact {
-                        label: "Location".into(),
-                        value: if folder.mounted {
-                            "In Dropbox"
-                        } else {
-                            "Not mounted"
-                        }
-                        .into(),
-                    },
-                ],
-                cautions: if folder.access.starts_with("viewer") {
-                    vec!["Read access does not permit Push.".into()]
-                } else {
-                    vec![]
-                },
-                connected_storage_id: config
+            .map(|(index, folder)| {
+                let connected = config
                     .storages
                     .iter()
                     .find(|s| {
@@ -422,7 +470,8 @@ pub async fn discover_dropbox_storage(
                             && s.provider_config.settings.get_str("namespace_id")
                                 == Some(folder.namespace.as_str())
                     })
-                    .map(|s| s.id.to_string()),
+                    .map(|s| s.id.to_string());
+                folder_candidate(index, folder, connected)
             })
             .collect(),
     };
@@ -582,6 +631,59 @@ mod tests {
         let mut foreign = switched;
         foreign.url.set_host(Some("example.test")).unwrap();
         assert!(!valid_link(&foreign));
+    }
+    #[test]
+    fn a_folder_row_keeps_its_english_beside_the_codes() {
+        use mallard_infrastructure::storage_core::MarkerDetail;
+        let folder = Folder {
+            namespace: "1234".into(),
+            name: "Team".into(),
+            access: "viewer_no_comment".into(),
+            mounted: false,
+            marker: MarkerState::Unreadable,
+            detail: Some(MarkerDetail::reason(
+                MarkerDetailCode::ScanTimedOut,
+                "Scan timed out",
+            )),
+        };
+        let row = folder_candidate(2, &folder, None);
+        assert_eq!(row.marker_detail.as_deref(), Some("Scan timed out"));
+        assert_eq!(row.marker_detail_code, Some(MarkerDetailCode::ScanTimedOut));
+        assert_eq!(row.marker_layout_version, None);
+        assert_eq!(
+            row.facts,
+            [
+                Fact {
+                    key: "access",
+                    label: "Access".into(),
+                    value: "viewer_no_comment".into(),
+                    value_code: "viewer_no_comment".into(),
+                },
+                Fact {
+                    key: "location",
+                    label: "Location".into(),
+                    value: "Not mounted".into(),
+                    value_code: "not_mounted".into(),
+                },
+            ]
+        );
+        assert_eq!(row.cautions, ["Read access does not permit Push."]);
+        assert_eq!(row.caution_codes, ["read_only"]);
+        let owned = folder_candidate(
+            0,
+            &Folder {
+                access: "owner".into(),
+                mounted: true,
+                marker: MarkerState::Storage,
+                detail: Some(MarkerDetail::layout(1)),
+                ..folder
+            },
+            Some("storage-1".into()),
+        );
+        assert_eq!(owned.marker_detail.as_deref(), Some("layout 1"));
+        assert_eq!(owned.marker_layout_version, Some(1));
+        assert_eq!(owned.facts[1].value, "In Dropbox");
+        assert!(owned.cautions.is_empty() && owned.caution_codes.is_empty());
     }
     #[test]
     fn draft_revision_provider_and_mode_are_checked_before_auth() {

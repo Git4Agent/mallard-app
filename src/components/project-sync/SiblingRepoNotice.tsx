@@ -1,5 +1,6 @@
 import type { BundleSnapshotSummary, SiblingBundleStatus } from "../../types";
 import Notice from "../notice/Notice";
+import { useTranslation } from "../../i18n";
 
 interface Props {
   status: SiblingBundleStatus;
@@ -13,6 +14,7 @@ interface Props {
  * `none` state renders nothing so callers can pass status through unfiltered.
  */
 export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
+  const { t } = useTranslation("reviews");
   if (status.state === "none") return null;
   const sibling = status.state === "sibling_found"
     ? status.matches[0] ?? null
@@ -20,10 +22,10 @@ export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
   if (!sibling) return null;
   const matches = status.state === "sibling_found" ? status.matches : [status.survivor];
   const body = status.state === "registration_twin"
-    ? "Two repos were registered for this repository at the same time, both still empty. Connect to the surviving one to converge."
+    ? t("sibling.twin")
     : sibling.registration_only
-      ? "Another machine registered this repository here without pushing yet. Connect so both sides share one repo."
-      : "It carries updates this link cannot see. Connect to receive them instead of publishing a separate repo.";
+      ? t("sibling.registrationOnly")
+      : t("sibling.carries");
   /* `warning`, not `info`: every branch of the body says the reader is seeing
    * less than the whole truth — a repo they cannot see carries updates, or two
    * repos are racing for the same repository — and every branch asks for the
@@ -37,9 +39,9 @@ export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
     <Notice
       severity="warning"
       timing="standing"
-      label="Notes about this storage"
+      label={t("sibling.notes")}
       className="sync-storage-notice sync-sibling-repo-notice notice-strip"
-      title={`This storage already has this repository — “${sibling.display_name}”`}
+      title={t("sibling.title", { name: sibling.display_name })}
       action={(
         <button
           type="button"
@@ -47,7 +49,7 @@ export default function SiblingRepoNotice({ status, busy, onConnect }: Props) {
           disabled={busy}
           onClick={() => onConnect(matches)}
         >
-          Connect…
+          {t("sibling.connect")}
         </button>
       )}
     >

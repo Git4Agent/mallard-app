@@ -2,7 +2,9 @@ import { useEffect, useRef } from "react";
 import type { StorageSummary } from "../../types";
 import Icon, { storageIconName } from "../Icons";
 import { NoticeChip } from "../notice/Notice";
+import { useTranslation } from "../../i18n";
 import { storageConnectionIssue, storageSubtitle, storageSubtitleIsPath } from "./StorageSettings";
+import { storageProviderName } from "./storageText";
 
 /**
  * Which storage a project is linked to, asked as the app asks every other
@@ -35,6 +37,7 @@ export default function StorageLinkDialog({
   onAddStorage,
   onCancel,
 }: Props) {
+  const { t } = useTranslation(["storage", "common"]);
   // Native <dialog> + showModal() supplies focus trap, Escape, inert
   // background, and focus restoration.
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -68,18 +71,15 @@ export default function StorageLinkDialog({
       <header className="sync-modal-header">
         <div>
           <span className="sync-eyebrow">{projectName}</span>
-          <h1 id="sync-storage-link-title">Link a storage</h1>
-          <p>
-            Where this project&apos;s sessions are pushed and pulled. A project can
-            be linked to more than one.
-          </p>
+          <h1 id="sync-storage-link-title">{t("linkDialog.title")}</h1>
+          <p>{t("linkDialog.intro")}</p>
         </div>
         <button
           type="button"
           className="btn btn-ghost"
           onClick={dismiss}
           disabled={busy}
-          aria-label="Close storage chooser"
+          aria-label={t("linkDialog.close")}
         >
           <Icon name="x" size={17} />
         </button>
@@ -88,7 +88,7 @@ export default function StorageLinkDialog({
       <div className="sync-modal-body">
         <ul className="sync-storage-link-list">
           {storages.map((storage) => {
-            const name = storage.name || "(unnamed)";
+            const name = storage.name || t("shared.unnamed");
             const subtitle = storageSubtitle(storage);
             const reconnect = storageConnectionIssue(storage);
             return (
@@ -98,10 +98,10 @@ export default function StorageLinkDialog({
                   className="sync-storage-index-row"
                   disabled={busy}
                   aria-label={[
-                    `Link ${name}`,
-                    `${storage.provider_label}, ${subtitle}`,
-                    reconnect ? `Storage issue: ${reconnect}` : null,
-                  ].filter(Boolean).join(". ")}
+                    t("linkDialog.link", { name }),
+                    t("linkDialog.where", { provider: storageProviderName(storage), subtitle }),
+                    reconnect ? t("shared.storageIssue", { issue: reconnect }) : null,
+                  ].filter(Boolean).join(t("shared.labelSeparator"))}
                   onClick={() => onLink(storage.storage_id)}
                 >
                   <span className="sync-storage-link-mark" aria-hidden="true">
@@ -111,10 +111,10 @@ export default function StorageLinkDialog({
                     <strong>{name}</strong>
                     {/* A path keeps the mono face; any other fact is prose. */}
                     <small className={storageSubtitleIsPath(storage) ? "path" : undefined}>
-                      {storage.provider_label} · {subtitle}
+                      {storageProviderName(storage)} · {subtitle}
                     </small>
                   </span>
-                  {reconnect ? <NoticeChip severity="warning">Reconnect</NoticeChip> : <span />}
+                  {reconnect ? <NoticeChip severity="warning">{t("shared.reconnect")}</NoticeChip> : <span />}
                   <span />
                   <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
                 </button>
@@ -125,13 +125,13 @@ export default function StorageLinkDialog({
       </div>
 
       <footer className="sync-modal-footer">
-        <span>{storages.length} available</span>
+        <span>{t("linkDialog.available", { count: storages.length })}</span>
         <div>
           <button type="button" className="btn btn-ghost" onClick={onAddStorage} disabled={busy}>
             <Icon name="plus" size={13} />
-            Add storage
+            {t("shared.addStorage")}
           </button>
-          <button type="button" className="btn" onClick={dismiss} disabled={busy}>Cancel</button>
+          <button type="button" className="btn" onClick={dismiss} disabled={busy}>{t("common:cancel")}</button>
         </div>
       </footer>
     </dialog>

@@ -1,6 +1,7 @@
 import { Fragment, useId, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Icon from "../Icons";
+import { useTranslation } from "../../i18n";
 import type { FolderRun, FolderVerdict } from "./projectFolder";
 
 /**
@@ -40,6 +41,7 @@ export default function ProjectFolderField({
   /** Carries out a way on the line offers that is not new text. */
   onRun?: (run: FolderRun) => void;
 }) {
+  const { t } = useTranslation("projectSetup");
   const id = useId();
   const hintId = `${id}-hint`;
   const [browseFailed, setBrowseFailed] = useState(false);
@@ -54,11 +56,11 @@ export default function ProjectFolderField({
     }
   };
   const line: FolderVerdict | null = browseFailed
-    ? { tone: "warn", message: "The folder dialog didn’t open. Type or paste the path instead." }
+    ? { tone: "warn", message: t("folder.dialogFailed") }
     : verdict;
   return (
     <div className="sync-project-folder-field">
-      <label htmlFor={id} className={labelHidden || heading ? "sync-visually-hidden" : undefined}>Folder</label>
+      <label htmlFor={id} className={labelHidden || heading ? "sync-visually-hidden" : undefined}>{t("sections.folder")}</label>
       {heading}
       <div className="sync-profile-select-row">
         <input
@@ -84,7 +86,7 @@ export default function ProjectFolderField({
           }}
         />
         <button type="button" className="btn" onClick={() => void browse()} disabled={disabled}>
-          <Icon name="folder" size={13} /> Browse…
+          <Icon name="folder" size={13} /> {t("folder.browse")}
         </button>
       </div>
       {line && (
@@ -93,7 +95,7 @@ export default function ProjectFolderField({
           {line.message}
           {line.path && <code>{line.path}</code>}
           {line.actions?.map((action, index) => (
-            <Fragment key={action.label}>
+            <Fragment key={index}>
               {index > 0 && <span aria-hidden="true">·</span>}
               <button
                 type="button"

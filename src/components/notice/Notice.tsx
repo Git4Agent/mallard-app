@@ -1,6 +1,7 @@
 import { Children, isValidElement, useEffect, useState, type ReactNode } from "react";
 import Icon, { type IconName } from "../Icons";
 import type { NoticeSeverity } from "../../types";
+import { t, useTranslation } from "../../i18n";
 
 /* One notice recipe for the whole app.
  *
@@ -35,12 +36,11 @@ const SEVERITY_RANK: Record<NoticeSeverity, number> = {
   success: 0,
 };
 
-export const SEVERITY_LABEL: Record<NoticeSeverity, string> = {
-  danger: "Error",
-  warning: "Warning",
-  info: "Note",
-  success: "Done",
-};
+/** The rung's own word, in the interface language: "Error", "Warning",
+ *  "Note", "Done". */
+export function severityLabel(severity: NoticeSeverity): string {
+  return t(`notice:severity.${severity}`);
+}
 
 export const SEVERITY_ICON: Record<NoticeSeverity, IconName> = {
   danger: "octagon-x",
@@ -153,12 +153,13 @@ export function DismissButton({ what, onClick, className }: {
   onClick: () => void;
   className?: string;
 }) {
+  const { t } = useTranslation("notice");
   return (
     <button
       type="button"
       className={`sync-notice-dismiss${className ? ` ${className}` : ""}`}
-      title="Dismiss"
-      aria-label={`Dismiss: ${what}`}
+      title={t("dismiss")}
+      aria-label={t("dismissWhat", { what })}
       onClick={onClick}
     >
       <Icon name="x" size={12} />
@@ -166,14 +167,21 @@ export function DismissButton({ what, onClick, className }: {
   );
 }
 
+/* A part that already ends as a sentence, in either language's stops. A
+   full-width stop carries its own space; after any other the next part
+   follows a space, as an English sentence does inside a Chinese line. */
+const SENTENCE_END = /[.!?…:。！？：]$/;
+const FULL_WIDTH_END = /[。！？：]$/;
+
 /** The message as one spoken line for its close control's name: each part
- * ends as a sentence, so "Scan incomplete." is not read with a second stop. */
+ * ends as a sentence, so "Scan incomplete." is not read with a second stop.
+ * A part that does not end as one takes the language's own stop. */
 function itemText(item: NoticeItem): string {
-  return [SEVERITY_LABEL[item.severity], noticeText(item.title), noticeText(item.message)]
+  return [severityLabel(item.severity), noticeText(item.title), noticeText(item.message)]
     .map((part) => part.trim())
     .filter(Boolean)
-    .map((part) => (/[.!?…:]$/.test(part) ? part : `${part}.`))
-    .join(" ");
+    .map((part) => (SENTENCE_END.test(part) ? part : t("notice:spoken.stop", { part })))
+    .reduce((line, part) => (line ? `${line}${FULL_WIDTH_END.test(line) ? "" : " "}${part}` : part), "");
 }
 
 type NoticeShellProps = NoticeTiming & {
@@ -236,7 +244,7 @@ function NoticeContent({ severity, title, children, action, mark, className, ...
   return (
     <NoticeShell severity={severity} className={className} action={action} mark={mark} {...timing}>
       <p className="notice-line">
-        <strong className="notice-type">{SEVERITY_LABEL[severity]} ·</strong>{" "}
+        <strong className="notice-type">{severityLabel(severity)} ·</strong>{" "}
         {title ? <strong className="notice-lead">{title}</strong> : null}
         {title ? " " : null}
         {children}
@@ -247,13 +255,15 @@ function NoticeContent({ severity, title, children, action, mark, className, ...
 
 export type NoticeZoneProps = NoticeTiming & {
   items: readonly NoticeItem[];
-  /** Plural noun for the count line, e.g. "notes about this record". */
+  /** What the count line counts, after its number: "notes about this
+   *  record"; in Chinese it opens on its measure word, "条关于…的提示". */
   subject: string;
   className?: string;
 };
 
 /** Every message a zone holds, in one box at the loudest rung present. */
 export function NoticeZone({ items: allItems, subject, className, ...timing }: NoticeZoneProps) {
+  const { t } = useTranslation("notice");
   const { visible: items, dismiss } = useVisibleNotices(allItems);
   const severity = highestSeverity(items.map((item) => item.severity));
   if (severity === null) return null;
@@ -289,12 +299,12 @@ export function NoticeZone({ items: allItems, subject, className, ...timing }: N
     <NoticeShell
       severity={severity}
       className={className}
-      action={<DismissButton what={`all ${items.length} ${subject}`} onClick={() => dismiss(items)} />}
+      action={<DismissButton what={t("zone.all", { count: items.length, subject })} onClick={() => dismiss(items)} />}
       {...timing}
     >
       <p className="notice-line">
-        <strong className="notice-type">{SEVERITY_LABEL[severity]} ·</strong>{" "}
-        <strong className="notice-lead">{`${items.length} ${subject}`}</strong>
+        <strong className="notice-type">{severityLabel(severity)} ·</strong>{" "}
+        <strong className="notice-lead">{t("zone.count", { count: items.length, subject })}</strong>
       </p>
       <ul className="notice-list">
         {items.map((item) => (
@@ -302,7 +312,7 @@ export function NoticeZone({ items: allItems, subject, className, ...timing }: N
             {/* One box means one leading glyph, so an item's own mark rides its
                 own line instead. */}
             {item.mark}
-            {mixed ? <strong className="notice-type">{SEVERITY_LABEL[item.severity]} ·</strong> : null}
+            {mixed ? <strong className="notice-type">{severityLabel(item.severity)} ·</strong> : null}
             {mixed ? " " : null}
             {item.title ? <strong className="notice-lead">{item.title}</strong> : null}
             {item.title ? " " : null}
@@ -344,7 +354,7 @@ export function Acknowledgement({ checked, onChange, disabled, title, children, 
       <Icon name={SEVERITY_ICON.warning} size={13} className="notice-mark" />
       <span className="notice-body">
         <span className="notice-line">
-          <strong className="notice-type">{SEVERITY_LABEL.warning} ·</strong>{" "}
+          <strong className="notice-type">{severityLabel("warning")} ·</strong>{" "}
           {title ? <strong className="notice-lead">{title}</strong> : null}
           {title ? " " : null}
           {children}
@@ -366,14 +376,15 @@ export function FieldMessage({ id, blocking, children }: {
   blocking?: boolean;
   children: ReactNode;
 }) {
+  const { t } = useTranslation("notice");
   const text = noticeText(children);
   const [closed, setClosed] = useState<string | null>(null);
   if (closed === text) return null;
   return (
     <div id={id} className="notice-field" role={blocking ? "alert" : undefined}>
       <Icon name={SEVERITY_ICON.danger} size={13} />
-      <span><span className="sync-visually-hidden">Error: </span>{children}</span>
-      <DismissButton what={`Error. ${text}`} onClick={() => setClosed(text)} />
+      <span><span className="sync-visually-hidden">{t("field.spoken")}</span>{children}</span>
+      <DismissButton what={t("field.dismiss", { text })} onClick={() => setClosed(text)} />
     </div>
   );
 }

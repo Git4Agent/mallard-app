@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "../../i18n";
 import Icon, { type IconName } from "../Icons";
 
 /** The parts Add Catalog resource's steps share with New project, drawn in
@@ -52,9 +53,13 @@ export function SetupPill({ active, disabled, mark, label, title, onClick }: {
 /** The setup page's "Needs review" mark on a band still waiting for an
  *  answer. */
 export function attentionBadge(show: boolean) {
-  if (!show) return null;
+  return show ? <AttentionBadge /> : null;
+}
+
+function AttentionBadge() {
+  const { t } = useTranslation("library");
   return (
-    <span className="sync-setup-state attention" aria-label="Needs review" title="Needs review">
+    <span className="sync-setup-state attention" aria-label={t("setup.needsReview")} title={t("setup.needsReview")}>
       <Icon name="alert-triangle" size={14} />
     </span>
   );

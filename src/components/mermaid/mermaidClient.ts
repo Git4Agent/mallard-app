@@ -1,3 +1,4 @@
+import { t, uiLanguage } from "../../i18n";
 import { mermaidSourceProblem, readMermaidResult, type MermaidResult } from "./mermaidModel";
 import type { SessionTheme } from "../sessionTheme";
 
@@ -18,7 +19,7 @@ interface RendererConnection {
 function connectRenderer(): RendererConnection {
   if (connection) return connection;
   const frame = document.createElement("iframe");
-  frame.title = "Flowchart parser";
+  frame.title = t("shell:mermaid.parserFrame");
   frame.className = "mermaid-parser-frame";
   frame.setAttribute("sandbox", "allow-scripts");
   frame.setAttribute("aria-hidden", "true");
@@ -27,11 +28,13 @@ function connectRenderer(): RendererConnection {
   let resolveReady: () => void;
   let rejectReady: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  // i18n-ignore: internal, the caller says the parser is unavailable
   const timeout = window.setTimeout(() => rejectReady(new Error("Parser load timeout")), REPLY_TIMEOUT_MS);
   function receive(event: MessageEvent) {
     if (event.source !== frame.contentWindow || event.origin !== "null" || event.data?.token !== token) return;
     if (event.data.type === "ready") {
       window.clearTimeout(timeout);
+      // i18n-ignore: internal, the caller says the parser is unavailable
       if (event.data.tauriPresent !== false) rejectReady(new Error("Privileged parser frame"));
       else resolveReady();
     } else if (event.data.type === "result" && pending && pending.id === event.data.id) {
@@ -67,7 +70,7 @@ async function requestDiagram(code: string, theme: SessionTheme): Promise<Mermai
       const timer = window.setTimeout(() => {
         pending = null;
         renderer.dispose();
-        resolve({ error: "The flowchart parser did not reply. The source is available below." });
+        resolve({ error: t("shell:mermaid.noReply") });
       }, REPLY_TIMEOUT_MS);
       pending = { id, resolve, timer };
       // An opaque frame needs '*'. Replies must match the window, origin, token, and ID.
@@ -75,17 +78,18 @@ async function requestDiagram(code: string, theme: SessionTheme): Promise<Mermai
     });
   } catch {
     renderer.dispose();
-    return { error: "The flowchart parser is unavailable. The source is available below." };
+    return { error: t("shell:mermaid.unavailable") };
   }
 }
 
 export function renderMermaid(code: string, theme: SessionTheme): Promise<MermaidResult> {
   const error = mermaidSourceProblem(code);
   if (error) return Promise.resolve({ error });
-  const key = `${theme}\n${code}`;
+  // A result holds its error in the language it was asked in.
+  const key = `${uiLanguage()}\n${theme}\n${code}`;
   const cached = cache.get(key);
   if (cached) return cached;
-  if (jobs >= MAX_JOBS) return Promise.resolve({ error: "Too many flowcharts are waiting. The source is available below." });
+  if (jobs >= MAX_JOBS) return Promise.resolve({ error: t("shell:mermaid.tooMany") });
   jobs++;
   const job = queue.then(() => requestDiagram(code, theme)).finally(() => { jobs--; });
   queue = job.catch(() => undefined);

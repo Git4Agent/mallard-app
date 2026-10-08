@@ -9,6 +9,7 @@ import type {
   LogLine,
 } from "../../types";
 import LogPanel, { ACTIVITY_LOG_TYPES } from "../LogPanel";
+import { useTranslation } from "../../i18n";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 
@@ -66,6 +67,7 @@ export default function ActivityLogDrawer({
   readLiveLines,
   subscribeToLiveLines,
 }: Props) {
+  const { t } = useTranslation("logs");
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [logTypeFilters, setLogTypeFilters] = useState<ActivityLogType[]>(() => [...ACTIVITY_LOG_TYPES]);
   const [logLevelFilter, setLogLevelFilter] = useState<ActivityLogLevel | "all">("all");
@@ -184,14 +186,14 @@ export default function ActivityLogDrawer({
       className={`log-drawer sync-log-drawer${open ? " open" : ""}`}
       style={{ height: open ? height : undefined }}
       role="region"
-      aria-label="Logs"
+      aria-label={t("drawer.label")}
       tabIndex={-1}
     >
       {open && (
         <div
           className="log-resizer"
           role="separator"
-          aria-label="Resize log"
+          aria-label={t("drawer.resize")}
           aria-orientation="horizontal"
           onMouseDown={onStartResize}
           onDoubleClick={onResetHeight}

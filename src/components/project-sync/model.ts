@@ -11,7 +11,9 @@ import type {
   StorageProviderDescriptor,
   StorageProviderKey,
 } from "../../types";
+import { t, UI_LANGUAGES } from "../../i18n";
 import { storageIconName, type IconName } from "../Icons";
+import { providerName } from "./storageText";
 
 /** A rename either landed, or failed with something to say, or was superseded
  *  by a host-identity change (`message: null`) and has nothing to report. */
@@ -35,18 +37,29 @@ export const STORAGE_BLOCKING_STATES: ReadonlySet<string> = new Set([
  * the complete inventory; this bounds only the rendered result. */
 export const PROJECT_FILE_CARD_RENDER_LIMIT = 500;
 
-/** The nouns the project lists count in — the search row and tile heads. */
-export const sessionNoun = (count: number) => (count === 1 ? "session" : "sessions");
-export const fileNoun = (count: number) => (count === 1 ? "file" : "files");
+/** The nouns the project lists count in — the search row and tile heads,
+ *  which print them after the number ("3 sessions", "3 个会话"). */
+export const sessionNoun = (count: number) => t("reviews:nouns.session", { count });
+export const fileNoun = (count: number) => t("reviews:nouns.file", { count });
 
+/** The backend's sentence when Codex's app holds a session it was asked to
+ *  delete; it stays English, like every backend error. */
+// i18n-ignore: backend text, compared against
 export const CODEX_DELETE_ERROR = "Codex provider request failed (code -32600).";
-export const CODEX_DELETE_CLOSE_NOTICE = "Delete failed. Close Codex, then try Delete again.";
+
+export const codexDeleteCloseNotice = () => t("projects:deleteCodexClose");
+
+/** Whether an error carries the Close Codex notice, in whichever language
+ *  it was written: the notice's button survives a language switch. */
+export function offersCloseCodex(message: string): boolean {
+  return UI_LANGUAGES.some((lng) => message.includes(t("projects:deleteCodexClose", { lng })));
+}
 
 export function localSessionDeleteError(provider: ProviderKey, result: LocalSessionDeleteResult): string | null {
-  if (provider === "codex" && result.provider_error === CODEX_DELETE_ERROR) return CODEX_DELETE_CLOSE_NOTICE;
+  if (provider === "codex" && result.provider_error === CODEX_DELETE_ERROR) return codexDeleteCloseNotice();
   return [
-    result.provider_error && `Session files: ${result.provider_error}`,
-    result.metadata_error && `Mallard binding: ${result.metadata_error}`,
+    result.provider_error && t("reviews:model.sessionFilesError", { error: result.provider_error }),
+    result.metadata_error && t("reviews:model.bindingError", { error: result.metadata_error }),
   ].filter(Boolean).join(" ") || null;
 }
 
@@ -70,25 +83,26 @@ export function repositoryFingerprintsRequireAcknowledgement(
   return (remoteFingerprint ?? null) !== (localFingerprint ?? null);
 }
 
-export const RESOURCE_GROUPS: Array<{
+/** The inventory's groups, in order. Their words are read when drawn. */
+export const RESOURCE_GROUPS: ReadonlyArray<{
   id: ProjectResourceCategory;
-  label: string;
-  description: string;
+  label: () => string;
+  description: () => string;
 }> = [
-  { id: "conversations", label: "Conversations", description: "Project-scoped agent sessions" },
-  { id: "project_files", label: "Project files", description: "Exact files and folders selected from a non-Git project" },
-  { id: "tools", label: "Requirements", description: "Environment requirements this backup expects on each machine" },
+  { id: "conversations", label: () => t("reviews:groups.conversations"), description: () => t("reviews:groups.conversationsDescription") },
+  { id: "project_files", label: () => t("reviews:groups.projectFiles"), description: () => t("reviews:groups.projectFilesDescription") },
+  { id: "tools", label: () => t("reviews:groups.tools"), description: () => t("reviews:groups.toolsDescription") },
 ];
 
 /** The file rows' Kind readout, Finder's vocabulary for the common suspects.
- * An unknown extension stays honest and terse: the extension, uppercased. */
-const FILE_KIND_LABELS: Record<string, string> = {
+ * An unknown extension stays honest and terse: the extension, uppercased.
+ * A format's own name reads the same in every language; a kind described in
+ * words is translated when it is drawn. */
+const FILE_FORMAT_NAMES: Record<string, string> = {
   md: "Markdown",
-  txt: "Text",
   doc: "Word",
   docx: "Word",
   pdf: "PDF",
-  sh: "Shell",
   py: "Python",
   js: "JavaScript",
   ts: "TypeScript",
@@ -99,37 +113,43 @@ const FILE_KIND_LABELS: Record<string, string> = {
   html: "HTML",
   css: "CSS",
   csv: "CSV",
-  png: "PNG image",
-  jpg: "JPEG image",
-  jpeg: "JPEG image",
-  gif: "GIF image",
-  svg: "SVG image",
-  webp: "WebP image",
   psd: "Photoshop",
-  wav: "WAV audio",
-  mp3: "MP3 audio",
-  mp4: "MP4 video",
-  mov: "QuickTime video",
-  zip: "ZIP archive",
-  gz: "Gzip archive",
+};
+
+const FILE_KIND_LABELS: Record<string, () => string> = {
+  txt: () => t("reviews:fileKind.text"),
+  sh: () => t("reviews:fileKind.shell"),
+  png: () => t("reviews:fileKind.pngImage"),
+  jpg: () => t("reviews:fileKind.jpegImage"),
+  jpeg: () => t("reviews:fileKind.jpegImage"),
+  gif: () => t("reviews:fileKind.gifImage"),
+  svg: () => t("reviews:fileKind.svgImage"),
+  webp: () => t("reviews:fileKind.webpImage"),
+  wav: () => t("reviews:fileKind.wavAudio"),
+  mp3: () => t("reviews:fileKind.mp3Audio"),
+  mp4: () => t("reviews:fileKind.mp4Video"),
+  mov: () => t("reviews:fileKind.quickTimeVideo"),
+  zip: () => t("reviews:fileKind.zipArchive"),
+  gz: () => t("reviews:fileKind.gzipArchive"),
 };
 
 export function fileKindLabel(name: string): string {
   const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "File";
+  if (dot <= 0 || dot === name.length - 1) return t("reviews:fileKind.file");
   const extension = name.slice(dot + 1).toLocaleLowerCase();
-  return FILE_KIND_LABELS[extension] ?? extension.toUpperCase();
+  return FILE_FORMAT_NAMES[extension] ?? FILE_KIND_LABELS[extension]?.() ?? extension.toUpperCase();
 }
 
 /* A scanned file's warning in one word pair, for the row chip on both the
    Files activity and the Push file review: the chip names the finding. */
-const PROJECT_FILE_WARNING_LABELS: Record<string, string> = {
-  possible_secret: "Possible secret",
-  executable: "Executable",
+const PROJECT_FILE_WARNING_LABELS: Record<string, () => string> = {
+  possible_secret: () => t("reviews:model.possibleSecret"),
+  executable: () => t("reviews:model.executable"),
 };
 
+/** An unknown code prints as the backend wrote it, underscores spaced. */
 export function projectFileWarningLabel(code: string): string {
-  return PROJECT_FILE_WARNING_LABELS[code] ?? code.replace(/_/g, " ");
+  return PROJECT_FILE_WARNING_LABELS[code]?.() ?? code.replace(/_/g, " ");
 }
 
 export function inventoryResources(inventory: ResourceInventory | null): InventoryResource[] {
@@ -151,8 +171,8 @@ export function projectContentReviewRow(
   return {
     ...entry.descriptor,
     category: "project_files",
-    kind_label: known?.kind_label ?? (entry.entry_type === "directory" ? "Project folder" : "Project file"),
-    apply_policy_label: known?.apply_policy_label ?? "Explicit review",
+    kind_label: known?.kind_label ?? (entry.entry_type === "directory" ? t("reviews:kind.projectFolder") : t("reviews:kind.projectFile")),
+    apply_policy_label: known?.apply_policy_label ?? t("reviews:model.explicitReview"),
     selectable: known?.selectable ?? true,
     logical_paths: [entry.logical_path],
     default_selected: entry.selected_in_recipe,
@@ -219,14 +239,14 @@ export function storageDoors(providers: readonly StorageProviderDescriptor[]): S
     doors.push({
       key: provider.key,
       icon: storageIconName(provider.key, provider.icon),
-      label: provider.display_name,
+      label: providerName(provider),
     });
   }
   return doors;
 }
 
 export function compactProjectPath(path?: string | null): string {
-  if (!path) return "Not mapped on this machine";
+  if (!path) return t("reviews:model.notMapped");
   // macOS and Linux homes alike; the Folder field compacts by the real home.
   return path.replace(/^\/(?:Users|home)\/[^/]+/, "~");
 }
@@ -237,7 +257,7 @@ export function compactProjectPath(path?: string | null): string {
  * validated key, so no component carries a fixed provider list.
  */
 export function providerLabel(provider?: ProviderKey | null): string {
-  if (!provider) return "Shared";
+  if (!provider) return t("reviews:model.shared");
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 

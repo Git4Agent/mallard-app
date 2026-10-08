@@ -37,6 +37,7 @@ import {
   sessionPushFacts,
 } from "./sessionDetailModel";
 import type { PushSessionFacts } from "../ProjectActivityPage";
+import { useTranslation } from "../../../i18n";
 
 const TIMELINE_PAGE_SIZE = 50;
 
@@ -99,13 +100,14 @@ type SessionDetailEntryStateProps =
   | { state: "failed"; back: PageBackTarget; error: string; onRetry: () => void };
 
 function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
+  const { t } = useTranslation(["session", "common"]);
   if (props.state === "loading") {
     // Match the loaded page geometry so detail lands without a jump. The
     // scaffold is a quiet named region.
     return (
-      <section className="session-detail-page session-detail-entry-state" aria-label="Loading session detail">
+      <section className="session-detail-page session-detail-entry-state" aria-label={t("page.loading")}>
         <PageBack target={props.back} />
-        <LoadingScaffold shape="detail" label="Loading session detail" />
+        <LoadingScaffold shape="detail" label={t("page.loading")} />
       </section>
     );
   }
@@ -114,9 +116,9 @@ function SessionDetailEntryState(props: SessionDetailEntryStateProps) {
       <PageBack target={props.back} />
       <div className="session-detail-state error" role="alert">
         <Icon name="alert-triangle" size={24} />
-        <h1 id="session-detail-entry-heading">Session detail unavailable</h1>
+        <h1 id="session-detail-entry-heading">{t("page.unavailable")}</h1>
         <span>{props.error}</span>
-        <button type="button" className="btn btn-ghost" onClick={props.onRetry}>Try again</button>
+        <button type="button" className="btn btn-ghost" onClick={props.onRetry}>{t("common:tryAgain")}</button>
       </div>
     </section>
   );
@@ -133,6 +135,7 @@ export default function SessionDetailPage({
   pushGate,
   source,
 }: Props) {
+  const { t, i18n } = useTranslation(["session", "common"]);
   const storageId = source.kind === "stored" ? source.storageId : null;
   const [detail, setDetail] = useState<ProjectSessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
@@ -206,10 +209,12 @@ export default function SessionDetailPage({
     void loadDetailRef.current(true);
   }, []);
 
+  // The crumb's fallback title and the Push row's facts are translated, so a
+  // language switch reports them again.
   useEffect(() => {
     onHeaderChange(detail ? {
       state: "ready",
-      title: detail.title || "Untitled session",
+      title: detail.title || t("untitled"),
       provider: detail.provider,
       providerDisplayName: detail.provider_display_name,
       refreshing: detailLoading,
@@ -219,7 +224,7 @@ export default function SessionDetailPage({
         ? { resourceId: detail.agent.parent_resource_id, title: detail.agent.parent_title }
         : null,
     } : detailError && !detailLoading ? { state: "failed" } : null);
-  }, [detail, detailError, detailLoading, onHeaderChange, refreshSession]);
+  }, [detail, detailError, detailLoading, onHeaderChange, refreshSession, i18n.language]);
 
   useEffect(() => () => onHeaderChange(null), [onHeaderChange]);
 
@@ -481,10 +486,10 @@ export default function SessionDetailPage({
     notices.push({
       key: "snapshot-changed",
       severity: "warning",
-      title: "This session changed.",
-      message: "Refresh before continuing so pages are not mixed across snapshots.",
+      title: t("page.changed"),
+      message: t("page.changedHint"),
       action: (
-        <button type="button" className="btn btn-ghost" onClick={() => void loadDetail(true)}>Refresh</button>
+        <button type="button" className="btn btn-ghost" onClick={() => void loadDetail(true)}>{t("common:refresh")}</button>
       ),
     });
   }
@@ -512,7 +517,7 @@ export default function SessionDetailPage({
 
       <NoticeZone
         items={notices}
-        subject="notes about this session"
+        subject={t("page.noticesSubject")}
         className="session-detail-notices"
         timing="blocking"
       />

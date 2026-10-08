@@ -9656,6 +9656,9 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
 }
 
 .session-detail-event-gap > span {
+  /* The pill rides a 24px rail and must not wrap: "+1m" cannot break, but
+     Han text breaks between any two characters. */
+  white-space: nowrap;
   padding: 1px 5px;
   border: 1px solid var(--border-mid);
   border-radius: var(--r-pill);
@@ -10863,6 +10866,26 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      act on, so they recede to ink and are told apart by glyph, clock vs bar. */
   --thread-status-pending: var(--text-2);
   --thread-status-unavailable: var(--text-2);
+}
+
+/* Simplified Chinese. Latin keeps its faces; Han falls back to the
+ * platform's own Chinese face (PingFang SC on macOS, Microsoft YaHei UI on
+ * Windows, Noto Sans CJK SC on Linux) ahead of system-ui, so it never lands
+ * on a Japanese or Traditional glyph set. Han strokes do not survive 9-10px,
+ * so the two smallest steps rise to 11px; tracking made for Latin caps only
+ * spaces Han apart, so it goes. */
+:root:lang(zh) {
+  --font-cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC";
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+    "Segoe UI", var(--font-cjk), system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Baloo 2", var(--font-cjk), "Arial Rounded MT Bold", var(--font-sans);
+  --type-3xs: 0.6875rem;
+  --type-2xs: 0.6875rem;
+}
+
+:root:lang(zh) * {
+  letter-spacing: normal !important;
 }
 
 /* Honey & Espresso, the Mallard Cloud website's palette. Light is cream paper

@@ -12,11 +12,13 @@ import { isClaudeWidgetTool } from "../../widgets/claudeWidget";
 import { writeClipboardText } from "../../sync-review/clipboard";
 import SessionDetailToolCall, {
   PayloadSection,
+  payloadLabel,
   type SessionToolDetailState,
 } from "./SessionDetailToolCall";
+import { formatCompactNumber } from "../../../format";
+import { t as translate, useTranslation } from "../../../i18n";
 import {
   eventAnchorId,
-  formatCompactNumber,
   formatSessionCount,
   formatSessionDetailClock,
   formatSessionDuration,
@@ -24,9 +26,9 @@ import {
   markdownPlayerKind,
   projectMarkdownDisplayPath,
   type ProjectMarkdownMediaState,
-  SESSION_AGENT_STATUS_LABELS,
-  SESSION_EVENT_KIND_LABELS,
+  sessionAgentStatusLabel,
   sessionDetailDateTime,
+  sessionEventKindLabel,
 } from "./sessionDetailModel";
 
 interface Props {
@@ -160,6 +162,8 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot?: string;
 }) {
+  const { t, i18n } = useTranslation("session");
+  // The renderers carry translated words, so a language switch rebuilds them.
   const components = useMemo<Components>(() => {
     const players = (node: Element | undefined) => onLoadProjectMedia
       ? linkedPlayers(node).map((path) => (
@@ -201,11 +205,11 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
           if (!projectPath || !onLoadProjectMedia) {
             return (
               <MarkdownImagePlaceholder
-                label={label || "image"}
+                label={label || t("media.image")}
                 kind={(projectPath && markdownPlayerKind(projectPath)) || "image"}
                 detail={projectPath
                   ? undefined
-                  : "Only images inside the project can be embedded."}
+                  : t("media.outsideProject")}
               />
             );
           }
@@ -248,7 +252,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
               href={safeHref}
               rel={external ? "noopener noreferrer" : undefined}
               {...(displayPath ? {
-                "aria-label": `Open ${displayPath}`,
+                "aria-label": t("media.openPath", { path: displayPath }),
                 "data-tooltip": displayPath,
               } : {})}
               onClick={external
@@ -270,7 +274,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
           );
         },
     };
-  }, [onOpenProjectPath, onLoadProjectMedia, projectRoot]);
+  }, [onOpenProjectPath, onLoadProjectMedia, projectRoot, i18n.language]);
 
   return (
     <ProjectMediaContext.Provider value={projectMedia}>
@@ -280,12 +284,13 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
 });
 
 function EventQuality({ event, title }: { event: SessionTimelineEvent; title?: string }) {
+  const { t } = useTranslation("session");
   if (event.quality === "exact") return null;
   const label = event.quality === "lower_bound"
-    ? "Partial"
+    ? t("count.partial")
     : event.quality === "inferred"
-      ? "Inferred"
-      : "Unavailable";
+      ? t("count.inferred")
+      : t("count.unavailable");
   /* The chip stays a chip — one word on the row, no box. But its explanation
      lived only in `title`, which on a role-less span is neither an accessible
      name nor a description: nothing announces it and no keyboard reaches it.
@@ -298,12 +303,6 @@ function EventQuality({ event, title }: { event: SessionTimelineEvent; title?: s
     </span>
   );
 }
-
-/* One word is not enough to explain a matched commit, and the row has no space
-   for the sentence. Both arms of the match land after the session ended, so
-   this holds whichever one produced the checkpoint. */
-const CHECKPOINT_QUALITY_HINT =
-  "Matched from Git after the session ended. The transcript does not record a commit.";
 
 /**
  * The rail tile is the speaker, and its label carries name and minute. Prompts
@@ -320,13 +319,13 @@ function EventNode({
   provider: string;
   providerDisplayName: string;
 }) {
-  const speaker = event.kind === "prompt"
-    ? SESSION_EVENT_KIND_LABELS.prompt
-    : event.kind === "checkpoint"
-      ? SESSION_EVENT_KIND_LABELS.checkpoint
-      : event.kind === "agent_call"
-        ? `${SESSION_EVENT_KIND_LABELS.agent_call} · ${event.agent?.label ?? ""}`.replace(/ · $/, "")
-        : providerDisplayName || SESSION_EVENT_KIND_LABELS[event.kind];
+  const speaker = event.kind === "prompt" || event.kind === "checkpoint"
+    ? sessionEventKindLabel(event.kind)
+    : event.kind === "agent_call"
+      ? event.agent?.label
+        ? `${sessionEventKindLabel(event.kind)} · ${event.agent.label}`
+        : sessionEventKindLabel(event.kind)
+      : providerDisplayName || sessionEventKindLabel(event.kind);
   const label = event.timestamp != null
     ? `${speaker} · ${formatSessionDetailClock(event.timestamp)}`
     : speaker;
@@ -348,15 +347,13 @@ function EventNode({
    transcript opens with it — so that section is not drawn at all: the verb in
    the head band is the way to it, and an apology in its place only sent the
    reader looking for a second control. */
-const AGENT_BRIEF_NOTE = "No brief was recorded for this agent.";
-
 function agentReportNote(agent: SessionAgentPreview): string {
   switch (agent.status) {
-    case "running": return "Still running — no report yet.";
-    case "failed": return "The call failed before a report.";
-    case "interrupted": return "Interrupted before a final message.";
-    case "unavailable": return "No transcript is available for this agent.";
-    default: return "The transcript ends before a final message.";
+    case "running": return translate("session:agent.reportRunning");
+    case "failed": return translate("session:agent.reportFailed");
+    case "interrupted": return translate("session:agent.reportInterrupted");
+    case "unavailable": return translate("session:agent.noTranscript");
+    default: return translate("session:agent.reportEnded");
   }
 }
 
@@ -378,13 +375,14 @@ function AgentRow({
   event: SessionTimelineEvent;
   onOpenSession?: (resourceId: string) => void;
 }) {
+  const { t } = useTranslation("session");
   const agent = event.agent;
   const [expanded, setExpanded] = useState(false);
   if (!agent) {
     return (
       <div className="session-detail-tool-malformed" role="note">
         <Icon name="alert-triangle" size={12} />
-        This agent call could not be projected safely.
+        {t("agent.malformed")}
       </div>
     );
   }
@@ -399,23 +397,23 @@ function AgentRow({
       onToggle={(toggleEvent) => setExpanded(toggleEvent.currentTarget.open)}
     >
       <summary>
-        <span className="session-detail-tool-name session-detail-agent-stamp">Agent</span>
+        <span className="session-detail-tool-name session-detail-agent-stamp">{t("agent.stamp")}</span>
         <span className="session-detail-agent-label" title={agent.label}>{agent.label}</span>
         {agent.task && <span className="session-detail-agent-task" title={agent.task}>{agent.task}</span>}
         {agent.role && <span className="session-detail-agent-pill">{agent.role}</span>}
-        {agent.mode === "async" && <span className="session-detail-agent-pill mode">async</span>}
+        {agent.mode === "async" && <span className="session-detail-agent-pill mode">{t("agentMode.async")}</span>}
         {/* One end cluster, so the length sits against the chevron on every
             row instead of splitting the free space with it. */}
         <span className="session-detail-agent-end">
           <span className="session-detail-agent-meta">
             {agent.tool_calls != null && (
-              <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
+              <span>{t("count.calls", { count: agent.tool_calls, value: formatCompactNumber(agent.tool_calls) })}</span>
             )}
             {length && <span className="session-detail-agent-length">{length}</span>}
           </span>
           {agent.status !== "completed" && (
             <span className={`session-detail-agent-status status-${agent.status}`}>
-              {SESSION_AGENT_STATUS_LABELS[agent.status]}
+              {sessionAgentStatusLabel(agent.status)}
             </span>
           )}
           <span className="session-detail-tool-chevron" aria-hidden="true">
@@ -433,7 +431,7 @@ function AgentRow({
               <div className="session-detail-agent-facts">
                 {agent.role && <span><Icon name="git-fork" size={12} />{agent.role}</span>}
                 {agent.model && <span>{agent.model}</span>}
-                <span>{agent.mode}</span>
+                <span>{t(`agentMode.${agent.mode}`)}</span>
                 {start && (
                   <span>
                     <Icon name="clock" size={12} />
@@ -441,34 +439,34 @@ function AgentRow({
                   </span>
                 )}
                 {agent.tool_calls != null && (
-                  <span>{formatCompactNumber(agent.tool_calls)} {agent.tool_calls === 1 ? "call" : "calls"}</span>
+                  <span>{t("count.calls", { count: agent.tool_calls, value: formatCompactNumber(agent.tool_calls) })}</span>
                 )}
-                {agent.tokens != null && <span>{formatCompactNumber(agent.tokens)} tokens</span>}
+                {agent.tokens != null && <span>{t("agent.tokens", { value: formatCompactNumber(agent.tokens) })}</span>}
               </div>
               <button
                 type="button"
                 className="btn session-detail-agent-open"
                 disabled={!transcript || !onOpenSession}
-                title={transcript ? "Open this agent's transcript as its own page" : "No transcript is available for this agent."}
+                title={transcript ? t("agent.openTitle") : t("agent.noTranscript")}
                 onClick={() => { if (transcript) onOpenSession?.(transcript); }}
               >
                 <Icon name="external-link" size={12} />
-                Open transcript
+                {t("agent.openTranscript")}
               </button>
             </div>
             {agent.brief
-              ? <PayloadSection label="Brief" value={agent.brief} truncated={agent.brief_truncated} />
+              ? <PayloadSection kind="brief" value={agent.brief} truncated={agent.brief_truncated} />
               : agent.mode !== "spawn" && (
                 <section className="session-detail-payload-section">
-                  <div className="session-detail-payload-head"><span className="session-detail-payload-label">Brief</span></div>
-                  <p className="session-detail-agent-note">{AGENT_BRIEF_NOTE}</p>
+                  <div className="session-detail-payload-head"><span className="session-detail-payload-label">{payloadLabel("brief")}</span></div>
+                  <p className="session-detail-agent-note">{t("agent.noBrief")}</p>
                 </section>
               )}
             {agent.report
-              ? <PayloadSection label="Report" value={agent.report} truncated={agent.report_truncated} />
+              ? <PayloadSection kind="report" value={agent.report} truncated={agent.report_truncated} />
               : (
                 <section className="session-detail-payload-section">
-                  <div className="session-detail-payload-head"><span className="session-detail-payload-label">Report</span></div>
+                  <div className="session-detail-payload-head"><span className="session-detail-payload-label">{payloadLabel("report")}</span></div>
                   <p className="session-detail-agent-note">{agentReportNote(agent)}</p>
                 </section>
               )}
@@ -506,6 +504,7 @@ function PromptCard({
   onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot: string;
 }) {
+  const { t } = useTranslation("session");
   const callCount = speakableCount(event.turn_tool_summary?.tool_calls);
   const clock = event.timestamp != null ? formatSessionDetailClock(event.timestamp) : null;
   return (
@@ -515,7 +514,7 @@ function PromptCard({
           {clock && <time dateTime={sessionDetailDateTime(event.timestamp)}>{clock}</time>}
           {turnDuration && <span>{turnDuration}</span>}
           {callCount && (
-            <span>{formatSessionCount(callCount)} {callCount.value === 1 ? "call" : "calls"}</span>
+            <span>{t("count.calls", { count: callCount.value ?? 0, value: formatSessionCount(callCount) })}</span>
           )}
         </div>
       )}
@@ -529,7 +528,7 @@ function PromptCard({
             projectRoot={projectRoot}
           />
         ) : (
-          <p className="session-detail-event-empty">No visible text is available for this event.</p>
+          <p className="session-detail-event-empty">{t("event.noText")}</p>
         )}
       </div>
     </div>
@@ -550,6 +549,7 @@ function ReplyCard({
   onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot: string;
 }) {
+  const { t } = useTranslation("session");
   const clock = event.timestamp != null ? formatSessionDetailClock(event.timestamp) : null;
   return (
     <div className="session-detail-card session-detail-card-reply">
@@ -568,7 +568,7 @@ function ReplyCard({
             projectRoot={projectRoot}
           />
         ) : (
-          <p className="session-detail-event-empty">No visible text is available for this event.</p>
+          <p className="session-detail-event-empty">{t("event.noText")}</p>
         )}
       </div>
     </div>
@@ -580,8 +580,9 @@ function CheckpointBody({ event, repositoryUrl }: {
   event: SessionTimelineEvent;
   repositoryUrl?: string | null;
 }) {
+  const { t } = useTranslation("session");
   const checkpoint = event.checkpoint;
-  const subject = checkpoint?.subject ?? event.text ?? "Git checkpoint";
+  const subject = checkpoint?.subject ?? event.text ?? t("event.gitCheckpoint");
   const sha = checkpoint?.short_sha ?? checkpoint?.sha.slice(0, 7);
   // A sha links only where a remote can resolve it, the same rule the activity
   // list follows; the glyph is what marks it as an off-app target.
@@ -594,7 +595,7 @@ function CheckpointBody({ event, repositoryUrl }: {
           href={commitUrl}
           target="_blank"
           rel="noopener noreferrer"
-          title={`Open ${checkpoint?.sha} on GitHub`}
+          title={t("event.openOnGitHub", { sha: checkpoint?.sha ?? "" })}
           onClick={(clickEvent) => { clickEvent.preventDefault(); void openExternalUrl(commitUrl); }}
         >
           <Icon name="external-link" size={12} />
@@ -608,9 +609,12 @@ function CheckpointBody({ event, repositoryUrl }: {
       {/* The flag rides with branch and clock instead of taking a line of its
           own above the card. Every checkpoint is matched rather than recorded,
           so a stacked chip resized the row on the one kind that always carries
-          one — 62px for the same commit a plain row states in 36px. */}
+          one — 62px for the same commit a plain row states in 36px. One word
+          is not enough to explain a matched commit, and the row has no space
+          for the sentence; both arms of the match land after the session
+          ended, so the hint holds whichever one produced the checkpoint. */}
       <span className="session-detail-checkpoint-end">
-        <EventQuality event={event} title={CHECKPOINT_QUALITY_HINT} />
+        <EventQuality event={event} title={t("event.checkpointHint")} />
         {checkpoint?.branch && (
           <span className="session-detail-checkpoint-branch">{checkpoint.branch}</span>
         )}
@@ -639,6 +643,7 @@ export default function SessionDetailEvent({
   repositoryUrl,
   onOpenSession,
 }: Props) {
+  const { t } = useTranslation("session");
   const classes = [
     "session-detail-event",
     `event-${event.kind.replace(/_/g, "-")}`,
@@ -709,7 +714,7 @@ export default function SessionDetailEvent({
                 projectRoot={projectRoot}
               />
             ) : (
-              <p className="session-detail-event-empty">No visible text is available for this event.</p>
+              <p className="session-detail-event-empty">{t("event.noText")}</p>
             )}
           </div>
         )}

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { en } from "../../src/i18n/en";
 import type {
   BundleSnapshotSummary,
   SiblingBundleStatus,
@@ -107,6 +108,7 @@ test("the setup repository choice is always explicit once a storage is chosen", 
   assert.match(setup, /const showRepositoryChoice = Boolean\(chosenStorageId\)/);
   // An empty storage gets the explicit creation statement instead of
   // silence, rendered as the section's own selected option card.
-  assert.match(setup, /Creates “\$\{draft\.display_name\}” in/);
+  assert.match(setup, /t\("setup\.createsIn", \{ name: draft\.display_name, storage: selectedStorage\.name \}\)/);
+  assert.match(en.projectSetup.setup.createsIn, /^Creates “\{\{name\}\}” in \{\{storage\}\}/);
   assert.match(setup, /listRemoteBundleSnapshots\(chosenStorageId\)/);
 });

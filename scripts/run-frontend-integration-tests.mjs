@@ -7,8 +7,11 @@ import { build } from "esbuild";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const testDirectory = join(projectRoot, "tests", "frontend");
+// Optional arguments narrow the run to test files whose names contain one of them.
+const filters = process.argv.slice(2);
 const entries = (await readdir(testDirectory, { withFileTypes: true }))
   .filter((entry) => entry.isFile() && entry.name.endsWith(".integration.test.tsx"))
+  .filter((entry) => filters.length === 0 || filters.some((filter) => entry.name.includes(filter)))
   .map((entry) => join("tests", "frontend", entry.name))
   .sort();
 const outputDirectory = await mkdtemp(join(tmpdir(), "agent-sync-frontend-tests-"));

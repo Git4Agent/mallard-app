@@ -1,5 +1,7 @@
 import type { IconName } from "../Icons";
 import { clockOptions, formatRelativeTime } from "../../clock";
+import { t, uiLocale } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import { errorMessage } from "../../storageError";
 import type { ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 import { isPullReviewStatus } from "../sync-review/pullReviewStatus";
@@ -89,21 +91,115 @@ export function catalogStorageRepositoryViews(
   }));
 }
 
+/** A capability's labels in the interface language: the backend's English,
+ * or Chinese looked up by the presentation hint beside them. */
+export function capabilityLabel(capability: Pick<CatalogCapabilityDescriptor, "presentation" | "label">): string {
+  return backendText(`capability.${capability.presentation.icon}.label`, capability.label);
+}
+
+export function capabilitySingular(capability: Pick<CatalogCapabilityDescriptor, "presentation" | "singular_label">): string {
+  return backendText(`capability.${capability.presentation.icon}.singular`, capability.singular_label);
+}
+
+export function capabilityFormatLabel(capability: Pick<CatalogCapabilityDescriptor, "presentation">): string {
+  return backendText(`capability.${capability.presentation.icon}.formatLabel`, capability.presentation.format_label);
+}
+
+/** A row's own label: its registered capability's, in the interface
+ * language, or the raw coordinate an unavailable row carries. */
+export function catalogScopeKindLabel(
+  scope: Pick<CatalogScopeDto, "label"> & { capability?: CatalogScopeView["capability"] },
+): string {
+  return scope.capability
+    ? backendText(`capability.${scope.capability.presentation.icon}.label`, scope.label)
+    : scope.label;
+}
+
 /** "Skills · Codex home" — the row label is the capability's label plus the
  * profile's current name, so renaming a profile renames its rows. An
  * unavailable row carries its raw coordinate as the label. */
 export function catalogScopeLabel(
-  scope: Pick<CatalogScopeDto, "label"> & { profile: Pick<CatalogProfile, "display_name"> },
+  scope: Pick<CatalogScopeDto, "label"> & {
+    capability?: CatalogScopeView["capability"];
+    profile: Pick<CatalogProfile, "display_name">;
+  },
 ): string {
-  return `${scope.label} · ${scope.profile.display_name}`;
+  return `${catalogScopeKindLabel(scope)} · ${scope.profile.display_name}`;
 }
 
 export function catalogScopeIcon(scope: Pick<CatalogScopeView, "capability">): IconName {
   return catalogPresentation(scope.capability).icon;
 }
 
-export function catalogNoun(pluralLabel: string, singularLabel: string, count: number): string {
-  return (count === 1 ? singularLabel : pluralLabel).toLowerCase();
+/** The words a page uses for one kind of resource. */
+export interface CatalogNouns {
+  /** A sentence about this kind, handed its noun for `count` things — the
+   *  plural when no count is given — to pass as `{{noun}}`. Chinese writes
+   *  `{{noun}}` straight against the Han beside it; the space a Latin noun
+   *  ("Skill") needs there is put in here, so 安装 Skill and 安装插件 both read
+   *  right. English sentences carry their own spaces. */
+  say: (sentence: (noun: string) => string, count?: number) => string;
+  /** A sentence that opens on the singular noun: English capitalizes it
+   *  ("Skill info"). */
+  lead: (sentence: (noun: string) => string) => string;
+  /** The noun a shared component prints after a bare count: "3 skills",
+   *  "3 个 Skill". */
+  counted: (count: number) => string;
+}
+
+type NounKind = "skill" | "plugin" | "petV1" | "petV2";
+
+/** The kinds this build has words for, by the presentation hint the glyphs
+ *  above read. */
+const NOUN_KINDS: Record<string, NounKind> = { skill: "skill", plugin: "plugin", pet: "petV1", "pet-v2": "petV2" };
+
+const NOUNS: Record<NounKind, (count: number) => string> = {
+  skill: (count) => t("library:noun.skill", { count }),
+  plugin: (count) => t("library:noun.plugin", { count }),
+  petV1: (count) => t("library:noun.petV1", { count }),
+  petV2: (count) => t("library:noun.petV2", { count }),
+};
+
+const COUNTED: Record<NounKind, (count: number) => string> = {
+  skill: (count) => t("library:counted.skill", { count }),
+  plugin: (count) => t("library:counted.plugin", { count }),
+  petV1: (count) => t("library:counted.petV1", { count }),
+  petV2: (count) => t("library:counted.petV2", { count }),
+};
+
+/** Any count English words in the plural. */
+const MANY = 2;
+
+/** The words for a capability's kind: from the catalog for a kind this build
+ *  knows, else from the backend's own labels — lowercased, as a sentence
+ *  holds a noun. */
+export function catalogNouns(
+  capability: Pick<CatalogCapabilityDescriptor, "presentation"> | null,
+  labels: { plural: string; singular: string },
+): CatalogNouns {
+  const kind = capability ? NOUN_KINDS[capability.presentation.icon] : undefined;
+  const fallback = { singular: labels.singular.toLowerCase(), plural: labels.plural.toLowerCase() };
+  const noun = (count: number) => (kind ? NOUNS[kind](count) : t("library:noun.other", { count, ...fallback }));
+  /* The noun is a value of its sentence, so `src/i18n` settles its spacing in
+     Chinese: 安装 Skill, 安装插件. */
+  const say = (sentence: (noun: string) => string, count = MANY) => sentence(noun(count));
+  return {
+    say,
+    lead: (sentence) => {
+      const one = noun(1);
+      return sentence(`${one.charAt(0).toUpperCase()}${one.slice(1)}`);
+    },
+    counted: (count) => (kind ? COUNTED[kind](count) : t("library:counted.other", { count, ...fallback })),
+  };
+}
+
+/** A Catalog row's words: its capability's, or its own label's when this
+ *  build registers none. */
+export function catalogScopeNouns(scope: Pick<CatalogScopeView, "label" | "capability">): CatalogNouns {
+  return catalogNouns(scope.capability, {
+    plural: scope.label,
+    singular: scope.capability?.singular_label ?? scope.label,
+  });
 }
 
 /** One radio of the Add chooser: a portable shape — kind, format, and
@@ -133,7 +229,7 @@ export function catalogAddChoices(
     const key = catalogChoiceKey(capability);
     const existing = choices.find((choice) => choice.key === key);
     if (existing) existing.providers.push(capability);
-    else choices.push({ key, label: capability.label, providers: [capability] });
+    else choices.push({ key, label: capabilityLabel(capability), providers: [capability] });
   }
   return choices;
 }
@@ -152,10 +248,14 @@ export function catalogDoors(capabilities: readonly CatalogCapabilityDescriptor[
 
 /** "Codex only", "Codex and Claude" — which providers offer one shape. */
 export function catalogProviderList(labels: readonly string[]): string {
-  if (labels.length === 1) return `${labels[0]} only`;
-  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+  if (labels.length === 1) return t("library:providers.only", { provider: labels[0] });
+  return t("library:providers.list", {
+    list: labels.slice(0, -1).join(t("library:providers.separator")),
+    last: labels[labels.length - 1],
+  });
 }
 
+// i18n-ignore: backend text
 const CATALOG_SCOPE_LINKS_STORAGES = "still links storages";
 
 export function catalogScopeRemovalRequiresCleanup(reason: unknown): boolean {
@@ -174,12 +274,9 @@ export function catalogScopeRemovalRequiresCleanup(reason: unknown): boolean {
  */
 export function catalogScopeRemovalMessage(label: string, reason: unknown): string {
   const message = errorMessage(reason);
-  if (catalogScopeRemovalRequiresCleanup(reason)) {
-    return `Unlink every storage from “${label}”, then remove it again.`;
-  }
-  if (message.includes("Catalog row changed")) {
-    return `“${label}” changed somewhere else. Refresh the Catalog, then try removing it again.`;
-  }
+  if (catalogScopeRemovalRequiresCleanup(reason)) return t("library:rowRemoval.unlinkFirst", { label });
+  // i18n-ignore: backend text
+  if (message.includes("Catalog row changed")) return t("library:rowRemoval.changed", { label });
   return message;
 }
 
@@ -250,33 +347,33 @@ export function catalogMatchingRows(
 /** The badge's sentence: what this row's state means for this storage, said
  * in the one place the state is shown. */
 export function rowStatusLabel(row: CatalogScopeRow, storageName: string | null): string {
-  const storage = storageName ?? "storage";
+  const storage = storageName ?? t("library:status.anyStorage");
   /* No state with a storage chosen: that storage refused the account, and
      the page's note says why. */
   if (!row.state) {
     return storageName
-      ? `Not compared with ${storageName}.`
-      : "Only on this Mac. Choose a storage to compare and sync it.";
+      ? t("library:status.notCompared", { storage: storageName })
+      : t("library:status.onlyHere");
   }
   switch (row.state) {
     case "in_sync":
-      return `Up to date here and in ${storage}.`;
+      return t("library:status.inSync", { storage });
     case "new":
-      return `Only on this computer. Push to save it in ${storage}.`;
+      return t("library:status.new", { storage });
     case "local_changed":
-      return `Newer on this computer. Push to update ${storage}.`;
+      return t("library:status.localChanged", { storage });
     case "remote_missing":
-      return `Gone from ${storage}. Push to put it back.`;
+      return t("library:status.remoteMissing", { storage });
     case "storage_changed":
-      return `Newer in ${storage}. Pull to update this computer.`;
+      return t("library:status.storageChanged", { storage });
     case "local_missing":
-      if (!row.remote_present) return `Not on this computer, and not in ${storage}.`;
-      return `Only in ${storage}. Pull to download it here.`;
+      if (!row.remote_present) return t("library:status.nowhere", { storage });
+      return t("library:status.localMissing", { storage });
     case "unreviewed_remote":
     case "diverged":
-      return `Changed here and in ${storage}. Review before syncing.`;
+      return t("library:status.diverged", { storage });
     case "blocked":
-      return row.blocker ?? "Can't be synced.";
+      return row.blocker ?? t("library:status.blocked");
   }
 }
 
@@ -322,10 +419,10 @@ export function rowStamp(row: CatalogScopeRow): { seconds: number; detail: strin
   const seconds = local ?? row.remote_updated_at ?? null;
   if (seconds == null) return null;
   const when = new Date(seconds * 1000);
-  const exact = `${when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(undefined, clockOptions())}`;
+  const exact = `${when.toLocaleDateString(uiLocale(), { year: "numeric", month: "short", day: "numeric" })} · ${when.toLocaleTimeString(uiLocale(), clockOptions())}`;
   return {
     seconds,
-    detail: `${local == null ? "Stored" : "Edited"} ${exact}`,
+    detail: local == null ? t("library:stamp.stored", { when: exact }) : t("library:stamp.edited", { when: exact }),
   };
 }
 
@@ -334,13 +431,13 @@ export function rowStamp(row: CatalogScopeRow): { seconds: number; detail: strin
 export function actionLabel(action: CatalogPullAction): string {
   switch (action.kind.kind) {
     case "preserve_as_copy_and_overwrite":
-      return `Keep local as ${action.kind.copy.copy_name} and overwrite`;
+      return t("library:action.keepLocalAs", { name: action.kind.copy.copy_name });
     case "overwrite_with_storage":
-      return "Overwrite local content";
+      return t("library:action.overwriteLocal");
     case "install":
-      return "Install stored content";
+      return t("library:action.installStored");
     case "update":
-      return "Update from storage";
+      return t("library:action.updateFromStorage");
   }
 }
 
@@ -403,11 +500,13 @@ export function catalogDefaultKind(cards: readonly CatalogKindCard[], doorKey: s
  * or the format label while the count is unknown. */
 export function catalogKindCardFoot(card: CatalogKindCard): string {
   const count = card.holding?.count;
-  if (count == null) return card.capability.presentation.format_label;
-  if (count === 0) return "Nothing here yet";
-  const counted = `${count} ${catalogNoun(card.capability.label, card.capability.singular_label, count)}`;
+  if (count == null) return capabilityFormatLabel(card.capability);
+  if (count === 0) return t("library:kindCard.empty");
+  const nouns = catalogNouns(card.capability, { plural: card.capability.label, singular: card.capability.singular_label });
   const newest = card.holding?.newest_modified_at;
-  return newest ? `${counted} · ${formatRelativeTime(newest)}` : counted;
+  return nouns.say((noun) => (newest
+    ? t("library:kindCard.countNewest", { count, noun, when: formatRelativeTime(newest) })
+    : t("library:kindCard.count", { count, noun })), count);
 }
 
 /** The storage a new row starts on: the one a Catalog row used last, else
@@ -428,9 +527,9 @@ export function catalogStorageHint(
   chosen: string | null,
   lastUsed: string | null | undefined,
 ): string | null {
-  if (storages.length === 0) return "No storage yet.";
+  if (storages.length === 0) return t("library:storageHint.none");
   if (!chosen) return null;
-  if (chosen === lastUsed) return "Used last by the Catalog.";
-  if (storages.length === 1) return "Your only storage.";
-  return storages[0]?.id === chosen && storages[0].provider === "managed_cloud" ? "Mallard Cloud first." : null;
+  if (chosen === lastUsed) return t("library:storageHint.lastUsed");
+  if (storages.length === 1) return t("library:storageHint.only");
+  return storages[0]?.id === chosen && storages[0].provider === "managed_cloud" ? t("library:storageHint.cloudFirst") : null;
 }

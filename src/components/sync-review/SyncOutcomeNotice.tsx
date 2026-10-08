@@ -1,24 +1,26 @@
 import { useId, useRef, useState } from "react";
+import type { ParseKeys } from "i18next";
 import { clockOptions } from "../../clock";
+import { uiLocale, useTranslation } from "../../i18n";
 import Icon, { type IconName } from "../Icons";
-import { DismissButton } from "../notice/Notice";
+import { DismissButton, severityLabel } from "../notice/Notice";
 import type { SyncOutcomeView, OutcomeAction, OutcomeActionPresentation, SyncOutcomeRowStatus } from "./outcome";
 
 const ROW_PRESENTATION: Record<
   SyncOutcomeRowStatus,
-  { icon: IconName; className: string; label: string }
+  { icon: IconName; className: string; label: ParseKeys<"syncReview"> }
 > = {
-  synced: { icon: "check-circle", className: "synced", label: "Synced" },
-  held: { icon: "git-compare-arrows", className: "diverged", label: "Held for Pull" },
-  preserved: { icon: "git-fork", className: "preserved", label: "Kept independently" },
-  failed: { icon: "octagon-x", className: "unavailable", label: "Failed" },
-  not_attempted: { icon: "git-compare-arrows", className: "unavailable", label: "Not attempted" },
-  skipped: { icon: "git-compare-arrows", className: "unavailable", label: "Skipped" },
-  not_pulled: { icon: "git-compare-arrows", className: "diverged", label: "Not pulled" },
+  synced: { icon: "check-circle", className: "synced", label: "outcome.synced" },
+  held: { icon: "git-compare-arrows", className: "diverged", label: "outcome.held" },
+  preserved: { icon: "git-fork", className: "preserved", label: "outcome.preserved" },
+  failed: { icon: "octagon-x", className: "unavailable", label: "outcome.failed" },
+  not_attempted: { icon: "git-compare-arrows", className: "unavailable", label: "outcome.notAttempted" },
+  skipped: { icon: "git-compare-arrows", className: "unavailable", label: "outcome.skipped" },
+  not_pulled: { icon: "git-compare-arrows", className: "diverged", label: "outcome.notPulled" },
 };
 
 function formatTime(seconds: number): string {
-  return new Date(seconds * 1_000).toLocaleString(undefined, {
+  return new Date(seconds * 1_000).toLocaleString(uiLocale(), {
     month: "short",
     day: "numeric",
     ...clockOptions(),
@@ -43,6 +45,7 @@ export default function SyncOutcomeNotice<A extends OutcomeAction>({
   onDismiss: () => void;
   presentAction?: (action: A, index: number) => OutcomeActionPresentation;
 }) {
+  const { t } = useTranslation("syncReview");
   const [open, setOpen] = useState(outcome.defaultOpen);
   const rendered = useRef(outcome);
   if (rendered.current !== outcome) {
@@ -52,7 +55,7 @@ export default function SyncOutcomeNotice<A extends OutcomeAction>({
   const bodyId = `sync-outcome-body-${useId().replace(/:/g, "")}`;
   /* A strip of the storage card in the notice recipe: the rung's word leads
      the title, the way every notice names its own severity. */
-  const word = outcome.tone === "success" ? "Done" : "Warning";
+  const word = severityLabel(outcome.tone === "success" ? "success" : "warning");
   const presented = outcome.actions.map((action, index) => ({ action, presentation: presentAction(action, index) }));
   const runnableActions = presented.filter(({ presentation }) => presentation.available);
   const manualActions = presented.filter(({ presentation }) => !presentation.available);
@@ -99,12 +102,12 @@ export default function SyncOutcomeNotice<A extends OutcomeAction>({
             className="sync-history-commit-toggle"
             aria-expanded={open}
             aria-controls={bodyId}
-            aria-label={`${open ? "Collapse" : "Expand"} the result list`}
+            aria-label={open ? t("outcome.collapse") : t("outcome.expand")}
             onClick={() => setOpen((value) => !value)}
           >
             <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
           </button>
-          <DismissButton what={`${word}. ${outcome.title}`} onClick={onDismiss} />
+          <DismissButton what={t("outcome.dismiss", { word, title: outcome.title })} onClick={onDismiss} />
         </span>
       </div>
       {outcome.message && (
@@ -123,14 +126,15 @@ export default function SyncOutcomeNotice<A extends OutcomeAction>({
         <div className="sync-history-thread-list sync-outcome-threads">
           {outcome.rows.map((row) => {
             const presentation = ROW_PRESENTATION[row.status];
+            const status = t(presentation.label);
             return (
               <article key={row.key} className="sync-history-thread-card">
                 <div className="sync-history-thread-topline">
                   <div className="sync-history-thread-title">
                     <span
                       className={`sync-thread-sync-indicator ${presentation.className}`}
-                      data-tooltip={row.reason ? `${presentation.label}\n${row.reason}` : presentation.label}
-                      aria-label={row.reason ? `${presentation.label}. ${row.reason}` : presentation.label}
+                      data-tooltip={row.reason ? `${status}\n${row.reason}` : status}
+                      aria-label={row.reason ? t("outcome.rowStatus", { status, reason: row.reason }) : status}
                       tabIndex={0}
                     >
                       <Icon name={presentation.icon} size={13} />
@@ -174,7 +178,7 @@ export default function SyncOutcomeNotice<A extends OutcomeAction>({
         </div>
         {outcome.tone === "warning" && outcome.technical.length > 0 && (
           <details className="sync-outcome-technical">
-            <summary>Technical results</summary>
+            <summary>{t("outcome.technical")}</summary>
             <dl>
               {outcome.technical.map((entry) => (
                 <div key={`${entry.label}:${entry.value}`}>

@@ -12,8 +12,10 @@ import { NoticeZone } from "../../src/components/notice/Notice";
 import { pushFailureNotice } from "../../src/components/project-sync/pushFailureNotice";
 import { buildPushOutcome } from "../../src/components/project-sync/syncOutcome";
 import { storageAccessErrorMessage } from "../../src/storageError";
+import { i18n } from "../../src/i18n";
 import {
-  PUSH_FINISHED,
+  isPushFinished,
+  pushFinished,
   finishPushOffered,
   ownUnfinishedPushSentence,
   unfinishedPushSentence,
@@ -196,7 +198,49 @@ test("only the two unfinished-push sentences, for this storage, offer Finish tha
   assert.equal(finishPushOffered(ownUnfinishedPushSentence("Attic R2"), "Attic R2"), true);
   assert.equal(finishPushOffered(unfinishedPushSentence("Attic R2"), "Other storage"), false);
   assert.equal(finishPushOffered("The storage changed while pushing. Compare again.", "Attic R2"), false);
-  assert.equal(finishPushOffered(PUSH_FINISHED, "Attic R2"), false);
+  assert.equal(finishPushOffered(pushFinished(), "Attic R2"), false);
   assert.equal(finishPushOffered(null, "Attic R2"), false);
-  assert.doesNotMatch(PUSH_FINISHED, /\b(error|warning|note|done)\b/i);
+  assert.doesNotMatch(pushFinished(), /\b(error|warning|note|done)\b/i);
+  // The done tone follows the sentence in either language, never another one.
+  assert.equal(isPushFinished(pushFinished()), true);
+  assert.equal(isPushFinished("已完成。请重新比较。"), true);
+  assert.equal(isPushFinished("The storage changed while pushing. Compare again."), false);
+});
+
+test("a push outcome in Chinese keeps the backend's reason and the thread titles as written", () => {
+  const reason = "conversation 'torn' does not end at a record boundary; refresh and push again";
+  const result: ProjectOperationResult = {
+    success: false,
+    message: "Published version 2 — 1 session not pushed",
+    revision: 2,
+    resources_changed: 1,
+    results: [{ resource_id: "claude:conversation:torn", state: "failed", message: reason }],
+  };
+  const build = () => buildPushOutcome({
+    projectId: "project-1",
+    storageId: "storage-1",
+    selectedResourceIds: selected,
+    threadComparison: threads,
+    result,
+  });
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const outcome = build();
+    assert.equal(outcome.title, "已上传 1/2 个会话");
+    assert.deepEqual(outcome.stats.map((stat) => [stat.label, stat.value]), [["已上传", "1"], ["未上传", "1"], ["Version", "2"]]);
+    assert.deepEqual(outcome.rows.map((row) => [row.title, row.reason ?? null]), [["Good thread", null], ["Torn thread", reason]]);
+    assert.deepEqual(outcome.technical, [{ label: "消息", value: "Published version 2 — 1 session not pushed" }]);
+    const clean = buildPushOutcome({
+      projectId: "project-1",
+      storageId: "storage-1",
+      selectedResourceIds: new Set(["claude:conversation:good"]),
+      threadComparison: threads,
+      result: { success: true, message: "", revision: 3, resources_changed: 1, results: [] },
+    });
+    assert.equal(clean.title, "上传完成");
+    assert.deepEqual(clean.stats[0], { icon: "upload", value: "1", label: "个会话" });
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(build().title, "Pushed 1 of 2 sessions");
 });

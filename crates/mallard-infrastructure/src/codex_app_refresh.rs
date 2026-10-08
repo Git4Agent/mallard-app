@@ -40,13 +40,112 @@ pub struct CodexAppRefreshOffer {
     pub app_kind: CodexAppKind,
     pub app_name: String,
     pub state: CodexAppRefreshState,
+    /// The project's Codex home a restart relaunches the app with, when it
+    /// is not the default one.
+    pub relaunch_home: Option<String>,
     pub message: String,
+}
+
+impl CodexAppRefreshOffer {
+    #[cfg(all(not(test), any(target_os = "macos", windows)))]
+    fn new(
+        operation_id: mallard_domain::ConversationOperationId,
+        app_name: &str,
+        state: CodexAppRefreshState,
+        relaunch_home: Option<String>,
+    ) -> Self {
+        Self {
+            operation_id,
+            app_kind: CodexAppKind::Codex,
+            app_name: app_name.to_string(),
+            message: offer_message(app_name, state, relaunch_home.as_deref()),
+            state,
+            relaunch_home,
+        }
+    }
+}
+
+/// What an offer says: a running app may need a restart, and the home it
+/// comes back with; an app Mallard could not check is restarted by hand.
+pub fn offer_message(
+    app_name: &str,
+    state: CodexAppRefreshState,
+    relaunch_home: Option<&str>,
+) -> String {
+    match state {
+        CodexAppRefreshState::RestartAvailable => format!(
+            "{app_name} may need a restart to refresh its conversation list.{}",
+            relaunch_home
+                .map(|home| format!(
+                    " Mallard will relaunch it with this project's Codex home ({home})."
+                ))
+                .unwrap_or_default()
+        ),
+        CodexAppRefreshState::ManualRestart => {
+            format!("Restart {app_name} manually if the synced conversation is not visible.")
+        }
+    }
+}
+
+/// What a finished restart did. A failure carries no outcome: its message
+/// is an error.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexAppRestartOutcome {
+    AlreadyClosed,
+    Restarted,
+    RestartedWithHome,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CodexAppRestartResult {
     pub success: bool,
     pub message: String,
+    pub outcome: Option<CodexAppRestartOutcome>,
+    pub app_name: Option<String>,
+    /// The Codex home a `restarted_with_home` relaunch pinned.
+    pub home_path: Option<String>,
+}
+
+impl CodexAppRestartResult {
+    #[cfg(any(target_os = "macos", windows))]
+    fn done(outcome: CodexAppRestartOutcome, app_name: &str, home_path: Option<String>) -> Self {
+        Self {
+            success: true,
+            message: restart_message(outcome, app_name, home_path.as_deref()),
+            outcome: Some(outcome),
+            app_name: Some(app_name.to_string()),
+            home_path,
+        }
+    }
+
+    pub fn failed(message: String) -> Self {
+        Self {
+            success: false,
+            message,
+            outcome: None,
+            app_name: None,
+            home_path: None,
+        }
+    }
+}
+
+/// What a finished restart says.
+pub fn restart_message(
+    outcome: CodexAppRestartOutcome,
+    app_name: &str,
+    home_path: Option<&str>,
+) -> String {
+    match outcome {
+        CodexAppRestartOutcome::AlreadyClosed => format!(
+            "{app_name} is already closed; its conversation list will refresh next time it opens."
+        ),
+        CodexAppRestartOutcome::Restarted => format!("{app_name} restarted."),
+        CodexAppRestartOutcome::RestartedWithHome => format!(
+            "{app_name} restarted with this project's Codex home ({}).",
+            home_path.unwrap_or_default()
+        ),
+    }
 }
 
 /// Offer a refresh for the app that will show the synced threads. The
@@ -57,76 +156,47 @@ pub fn refresh_offer(
     operation_id: mallard_domain::ConversationOperationId,
     codex_home: Option<&Path>,
 ) -> Option<CodexAppRefreshOffer> {
+    #[cfg(all(not(test), any(target_os = "macos", windows)))]
+    let relaunch_home = codex_home
+        .filter(|home| !is_default_codex_home(home))
+        .map(|home| home.display().to_string());
     #[cfg(all(not(test), target_os = "macos"))]
     {
-        let profile_note = codex_home
-            .filter(|home| !is_default_codex_home(home))
-            .map(|home| {
-                format!(
-                    " Mallard will relaunch it with this project's Codex home ({}).",
-                    home.display()
-                )
-            })
-            .unwrap_or_default();
         let app = find_installed_mac_app()?;
+        let app_name = app.specification.app_name;
         match mac_app_is_running(&app) {
-            Ok(true) => Some(CodexAppRefreshOffer {
+            Ok(true) => Some(CodexAppRefreshOffer::new(
                 operation_id,
-                app_kind: CodexAppKind::Codex,
-                app_name: app.specification.app_name.to_string(),
-                state: CodexAppRefreshState::RestartAvailable,
-                message: format!(
-                    "{} may need a restart to refresh its conversation list.{}",
-                    app.specification.app_name, profile_note
-                ),
-            }),
+                app_name,
+                CodexAppRefreshState::RestartAvailable,
+                relaunch_home,
+            )),
             Ok(false) => None,
-            Err(_) => Some(CodexAppRefreshOffer {
+            Err(_) => Some(CodexAppRefreshOffer::new(
                 operation_id,
-                app_kind: CodexAppKind::Codex,
-                app_name: app.specification.app_name.to_string(),
-                state: CodexAppRefreshState::ManualRestart,
-                message: format!(
-                    "Restart {} manually if the synced conversation is not visible.",
-                    app.specification.app_name
-                ),
-            }),
+                app_name,
+                CodexAppRefreshState::ManualRestart,
+                None,
+            )),
         }
     }
     #[cfg(all(not(test), windows))]
     {
-        let profile_note = codex_home
-            .filter(|home| !is_default_codex_home(home))
-            .map(|home| {
-                format!(
-                    " Mallard will relaunch it with this project's Codex home ({}).",
-                    home.display()
-                )
-            })
-            .unwrap_or_default();
         let app = find_installed_windows_app()?;
         match windows_app_is_running(&app) {
-            Ok(true) => Some(CodexAppRefreshOffer {
+            Ok(true) => Some(CodexAppRefreshOffer::new(
                 operation_id,
-                app_kind: CodexAppKind::Codex,
-                app_name: WINDOWS_CODEX_APP_NAME.to_string(),
-                state: CodexAppRefreshState::RestartAvailable,
-                message: format!(
-                    "{WINDOWS_CODEX_APP_NAME} may need a restart to refresh its conversation \
-                     list.{profile_note}"
-                ),
-            }),
+                WINDOWS_CODEX_APP_NAME,
+                CodexAppRefreshState::RestartAvailable,
+                relaunch_home,
+            )),
             Ok(false) => None,
-            Err(_) => Some(CodexAppRefreshOffer {
+            Err(_) => Some(CodexAppRefreshOffer::new(
                 operation_id,
-                app_kind: CodexAppKind::Codex,
-                app_name: WINDOWS_CODEX_APP_NAME.to_string(),
-                state: CodexAppRefreshState::ManualRestart,
-                message: format!(
-                    "Restart {WINDOWS_CODEX_APP_NAME} manually if the synced conversation is \
-                     not visible."
-                ),
-            }),
+                WINDOWS_CODEX_APP_NAME,
+                CodexAppRefreshState::ManualRestart,
+                None,
+            )),
         }
     }
     #[cfg(any(test, not(any(target_os = "macos", windows))))]
@@ -147,13 +217,11 @@ pub fn restart_after_pull(
             "the reviewed Codex App installation is no longer available".to_string()
         })?;
         if !mac_app_is_running(&app)? {
-            return Ok(CodexAppRestartResult {
-                success: true,
-                message: format!(
-                    "{} is already closed; its conversation list will refresh next time it opens.",
-                    app.specification.app_name
-                ),
-            });
+            return Ok(CodexAppRestartResult::done(
+                CodexAppRestartOutcome::AlreadyClosed,
+                app.specification.app_name,
+                None,
+            ));
         }
         request_mac_app_quit(&app)?;
         let deadline = Instant::now() + APP_QUIT_TIMEOUT;
@@ -175,13 +243,11 @@ pub fn restart_after_pull(
             "the reviewed Codex App installation is no longer available".to_string()
         })?;
         if !windows_app_is_running(&app)? {
-            return Ok(CodexAppRestartResult {
-                success: true,
-                message: format!(
-                    "{WINDOWS_CODEX_APP_NAME} is already closed; its conversation list will \
-                     refresh next time it opens."
-                ),
-            });
+            return Ok(CodexAppRestartResult::done(
+                CodexAppRestartOutcome::AlreadyClosed,
+                WINDOWS_CODEX_APP_NAME,
+                None,
+            ));
         }
         request_windows_app_quit(&app)?;
         let deadline = Instant::now() + APP_QUIT_TIMEOUT;
@@ -316,16 +382,18 @@ fn relaunch_windows_app(
     let deadline = Instant::now() + APP_QUIT_TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(true) = windows_app_is_running(app) {
-            return Ok(CodexAppRestartResult {
-                success: true,
-                message: if pinned.is_empty() {
-                    format!("{WINDOWS_CODEX_APP_NAME} restarted.")
-                } else {
-                    format!(
-                        "{WINDOWS_CODEX_APP_NAME} restarted with this project's Codex home ({}).",
-                        codex_home.display()
-                    )
-                },
+            return Ok(if pinned.is_empty() {
+                CodexAppRestartResult::done(
+                    CodexAppRestartOutcome::Restarted,
+                    WINDOWS_CODEX_APP_NAME,
+                    None,
+                )
+            } else {
+                CodexAppRestartResult::done(
+                    CodexAppRestartOutcome::RestartedWithHome,
+                    WINDOWS_CODEX_APP_NAME,
+                    Some(codex_home.display().to_string()),
+                )
             });
         }
         thread::sleep(Duration::from_millis(250));
@@ -361,10 +429,11 @@ fn relaunch_mac_app(
                 app.specification.app_name
             ));
         }
-        return Ok(CodexAppRestartResult {
-            success: true,
-            message: format!("{} restarted.", app.specification.app_name),
-        });
+        return Ok(CodexAppRestartResult::done(
+            CodexAppRestartOutcome::Restarted,
+            app.specification.app_name,
+            None,
+        ));
     }
     let executable = app
         .bundle_path
@@ -393,14 +462,11 @@ fn relaunch_mac_app(
         // the LaunchServices running check stays the only success authority.
         let _ = child.try_wait();
         if let Ok(true) = mac_app_is_running(app) {
-            return Ok(CodexAppRestartResult {
-                success: true,
-                message: format!(
-                    "{} restarted with this project's Codex home ({}).",
-                    app.specification.app_name,
-                    codex_home.display()
-                ),
-            });
+            return Ok(CodexAppRestartResult::done(
+                CodexAppRestartOutcome::RestartedWithHome,
+                app.specification.app_name,
+                Some(codex_home.display().to_string()),
+            ));
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -544,6 +610,49 @@ fn run_status_bounded(command: &mut Command, timeout: Duration) -> Result<bool, 
                 return Err("Codex App platform adapter timed out".to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[test]
+    fn offers_and_results_keep_their_english_beside_the_values() {
+        assert_eq!(
+            offer_message("Codex", CodexAppRefreshState::RestartAvailable, None),
+            "Codex may need a restart to refresh its conversation list."
+        );
+        assert_eq!(
+            offer_message(
+                "ChatGPT",
+                CodexAppRefreshState::RestartAvailable,
+                Some("/work/.codex")
+            ),
+            "ChatGPT may need a restart to refresh its conversation list. Mallard will relaunch it with this project's Codex home (/work/.codex)."
+        );
+        assert_eq!(
+            offer_message("Codex App", CodexAppRefreshState::ManualRestart, None),
+            "Restart Codex App manually if the synced conversation is not visible."
+        );
+        assert_eq!(
+            restart_message(CodexAppRestartOutcome::AlreadyClosed, "Codex", None),
+            "Codex is already closed; its conversation list will refresh next time it opens."
+        );
+        assert_eq!(
+            restart_message(CodexAppRestartOutcome::Restarted, "Codex", None),
+            "Codex restarted."
+        );
+        assert_eq!(
+            restart_message(
+                CodexAppRestartOutcome::RestartedWithHome,
+                "Codex",
+                Some("/work/.codex")
+            ),
+            "Codex restarted with this project's Codex home (/work/.codex)."
+        );
+        let failed = CodexAppRestartResult::failed("did not quit".into());
+        assert!(!failed.success && failed.outcome.is_none() && failed.app_name.is_none());
     }
 }
 

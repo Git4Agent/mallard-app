@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
+  AfterPullActionOffer,
   BundleReadiness,
   ConversationBlocker,
   ConversationReviewAction,
@@ -19,6 +20,7 @@ import RestorePlanView, {
 import SyncOutcomeNotice from "../../src/components/sync-review/SyncOutcomeNotice";
 import {
   buildPullOutcome,
+  maintenanceSummary,
   type SyncOutcome,
 } from "../../src/components/project-sync/syncOutcome";
 import { REVIEW_EXPIRED, REVIEW_SUPERSEDED, compareAgainOffered } from "../../src/components/project-sync/pullReviewFlow";
@@ -40,6 +42,7 @@ import {
   sessionPullAnswer,
   type PullReviewApi,
 } from "../../src/components/project-sync/pullReviewFlow";
+import { i18n } from "../../src/i18n";
 
 function renderOutcome(outcome: SyncOutcome) {
   return renderToStaticMarkup(
@@ -1001,14 +1004,16 @@ test("a session's Pull ends on the session's page, and its failure retries the s
   const apply = shell.slice(shell.indexOf("const applyReview = async"), shell.indexOf("/** Verify a draft against its provider"));
   assert.ok(apply.length > 0 && apply.length < 4_500, "applyReview was found");
   assert.match(apply, /closePullReview\(\);[\s\S]{0,260}const landing = restoreRequest\.current;\s*const stillHere = \(\) => hostWorkflowEpoch\.current === workflowEpoch && restoreRequest\.current === landing;/);
-  assert.match(apply, /if \(pulledSession && stillHere\(\)\) \{\s*await openPulledSession\(restoreBinding\.local_project_id, pulledSession\);\s*if \(stillHere\(\)\) notify\(`\$\{outcome\.title\}\.`\);\s*\}/);
+  assert.match(apply, /if \(pulledSession && stillHere\(\)\) \{\s*await openPulledSession\(restoreBinding\.local_project_id, pulledSession\);\s*if \(stillHere\(\)\) notify\(t\("notices\.outcome", \{ title: outcome\.title \}\)\);\s*\}/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /outcome: "\{\{title\}\}\.",/);
   const afterClose = apply.slice(apply.indexOf("closePullReview();"), apply.indexOf("} catch (reason)"));
   assert.doesNotMatch(afterClose, /restoreRequest\.current === requestId/);
   // The card keeps a session's outcome only when it holds something to act on.
   assert.match(apply, /setStorageNotice\(pulledSession && outcome\.actions\.length === 0 \? null : \{/);
   // Nothing to review: no apply is sent for a session that is here, and the
   // line says which of the two it is.
-  assert.match(shell, /if \(!here\) notify\("Nothing to pull for that session\.", "attention"\);\s*else notify\(answer === "up_to_date" \? "Already here and up to date\." : "Already here — nothing to pull\.", "note"\);/);
+  assert.match(shell, /if \(!here\) notify\(t\("notices\.nothingToPull"\), "attention"\);\s*else notify\(t\(answer === "up_to_date" \? "notices\.upToDate" : "notices\.alreadyHere"\), "note"\);/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /nothingToPull: "Nothing to pull for that session\.",\s*upToDate: "Already here and up to date\.",\s*alreadyHere: "Already here — nothing to pull\.",/);
   // A Pull that could not start is retried as what it was: a session's
   // Retry must not open the project's review.
   assert.match(shell, /onPull=\{\(projectId, storageId, scope\) => beginProjectRestore\(projectId, storageId, scope\)\}/);
@@ -1019,8 +1024,9 @@ test("a session's Pull ends on the session's page, and its failure retries the s
   // only in storage, with the project's own Pull one press away.
   assert.match(workspace, /onProjectFilesToPullChange\?\.\(projectFileCounts\.pull\);/);
   assert.match(shell, /activeProjectSubview\.kind === "session_detail" && projectFilesToPull > 0 && activeProjectId && activeStorageId/);
-  assert.match(shell, /message: `Project files for this folder are still in \$\{storageName\}\.`,/);
-  assert.match(shell, /onClick=\{\(\) => void beginProjectRestore\(projectId, storageId\)\}\s*>\s*Pull project\s*<\/button>/);
+  assert.match(shell, /message: t\("notices\.filesInStorage", \{ storage: storageName \}\),/);
+  assert.match(shell, /onClick=\{\(\) => void beginProjectRestore\(projectId, storageId\)\}\s*>\s*\{t\("notices\.pullProject"\)\}\s*<\/button>/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /filesInStorage: "Project files for this folder are still in \{\{storage\}\}\.",\s*pullProject: "Pull project",/);
 });
 
 test("a session's outcome names the session and never speaks of Push", () => {
@@ -1325,4 +1331,165 @@ test("the tools row says Checking… while its readiness checks run", () => {
   assert.match(checking, /<summary>[\s\S]*?Checking…[\s\S]*?<\/summary>/);
   assert.doesNotMatch(checking, /Checking readiness/);
   assert.match(render(false), /<summary>[\s\S]*?0 selected[\s\S]*?<\/summary>/);
+});
+
+/* The Pull review and its outcome in Chinese: the frontend's words translate,
+   while session titles and the backend's own sentences stay as written. */
+test("the Pull review and its outcome speak Chinese and keep backend sentences English", () => {
+  const row = conversationRow("keep_both", "selection-zh", null, "修复登录跳转");
+  const plan: PullReview = { ...restorePlan, revision: 3, actions: [], conversation_review: [row] };
+  const backendReason = "Source changed after the comparison. Compare again.";
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderReview(plan);
+    const header = html.match(/<header\b[\s\S]*?<\/header>/)?.[0] ?? "";
+    const footer = html.match(/<footer\b[\s\S]*?<\/footer>/)?.[0] ?? "";
+    assert.match(header, /<h2 id="sync-pull-review-title">下载检查<\/h2>/);
+    assert.match(header, /<span class="sync-pull-review-meta">Version 3<\/span>/);
+    assert.match(header, /aria-label="关闭 gam2 的下载检查"/);
+    assert.match(footer, /标记为已检查<\/button>/);
+    assert.match(html, /<strong>会话<\/strong><span>会话 · Codex<\/span>/);
+    assert.match(html, /aria-label="选择“会话”"/);
+    assert.doesNotMatch(html, />Pull review<|Mark as reviewed/);
+
+    // A failed Pull: Chinese around the backend's English reason.
+    const failed = buildPullOutcome({
+      projectId: binding.local_project_id,
+      plan,
+      result: result({
+        success: false,
+        reviewed_base_advanced: false,
+        failed_actions: [{ action_id: row.action_id!, display_name: null, message: backendReason }],
+      }),
+      readiness: null,
+      items: buildPullReviewItems(plan),
+      completedResourceIds: new Set(),
+    });
+    assert.equal(failed.title, "1 项更改需要处理");
+    assert.deepEqual(failed.stats.map((stat) => stat.label), ["已还原", "失败", "Version"]);
+    assert.equal(failed.rows[0].title, "修复登录跳转");
+    assert.equal(failed.rows[0].reason, backendReason);
+    assert.equal(failed.rows[1].title, "上传仍被阻止");
+    assert.deepEqual(failed.actions, [{ kind: "open_pull", label: "打开下载检查" }]);
+    assert.deepEqual(failed.technical, [{ label: "消息", value: "Applied restore actions" }, { label: "计划", value: "plan-restore" }]);
+    const outcomeHtml = renderOutcome(failed);
+    assert.match(outcomeHtml, /1 项更改需要处理/);
+    assert.match(outcomeHtml, /Source changed after the comparison\. Compare again\./);
+
+    // A Pull that failed outright: the lead-in is Chinese, the cause is not,
+    // and Compare again is still offered for the backend's own sentence.
+    const restoreFailed = `还原失败：${REVIEW_SUPERSEDED}`;
+    assert.equal(compareAgainOffered(restoreFailed), true);
+    const banner = renderReview(plan, restoreFailed, () => undefined);
+    assert.match(banner, /还原失败：The storage changed since this review\. Compare again\./);
+    assert.match(banner, /重新比较<\/button>/);
+
+    // A session pulled by itself names the session as it was titled.
+    const pulled = buildPullOutcome({
+      projectId: binding.local_project_id,
+      plan: { ...plan, scope: { kind: "session", resource_id: row.resource_id } },
+      result: result({ applied_action_ids: [row.action_id!] }),
+      readiness: null,
+      items: buildPullReviewItems(plan),
+      completedResourceIds: new Set([row.resource_id]),
+    });
+    assert.equal(pulled.title, "已下载“修复登录跳转”");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+});
+
+/* D7: readiness issues, after-Pull offers and maintenance results are the
+   backend's English with a code and the values beside them. */
+test("readiness issues, after-Pull offers and maintenance results keep their English and are worded by code in Chinese", () => {
+  const readiness: BundleReadiness = {
+    bundle_id: binding.bundle_id,
+    state: "blocked",
+    issues: [
+      {
+        issue_id: "provider-home-codex",
+        category: "conversations",
+        title: "Codex home is not mapped",
+        detail: "Choose an existing Codex home before restoring provider state.",
+        severity: "error",
+        provider: "codex",
+        provider_name: "Codex",
+      },
+      {
+        issue_id: "restore-project-data",
+        category: "project_files",
+        title: "2 project data changes were left unchanged",
+        detail: "Review the technical result, fix the reported problem, and try Pull again.",
+        severity: "error",
+        count: 2,
+      },
+    ],
+  };
+  const offer: AfterPullActionOffer = {
+    provider: "codex",
+    action_id: "codex.app.restart",
+    label: "Restart Codex",
+    message: "Codex may need a restart to refresh its conversation list. Mallard will relaunch it with this project's Codex home (/Users/me/work/.codex).",
+    message_code: "restart_app_with_home",
+    app_name: "Codex",
+    home_path: "/Users/me/work/.codex",
+    available: true,
+    arguments: { operation_id: "operation-materialize", app_kind: "codex" },
+  };
+  const build = (restore: RestoreResult, ready: BundleReadiness) => buildPullOutcome({
+    projectId: binding.local_project_id,
+    plan: restorePlan,
+    result: restore,
+    readiness: ready,
+    items: buildPullReviewItems(restorePlan),
+    completedResourceIds: new Set(["codex:session:thread-a"]),
+  });
+  const blocked = () => build(result({ applied_action_ids: ["action-session"] }), readiness);
+  const offered = () => build(
+    result({ applied_action_ids: ["action-session"], after_pull_actions: [offer] }),
+    { bundle_id: binding.bundle_id, state: "ready", issues: [] },
+  );
+  const issueRows = (outcome: SyncOutcome) => outcome.rows
+    .filter((row) => row.key.startsWith("provider-home") || row.key === "restore-project-data")
+    .map((row) => [row.title, row.reason]);
+  const restarted = {
+    provider: "codex",
+    action_id: "codex.app.restart",
+    ready: true,
+    summary: "Codex restarted with this project's Codex home (/Users/me/work/.codex).",
+    summary_code: "app_restarted_with_home" as const,
+    app_name: "Codex",
+    home_path: "/Users/me/work/.codex",
+    facts: {},
+  };
+  const failed = { provider: "codex", action_id: "codex.app.restart", ready: false, summary: "Codex did not finish a graceful quit", facts: {} };
+
+  // English is the backend's own text.
+  assert.deepEqual(issueRows(blocked()), [
+    ["Codex home is not mapped", "Choose an existing Codex home before restoring provider state."],
+    ["2 project data changes were left unchanged", "Review the technical result, fix the reported problem, and try Pull again."],
+  ]);
+  assert.deepEqual(offered().actions, [{ kind: "after_pull_action", label: "Restart Codex", title: offer.message, offer }]);
+  assert.equal(maintenanceSummary(restarted), restarted.summary);
+  assert.equal(maintenanceSummary(failed), failed.summary);
+
+  // Chinese by code; the app's name and the path stay as given.
+  void i18n.changeLanguage("zh-CN");
+  try {
+    assert.deepEqual(issueRows(blocked()), [
+      ["Codex 主目录未映射", "恢复提供方状态前，请选择一个现有的 Codex 主目录。"],
+      ["2 项项目数据更改未应用", "请查看技术结果，修复报告的问题，然后重新下载。"],
+    ]);
+    const [action] = offered().actions;
+    assert.equal(action.kind === "after_pull_action" && action.label, "重启 Codex");
+    assert.equal(
+      action.kind === "after_pull_action" && action.title,
+      "Codex 可能需要重启才能刷新会话列表。Mallard 会使用此项目的 Codex 主目录（/Users/me/work/.codex）重新启动它。",
+    );
+    assert.equal(maintenanceSummary(restarted), "Codex 已使用此项目的 Codex 主目录（/Users/me/work/.codex）重启。");
+    // A failure's summary is an error and stays as the backend wrote it.
+    assert.equal(maintenanceSummary(failed), "Codex did not finish a graceful quit");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });

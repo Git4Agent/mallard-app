@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import type { InventoryResource, ProjectResourceCategory } from "../../types";
 import Icon from "../Icons";
+import { useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import { RESOURCE_GROUPS } from "./model";
 
 interface Props {
@@ -46,6 +48,7 @@ function ResourceRow({
   disabled: boolean;
   onToggle: () => void;
 }) {
+  const { t } = useTranslation("reviews");
   const [expanded, setExpanded] = useState(false);
   const blocked = !!resource.blocked_reason;
 
@@ -58,7 +61,7 @@ function ResourceRow({
             checked={checked}
             disabled={disabled}
             onChange={onToggle}
-            aria-label={`Include ${resource.display_name}`}
+            aria-label={t("inventory.include", { name: resource.display_name })}
           />
         </label>
       )}
@@ -86,7 +89,7 @@ function ResourceRow({
           {resource.description && <p>{resource.description}</p>}
           {resource.logical_paths && resource.logical_paths.length > 0 && (
             <div>
-              <span>Portable paths</span>
+              <span>{t("inventory.portablePaths")}</span>
               <code>{resource.logical_paths.join("\n")}</code>
             </div>
           )}
@@ -96,13 +99,13 @@ function ResourceRow({
                 — a recipe entry that no longer resolves locally is the case.
                 Printing the id again under a caption said it twice. */}
             {resource.resource_id !== resource.display_name && (
-              <><dt>Resource ID</dt><dd><code>{resource.resource_id}</code></dd></>
+              <><dt>{t("inventory.resourceId")}</dt><dd><code>{resource.resource_id}</code></dd></>
             )}
             {/* Wire coordinates never reach the screen raw: the registered
                 contracts label the kind and say in words what will happen to
                 the file, and an unregistered coordinate is labelled by itself. */}
-            <dt>Kind</dt><dd>{resource.kind_label}</dd>
-            <dt>Apply</dt><dd>{resource.apply_policy_label}</dd>
+            <dt>{t("inventory.kind")}</dt><dd>{backendText(`resourceKind.${resource.kind.key}`, resource.kind_label)}</dd>
+            <dt>{t("inventory.apply")}</dt><dd>{backendText(`applyPolicy.${resource.apply_policy.key}`, resource.apply_policy_label)}</dd>
           </dl>
           {resource.blocked_reason && (
             <div className="sync-resource-blocker"><Icon name="alert-triangle" size={14} /> {resource.blocked_reason}</div>
@@ -132,6 +135,7 @@ function ResourceGroup({
   forceExpanded: boolean;
   onToggle: (resourceId: string) => void;
 }) {
+  const { t } = useTranslation("reviews");
   const [folded, setCollapsed] = useState(defaultCollapsed);
   const collapsed = folded && !forceExpanded;
   const selectableItems = items.filter((item) => (
@@ -157,22 +161,22 @@ function ResourceGroup({
           type="button"
           className="sync-resource-group-fold"
           aria-expanded={!collapsed}
-          title={group.description}
+          title={group.description()}
           onClick={toggleCollapsed}
           disabled={forceExpanded}
         >
           <span className="sync-resource-group-icon"><Icon name={CATEGORY_ICON[group.id]} size={16} /></span>
           <span className="sync-resource-group-copy">
-            <strong>{group.label}</strong>
-            <span>{group.description}</span>
+            <strong>{group.label()}</strong>
+            <span>{group.description()}</span>
           </span>
           {unavailableCount > 0 && (
             <span
               className="sync-resource-group-unavailable"
-              title={`${unavailableCount} of ${items.length} unavailable on this machine`}
+              title={t("inventory.unavailableTitle", { count: unavailableCount, total: items.length })}
             >
               <Icon name="alert-triangle" size={12} />
-              {unavailableCount} unavailable
+              {t("inventory.unavailable", { count: unavailableCount })}
             </span>
           )}
           <span className="sync-resource-group-count">{selectedCount}/{items.length}</span>
@@ -188,7 +192,7 @@ function ResourceGroup({
               }
             }}
           >
-            {allSelected ? "Clear" : "Include all"}
+            {allSelected ? t("inventory.clear") : t("inventory.includeAll")}
           </button>
         </span>
         <Icon name={collapsed ? "chevron-right" : "chevron-down"} size={13} className="sync-resource-group-chevron" />
@@ -220,6 +224,7 @@ export default function ResourceInventory({
   forceExpanded = false,
   onToggle,
 }: Props) {
+  const { t } = useTranslation("reviews");
   const grouped = useMemo(() => {
     const result = new Map<ProjectResourceCategory, InventoryResource[]>();
     for (const group of RESOURCE_GROUPS) result.set(group.id, []);
@@ -231,8 +236,8 @@ export default function ResourceInventory({
     return (
       <div className="sync-empty-state compact">
         <Icon name="folder" size={22} />
-        <strong>No project resources discovered</strong>
-        <span>Refresh after the provider has created tasks, sessions, or project configuration.</span>
+        <strong>{t("inventory.emptyTitle")}</strong>
+        <span>{t("inventory.emptyDetail")}</span>
       </div>
     );
   }

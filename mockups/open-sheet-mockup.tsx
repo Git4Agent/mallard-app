@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import Icon, { type IconName } from "../src/components/Icons";
 import AppLinkSheet, { type AppLinkSheetState } from "../src/components/app-link/AppLinkSheet";
-import { INVALID_LINK, linkVerdict, type LinkContext, type LinkStop, type LinkVerdict } from "../src/components/app-link/appLink";
+import { invalidLink, linkVerdict, type LinkContext, type LinkStop, type LinkVerdict } from "../src/components/app-link/appLink";
 import type { CatalogCapabilityDescriptor, CatalogScopeView } from "../src/components/storage-catalog/types";
 import type { AppLinkAccount, AppLinkAnswer, AppLinkRepository } from "../src/types";
 import "../src/App.css";
@@ -95,7 +95,7 @@ const SCENES: Scene[] = [
     id: "failed", label: "Stop · no answer", subject: PORTAL.address,
     state: answered(linkVerdict(answer(PORTAL.address, [account({ kind: "failed", message: "Mallard Cloud could not be reached. Check the network and try again." })]), CONTEXT)),
   },
-  { id: "invalid", label: "Stop · bad link", subject: null, state: answered(INVALID_LINK) },
+  { id: "invalid", label: "Stop · bad link", subject: null, state: answered(invalidLink()) },
 ];
 
 /* ——— one view model every direction draws from ———————————————————————— */

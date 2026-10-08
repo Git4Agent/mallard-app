@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { renderToStaticMarkup } from "react-dom/server";
 import { projectSyncApi } from "../../src/components/project-sync/api";
+import { i18n } from "../../src/i18n";
 import CloudProjectSource, {
   browsedPath,
   clonesFrom,
@@ -19,6 +20,7 @@ import CloudProjectSource, {
 } from "../../src/components/project-sync/CloudProjectSource";
 import NewProjectFolderStep from "../../src/components/project-sync/NewProjectFolderStep";
 import ProjectFolderField from "../../src/components/project-sync/ProjectFolderField";
+import ProjectBindingEditor from "../../src/components/project-sync/ProjectBindingEditor";
 import { compactFolderPath, readFolderInput } from "../../src/components/project-sync/projectFolder";
 import RepositoryAddressPicker, {
   cloneSourceWord,
@@ -526,7 +528,7 @@ for (const scenario of [
         getConfig: async () => ({ schema: 1, revision: 7, storages: [personal, work, r2] }),
       },
       refreshStorageSetupDrafts: async () => {}, openStorageDraftForm: noop,
-      adoptConfigSnapshot: noop, notify: noop, setBusy: noop,
+      adoptConfigSnapshot: noop, notify: noop, setBusy: noop, t: (key: string) => key,
       setError: (reason: unknown) => { if (reason) errors.push(reason); },
       errorMessage: (reason: unknown) => String(reason),
       beginAddProject: async (options: unknown) => { destinations.push(options); },
@@ -570,3 +572,131 @@ for (const scenario of [
     assert.equal(linksResumed, scenario === "a waiting listing link" || scenario === "a waiting repository link" ? 1 : 0);
   });
 }
+
+/* Chinese: New project › From Mallard Cloud, its Folder line and why a
+   clone left the folder empty. Account names, addresses and paths stay as
+   given; Git and GitHub stay names. */
+test("in Chinese From Mallard Cloud speaks Chinese around the account, the address and the path", () => {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderToStaticMarkup(
+      <NewProjectFolderStep
+        workflowEpoch={1}
+        isWorkflowCurrent={() => true}
+        projects={[]}
+        providers={providers}
+        profiles={profiles}
+        storages={[personal, work]}
+        busy={false}
+        initialSource="cloud"
+        initialStorageId="storage-work"
+        onCancel={() => undefined}
+        onChoose={() => undefined}
+        onOpenProject={() => undefined}
+        onAddCloudAccount={() => undefined}
+        onCloudProjectDone={() => undefined}
+      />,
+    );
+    assert.match(html, /<h1 id="sync-new-project-title">新项目<\/h1>/);
+    assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?<strong>来自 Mallard Cloud<\/strong>/);
+    assert.match(html, /<strong>存储<\/strong>[\s\S]*?class="setup-pill active"[^>]*>[\s\S]*?Mallard Cloud rika-acme/);
+    assert.match(html, /<strong>仓库<\/strong>[\s\S]*?placeholder="搜索，或粘贴链接、owner\/name 或邀请码"/);
+    assert.match(html, /<button type="button" class="btn btn-ghost">取消<\/button><button type="button" class="btn btn-primary" disabled="">连接<\/button>/);
+    assert.match(renderSource([personal, work]), /请先选择账户。/);
+    assert.match(renderSource([r2]), /还没有 Mallard Cloud 账户。[\s\S]*?设置 Mallard Cloud/);
+
+    const path = `${HOME}/code/portal`;
+    const input = readFolderInput("~/code/portal", HOME);
+    const key = `${path}\n${"f".repeat(64)}\n0`;
+    const verdict = (folder: CloudProjectFolder, mode: "new" | "existing" = "new") => destinationVerdict(
+      input, { status: "done", key, probe: { folder, can_clone: true } }, key, repository(), compact, mode,
+    );
+    assert.deepEqual(verdict({ kind: "new" }), { tone: "ok", message: "克隆 github.com/acme/portal；克隆失败时保留一个空的 Git 仓库。" });
+    assert.deepEqual(verdict(occupied()), {
+      tone: "warn",
+      message: "里面有文件。",
+      actions: [{ label: "按原样使用", run: "use-as-is" }, { label: "使用 ~/code/portal-2", value: "~/code/portal-2" }],
+    });
+    assert.deepEqual(
+      verdict(occupied({ local_fingerprint: "e".repeat(64), git_remote: "github.com/maya/portal" }), "existing"),
+      { tone: "warn", message: "Git 远程地址：github.com/maya/portal。" },
+    );
+    assert.equal(cloneFailureText("refused"), "GitHub 拒绝了请求。");
+    assert.equal(roleWord(repository({ role: "admin" })), "管理员");
+    assert.equal(cloneSourceWord(repository({ github_url: null })), "缺少 GitHub URL");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+});
+
+/* The locked binding editor states each agent's profile as a fact: its
+   name and path as registered, a marker when it cannot be used as is, and
+   the id of one missing on this machine. */
+test("a locked binding states each profile as a fact, in both languages", () => {
+  const extra = { key: "gemini", display_name: "Gemini", display_rank: 30, profile_label: "Gemini home", setup_default: false, has_cli: true, maintenance_actions: [] } as unknown as ProviderDescriptor;
+  const render = () => renderToStaticMarkup(
+    <ProjectBindingEditor
+      title="Agent profile"
+      binding={{
+        local_project_id: "project-1", bundle_id: "b".repeat(32), project_root: `${HOME}/code/portal`, locked: true,
+        profile_ids: { codex: "p-codex", claude: "p-claude", gemini: "p-gone" },
+      }}
+      busy={false}
+      actionLabel="Save"
+      providers={[...providers, extra]}
+      profiles={[profile("p-codex", "codex", ".codex"), { ...profile("p-claude", "claude", ".claude"), writable: false }]}
+      onCancel={() => undefined}
+      onSubmit={() => undefined}
+    />,
+  );
+  const english = render();
+  assert.match(english, /<small title="\/home\/you\/.codex">~\/.codex · <code>~\/.codex<\/code><\/small>/);
+  assert.match(english, /<small title="\/home\/you\/.claude">~\/.claude · <code>~\/.claude<\/code> · Read only<\/small>/);
+  assert.match(english, /<small>Profile missing on this machine · <code>p-gone<\/code><\/small>/);
+  assert.match(english, /<span class="sync-eyebrow">Machine-local binding<\/span>/);
+  assert.match(english, /<button type="button" class="btn">Done<\/button>/);
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const chinese = render();
+    assert.match(chinese, /<small title="\/home\/you\/.codex">~\/.codex · <code>~\/.codex<\/code><\/small>/);
+    assert.match(chinese, /~\/.claude · <code>~\/.claude<\/code> · 只读<\/small>/);
+    assert.match(chinese, /<small>这台电脑上缺少此配置 · <code>p-gone<\/code><\/small>/);
+    assert.match(chinese, /<span class="sync-eyebrow">本机绑定<\/span>/);
+    assert.match(chinese, /<button type="button" class="btn">完成<\/button>/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+});
+
+/* Each agent's profile label is the backend's, worded in Chinese by the
+   provider key; a provider without Chinese keeps the backend's label. */
+test("in Chinese the binding editor words each agent's profile label by its provider key", () => {
+  const extra = { key: "gemini", display_name: "Gemini", display_rank: 30, profile_label: "Gemini home", setup_default: false, has_cli: true, maintenance_actions: [] } as unknown as ProviderDescriptor;
+  const render = () => renderToStaticMarkup(
+    <ProjectBindingEditor
+      title="Agent profile"
+      binding={{
+        local_project_id: "project-1", bundle_id: "b".repeat(32), project_root: `${HOME}/code/portal`, locked: true,
+        profile_ids: { codex: "p-codex", claude: "p-claude", gemini: "p-gone" },
+      }}
+      busy={false}
+      actionLabel="Save"
+      providers={[...providers, extra]}
+      profiles={[profile("p-codex", "codex", ".codex"), profile("p-claude", "claude", ".claude")]}
+      onCancel={() => undefined}
+      onSubmit={() => undefined}
+    />,
+  );
+  const english = render();
+  assert.match(english, /<strong>Codex<\/strong><span>Codex home<\/span>/);
+  assert.match(english, /<strong>Claude<\/strong><span>Claude config<\/span>/);
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const chinese = render();
+    assert.match(chinese, /<strong>Codex<\/strong><span>\.codex 配置<\/span>/);
+    assert.match(chinese, /<strong>Claude<\/strong><span>\.claude 配置<\/span>/);
+    assert.match(chinese, /<strong>Gemini<\/strong><span>Gemini home<\/span>/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+});

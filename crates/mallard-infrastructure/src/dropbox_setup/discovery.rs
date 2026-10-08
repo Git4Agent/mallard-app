@@ -1,6 +1,6 @@
 //! Bounded, read-only Dropbox namespace discovery.
 use crate::dropbox_auth::{validate_id, AuthError, DropboxClient};
-use crate::storage_core::{classify_storage_marker, MarkerState};
+use crate::storage_core::{classify_storage_marker, MarkerDetail, MarkerDetailCode, MarkerState};
 use mallard_domain::SecretValue;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -63,7 +63,7 @@ pub struct Folder {
     pub access: String,
     pub mounted: bool,
     pub marker: MarkerState,
-    pub detail: Option<String>,
+    pub detail: Option<MarkerDetail>,
 }
 
 pub struct Scan {
@@ -75,16 +75,25 @@ pub async fn marker(
     client: &DropboxClient,
     token: &SecretValue,
     namespace: &str,
-) -> Result<(MarkerState, Option<String>), AuthError> {
+) -> Result<(MarkerState, Option<MarkerDetail>), AuthError> {
     Ok(match client.read_storage_marker(namespace, token).await {
         Ok(Some(bytes)) => classify_storage_marker(&bytes),
         Ok(None) => (MarkerState::Missing, None),
         Err(AuthError::Reconnect) => return Err(AuthError::Reconnect),
         Err(AuthError::Invalid) => (MarkerState::Invalid, None),
-        Err(AuthError::Permission) => (MarkerState::Unreadable, Some("Access denied".into())),
+        Err(AuthError::Permission) => (
+            MarkerState::Unreadable,
+            Some(MarkerDetail::reason(
+                MarkerDetailCode::AccessDenied,
+                "Access denied",
+            )),
+        ),
         Err(_) => (
             MarkerState::Unreadable,
-            Some("Could not read marker".into()),
+            Some(MarkerDetail::reason(
+                MarkerDetailCode::CouldNotRead,
+                "Could not read marker",
+            )),
         ),
     })
 }
@@ -191,7 +200,13 @@ pub async fn discover(
             jobs.spawn(async move {
                 let found = timeout_at(deadline, marker(&client, &token, &namespace))
                     .await
-                    .unwrap_or(Ok((MarkerState::Unreadable, Some("Scan timed out".into()))));
+                    .unwrap_or(Ok((
+                        MarkerState::Unreadable,
+                        Some(MarkerDetail::reason(
+                            MarkerDetailCode::ScanTimedOut,
+                            "Scan timed out",
+                        )),
+                    )));
                 (index, found)
             });
         }
@@ -393,5 +408,12 @@ mod tests {
         assert!(scan.partial);
         assert_eq!(scan.folders[0].marker, MarkerState::Invalid);
         assert_eq!(scan.folders[1].marker, MarkerState::Unreadable);
+        assert_eq!(
+            scan.folders[1].detail,
+            Some(MarkerDetail::reason(
+                MarkerDetailCode::AccessDenied,
+                "Access denied"
+            ))
+        );
     }
 }

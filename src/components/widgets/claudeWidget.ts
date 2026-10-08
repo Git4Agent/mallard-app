@@ -1,3 +1,4 @@
+import { t } from "../../i18n";
 import type { SessionTheme } from "../sessionTheme";
 
 export const CLAUDE_WIDGET_TOOL = "mcp__visualize__show_widget";
@@ -15,28 +16,28 @@ export function isClaudeWidgetTool(tool: { native_name: string } | null | undefi
 }
 
 export function readClaudeWidget(tool: ClaudeWidgetTool): { title: string; code: string; error: string | null } {
-  const fallback = { title: "Claude widget", code: tool.argument_preview ?? "" };
-  if (tool.argument_truncated) return { ...fallback, error: "The widget source is incomplete." };
+  const fallback = { title: t("shell:widget.title"), code: tool.argument_preview ?? "" };
+  if (tool.argument_truncated) return { ...fallback, error: t("shell:widget.incomplete") };
   if (new TextEncoder().encode(fallback.code).length > MAX_WIDGET_BYTES) {
-    return { ...fallback, error: "The widget exceeds the 1 MiB display limit." };
+    return { ...fallback, error: t("shell:widget.tooLarge") };
   }
   let input: unknown;
   try {
     input = JSON.parse(fallback.code);
   } catch {
-    return { ...fallback, error: "The widget arguments are not valid JSON." };
+    return { ...fallback, error: t("shell:widget.invalidJson") };
   }
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return { ...fallback, error: "No widget source is available." };
+    return { ...fallback, error: t("shell:widget.noSource") };
   }
   const fields = input as Record<string, unknown>;
   const title = typeof fields.title === "string" && fields.title.trim()
     ? fields.title.trim().slice(0, 256) : fallback.title;
   const code = typeof fields.widget_code === "string" ? fields.widget_code : "";
-  if (!code.trim()) return { title, code: fallback.code, error: "No widget source is available." };
-  if (tool.status === "failed") return { title, code, error: "The widget call failed." };
+  if (!code.trim()) return { title, code: fallback.code, error: t("shell:widget.noSource") };
+  if (tool.status === "failed") return { title, code, error: t("shell:widget.failed") };
   if (!/^\s*(?:(?:<\?xml\s[^?]*\?>|<!--[\s\S]*?-->)\s*)*<svg(?:\s|\/?>)/.test(code)) {
-    return { title, code, error: "Only SVG widgets can be displayed. Open Source to inspect this widget." };
+    return { title, code, error: t("shell:widget.onlySvg") };
   }
   return { title, code, error: null };
 }
@@ -77,15 +78,16 @@ const SVG_STYLE = `
 export function svgWidgetImage(code: string, theme: SessionTheme): { src: string | null; error: string | null } {
   // Node rendering has no XML parser. The browser prepares the image on mount.
   if (typeof DOMParser === "undefined") return { src: null, error: null };
-  if (/<!DOCTYPE|<!ENTITY/i.test(code)) return { src: null, error: "SVG document declarations are not supported." };
+  if (/<!DOCTYPE|<!ENTITY/i.test(code)) return { src: null, error: t("shell:widget.declarations") };
   try {
     const documentCode = code.replace(/<svg\b([^>]*)>/, (root, attributes: string) => (
+      // i18n-ignore: SVG markup, not copy
       /\bxmlns\s*=/.test(attributes) ? root : `<svg xmlns="http://www.w3.org/2000/svg"${attributes}>`
     ));
     const parsed = new DOMParser().parseFromString(documentCode, "image/svg+xml");
     if (parsed.querySelector("parsererror") || parsed.documentElement.localName !== "svg"
         || parsed.documentElement.namespaceURI !== "http://www.w3.org/2000/svg") {
-      return { src: null, error: "The widget source is not a complete SVG document." };
+      return { src: null, error: t("shell:widget.notSvg") };
     }
     const style = parsed.createElementNS("http://www.w3.org/2000/svg", "style");
     style.textContent = SVG_PALETTES[theme] + SVG_STYLE;
@@ -94,6 +96,6 @@ export function svgWidgetImage(code: string, theme: SessionTheme): { src: string
     const xml = new XMLSerializer().serializeToString(parsed);
     return { src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`, error: null };
   } catch {
-    return { src: null, error: "The widget source is not a complete SVG document." };
+    return { src: null, error: t("shell:widget.notSvg") };
   }
 }

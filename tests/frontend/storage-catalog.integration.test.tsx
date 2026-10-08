@@ -16,7 +16,7 @@ import {
   catalogKindCardFoot,
   catalogKindCards,
   catalogMatchingRows,
-  catalogNoun,
+  catalogNouns,
   catalogPresentation,
   catalogProviderList,
   catalogScopeLabel,
@@ -32,6 +32,8 @@ import {
   unambiguousProfile,
 } from "../../src/components/storage-catalog/model";
 import { formatRelativeTime } from "../../src/clock";
+import { i18n } from "../../src/i18n";
+import { en } from "../../src/i18n/en";
 import type { StatusScope } from "../../src/components/sync-review/statusScopes";
 import type {
   CatalogCapabilityDescriptor,
@@ -135,6 +137,17 @@ const CAPABILITIES: CatalogCapabilityDescriptor[] = [
   plugins("claude", "Claude"),
 ];
 const [CODEX_SKILLS, CODEX_PLUGINS, CODEX_PETS_V1, CODEX_PETS_V2] = CAPABILITIES;
+
+/** A capability's words, as a page builds them. */
+const nounsOf = (capability: CatalogCapabilityDescriptor) =>
+  catalogNouns(capability, { plural: capability.label, singular: capability.singular_label });
+
+type CatalogTree = { readonly [key: string]: string | CatalogTree };
+/** Every string of the Library's English catalog, for checks on copy that
+ *  no longer lives in the source. */
+const libraryCopy = (function flatten(tree: CatalogTree): string[] {
+  return Object.values(tree).flatMap((value) => (typeof value === "string" ? [value] : flatten(value)));
+})(en.library).join("\n");
 
 function profile(provider: string, providerLabel: string, displayName: string, home: string): CatalogProfile {
   return {
@@ -289,12 +302,25 @@ test("a row label derives from the capability's label and the profile, covering 
 });
 
 test("the copy's nouns come from the capability's label", () => {
-  assert.equal(catalogNoun("Skills", "Skill", 1), "skill");
-  assert.equal(catalogNoun("Skills", "Skill", 3), "skills");
-  assert.equal(catalogNoun("Plugins", "Plugin", 0), "plugins");
-  assert.equal(catalogNoun("Pets v1", "Pet v1", 1), "pet v1");
-  assert.equal(catalogNoun("Pets v2", "Pet v2", 2), "pets v2");
-  assert.equal(catalogNoun("Policies", "Policy", 1), "policy");
+  const noun = (capability: CatalogCapabilityDescriptor, count: number) => nounsOf(capability).say((word) => word, count);
+  assert.equal(noun(CODEX_SKILLS, 1), "skill");
+  assert.equal(noun(CODEX_SKILLS, 3), "skills");
+  assert.equal(noun(CODEX_PLUGINS, 0), "plugins");
+  assert.equal(noun(CODEX_PETS_V1, 1), "pet v1");
+  assert.equal(noun(CODEX_PETS_V2, 2), "pets v2");
+  // In English every registered kind's noun is its backend label, lowercased,
+  // in the count's number; a shared count line prints the same word.
+  for (const capability of CAPABILITIES) {
+    assert.equal(noun(capability, 1), capability.singular_label.toLowerCase());
+    assert.equal(noun(capability, 4), capability.label.toLowerCase());
+    assert.equal(nounsOf(capability).counted(4), capability.label.toLowerCase());
+  }
+  // A kind this build has no words for is named by its own labels.
+  const policies = catalogNouns({ presentation: { icon: "policy", kind_label: "Policies", format_label: "Policy" } }, { plural: "Policies", singular: "Policy" });
+  assert.equal(policies.say((word) => word, 1), "policy");
+  assert.equal(policies.say((word) => word), "policies", "no count is the plural");
+  // A sentence that opens on the noun capitalizes it.
+  assert.equal(nounsOf(CODEX_PETS_V1).lead((word) => `${word} info`), "Pet v1 info");
 });
 
 test("every presentation hint wears its own mark rather than borrowing one", () => {
@@ -636,10 +662,11 @@ test("the Add chooser lists the backend's capabilities in its order and records 
   );
   const setup = readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8");
   assert.match(setup, /const cards = catalogKindCards\(capabilities, profile, scopes, inspection\?\.holdings \?\? null\);/);
-  assert.match(setup, /role="radiogroup" aria-label="Resource kind"[\s\S]*?cards\.map\(\(candidate\) => \{/);
+  assert.match(setup, /role="radiogroup" aria-label=\{t\("setup\.kind"\)\}[\s\S]*?cards\.map\(\(candidate\) => \{/);
+  assert.equal(en.library.setup.kind, "Resource kind");
   assert.match(setup, /className=\{`setup-choice-card\$\{active \? " active" : ""\}`\}/);
   assert.match(setup, /<Icon name=\{catalogPresentation\(candidate\.capability\)\.icon\} size=\{24\} \/>/);
-  assert.match(setup, /\{candidate\.capability\.label\}/);
+  assert.match(setup, /\{capabilityLabel\(candidate\.capability\)\}/);
   assert.match(setup, /\{catalogKindCardFoot\(candidate\)\}/);
   assert.match(setup, /storageCatalogApi\.createScope\(card\.capability, profile\.profile_id\)/);
 
@@ -686,9 +713,10 @@ test("stored-only rows lead the scope page in their own plain section", () => {
   assert.match(page, /const localRows = matchingRows\.filter\(\(row\) => row\.local_present \|\| !row\.remote_present\)/);
   assert.match(
     page,
-    /Only in <span className="sync-history-storage-name">\{storageName \?\? "storage"\}<\/span>[\s\S]*<h2><Icon name=\{glyph\.icon\} size=\{14\} \/>\{scope\.label\}<\/h2>/,
+    /i18nKey="library:list\.onlyInHeading"[\s\S]*?components=\{\{ name: <span className="sync-history-storage-name">\{storageName \?\? t\("status\.anyStorage"\)\}<\/span> \}\}[\s\S]*<h2><Icon name=\{glyph\.icon\} size=\{14\} \/>\{catalogScopeKindLabel\(scope\)\}<\/h2>/,
     "the cloud section renders above the capability's own section",
   );
+  assert.equal(en.library.list.onlyInHeading, "Only in <name/>");
   // Both sections draw the same rows through one renderer, so the two halves
   // cannot drift apart card by card.
   assert.match(page, /\{cloudRows\.map\(renderRow\)\}/);
@@ -717,7 +745,8 @@ test("the scope page wears the project workspace's trail and list", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // `rows`, not a card grid: the landed list is the same thread-card family
   // Activity lands, and the scaffold must draw the page's own destination.
-  assert.match(page, /<LoadingScaffold shape="rows" label=\{`Loading \$\{label\}`\} \/>/);
+  assert.match(page, /<LoadingScaffold shape="rows" label=\{t\("page\.loading", \{ label \}\)\} \/>/);
+  assert.equal(en.library.page.loading, "Loading {{label}}");
   // An initial load error belongs only to the Retry panel below the notices;
   // later action errors remain in the page notice zone.
   assert.match(page, /if \(error && page\) \{\s*pageNotices\.push/);
@@ -767,7 +796,8 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   assert.match(page, /closeMenu\(true\)/);
   assert.match(page, /document\.addEventListener\("focusin", onFocusIn\)/);
   assert.match(page, /role="status" aria-live="polite"/);
-  assert.match(page, /Could not copy\./);
+  assert.match(page, /t\("info\.copyFailedStatus"\)/);
+  assert.equal(en.library.info.copyFailedStatus, "Could not copy.");
   // Reveal in Finder stays off when nothing is local.
   assert.match(page, /revealItemInDir/);
   assert.match(page, /disabled=\{!row\.local_path\}/);
@@ -777,9 +807,11 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   // action with the backend's provider label, carry no inert span, and
   // report failures on the page surface.
   assert.doesNotMatch(page, /sync-history-provider-inert/);
-  assert.match(page, /title=\{`Open in \$\{providerLabel\}`\}[\s\S]{0,200}?<ProviderMark provider=\{provider\} displayName=\{providerLabel\}/);
+  assert.match(page, /title=\{t\("card\.openIn", \{ provider: providerLabel \}\)\}[\s\S]{0,200}?<ProviderMark provider=\{provider\} displayName=\{providerLabel\}/);
+  assert.equal(en.library.card.openIn, "Open in {{provider}}");
   assert.match(page, /providerLabel=\{profile\.provider_label\}/);
-  assert.match(page, /aria-label="Open in Terminal"[\s\S]{0,120}?<Icon name="terminal" size=\{14\}/);
+  assert.match(page, /aria-label=\{t\("card\.openInTerminal"\)\}[\s\S]{0,120}?<Icon name="terminal" size=\{14\}/);
+  assert.equal(en.library.card.openInTerminal, "Open in Terminal");
   assert.match(page, /storageCatalogApi\.openProfileApp\(profile\.profile_id\)/);
   assert.match(page, /storageCatalogApi\.openProfileTerminal\(profile\.profile_id\)/);
   // Acknowledgements are the shared Acknowledgement inside the card that
@@ -805,14 +837,18 @@ test("every row is the activity card: badge, name as the door, facts, one ⓘ", 
   // the accessible name still carries in full.
   assert.match(page, /WARNING_LEADS/);
   assert.match(page, /warningParts\(warning\)/);
-  assert.match(page, /aria-label=\{`Reviewed: \$\{warning\.message\}`\}|ariaLabel=\{`Reviewed: \$\{warning\.message\}`\}/);
-  assert.match(page, /verbs=\{\["Mark reviewed", "Reviewed"\]\}/);
-  assert.match(page, /verbs=\{\["Approve overwrite", "Approved"\]\}/);
-  assert.doesNotMatch(page, /Reviewed this warning — |I understand this replaces/);
+  assert.match(page, /ariaLabel=\{t\("push\.reviewedLabel", \{ message: warning\.message \}\)\}/);
+  assert.equal(en.library.push.reviewedLabel, "Reviewed: {{message}}");
+  assert.match(page, /verbs=\{\[t\("push\.markReviewed"\), t\("push\.reviewed"\)\]\}/);
+  assert.deepEqual([en.library.push.markReviewed, en.library.push.reviewed], ["Mark reviewed", "Reviewed"]);
+  assert.match(page, /verbs=\{\[t\("pull\.approve"\), t\("pull\.approved"\)\]\}/);
+  assert.deepEqual([en.library.pull.approve, en.library.pull.approved], ["Approve overwrite", "Approved"]);
+  for (const source of [page, libraryCopy]) assert.doesNotMatch(source, /Reviewed this warning — |I understand this replaces/);
   // The count rides the verb at the point of commitment; on Mallard Cloud
   // Push says only Push, as a project's does.
-  assert.match(page, /`Push \$\{pushSelected\.size\}`/);
-  assert.match(page, /`Pull \$\{pullReviewSelectedCount\}`/);
+  assert.match(page, /t\("verb\.pushCount", \{ count: pushSelected\.size \}\)/);
+  assert.match(page, /t\("verb\.pullCount", \{ count: pullReviewSelectedCount \}\)/);
+  assert.deepEqual([en.library.verb.pushCount, en.library.verb.pullCount], ["Push {{count}}", "Pull {{count}}"]);
 });
 
 test("an empty Catalog review's footer holds only the way back to the page it closes onto", () => {
@@ -827,14 +863,18 @@ test("an empty Catalog review's footer holds only the way back to the page it cl
     assert.ok(footer, `${verb} footer branches on an empty review`);
     const [exitBranch, commitBranch] = footer.split(") : (");
     assert.match(exitBranch, /className="btn sync-review-exit"/);
-    assert.match(exitBranch, new RegExp(`title=\\{\`Close ${verb} review — back to \\$\\{itemRow\\?\\.display_name \\?\\? scope\\.label\\}\`\\}`));
-    assert.match(exitBranch, /<span>\{`Back to \$\{itemRow\?\.display_name \?\? scope\.label\}`\}<\/span>/);
+    const key = verb === "Push" ? "push" : "pull";
+    assert.match(exitBranch, new RegExp(`title=\\{t\\("${key}\\.exitTitle", \\{ name: itemRow\\?\\.display_name \\?\\? catalogScopeKindLabel\\(scope\\) \\}\\)\\}`));
+    assert.equal(en.library[key].exitTitle, `Close ${verb} review — back to {{name}}`);
+    assert.match(exitBranch, /<span>\{t\("review\.backTo", \{ name: itemRow\?\.display_name \?\? catalogScopeKindLabel\(scope\) \}\)\}<\/span>/);
     assert.match(exitBranch, /onClick=\{\(\) => setMode\(\{ kind: "list" \}\)\}/);
     assert.doesNotMatch(exitBranch, /btn-primary|btn-ghost|chevron-left/);
-    assert.match(commitBranch, new RegExp(`${verb} \\$\\{`));
+    assert.match(commitBranch, new RegExp(`t\\("verb\\.${key}Count"`));
   }
+  assert.equal(en.library.review.backTo, "Back to {{name}}");
   // "Library" is not a name the app shows; the sidebar and index say Catalog.
   assert.doesNotMatch(page, /Back to Library/);
+  assert.doesNotMatch(libraryCopy, /\bLibrary\b/);
 });
 
 test("rows of a capability with artwork wear the preview tile, and stored-only previews arrive lazily", () => {
@@ -867,8 +907,8 @@ test("rows of a capability with artwork wear the preview tile, and stored-only p
 test("Push and Pull are page verbs with one review each, and link on the way", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // The bar owns both verbs, with the count the list itself produced.
-  assert.match(page, /sync-path-sync[\s\S]*Pull<\/span>[\s\S]*counts\.pull/);
-  assert.match(page, /sync-path-sync[\s\S]*Push<\/span>[\s\S]*counts\.push/);
+  assert.match(page, /sync-path-sync[\s\S]*\{t\("common:pull"\)\}<\/span>[\s\S]*counts\.pull/);
+  assert.match(page, /sync-path-sync[\s\S]*\{t\("common:push"\)\}<\/span>[\s\S]*counts\.push/);
   assert.match(page, /counts = useMemo\(\(\) => barRows\.reduce/);
   // Push and Pull create the one scope-storage pairing they need; the user
   // never links by hand, and each review consumes exactly one plan.
@@ -885,9 +925,12 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   // Pull operations speak the files review's chip grammar — "Install skill",
   // "Update pet v1 · keeps local copy" — one voice across every pull review,
   // with the noun read off the capability's label.
-  assert.match(page, /actionChipLabel\(action\.chosen, kindNoun\)/);
-  assert.match(page, /keeps local copy/);
-  assert.match(page, /kindNoun=\{noun\(1\)\}/);
+  assert.match(page, /actionChipLabel\(action\.chosen\.kind, nouns\)/);
+  // The verb, chip and danger mark follow the plan's action kind, never its
+  // English label read back.
+  assert.match(page, /option\.kind === "overwrite_with_storage" \? " danger" : ""/);
+  assert.equal(en.library.chip.keepCopy, "Update {{noun}} · keeps local copy");
+  assert.match(page, /nouns=\{nouns\}/);
   // The scroll owns the gutter under the header. A catalog review's first
   // child is a progress notice, a banner or row one, and only the banner ever
   // carried a top margin — and only by collapsing out of the scroll — so a
@@ -972,15 +1015,19 @@ test("Add is New project's two steps: the agent home as the project's Agent band
   const setup = readFileSync("src/components/storage-catalog/CatalogScopeSetupStep.tsx", "utf8");
 
   // New project's two doors, at the top of step one.
-  assert.match(add, /title="On this computer"[\s\S]*title="From Mallard Cloud"/);
+  assert.match(add, /title=\{t\("add\.local"\)\}[\s\S]*title=\{t\("add\.cloud"\)\}/);
+  assert.deepEqual([en.library.add.local, en.library.add.cloud], ["On this computer", "From Mallard Cloud"]);
   assert.match(add, /className="storage-mode-doors" role="radiogroup"/);
   // From Mallard Cloud is New project's bands: the account, the repository
   // (its kind comes with it), then the row it lands in.
-  const cloud = ["Storage", "Repository", "Catalog row"].map((label) => add.indexOf(`<strong>${label}</strong>`));
+  const cloud = ["bar.storage", "add.repository", "bar.row"].map((key) => add.indexOf(`<strong>{t("${key}")}</strong>`));
   assert.ok(cloud.every((index) => index >= 0));
   assert.deepEqual(cloud, [...cloud].sort((left, right) => left - right));
-  assert.match(add, /No Mallard Cloud account yet\./);
-  assert.match(add, /Can’t be changed later\./);
+  assert.deepEqual([en.library.bar.storage, en.library.add.repository, en.library.bar.row], ["Storage", "Repository", "Catalog row"]);
+  assert.match(add, /<strong>\{t\("add\.noAccount"\)\}<\/strong>/);
+  assert.equal(en.library.add.noAccount, "No Mallard Cloud account yet.");
+  assert.match(add, /\{t\("add\.fixed"\)\}/);
+  assert.equal(en.library.add.fixed, "Can’t be changed later.");
   assert.match(add, /storageCatalogApi\.connectCloudRepository\(/);
   assert.doesNotMatch(add + home + setup, /preparePull|applyPull|preparePush|applyPush/);
 
@@ -993,9 +1040,10 @@ test("Add is New project's two steps: the agent home as the project's Agent band
   assert.match(home, /className="sync-provider-toggle setup-marked-toggle"/);
   assert.match(home, /type="radio"\s+name="catalog-home-provider"/);
   assert.match(home, /sync-agent-profile-row/);
-  assert.match(home, /<option value="">Choose profile<\/option>/);
-  assert.match(home, /<option value="__pending">Custom path…<\/option>/);
-  assert.match(home, /<Icon name="folder" size=\{13\} \/> Browse/);
+  assert.match(home, /<option value="">\{t\("home\.chooseProfile"\)\}<\/option>/);
+  assert.match(home, /<option value="__pending">\{t\("home\.customPath"\)\}<\/option>/);
+  assert.match(home, /<Icon name="folder" size=\{13\} \/> \{t\("home\.browse"\)\}/);
+  assert.deepEqual([en.library.home.chooseProfile, en.library.home.customPath, en.library.home.browse], ["Choose profile", "Custom path…", "Browse"]);
   assert.match(home, /from "\.\.\/\.\.\/profilePath"/);
   assert.match(home, /profilePathHint\(probe, selection\.path, homePath, \{ display_name: label \}, profiles\)/);
   assert.match(home, /storageCatalogApi\.probeProfile\(provider, path\)/);
@@ -1003,23 +1051,28 @@ test("Add is New project's two steps: the agent home as the project's Agent band
   // is chosen, none or several wait on "Choose profile" and the project's
   // field message.
   assert.match(home, /const only = unambiguousProfile\(profiles, key\);/);
-  assert.match(home, /Choose a profile for \{label\}\./);
+  assert.match(home, /t\("home\.chooseFor", \{ provider: label \}\)/);
+  assert.equal(en.library.home.chooseFor, "Choose a profile for {{provider}}.");
   // The button names the step it opens, from the saved name or the one the
   // probe would give a typed folder.
-  assert.match(home, /homeName \? `Set up \$\{homeName\}` : "Set up"/);
+  assert.match(home, /homeName \? t\("home\.setUpNamed", \{ name: homeName \}\) : t\("home\.setUp"\)/);
+  assert.deepEqual([en.library.home.setUpNamed, en.library.home.setUp], ["Set up {{name}}", "Set up"]);
   assert.match(home, /resolvedProbe\?\.suggested_name/);
 
   // Step two is the project's setup page for that home: Home, one kind as
   // the shipped cards, Storage as New project's pill row, Finish.
-  const bands = ["Home", "Resource", "Storage"].map((label) => setup.indexOf(`<strong>${label}</strong>`));
+  const bands = ["setup.home", "setup.resource", "bar.storage"].map((key) => setup.indexOf(`<strong>{t("${key}")}</strong>`));
+  assert.deepEqual([en.library.setup.home, en.library.setup.resource], ["Home", "Resource"]);
   assert.ok(bands.every((index) => index >= 0), "all three bands render");
   assert.deepEqual(bands, [...bands].sort((left, right) => left - right));
   assert.match(setup, /storageCatalogApi\.inspectProfile\(profile\.profile_id\)/);
   assert.match(setup, /catalogDefaultKind\(cards, initialChoiceKey\)/);
   assert.match(setup, /catalogDefaultStorage\(storages, inspection\?\.last_used_storage_id\)/);
-  assert.match(setup, /label="None yet"/);
+  assert.match(setup, /label=\{t\("setup\.noneYet"\)\}/);
+  assert.equal(en.library.setup.noneYet, "None yet");
   assert.match(setup, /storageIconName\(candidate\.provider, candidate\.icon\)/);
-  assert.match(setup, /chosenStorage \? "Finish" : "Finish locally"/);
+  assert.match(setup, /chosenStorage \? t\("setup\.finish"\) : t\("setup\.finishLocally"\)/);
+  assert.deepEqual([en.library.setup.finish, en.library.setup.finishLocally], ["Finish", "Finish locally"]);
   // Finish makes exactly one row and links it once; a link that fails after
   // the row was made leaves the row standing and says so.
   assert.equal((setup.match(/storageCatalogApi\.createScope\(/g) ?? []).length, 1);
@@ -1033,7 +1086,7 @@ test("Add is New project's two steps: the agent home as the project's Agent band
 
   // Both steps wear the project-setup language, and the Kind is never a
   // table of the frontend's own.
-  for (const source of [add, home, setup]) {
+  for (const source of [add, home, setup, libraryCopy]) {
     assert.doesNotMatch(source, /CATALOG_KINDS|Codex only|Codex and Claude/);
   }
   assert.match(add, /sync-inline-new-project sync-setup-workspace/);
@@ -1042,6 +1095,7 @@ test("Add is New project's two steps: the agent home as the project's Agent band
   assert.match(home, /sync-setup-footer/);
   assert.match(setup, /sync-setup-footer/);
   assert.doesNotMatch(add + home + setup, /Add profile|className="catalog-inline-form"|Manage saved homes|removeProfile|storageCatalogApi\.deleteProfile/);
+  assert.doesNotMatch(libraryCopy, /Add profile|Manage saved homes/);
   assert.doesNotMatch(readFileSync("src/App.css", "utf8"), /catalog-setup-(grid|card|step)/);
 });
 
@@ -1091,7 +1145,8 @@ test("the profile is named by its folder, and renamed from the row's page", () =
   const home = readFileSync("src/components/storage-catalog/CatalogHomeStep.tsx", "utf8");
   // Step one never asks for a name: a typed path is saved as part of Set up
   // itself, named by its folder, and the home's setup page opens on it.
-  assert.doesNotMatch(home, /Profile name|Save home|catalog-profile-save-row/);
+  assert.doesNotMatch(home, /Profile name|Save home|catalog-profile-save-row|t\("rename\./);
+  assert.doesNotMatch(libraryCopy, /Save home/);
   // A display name reaches step one only as the label a provider mark draws
   // itself with — never as a field, a piece of state, or a value it sends.
   assert.doesNotMatch(
@@ -1111,11 +1166,14 @@ test("the profile is named by its folder, and renamed from the row's page", () =
   // rename row the project page uses, pinned to the profile's revision, with
   // the derived folder name one click away.
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
-  assert.match(page, /label: "Rename profile…"/);
-  assert.match(page, /for every Catalog row that uses this home/);
+  assert.match(page, /label: t\("bar\.rename"\)/);
+  assert.equal(en.library.bar.rename, "Rename profile…");
+  assert.match(page, /title: t\("bar\.renameTitle", \{ name: profile\.display_name \}\)/);
+  assert.match(en.library.bar.renameTitle, /for every Catalog row that uses this home/);
   assert.match(page, /className="sync-path-rename"/);
   assert.match(page, /storageCatalogApi\.renameProfile\(profile\.profile_id, profileNameDraft\.trim\(\), profile\.revision\)/);
-  assert.match(page, /Use folder name/);
+  assert.match(page, /\{t\("rename\.useFolder"\)\}/);
+  assert.equal(en.library.rename.useFolder, "Use folder name");
   // A successful rename relabels the shell too — sidebar and Switch-to read
   // the scope list.
   assert.match(page, /onProfileRenamed\(\)/);
@@ -1138,9 +1196,11 @@ test("Unlink is the storage crumb's verb and Fork lives on the card", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   // Unlinking the one pairing is the storage crumb's verb, worded the way
   // the project's is, pinned to the link's own revision.
-  assert.match(page, /label: `Unlink from \$\{label\}…`/);
+  assert.match(page, /label: t\("bar\.unlinkFrom", \{ label \}\)/);
+  assert.equal(en.library.bar.unlinkFrom, "Unlink from {{label}}…");
   assert.match(page, /storageCatalogApi\.unlinkScopeStorage\(pageLink\.link_id, pageLink\.revision\)/);
-  assert.match(page, /Push and Pull stop for these/);
+  assert.match(page, /t\("unlink\.message", \{/);
+  assert.match(en.library.unlink.message, /Push and Pull stop for these \{\{noun\}\}/);
   // Fork is the card's own verb: a git-fork button toggling the card's
   // drawer, keyed by the scope and the resource — no registration anywhere.
   assert.match(page, /storageCatalogApi\.prepareFork\(scope\.scope\.scope_id, row\.resource_id, name\.trim\(\)\)/);
@@ -1155,7 +1215,8 @@ test("Unlink is the storage crumb's verb and Fork lives on the card", () => {
   // cluster and cost the list its column of controls.
   assert.match(page, /const canFork = row\.local_present && !!row\.resource_id;/);
   assert.match(page, /disabled=\{!canFork\}/);
-  assert.match(page, /title=\{canFork \? forkTitle : `Not on this Mac, so there is nothing to fork`\}/);
+  assert.match(page, /title=\{canFork \? forkTitle : t\("card\.nothingToFork"\)\}/);
+  assert.equal(en.library.card.nothingToFork, "Not on this Mac, so there is nothing to fork");
   // The capture protocol decides whether the control exists at all: a fork
   // copies a directory, so a capability inventoried by its provider shows no
   // button rather than one dead on every row.
@@ -1245,8 +1306,10 @@ test("Pull labels are the protocol's four outcomes, the same for every format", 
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
   assert.doesNotMatch(types, /install_skill|install_plugin|install_pet|overwrite_plugin_with_storage/);
   assert.match(types, /conflicting_claims: CatalogClaimPin\[\]/);
-  assert.match(page, /claimed by[\s\S]*Preserve a copy, acknowledge overwrite, or Skip/);
-  assert.match(readFileSync("src/components/storage-catalog/outcomes.ts", "utf8"), /Completed changes were kept/);
+  assert.match(page, /t\("pull\.claimedBy", \{[\s\S]*t\("pull\.claimedMessage"\)/);
+  assert.match(`${en.library.pull.claimedBy} ${en.library.pull.claimedMessage}`, /claimed by[\s\S]*Preserve a copy, acknowledge overwrite, or Skip/);
+  assert.match(readFileSync("src/components/storage-catalog/outcomes.ts", "utf8"), /t\("library:outcome\.changesKept"\)/);
+  assert.match(en.library.outcome.changesKept, /Completed changes were kept/);
 });
 
 test("the Catalog remains independent from project sync", () => {
@@ -1333,7 +1396,7 @@ test("the Library page offers Finish that push on the unfinished-push sentence o
   assert.match(page, /action: finishPushOffered\(failure, storageName\)/);
   assert.match(page, /Finish that push/);
   assert.match(page, /storageCatalogApi\.finishUnfinishedPush\(scope\.scope\.scope_id, storageId\)/);
-  assert.match(page, /notify\(PUSH_FINISHED\)/);
+  assert.match(page, /notify\(pushFinished\(\)\)/);
 });
 
 
@@ -1370,7 +1433,9 @@ test("Cloud repository and review components are shared without feature imports"
     assert.doesNotMatch(source, /project-sync|storage-catalog|from ["'].*ipc["']/);
   }
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
-  assert.doesNotMatch(page, /nothing was published|nothing was changed/);
+  for (const source of [page, readFileSync("src/components/storage-catalog/outcomes.ts", "utf8"), libraryCopy]) {
+    assert.doesNotMatch(source, /nothing was published|nothing was changed/);
+  }
   assert.match(page, /applyInFlight.current/);
   assert.match(page, /PREPARING_CANCELLED/);
 });
@@ -1408,7 +1473,8 @@ for (const verb of ["push", "pull"] as const) {
       setPushSelected: noop, setPushAcks: noop, setMode: (value: unknown) => { mode = value; },
       setPullPlan: (value: unknown) => { shown = value; }, setPullSelected: noop, setPullChoice: noop, setPullAcks: noop,
       filterCatalogPullReviewItems, storageCatalogApi: { preparePush: deferred, applyPush: deferred, preparePull: deferred, applyPull: deferred }, storageFailureMessage: String,
-      pushPlan: plan, pushSelected: new Set(["duck"]), pushAcks: new Set(), setProgress: noop, noun: () => "pets",
+      pushPlan: plan, pushSelected: new Set(["duck"]), pushAcks: new Set(), setProgress: noop, nouns: nounsOf(CODEX_PETS_V1),
+      t: i18n.getFixedT(null, ["library", "common"]),
       pullPlan: plan, pullSelected: new Set(["duck"]), pullChoice: { duck: "install" }, pullAcks: new Set(), pullResult: noop,
       load: async () => { refreshes += 1; }, pushResult: noop, finishPushOffered: () => false, storageName: "Cloud",
     };
@@ -1473,8 +1539,8 @@ function cloudRepository(overrides: Partial<CatalogCloudRepository> = {}): Catal
 test("a pet's chooser names every misfit in one sentence, and the backend checks again on Connect", async () => {
   const { cloudRepositoryMisfit, cloudRoleWord } = await import("../../src/components/storage-catalog/CloudRepositoryChoice");
   const pet = { provider: "codex", resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 2 };
-  const item = { kind: "item" as const, coordinate: pet, noun: "pet v2", resourceId: "duck", name: "Duck", offerNew: true };
-  const add = { kind: "add" as const, coordinate: pet, noun: "pet v2", rowLabel: "Pets v2 · Codex home", listed: new Set(["duck"]) };
+  const item = { kind: "item" as const, coordinate: pet, nouns: nounsOf(CODEX_PETS_V2), resourceId: "duck", name: "Duck", offerNew: true };
+  const add = { kind: "add" as const, coordinate: pet, nouns: nounsOf(CODEX_PETS_V2), rowLabel: "Pets v2 · Codex home", listed: new Set(["duck"]) };
   const skill = cloudRepository({ owner_login: "maya", name: "pdf-tools", resource_kind: "agent_skill", format: "agentskills.io.skill", format_version: 1, kind_label: "Skills" });
   const classic = cloudRepository({ owner_login: "Rika321", name: "Duck-classic", format_version: 1, format_label: "Codex pet v1" });
   const owl = cloudRepository({ owner_login: "Rika321", name: "Owl", resource_id: "owl", display_name: "Owl", role: "owner" });
@@ -1532,7 +1598,7 @@ test("the connect dialog is the project's, with fewer words, and opens no review
       reason={{ kind: "connect", resourceId: "duck", name: "Duck" }}
       scopeId="pets" storageId="cloud" accountLogin="Rika321"
       coordinate={{ provider: "codex", resource_kind: "desktop_pet", format: "openai.codex-pet", format_version: 2 }}
-      noun="pet v2" rowLabel="Pets v2 · Codex home" listed={new Set()} capabilities={CAPABILITIES}
+      nouns={nounsOf(CODEX_PETS_V2)} rowLabel="Pets v2 · Codex home" listed={new Set()} capabilities={CAPABILITIES}
       onClose={() => undefined} onConnected={() => undefined}
     />,
   );
@@ -1543,10 +1609,11 @@ test("the connect dialog is the project's, with fewer words, and opens no review
   assert.doesNotMatch(html, /sync-bundle-context|repo-list-head/, "no context row, no list heading");
   assert.doesNotMatch(html, /Can’t be changed later/, "said once the choice can be made");
   const dialog = readFileSync("src/components/storage-catalog/CatalogConnectDialog.tsx", "utf8");
-  assert.match(dialog, /Can’t be changed later\./);
+  assert.match(dialog, /t\("add\.fixed"\)/);
   assert.match(dialog, /storageCatalogApi\.createCloudRepository\(/);
   assert.match(dialog, /storageCatalogApi\.connectCloudRepository\(/);
   assert.doesNotMatch(dialog, /preparePull|applyPull|openPull|Connect and review|Disconnect/);
+  assert.doesNotMatch(libraryCopy, /Connect and review|Disconnect/);
 });
 
 test("every storage's item has its own page, and on Mallard Cloud its repository lives in its bar", () => {
@@ -1554,13 +1621,15 @@ test("every storage's item has its own page, and on Mallard Cloud its repository
   // The list carries no Cloud chip and no per-row connect; its names open
   // the item's page on every storage.
   assert.doesNotMatch(page, /CatalogCloudItem|CatalogCloudConnections|Connect Cloud repository|>Cloud repositories</);
+  assert.doesNotMatch(libraryCopy, /Connect Cloud repository|^Cloud repositories$/m);
   assert.match(page, /onOpen=\{resourceId && !itemRow \?/);
   assert.match(page, /const itemRow = itemId \? rowByResource\.get\(itemId\) \?\? null : null;/);
   // What only Mallard Cloud has stays Mallard Cloud's: the first Push's
   // repository card, and the several-repositories note.
   assert.match(page, /\{managedCloud && !itemRepository && itemRow\.state !== "blocked" && !pageCloud && \(/);
   assert.match(page, /if \(managedCloud && itemRow\?\.state === "blocked" && itemRow\.resource_id\) \{/);
-  assert.match(page, /className="sync-history-session-title-button" title=\{`\$\{row\.display_name\} · View \$\{kindNoun\} details`\}/);
+  assert.match(page, /className="sync-history-session-title-button" title=\{nouns\.say\(\(noun\) => t\("card\.viewDetails", \{ name: row\.display_name, noun \}\), 1\)\}/);
+  assert.equal(en.library.card.viewDetails, "{{name}} · View {{noun}} details");
   // One chip, in the bar, on an item's page; read once per load.
   assert.equal(page.match(/<ManagedCloudChip/g)?.length, 1);
   assert.match(page, /\{itemRow && itemRepository && \(\s*<ManagedCloudChip/);
@@ -1574,10 +1643,12 @@ test("every storage's item has its own page, and on Mallard Cloud its repository
   // Mallard Cloud's list only: the head is a row, the search keeps its own
   // rule with no count, and the bar holds no round +. An empty row offers
   // the same verb in its empty state.
-  assert.doesNotMatch(page, /sync-path-icon-action"\s+title="Add from Mallard Cloud…"/);
+  assert.doesNotMatch(page, /sync-path-icon-action"\s+title=(?:"Add from Mallard Cloud…"|\{t\("cloud\.addFrom"\)\})/);
+  assert.equal((page.match(/t\("cloud\.addFrom"\)/g) ?? []).length, 1, "Add from Mallard Cloud… is one button, the list head's");
   assert.match(page, /const addFromCloud = managedCloud && \(\s*<button\s+type="button"\s+className="btn"\s+aria-haspopup="dialog"/);
   assert.match(page, /<NameSearchField[^/]*count=\{!managedCloud\} trailing=\{addFromCloud\} \/>/);
-  assert.match(page, /none stored yet\.`\}\s*\{addFromCloud\}/);
+  assert.match(page, /t\("list\.empty", \{ noun \}\), 1\)\}\s*\{addFromCloud\}/);
+  assert.match(en.library.list.empty, /none stored yet\.$/);
   const field = readFileSync("src/components/sync-review/NameSearchField.tsx", "utf8");
   assert.match(field, /\{count \? \(/);
   assert.match(field, /className="sync-visually-hidden" role="status"/);
@@ -1593,12 +1664,18 @@ test("every storage's item has its own page, and on Mallard Cloud its repository
   // A review, its Preparing… and a finished Push or Pull sit on the Storage
   // card, as a project's do; any other storage keeps the Catalog's page.
   assert.match(page, /<StorageCard name=\{storageName \?\? "Mallard Cloud"\} review>\s*<div className="sync-storage-inline-review" tabIndex=\{-1\}>/);
-  assert.match(page, /Reading the latest version from \$\{storageWord\}/);
-  assert.match(page, /Comparing this computer with \$\{storageWord\}/);
+  assert.match(page, /t\("review\.readingLatest", \{ storage: storageWord \}\)/);
+  assert.match(page, /t\("review\.comparingWith", \{ storage: storageWord \}\)/);
+  assert.deepEqual(
+    [en.library.review.readingLatest, en.library.review.comparingWith],
+    ["Reading the latest version from {{storage}}", "Comparing this computer with {{storage}}"],
+  );
   assert.match(page, /const outcomeCard = managedCloud && outcomeNotice/);
-  assert.match(page, /managedCloud \? \(pushing \? "Pushing…" : "Push"\) : `Push \$\{pushSelected\.size\}`/);
-  assert.match(page, /A running push finishes or fails whole — it can’t be cancelled midway\./);
-  assert.match(page, /Pull cannot be cancelled while changes are being applied\./);
+  assert.match(page, /managedCloud \? \(pushing \? t\("verb\.pushing"\) : t\("common:push"\)\) : t\("verb\.pushCount", \{ count: pushSelected\.size \}\)/);
+  assert.match(page, /t\("push\.cantCancel"\)/);
+  assert.equal(en.library.push.cantCancel, "A running push finishes or fails whole — it can’t be cancelled midway.");
+  assert.match(page, /t\("pull\.cantCancel"\)/);
+  assert.equal(en.library.pull.cantCancel, "Pull cannot be cancelled while changes are being applied.");
   assert.match(page, /\? cloudPushOutcome\(result, \{/);
   const api = readFileSync("src/components/storage-catalog/api.ts", "utf8");
   assert.doesNotMatch(api, /disconnect/);
@@ -1608,9 +1685,8 @@ test("every storage's item has its own page, and on Mallard Cloud its repository
 
 test("a Mallard Cloud outcome speaks the project's words: what moved, its repository, one version", async () => {
   const { cloudPushOutcome, cloudPullOutcome, pushOutcome } = await import("../../src/components/storage-catalog/outcomes");
-  const noun = (count: number) => (count === 1 ? "pet v2" : "pets v2");
   const addresses: Record<string, string> = { duck: "Rika321/Duck", pip: "kai/Pip", mossy: "Rika321/Mossy" };
-  const words = { noun, addressOf: (id: string) => addresses[id], at: 100 };
+  const words = { nouns: nounsOf(CODEX_PETS_V2), addressOf: (id: string) => addresses[id], at: 100 };
   const single = cloudPushOutcome({ plan_id: "review", published: true, revision: null, stopped: null, message: "", results: [
     { resource_id: "duck", display_name: "Duck", state: "published", message: null, revision: 3 },
   ] }, words);
@@ -1764,7 +1840,7 @@ test("an item's page leads its facts line with the way back to its list", async 
   assert.match(page, /const closeItemFile = \(\) => setItemFile\(null\);\s*const closeItem = \(\) => \{\s*setMode\(\{ kind: "list" \}\);\s*setItemId\(null\);\s*\};/);
   assert.match(page, /onActivate: itemRow \? closeItem : undefined,/);
   assert.match(page, /onActivate: openFilePath \? closeItemFile : undefined,/);
-  assert.match(page, /back=\{openFilePath\s*\? \{ voice: "name", label: name, onActivate: closeItemFile \}\s*: \{ voice: "app", label: scope\.label, onActivate: closeItem \}\}/);
+  assert.match(page, /back=\{openFilePath\s*\? \{ voice: "name", label: name, onActivate: closeItemFile \}\s*: \{ voice: "app", label: catalogScopeKindLabel\(scope\), onActivate: closeItem \}\}/);
 });
 
 test("a plugin's page is the store hero with this Mac's install state and the adapter's lines", async () => {
@@ -1831,7 +1907,8 @@ test("a pet's page plays its atlas on the desk, with Pause, and says what it is 
 
 test("off Mallard Cloud, a blocked item's page says why it can't be synced", () => {
   const page = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
-  assert.match(page, /\{!managedCloud && itemRow\.state === "blocked" && \(\s*<Notice severity="warning" timing="standing" label=\{`Why \$\{name\} can't be synced`\} title=\{`\$\{name\} can't be synced\.`\}>\s*\{itemRow\.blocker \?\? /);
+  assert.match(page, /\{!managedCloud && itemRow\.state === "blocked" && \(\s*<Notice severity="warning" timing="standing" label=\{t\("item\.whyBlocked", \{ name \}\)\} title=\{t\("item\.blocked", \{ name \}\)\}>\s*\{itemRow\.blocker \?\? /);
+  assert.deepEqual([en.library.item.whyBlocked, en.library.item.blocked], ["Why {{name}} can't be synced", "{{name}} can't be synced."]);
 });
 
 test("SKILL.md's frontmatter splits the way Mallard Cloud's skill page splits it", async () => {
@@ -1861,7 +1938,9 @@ test("the app's one Markdown renderer belongs to neither feature", () => {
   // itself resolves to one of its own files.
   assert.match(renderer, /\(url: string\) => \(fileLink\?\.resolve\(url\) \? url : safeMarkdownUrl\(url\)\)/);
   assert.match(renderer, /urlTransform=\{urlTransform\}/);
-  assert.match(renderer, /img: \(\{ alt \}\) => <MarkdownImagePlaceholder label=\{alt \|\| "image"\} \/>/);
+  // An image is a chip, never fetched; without alt text it names its kind.
+  assert.match(renderer, /img: \(\{ alt \}\) => <MarkdownImagePlaceholder label=\{alt\} \/>/);
+  assert.match(renderer, /const label = given \|\| word;/);
   for (const file of ["src/components/markdown/MarkdownText.tsx", "src/components/markdown/markdownUrl.ts", "src/components/markdown/remarkLatexMath.ts"]) {
     assert.doesNotMatch(readFileSync(file, "utf8"), /project-sync|storage-catalog/, file);
   }
@@ -1900,7 +1979,7 @@ test("removal cancellation and page changes never apply", async () => {
     let current = true;
     let applied = false;
     const result = await removeLocalCatalogResource({
-      kindNoun: "pet", prepare: async () => plan,
+      nouns: nounsOf(CODEX_PETS_V1), prepare: async () => plan,
       confirm: async (message, options) => {
         assert.match(message, /3 files/);
         assert.equal(options.okLabel, "Delete");
@@ -1920,7 +1999,7 @@ test("plugin removal uses uninstall copy and refreshes after success or failure"
   for (const fail of [false, true]) {
     let refreshed = 0;
     const work = removeLocalCatalogResource({
-      kindNoun: "plugin",
+      nouns: nounsOf(CODEX_PLUGINS),
       prepare: async () => ({ plan_id: "review", scope_id: "scope", resource_id: "plugin", display_name: "Plugin", uninstall: true, file_count: 0, created_at: 1, expires_at: 2 }),
       confirm: async (message, options) => { assert.match(message, /user installation/); assert.equal(options.okLabel, "Uninstall"); return true; },
       apply: async (id) => { assert.equal(id, "review"); if (fail) throw new Error("provider failed"); return { removed: true, message: "Removed" }; },
@@ -2001,7 +2080,7 @@ test("the Library list wears the project faces' status strip", () => {
   // Under the list's own search, which counts "3 of 13" while a scope holds.
   assert.match(
     page,
-    /narrowed=\{statusScope !== null\} count=\{!managedCloud\} trailing=\{addFromCloud\} \/>\s*\{scopeBarShown && \([\s\S]*?<StatusScopeBar\s+label=\{`Show \$\{plural\} by status`\}/,
+    /narrowed=\{statusScope !== null\} count=\{!managedCloud\} trailing=\{addFromCloud\} \/>\s*\{scopeBarShown && \([\s\S]*?<StatusScopeBar\s+label=\{nouns\.say\(\(noun\) => t\("list\.showByStatus", \{ noun \}\)\)\}/,
   );
   // The list only: no strip in a review or on an item's page.
   assert.equal(page.match(/<StatusScopeBar/g)?.length, 1);
@@ -2014,7 +2093,8 @@ test("the Library list wears the project faces' status strip", () => {
     page,
     /const scopeEmptiedList = statusScope !== null && matchingRows\.length === 0\s*&& rows\.some\(\(row\) => nameMatchesSearch\(row\.display_name, searchQuery\)\);/,
   );
-  assert.match(page, /\{scopeEmptiedList && \(\s*<button type="button" className="btn btn-ghost" onClick=\{clearStatusScope\}>Clear filter<\/button>/);
+  assert.match(page, /\{scopeEmptiedList && \(\s*<button type="button" className="btn btn-ghost" onClick=\{clearStatusScope\}>\{t\("list\.clearFilter"\)\}<\/button>/);
+  assert.deepEqual([en.library.list.showByStatus, en.library.list.clearFilter], ["Show {{noun}} by status", "Clear filter"]);
   // The scope lives and resets with the search.
   assert.match(
     page,
@@ -2129,4 +2209,279 @@ test("the item's rows and SKILL.md's links open its files; without a file link M
   assert.match(page, /onActivate: openFilePath \? closeItemFile : undefined,/);
   assert.match(page, /id: "file",\s*label: baseName\(openFilePath\),\s*title: openFilePath,/);
   assert.match(page, /items: itemFiles\.filter\(\(file\) => file\.path !== openFilePath\)/);
+});
+
+/* ——— in Chinese ——— */
+
+/** `t` for a key the test builds while walking the catalog. */
+const anyKey = i18n.t.bind(i18n) as unknown as (key: string, options?: Record<string, unknown>) => string;
+
+/** Renders with the interface in Chinese, then puts English back. */
+function inChinese<T>(fn: () => T): T {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    return fn();
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+}
+
+const HAN = "\\p{Script=Han}";
+/** Han against a Latin letter or digit with no space between: the one
+ *  spacing fault a noun arriving in a sentence could make. */
+const UNSPACED = new RegExp(`${HAN}[A-Za-z0-9]|[A-Za-z0-9]${HAN}`, "u");
+
+test("in Chinese a kind's noun is Skill, 插件 or 宠物, spaced from Han only when it is Latin", async () => {
+  const { zhCN } = await import("../../src/i18n/zh-CN");
+  const catalog = zhCN.library as CatalogTree;
+  const sentences = (function walk(tree: CatalogTree, prefix: string): Array<[string, string]> {
+    return Object.entries(tree).flatMap(([key, value]) => (typeof value === "string" ? [[`${prefix}${key}`, value] as [string, string]] : walk(value, `${prefix}${key}.`)));
+  })(catalog, "");
+  // The catalog writes {{noun}} straight against the Han beside it; the
+  // space a Latin noun needs is put in when it arrives.
+  for (const [key, text] of sentences) {
+    assert.doesNotMatch(text, new RegExp(`${HAN} \\{\\{(noun|wanted)\\}\\}|\\{\\{(noun|wanted)\\}\\} ${HAN}`, "u"), key);
+  }
+  inChinese(() => {
+    /* Every other value is Han, so only the noun's own edges can set
+       Latin against Han. */
+    const said = (capability: CatalogCapabilityDescriptor, key: string, count = 3) => nounsOf(capability).say((noun) => {
+      const text = sentences.find(([name]) => name === key)?.[1] ?? "";
+      const values = Object.fromEntries([...text.matchAll(/\{\{(\w+)\}\}/g)].map(([, name]) => [name, "甲"]));
+      return anyKey(`library:${key}`, { ...values, noun, count });
+    }, count);
+    assert.equal(said(CODEX_SKILLS, "chip.install", 1), "安装 Skill");
+    assert.equal(said(CODEX_PLUGINS, "chip.install", 1), "安装插件");
+    assert.equal(said(CODEX_PETS_V1, "removal.deleteLabel", 1), "删除本地宠物 v1");
+    assert.equal(said(CODEX_PETS_V2, "outcome.needAttention"), "3 个宠物 v2 需要处理");
+    assert.equal(said(CODEX_SKILLS, "kindCard.count", 9), "9 个 Skill");
+    assert.equal(said(CODEX_SKILLS, "review.search"), "搜索 Skill");
+    assert.equal(said(CODEX_SKILLS, "chip.keepCopy", 1), "更新 Skill · 保留本地副本");
+    assert.equal(nounsOf(CODEX_SKILLS).lead((noun) => i18n.t("library:info.label", { noun, name: "release-notes" })), "release-notes 的 Skill 信息");
+    assert.equal(nounsOf(CODEX_SKILLS).counted(9), "个 Skill");
+    assert.equal(nounsOf(CODEX_PLUGINS).counted(2), "个插件");
+    // Every sentence holding a noun reads right for every kind, Latin or Han.
+    for (const capability of [CODEX_SKILLS, CODEX_PLUGINS, CODEX_PETS_V1, CODEX_PETS_V2]) {
+      for (const [key, text] of sentences) {
+        if (!text.includes("{{noun}}")) continue;
+        const out = said(capability, key);
+        assert.doesNotMatch(out, UNSPACED, `${capability.label} ${key}: ${out}`);
+        assert.doesNotMatch(out, / {2}|^ | $|[\uE000\uE001]/, `${capability.label} ${key}: ${out}`);
+      }
+    }
+  });
+});
+
+test("in Chinese a scope page speaks Chinese around the backend's labels and reasons", () => {
+  const unavailable = inChinese(() => renderScopePage(unavailableScope));
+  // The backend's reason and the row's raw label stay as they came.
+  assert.match(unavailable, new RegExp(escapeRegExp(UNAVAILABLE_REASON)));
+  assert.match(unavailable, /当前构建无法使用 codex\/agent_skill\/agentskills\.io\.skill@2 · conf2。/);
+  assert.match(unavailable, /aria-label="此资源库行为何不可用"/);
+  assert.equal(
+    unavailable.match(new RegExp(`<button[^>]*class="sync-path-sync"[^>]*disabled=""[^>]*title="${escapeRegExp(UNAVAILABLE_REASON)}"`, "g"))?.length,
+    2,
+    "Pull and Push carry the backend's reason, in English",
+  );
+  const page = inChinese(() => renderScopePage());
+  assert.match(page, /<span class="sync-path-sync-label">下载<\/span>/);
+  assert.match(page, /<span class="sync-path-sync-label">上传<\/span>/);
+  assert.match(page, /aria-label="刷新比较"/);
+  assert.match(page, /aria-label="无存储。存储菜单"/);
+  // The capability's label comes from Rust, keyed by its presentation hint:
+  // Skill stays English and singular in Chinese; the profile's name stays.
+  assert.match(page, /aria-label="Skill · conf2 路径"/);
+  assert.match(page, /aria-label="Skill · conf2。资源库行菜单"/);
+  assert.doesNotMatch(page, /技能|推送|拉取/);
+  // English is back afterwards.
+  assert.match(renderScopePage(), /<span class="sync-path-sync-label">Pull<\/span>/);
+
+  const index = inChinese(() => renderToStaticMarkup(
+    <CatalogIndexPage scopes={[]} capabilities={CAPABILITIES} busy={false} appActions={[]} onOpenScope={() => undefined} onAddScope={() => undefined} />,
+  ));
+  assert.match(index, /本机 0 个/);
+  assert.match(index, /添加资源…/);
+  assert.match(index, /通过你的存储共享/);
+  assert.match(index, /aria-label="添加 Skill"/);
+});
+
+test("in Chinese a Pull review row's chooser keeps names and the backend's words", async () => {
+  const { ResourceCard } = await import("../../src/components/storage-catalog/StorageCatalogPage");
+  const pullAction = (kind: CatalogPullAction["kind"]["kind"], id: string): CatalogPullAction => ({
+    action_id: id,
+    resource_id: "release-notes",
+    kind: kind === "preserve_as_copy_and_overwrite"
+      ? { kind, copy: { copy_name: "release-notes-local", copy_resource_id: "r", copy_target_path: "/t", transformed_content_sha256: "e", original_content_sha256: "f", storage_content_sha256: "1", reusable_witness: false } }
+      : { kind } as CatalogPullAction["kind"],
+    requires_destructive_approval: kind === "overwrite_with_storage",
+    expected_target_state: { state: "absent" },
+    incoming_content_sha256: "c",
+  });
+  const actions = [pullAction("preserve_as_copy_and_overwrite", "keep"), pullAction("overwrite_with_storage", "over"), pullAction("install", "inst"), pullAction("update", "upd")];
+  const card = (capability: CatalogCapabilityDescriptor, chosen: number) => {
+    const options = actions.map((candidate) => ({ id: candidate.action_id, label: actionLabel(candidate), kind: candidate.kind.kind }));
+    return renderToStaticMarkup(
+      <ResourceCard
+        row={itemRow({ state: "storage_changed", blocker: "Folder is a symlink", warnings: [{ code: "executable_content", digest: "d1", message: "contains executable content: scripts/run.sh" }] })}
+        storageName="Vault"
+        storageRevision={null}
+        provider="codex"
+        providerLabel="Codex"
+        nouns={nounsOf(capability)}
+        onOpenApp={() => undefined}
+        onOpenTerminal={() => undefined}
+        onReveal={() => undefined}
+        removal={{ label: "删除本地 Skill", busy: false, removing: false, onRemove: () => undefined }}
+        selectable
+        selected
+        action={{ chosen: options[chosen]!, options, expanded: true, destructive: chosen === 1, onToggle: () => undefined, onChoose: () => undefined }}
+      />,
+    );
+  };
+  const skill = inChinese(() => card(CODEX_SKILLS, 0));
+  // The chip, its menu and every option, in Chinese; the row and the copy
+  // keep the names they were given.
+  assert.match(skill, /<strong title="release-notes">release-notes<\/strong>/);
+  assert.match(skill, /title="将本地保留为 release-notes-local 并覆盖——选择其他本地操作">更新 Skill · 保留本地副本<svg/);
+  assert.match(skill, /role="menu" aria-label="release-notes 的本地操作"/);
+  for (const [verb, phrase] of [["保留副本", "将本地保留为 release-notes-local 并覆盖"], ["覆盖", "覆盖本地内容"], ["安装", "安装存储中的内容"], ["更新", "从存储更新"]]) {
+    assert.match(skill, new RegExp(`<span>${verb}</span><small class="phrase">${phrase}</small>`));
+  }
+  assert.match(skill, /class="sync-path-menu-item danger"[^>]*><span class="sync-path-menu-copy"><span>覆盖<\/span>/);
+  assert.match(skill, /aria-label="排除 release-notes"/);
+  assert.match(skill, /data-tooltip="Vault 中较新。下载以更新本机。"/);
+  // The backend's refusal and warning stay in its words.
+  assert.match(skill, /title="Folder is a symlink"/);
+  assert.match(skill, /data-tooltip="contains executable content: scripts\/run\.sh"/);
+  assert.doesNotMatch(skill, /技能|推送|拉取/);
+  // A Han noun sets against the Han beside it.
+  assert.match(inChinese(() => card(CODEX_PLUGINS, 2)), />安装插件<svg/);
+  assert.match(inChinese(() => card(CODEX_PETS_V1, 1)), />覆盖宠物 v1<svg/);
+  // And English is what it was.
+  assert.match(card(CODEX_SKILLS, 0), />Update skill · keeps local copy<svg/);
+});
+
+test("in Chinese the fork drawer keeps the name and the backend's refusal as given", async () => {
+  const { ForkDrawer } = await import("../../src/components/storage-catalog/StorageCatalogPage");
+  const drawer = (seed: string, error: string | null) => renderToStaticMarkup(
+    <ForkDrawer displayName="大黄" seed={seed} maxLength={128} busy={false} error={error}
+      onEdited={() => undefined} onSubmit={() => undefined} onClose={() => undefined} />,
+  );
+  const refusal = "invalid skill name: '潮汐笔记'";
+  const refused = inChinese(() => drawer("big-yellow-copy", refusal));
+  assert.match(refused, /<span class="catalog-fork-lead">将<strong>“大黄”<\/strong>复刻为<\/span>/);
+  assert.match(refused, /aria-label="大黄复刻的名称"/);
+  assert.match(refused, /<\/svg> 复刻<\/button>/);
+  assert.match(refused, />取消<\/button>/);
+  assert.match(refused, new RegExp(`role="alert"><svg[\\s\\S]*?</svg> ${escapeRegExp(refusal.replace(/'/g, "&#x27;"))}</span>`));
+  const broken = inChinese(() => drawer("潮汐-copy", null));
+  assert.match(broken, /以字母或数字开头，之后可用字母、数字、点、短横线和下划线——这会成为副本的文件夹名。/);
+  assert.match(broken, /value="潮汐-copy"/);
+  assert.match(inChinese(() => drawer("big-yellow-copy", null)), /在原件旁以此名称建立的独立副本——单独成行，上传之前只在本机。/);
+  assert.match(drawer("big-yellow-copy", null), /<span class="catalog-fork-lead">Fork <strong>“大黄”<\/strong> as<\/span>/);
+  // A name is text in either language, never markup the sentence's tags parse.
+  const markup = "a<i>b</i> & <b>c</b> {{x}} <0>z</0>";
+  const escaped = "a&lt;i&gt;b&lt;/i&gt; &amp; &lt;b&gt;c&lt;/b&gt; {{x}} &lt;0&gt;z&lt;/0&gt;";
+  const named = (displayName: string) => renderToStaticMarkup(
+    <ForkDrawer displayName={displayName} seed="x" maxLength={128} busy={false} error={null}
+      onEdited={() => undefined} onSubmit={() => undefined} onClose={() => undefined} />,
+  );
+  assert.match(named(markup), new RegExp(`<span class="catalog-fork-lead">Fork <strong>“${escapeRegExp(escaped)}”</strong> as</span>`));
+  assert.match(inChinese(() => named(markup)), new RegExp(`<span class="catalog-fork-lead">将<strong>“${escapeRegExp(escaped)}”</strong>复刻为</span>`));
+  // A card's Fork names the kind in Chinese, the item as it is.
+  assert.equal(
+    inChinese(() => nounsOf(CODEX_SKILLS).say((noun) => i18n.t("library:fork.title", { name: "release-notes", noun }), 1)),
+    "复刻 release-notes——以新名称复制此 Skill",
+  );
+});
+
+test("in Chinese an outcome counts in 个 and keeps each row's message", async () => {
+  const { cloudPullOutcome, pushOutcome } = await import("../../src/components/storage-catalog/outcomes");
+  const pulled = inChinese(() => cloudPullOutcome({ plan_id: "review", remote_accepted: true, results: [
+    { resource_id: "pip", display_name: "Pip", outcome: "failed", message: "Provider apply stopped" },
+    { resource_id: "duck", display_name: "Duck", outcome: "skipped", message: "Not on this computer" },
+  ] }, { nouns: nounsOf(CODEX_SKILLS), addressOf: () => null, at: 1, keptAs: () => null, version: null }));
+  assert.equal(pulled.title, "2 个 Skill 需要处理");
+  assert.deepEqual(pulled.stats.map((stat) => stat.label), ["已还原", "失败", "已跳过"]);
+  assert.deepEqual(pulled.rows.map((row) => [row.title, row.reason]), [["Pip", "Provider apply stopped"], ["Duck", "Not on this computer"]]);
+  const pushed = inChinese(() => pushOutcome({ plan_id: "review", published: true, revision: 4, stopped: "Second item refused", message: "", results: [
+    { resource_id: "a", display_name: "Duck", state: "published", message: null },
+    { resource_id: "b", display_name: "Seal", state: "failed", message: "No access" },
+  ] }));
+  assert.equal(pushed.title, "已上传 1 / 2 项");
+  assert.deepEqual(pushed.technical, [{ label: "上传已停止", value: "Second item refused" }]);
+  assert.deepEqual(pushed.stats.map((stat) => stat.label), ["已完成", "Version"]);
+});
+
+test("in Chinese the backend's capability labels read by their presentation hint; Skill stays English and singular", () => {
+  const withProfile = (capability: CatalogCapabilityDescriptor, name: string) => ({
+    label: capability.label,
+    capability,
+    profile: { display_name: name },
+  });
+  assert.deepEqual(
+    inChinese(() => [CODEX_SKILLS, CODEX_PLUGINS, CODEX_PETS_V1, CODEX_PETS_V2].map((capability) => catalogScopeLabel(withProfile(capability, "Codex home")))),
+    ["Skill · Codex home", "插件 · Codex home", "宠物 v1 · Codex home", "宠物 v2 · Codex home"],
+  );
+  // English is the backend's label; a row with no capability keeps its raw label.
+  assert.equal(catalogScopeLabel(withProfile(CODEX_PLUGINS, "Codex home")), "Plugins · Codex home");
+  assert.equal(inChinese(() => catalogScopeLabel(unavailableScope)), "codex/agent_skill/agentskills.io.skill@2 · conf2");
+  // The Add chooser and the index doors, one per shape.
+  assert.deepEqual(inChinese(() => catalogAddChoices(CAPABILITIES).map((choice) => choice.label)), ["Skill", "插件", "宠物 v1", "宠物 v2"]);
+  assert.deepEqual(catalogAddChoices(CAPABILITIES).map((choice) => choice.label), ["Skills", "Plugins", "Pets v1", "Pets v2"]);
+  const index = inChinese(() => renderToStaticMarkup(
+    <CatalogIndexPage scopes={[scopeView]} capabilities={CAPABILITIES} busy={false} appActions={[]} onOpenScope={() => undefined} onAddScope={() => undefined} />,
+  ));
+  assert.match(index, /aria-label="打开 Skill · conf2"/);
+  assert.doesNotMatch(index, /Skills/);
+  // A kind card whose count is not in yet shows its format, in Chinese.
+  const card = catalogKindCards(CAPABILITIES, { profile_id: "catprofile-1", provider: "codex" }, [], null)
+    .find((candidate) => candidate.capability === CODEX_PLUGINS)!;
+  assert.equal(inChinese(() => catalogKindCardFoot(card)), "插件安装意向");
+  assert.equal(catalogKindCardFoot(card), "Plugin install intent");
+  // The scope page's crumb, and nowhere the backend's English plural.
+  const page = inChinese(() => renderScopePage());
+  assert.match(page, /aria-label="Skill · conf2 路径"/);
+  assert.doesNotMatch(page, /Skills/);
+});
+
+/* D7: the Library's progress lines and fixed result messages are the
+   backend's English with a stage or message code and the item's name. */
+test("Library progress and fixed results keep their English and are worded by code in Chinese", async () => {
+  const { catalogActionMessage, catalogProgressText, catalogRemovalMessage, pullOutcome } = await import("../../src/components/storage-catalog/outcomes");
+  const pushing = { plan_id: "catplan-1", completed: 1, total: 3, message: "Pushing tidal-notes…", stage: "pushing" as const, name: "tidal-notes" };
+  const finished = { plan_id: "catplan-1", completed: 3, total: 3, message: "Push finished", stage: "push_finished" as const };
+  const skipped = {
+    resource_id: "skill:a", display_name: "tidal-notes", outcome: "skipped" as const,
+    message: "Skipped; local content was left unchanged", message_code: "skipped" as const,
+  };
+  const kept = {
+    resource_id: "skill:b", display_name: "潮汐笔记", outcome: "preserved_and_updated" as const,
+    message: "Kept your version as 'tidal-notes-local'", message_code: "kept_as" as const, message_name: "tidal-notes-local",
+  };
+  const failedRow = { resource_id: "skill:c", display_name: "harbor", outcome: "failed" as const, message: "payload digest mismatch" };
+  const forked = {
+    resource_id: "skill:d", display_name: "tidal-notes-2", outcome: "forked" as const,
+    message: "Forked from 'tidal-notes'; local-only until you push it", message_code: "forked" as const, message_name: "tidal-notes",
+  };
+  const removed = { removed: true, message: "tidal-notes removed from this provider home. Copies in storage are kept.", display_name: "tidal-notes" };
+  const notRemoved = { removed: false, message: "Removal did not complete. Some local changes may have been made. busy", display_name: "tidal-notes" };
+  const reasons = () => pullOutcome({ plan_id: "catplan-2", remote_accepted: false, results: [skipped, kept, failedRow] }).rows.map((row) => row.reason);
+
+  // English is the backend's own text.
+  assert.equal(catalogProgressText(pushing), "Pushing tidal-notes… (1/3)");
+  assert.equal(catalogProgressText(finished), "Push finished (3/3)");
+  assert.deepEqual(reasons(), [skipped.message, kept.message, failedRow.message]);
+  assert.equal(catalogActionMessage(forked), forked.message);
+  assert.equal(catalogRemovalMessage(removed), removed.message);
+
+  inChinese(() => {
+    assert.equal(catalogProgressText(pushing), "正在上传 tidal-notes… (1/3)");
+    assert.equal(catalogProgressText(finished), "上传完成 (3/3)");
+    // An error stays as the backend wrote it; names stay as given.
+    assert.deepEqual(reasons(), ["已跳过，本地内容保持不变", "你本地的内容已另存为“tidal-notes-local”", "payload digest mismatch"]);
+    assert.equal(catalogActionMessage(forked), "已从“tidal-notes”复刻；上传之前仅保存在本地");
+    assert.equal(catalogRemovalMessage(removed), "已从此代理主目录移除 tidal-notes。存储中的副本会保留。");
+    assert.equal(catalogRemovalMessage(notRemoved), notRemoved.message);
+  });
 });

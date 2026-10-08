@@ -13,6 +13,7 @@ use crate::providers::traits::{
     SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineQuery, SessionToolCategory,
 };
 use crate::providers::{AgentProviderRegistry, SessionTimelineContext};
+use crate::session_detail::token_count;
 use mallard_domain::{
     sha256_hex, BundleManifest, ConversationFileRole, NoticeSeverity, ProviderKey,
 };
@@ -39,11 +40,63 @@ struct SessionView<'a> {
     ended_at: Option<u64>,
     branch: Option<String>,
     recorded_sha: Option<String>,
-    tokens: SessionCount,
-    event_counts: SessionEventCounts,
+    tokens: ViewCount,
+    event_counts: ViewEventCounts,
     events: &'a [SessionTimelineEvent],
     truncated: bool,
     warnings: Vec<ViewWarning>,
+}
+
+/// A count as the website reads it: the English explanation, never the
+/// code the desktop translates by.
+#[derive(Serialize, Clone)]
+struct ViewCount {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<u64>,
+    quality: SessionCountQuality,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanation: Option<String>,
+}
+
+impl From<&SessionCount> for ViewCount {
+    fn from(count: &SessionCount) -> Self {
+        Self {
+            value: count.value,
+            quality: count.quality,
+            explanation: count.explanation.clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct ViewEventCounts {
+    prompts: ViewCount,
+    responses: ViewCount,
+    intermediate_steps: ViewCount,
+    checkpoints: ViewCount,
+    tool_calls: ViewCount,
+    file_edits: ViewCount,
+    shell_calls: ViewCount,
+    reads: ViewCount,
+    other_tools: ViewCount,
+    agent_calls: ViewCount,
+}
+
+impl From<&SessionEventCounts> for ViewEventCounts {
+    fn from(counts: &SessionEventCounts) -> Self {
+        Self {
+            prompts: (&counts.prompts).into(),
+            responses: (&counts.responses).into(),
+            intermediate_steps: (&counts.intermediate_steps).into(),
+            checkpoints: (&counts.checkpoints).into(),
+            tool_calls: (&counts.tool_calls).into(),
+            file_edits: (&counts.file_edits).into(),
+            shell_calls: (&counts.shell_calls).into(),
+            reads: (&counts.reads).into(),
+            other_tools: (&counts.other_tools).into(),
+            agent_calls: (&counts.agent_calls).into(),
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -64,8 +117,8 @@ struct ViewFacts<'a> {
     ended_at: Option<u64>,
     branch: Option<String>,
     recorded_sha: Option<String>,
-    tokens: SessionCount,
-    event_counts: SessionEventCounts,
+    tokens: ViewCount,
+    event_counts: ViewEventCounts,
     warnings: Vec<ViewWarning>,
 }
 
@@ -162,25 +215,16 @@ pub fn build_view(
             _ => break,
         }
     }
-    let mut counts = index.counts.clone();
-    counts.checkpoints = SessionCount::unsupported(
-        "Checkpoints are not carried in Mallard Cloud views: the pushing desktop builds the view without the project's Git history.",
-    );
-    let tokens = match summary.total_tokens {
-        Some(value) => SessionCount {
-            value: Some(value),
-            quality: if summary.metrics_complete {
-                SessionCountQuality::Exact
-            } else {
-                SessionCountQuality::LowerBound
-            },
-            explanation: (!summary.metrics_complete)
-                .then(|| "The provider transcript may contain additional token usage.".to_string()),
-        },
-        None => SessionCount::unsupported(
-            "This provider transcript does not expose a reliable token total.",
+    let mut counts = ViewEventCounts::from(&index.counts);
+    counts.checkpoints = ViewCount {
+        value: None,
+        quality: SessionCountQuality::Unsupported,
+        explanation: Some(
+            "Checkpoints are not carried in Mallard Cloud views: the pushing desktop builds the view without the project's Git history."
+                .to_string(),
         ),
     };
+    let tokens = ViewCount::from(&token_count(&summary));
     let title = display_title
         .filter(|title| !title.trim().is_empty())
         .map(str::to_owned)
@@ -441,6 +485,8 @@ mod tests {
         assert!(!view.truncated);
         assert_eq!(view.source_sha256, sha256_hex(&wire));
         assert_eq!(view.sha256, sha256_hex(&view.bytes));
+        // The website reads English explanations; the desktop's codes stay home.
+        assert!(!String::from_utf8_lossy(&view.bytes).contains("explanation_code"));
         let messages = value["events"]
             .as_array()
             .unwrap()
@@ -452,6 +498,48 @@ mod tests {
             .flat_map(|turn| [format!("Prompt {turn}"), format!("Reply {turn}")])
             .collect::<Vec<_>>();
         assert_eq!(messages, expected);
+    }
+
+    #[test]
+    fn view_counts_keep_the_english_and_drop_the_codes() {
+        use crate::providers::traits::SessionCountExplanation;
+        let explained = SessionCount::explained(
+            2,
+            SessionCountQuality::LowerBound,
+            Some(SessionCountExplanation::CodexToolActivityIncomplete),
+        );
+        assert!(explained.explanation_code.is_some());
+        let counts = SessionEventCounts {
+            prompts: SessionCount::exact(1),
+            responses: explained.clone(),
+            intermediate_steps: explained.clone(),
+            checkpoints: SessionCount::unsupported(
+                SessionCountExplanation::CodexCheckpointsOutsideTranscript,
+            ),
+            tool_calls: explained.clone(),
+            file_edits: explained.clone(),
+            shell_calls: explained.clone(),
+            reads: explained.clone(),
+            other_tools: explained.clone(),
+            agent_calls: explained,
+        };
+        let value = serde_json::to_value(ViewEventCounts::from(&counts)).unwrap();
+        assert_eq!(value["prompts"], json!({"value": 1, "quality": "exact"}));
+        assert_eq!(
+            value["tool_calls"],
+            json!({
+                "value": 2,
+                "quality": "lower_bound",
+                "explanation": "Some Codex tool activity may be absent because the durable rollout was incomplete."
+            })
+        );
+        assert_eq!(
+            value["checkpoints"],
+            json!({
+                "quality": "unsupported",
+                "explanation": "Git checkpoints are correlated by Mallard outside the Codex transcript."
+            })
+        );
     }
 
     #[test]

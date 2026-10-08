@@ -1,3 +1,5 @@
+import { t } from "../../i18n";
+
 /**
  * The address Mallard Cloud gives a new repository, as the desktop previews
  * it before the request: a project's New repository row and a Catalog item's
@@ -45,7 +47,7 @@ export function deriveRepositoryName(requested: string): string | null {
 
 /** The one sentence a New row prints for a title the service would refuse. */
 export function nameRefusal(subject: "project" | "item"): string {
-  return `Name needs a letter or digit; rename the ${subject} first.`;
+  return subject === "project" ? t("cloud:name.refusalProject") : t("cloud:name.refusalItem");
 }
 
 export type AddressPrediction =

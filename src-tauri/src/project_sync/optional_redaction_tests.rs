@@ -167,6 +167,10 @@ fn optional_redaction_session_children_pull_adoption_and_republication() {
             entries[0].status_detail.as_deref(),
             Some("Export settings changed")
         );
+        assert_eq!(
+            entries[0].status_detail_code,
+            Some("export_settings_changed")
+        );
         save_test_redaction(&repo, true);
         let stale = service
             .push_reviewed(

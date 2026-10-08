@@ -1,6 +1,24 @@
 # Simplified Chinese for Mallard — desktop and website
 
-Status: planned October 7, 2026. Nothing implemented. Specimens:
+Status: **desktop implemented October 8, 2026 (uncommitted); website not
+started.** Owner: "Looks good, implement the desktop first" — the
+recommended option of every open decision below was taken. Desktop D1–D8 are
+in the tree: i18next 26.4.2 + react-i18next 17.0.15 with plain string keys
+(measured: tsc 13.5 s with a 2.8k-key typed catalog vs 15.2 s for selectors);
+15 namespaces in `src/i18n/{en,zh-CN}`, zh typed against en; a value-spacing
+formatter that settles Han/Latin spacing around interpolated values; backend
+fixed labels translated by key through `backendText` (`src/i18n/backend.ts`)
+with new Rust codes where none existed (discovery facts, count explanations,
+sync details, readiness, progress, after-Pull offers); the native menu from
+`src-tauri/src/app_menu.rs` via `set_ui_language`; `CFBundleLocalizations`;
+Settings › Appearance › Language and a quick switch in the app menu.
+Checks: 682 frontend tests, every workspace crate's lib tests, both tsc
+configs, `npm run build`, `scripts/i18n-guard.mjs` at 0 over all of `src/`,
+English text of 76 harness screens identical to the pre-change baseline,
+and a Chinese harvest of the same screens leaving only user data, backend
+errors and product names in English. Open: the live Tauri pass on macOS and
+the Windows WebView2 language check. The specimen board now draws from the
+real catalogs (`?copy=app`, the default). Specimens:
 `mockups/i18n-zh-mockup.html` (desktop, round 2: the shipped shell live on a
 stand-in backend, `?lang=zh|en&font=cjk|default&theme=light|dark`, frames
 `mockups/i18n-zh-live.html?screen=…`) and, in mallardInternal,
@@ -64,6 +82,8 @@ user-visible strings live in the desktop frontend and 1,650 in the website.
 | Push / Pull | 上传 / 下载 | decided |
 | Version | Version | decided: stays English |
 | Skill / Skills | Skill | decided: stays English, never 技能 |
+| Review (Push/Pull review, mark reviewed) | 检查 | decided 2026-10-08: 上传检查, 下载检查, 标为已检查 — never 审阅 |
+| Claimed by another storage | 同时关联了 … | decided 2026-10-08: never 固定 |
 | Credential redaction | 密钥隐藏 | decided |
 | Mallard, Mallard Cloud, Codex, Claude, GitHub | unchanged | product names |
 | Session | 会话 | to confirm |

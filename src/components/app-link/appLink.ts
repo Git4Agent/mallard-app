@@ -6,8 +6,9 @@ import type {
   LocalProjectSummary,
   ProjectStorageLink,
 } from "../../types";
+import { t } from "../../i18n";
 import type { IconName } from "../Icons";
-import { catalogCapabilityFor, catalogChoiceKey, catalogPresentation, catalogScopeLabel, sameCatalogCoordinate } from "../storage-catalog/model";
+import { capabilityLabel, catalogCapabilityFor, catalogChoiceKey, catalogPresentation, catalogScopeLabel, sameCatalogCoordinate } from "../storage-catalog/model";
 import type { CatalogCapabilityDescriptor, CatalogCloudPlace, CatalogScopeView } from "../storage-catalog/types";
 
 /**
@@ -105,20 +106,25 @@ export interface LinkContext {
   links: readonly Pick<ProjectStorageLink, "local_project_id" | "storage_id" | "bundle_id" | "managed_cloud_repository_id">[];
   /** In the project list's order: two projects on one repository open the first. */
   projects: readonly Pick<LocalProjectSummary, "local_project_id" | "display_name" | "local_alias">[];
-  scopes: readonly Pick<CatalogScopeView, "scope" | "label" | "profile">[];
+  /** `capability` words the row in the interface language; without it the
+   *  row reads as the backend labelled it. */
+  scopes: readonly (Pick<CatalogScopeView, "scope" | "label" | "profile"> & Partial<Pick<CatalogScopeView, "capability">>)[];
   capabilities: readonly CatalogCapabilityDescriptor[];
   /** Per storage that sees a Catalog item: the row that saved it, if one did. */
   places: Readonly<Record<string, CatalogCloudPlace | null>>;
 }
 
-export const INVALID_LINK: LinkStop = {
-  kind: "stop",
-  severity: "warning",
-  title: "Broken link",
-  icon: "link-off",
-  message: "Mallard can’t open that link.",
-  action: null,
-};
+/** A link that cannot be read, worded in the language of the moment it is said. */
+export function invalidLink(): LinkStop {
+  return {
+    kind: "stop",
+    severity: "warning",
+    title: t("shell:link.brokenTitle"),
+    icon: "link-off",
+    message: t("shell:link.broken"),
+    action: null,
+  };
+}
 
 /**
  * The host a Mallard Cloud storage signs in to, spelled as the backend's
@@ -135,10 +141,15 @@ export function serviceHost(origin: string): string | null {
 
 type ListingLink = Extract<AppLinkArrival, { kind: "listing" }>;
 
-/** The page the listing's link opens, by name: projects are pushed from
- *  Projects; skills, plugins and pets from the Catalog. */
-export function listingPage(link: Pick<ListingLink, "listing_kind">): "Projects" | "Catalog" {
-  return link.listing_kind === null || link.listing_kind === "project" ? "Projects" : "Catalog";
+/** Which page a listing link opens: projects are pushed from Projects;
+ *  skills, plugins and pets from the Catalog. */
+export function listingDestination(link: Pick<ListingLink, "listing_kind">): "projects" | "catalog" {
+  return link.listing_kind === null || link.listing_kind === "project" ? "projects" : "catalog";
+}
+
+/** That page's name, as the waiting notice says it. */
+export function listingPage(link: Pick<ListingLink, "listing_kind">): string {
+  return t(listingDestination(link) === "catalog" ? "shell:roots.catalog" : "shell:roots.projects");
 }
 
 /**
@@ -149,34 +160,47 @@ export function listingPage(link: Pick<ListingLink, "listing_kind">): "Projects"
  */
 export function listingVerdict(link: ListingLink, cloudHosts: readonly string[]): LinkStop | LinkDirect {
   if (!cloudHosts.includes(link.host)) {
-    return link.can_set_up ? signIn("Sign in to Mallard Cloud to share.") : noAccount(link.host);
+    return link.can_set_up ? signIn(t("shell:link.signInShare")) : noAccount(link.host);
   }
-  return { kind: "direct", destination: { kind: listingPage(link) === "Catalog" ? "catalog" : "projects" } };
+  return { kind: "direct", destination: { kind: listingDestination(link) } };
 }
 
 /** The service could not be asked, or could not answer: say why, and ask again. */
 export const unanswered = (message: string): LinkStop => (
-  { kind: "stop", severity: "danger", title: "Mallard Cloud didn’t answer", icon: "cloud-x", message, action: "retry" }
+  { kind: "stop", severity: "danger", title: t("shell:link.unansweredTitle"), icon: "cloud-x", message, action: "retry" }
 );
 const signIn = (message: string): LinkStop => (
-  { kind: "stop", severity: "info", title: "Sign in first", icon: "user", message, action: "set_up" }
+  { kind: "stop", severity: "info", title: t("shell:link.signInTitle"), icon: "user", message, action: "set_up" }
 );
 const noAccount = (host: string): LinkStop => (
-  { kind: "stop", severity: "warning", title: `No account on ${host}`, icon: "user", message: `No account here for ${host}.`, action: null }
+  { kind: "stop", severity: "warning", title: t("shell:link.noAccountTitle", { host }), icon: "user", message: t("shell:link.noAccount", { host }), action: null }
 );
 
 const capitalize = (value: string) => (value ? `${value[0].toUpperCase()}${value.slice(1)}` : value);
 
+/** The account's role in a word: the service's three roles by key, any
+ *  other as the service spelled it. */
+function roleWord(role: string): string {
+  switch (role) {
+    case "owner": return t("shell:link.roleOwner");
+    case "admin": return t("shell:link.roleAdmin");
+    case "member": return t("shell:link.roleMember");
+    default: return capitalize(role);
+  }
+}
+
 /** What the service said about it: who can see it, the account's role, and the session a session's link names. */
 function facts(repository: Pick<AppLinkRepository, "role" | "visibility">, session: string | null = null): LinkFact[] {
-  const shown: LinkFact[] = [repository.visibility === "public" ? { icon: "cloud", word: "Public" } : { icon: "lock", word: "Private" }];
-  if (repository.role !== null) shown.push({ icon: "user", word: capitalize(repository.role) });
-  if (session) shown.push({ icon: "message", word: "1 session" });
+  const shown: LinkFact[] = [repository.visibility === "public"
+    ? { icon: "cloud", word: t("shell:link.public") }
+    : { icon: "lock", word: t("shell:link.private") }];
+  if (repository.role !== null) shown.push({ icon: "user", word: roleWord(repository.role) });
+  if (session) shown.push({ icon: "message", word: t("shell:link.sessions", { count: 1 }) });
   return shown;
 }
 
 const present = (place: LinkHere["place"], name: string): LinkHere => ({
-  place, present: true, word: name, sentence: `${place === "catalog" ? "In your Catalog" : "On this computer"}: ${name}`,
+  place, present: true, word: name, sentence: t(place === "catalog" ? "shell:link.inCatalog" : "shell:link.onComputer", { name }),
 });
 const absent = (place: LinkHere["place"], word: string, sentence: string): LinkHere => ({ place, present: false, word, sentence });
 
@@ -202,7 +226,7 @@ export function catalogSeers(answer: AppLinkAnswer): Array<{ storageId: string; 
 export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session: string | null = null): LinkVerdict {
   const { accounts, address } = answer;
   if (accounts.length === 0) {
-    return answer.can_set_up ? signIn(`Sign in to Mallard Cloud to open ${address}.`) : noAccount(answer.host);
+    return answer.can_set_up ? signIn(t("shell:link.signInOpen", { address })) : noAccount(answer.host);
   }
   const seers = accounts.filter(sees);
   if (seers.length === 0) {
@@ -213,16 +237,18 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
     return {
       kind: "stop",
       severity: "warning",
-      title: "No access",
+      title: t("shell:link.noAccessTitle"),
       icon: "lock",
-      message: accounts.length === 1 ? `${accounts[0].account_login} can’t see ${address}.` : `No account here can see ${address}.`,
+      message: accounts.length === 1
+        ? t("shell:link.noAccessOne", { login: accounts[0].account_login, address })
+        : t("shell:link.noAccessAny", { address }),
       action: null,
     };
   }
   const repository = seers[0].sight.repository;
 
   if (repository.repository_class !== "catalog") {
-    if (!repository.bundle_id) return INVALID_LINK;
+    if (!repository.bundle_id) return invalidLink();
     // Any account on the host may be the one the project is connected through.
     const onHost = new Set(accounts.map((account) => account.storage_id));
     const connected = context.links.filter((link) => onHost.has(link.storage_id) && (
@@ -239,8 +265,8 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
         kind: "landing",
         found: { address: repository.address, mark, facts: shown, here: present("computer", project.local_alias || project.display_name) },
         ...(session
-          ? { verb: "Pull session…", destination: { kind: "pull_session", projectId: project.local_project_id, storageId: link.storage_id, resourceId: session } }
-          : { verb: "Open project", destination: { kind: "project", projectId: project.local_project_id, storageId: link.storage_id } }),
+          ? { verb: t("shell:link.pullSession"), destination: { kind: "pull_session", projectId: project.local_project_id, storageId: link.storage_id, resourceId: session } }
+          : { verb: t("shell:link.openProject"), destination: { kind: "project", projectId: project.local_project_id, storageId: link.storage_id } }),
       };
     }
     return {
@@ -250,27 +276,34 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
         address: repository.address,
         mark,
         facts: shown,
-        here: absent("computer", "Not here", session ? "Not on this computer. Set up the project, then use the link again." : "Not on this computer."),
+        here: absent("computer", t("shell:link.notHere"), t(session ? "shell:link.notOnComputerSetUp" : "shell:link.notOnComputer")),
       },
-      verb: "Set up project…",
+      verb: t("shell:link.setUpProject"),
       // Several accounts see it: none is ticked, as New project does.
       destination: { kind: "new_project", storageId: seers.length === 1 ? seers[0].storage_id : null, address: repository.address },
     };
   }
   // A Catalog item has no session pages: the website writes no such link.
-  if (session) return INVALID_LINK;
+  if (session) return invalidLink();
 
   const coordinate = repository.catalog;
   const capability = coordinate ? catalogCapabilityFor(context.capabilities, coordinate) : null;
   if (!coordinate || !capability) {
-    return { kind: "stop", severity: "warning", title: "Can’t open this kind", icon: "ban", message: `${repository.address} is a kind this app can’t open.`, action: null };
+    return {
+      kind: "stop",
+      severity: "warning",
+      title: t("shell:link.unknownKindTitle"),
+      icon: "ban",
+      message: t("shell:link.unknownKind", { address: repository.address }),
+      action: null,
+    };
   }
   const mark = catalogPresentation(capability).icon;
   // The item's page is its repository's, so its link pulls the item.
-  const pull = `Pull ${capability.singular_label.toLowerCase()}…`;
+  const pull = pullVerb(capability);
   const rowLabel = (scopeId: string) => {
     const row = context.scopes.find((scope) => scope.scope.scope_id === scopeId);
-    return row ? catalogScopeLabel(row) : capability.label;
+    return row ? catalogScopeLabel(row) : capabilityLabel(capability);
   };
   const saved = seers.map((seer) => context.places[seer.storage_id] ?? null).find((place) => place !== null) ?? null;
   if (saved) {
@@ -300,18 +333,30 @@ export function linkVerdict(answer: AppLinkAnswer, context: LinkContext, session
         address: repository.address,
         mark,
         facts: facts(owner.sight.repository),
-        here: absent("catalog", `No ${capability.label} row`, `No ${capability.label} row on this computer.`),
+        here: absent("catalog", t("shell:link.noRow", { label: capabilityLabel(capability) }), t("shell:link.noRowHere", { label: capabilityLabel(capability) })),
       },
-      verb: "Add to Catalog…",
+      verb: t("shell:link.addToCatalog"),
       destination: { kind: "add_catalog_row", choiceKey: catalogChoiceKey(capability), storageId: owner.storage_id, resourceId: coordinate.resource_id },
     };
   }
   return {
     kind: "landing",
-    found: { address: repository.address, mark, facts: facts(repository), here: absent("catalog", "Not in Catalog", "Not in your Catalog.") },
-    verb: "Add to Catalog…",
+    found: { address: repository.address, mark, facts: facts(repository), here: absent("catalog", t("shell:link.notInCatalog"), t("shell:link.notInYourCatalog")) },
+    verb: t("shell:link.addToCatalog"),
     destination: { kind: "add_catalog_item", storageId: seers[0].storage_id, address: repository.address },
   };
+}
+
+/** The verb that pulls a Catalog item, one sentence per kind the registry
+ *  ships, since a lower-cased English noun is not a word in every language.
+ *  A kind this build does not know is named by the registry's own label. */
+function pullVerb(capability: Pick<CatalogCapabilityDescriptor, "resource_kind" | "format_version" | "singular_label">): string {
+  switch (capability.resource_kind) {
+    case "agent_skill": return t("shell:link.pullSkill");
+    case "plugin_install_intent": return t("shell:link.pullPlugin");
+    case "desktop_pet": return t("shell:link.pullPet", { version: capability.format_version });
+    default: return t("shell:link.pullItem", { kind: capability.singular_label.toLowerCase() });
+  }
 }
 
 /**

@@ -62,6 +62,24 @@ pub struct ConversationDecision {
     pub selectable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// When the service words the reason itself instead of the blocker's own
+    /// sentence: that sentence's code, and the value it names (a provider, a
+    /// read error), for the interface to translate by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_value: Option<String>,
+}
+
+impl ConversationDecision {
+    /// The same decision, its reason worded by the service: the English, its
+    /// code, and the value the sentence names.
+    pub fn reworded(mut self, code: &'static str, reason: String, value: Option<String>) -> Self {
+        self.blocked_reason = Some(reason);
+        self.reason_code = Some(code);
+        self.reason_value = value;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +263,8 @@ fn decision(action: ConversationReviewAction) -> ConversationDecision {
         action,
         blocker: None,
         blocked_reason: None,
+        reason_code: None,
+        reason_value: None,
     }
 }
 
@@ -261,6 +281,8 @@ fn blocked(blocker: ConversationBlocker) -> ConversationDecision {
         blocker: Some(blocker),
         selectable: false,
         blocked_reason: Some(blocked_reason(blocker).to_string()),
+        reason_code: None,
+        reason_value: None,
     }
 }
 

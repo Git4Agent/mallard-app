@@ -50,9 +50,11 @@ import BundleConnectionDialog, { type BundleConnectionChoice } from "./BundleCon
 import { isManagedCloudStorage, managedCloudAccount } from "./RepositoryAddressPicker";
 import ActivityLogDrawer from "./ActivityLogDrawer";
 import SettingsPage from "./SettingsPage";
-import { getPreference } from "../../preferences";
+import { getPreference, setLanguageChoice } from "../../preferences";
+import { LANGUAGE_NAMES, OFFERED_LANGUAGES, Trans, uiLanguage, useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
-import { PUSH_FINISHED } from "../../unfinishedPush";
+import { pushFinished } from "../../unfinishedPush";
 import { pushFailureNotice } from "./pushFailureNotice";
 import ProjectBindingEditor, {
   type BindingProfileSelection,
@@ -92,11 +94,12 @@ import StorageCatalogPage, {
 import CatalogIndexPage from "../storage-catalog/CatalogIndexPage";
 import AddCatalogScopeWorkspace, { type CatalogCloudLanding, type CatalogCloudStart } from "../storage-catalog/AddCatalogScopeWorkspace";
 import AppLinkSheet from "../app-link/AppLinkSheet";
-import { INVALID_LINK, linkWaits, listingPage, serviceHost, type LinkDestination, type LinkVerdict } from "../app-link/appLink";
+import { invalidLink, linkWaits, listingPage, serviceHost, type LinkDestination, type LinkVerdict } from "../app-link/appLink";
 import { useAppLink } from "../app-link/useAppLink";
 import { storageCatalogApi } from "../storage-catalog/api";
 import type { CatalogCapabilityDescriptor, CatalogScopeDto, CatalogScopeView } from "../storage-catalog/types";
 import {
+  catalogCapabilityFor,
   catalogScopeLabel,
   catalogScopeRemovalMessage,
   catalogScopeRemovalRequiresCleanup,
@@ -117,6 +120,7 @@ import { buildPullReviewItems, pullActionResourceIds } from "./pullReviewModel";
 import {
   buildPullOutcome,
   buildPushOutcome,
+  maintenanceSummary,
   type SyncOutcome,
   type SyncOutcomeAction,
 } from "./syncOutcome";
@@ -139,7 +143,8 @@ import {
 import {
   inventoryResources,
   CODEX_DELETE_ERROR,
-  CODEX_DELETE_CLOSE_NOTICE,
+  codexDeleteCloseNotice,
+  offersCloseCodex,
   maintenanceActionFor,
   projectContentReviewRow,
   projectLabel,
@@ -336,6 +341,7 @@ function defaultProfileIds(): Record<ProviderKey, string> {
 }
 
 export default function ProjectSync({ theme, onThemeChange }: Props) {
+  const { t } = useTranslation(["shell", "common"]);
   const [config, setConfig] = useState<SyncConfig>(EMPTY_CONFIG);
   const [registrations, setRegistrations] = useState<LocalProjectRegistration[]>([]);
   const [repositoryKinds, setRepositoryKinds] = useState<Record<string, boolean>>({});
@@ -925,10 +931,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   });
   // The project workspace names itself in its path bar, so the titlebar stays
   // silent there and speaks only for the screens that carry no trail.
+  const onProjectsLanding = !activeDraftSummary && !choosingProjectFolder && !addingCatalogScope && !activeSummary;
   const workspaceTitle = activeDraftSummary?.display_name
-    ?? (choosingProjectFolder ? "New project" : null)
-    ?? (addingCatalogScope ? "Add Catalog resource" : null)
-    ?? (activeSummary ? null : "Projects");
+    ?? (choosingProjectFolder ? t("pages.newProject") : null)
+    ?? (addingCatalogScope ? t("pages.addCatalog") : null)
+    ?? (onProjectsLanding ? t("roots.projects") : null);
   const workspaceIcon = activeDraftSummary
     ? "folder"
     : addingCatalogScope
@@ -1086,9 +1093,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       nextConfig = await projectSyncApi.getConfig();
       if (shellRequest.current !== requestId) return unavailableResult();
       if (nextConfig.schema !== PROJECT_SYNC_SCHEMA) {
-        throw new Error(
-          `Expected project sync schema ${PROJECT_SYNC_SCHEMA}, received schema ${nextConfig.schema}`,
-        );
+        throw new Error(t("load.schemaMismatch", { expected: PROJECT_SYNC_SCHEMA, received: nextConfig.schema }));
       }
       if (
         configSnapshotValidRef.current
@@ -1101,7 +1106,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setConfig(nextConfig);
       }
     } catch (reason) {
-      failures.push(`Configuration: ${errorMessage(reason)}`);
+      failures.push(t("load.configuration", { message: errorMessage(reason) }));
       if (configSnapshotValidRef.current) {
         nextConfig = configRef.current;
       } else {
@@ -1117,7 +1122,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // interrupted sync can take a while, and it must not read as a freeze.
       await projectSyncApi.recoverStartupState();
     } catch (reason) {
-      failures.push(`Recovery: ${errorMessage(reason)}`);
+      failures.push(t("load.recovery", { message: errorMessage(reason) }));
     }
     if (shellRequest.current !== requestId) return unavailableResult();
     setStartupStage("projects");
@@ -1142,13 +1147,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       nextProjects = projectsResult.value;
       setRegistrations(nextProjects);
     } else {
-      failures.push(`Projects: ${errorMessage(projectsResult.reason)}`);
+      failures.push(t("load.projects", { message: errorMessage(projectsResult.reason) }));
       setRegistrations([]);
     }
     if (repositoryKindsResult.status === "fulfilled") {
       setRepositoryKinds(repositoryKindsResult.value);
     } else {
-      failures.push(`Repository types: ${errorMessage(repositoryKindsResult.reason)}`);
+      failures.push(t("load.repositoryKinds", { message: errorMessage(repositoryKindsResult.reason) }));
       setRepositoryKinds({});
     }
     setStartupStage("providers");
@@ -1158,27 +1163,27 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       nextAgentProviders = agentProvidersResult.value;
       setAgentProviders(nextAgentProviders);
     } else {
-      failures.push(`Agent providers: ${errorMessage(agentProvidersResult.reason)}`);
+      failures.push(t("load.agentProviders", { message: errorMessage(agentProvidersResult.reason) }));
       setAgentProviders([]);
     }
     if (storageProvidersResult.status === "fulfilled") {
       setStorageProviders(storageProvidersResult.value);
     } else {
-      failures.push(`Storage providers: ${errorMessage(storageProvidersResult.reason)}`);
+      failures.push(t("load.storageProviders", { message: errorMessage(storageProvidersResult.reason) }));
       setStorageProviders([]);
     }
     if (profilesResult.status === "fulfilled") {
       nextProfiles = profilesResult.value;
       setProfiles(nextProfiles);
     } else {
-      failures.push(`Profiles: ${errorMessage(profilesResult.reason)}`);
+      failures.push(t("load.profiles", { message: errorMessage(profilesResult.reason) }));
       setProfiles([]);
     }
     if (bindingsResult.status === "fulfilled") {
       nextBindings = bindingsResult.value;
       setBindings(nextBindings);
     } else {
-      failures.push(`Bindings: ${errorMessage(bindingsResult.reason)}`);
+      failures.push(t("load.bindings", { message: errorMessage(bindingsResult.reason) }));
       setBindings([]);
     }
     setStartupStage("workspace");
@@ -1244,10 +1249,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const pending = getCurrentWindow().onCloseRequested(async (event) => {
       if (!busyRef.current) return;
       event.preventDefault();
-      const leave = await confirm(
-        "A sync is still writing. Quitting now can leave this project's synced state half-written, and it cannot be undone.\n\nWait for it to finish, or quit anyway?",
-        { title: "Sync in progress", kind: "warning", okLabel: "Quit anyway", cancelLabel: "Keep syncing" },
-      );
+      const leave = await confirm(t("confirm.quit"), {
+        title: t("confirm.quitTitle"), kind: "warning", okLabel: t("confirm.quitOk"), cancelLabel: t("confirm.quitCancel"),
+      });
       if (leave) await getCurrentWindow().destroy();
     });
     return () => {
@@ -1273,7 +1277,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     try {
       const nextDetail = await projectSyncApi.getProject(projectId);
       if (superseded()) return;
-      if (!nextDetail) throw new Error("The selected local project no longer exists.");
+      if (!nextDetail) throw new Error(t("errors.projectGone"));
       setDetail(nextDetail);
       setRegistrations((current) => upsertProject(current, nextDetail.project));
       if (nextDetail.binding) {
@@ -1696,7 +1700,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         current?.kind === "folder" ? { kind: "draft", draftId: created.draft.draft_id } : current
       ));
       if (created.resumed) {
-        notify(`Resumed setup draft for ${created.draft.display_name}.`);
+        notify(t("notices.draftResumed", { name: created.draft.display_name }));
       }
       await refreshSetupDrafts(undefined, workflowEpoch);
     } catch (reason) {
@@ -1795,10 +1799,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       ? { scopeId: scope.scope.scope_id, resourceId: linked.resourceId, pull: true }
       : null);
     setCatalogScopeId(scope.scope.scope_id);
-    const label = catalogScopeLabel(scope);
+    const label = catalogScopeLabel({ ...scope, capability: catalogCapabilityFor(catalogCapabilities, scope.scope) });
     notify(linkError
-      ? `${label} added to the Catalog, but its storage could not be linked: ${linkError}`
-      : `${label} added to the Catalog.`);
+      ? t("notices.catalogAddedUnlinked", { label, error: linkError })
+      : t("notices.catalogAdded", { label }));
     await refreshCatalogScopes(undefined, workflowEpoch);
   };
 
@@ -1810,10 +1814,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       return;
     }
     const label = catalogScopeLabel(scope);
-    const approved = await confirm(
-      `Remove the “${label}” row from the Catalog?\n\nOnly the menu row is removed. No provider or storage content is touched.`,
-      { title: "Remove Catalog row" },
-    );
+    const approved = await confirm(t("confirm.removeCatalogRow", { label }), {
+      title: t("confirm.removeCatalogRowTitle"), okLabel: t("common:ok"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
@@ -1827,7 +1830,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       await refreshCatalogScopes(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      notify(`${label} removed — no provider or storage content touched.`);
+      notify(t("notices.catalogRowRemoved", { label }));
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) {
         const message = catalogScopeRemovalMessage(label, reason);
@@ -1857,10 +1860,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const discardSetupDraft = async (draftId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const summary = setupDrafts.find((candidate) => candidate.draft_id === draftId);
-    const approved = await confirm(
-      `Discard the setup draft for “${summary?.display_name ?? "this project"}”?\n\nOnly the draft is removed. No project files are touched.`,
-      { title: "Discard draft" },
-    );
+    const approved = await confirm(t("confirm.discardDraft", { name: summary?.display_name ?? t("fallback.thisProject") }), {
+      title: t("confirm.discardDraftTitle"), okLabel: t("common:ok"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
@@ -1870,7 +1872,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (setupDraftId === draftId) setSetupView(null);
       await refreshSetupDrafts(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      notify("Draft discarded — no files touched.");
+      notify(t("notices.draftDiscarded"));
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -1884,10 +1886,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const discardStorageSetupDraft = async (draftId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const draft = storageSetupDrafts.find((candidate) => candidate.draft_id === draftId);
-    const approved = await confirm(
-      `Discard the storage draft for “${draft?.name || "(unnamed)"}”?\n\nThis removes only Mallard’s local setup draft; external storage resources are not changed.`,
-      { title: "Discard storage draft" },
-    );
+    const approved = await confirm(t("confirm.discardStorageDraft", { name: draft?.name || t("fallback.unnamed") }), {
+      title: t("confirm.discardStorageDraftTitle"), okLabel: t("common:ok"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
@@ -1897,7 +1898,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (catalogStorageSetupRef.current?.draftId === draftId) catalogStorageSetupRef.current = null;
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      notify("Storage draft discarded.");
+      notify(t("notices.storageDraftDiscarded"));
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -1913,7 +1914,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setSetupView(null);
     const projectId = detail.project.local_project_id;
     const storageId = detail.links[0]?.storage_id ?? null;
-    notify(`${projectLabel(detail.project)} is set up${storageId ? "" : " — link storage when ready"}.`);
+    notify(t(storageId ? "notices.setUp" : "notices.setUpUnlinked", { name: projectLabel(detail.project) }));
     const { nextConfig, hostIdentityReady } = await loadShell();
     if (!hostIdentityReady || hostWorkflowEpoch.current !== workflowEpoch) return;
     await refreshSetupDrafts(undefined, workflowEpoch);
@@ -1944,7 +1945,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setActiveProjectId(projectId);
     await loadProjectData(projectId, nextConfig, storageId, workflowEpoch, false);
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
-    notify("Storage linked.");
+    notify(t("notices.storageLinked"));
   };
 
   const linkStorage = async (projectId: string, storageId: string) => {
@@ -1953,7 +1954,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setError(null);
     try {
       const project = registrations.find((candidate) => candidate.local_project_id === projectId);
-      if (!project) throw new Error("The selected local project no longer exists.");
+      if (!project) throw new Error(t("errors.projectGone"));
       // Mallard Cloud: the repository is chosen by its address, every time.
       // The dialog lists and resolves the account's repositories itself, so
       // an empty account is a choice to make, never a silent creation.
@@ -2032,9 +2033,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const nextDetail = context.project;
       const nextInventory = context.inventory;
       const storage = config.storages.find((candidate) => candidate.storage_id === storageId);
-      if (!storage) throw new Error("The selected storage no longer exists.");
+      if (!storage) throw new Error(t("errors.storageGone"));
       const link = nextDetail.links.find((candidate) => candidate.storage_id === storageId);
-      if (!link) throw new Error("This project is no longer linked to the selected storage.");
+      if (!link) throw new Error(t("errors.linkGone"));
 
       // A destination the push cannot get past never opens the review — the
       // gate lands as a banner on the storage card instead.
@@ -2418,7 +2419,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setBusy(true);
     try {
       await projectSyncApi.finishUnfinishedPush(projectId, storageId);
-      if (hostWorkflowEpoch.current === workflowEpoch) setPushError(PUSH_FINISHED);
+      if (hostWorkflowEpoch.current === workflowEpoch) setPushError(pushFinished());
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) {
         setPushError(storageFailureMessage(storageId, reason));
@@ -2497,7 +2498,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       setDetail((current) => current ? { ...current, binding: saved } : current);
       await refreshRepositoryKinds(workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      notify("Machine binding updated — cloud identity unchanged.");
+      notify(t("notices.bindingUpdated"));
       await loadProjectData(projectId, config, activeStorageId, workflowEpoch);
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -2514,7 +2515,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     setBusy(true);
     try {
       const registration = registrations.find((candidate) => candidate.local_project_id === projectId);
-      if (!registration) throw new Error("Project not found.");
+      if (!registration) throw new Error(t("errors.projectNotFound"));
       const updated = await projectSyncApi.renameProject(projectId, alias, registration.revision);
       if (hostWorkflowEpoch.current !== workflowEpoch) return { ok: false, message: null };
       setRegistrations((current) => current.map((candidate) => (
@@ -2524,8 +2525,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         setDetail((current) => current ? { ...current, project: updated } : current);
       }
       notify(alias
-        ? `Shown as “${alias}” on this computer.`
-        : `Name reset to “${updated.display_name}”.`);
+        ? t("notices.alias", { alias })
+        : t("notices.aliasReset", { name: updated.display_name }));
       return { ok: true };
     } catch (reason) {
       if (hostWorkflowEpoch.current !== workflowEpoch) return { ok: false, message: null };
@@ -2602,10 +2603,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           const answer = sessionPullAnswer(review.restorePlan);
           const here = await openPulledSession(targetBinding.local_project_id, scope.resource_id);
           if (restoreRequest.current !== requestId) return null;
-          if (!here) notify("Nothing to pull for that session.", "attention");
-          else notify(answer === "up_to_date" ? "Already here and up to date." : "Already here — nothing to pull.", "note");
+          if (!here) notify(t("notices.nothingToPull"), "attention");
+          else notify(t(answer === "up_to_date" ? "notices.upToDate" : "notices.alreadyHere"), "note");
         } else {
-          notify(`Storage reviewed for ${displayName} — files unchanged.`);
+          notify(t("notices.filesUnchanged", { name: displayName }));
         }
         preparing?.finish();
         return null;
@@ -2625,12 +2626,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         .then((support) => {
           if (restoreRequest.current !== requestId) return;
           if (support.errors.length > 0) {
-            setRestoreError(`The project changes are ready to apply. ${support.errors.join(" ")}`);
+            setRestoreError(t("notices.readyToApply", { errors: support.errors.join(" ") }));
           }
         })
         .catch((reason) => {
           if (restoreRequest.current === requestId) {
-            setRestoreError(`The project changes are ready to apply. Supporting checks: ${errorMessage(reason)}`);
+            setRestoreError(t("notices.readyToApplyChecks", { message: errorMessage(reason) }));
           }
         })
         .finally(() => {
@@ -2671,7 +2672,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         pullOutcomeInputs.current = { ...inputs, readiness, error: null };
         if (next.tone === "success" && next.actions.length === 0) {
           setStorageNotice(null);
-          notify("Setup resolved — project ready.");
+          notify(t("notices.setupResolved"));
         } else {
           setStorageNotice({
             projectId: outcome.projectId,
@@ -2701,13 +2702,17 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       action.offer.action_id,
     );
     if (!descriptor) {
-      notify(`“${action.label}” is no longer declared by this provider.`, "attention");
+      notify(t("notices.actionGone", { label: action.label }), "attention");
       return;
     }
     const confirmed = descriptor.requires_confirmation
       ? await confirm(
-        `${action.label}?\n\n${action.title}\n\n${descriptor.description}`,
-        { title: action.label },
+        t("confirm.maintenance", {
+          label: action.label,
+          title: action.title,
+          description: backendText(`maintenance.${descriptor.action_id}.description`, descriptor.description),
+        }),
+        { title: action.label, okLabel: t("common:ok"), cancelLabel: t("common:cancel") },
       )
       : false;
     if (descriptor.requires_confirmation && !confirmed) return;
@@ -2730,7 +2735,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             outcome: { ...outcome, actions: remainingActions },
           };
         });
-        notify(result.summary);
+        notify(maintenanceSummary(result));
       } else {
         notify(result.summary, "attention");
       }
@@ -2755,7 +2760,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const nextDetail = await preparing.race(projectSyncApi.getProject(projectId));
       if (nextDetail === PREPARING_CANCELLED) return;
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      if (!nextDetail) throw new Error("The selected local project no longer exists.");
+      if (!nextDetail) throw new Error(t("errors.projectGone"));
       setActiveProjectId(projectId);
       setActiveStorageByProject((current) => ({ ...current, [projectId]: storageId }));
       setDetail(nextDetail);
@@ -2770,10 +2775,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           locked: false,
           expected_revision: nextDetail.binding?.revision ?? null,
         });
-        notify(nextDetail.binding
-          ? "Confirm project folder and profile before pulling."
-          : "Choose project folder and profile before pulling.",
-          "attention");
+        notify(t(nextDetail.binding ? "notices.confirmBinding" : "notices.chooseBinding"), "attention");
         return;
       }
       const failure = await planRestore(
@@ -2785,12 +2787,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         scope,
       );
       if (!failure) return;
+      // i18n-ignore: backend text
       if (failure.startsWith("There is nothing to pull from")) {
         /* O2: a cleared storage this computer synced with before. The
            standing note in the activity list already says to push again. */
         setStorageNotice({ projectId, storageId, kind: "nothing_to_pull", message: failure });
         return;
       }
+      // i18n-ignore: backend text
       if (failure.includes("does not exist")) {
         if (isManagedCloudStorage(config.storages.find((candidate) => candidate.storage_id === storageId))) {
           // The address picker is the feedback: the repository to pull from
@@ -2897,7 +2901,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       candidate.local_project_id === projectId
     ));
     if (!project) {
-      setError("The selected local project no longer exists.");
+      setError(t("errors.projectGone"));
       return;
     }
     connectionInFlight.current = true;
@@ -2923,7 +2927,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await loadProjectData(projectId, nextConfig, storageId, workflowEpoch, false);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       setPendingBundleConnection(null);
-      notify("Storage linked.");
+      notify(t("notices.storageLinked"));
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -2950,7 +2954,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         return;
       } else {
         setPendingBundleConnection(null);
-        notify("Kept local-only identity — Push publishes it separately.");
+        notify(t("notices.keptLocal"));
         await openPushChooser(pending.projectId, pending.storageId, { kind: "project" }, undefined, workflowEpoch);
         return;
       }
@@ -2965,10 +2969,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const removeProject = async (projectId: string) => {
     const workflowEpoch = hostWorkflowEpoch.current;
     const summary = projects.find((candidate) => candidate.local_project_id === projectId);
-    const approved = await confirm(
-      `Remove “${summary ? projectLabel(summary) : "this project"}” from Mallard?\n\nThe checkout and provider files stay on disk. Only this app's project registration, links, and active binding are removed.`,
-      { title: "Remove project" },
-    );
+    const approved = await confirm(t("confirm.removeProject", { name: summary ? projectLabel(summary) : t("fallback.thisProject") }), {
+      title: t("confirm.removeProjectTitle"), okLabel: t("common:ok"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
@@ -2977,7 +2980,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       await refresh(workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
-      notify(`${summary ? projectLabel(summary) : "Project"} removed — files kept on disk.`);
+      notify(t("notices.projectRemoved", { name: summary ? projectLabel(summary) : t("fallback.project") }));
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -2998,13 +3001,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const workflowEpoch = hostWorkflowEpoch.current;
     const summary = projects.find((candidate) => candidate.local_project_id === projectId);
     if (!summary) {
-      setError("The selected local project no longer exists.");
+      setError(t("errors.projectGone"));
       return;
     }
-    const approved = await confirm(
-      `Delete all local sessions for “${projectLabel(summary)}”?\n\nDeletes sessions and subagents from its bound Codex/Claude profiles. Clears all project session bindings and local sync state.\n\nProject files and cloud copies are kept. This cannot be undone.`,
-      { title: "Delete all local sessions?", kind: "warning", okLabel: "Delete all", cancelLabel: "Cancel" },
-    );
+    const approved = await confirm(t("confirm.deleteSessions", { name: projectLabel(summary) }), {
+      title: t("confirm.deleteSessionsTitle"), kind: "warning", okLabel: t("confirm.deleteSessionsOk"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
     setBusy(true);
@@ -3026,16 +3028,21 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await refresh(workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
 
-      const outcome = `${result.sessions_deleted} local session${result.sessions_deleted === 1 ? "" : "s"} deleted; ${result.sessions_failed} failed.`;
+      const counts = { count: result.sessions_deleted, failed: result.sessions_failed };
       const failures = [
         ...result.provider_errors,
-        ...(result.metadata_error ? [`Local sync state: ${result.metadata_error}`] : []),
+        ...(result.metadata_error ? [t("errors.localSyncState", { message: result.metadata_error })] : []),
       ];
       if (failures.length > 0) {
+        // i18n-ignore: backend text
         const offerClose = result.provider_errors.some((message) => message.startsWith("codex session ") && message.endsWith(CODEX_DELETE_ERROR));
-        setError(`${outcome} ${failures.join(" ")}${offerClose ? ` ${CODEX_DELETE_CLOSE_NOTICE}` : ""}`);
+        setError([
+          t("notices.sessionsDeleted", counts),
+          ...failures,
+          ...(offerClose ? [codexDeleteCloseNotice()] : []),
+        ].join(" "));
       } else {
-        notify(`${outcome} All project session bindings and local sync state cleared.`);
+        notify(t("notices.sessionsCleared", counts));
       }
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -3049,8 +3056,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const workflowEpoch = hostWorkflowEpoch.current;
     setClosingCodex(true);
     try {
-      const approved = await confirm("Closing Codex can interrupt running chats. Close the app?", {
-        title: "Close Codex", kind: "warning", okLabel: "Close Codex", cancelLabel: "Cancel",
+      const approved = await confirm(t("confirm.closeCodex"), {
+        title: t("confirm.closeCodexTitle"), kind: "warning", okLabel: t("confirm.closeCodexTitle"), cancelLabel: t("common:cancel"),
       });
       if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
       const result = await projectSyncApi.executeProviderMaintenanceAction({
@@ -3058,9 +3065,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       });
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       if (!result.ready) throw new Error(result.summary);
-      setError((current) => current?.includes(CODEX_DELETE_CLOSE_NOTICE) ? null : current);
-      setSessionActionError((current) => current?.includes(CODEX_DELETE_CLOSE_NOTICE) ? null : current);
-      notify(result.summary, "note");
+      setError((current) => current && offersCloseCodex(current) ? null : current);
+      setSessionActionError((current) => current && offersCloseCodex(current) ? null : current);
+      notify(maintenanceSummary(result), "note");
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -3070,7 +3077,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
   const closeCodexButton = (
     <button type="button" className="btn" disabled={busy || closingCodex} onClick={() => void closeCodex()}>
-      {closingCodex ? "Closing…" : "Close Codex"}
+      {closingCodex ? t("notices.closingCodex") : t("notices.closeCodex")}
     </button>
   );
 
@@ -3080,21 +3087,32 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     items: [
       {
         id: "settings",
-        label: "Settings",
+        label: t("common:settings"),
         icon: "settings" as const,
         onSelect: openSettings,
       },
       {
         id: "theme",
-        label: "Dark theme",
+        label: t("window.darkTheme"),
         icon: "moon" as const,
         checked: theme === "dark",
         onSelect: () => onThemeChange(theme === "dark" ? "light" : "dark"),
       },
+      // The quick switch beside the theme: names the other language in itself,
+      // and picking it sets that language outright, stepping out of System —
+      // as the titlebar's theme toggle does. Settings is where System is picked.
+      ...OFFERED_LANGUAGES.filter((language) => language !== uiLanguage()).slice(0, 1).map((language) => ({
+        id: "language",
+        label: LANGUAGE_NAMES[language],
+        lang: language,
+        icon: "language" as const,
+        title: t("window.switchLanguage", { language: LANGUAGE_NAMES[language] }),
+        onSelect: () => { setLanguageChoice(language); },
+      })),
       {
         id: "reload",
-        label: "Reload app data",
-        detail: "Every project and storage, from disk",
+        label: t("window.reload"),
+        detail: t("window.reloadDetail"),
         // Not `refresh`: the bar's refresh button is one project's activity,
         // and two identical glyphs in one row is the confusion this redesign
         // set out to remove. This one reloads what the machine knows.
@@ -3112,13 +3130,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   // the Projects landing and New project leave the toggle out.
   const windowActions = (
     <div className="sync-titlebar-actions">
-      {workspaceTitle === "Projects" || choosingProjectFolder ? null : (
+      {onProjectsLanding || choosingProjectFolder ? null : (
         <button
           type="button"
           className="sync-theme-button"
           onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
-          title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          title={t(theme === "dark" ? "window.toLight" : "window.toDark")}
+          aria-label={t(theme === "dark" ? "window.toLight" : "window.toDark")}
         >
           <Icon name={theme === "dark" ? "moon" : "sun"} size={18} />
         </button>
@@ -3131,8 +3149,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           aria-haspopup="menu"
           aria-expanded={appMenuOpen}
           aria-controls="sync-app-actions-menu"
-          title="App actions"
-          aria-label="App actions"
+          title={t("window.appActions")}
+          aria-label={t("window.appActions")}
           onClick={() => setAppMenuOpen((current) => !current)}
           onKeyDown={(event) => {
             // The menu-button contract: the arrows open the menu on its
@@ -3149,7 +3167,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         <PathBarMenu
           id="sync-app-actions-menu"
           groups={appActions}
-          label="App actions"
+          label={t("window.appActions")}
           align="end"
           open={appMenuOpen}
           registerRef={(node) => { appMenuPanelRef.current = node; }}
@@ -3195,11 +3213,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     if (!project || !storage) return;
 
     const projectName = projectLabel(project);
-    const storageName = storage.name || "Storage";
-    const approved = await confirm(
-      `Unlink “${storageName}” from “${projectName}”?\n\nPush and Pull will stop for this pairing. Files and repositories already stored there will not be deleted, and you can link the storage again later.`,
-      { title: "Unlink storage" },
-    );
+    const storageName = storage.name || t("fallback.storageTitle");
+    const approved = await confirm(t("confirm.unlink", { storage: storageName, project: projectName }), {
+      title: t("confirm.unlinkTitle"), okLabel: t("common:ok"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
     setBusy(true);
@@ -3242,8 +3259,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       await loadProjectData(projectId, nextConfig, nextStorageId, workflowEpoch);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       notify(removed
-        ? `${storageName} unlinked from ${projectName} — files kept.`
-        : `${storageName} was already unlinked.`);
+        ? t("notices.unlinked", { storage: storageName, project: projectName })
+        : t("notices.alreadyUnlinked", { storage: storageName }));
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -3316,7 +3333,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       }
       if (pulledSession && stillHere()) {
         await openPulledSession(restoreBinding.local_project_id, pulledSession);
-        if (stillHere()) notify(`${outcome.title}.`);
+        if (stillHere()) notify(t("notices.outcome", { title: outcome.title }));
       }
     } catch (reason) {
       if (restoreRequest.current === requestId) setRestoreError(errorMessage(reason));
@@ -3383,12 +3400,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         || saved.revision < result.config_revision
         || !saved.storages.some((candidate) => candidate.storage_id === result.storage_id)
       ) {
-        throw new Error("The storage was verified and saved, but its configuration could not be refreshed.");
+        throw new Error(t("errors.configNotRefreshed"));
       }
       adoptConfigSnapshot(saved);
       const committed = saved.storages.find((candidate) => candidate.storage_id === result.storage_id);
-      const storageName = committed?.name || "Storage";
-      notify(`${result.replaced ? "Updated" : "Connected"} ${storageName}.`);
+      const storageName = committed?.name || t("fallback.storageTitle");
+      notify(t(result.replaced ? "notices.storageUpdated" : "notices.storageConnected", { name: storageName }));
       // A link set aside for a Mallard Cloud account has one now.
       if (!result.replaced && isManagedCloudStorage(committed) && appLink.awaitsAccount()) {
         appLinkLandingRef.current = result.storage_id;
@@ -3421,7 +3438,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const saved = await projectSyncApi.renameStorage(storageId, name, configRef.current.revision);
       if (hostWorkflowEpoch.current !== workflowEpoch) return false;
       adoptConfigSnapshot(saved);
-      notify(`Storage renamed to “${name}”.`);
+      notify(t("notices.storageRenamed", { name }));
       return true;
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
@@ -3435,15 +3452,14 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const workflowEpoch = hostWorkflowEpoch.current;
     const storage = configRef.current.storages.find((candidate) => candidate.storage_id === storageId);
     if (!storage) {
-      setError("The selected storage no longer exists.");
+      setError(t("errors.storageGone"));
       return;
     }
     const expectedConfigRevision = configRef.current.revision;
-    const storageName = storage.name || "Storage";
-    const approved = await confirm(
-      `Permanently clear all Mallard data from “${storageName}”?\n\nThis deletes every synced project repository and Library resource in this storage. It does not delete unrelated bucket/folder contents, local project files, provider sessions, or the storage connection. This cannot be undone.\n\nStop sync on all machines before you continue. By choosing “Sync stopped — clear”, you confirm that sync has stopped on all machines.`,
-      { title: "Clear storage data", okLabel: "Sync stopped — clear", cancelLabel: "Cancel" },
-    );
+    const storageName = storage.name || t("fallback.storageTitle");
+    const approved = await confirm(t("confirm.clearStorage", { name: storageName }), {
+      title: t("confirm.clearStorageTitle"), okLabel: t("confirm.clearStorageOk"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
 
     setBusy(true);
@@ -3464,10 +3480,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       // listing the repositories this call just deleted. Reload it.
       setStorageRefreshEpoch((current) => current + 1);
       const deleted = result.repository_objects_deleted + result.library_objects_deleted;
-      notify(
-        `${storageName} cleared — ${deleted} Mallard object${deleted === 1 ? "" : "s"} deleted; storage settings and unrelated data kept.`,
-        "ok",
-      );
+      notify(t("notices.storageCleared", { name: storageName, count: deleted }), "ok");
     } catch (reason) {
       if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
     } finally {
@@ -3479,16 +3492,15 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     const workflowEpoch = hostWorkflowEpoch.current;
     const storage = config.storages.find((candidate) => candidate.storage_id === storageId);
     if (!storage) return;
-    const storageName = storage.name || "Storage";
+    const storageName = storage.name || t("fallback.storageTitle");
     const linkedProjects = config.links.filter((link) => link.storage_id === storageId).length;
     if (linkedProjects > 0) {
-      setError(`${storageName} is linked to ${linkedProjects} project${linkedProjects === 1 ? "" : "s"}. Unlink it before removing the storage.`);
+      setError(t("errors.storageLinked", { name: storageName, count: linkedProjects }));
       return;
     }
-    const approved = await confirm(
-      `Remove “${storageName}” from Mallard?\n\nFiles already written to the storage location will not be deleted.`,
-      { title: "Remove storage" },
-    );
+    const approved = await confirm(t("confirm.removeStorage", { name: storageName }), {
+      title: t("confirm.removeStorageTitle"), okLabel: t("common:ok"), cancelLabel: t("common:cancel"),
+    });
     if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
     setBusy(true);
     setError(null);
@@ -3496,7 +3508,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       const saved = await projectSyncApi.removeStorage(storageId, configRef.current.revision);
       if (hostWorkflowEpoch.current !== workflowEpoch) return;
       adoptConfigSnapshot(saved);
-      notify(`${storageName} removed — stored files were not deleted.`);
+      notify(t("notices.storageRemoved", { name: storageName }));
       setStorageEditorRequest((current) => ({
         mode: "close",
         requestId: (current?.requestId ?? 0) + 1,
@@ -3605,7 +3617,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
     if (hostWorkflowEpoch.current !== workflowEpoch) return;
     if (!draft) {
-      setError("This storage draft no longer exists.");
+      setError(t("errors.storageDraftGone"));
       await refreshStorageSetupDrafts(undefined, workflowEpoch);
       return;
     }
@@ -3670,8 +3682,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     /* Until the rows land and the folder is walked, both buttons wear the
        wait itself. */
     continueLabel: pendingPushListState === "loading"
-      ? "Loading sessions…"
-      : projectContentLoading ? "Scanning files…" : null,
+      ? t("preparing.loadingSessions")
+      : projectContentLoading ? t("preparing.scanningFiles") : null,
     continuePending: pendingPushListState === "loading" || projectContentLoading,
     onClose: closePushReview,
     content: pushSessionEntry && pendingPush.threadComparison ? (
@@ -3791,26 +3803,24 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     /* The review's frame while it is prepared: the storage card opens where
        the review will be and turns into it, or into the card's notice, in
        place. Both buttons wear the wait; × is Cancel until a write starts. */
-    const verb = preparingReview.kind === "pull" ? "Pull" : "Push";
+    const pull = preparingReview.kind === "pull";
     const storageName = config.storages.find((storage) => storage.storage_id === preparingReview.storageId)?.name
-      || "storage";
+      || t("fallback.storage");
     return {
       kind: preparingReview.kind,
       projectId: preparingReview.projectId,
       storageId: preparingReview.storageId,
       preparing: true,
       continueDisabled: true,
-      continueTitle: `Preparing the ${verb} review`,
-      continueLabel: "Preparing…",
+      continueTitle: t(pull ? "preparing.pullTitle" : "preparing.pushTitle"),
+      continueLabel: t("preparing.label"),
       continuePending: true,
       onClose: cancelPreparing,
       content: (
         <ReviewPreparing
           verb={preparingReview.kind}
-          title={`${verb} review`}
-          caption={preparingReview.kind === "pull"
-            ? `Reading the latest version from ${storageName}`
-            : `Comparing this computer with ${storageName}`}
+          title={t(pull ? "preparing.pull" : "preparing.push")}
+          caption={t(pull ? "preparing.pullCaption" : "preparing.pushCaption", { storage: storageName })}
           onCancel={cancelPreparing}
           cancelDisabled={preparingReview.writing}
         />
@@ -3884,8 +3894,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
           <div className="sync-empty-illustration" aria-hidden="true">
             <Icon name="alert-triangle" size={24} />
           </div>
-          <h1 id="sync-host-recovery-title">Host identity unavailable</h1>
-          <p>Mallard could not verify this installation, so sync remains paused.</p>
+          <h1 id="sync-host-recovery-title">{t("load.hostTitle")}</h1>
+          <p>{t("load.hostBody")}</p>
           {/* `blocking`, not `inline`: this screen replaces the startup loader
               after mount, so the failure is an event the page did not render
               with. Without a live region a screen-reader user is never told
@@ -3894,7 +3904,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
               wrong, not to the page. */}
           <Notice severity="danger" timing="blocking" dismissalId={String(shellFailures)}>{hostIdentityError}</Notice>
           <button type="button" className="btn btn-primary" onClick={() => void refresh()} disabled={loading}>
-            {loading ? "Checking…" : "Retry"}
+            {loading ? t("load.checking") : t("load.retry")}
           </button>
         </section>
       </main>
@@ -3911,10 +3921,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     shellNotices.push({
       key: "backend-unavailable",
       severity: "danger",
-      title: "Project-sync backend unavailable.",
+      title: t("load.backendUnavailable"),
       message: backendError,
       dismissalId: String(shellFailures),
-      action: <button type="button" className="btn" onClick={() => void refresh()}>Retry</button>,
+      action: <button type="button" className="btn" onClick={() => void refresh()}>{t("load.retry")}</button>,
     });
   }
   /* A modal makes the shell inert. Keep its action failure inside the dialog
@@ -3931,7 +3941,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       message: shellError,
       /* Shell-owned failures stay visible on every non-modal screen,
          including failures from destructive actions, until closed. */
-      action: shellError.includes(CODEX_DELETE_CLOSE_NOTICE) ? closeCodexButton : catalogRemovalErrorTarget?.message === shellError ? (
+      action: offersCloseCodex(shellError) ? closeCodexButton : catalogRemovalErrorTarget?.message === shellError ? (
         <button
           type="button"
           className="btn"
@@ -3943,9 +3953,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             setCatalogRemovalErrorTarget(null);
             openCatalogScope(catalogRemovalErrorTarget.scopeId);
           }}
-          title={`Open ${catalogRemovalErrorTarget.label}`}
+          title={t("notices.openRow", { name: catalogRemovalErrorTarget.label })}
         >
-          Open storage menu
+          {t("notices.openStorageMenu")}
         </button>
       ) : undefined,
       onDismiss: () => {
@@ -3976,7 +3986,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       severity: "danger",
       message: listActionError,
       onDismiss: () => setSessionActionError(null),
-      action: listActionError.includes(CODEX_DELETE_CLOSE_NOTICE) ? closeCodexButton : undefined,
+      action: offersCloseCodex(listActionError) ? closeCodexButton : undefined,
     });
   }
   if (notice) {
@@ -3993,21 +4003,21 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   if (activeProjectSubview.kind === "session_detail" && projectFilesToPull > 0 && activeProjectId && activeStorageId) {
     const projectId = activeProjectId;
     const storageId = activeStorageId;
-    const storageName = config.storages.find((storage) => storage.storage_id === storageId)?.name || "storage";
+    const storageName = config.storages.find((storage) => storage.storage_id === storageId)?.name || t("fallback.storage");
     shellNotices.push({
       key: "session-project-files-pending",
       severity: "info",
-      message: `Project files for this folder are still in ${storageName}.`,
+      message: t("notices.filesInStorage", { storage: storageName }),
       dismissalId: projectId,
       action: (
         <button
           type="button"
           className="btn"
           disabled={busy}
-          title={busy ? "Available when the current operation finishes" : undefined}
+          title={busy ? t("window.busy") : undefined}
           onClick={() => void beginProjectRestore(projectId, storageId)}
         >
-          Pull project
+          {t("notices.pullProject")}
         </button>
       ),
     });
@@ -4018,28 +4028,31 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   const heldLink = appLink.held;
   if (heldLink?.phase === "waiting") {
     const { link, id } = heldLink;
+    const invalid = invalidLink();
     shellNotices.push(link.kind === "invalid" ? {
       key: "app-link-waiting",
-      severity: INVALID_LINK.severity,
-      title: "Link",
-      message: INVALID_LINK.message,
+      severity: invalid.severity,
+      title: t("notices.linkTitle"),
+      message: invalid.message,
       dismissalId: String(id),
       onDismiss: () => appLink.drop(id),
     } : {
       key: "app-link-waiting",
       severity: "info",
-      title: "Link",
-      message: `${link.kind === "listing" ? listingPage(link) : link.address} is waiting.`,
+      title: t("notices.linkTitle"),
+      message: link.kind === "listing"
+        ? t("notices.pageWaiting", { page: listingPage(link) })
+        : t("notices.addressWaiting", { address: link.address }),
       dismissalId: String(id),
       action: (
         <button
           type="button"
           className="btn"
           disabled={busy}
-          title={busy ? "Available when the current operation finishes" : undefined}
+          title={busy ? t("window.busy") : undefined}
           onClick={appLink.open}
         >
-          Open
+          {t("common:open")}
         </button>
       ),
       onDismiss: () => appLink.drop(id),
@@ -4052,16 +4065,19 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     shellNotices.push({
       key: "clone-fallback",
       severity: "warning",
-      title: `${cloneFallback.projectName}: source code not downloaded.`,
-      message: (
-        <>
-          {cloneFailureText(cloneFallback.failure.reason)} The project remains a Git repository.
-          {command ? <> Fetch the source code: <code>{command}</code></> : " Link its GitHub repository in Mallard Cloud."}
-        </>
-      ),
+      title: t("clone.title", { name: cloneFallback.projectName }),
+      message: command ? (
+        /* The reason and the command are text, never markup: Trans parses
+           tags after it interpolates values, so neither goes in as one. */
+        <Trans
+          t={t}
+          i18nKey="shell:clone.command"
+          components={{ reason: <>{cloneFailureText(cloneFallback.failure.reason)}</>, code: <code>{command}</code> }}
+        />
+      ) : t("clone.link", { reason: cloneFailureText(cloneFallback.failure.reason) }),
       action: command ? (
         <button type="button" className="btn" onClick={() => void writeClipboardText(command).catch(() => {})}>
-          Copy command
+          {t("clone.copyCommand")}
         </button>
       ) : undefined,
       onDismiss: () => setCloneFallback(null),
@@ -4087,7 +4103,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
      place it: it reaches those screens through `PathBarBelow`. */
   const shellNoticeZone: NoticeZoneProps = {
     items: shellNotices,
-    subject: "messages from Mallard",
+    subject: t("window.messages"),
     className: "sync-backend-banner",
     ...shellNoticeTiming,
   };
@@ -4101,10 +4117,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         type="button"
         className="sync-sidebar-toggle"
         onClick={toggleSidebar}
-        title={`Toggle sidebar ${sidebarShortcutLabel()}`}
+        title={t("window.toggleSidebar", { shortcut: sidebarShortcutLabel() })}
         aria-label={sidebarVisible
-          ? "Hide sidebar"
-          : appUpdates.readyVersion ? `Show sidebar, Mallard ${appUpdates.readyVersion} is ready` : "Show sidebar"}
+          ? t("window.hideSidebar")
+          : appUpdates.readyVersion ? t("window.showSidebarUpdate", { version: appUpdates.readyVersion }) : t("window.showSidebar")}
         aria-controls="project-sidebar"
         aria-expanded={sidebarVisible}
         aria-keyshortcuts="Meta+B Control+B"
@@ -4173,7 +4189,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       <div
         className="sync-sidebar-resizer"
         role="separator"
-        aria-label="Resize sidebar"
+        aria-label={t("window.resizeSidebar")}
         aria-orientation="vertical"
         aria-valuemin={MIN_PROJECT_SIDEBAR_WIDTH}
         aria-valuemax={availableProjectSidebarWidth()}
@@ -4206,7 +4222,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
                 <strong>{workspaceTitle}</strong>
               </>
             )}
-            {activeDraftSummary && <span>Draft setup</span>}
+            {activeDraftSummary && <span>{t("pages.draftSetup")}</span>}
           </div>
           {windowActions}
         </header>
@@ -4277,7 +4293,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             appUpdates={appUpdates}
             onLogsChanged={() => setLogRefreshEpoch((epoch) => epoch + 1)}
             onDone={() => void closeWorkspaceSettings()}
-            doneTarget={activeSummary ? projectLabel(activeSummary) : "Projects"}
+            doneTarget={activeSummary ? projectLabel(activeSummary) : t("roots.projects")}
           />
         ) : storageProviderPickerOpen ? (
           <StorageProviderPicker
@@ -4455,13 +4471,13 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
 
       {editingBinding && (
         <ProjectBindingEditor
-          title={`Project setup for ${activeSummary ? projectLabel(activeSummary) : "project"}`}
+          title={activeSummary ? t("binding.title", { name: projectLabel(activeSummary) }) : t("binding.titleUnnamed")}
           binding={editingBinding}
           providers={agentProviders}
           profiles={profiles}
           busy={busy}
           error={error}
-          actionLabel="Save project setup"
+          actionLabel={t("binding.save")}
           onCancel={() => setEditingBinding(null)}
           onSubmit={(next) => void saveRemap(next)}
         />

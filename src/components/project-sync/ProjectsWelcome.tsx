@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "../../i18n";
 import Icon from "../Icons";
 
 export const WELCOME_RIDES = ["bicycle", "rocket", "submarine"] as const;
@@ -31,6 +32,7 @@ export default function ProjectsWelcome({ onAddProject, onAddCloudProject }: {
   onAddProject: () => void;
   onAddCloudProject: () => void;
 }) {
+  const { t } = useTranslation("shell");
   const [ride] = useState(() => {
     lastRide = pickWelcomeRide(lastRide);
     return lastRide;
@@ -72,15 +74,15 @@ export default function ProjectsWelcome({ onAddProject, onAddCloudProject }: {
           />
         )}
       </div>
-      <h1 id="projects-welcome-title">Add your first project</h1>
+      <h1 id="projects-welcome-title">{t("landing.welcome")}</h1>
       <div className="projects-welcome-actions">
         <button type="button" className="btn btn-primary" onClick={onAddProject}>
           <Icon name="plus" size={13} />
-          Add project…
+          {t("landing.addProject")}
         </button>
         <button type="button" className="btn btn-ghost" onClick={onAddCloudProject}>
           <Icon name="cloud" size={14} />
-          From Mallard Cloud…
+          {t("landing.fromCloud")}
         </button>
       </div>
     </section>

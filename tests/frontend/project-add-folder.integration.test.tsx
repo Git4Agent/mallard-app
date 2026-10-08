@@ -14,6 +14,8 @@ import {
   type FolderProbeState,
 } from "../../src/components/project-sync/projectFolder";
 import type { LocalProjectSummary, ProjectFolderProbe, ProviderDescriptor } from "../../src/types";
+import { en } from "../../src/i18n/en";
+import { i18n } from "../../src/i18n";
 
 const HOME = "/home/you";
 const compact = (path: string) => compactFolderPath(path, HOME);
@@ -192,7 +194,9 @@ test("New project opens at the Folder field and writes nothing until a folder is
   assert.match(step, /const FIRST_FOLDERS = 6;/);
   // The fold toggles both ways, and folding keeps the picked row in view.
   assert.match(step, /aria-expanded=\{showAll\}\s*onClick=\{\(\) => setShowAll\(\(open\) => !open\)\}/);
-  assert.match(step, /\{showAll \? "Show less" : `Show all \$\{listed\.length\}`\}/);
+  assert.match(step, /\{showAll \? t\("newProject\.showLess"\) : t\("newProject\.showAll", \{ count: listed\.length \}\)\}/);
+  assert.equal(en.projectSetup.newProject.showLess, "Show less");
+  assert.equal(en.projectSetup.newProject.showAll, "Show all {{count}}");
   assert.match(step, /pickedFolder && !firstRows\.includes\(pickedFolder\) \? \[\.\.\.firstRows, pickedFolder\] : firstRows/);
   // What the list leaves out is left out silently; scratch folders come back
   // only when the field searches for them or names them.
@@ -212,5 +216,72 @@ test("the setup page's Folder moves the draft only on Enter or a Browse result",
   assert.match(setup, /probe\.existing_draft_id && probe\.existing_draft_id !== draftId\)\) return;/);
   // Finish never sets up a folder still being typed.
   assert.match(setup, /&& !folderUncommitted;/);
-  assert.match(setup, /Press Enter to use the new folder/);
+  assert.match(setup, /\{t\("setup\.pressEnter"\)\}/);
+  assert.equal(en.projectSetup.setup.pressEnter, "Press Enter to use the new folder");
+});
+
+/* Chinese: the New project step, the Folder line and the recent stamps;
+   project names and paths stay as given. */
+test("in Chinese New project offers its doors and folder in Chinese, and names and paths stay as given", () => {
+  const providers = [
+    { key: "codex", display_name: "Codex", display_rank: 0, profile_label: "Codex home", setup_default: true, has_cli: true },
+  ] as unknown as ProviderDescriptor[];
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderToStaticMarkup(
+      <NewProjectFolderStep
+        workflowEpoch={1}
+        isWorkflowCurrent={() => true}
+        projects={[blog]}
+        providers={providers}
+        profiles={[]}
+        storages={[]}
+        busy={false}
+        onCancel={() => {}}
+        onChoose={() => {}}
+        onOpenProject={() => {}}
+        onAddCloudAccount={() => {}}
+        onCloudProjectDone={() => {}}
+      />,
+    );
+    assert.match(html, /<h1 id="sync-new-project-title">新项目<\/h1>/);
+    assert.match(html, /aria-label="关闭；尚未保存任何内容"/);
+    assert.match(html, /role="radiogroup" aria-label="项目来源"/);
+    assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?<strong>本机<\/strong>[\s\S]*?你已有的文件夹。/);
+    assert.match(html, /<strong>来自 Mallard Cloud<\/strong>[\s\S]*?你可以打开的仓库。/);
+    assert.match(html, /<div class="sync-card-heading"><div><strong>文件夹<\/strong><\/div><\/div>/);
+    assert.match(html, /placeholder="路径，例如 ~\/code\/app"/);
+    assert.match(html, /浏览…/);
+    assert.match(html, /正在查找最近的文件夹…/);
+    assert.match(html, /<button type="button" class="btn btn-ghost">取消<\/button><button type="button" class="btn btn-primary" disabled="">使用此文件夹<\/button>/);
+
+    // The Folder line names the project as it was named, and the path as typed.
+    const path = `${HOME}/code/app`;
+    const input = { kind: "path", path } as const;
+    const context = { compact, projects: [blog] };
+    assert.deepEqual(folderVerdict(input, settled(path, folder({ existing_project_ids: ["project-blog"] })), context), {
+      tone: "ok",
+      message: "已添加为“blog”。",
+      actions: [{ label: "用另一个代理配置来设置它", run: "another-profile" }],
+    });
+    assert.deepEqual(folderVerdict(input, settled(path, folder({ canonical_path: `${HOME}/src/app` })), context), {
+      tone: "ok", message: "Git 仓库 · 实际位置", path: "~/src/app",
+    });
+    assert.deepEqual(folderVerdict(input, settled(path, { kind: "not_a_directory", parent: path }), context)!.actions, [
+      { label: "使用 ~/code/app", value: "~/code/app" },
+    ]);
+
+    // Recent stamps: the shared clock's words, tight to their number; dates in Chinese order.
+    const now = Date.UTC(2026, 8, 25, 12, 0, 0);
+    const at = (secondsAgo: number) => Math.floor(now / 1000) - secondsAgo;
+    assert.equal(formatRecentStamp(at(20), now), "刚刚");
+    assert.equal(formatRecentStamp(at(12 * 60), now), "12分钟前");
+    assert.equal(formatRecentStamp(at(3 * 3600), now), "3小时前");
+    assert.match(formatRecentStamp(Date.UTC(2025, 5, 1, 12) / 1000, now), /^2025年6月1日$/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  // Back in English, the stamp's formatter is English again.
+  assert.match(formatRecentStamp(Date.UTC(2025, 5, 1, 12) / 1000, Date.UTC(2026, 8, 25, 12)), /2025/);
+  assert.doesNotMatch(formatRecentStamp(Date.UTC(2025, 5, 1, 12) / 1000, Date.UTC(2026, 8, 25, 12)), /年/);
 });

@@ -108,22 +108,22 @@ type Outcome = "complete" | "partial" | "empty" | "failed";
 function scan(provider: StorageProviderDescriptor, outcome: Outcome): StorageDiscoveryResult {
   const r2 = provider.key === "r2";
   const rows: StorageDiscoveryResult["candidates"] = r2 ? [
-    { candidate_id: "r2-1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "Default" }, { label: "Created", value: "Aug 30" }], cautions: [], connected_storage_id: "storage-1" },
-    { candidate_id: "r2-2", name: "mallard-brave", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "Default" }, { label: "Created", value: "Sep 2" }], cautions: [] },
-    { candidate_id: "r2-3", name: "codex-sync-backups", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "EU" }, { label: "Created", value: "Jul 14" }], cautions: [] },
-    { candidate_id: "r2-4", name: "mallard-gently", marker: "unsupported", marker_detail: "layout 2", facts: [{ label: "Jurisdiction", value: "Default" }, { label: "Created", value: "Sep 8" }], cautions: [] },
-    { candidate_id: "r2-5", name: "team-archive", marker: "unreadable", marker_detail: "access denied", facts: [{ label: "Jurisdiction", value: "Default" }], cautions: [] },
+    { candidate_id: "r2-1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }, { key: "created", label: "Created", value: "Aug 30" }], cautions: [], connected_storage_id: "storage-1" },
+    { candidate_id: "r2-2", name: "mallard-brave", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }, { key: "created", label: "Created", value: "Sep 2" }], cautions: [] },
+    { candidate_id: "r2-3", name: "codex-sync-backups", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "EU", value_code: "eu" }, { key: "created", label: "Created", value: "Jul 14" }], cautions: [] },
+    { candidate_id: "r2-4", name: "mallard-gently", marker: "unsupported", marker_detail: "layout 2", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }, { key: "created", label: "Created", value: "Sep 8" }], cautions: [] },
+    { candidate_id: "r2-5", name: "team-archive", marker: "unreadable", marker_detail: "access denied", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }], cautions: [] },
     ...["assets-prod", "www-static", "photos-2024", "backups-old", "logs-archive", "tmp-uploads", "r2-test", "media-cdn", "artifacts"].map((name, index) => ({
-      candidate_id: `r2-m${index}`, name, marker: "missing" as const, facts: [{ label: "Jurisdiction", value: index % 3 === 2 ? "EU" : "Default" }], cautions: [],
+      candidate_id: `r2-m${index}`, name, marker: "missing" as const, facts: [{ key: "jurisdiction" as const, label: "Jurisdiction", value: index % 3 === 2 ? "EU" : "Default", value_code: index % 3 === 2 ? "eu" : "default" }], cautions: [],
     })),
   ] : [
-    { candidate_id: "dbx-1", name: "Mallard otter", identity: "ns 1234567890", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Access", value: "Owner" }], cautions: [] },
-    { candidate_id: "dbx-2", name: "Mallard team notes", identity: "ns 2233445566", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Access", value: "Viewer" }], cautions: ["Not in your Dropbox", "Viewer — Push will be refused"] },
-    { candidate_id: "dbx-3", name: "Legal archive", identity: "ns 9988776655", marker: "unreadable", marker_detail: "not mounted", facts: [{ label: "Access", value: "Viewer" }], cautions: ["Not in your Dropbox"] },
-    { candidate_id: "dbx-4", name: "Acme team space", identity: "ns 5544332211", marker: "missing", facts: [{ label: "Team", value: "space" }, { label: "Access", value: "Editor" }], cautions: [] },
-    { candidate_id: "dbx-5", name: "Family photos", identity: "ns 3344556677", marker: "missing", facts: [{ label: "Access", value: "Owner" }], cautions: [] },
-    { candidate_id: "dbx-6", name: "Design handoff", identity: "ns 4455667788", marker: "missing", facts: [{ label: "Access", value: "Editor" }], cautions: [] },
-    { candidate_id: "dbx-7", name: "Podcast raw", identity: "ns 6677889900", marker: "missing", facts: [{ label: "Access", value: "Editor" }], cautions: ["Not in your Dropbox"] },
+    { candidate_id: "dbx-1", name: "Mallard otter", identity: "ns 1234567890", marker: "storage", marker_detail: "layout 1", facts: [{ key: "access", label: "Access", value: "Owner", value_code: "owner" }], cautions: [] },
+    { candidate_id: "dbx-2", name: "Mallard team notes", identity: "ns 2233445566", marker: "storage", marker_detail: "layout 1", facts: [{ key: "access", label: "Access", value: "Viewer", value_code: "viewer" }], cautions: ["Not in your Dropbox", "Viewer — Push will be refused"] },
+    { candidate_id: "dbx-3", name: "Legal archive", identity: "ns 9988776655", marker: "unreadable", marker_detail: "not mounted", facts: [{ key: "access", label: "Access", value: "Viewer", value_code: "viewer" }], cautions: ["Not in your Dropbox"] },
+    { candidate_id: "dbx-4", name: "Acme team space", identity: "ns 5544332211", marker: "missing", facts: [{ label: "Team", value: "space" }, { key: "access", label: "Access", value: "Editor", value_code: "editor" }], cautions: [] },
+    { candidate_id: "dbx-5", name: "Family photos", identity: "ns 3344556677", marker: "missing", facts: [{ key: "access", label: "Access", value: "Owner", value_code: "owner" }], cautions: [] },
+    { candidate_id: "dbx-6", name: "Design handoff", identity: "ns 4455667788", marker: "missing", facts: [{ key: "access", label: "Access", value: "Editor", value_code: "editor" }], cautions: [] },
+    { candidate_id: "dbx-7", name: "Podcast raw", identity: "ns 6677889900", marker: "missing", facts: [{ key: "access", label: "Access", value: "Editor", value_code: "editor" }], cautions: ["Not in your Dropbox"] },
   ];
   const candidates = outcome === "empty"
     ? rows.filter((row) => row.marker === "missing")

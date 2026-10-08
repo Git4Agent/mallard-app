@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import Icon from "../Icons";
+import { useTranslation } from "../../i18n";
 
 export function isInvitationCodeShaped(text: string): boolean {
   const trimmed = text.trim();
@@ -39,6 +40,7 @@ export default function RepositoryLookupField({ value, onChange, onSubmit, disab
   /** The placeholder already says it: the label stays for screen readers. */
   labelHidden?: boolean;
 }) {
+  const { t } = useTranslation("cloud");
   const kind = entryKind(value);
   const code = kind === "code";
   /* Words filter the rows as they are typed; the verb lights only for
@@ -46,18 +48,18 @@ export default function RepositoryLookupField({ value, onChange, onSubmit, disab
   const actionable = kind === "address" || kind === "code";
   return (
     <label className="sync-folder-field compact">
-      <span className={labelHidden ? "sync-visually-hidden" : undefined}>Search, address or invitation code</span>
+      <span className={labelHidden ? "sync-visually-hidden" : undefined}>{t("lookup.label")}</span>
       <div>
         <input value={value} disabled={disabled || joining} spellCheck={false} autoComplete="off"
-          placeholder="Search, or paste a link, owner/name or an invitation code" aria-invalid={invalid || undefined} aria-describedby={describedBy}
+          placeholder={t("lookup.placeholder")} aria-invalid={invalid || undefined} aria-describedby={describedBy}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && actionable) { event.preventDefault(); onSubmit(); } }} />
         <button type="button" className="btn repo-verb" disabled={disabled || looking || joining || !actionable} onClick={onSubmit}>
           <Icon name={code ? "user" : "search"} size={12} />
-          {joining ? "Joining…" : looking ? "Looking up…" : code ? "Join" : "Look up"}
+          {joining ? t("lookup.joining") : looking ? t("lookup.looking") : code ? t("lookup.join") : t("lookup.lookUp")}
         </button>
       </div>
-      {code && <small>Join to become a member.</small>}
+      {code && <small>{t("lookup.joinHint")}</small>}
       {error}
     </label>
   );

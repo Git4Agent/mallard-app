@@ -36,6 +36,7 @@ import type {
   LibraryHeadCoordinate,
 } from "../src/components/storage-catalog/types";
 import { installChineseShim, CJK_FONT_CSS } from "./i18n-zh-shim";
+import { inUi, startsInUi } from "./i18n-ui-lookup";
 
 /**
  * Chinese UI, live: the shipped shell on a stand-in backend, with the
@@ -53,9 +54,9 @@ import { installChineseShim, CJK_FONT_CSS } from "./i18n-zh-shim";
  *           session-detail|session-detail-tool|session-detail-agent|session-detail-en|session-detail-child|
  *           library-scope|library-push|library-pushed|library-pull|library-pull-overwrite|library-pulled|
  *           library-fork|library-fork-refused|library-cloud-push|library-cloud-pull|
- *           delete-session-in-use|delete-close-codex|delete-codex-closed|delete-all-stopped
+ *           delete-codex-refused|delete-close-codex
  *   ?lang=en|zh   ?font=default|cjk
- *   ?pref=system|en|zh (the Language row, direction A)   ?theme=light|dark
+ *   ?ui=en|zh-CN (the app's own catalogs, no shim — set by i18n-zh-live.html)   ?theme=light|dark
  *
  * Owner rules (2026-10-07): what the user typed is never translated, so the
  * sample data is the same mixed Chinese and English in both languages; and
@@ -68,7 +69,6 @@ const query = new URLSearchParams(window.location.search);
 const screen = query.get("screen") ?? "sessions";
 const zh = query.get("lang") === "zh";
 const cjkFont = query.get("font") === "cjk";
-const pref = (["system", "en", "zh"] as const).find((value) => value === query.get("pref")) ?? "system";
 const theme = query.get("theme") === "dark" ? "dark" : "light";
 
 try {
@@ -283,8 +283,8 @@ function summary(project: Project, session: Session): ProjectSessionSummary {
     user_round_count: session.rounds, agent_message_count: session.rounds * 2, tool_call_count: session.rounds * 3,
     total_input_tokens: null, total_output_tokens: null, total_tokens: session.rounds * 21_000, metrics_complete: true,
     actions: [
-      { action_id: "open_in_app", kind: "open_in_app", label: `Open in ${name}`, enabled: true },
-      { action_id: "open_in_terminal", kind: "open_in_terminal", label: "Open in Terminal", enabled: true },
+      { action_id: `${session.provider}.open-in-app`, kind: "open_in_app", label: `Open in ${name}`, enabled: true },
+      { action_id: `${session.provider}.open-in-terminal`, kind: "open_in_terminal", label: "Open in Terminal", enabled: true },
     ],
   } as ProjectSessionSummary;
 }
@@ -403,8 +403,8 @@ function codexTranscript(session: Session): Transcript {
         checkpoints: exact(1), tool_calls: exact(7), file_edits: exact(2), shell_calls: exact(2), reads: exact(1), other_tools: exact(1), agent_calls: exact(1),
       },
       actions: [
-        { action_id: "open_in_app", kind: "open_in_app", label: "Open in Codex", enabled: true },
-        { action_id: "open_in_terminal", kind: "open_in_terminal", label: "Open in Terminal", enabled: true },
+        { action_id: "codex.open-in-app", kind: "open_in_app", label: "Open in Codex", enabled: true },
+        { action_id: "codex.open-in-terminal", kind: "open_in_terminal", label: "Open in Terminal", enabled: true },
       ],
       github_repository_url: "https://github.com/octocat/tidewatch",
       warnings: [{ code: "usage_partial", message: "Token usage is missing for 1 turn; the total is a lower bound.", severity: "info" }],
@@ -469,8 +469,8 @@ function claudeTranscript(session: Session): Transcript {
         file_edits: exact(1), shell_calls: exact(1), reads: exact(1), other_tools: exact(0), agent_calls: exact(1),
       },
       actions: [
-        { action_id: "open_in_app", kind: "open_in_app", label: "Open in Claude", enabled: true },
-        { action_id: "open_in_terminal", kind: "open_in_terminal", label: "Open in Terminal", enabled: true },
+        { action_id: "claude.open-in-app", kind: "open_in_app", label: "Open in Claude", enabled: true },
+        { action_id: "claude.open-in-terminal", kind: "open_in_terminal", label: "Open in Terminal", enabled: true },
       ],
       warnings: [], settings: { model: "claude-opus-5-5", effort: "high", source: "reply" },
     },
@@ -855,9 +855,9 @@ projectSyncApi.discoverR2Storage = async () => {
   return {
     scan_id: "scan-1", scope: "octocat · Default and EU", status: "complete", issues: [],
     candidates: [
-      { candidate_id: "c1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "Default" }, { label: "Created", value: "Sep 12, 2026" }], cautions: [], connected_storage_id: "storage-r2" },
-      { candidate_id: "c2", name: "team-sessions", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "EU" }, { label: "Created", value: "Aug 30, 2026" }], cautions: [], connected_storage_id: null },
-      { candidate_id: "c3", name: "website-assets", marker: "missing", marker_detail: null, facts: [{ label: "Jurisdiction", value: "Default" }, { label: "Created", value: "Mar 3, 2026" }], cautions: [], connected_storage_id: null },
+      { candidate_id: "c1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }, { key: "created", label: "Created", value: "Sep 12, 2026", at: Date.UTC(2026, 8, 12) / 1000 }], cautions: [], connected_storage_id: "storage-r2" },
+      { candidate_id: "c2", name: "team-sessions", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "EU", value_code: "eu" }, { key: "created", label: "Created", value: "Aug 30, 2026", at: Date.UTC(2026, 7, 30) / 1000 }], cautions: [], connected_storage_id: null },
+      { candidate_id: "c3", name: "website-assets", marker: "missing", marker_detail: null, facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }, { key: "created", label: "Created", value: "Mar 3, 2026", at: Date.UTC(2026, 2, 3) / 1000 }], cautions: [], connected_storage_id: null },
     ],
   };
 };
@@ -888,12 +888,10 @@ projectSyncApi.prepareFeishuStorage = async () => hold();
 projectSyncApi.cancelFeishuSetup = async () => {};
 
 /* A delete Codex refuses: which confirms each screen answers Yes to before
-   the dialog it shows (sessionDeletion.ts). */
+   the screen it shows. */
 const APPROVED_DIALOGS: Record<string, string[]> = {
-  "delete-session-in-use": ["Delete local session?"],
+  "delete-codex-refused": ["Delete local session?"],
   "delete-close-codex": ["Delete local session?"],
-  "delete-codex-closed": ["Delete local session?", "Close Codex before deleting"],
-  "delete-all-stopped": ["Delete all local sessions?"],
 };
 
 /* ——— native dialogs: macOS draws them outside the page, so the specimen
@@ -945,18 +943,14 @@ mockIPC(async (command, payload) => {
     case "plugin:dialog|message": {
       /* A blocked delete: the confirms before the asked-for dialog are approved. */
       const buttons = args.buttons as { OkCancelCustom?: [string, string] } | string | undefined;
-      if ((APPROVED_DIALOGS[screen] ?? []).includes(String(args.title))) {
+      if ((APPROVED_DIALOGS[screen] ?? []).some((title) => inUi(title).includes(String(args.title)))) {
         return typeof buttons === "object" && buttons.OkCancelCustom ? buttons.OkCancelCustom[0] : "Ok";
       }
       drawDialog(args);
       return hold();
     }
-    case "delete_local_project_session": return {
-      blocked_by: screen === "delete-session-in-use" ? "codex_session_in_use" : "codex_app_running", provider_error: null, metadata_error: null,
-    };
-    case "delete_local_project_sessions": return {
-      blocked_by: "codex_app_running", sessions_deleted: 2, sessions_failed: 0, provider_errors: [], metadata_reset: null, metadata_error: null,
-    };
+    /* Codex refuses while its app holds the session: the backend's sentence. */
+    case "delete_local_project_session": return { provider_error: "Codex provider request failed (code -32600).", metadata_error: null };
     case "execute_provider_maintenance_action": {
       await wait(150);
       return { provider: "codex", action_id: "codex.app.close", ready: true, summary: "Codex is closed.", facts: {} };
@@ -1011,6 +1005,7 @@ mockIPC(async (command, payload) => {
     case "list_managed_cloud_public":
     case "list_catalog_cloud_starred":
     case "list_catalog_cloud_public": return { rows: [], next_cursor: null };
+    case "set_ui_language":
     case "take_app_link":
     case "recover_startup_state":
     case "hold_project_git_watch":
@@ -1089,28 +1084,35 @@ async function until<T>(find: () => T | null | undefined, timeout = 4000): Promi
     await settle();
   }
 }
-/* Buttons are found by their English label before the shim rewrites it, or by
-   the label the shim remembers it had. */
+/* Buttons are found by their English label: before the shim rewrites it, by
+   the label the shim remembers it had, or — with the app's own catalogs in
+   Chinese — as the catalogs render that label now (i18n-ui-lookup.ts). */
 const englishOf = (element: Element) => element.getAttribute("data-i18n-en") ?? element.textContent?.trim() ?? "";
 const labelOf = (element: Element) => element.getAttribute("data-i18n-en-aria-label") ?? element.getAttribute("aria-label") ?? "";
+const named = (element: Element, name: string) => {
+  const names = inUi(name);
+  return names.includes(englishOf(element)) || names.includes(labelOf(element));
+};
 const buttonNamed = (name: string, scope: ParentNode = document) =>
-  [...scope.querySelectorAll("button, [role=menuitem], a")].find((element) => englishOf(element) === name || labelOf(element) === name) as HTMLElement | undefined;
+  [...scope.querySelectorAll("button, [role=menuitem], a")].find((element) => named(element, name)) as HTMLElement | undefined;
 
-/* Which provider each storage screen opens, by its prefix. */
-const STORAGE_TYPE: Array<[string, string]> = [
+/* Which provider each storage screen opens, by its prefix; the provider's
+   name is the backend's, translated by key, so Chinese names it here. */
+const STORAGE_TYPE: Array<[string, string, string?]> = [
   ["storage-r2", "Set up Cloudflare R2 storage"],
   ["storage-cloud", "Set up Mallard Cloud storage"],
-  ["storage-local", "Set up Local folder storage"],
+  ["storage-local", "Set up Local folder storage", "设置本地文件夹存储"],
   ["storage-dropbox", "Set up Dropbox storage"],
 ];
 
 /* An element by the English it had before the shim, its own text, or its label. */
 function byEnglish(text: string): HTMLElement | undefined {
+  const names = inUi(text);
   const hit = [...document.querySelectorAll<HTMLElement>("body *")].find((element) =>
     element.getAttribute("data-i18n-en") === text
     || element.getAttribute("data-i18n-en-aria-label") === text
-    || element.getAttribute("aria-label") === text
-    || ((element.children.length === 0 || element.matches("button, [role=radio], a")) && element.textContent?.trim() === text));
+    || names.includes(element.getAttribute("aria-label") ?? "")
+    || ((element.children.length === 0 || element.matches("button, [role=radio], a")) && names.includes(element.textContent?.trim() ?? "")));
   return (hit?.closest("button, [role=radio], a") as HTMLElement | null) ?? hit;
 }
 async function press(text: string, pause = 300) {
@@ -1150,11 +1152,11 @@ async function drive() {
     if (screen === "cloud-publish") await press("Publish version 3…", 600);
   }
   if (screen === "push" || screen === "error") {
-    (await until(() => [...document.querySelectorAll(".sync-path-sync")].find((element) => labelOf(element).startsWith("Push")) as HTMLElement | undefined)).click();
+    (await until(() => [...document.querySelectorAll(".sync-path-sync")].find((element) => startsInUi(labelOf(element), "Push") || startsInUi(element.textContent?.trim() ?? "", "Push")) as HTMLElement | undefined)).click();
     await settle(500);
     if (screen === "error") {
       const commit = await until(() => [...document.querySelectorAll("button")]
-        .find((element) => englishOf(element) === "Push" && !element.classList.contains("sync-path-sync")) as HTMLElement | undefined);
+        .find((element) => inUi("Push").includes(englishOf(element)) && !element.classList.contains("sync-path-sync")) as HTMLElement | undefined);
       commit.click();
       await settle(500);
     }
@@ -1164,7 +1166,6 @@ async function drive() {
     await settle(120);
     (await until(() => buttonNamed("Settings"))).click();
     await settle(400);
-    addLanguageRow();
   }
   if (screen.startsWith("storage")) {
     (await until(() => buttonNamed("Storages"))).click();
@@ -1173,7 +1174,11 @@ async function drive() {
       (await until(() => buttonNamed("Add storage…"))).click();
       await settle(300);
       const type = STORAGE_TYPE.find(([prefix]) => screen.startsWith(prefix));
-      if (type) await press(type[1], 400);
+      if (type) {
+        const [, english, chinese] = type;
+        (await until(() => byEnglish(english) ?? (chinese ? byEnglish(chinese) : undefined))).click();
+        await settle(400);
+      }
     }
     if (screen.startsWith("storage-r2-")) {
       const existing = screen === "storage-r2-existing";
@@ -1231,13 +1236,12 @@ async function drive() {
   if (screen === "confirm-delete-session") await press("Delete local session", 500);
   if (screen.startsWith("delete-")) {
     await openProject();
-    if (screen === "delete-all-stopped") {
-      await press("tidewatch. Project menu", 300);
-      await press("Delete all local sessions…", 500);
-    } else {
-      await press("Delete local session", 500);
+    await press("Delete local session", 600);
+    await until(() => byEnglish("Close Codex"));
+    if (screen === "delete-close-codex") {
+      await press("Close Codex", 400);
+      await until(() => document.querySelector(".zh-native-dialog"));
     }
-    await until(() => document.querySelector(".zh-native-dialog"));
     await settle(200);
   }
   if (screen === "confirm-remove-project") await press("Remove portal from Mallard", 500);
@@ -1315,7 +1319,7 @@ async function drive() {
     }
     if (screen.startsWith("library-fork")) {
       (await until(() => [...document.querySelectorAll<HTMLButtonElement>("button")]
-        .find((element) => labelOf(element).startsWith("Fork tide-csv-clean")))).click();
+        .find((element) => startsInUi(labelOf(element), "Fork tide-csv-clean")))).click();
       const drawer = await until(() => document.querySelector<HTMLFormElement>(".catalog-fork-drawer"));
       await settle(300);
       if (screen === "library-fork-refused") {
@@ -1334,33 +1338,6 @@ async function drive() {
     await settle(400);
   }
   document.documentElement.dataset.ready = "1";
-}
-
-/* ——— direction A: a Language row under Theme, drawn with SettingsRow's markup ———
-   Specimen-only: appended beside React's rows (never in place of them). The
-   simulated Mac prefers Chinese, so System shows Chinese. Picking reloads the
-   frame in that language: the app applies the choice at once. */
-function addLanguageRow() {
-  const card = document.getElementById("settings-appearance")?.closest("section")?.querySelector(".sync-settings-card");
-  if (!card || card.querySelector("[data-language-row]")) return;
-  const row = document.createElement("div");
-  row.className = "sync-settings-row";
-  row.dataset.languageRow = "";
-  row.dataset.i18nSkip = "";
-  const label = zh ? "语言" : "Language";
-  const hint = zh ? "“跟随系统”使用 macOS 的语言。" : "System uses your macOS language.";
-  const options: Array<[typeof pref, string, string]> = [["system", zh ? "跟随系统" : "System", zh ? "zh-CN" : "en"], ["en", "English", "en"], ["zh", "简体中文", "zh-CN"]];
-  row.innerHTML = `<div class="sync-settings-copy"><strong>${label}</strong><p>${hint}</p></div>
-    <div class="sync-settings-control"><div class="sync-settings-segment" role="radiogroup" aria-label="${label}">${options.map(([value, text, lang]) =>
-      `<button type="button" role="radio" lang="${lang}" data-pref="${value}" aria-checked="${pref === value}"${pref === value ? ' class="active"' : ""}>${text}</button>`).join("")}</div></div>`;
-  row.querySelectorAll<HTMLButtonElement>("button[data-pref]").forEach((button) => button.addEventListener("click", () => {
-    const next = new URLSearchParams(window.location.search);
-    const chosen = button.dataset.pref!;
-    next.set("pref", chosen);
-    next.set("lang", chosen === "en" ? "en" : "zh");
-    window.location.search = `?${next}`;
-  }));
-  card.append(row);
 }
 
 if (zh) {

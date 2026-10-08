@@ -13,7 +13,7 @@ import type {
 } from "../../types";
 import Icon from "../Icons";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
-import ProjectActivityPage, { REVIEW_LIST_FAILED_REASON, type PushGitHistory, type ReviewListState } from "./ProjectActivityPage";
+import ProjectActivityPage, { type PushGitHistory, type ReviewListState } from "./ProjectActivityPage";
 import ProjectFilesReviewPage, {
   projectFileReviewCards,
   type ProjectFileReveal,
@@ -34,6 +34,7 @@ import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
 import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence, type ReviewBudget } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
+import { t, useTranslation } from "../../i18n";
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -156,32 +157,43 @@ export function pullRequiredCopy(
   baseRevision: number | null | undefined,
   changedConversationCount = 0,
 ): PullRequiredCopy {
-  const storage = storageName?.trim() || "this storage";
+  // A storage without a name is "this storage", inside each sentence.
+  const storage = storageName?.trim() || null;
   // The three fields stack as one banner: title, one sentence, and the lineage
   // figures abbreviated to what support actually reads off a screenshot. The
   // footer button says what to do, so the sentence only has to say what is
   // there and what the review unlocks.
-  const detail = `Version ${remoteRevision} · ${baseRevision != null ? `reviewed ${baseRevision}` : "review required"}`;
+  const detail = baseRevision != null
+    ? t("reviews:pullRequired.detailReviewed", { remote: remoteRevision, base: baseRevision })
+    : t("reviews:pullRequired.detailRequired", { remote: remoteRevision });
   if (reason === "remote_advanced") {
-    const one = changedConversationCount === 1;
+    const count = changedConversationCount;
     return {
-      title: "Storage has newer changes",
-      body: changedConversationCount > 0
-        ? `${changedConversationCount} conversation${one ? " is" : "s are"} newer in ${storage}. Review ${one ? "it" : "them"} in Pull — ${one ? "it stays" : "they stay"} held afterwards while your other sessions push.`
-        : `${storage} changed after this computer last synced. Review it in Pull before pushing.`,
+      title: t("reviews:pullRequired.advancedTitle"),
+      body: count > 0
+        ? (storage
+          ? t("reviews:pullRequired.advancedConversations", { count, storage })
+          : t("reviews:pullRequired.advancedConversationsUnnamed", { count }))
+        : (storage
+          ? t("reviews:pullRequired.advanced", { storage })
+          : t("reviews:pullRequired.advancedUnnamed")),
       detail,
     };
   }
   if (reason === "remote_without_base") {
     return {
-      title: "Storage review required",
-      body: `Review the existing data in ${storage} before pushing from this connection.`,
+      title: t("reviews:pullRequired.withoutBaseTitle"),
+      body: storage
+        ? t("reviews:pullRequired.withoutBase", { storage })
+        : t("reviews:pullRequired.withoutBaseUnnamed"),
       detail,
     };
   }
   return {
-    title: "Project changed since last sync",
-    body: `The project folder or Codex profile is different now. Review ${storage} first.`,
+    title: t("reviews:pullRequired.bindingChangedTitle"),
+    body: storage
+      ? t("reviews:pullRequired.bindingChanged", { storage })
+      : t("reviews:pullRequired.bindingChangedUnnamed"),
     detail,
   };
 }
@@ -249,26 +261,43 @@ export function pushReviewBlockers(
   return blockers;
 }
 
-/** The scanner's finding as the rest of a sentence about the file. */
-function projectFileWarningClause(code: string | null | undefined): string {
-  if (code === "executable") return "is executable";
-  if (code === "possible_secret") return "may hold a secret";
-  return "has a scan warning";
+/** The sentence about one flagged file, by the scanner's finding: by its
+ *  file name, or as "a selected file" when the scan no longer lists it. */
+function projectFileWarningSentence(code: string | null | undefined, name: string | null): string {
+  if (code === "executable") {
+    return name === null ? t("reviews:blockers.executableUnnamed") : t("reviews:blockers.executable", { name });
+  }
+  if (code === "possible_secret") {
+    return name === null ? t("reviews:blockers.secretUnnamed") : t("reviews:blockers.secret", { name });
+  }
+  return name === null ? t("reviews:blockers.warningUnnamed") : t("reviews:blockers.warning", { name });
 }
 
 /** One blocking item by the name its row shows: a file by its file name, a
- *  session by its title. */
+ *  session by its title; null when the review no longer lists it. */
 function blockerName(
   blocker: PushReviewBlocker,
   threadComparison?: ThreadSyncComparison | null,
   projectContentInventory?: ProjectContentInventory | null,
-): string {
+): string | null {
   if (blocker.step === "history") {
-    const entry = threadComparison?.entries.find((candidate) => candidate.resource_id === blocker.resourceId);
-    return entry ? `“${entry.display_name}”` : "A selected session";
+    return threadComparison?.entries.find((candidate) => candidate.resource_id === blocker.resourceId)?.display_name ?? null;
   }
   const entry = projectContentInventory?.entries.find((candidate) => candidate.descriptor.resource_id === blocker.resourceId);
-  return entry ? entry.relative_path.split("/").pop()! : "A selected file";
+  return entry ? entry.relative_path.split("/").pop()! : null;
+}
+
+/** The sentence about one item the capture cannot read. */
+function unreadableSentence(
+  blocker: PushReviewBlocker,
+  threadComparison?: ThreadSyncComparison | null,
+  projectContentInventory?: ProjectContentInventory | null,
+): string {
+  const name = blockerName(blocker, threadComparison, projectContentInventory);
+  if (blocker.step === "history") {
+    return name === null ? t("reviews:blockers.unreadableUnnamedSession") : t("reviews:blockers.unreadableSession", { name });
+  }
+  return name === null ? t("reviews:blockers.unreadableUnnamedFile") : t("reviews:blockers.unreadable", { name });
 }
 
 /**
@@ -286,21 +315,25 @@ export function pushBlockerSentence(
   const local = blockers.filter((blocker) => blocker.kind !== "storage");
   const flagged = local.filter((blocker) => blocker.state === WARNING_UNACKNOWLEDGED);
   const unreadable = local.filter((blocker) => blocker.state !== WARNING_UNACKNOWLEDGED);
-  const sentences: string[] = [];
+  let flaggedSentence: string | null = null;
   if (flagged.length === 1) {
     const entry = projectContentInventory?.entries.find((candidate) => (
       candidate.descriptor.resource_id === flagged[0].resourceId
     ));
-    sentences.push(`${blockerName(flagged[0], threadComparison, projectContentInventory)} ${projectFileWarningClause(entry?.warning_code)} — mark it reviewed or exclude it.`);
+    flaggedSentence = projectFileWarningSentence(entry?.warning_code, blockerName(flagged[0], threadComparison, projectContentInventory));
   } else if (flagged.length > 1) {
-    sentences.push(`${flagged.length} files need review — mark them reviewed or exclude them.`);
+    flaggedSentence = t("reviews:blockers.flaggedMany", { count: flagged.length });
   }
+  let captureSentence: string | null = null;
   if (unreadable.length === 1) {
-    sentences.push(`${blockerName(unreadable[0], threadComparison, projectContentInventory)} can’t be captured — exclude it to push.`);
+    captureSentence = unreadableSentence(unreadable[0], threadComparison, projectContentInventory);
   } else if (unreadable.length > 1) {
-    sentences.push(`${unreadable.length} selected items can’t be captured — exclude them to push.`);
+    captureSentence = t("reviews:blockers.unreadableMany", { count: unreadable.length });
   }
-  return sentences.length > 0 ? sentences.join(" ") : null;
+  if (flaggedSentence && captureSentence) {
+    return t("reviews:blockers.both", { flagged: flaggedSentence, unreadable: captureSentence });
+  }
+  return flaggedSentence ?? captureSentence;
 }
 
 /** The blocking row the footer's pill opens. A blocker whose row the review
@@ -325,9 +358,9 @@ export function pushBlockerPillLabel(blockers: readonly PushReviewBlocker[]): st
   const local = blockers.filter((blocker) => blocker.kind !== "storage");
   if (local.length === 0) return null;
   const flagged = local.filter((blocker) => blocker.state === WARNING_UNACKNOWLEDGED).length;
-  if (flagged === local.length) return `${flagged} need${flagged === 1 ? "s" : ""} review`;
-  if (flagged === 0) return `${local.length} unavailable`;
-  return `${local.length} need attention`;
+  if (flagged === local.length) return t("reviews:blockers.needsReview", { count: flagged });
+  if (flagged === 0) return t("reviews:blockers.unavailable", { count: local.length });
+  return t("reviews:blockers.needAttention", { count: local.length });
 }
 
 export function pushSelectableResourceIds(
@@ -604,9 +637,10 @@ export function pushReviewDisabledReason({
 }): string | null {
   /* First: until the rows are on screen, or while the scan is running,
      every judgement below is provisional, including the size of the push. */
-  if (listState === "loading") return "Loading sessions…";
-  if (listState === "failed") return REVIEW_LIST_FAILED_REASON;
-  if (projectContentLoading) return "Project files are still being scanned";
+  if (listState === "loading") return t("reviews:review.loadingSessions");
+  // The list itself carries the error and its Try again; the button only points at it.
+  if (listState === "failed") return t("projects:review.listFailed");
+  if (projectContentLoading) return t("reviews:push.filesScanning");
   const budget = pushBudgetTotal(selected, threadComparison, projectContentInventory, {
     removals: projectContentRemovals,
     filesShown: projectFilesShown,
@@ -624,14 +658,14 @@ export function pushReviewDisabledReason({
   );
   const blockerSentence = pushBlockerSentence(blockers, threadComparison, projectContentInventory);
   if (blockerSentence) return blockerSentence;
-  if (blockers.length > 0) return "Resolve the held items above before pushing";
+  if (blockers.length > 0) return t("reviews:push.resolveHeld");
   const impact = pushProjectFileCommitImpact(
     projectContentInventory,
     selected,
     projectContentRemovals,
   );
   if (projectFileDeletionCount(impact) > 0 && !deletionApproved) {
-    return "Approve the selected project file deletions";
+    return t("reviews:push.approveDeletions");
   }
   /* A scan ticks the files the recipe already holds, so a selection can be
      full of files storage has as they are. Those send nothing. */
@@ -643,14 +677,14 @@ export function pushReviewDisabledReason({
     && !sendsFiles
     && projectContentRemovals.size === 0
     && !gitHistoryChanged
-  ) return "Nothing is selected";
+  ) return t("reviews:review.nothingSelected");
   return null;
 }
 
 /** The meter's refusal without its way out: a session's own review cannot
  *  exclude anything, so the sentence stops at the overshoot. */
 function sessionOverLimitSentence(budget: ReviewBudget): string {
-  return `${formatBytes(budget.total - budget.limit)} over the ${formatBytes(budget.limit)} push limit.`;
+  return t("reviews:push.overLimit", { over: formatBytes(budget.total - budget.limit), limit: formatBytes(budget.limit) });
 }
 
 type PushBudget = NonNullable<ReturnType<typeof pushBudgetTotal>>;
@@ -659,7 +693,11 @@ type PushBudget = NonNullable<ReturnType<typeof pushBudgetTotal>>;
  *  The meter itself is the shared review primitive; only this wording is
  *  Push's, because only Push carries requirements. */
 function pushBudgetBreakdown(total: PushBudget): string {
-  return `Sessions ${formatBytes(total.sessions)} · Requirements ${formatBytes(total.reserved)} · Project files ${formatBytes(total.projectFiles)}`;
+  return t("reviews:push.breakdown", {
+    sessions: formatBytes(total.sessions),
+    requirements: formatBytes(total.reserved),
+    projectFiles: formatBytes(total.projectFiles),
+  });
 }
 
 /** The commit of both reviews that push. It wears the wait while the rows
@@ -675,6 +713,7 @@ export function PushApplyButton({ busy, listPending = false, filesPending = fals
   disabledReason: string | null;
   onPush: () => void;
 }) {
+  const { t } = useTranslation(["reviews", "common"]);
   return (
     <button
       type="button"
@@ -689,8 +728,8 @@ export function PushApplyButton({ busy, listPending = false, filesPending = fals
       {busy
         ? (fetchProgress && fetchProgress.phase === "push"
           ? <span className="sync-btn-readout">{`${fetchProgress.index}/${fetchProgress.total_objects} · ${(fetchProgress.fetched_bytes / 1_000_000).toFixed(1)} MB…`}</span>
-          : "Pushing…")
-        : listPending ? "Loading sessions…" : filesPending ? "Scanning files…" : "Push"}
+          : t("push.pushing"))
+        : listPending ? t("review.loadingSessions") : filesPending ? t("push.scanningFiles") : t("common:push")}
     </button>
   );
 }
@@ -709,7 +748,7 @@ export default function PushResourceWorkspace({
   project,
   binding = null,
   storageId = null,
-  storageName = "storage",
+  storageName: storageNameProp,
   refreshEpoch = 0,
   threadComparison,
   projectContentInventory = null,
@@ -734,6 +773,9 @@ export default function PushResourceWorkspace({
   onPush,
   onPull,
 }: Props) {
+  const { t } = useTranslation("reviews");
+  // An absent name reads as the word; a null one stays null.
+  const storageName = storageNameProp === undefined ? t("review.defaultStorage") : storageNameProp;
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<NameSearchResults | null>(null);
   useEffect(() => { setSearchQuery(""); setSearchResults(null); }, [project?.local_project_id, storageId]);
@@ -880,11 +922,11 @@ export default function PushResourceWorkspace({
       // banner speaks for the threads carrying that status, and the mark is
       // what ties it to them. The rung is still named in the text.
       mark: <ThreadStatusIcon status="divergent" size={16} />,
-      title: `${heldConversationCount} conversation${heldConversationCount === 1 ? "" : "s"} held for Pull`,
-      message: "Storage has newer versions. Selected threads still push.",
+      title: t("push.heldConversations", { count: heldConversationCount }),
+      message: t("push.heldConversationsDetail"),
       action: onPull
         ? (
-          <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
+          <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>{t("review.openPull")}</button>
         )
         : undefined,
     });
@@ -894,11 +936,11 @@ export default function PushResourceWorkspace({
       key: "project-file-pull-holds",
       severity: "warning",
       mark: <ThreadStatusIcon status="cloud-outstanding" size={16} />,
-      title: `${heldProjectFileCount} project file${heldProjectFileCount === 1 ? "" : "s"} ${heldProjectFileCount === 1 ? "requires" : "require"} Pull`,
-      message: "Storage has newer file changes. Review them before pushing local project files.",
+      title: t("push.heldFiles", { count: heldProjectFileCount }),
+      message: t("push.heldFilesDetail"),
       action: onPull
         ? (
-          <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>Open Pull review</button>
+          <button type="button" className="btn btn-ghost" onClick={onPull} disabled={busy}>{t("review.openPull")}</button>
         )
         : undefined,
     });
@@ -913,7 +955,7 @@ export default function PushResourceWorkspace({
     banners.push({
       key: "comparison-failed",
       severity: "danger",
-      title: "Conversations couldn't be compared, so nothing can be selected",
+      title: t("push.comparisonFailed"),
       message: threadComparisonError,
     });
   }
@@ -923,7 +965,7 @@ export default function PushResourceWorkspace({
   const bannersAtOpen = useRef<boolean | null>(null);
   if (bannersAtOpen.current === null) bannersAtOpen.current = banners.length > 0;
   const bannerTiming: NoticeTiming = bannersAtOpen.current
-    ? { timing: "standing", label: "Notes about this Push review" }
+    ? { timing: "standing", label: t("push.notes") }
     : { timing: "progress" };
   // Selection-driven, so it reports in the footer rather than the banner zone
   // above the list — see the banner comment.
@@ -980,7 +1022,7 @@ export default function PushResourceWorkspace({
     && projectContentRemovals.size === 0
     && !gitHistoryChanged;
   // The page the review closes onto, as the path bar names it.
-  const exitTarget = project?.is_git_repository ? "Git history" : project ? projectLabel(project) : "project";
+  const exitTarget = project?.is_git_repository ? t("push.exitGitHistory") : project ? projectLabel(project) : null;
   /* The review says it is ready once, when its rows land — after mount, so a
      review ready from its first render still changes the region. */
   const [readyAnnounced, setReadyAnnounced] = useState(false);
@@ -1085,15 +1127,16 @@ export default function PushResourceWorkspace({
     <section className="sync-inline-action-review sync-inline-push-review sync-sync-review-workspace" aria-labelledby="sync-push-resource-title">
       <header className="sync-inline-action-header sync-push-resource-header sync-sync-review-header">
         <div className="sync-sync-review-title">
-          <h2 id="sync-push-resource-title">Push review</h2>
-          <span className="sync-settings-flag">Credential redaction: {credentialRedactionEnabled ? "On" : "Off"}</span>
+          <h2 id="sync-push-resource-title">{t("push.title")}</h2>
+          <span className="sync-settings-flag">{credentialRedactionEnabled ? t("push.redactionOn") : t("push.redactionOff")}</span>
           <span className="sync-visually-hidden" role="status">
-            {readyAnnounced ? "Push review ready." : ""}
+            {readyAnnounced ? t("push.ready") : ""}
           </span>
         </div>
         {/* An empty review draws no meter: it would measure only the
             reserved requirements of a push that cannot happen. */}
         {budgetTotal && !listPending && !emptyReview && (
+          // i18n-ignore: the meter's mode key, not copy
           <ReviewBudgetGlance budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
         )}
         <SyncReviewSelectionBar
@@ -1101,14 +1144,18 @@ export default function PushResourceWorkspace({
           total={currentGroup.length}
           busy={busy}
           listPending={listPending}
-          recommendedTitle={`Use the recommended ${searchActive ? "matching session" : activeStep === "history" ? "session" : "project file"} selection (${recommendedCount})`}
+          recommendedTitle={searchActive
+            ? t("push.recommendMatching", { count: recommendedCount })
+            : activeStep === "history"
+              ? t("push.recommendSessions", { count: recommendedCount })
+              : t("push.recommendFiles", { count: recommendedCount })}
           recommendedCount={recommendedCount}
           recommendedDisabled={currentDefaults.length === 0 || currentMatchesDefaults}
           onRecommended={useRecommendedForStep}
           searchActive={searchActive}
           clearDisabled={countSelected(searchGroup, effectiveSelected) === 0}
           onClear={clearStep}
-          close={{ ariaLabel: "Close push review", onClose }}
+          close={{ ariaLabel: t("push.close"), onClose }}
         />
       </header>
 
@@ -1135,7 +1182,7 @@ export default function PushResourceWorkspace({
             <div className="sync-review-banners">
               <NoticeZone
                 items={banners}
-                subject="notes about this Push review"
+                subject={t("push.notesSubject")}
                 {...bannerTiming}
               />
             </div>
@@ -1174,10 +1221,10 @@ export default function PushResourceWorkspace({
                 />
               ) : (
                 <>
-                  <NameSearchField query={searchQuery} onChange={setSearchQuery} label="Search sessions"
+                  <NameSearchField query={searchQuery} onChange={setSearchQuery} label={t("review.searchSessions")}
                     matches={matchingConversations.length} total={visibleConversations.length} noun={sessionNoun}
                     hiddenSelected={countSelected(visibleConversations, effectiveSelected) - countSelected(matchingConversations, effectiveSelected)} />
-                  {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">No matching sessions.</div>}
+                  {searchActive && matchingConversations.length === 0 && <div className="sync-history-state">{t("review.noMatches")}</div>}
                   {(!searchActive || matchingConversations.length > 0) && (
                     <ResourceInventory resources={matchingConversations} selected={effectiveSelected} selectableResourceIds={selectableConversationIds} disabled={busy} forceExpanded={searchActive} onToggle={toggleResource} />
                   )}
@@ -1209,8 +1256,8 @@ export default function PushResourceWorkspace({
               eligibility={projectContentInventory?.eligibility ?? {
                 state: project?.is_git_repository ? "git_managed" : "eligible",
                 reason: project?.is_git_repository
-                  ? "Git manages files in this project folder."
-                  : "This project folder is not inside a Git work tree.",
+                  ? t("push.gitManaged")
+                  : t("push.notGit"),
               }}
               rows={projectFileRows}
               selectedIds={effectiveSelected}
@@ -1274,10 +1321,10 @@ export default function PushResourceWorkspace({
             type="button"
             className="btn sync-review-exit"
             disabled={busy}
-            title={`Close Push review — back to ${exitTarget}`}
+            title={exitTarget === null ? t("push.exitTitleUnnamed") : t("push.exitTitle", { target: exitTarget })}
             onClick={onClose}
           >
-            <span>{`Back to ${exitTarget}`}</span>
+            <span>{exitTarget === null ? t("push.exitUnnamed") : t("push.exit", { target: exitTarget })}</span>
           </button>
         ) : (
           <>
@@ -1290,16 +1337,16 @@ export default function PushResourceWorkspace({
                 className="btn btn-ghost"
                 disabled={busy}
                 title={activeStep !== "history"
-                  ? "Back to session selection"
+                  ? t("review.backToSessions")
                   : waitingProjectFiles > 0
-                    ? `${waitingProjectFiles} new project file${waitingProjectFiles === 1 ? " is" : "s are"} not in this push`
-                    : "Review project files next"}
+                    ? t("push.waitingFiles", { count: waitingProjectFiles })
+                    : t("review.filesNext")}
                 onClick={() => selectStep(activeStep === "history" ? "project_files" : "history")}
               >
                 {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
-                {activeStep === "history" ? "Project files" : historyStepLabel(showProjectFiles)}
+                {activeStep === "history" ? t("review.projectFiles") : historyStepLabel(showProjectFiles)}
                 {activeStep === "history" && waitingProjectFiles > 0 && (
-                  <span className="sync-path-count">{waitingProjectFiles} new</span>
+                  <span className="sync-path-count">{t("push.newCount", { count: waitingProjectFiles })}</span>
                 )}
                 {activeStep === "history" && <Icon name="chevron-right" size={14} />}
               </button>
@@ -1320,6 +1367,7 @@ export default function PushResourceWorkspace({
               </button>
             )}
             {budgetTotal && !listPending && (
+              // i18n-ignore: the meter's mode key, not copy
               <ReviewBudgetGauge budget={budgetTotal} verb="push" breakdown={pushBudgetBreakdown(budgetTotal)} />
             )}
             <PushApplyButton

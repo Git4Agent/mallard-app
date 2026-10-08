@@ -6,6 +6,7 @@ import rehypeKatex from "rehype-katex";
 import type { PluggableList } from "unified";
 import "katex/dist/katex.min.css";
 import Icon from "../Icons";
+import { useTranslation } from "../../i18n";
 import { makeMermaidPre } from "../mermaid/MermaidFlowchart";
 import { remarkMermaidFences } from "../mermaid/remarkMermaidFences";
 import { writeClipboardText } from "../sync-review/clipboard";
@@ -24,28 +25,34 @@ import { remarkLatexMath } from "./remarkLatexMath";
 /** Alt text (or the path) inside a bordered chip: the still-loading and
  * cannot-embed states share one calm shape instead of the webview's
  * broken-image glyph. A track or a clip names itself, and a page that knows
- * why a file did not show prints the reason in place of "not shown". */
+ * why a file did not show prints the reason in place of "not shown". Without
+ * alt text the chip names its kind. */
 export function MarkdownImagePlaceholder({
-  label,
+  label: given,
   detail,
   loading,
   kind = "image",
   showDetail = false,
 }: {
-  label: string;
+  label?: string;
   detail?: string;
   loading?: boolean;
   kind?: "image" | "audio" | "video";
   showDetail?: boolean;
 }) {
+  /* Its own hook: the renderer around it is memoized on the text, and the
+     words here must still follow the interface language. */
+  const { t } = useTranslation("syncReview");
+  const word = t(`media.${kind}`);
+  const label = given || word;
   /* A tint is not a text alternative, and a tooltip on a non-interactive span
      is not keyboard-reachable. Print the state as a word and repeat it in the
      accessible name because `role="img"` replaces the subtree. */
   const reason = showDetail && !loading && detail ? detail : null;
-  const state = loading ? "loading…" : reason ?? "not shown";
+  const state = loading ? t("media.loading") : reason ?? t("media.notShown");
   const accessibleName = reason
-    ? `${label} — ${reason}`
-    : detail ? `${label} — ${kind} ${state}. ${detail}` : `${label} — ${kind} ${state}`;
+    ? t("media.nameReason", { label, reason })
+    : detail ? t("media.nameDetail", { label, kind: word, state, detail }) : t("media.name", { label, kind: word, state });
   return (
     <span
       className={`markdown-image-placeholder${loading ? " is-loading" : ""}`}
@@ -102,7 +109,7 @@ const MarkdownText = memo(function MarkdownText({
   );
   const merged = useMemo<Components>(() => ({
     pre: makeMermaidPre(writeClipboardText),
-    img: ({ alt }) => <MarkdownImagePlaceholder label={alt || "image"} />,
+    img: ({ alt }) => <MarkdownImagePlaceholder label={alt} />,
     // `node` is react-markdown's syntax tree, not an attribute.
     a: ({ href, children, node: _node, ...props }) => {
       const file = href && fileLink ? fileLink.resolve(href) : null;

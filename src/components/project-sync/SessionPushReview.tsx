@@ -3,6 +3,7 @@ import type { BundleFetchProgress, GitHistoryOutgoing, GitHistorySnapshot, Threa
 import Icon from "../Icons";
 import { ReviewBudgetGauge } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
+import { useTranslation } from "../../i18n";
 import { SessionPushRow, type PushSessionFacts, type SessionPushHistory } from "./ProjectActivityPage";
 import {
   PushApplyButton,
@@ -51,6 +52,7 @@ export default function SessionPushReview({
   onClose: () => void;
   onPush: () => void;
 }) {
+  const { t } = useTranslation("reviews");
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
@@ -84,10 +86,10 @@ export default function SessionPushReview({
     >
       <header className="sync-inline-action-header sync-push-resource-header sync-sync-review-header">
         <div className="sync-sync-review-title">
-          <h2 id="sync-push-resource-title">Push review</h2>
-          <span className="sync-settings-flag">Credential redaction: {credentialRedactionEnabled ? "On" : "Off"}</span>
+          <h2 id="sync-push-resource-title">{t("push.title")}</h2>
+          <span className="sync-settings-flag">{credentialRedactionEnabled ? t("push.redactionOn") : t("push.redactionOff")}</span>
           <span className="sync-visually-hidden" role="status">
-            {readyAnnounced ? "Push review ready." : ""}
+            {readyAnnounced ? t("push.ready") : ""}
           </span>
         </div>
         <div className="sync-push-resource-actions">
@@ -96,7 +98,7 @@ export default function SessionPushReview({
             className="btn btn-ghost sync-inline-action-close"
             onClick={onClose}
             disabled={busy}
-            aria-label="Close push review"
+            aria-label={t("push.close")}
           >
             <Icon name="x" size={15} />
           </button>
@@ -106,7 +108,7 @@ export default function SessionPushReview({
       <div className="sync-inline-action-content sync-push-resource-content sync-sync-review-content">
         <div className="sync-inline-action-scroll sync-sync-review-scroll">
           <div className="sync-history-page sync-history-embedded sync-history-selection-review">
-            <section className="sync-history-content" aria-label="Session">
+            <section className="sync-history-content" aria-label={t("push.session")}>
               <div className="sync-history-thread-list flat">
                 <SessionPushRow entry={entry} storageName={storageName} facts={facts} history={history} />
               </div>
@@ -125,8 +127,9 @@ export default function SessionPushReview({
         {budget && (
           <ReviewBudgetGauge
             budget={budget}
+            // i18n-ignore: the meter's mode key, not copy
             verb="push"
-            breakdown={`Session ${formatBytes(budget.sessions)} · Requirements ${formatBytes(budget.reserved)}`}
+            breakdown={t("push.sessionBreakdown", { session: formatBytes(budget.sessions), requirements: formatBytes(budget.reserved) })}
           />
         )}
         <PushApplyButton

@@ -14,7 +14,7 @@ pub mod naming;
 mod timeline_sources;
 
 use super::traits::{
-    AfterPullActionOffer, MaintenanceActionDescriptor, MaintenanceActionScope,
+    AfterPullActionOffer, AfterPullOfferCode, MaintenanceActionDescriptor, MaintenanceActionScope,
     MaterializationTargetRequest, NewSessionRequest, PlannedProviderTarget, ProjectOpenCommand,
     ProviderCli, ProviderDescriptor, SessionActionContext, SessionActionDescriptor,
     SessionActionOutcome, SessionActionRequest, SessionAdapter, SessionAgentPreview,
@@ -244,6 +244,7 @@ impl SessionAdapter for CodexAdapter {
         operation_id: &mallard_domain::ConversationOperationId,
         provider_home: Option<&Path>,
     ) -> Option<AfterPullActionOffer> {
+        use crate::codex_app_refresh::CodexAppRefreshState;
         let offer = crate::codex_app_refresh::refresh_offer(operation_id.clone(), provider_home)?;
         let arguments = mallard_domain::BoundedConfigObject::from_json(&serde_json::json!({
             "operation_id": offer.operation_id.as_str(),
@@ -256,8 +257,16 @@ impl SessionAdapter for CodexAdapter {
                 .expect("static action key"),
             label: format!("Restart {}", offer.app_name),
             message: offer.message,
-            available: offer.state
-                == crate::codex_app_refresh::CodexAppRefreshState::RestartAvailable,
+            message_code: match (offer.state, &offer.relaunch_home) {
+                (CodexAppRefreshState::ManualRestart, _) => AfterPullOfferCode::RestartAppManually,
+                (CodexAppRefreshState::RestartAvailable, None) => AfterPullOfferCode::RestartApp,
+                (CodexAppRefreshState::RestartAvailable, Some(_)) => {
+                    AfterPullOfferCode::RestartAppWithHome
+                }
+            },
+            app_name: offer.app_name,
+            home_path: offer.relaunch_home,
+            available: offer.state == CodexAppRefreshState::RestartAvailable,
             arguments,
         })
     }

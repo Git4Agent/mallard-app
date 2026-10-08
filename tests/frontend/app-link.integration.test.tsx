@@ -3,9 +3,11 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import AppLinkSheet from "../../src/components/app-link/AppLinkSheet";
+import { i18n } from "../../src/i18n";
+import { en } from "../../src/i18n/en";
 import {
   catalogSeers,
-  INVALID_LINK,
+  invalidLink,
   linkVerdict,
   linkWaits,
   listingPage,
@@ -219,7 +221,7 @@ test("a session's link opens that session's Pull review in the project that hold
   assert.equal(stop(linkVerdict(answer([]), context(), SESSION)).action, "set_up");
   assert.equal(stop(linkVerdict(answer([account("s", "guest", { kind: "not_found" })]), context(), SESSION)).message, "guest can’t see maya/portal.");
   // A Catalog item has no session pages: the website writes no such link.
-  assert.equal(linkVerdict(answer([account("s-personal", "Rika321", found(item()))]), context({ scopes: [PETS_ROW] }), SESSION), INVALID_LINK);
+  assert.deepEqual(linkVerdict(answer([account("s-personal", "Rika321", found(item()))]), context({ scopes: [PETS_ROW] }), SESSION), invalidLink());
 
   // The sheet's facts gain the session, and its verb is the review's opener.
   const sheet = renderToStaticMarkup(
@@ -315,9 +317,9 @@ test("a link that cannot land says why, and offers a verb only where there is a 
     account("t", "rika-acme", found(project())),
   ]), context()).kind, "landing");
 
-  assert.deepEqual(stop(linkVerdict(answer([account("s", "Rika321", found(project({ bundle_id: null })))]), context())), INVALID_LINK);
-  assert.equal(INVALID_LINK.message, "Mallard can’t open that link.");
-  assert.equal(INVALID_LINK.title, "Broken link");
+  assert.deepEqual(stop(linkVerdict(answer([account("s", "Rika321", found(project({ bundle_id: null })))]), context())), invalidLink());
+  assert.equal(invalidLink().message, "Mallard can’t open that link.");
+  assert.equal(invalidLink().title, "Broken link");
 });
 
 test("the listing's link goes straight to Projects, or to the Catalog for a Catalog kind", () => {
@@ -395,7 +397,7 @@ test("the sheet titles itself with what the link names, says the rest in two sho
   assert.match(signIn, /<code class="app-link-subject">maya\/portal<\/code>/);
   assert.deepEqual(buttons(signIn), ["", "Cancel", "Set up Mallard Cloud"]);
 
-  const refused = sheet({ phase: "answered", verdict: INVALID_LINK }, null);
+  const refused = sheet({ phase: "answered", verdict: invalidLink() }, null);
   assert.match(refused, /<h1[^>]*>Broken link<\/h1>/);
   assert.doesNotMatch(refused, /app-link-subject/, "a link that cannot be read names nothing");
   assert.deepEqual(buttons(refused), ["", "Close"], "a link that cannot be read offers nothing");
@@ -408,6 +410,63 @@ test("the sheet titles itself with what the link names, says the rest in two sho
   // Return presses the verb: focus moves to it when it appears, never to ×.
   const source = readFileSync("src/components/app-link/AppLinkSheet.tsx", "utf8");
   assert.match(source, /useEffect\(\(\) => \{ \(verbRef\.current \?\? exitRef\.current\)\?\.focus\(\); \}, \[verb\]\);/);
+});
+
+test("in Chinese the sheet and its verdicts speak Chinese, and the link's own words stay as given", () => {
+  const sheet = (state: Parameters<typeof AppLinkSheet>[0]["state"], subject: string | null = "maya/portal") => renderToStaticMarkup(
+    <AppLinkSheet subject={subject} state={state} onVerb={() => undefined} onClose={() => undefined} />,
+  );
+  const buttons = (html: string) => [...html.matchAll(/<button[^>]*>(.*?)<\/button>/g)].map((match) => match[1].replace(/<[^>]+>/g, ""));
+  const projects = [{ local_project_id: "p-portal", display_name: "portal", local_alias: null }];
+  const links = [{ local_project_id: "p-portal", storage_id: "s-personal", bundle_id: "b".repeat(32), managed_cloud_repository_id: "repo_portal" }];
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const seen = answer([account("s-personal", "Rika321", found(project({ role: "owner", visibility: "private" })))]);
+    const here = landing(linkVerdict(seen, context({ projects, links }), "codex:conversation:cloudthread"));
+    assert.equal(here.verb, "下载会话…");
+    assert.deepEqual(here.found.facts.map((fact) => fact.word), ["私有", "所有者", "1 个会话"]);
+    assert.deepEqual(here.found.here, { place: "computer", present: true, word: "portal", sentence: "本机：portal" });
+    const answered = sheet({ phase: "answered", verdict: here });
+    assert.match(answered, /<h1[^>]*>maya\/portal<\/h1>/, "the address is the service's, never translated");
+    assert.match(answered, /aria-label="关闭，不打开此链接"/);
+    assert.deepEqual(buttons(answered), ["", "取消", "下载会话…"]);
+
+    const looking = sheet({ phase: "looking" });
+    assert.match(looking, /正在查找 maya\/portal…/);
+    assert.deepEqual(buttons(looking), ["", "取消", "打开…"]);
+
+    const away = landing(linkVerdict(answer([account("s", "Rika321", found(project({ role: "admin" })))]), context()));
+    assert.equal(away.verb, "设置项目…");
+    assert.deepEqual(away.found.facts.map((fact) => fact.word), ["公开", "管理员"]);
+    assert.deepEqual(away.found.here, { place: "computer", present: false, word: "不在本机", sentence: "不在这台电脑上。" });
+    // A role the service may add later is printed as it spells it.
+    assert.equal(landing(linkVerdict(answer([account("s", "Rika321", found(project({ role: "auditor" })))]), context())).found.facts[1].word, "Auditor");
+
+    // A Catalog kind's verb is one sentence per kind, never a lower-cased label.
+    const pet = landing(linkVerdict(answer([account("s", "Rika321", found(item()))], { address: "maya/Mochi" }), context({ scopes: [PETS_ROW] })));
+    assert.equal(pet.verb, "添加到资源库…");
+    const saved = landing(linkVerdict(answer([account("s", "Rika321", found(item({ role: "owner" })))], { address: "maya/Mochi" }), context({ scopes: [PETS_ROW] })));
+    assert.equal(saved.verb, "下载宠物 v2…");
+    assert.equal(saved.found.here.sentence, "在你的资源库中：Pets v2 · Default Codex");
+
+    const signIn = sheet({ phase: "answered", verdict: linkVerdict(answer([]), context()) });
+    assert.match(signIn, /<h1[^>]*title="登录 Mallard Cloud 后即可打开 maya\/portal。"[^>]*>请先登录<\/h1>/);
+    assert.deepEqual(buttons(signIn), ["", "取消", "设置 Mallard Cloud"]);
+    assert.match(sheet({ phase: "answered", verdict: invalidLink() }, null), /<h1[^>]*>链接无效<\/h1>/);
+    assert.deepEqual(buttons(sheet({ phase: "answered", verdict: invalidLink() }, null)), ["", "关闭"]);
+
+    // The service's own sentence stays English inside the Chinese sheet.
+    const retry = sheet({ phase: "answered", verdict: unanswered("Couldn’t reach Mallard Cloud.") });
+    assert.match(retry, /<h1[^>]*title="Couldn’t reach Mallard Cloud\."[^>]*>Mallard Cloud 没有响应<\/h1>/);
+    assert.deepEqual(buttons(retry), ["", "取消", "重试"]);
+    assert.equal(stop(linkVerdict(answer([account("s", "guest", { kind: "not_found" })]), context())).message, "guest 无法查看 maya/portal。");
+
+    assert.equal(listingPage({ listing_kind: "desktop_pet" }), "资源库");
+    assert.equal(listingPage({ listing_kind: null }), "项目");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(listingPage({ listing_kind: null }), "Projects");
 });
 
 /* ——— the landing pages take the address ——————————————————————————————— */
@@ -590,12 +649,15 @@ test("a link reads and navigates; every write stays behind a verb the person pre
   assert.match(shell, /const pull = catalogAddPullRef\.current !== null;\s*catalogAddPullRef\.current = null;/);
   assert.match(shell, /initialPull=\{catalogLandingItem\?\.scopeId === activeCatalogScope\.scope\.scope_id && catalogLandingItem\.pull === true\}/);
   const catalogPage = readFileSync("src/components/storage-catalog/StorageCatalogPage.tsx", "utf8");
-  assert.match(catalogPage, /if \(pullRows\.length > 0\) void openPull\(\);\s*else notify\("Already here and up to date\.", "note"\);/);
+  assert.match(catalogPage, /if \(pullRows\.length > 0\) void openPull\(\);\s*else notify\(t\("page\.upToDate"\), "note"\);/);
+  assert.equal(en.library.page.upToDate, "Already here and up to date.");
 
   // The sheet opens by itself only when the shell is free; otherwise the link waits under the bar.
   assert.match(shell, /waits: \(\) => linkWaits\(\{\s*busy: busyRef\.current,\s*reviewOpen: Boolean\(pendingPush \|\| restorePlan \|\| preparingReview\),\s*dialogOpen: document\.querySelector\("dialog\[open\]:not\(\.app-link-sheet\)"\) !== null,\s*\}\)/);
   assert.match(shell, /heldLink\?\.phase === "waiting"/);
-  assert.match(shell, /message: `\$\{link\.kind === "listing" \? listingPage\(link\) : link\.address\} is waiting\.`/);
+  assert.match(shell, /message: link\.kind === "listing"\s*\? t\("notices\.pageWaiting", \{ page: listingPage\(link\) \}\)\s*: t\("notices\.addressWaiting", \{ address: link\.address \}\),/);
+  assert.equal(en.shell.notices.pageWaiting, "{{page}} is waiting.");
+  assert.equal(en.shell.notices.addressWaiting, "{{address}} is waiting.");
   assert.match(shell, /disabled=\{busy\}[\s\S]{0,160}onClick=\{appLink\.open\}/, "Open waits for a running operation");
   // One sheet per arrival, and a sheet lets go of its own link only: a close
   // that lands late must not take a newer link with it.

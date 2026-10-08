@@ -3,10 +3,11 @@ import { useEffect, useState } from "react";
 import Icon, { type IconName } from "../Icons";
 import { writeClipboardText } from "../sync-review/clipboard";
 import { PathBarPopover } from "../sync-review/SyncPathBar";
+import { useTranslation } from "../../i18n";
 
 import {
   canDiscardDraft, canPublishVersion, cloudContributor, cloudFacts, cloudHeadline, cloudReleaseUrl, cloudStatusNotice, cloudVerbs, cloudVersionUrl,
-  cloudVersionsUrl, discardDraftHold, discardDraftQuestion, publishVersionHold,
+  cloudVersionsUrl, discardDraftHold, publishVersionHold,
 } from "./managedCloudLink";
 
 /**
@@ -37,6 +38,9 @@ interface PanelProps extends ManagedCloudChipActions {
   close: (returnFocus: boolean) => void;
 }
 
+/** The links a row's button copies, each with its own words. */
+type CopyTarget = "release" | "draft" | "versions" | "public";
+
 interface CloudRow {
   id: string;
   label: string;
@@ -45,7 +49,7 @@ interface CloudRow {
   disabled?: boolean;
   title?: string;
   onSelect: () => void;
-  copy?: { name: string; url: string };
+  copy?: { target: CopyTarget; url: string };
 }
 
 /** How long a row's copy button says Copied, as File info's rows do. */
@@ -54,18 +58,19 @@ const COPIED_FOR_MS = 2_000;
 export function ManagedCloudPanel({
   status, storageName, busy, refreshing, close, onOpenUrl, onPublishVersion, onDiscardDraft, onRetry, onStorageSettings,
 }: PanelProps) {
-  const [copied, setCopied] = useState<string | null>(null);
+  const { t } = useTranslation(["cloud", "common"]);
+  const [copied, setCopied] = useState<CopyTarget | null>(null);
   const [copyFailed, setCopyFailed] = useState(false);
   useEffect(() => {
     if (!copied) return;
     const timeout = window.setTimeout(() => setCopied(null), COPIED_FOR_MS);
     return () => window.clearTimeout(timeout);
   }, [copied]);
-  const copy = async (name: string, url: string) => {
+  const copy = async (target: CopyTarget, url: string) => {
     try {
       await writeClipboardText(url);
       setCopyFailed(false);
-      setCopied(name);
+      setCopied(target);
     } catch {
       setCopied(null);
       setCopyFailed(true);
@@ -85,7 +90,7 @@ export function ManagedCloudPanel({
     };
     if (onPublishVersion && verbs.publishVersion !== null) {
       rows.push({
-        id: "publish-version", label: `Publish version ${verbs.publishVersion}…`, icon: "git-commit",
+        id: "publish-version", label: t("panel.publishVersion", { version: verbs.publishVersion }), icon: "git-commit",
         disabled: busy || !canPublishVersion(status), title: publishVersionHold(status) ?? undefined,
         onSelect: () => {
           close(true);
@@ -93,30 +98,32 @@ export function ManagedCloudPanel({
         },
       });
     }
-    const release = { name: "release link", url: cloudReleaseUrl(link) };
+    const release = { target: "release" as const, url: cloudReleaseUrl(link) };
     if (verbs.requestRelease) {
-      rows.push({ id: "request-release", label: "Request public release", icon: "check-circle", copy: release, onSelect: open(release.url) });
+      rows.push({ id: "request-release", label: t("panel.requestRelease"), icon: "check-circle", copy: release, onSelect: open(release.url) });
     } else if (verbs.viewRelease) {
-      rows.push({ id: "view-release", label: "View release request", icon: "external-link", copy: release, onSelect: open(release.url) });
+      rows.push({ id: "view-release", label: t("panel.viewRelease"), icon: "external-link", copy: release, onSelect: open(release.url) });
     }
     if (verbs.viewDraft) {
       const url = cloudVersionUrl(link, "draft");
-      rows.push({ id: "view-draft", label: "View draft", icon: "external-link", copy: { name: "draft link", url }, onSelect: open(url) });
+      rows.push({ id: "view-draft", label: t("panel.viewDraft"), icon: "external-link", copy: { target: "draft", url }, onSelect: open(url) });
     }
     if (onPublishVersion && verbs.versions) {
       const url = cloudVersionsUrl(link);
-      rows.push({ id: "versions", label: "Versions", icon: "external-link", copy: { name: "versions link", url }, onSelect: open(url) });
+      rows.push({ id: "versions", label: t("panel.versions"), icon: "external-link", copy: { target: "versions", url }, onSelect: open(url) });
     }
     if (verbs.viewPublic !== null) {
       const url = cloudVersionUrl(link, verbs.viewPublic);
-      rows.push({ id: "view-public", label: "View public version", icon: "external-link", copy: { name: "public link", url }, onSelect: open(url) });
+      rows.push({ id: "view-public", label: t("panel.viewPublic"), icon: "external-link", copy: { target: "public", url }, onSelect: open(url) });
     }
     if (verbs.discardDraft) {
       // In view for the Owner and Admins in every state; off, with its reason, while there is nothing to remove.
-      const { kept } = discardDraftQuestion(link, status.publication);
+      // The version the draft returns to, as Discard draft's question names it.
+      const kept = status.publication?.latest_version ?? null;
       rows.push({
-        id: "discard-draft", label: "Discard draft…", icon: "x", danger: true, disabled: busy || !canDiscardDraft(status),
-        title: discardDraftHold(status) ?? (kept ? `Discard draft… · back to ${kept}` : "Discard draft… · every push"),
+        id: "discard-draft", label: t("panel.discardDraft"), icon: "x", danger: true, disabled: busy || !canDiscardDraft(status),
+        title: discardDraftHold(status)
+          ?? (kept !== null ? t("panel.discardBackTo", { version: kept }) : t("panel.discardEveryPush")),
         onSelect: () => {
           close(true);
           onDiscardDraft();
@@ -146,18 +153,19 @@ export function ManagedCloudPanel({
     );
     if (!row.copy) return item;
     const target = row.copy;
-    const done = copied === target.name;
+    const done = copied === target.target;
+    const copyLabel = t(`copy.${target.target}`);
     return (
       <div key={row.id} className="sync-cloud-panel-row">
         {item}
         <button
           type="button"
           className={`sync-cloud-panel-copy${done ? " copied" : ""}`}
-          aria-label={`Copy ${target.name}`}
-          title={`Copy ${target.name}\n${target.url}`}
-          onClick={() => void copy(target.name, target.url)}
+          aria-label={copyLabel}
+          title={`${copyLabel}\n${target.url}`}
+          onClick={() => void copy(target.target, target.url)}
         >
-          {done && <small>Copied</small>}
+          {done && <small>{t("common:copied")}</small>}
           <Icon name={done ? "check" : "copy"} size={13} />
         </button>
       </div>
@@ -176,13 +184,14 @@ export function ManagedCloudPanel({
       <p className="sync-cloud-panel-line">{head.line}</p>
       {link && (
         <dl className="sync-cloud-panel-facts">
-          {cloudFacts(link, status.publication).map((fact) => (
-            <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>
+          {/* Four facts in a fixed order: the place is the key. */}
+          {cloudFacts(link, status.publication).map((fact, index) => (
+            <div key={index}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>
           ))}
         </dl>
       )}
       {link && cloudContributor(link) && (
-        <p className="sync-cloud-panel-line quiet">Not a collaborator: anyone signed in can push here, and the Owner decides what's released.</p>
+        <p className="sync-cloud-panel-line quiet">{t("panel.contributor")}</p>
       )}
       {note?.action && (
         <button
@@ -195,13 +204,13 @@ export function ManagedCloudPanel({
             else onRetry();
           }}
         >
-          {note.action === "storage_settings" ? "Storage settings" : "Retry"}
+          {note.action === "storage_settings" ? t("panel.storageSettings") : t("panel.retry")}
         </button>
       )}
       {rows.length > 0 && (
         /* A group, not a menu: a row with a copy button is two buttons, which
            a menuitem cannot hold. Tab walks it. */
-        <div className="sync-path-menu-list sync-cloud-panel-verbs" role="group" aria-label="Mallard Cloud actions">
+        <div className="sync-path-menu-list sync-cloud-panel-verbs" role="group" aria-label={t("panel.actions")}>
           <div className="sync-path-menu-separator" role="separator" />
           {plain.map(renderRow)}
           {danger.length > 0 && plain.length > 0 && <div className="sync-path-menu-separator" role="separator" />}
@@ -209,10 +218,10 @@ export function ManagedCloudPanel({
         </div>
       )}
       <span className="sync-visually-hidden" role="status" aria-live="polite">
-        {copyFailed ? "Couldn't copy the link." : copied ? `Copied the ${copied}.` : ""}
+        {copyFailed ? t("panel.copyFailed") : copied ? t(`copied.${copied}`) : ""}
       </span>
       {copyFailed && (
-        <p className="sync-cloud-panel-line error" aria-hidden="true">Couldn't copy. The address is in the button's tooltip.</p>
+        <p className="sync-cloud-panel-line error" aria-hidden="true">{t("panel.copyFailedLine")}</p>
       )}
     </div>
   );
@@ -228,8 +237,9 @@ export default function ManagedCloudChip({
   busy: boolean;
   refreshing: boolean;
 }) {
+  const { t } = useTranslation("cloud");
   const head = cloudHeadline(status);
-  const name = `Mallard Cloud: ${head.word}. ${head.line}`;
+  const name = status ? t("chip.name", { word: head.word, line: head.line }) : t("chip.checking");
   return (
     <PathBarPopover
       id={id}

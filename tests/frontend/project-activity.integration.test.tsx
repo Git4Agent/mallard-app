@@ -12,14 +12,17 @@ import {
   SessionMetrics,
   sessionDebugCopyText,
   sessionSyncPresentation,
+  syncHoldDetail,
   unresolvedSyncPresentation,
 } from "../../src/components/project-sync/ProjectActivityPage";
+import { sessionPushDisabledReason } from "../../src/components/project-sync/session-detail/sessionDetailModel";
 import { projectSyncCountPhrase } from "../../src/components/project-sync/ProjectLinksWorkspace";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import Icon from "../../src/components/Icons";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../../src/components/sync-review/ThreadStatusIcon";
 import { createActivityRefresh, createSingleFlight } from "../../src/components/project-sync/api";
 import { dismissStorageWarning, clearStorageWarningDismissal } from "../../src/preferences";
+import { i18n } from "../../src/i18n";
 import type {
   ConversationReviewAction,
   ProjectActivityRefreshEvent,
@@ -340,7 +343,8 @@ test("a non-Git project's Pull and Push badges count its files and hold on both 
   // The scan holds the host-operation lock both verbs take, so they wait it
   // out — with a reason — rather than be refused mid-scan.
   assert.equal((workspace.match(/\|\| !!runningAction\s*\|\| projectFilesScan\.loading/g) ?? []).length, 2);
-  assert.match(workspace, /const projectFilesScanIssue = projectFilesScan\.loading \? "Scanning project files…" : null;/);
+  assert.match(workspace, /const projectFilesScanIssue = projectFilesScan\.loading \? t\("sync\.scanningFiles"\) : null;/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /scanningFiles: "Scanning project files…",/);
   assert.equal((workspace.match(/\?\? workspaceProfileIssue\s*\?\? projectFilesScanIssue/g) ?? []).length, 2);
 });
 
@@ -355,11 +359,13 @@ test("the path bar hangs the branch on the project crumb and keeps one overflow"
   // Neither project type has a section crumb.
   assert.doesNotMatch(workspace, /id: "section"/);
   assert.doesNotMatch(workspace, /menuLabel: "Switch view"|setActivityView\(otherView\)/);
+  assert.doesNotMatch(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /Switch view/);
   assert.doesNotMatch(workspace, /sync-path-view-switch|activityViewSwitch/);
   // The switch is the app's segmented pill as a tablist, arrows moving between
   // its two tabs, and both faces seat it through their own slot.
   const viewSwitch = readFileSync("src/components/project-sync/ProjectViewSwitch.tsx", "utf8");
-  assert.match(viewSwitch, /className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view"/);
+  assert.match(viewSwitch, /className="sync-segmented sync-project-view-tabs" role="tablist" aria-label=\{t\("projectView\.label"\)\}/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /projectView: \{\s*label: "Project view",/);
   assert.match(viewSwitch, /role="tab"\s*aria-selected=\{active\}\s*aria-controls=\{PROJECT_VIEW_PANEL_ID\}\s*tabIndex=\{active \? 0 : -1\}/);
   assert.match(viewSwitch, /event\.key === "ArrowRight" \|\| event\.key === "ArrowDown"/);
   // Choosing the other face replaces the pill along with the page, so focus
@@ -398,8 +404,9 @@ test("the path bar hangs the branch on the project crumb and keeps one overflow"
   assert.match(workspace, /\{showPushCount && <span className="sync-path-count" aria-hidden="true">\{pushCount\}<\/span>\}/);
   // The number is decorative only because the button's own name already says
   // it — never let the badge become the only place the count is spoken.
-  assert.match(workspace, /`Pull \$\{projectSyncCountPhrase\(pullThreadCount, pullFileCount\)\} from /);
-  assert.match(workspace, /`Push \$\{projectSyncCountPhrase\(pushThreadCount, pushFileCount\)\} to /);
+  assert.match(workspace, /t\("sync\.pullCountLabel", \{ phrase: projectSyncCountPhrase\(pullThreadCount, pullFileCount\), name: workspaceStorageName \}\)/);
+  assert.match(workspace, /t\("sync\.pushCountLabel", \{ phrase: projectSyncCountPhrase\(pushThreadCount, pushFileCount\), name: workspaceStorageName \}\)/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /pullCountLabel: "Pull \{\{phrase\}\} from \{\{name\}\}",[\s\S]*pushCountLabel: "Push \{\{phrase\}\} to \{\{name\}\}",/);
 
   // One overflow, at the end of the row. Two `⋯` in one bar was the reason a
   // command could only be found by opening both.
@@ -408,7 +415,8 @@ test("the path bar hangs the branch on the project crumb and keeps one overflow"
   assert.match(sync, /appActions: PathBarMenuGroup\[\] = \[\{\s*label: "Mallard",/);
   // And one refresh glyph: the app-wide reload cannot wear the same mark as
   // the project refresh sitting a few pixels from it.
-  assert.match(sync, /label: "Reload app data",[\s\S]*?icon: "computer" as const,/);
+  assert.match(sync, /label: t\("window\.reload"\),[\s\S]*?icon: "computer" as const,/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /reload: "Reload app data",/);
 });
 
 test("session indicators use the quiet desktop sync vocabulary", () => {
@@ -1202,8 +1210,9 @@ test("refreshing project activity spins in the path bar, and announces from the 
   assert.match(workspace, /className=\{`sync-path-icon-action\$\{viewRefresh\.refreshing \? " loading" : ""\}`\}/);
   assert.match(workspace, /aria-busy=\{viewRefresh\.refreshing\}/);
   assert.match(workspace, /className=\{`icon-spin-frame\$\{viewRefresh\.refreshing \? " spinning" : ""\}`\}/);
-  assert.match(workspace, /"Refreshing session" : "Refresh session"/);
-  assert.match(workspace, /"Refreshing activity" : "Refresh activity"/);
+  assert.match(workspace, /t\("refresh\.sessionBusy"\) : t\("refresh\.session"\)/);
+  assert.match(workspace, /t\("refresh\.activityBusy"\) : t\("refresh\.activity"\)/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /session: "Refresh session",\s*sessionBusy: "Refreshing session",[\s\S]*?activity: "Refresh activity",\s*activityBusy: "Refreshing activity",/);
 
   const css = readFileSync("src/App.css", "utf8");
   // Turning is work in progress, not a disabled control: the one place a
@@ -1547,15 +1556,32 @@ test("a cleared-storage dismissal survives reopening only for the same project, 
   const render = (currentProject = project, currentComparison = comparison) => renderToStaticMarkup(
     <ProjectChatHistoryContent {...contentDefaults} project={currentProject} activity={activity} comparison={currentComparison} />,
   );
+  // The condition is data, never the notice's sentence: a sentence is in
+  // whichever language was on, and a dismissal must outlive a switch. It is
+  // the data the sentence reads: storage, name, continuity, written areas.
   const condition = JSON.stringify([
     project.local_project_id, comparison.storage_id, comparison.remote_continuity,
-    "Another computer cleared Local storage 1.",
+    "Local storage 1", [], null,
   ]);
   try {
     assert.match(render(), /Another computer cleared/);
     assert.equal(dismissStorageWarning(project.local_project_id, comparison.storage_id, condition), true);
     // Each render mounts a fresh component, as reopening does.
     assert.doesNotMatch(render(), /Another computer cleared/);
+    void i18n.changeLanguage("zh-CN");
+    try {
+      assert.doesNotMatch(render(), /另一台电脑清空了/);
+      assert.match(render({ ...project, local_project_id: "another-project" }), /另一台电脑清空了 Local storage 1。/);
+    } finally {
+      void i18n.changeLanguage("en");
+    }
+    // The same continuity under a changed instruction is another condition:
+    // once a Pull comes first, or the storage is renamed, the note is back.
+    assert.match(render(project, {
+      ...comparison,
+      scopes: [{ scope: "provider:codex", access: "bound_ready", continuity: { state: "unreviewed", remote_revision: 1 } }],
+    }), /Another computer cleared Local storage 1\. Pull, then push again\./);
+    assert.match(render(project, { ...comparison, storage_name: "Attic" }), /Another computer cleared Attic\./);
     assert.match(render({ ...project, local_project_id: "another-project" }), /Another computer cleared/);
     assert.match(render(project, { ...comparison, storage_id: "another-storage" }), /Another computer cleared/);
     assert.match(render(project, {
@@ -4465,4 +4491,217 @@ test("an empty flat list carries New session in its box, not in the search row",
     />,
   );
   assert.match(git, /class="sync-list-head">[\s\S]*?<div class="sync-new-session"><button[^>]*class="btn"/);
+});
+
+/* The sessions list and the Git timeline in Chinese: the page's own words
+   translate; titles, commit subjects, branches and storage names stay exactly
+   as given, and so do the backend's action labels. */
+test("the sessions list and Git timeline speak Chinese around the user's titles", () => {
+  const fixture = scopeFixture([
+    { key: "zh", title: "修复登录页的跳转问题", state: "local_ahead" },
+    { key: "en", title: "Add a bell to the pelican bicycle", state: "storage_only" },
+    { key: "settled", title: "Tidy the release notes", state: "synced" },
+  ]);
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = renderToStaticMarkup(
+      <ProjectChatHistoryContent
+        {...contentDefaults}
+        activity={fixture.activity}
+        comparison={fixture.comparison}
+        activeStorageName="Local storage 1"
+        storageId="storage-1"
+        onStartSession={() => undefined}
+        onOpenSessionDetail={() => undefined}
+      />,
+    );
+    // What the user typed, as typed.
+    assert.match(html, />修复登录页的跳转问题</);
+    assert.match(html, />Add a bell to the pelican bicycle</);
+    assert.match(html, /<strong title="Add project-scoped history">Add project-scoped history<\/strong>/);
+    assert.match(html, /aria-label="Open in Codex"/);
+
+    // The timeline's frame.
+    assert.match(html, /<section class="sync-history-content" aria-label="Git 历史">/);
+    assert.match(html, /aria-label="main 分支上的首父提交"/);
+    assert.match(html, /aria-label="收起提交 bbbbbbb"/);
+    assert.match(html, /aria-label="在 GitHub 上打开提交 bbbbbbb"/);
+    assert.match(html, /<h2 id="branch-unmapped-heading"><svg[^>]*>.*?<\/svg>未提交<\/h2>/s);
+    assert.match(html, /<h2 id="storage-only-heading"><svg[^>]*>.*?<\/svg>仅在 <span class="sync-history-storage-name">Local storage 1<\/span> 中<\/h2>/s);
+    assert.match(html, /aria-label="1 个会话不在本机"/);
+    const foot = html.slice(html.indexOf("sync-history-rail-foot"));
+    assert.match(foot, /<strong>载入更早的<\/strong>/);
+    assert.match(foot, /aria-label="载入更早的历史——截至 \d{4}年\d{1,2}月\d{1,2}日，41 个提交和 6 个会话"/);
+
+    // A row: its badge against the storage by name, its readouts and controls.
+    assert.match(html, /aria-label="本机较新。上传以更新 Local storage 1。"/);
+    assert.match(html, /aria-label="仅在 Local storage 1 中。下载后才会出现在本机。"/);
+    assert.match(html, /aria-label="消息：8。提示词：3。回复：5"/);
+    assert.match(html, /data-tooltip="工具调用 · 13"/);
+    assert.match(html, /title="会话信息" aria-label="显示会话信息"/);
+    assert.match(html, /title="复制资源 ID"/);
+    assert.match(html, /aria-label="查看会话详情"/);
+
+    // The search row, its scope bar and New session.
+    assert.match(html, /搜索已载入的会话/);
+    assert.match(html, /aria-label="按状态显示会话"/);
+    assert.match(html, /aria-label="新会话"/);
+    assert.match(html, /<span class="sync-new-session-label">新会话<\/span>/);
+    assert.match(html, /<span>Codex 应用<\/span>/);
+    assert.match(html, /<span>终端<\/span>/);
+
+    assert.doesNotMatch(html, /Git history|Search loaded sessions|Uncommitted|Load earlier|Only in|View session details|New session/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+
+  // The branch picker and a Pull row's chip, in the same language.
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const picker = renderToStaticMarkup(
+      <BranchPicker branches={[{ name: "main", is_current: true }]} selectedBranch="main" disabled={false} onChange={() => undefined} />,
+    );
+    assert.match(picker, /aria-label="分支：main，当前分支"/);
+    assert.match(picker, /title="选择分支"/);
+    assert.match(picker, />当前</);
+    const [stored] = fixture.comparison.entries.filter((candidate) => candidate.state === "storage_only");
+    assert.equal(pullOperationChip(stored), "添加会话");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+});
+
+/* The backend's session actions and conversation blockers carry a stable id
+   beside their English: in Chinese they are worded by it, and a sentence
+   the service rewrites under the same blocker stays as it came. */
+test("in Chinese, session actions and Push blockers are worded by the backend's ids", async () => {
+  const { sessionPushDisabledReason } = await import("../../src/components/project-sync/session-detail/sessionDetailModel");
+  const realActions = (enabled: boolean) => [
+    { action_id: "codex.open-in-app", kind: "open_in_app" as const, label: "Open in Codex", enabled, disabled_reason: enabled ? null : "This session is not materialized locally." },
+    { action_id: "codex.open-in-terminal", kind: "open_in_terminal" as const, label: "Open in Terminal", enabled, disabled_reason: enabled ? null : "This session is not materialized locally." },
+  ];
+  const held = {
+    ...codexSession,
+    resource_id: "codex:conversation:held-thread",
+    provider_session_id: "held-thread",
+    logical_thread_id: "held-thread",
+    title: "Held session",
+    ended_at: codexSession.ended_at - 100,
+    actions: realActions(false),
+  };
+  const render = () => renderToStaticMarkup(
+    <ProjectChatHistoryContent
+      {...contentDefaults}
+      activity={{ ...activity, git: null, sessions: [{ ...codexSession, actions: realActions(true) }, held] }}
+    />,
+  );
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const html = render();
+    assert.equal((html.match(/aria-label="在 Codex 中打开"/g) ?? []).length, 2);
+    assert.equal((html.match(/aria-label="在终端中打开"/g) ?? []).length, 2);
+    assert.match(html, /title="此会话不在本机上。"/);
+    assert.doesNotMatch(html, /Open in Codex|Open in Terminal|not materialized/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  const english = render();
+  assert.equal((english.match(/aria-label="Open in Codex"/g) ?? []).length, 2);
+  assert.match(english, /title="This session is not materialized locally\."/);
+
+  const blocked = (blocker: ThreadSyncEntry["push_decision"]["blocker"], reason: string): ThreadSyncEntry => ({
+    provider: "codex",
+    provider_display_name: "Codex",
+    access: "bound_ready",
+    thread_id: CODEX_SESSION_ID,
+    conversation_resource_id: codexResourceId,
+    resource_id: codexResourceId,
+    display_name: "Add Git history mapping",
+    state: "local_ahead",
+    local_present: true,
+    storage_present: true,
+    cloud_thread_id: CODEX_SESSION_ID,
+    compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+    provider_thread_id: CODEX_SESSION_ID,
+    push_decision: { action: "blocked", blocker, selectable: false, blocked_reason: reason },
+    pull_decision: reviewDecision("no_changes"),
+  });
+  const busy = blocked("busy", "Another sync operation still owns this conversation. Wait for it to finish.");
+  // A view-only row: the service's own sentence under missing_binding.
+  const viewOnly = blocked("missing_binding", "View only — connect a Codex profile to sync this session.");
+  void i18n.changeLanguage("zh-CN");
+  try {
+    assert.equal(sessionPushDisabledReason(busy), "另一个同步操作仍在处理此会话，请等它完成。");
+    assert.equal(sessionPushDisabledReason(viewOnly), "View only — connect a Codex profile to sync this session.");
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+  assert.equal(sessionPushDisabledReason(busy), "Another sync operation still owns this conversation. Wait for it to finish.");
+});
+
+/* D7: a row's detail and a decision's reason are the backend's English; the
+   sentences the service words itself carry a code and the value they name. */
+test("sync details keep the backend's English and are worded by code in Chinese", () => {
+  type Entry = Parameters<typeof sessionSyncPresentation>[0];
+  const synced = {
+    state: "synced",
+    status_detail: "Synced to the Cloud draft.",
+    status_detail_code: "cloud_draft_synced",
+    push_decision: { action: "no_changes", selectable: false },
+  } as Entry;
+  const tooLarge = {
+    state: "unavailable",
+    display_name: "Refactor the parser",
+    local_present: true,
+    status_detail: "size limit exceeded.",
+    status_detail_code: "capture_size_limit",
+    push_decision: {
+      action: "blocked", blocker: "codec_unsupported", selectable: false,
+      blocked_reason: "size limit exceeded.", reason_code: "capture_size_limit",
+    },
+    pull_decision: { action: "no_changes", selectable: false },
+  } as Entry;
+  const unreadable = {
+    state: "local_ahead",
+    local_present: true,
+    push_decision: {
+      action: "blocked", blocker: "observation_failed", selectable: false,
+      blocked_reason: "This conversation's local session could not be read for review: rollout line 3 is not JSON",
+      reason_code: "local_session_unreadable", reason_value: "rollout line 3 is not JSON",
+    },
+  } as Entry;
+  const keepBoth = {
+    state: "diverged",
+    pull_decision: {
+      action: "keep_both", selectable: true,
+      blocked_reason: "Child session agent-7 is missing. Keep both restores the cloud copy and retains the local files.",
+      reason_code: "keep_both_restores_cloud_copy", reason_value: "Child session agent-7 is missing.",
+    },
+  } as Entry;
+
+  // English is the backend's own text.
+  assert.equal(sessionSyncPresentation(synced, "Mallard Cloud").label, "Synced to the Cloud draft.");
+  assert.equal(sessionSyncPresentation(tooLarge, "Storage").label, "Cannot sync “Refactor the parser”: size limit exceeded.");
+  assert.equal(sessionPushDisabledReason(unreadable), unreadable.push_decision.blocked_reason);
+  assert.equal(syncHoldDetail("pull", keepBoth), keepBoth.pull_decision.blocked_reason);
+
+  void i18n.changeLanguage("zh-CN");
+  try {
+    assert.equal(sessionSyncPresentation(synced, "Mallard Cloud").label, "已同步到 Cloud 草稿。");
+    assert.equal(sessionSyncPresentation(tooLarge, "Storage").label, "无法同步“Refactor the parser”：超出大小限制。");
+    // A read error stays English after the Chinese lead-in.
+    assert.equal(sessionPushDisabledReason(unreadable), "无法读取此会话的本地记录以供检查：rollout line 3 is not JSON");
+    assert.equal(
+      syncHoldDetail("pull", keepBoth),
+      "Child session agent-7 is missing. 选择“两者都保留”会恢复云端副本，并保留本地文件。",
+    );
+    // A detail without a code reads as the backend wrote it.
+    assert.equal(
+      sessionSyncPresentation({ ...synced, status_detail_code: null, status_detail: "Some future detail." } as Entry, "Storage").label,
+      "Some future detail.",
+    );
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });

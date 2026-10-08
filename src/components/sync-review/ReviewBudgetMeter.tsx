@@ -1,4 +1,5 @@
 import { formatBytes } from "../../format";
+import { t } from "../../i18n";
 
 /** What a review's selection would move against the most one apply may. */
 export interface ReviewBudget {
@@ -15,22 +16,29 @@ export type ReviewBudgetVerb = "push" | "pull";
  *  the way out past the limit. The over sentence is also the apply button's
  *  title in both reviews, so the refusal and its reason are worded once. */
 export function reviewBudgetSentence(budget: ReviewBudget, verb: ReviewBudgetVerb): string {
-  return budget.total > budget.limit
-    ? `${formatBytes(budget.total - budget.limit)} over the ${formatBytes(budget.limit)} ${verb} limit — exclude sessions or files to ${verb}.`
-    : `This ${verb} · ${formatBytes(budget.total)} of ${formatBytes(budget.limit)}`;
+  const limit = formatBytes(budget.limit);
+  if (budget.total > budget.limit) {
+    const over = formatBytes(budget.total - budget.limit);
+    return verb === "push"
+      ? t("syncReview:budget.overPush", { over, limit })
+      : t("syncReview:budget.overPull", { over, limit });
+  }
+  const total = formatBytes(budget.total);
+  return verb === "push"
+    ? t("syncReview:budget.fitsPush", { total, limit })
+    : t("syncReview:budget.fitsPull", { total, limit });
 }
 
 function sizeLabel(verb: ReviewBudgetVerb): string {
-  return verb === "push" ? "Push size" : "Pull size";
+  return verb === "push" ? t("syncReview:budget.pushSize") : t("syncReview:budget.pullSize");
 }
 
-/** `424 MB / 512 MB` while it fits, the overshoot alone once it does not —
- *  `short` drops the trailing "over 512 MB" where the sentence beside it has
- *  already named the limit. Carries the meter semantics for both instances. */
-function ReviewBudgetFigure({ budget, verb, short = false, label }: {
+/** `424 MB / 512 MB` while it fits, the overshoot alone once it does not:
+ *  both instances sit beside words that already name the limit. Carries the
+ *  meter semantics for both instances. */
+function ReviewBudgetFigure({ budget, verb, label }: {
   budget: ReviewBudget;
   verb: ReviewBudgetVerb;
-  short?: boolean;
   label?: string;
 }) {
   const over = budget.total - budget.limit;
@@ -45,7 +53,7 @@ function ReviewBudgetFigure({ budget, verb, short = false, label }: {
       aria-valuetext={reviewBudgetSentence(budget, verb)}
     >
       {over > 0
-        ? <><b>+{formatBytes(over)}</b>{short ? "" : ` over ${formatBytes(budget.limit)}`}</>
+        ? <b>+{formatBytes(over)}</b>
         : <><b>{formatBytes(budget.total)}</b> / {formatBytes(budget.limit)}</>}
     </span>
   );
@@ -90,7 +98,7 @@ export function ReviewBudgetGlance({ budget, verb, breakdown }: {
           Select pill, and at the default window it has no room for the bar;
           the track is decoration and the footer gauge fills the same way. */}
       {verb === "pull" && <ReviewBudgetTrack budget={budget} />}
-      <ReviewBudgetFigure budget={budget} verb={verb} short label={sizeLabel(verb)} />
+      <ReviewBudgetFigure budget={budget} verb={verb} label={sizeLabel(verb)} />
     </div>
   );
 }
@@ -123,7 +131,7 @@ export function ReviewBudgetGauge({ budget, verb, breakdown }: {
           aria-hidden="true"
         />
       )}
-      <ReviewBudgetFigure budget={budget} verb={verb} short />
+      <ReviewBudgetFigure budget={budget} verb={verb} />
     </div>
   );
 }

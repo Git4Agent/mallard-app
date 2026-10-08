@@ -3,6 +3,8 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readClaudeWidget, isClaudeWidgetTool, CLAUDE_WIDGET_TOOL, type ClaudeWidgetTool } from "../../src/components/widgets/claudeWidget";
 import SessionDetailEvent from "../../src/components/project-sync/session-detail/SessionDetailEvent";
+import ClaudeSvgWidget from "../../src/components/widgets/ClaudeSvgWidget";
+import { i18n } from "../../src/i18n";
 import type { SessionTimelineEvent } from "../../src/types";
 
 const svg = '<svg viewBox="0 0 200 80"><text x="10" y="40">Portable 🦆</text></svg>';
@@ -49,4 +51,20 @@ test("shows the widget in a closed-tool timeline and keeps arbitrary tools as to
   assert.doesNotMatch(widget, /session-detail-tool-call|<svg[^>]*>.*Portable|<iframe/);
   assert.doesNotMatch(render("claude", "Write"), /claude-widget/);
   assert.doesNotMatch(render("codex"), /claude-widget/);
+});
+
+test("in Chinese the widget's frame and refusals speak Chinese; the recorded title and source stay as given", () => {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    assert.equal(readClaudeWidget({ ...tool, argument_truncated: true }).error, "小组件源代码不完整。");
+    assert.equal(readClaudeWidget({ ...tool, argument_preview: "{" }).title, "Claude 小组件");
+    const html = renderToStaticMarkup(<ClaudeSvgWidget tool={tool} onCopy={async () => undefined} />);
+    assert.match(html, /aria-label="Portable diagram"/);
+    assert.match(html, /<span>小组件<\/span><strong>Portable diagram<\/strong>/);
+    assert.match(html, /<summary>源代码<\/summary>/);
+    const refused = renderToStaticMarkup(<ClaudeSvgWidget tool={{ ...tool, argument_preview: JSON.stringify({ title: "Counter", widget_code: "<div>counter</div>" }) }} onCopy={async () => undefined} />);
+    assert.match(refused, /只能显示 SVG 小组件。打开“源代码”可查看此小组件。/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });

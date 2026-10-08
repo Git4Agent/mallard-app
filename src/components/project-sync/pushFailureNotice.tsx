@@ -1,6 +1,7 @@
 import Icon from "../Icons";
 import type { NoticeItem } from "../notice/Notice";
-import { PUSH_FINISHED, finishPushOffered } from "../../unfinishedPush";
+import { finishPushOffered, isPushFinished } from "../../unfinishedPush";
+import { t } from "../../i18n";
 
 /**
  * A Push the user just started that did not happen, as the shell zone under
@@ -20,7 +21,7 @@ export function pushFailureNotice(
     onDismiss: () => void;
   },
 ): NoticeItem {
-  const finished = error === PUSH_FINISHED;
+  const finished = isPushFinished(error);
   return {
     key: "push-failed",
     severity: finished ? "success" : "danger",
@@ -28,7 +29,7 @@ export function pushFailureNotice(
     action: finishPushOffered(error, storageName) ? (
       <button type="button" className="btn btn-ghost" onClick={onFinishPush} disabled={busy}>
         <Icon name="upload" size={13} />
-        Finish that push
+        {t("reviews:failure.finishPush")}
       </button>
     ) : undefined,
     onDismiss,

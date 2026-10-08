@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import packageMetadata from "../../../package.json";
+import { useTranslation } from "../../i18n";
 import type {
   LocalProjectSummary,
   SetupDraftSummary,
@@ -13,6 +14,7 @@ import Icon, { storageIconName, type IconName } from "../Icons";
 import { catalogDoors, catalogScopeIcon, catalogScopeLabel } from "../storage-catalog/model";
 import type { CatalogCapabilityDescriptor, CatalogScopeView } from "../storage-catalog/types";
 import { projectLabel, storageDoors } from "./model";
+import { storageProviderName } from "./storageText";
 import { findStorageProvider, storageConnectionIssue } from "./StorageSettings";
 
 /* One rail, one list. The head says the five destinations once, as a strip of
@@ -30,14 +32,9 @@ import { findStorageProvider, storageConnectionIssue } from "./StorageSettings";
    in the nav and once as a section heading; the strip says each of them
    once. */
 
-/** The three roots that own the rail, in the order they sit in the strip. */
+/** The three roots that own the rail, in the order they sit in the strip;
+ *  each is named by `shell:roots.<id>`. */
 export type SectionId = "projects" | "catalog" | "storages";
-
-const SECTION_TITLES: Record<SectionId, string> = {
-  projects: "Projects",
-  catalog: "Catalog",
-  storages: "Storages",
-};
 
 /** An empty rail's rows: one dashed tile per way Add can start — the glyph
  * and a plus, no words — so the count of tiles is the count of choices, and
@@ -186,6 +183,7 @@ export default function ProjectSidebar({
   onOpenSettings,
   versionAction,
 }: Props) {
+  const { t } = useTranslation(["shell", "common"]);
   /* The root the workspace is standing in. Three of the five destinations own
      a list; Settings is a leaf with none, so it reports null rather than
      falling through to Projects. Logs is a drawer over whatever is already
@@ -219,16 +217,16 @@ export default function ProjectSidebar({
      root's add page is open it is held off, doors and all: pressing it again
      would only reopen the page, and drop a choice already made there. */
   const railAdd = railRoot === "projects"
-    ? { onClick: onAddProject, title: "Add project", label: "Add project", open: addingProject, openTitle: "Already adding a project" }
+    ? { onClick: onAddProject, title: t("sidebar.addProject"), label: t("sidebar.addProject"), open: addingProject, openTitle: t("sidebar.addingProject") }
     : railRoot === "catalog"
       ? {
         onClick: () => onAddCatalogScope(),
-        title: "Add a resource: one kind from one agent profile",
-        label: "Add Catalog resource",
+        title: t("sidebar.addCatalogTitle"),
+        label: t("pages.addCatalog"),
         open: addingCatalogScope,
-        openTitle: "Already adding a Catalog resource",
+        openTitle: t("sidebar.addingCatalog"),
       }
-      : { onClick: () => onAddStorage(), title: "Add storage", label: "Add storage", open: addingStorage, openTitle: "Already adding storage" };
+      : { onClick: () => onAddStorage(), title: t("sidebar.addStorage"), label: t("sidebar.addStorage"), open: addingStorage, openTitle: t("sidebar.addingStorage") };
   const addHeld = busy || railAdd.open;
 
   const projectRows = () => (
@@ -244,11 +242,11 @@ export default function ProjectSidebar({
             onClick={() => onSelectDraft(draft.draft_id)}
             disabled={busy}
             title={draft.last_error
-              ? `${draft.project_root} — last attempt failed: ${draft.last_error}`
-              : `${draft.project_root} — resumable setup draft`}
+              ? t("sidebar.draftFailedTitle", { path: draft.project_root, error: draft.last_error })
+              : t("sidebar.draftTitle", { path: draft.project_root })}
             aria-label={draft.last_error
-              ? `${draft.display_name} draft — last attempt failed: ${draft.last_error}`
-              : `${draft.display_name} — resumable setup draft`}
+              ? t("sidebar.draftFailedLabel", { name: draft.display_name, error: draft.last_error })
+              : t("sidebar.draftLabel", { name: draft.display_name })}
           >
             <Icon name="folder" size={15} />
             <span>{draft.display_name}</span>
@@ -260,7 +258,7 @@ export default function ProjectSidebar({
               {draft.status === "attention" && (
                 <Icon name="alert-triangle" size={12} aria-hidden="true" />
               )}
-              Draft
+              {t("sidebar.draft")}
             </span>
           </button>
           <div className="sidebar-profile-actions">
@@ -268,8 +266,8 @@ export default function ProjectSidebar({
               type="button"
               onClick={() => onSelectDraft(draft.draft_id)}
               disabled={busy}
-              title={`Continue setup for ${draft.display_name}`}
-              aria-label={`Continue setup for ${draft.display_name}`}
+              title={t("sidebar.continueSetup", { name: draft.display_name })}
+              aria-label={t("sidebar.continueSetup", { name: draft.display_name })}
             >
               <Icon name="settings" size={13} />
             </button>
@@ -278,8 +276,8 @@ export default function ProjectSidebar({
               className="sidebar-profile-remove"
               onClick={() => onDiscardDraft(draft.draft_id)}
               disabled={busy}
-              title={`Discard the setup draft for ${draft.display_name}; no project files are touched`}
-              aria-label={`Discard the setup draft for ${draft.display_name}`}
+              title={t("sidebar.discardDraftTitle", { name: draft.display_name })}
+              aria-label={t("sidebar.discardDraft", { name: draft.display_name })}
             >
               <Icon name="trash" size={13} />
             </button>
@@ -287,12 +285,12 @@ export default function ProjectSidebar({
         </div>
       ))}
       {loading && projects.length === 0 && drafts.length === 0 ? (
-        <div className="sidebar-msg">Loading projects…</div>
+        <div className="sidebar-msg">{t("sidebar.loadingProjects")}</div>
       ) : projects.length === 0 && drafts.length === 0 ? (
         /* One door: Add project opens setup at its Folder field. */
         <SidebarDoors
           disabled={addHeld}
-          doors={[{ key: "folder", icon: "folder", label: "Add project", onOpen: onAddProject }]}
+          doors={[{ key: "folder", icon: "folder", label: t("sidebar.addProject"), onOpen: onAddProject }]}
         />
       ) : projects.map((project) => {
         const profileRequired = Object.keys(project.profile_ids ?? {}).length === 0;
@@ -310,13 +308,12 @@ export default function ProjectSidebar({
               disabled={busy}
               /* The triangle is decorative, so the button's accessible
                  name must include the project issue. */
-              aria-label={[
-                project.is_git_repository === true ? `${label}, Git repository` : label,
-                profileRequired ? "Project issue: No agent profile is assigned" : null,
-              ].filter(Boolean).join(". ")}
+              aria-label={project.is_git_repository === true
+                ? t(profileRequired ? "sidebar.projectGitIssue" : "sidebar.projectGit", { name: label })
+                : profileRequired ? t("sidebar.projectIssue", { name: label }) : label}
               title={[
-                project.is_git_repository === true ? "Git repository" : null,
-                aliased ? `Repo: ${project.display_name}` : null,
+                project.is_git_repository === true ? t("sidebar.gitRepository") : null,
+                aliased ? t("sidebar.repoName", { name: project.display_name }) : null,
                 project.project_root ?? null,
               ].filter(Boolean).join("\n") || label}
             >
@@ -341,8 +338,8 @@ export default function ProjectSidebar({
                 className="sidebar-profile-remove"
                 onClick={() => onRemoveProject(project.local_project_id)}
                 disabled={busy}
-                title={`Remove ${label} from Mallard; project files stay on disk`}
-                aria-label={`Remove ${label} from Mallard`}
+                title={t("sidebar.removeProjectTitle", { name: label })}
+                aria-label={t("sidebar.removeFromMallard", { name: label })}
               >
                 <Icon name="trash" size={13} />
               </button>
@@ -363,10 +360,10 @@ export default function ProjectSidebar({
           ? catalogDoors(catalogCapabilities).map((door) => ({
             key: door.key,
             icon: door.icon,
-            label: `Add ${door.label}`,
+            label: t("sidebar.addDoor", { label: door.label }),
             onOpen: () => onAddCatalogScope(door.key),
           }))
-          : [{ key: "any", icon: "catalog", label: "Add resource", onOpen: () => onAddCatalogScope() }]}
+          : [{ key: "any", icon: "catalog", label: t("sidebar.addResource"), onOpen: () => onAddCatalogScope() }]}
       />
     ) : catalogScopes.map((scope) => {
       const label = catalogScopeLabel(scope);
@@ -391,8 +388,8 @@ export default function ProjectSidebar({
               className="sidebar-profile-remove"
               onClick={() => onRemoveCatalogScope(scope.scope.scope_id)}
               disabled={busy}
-              title={`Remove the ${label} row; no provider or storage content is touched`}
-              aria-label={`Remove the ${label} row`}
+              title={t("sidebar.removeRowTitle", { label })}
+              aria-label={t("sidebar.removeRow", { label })}
             >
               <Icon name="trash" size={13} />
             </button>
@@ -413,14 +410,14 @@ export default function ProjectSidebar({
             ? storageDoors(storageProviders).map((door) => ({
               key: door.key,
               icon: door.icon,
-              label: `Add ${door.label} storage`,
+              label: t("sidebar.addStorageDoor", { label: door.label }),
               onOpen: () => onAddStorage(door.key),
             }))
-            : [{ key: "any", icon: "storage", label: "Add storage", onOpen: () => onAddStorage() }]}
+            : [{ key: "any", icon: "storage", label: t("sidebar.addStorage"), onOpen: () => onAddStorage() }]}
         />
       ) : storages.map((storage) => {
         const usage = storageUsage[storage.storage_id] ?? 0;
-        const storageName = storage.name || "storage";
+        const storageName = storage.name || t("fallback.storage");
         /* A storage this build cannot open is flagged the way a broken
            one is: the row stays, the triangle says why in its name. A
            refused credential comes first and opens straight onto the
@@ -428,7 +425,7 @@ export default function ProjectSidebar({
            credential is asked for again. */
         const storageIssue = storageConnectionIssue(storage)
           ?? storageIssues[storage.storage_id]
-          ?? (storage.available ? null : `This build has no ${storage.provider_label} adapter`);
+          ?? (storage.available ? null : t("sidebar.noAdapter", { provider: storageProviderName(storage) }));
         return (
           <div
             key={storage.storage_id}
@@ -439,13 +436,15 @@ export default function ProjectSidebar({
               className="sidebar-profile-main"
               onClick={() => onOpenStorage(storage.storage_id)}
               disabled={busy}
-              title={storageIssue ? `Open ${storageName} — ${storageIssue}` : `Open ${storageName}`}
+              title={storageIssue
+                ? t("sidebar.openStorageIssueTitle", { name: storageName, issue: storageIssue })
+                : t("sidebar.openStorage", { name: storageName })}
               aria-label={storageIssue
-                ? `Open ${storageName}. Storage issue: ${storageIssue}`
-                : `Open ${storageName}`}
+                ? t("sidebar.openStorageIssue", { name: storageName, issue: storageIssue })
+                : t("sidebar.openStorage", { name: storageName })}
             >
               <Icon name={storageIconName(storage.provider, storage.icon)} size={16} />
-              <span>{storage.name || "(unnamed)"}</span>
+              <span>{storage.name || t("fallback.unnamed")}</span>
               {storageIssue && (
                 <Icon
                   name="alert-triangle"
@@ -462,9 +461,9 @@ export default function ProjectSidebar({
                 onClick={() => onRemoveStorage(storage.storage_id)}
                 disabled={busy || usage > 0}
                 title={usage > 0
-                  ? `${storageName} is linked to ${usage} project${usage === 1 ? "" : "s"}; unlink it before removing`
-                  : `Remove ${storageName}; synced files stay in storage`}
-                aria-label={`Remove ${storageName} from Mallard`}
+                  ? t("sidebar.storageLinked", { name: storageName, count: usage })
+                  : t("sidebar.removeStorageTitle", { name: storageName })}
+                aria-label={t("sidebar.removeFromMallard", { name: storageName })}
               >
                 <Icon name="trash" size={13} />
               </button>
@@ -476,7 +475,7 @@ export default function ProjectSidebar({
           the form; trash discards only the draft. The active editor's
           storage id supplies the active marker. */}
       {storageDrafts.map((draft) => {
-        const draftName = draft.name || "(unnamed)";
+        const draftName = draft.name || t("fallback.unnamed");
         const draftIcon = findStorageProvider(storageProviders, draft.provider, draft.config_version)?.icon;
         return (
           <div
@@ -488,12 +487,12 @@ export default function ProjectSidebar({
               className="sidebar-profile-main"
               onClick={() => onOpenStorageDraft(draft.draft_id)}
               disabled={busy}
-              title={`Continue setting up ${draftName}`}
-              aria-label={`Continue setting up ${draftName} — resumable storage draft`}
+              title={t("sidebar.continueStorage", { name: draftName })}
+              aria-label={t("sidebar.continueStorageLabel", { name: draftName })}
             >
               <Icon name={storageIconName(draft.provider, draftIcon)} size={16} />
               <span>{draftName}</span>
-              <span className="sync-draft-badge">Draft</span>
+              <span className="sync-draft-badge">{t("sidebar.draft")}</span>
             </button>
             <div className="sidebar-profile-actions">
               <button
@@ -501,8 +500,8 @@ export default function ProjectSidebar({
                 className="sidebar-profile-remove"
                 onClick={() => onDiscardStorageDraft(draft.draft_id)}
                 disabled={busy}
-                title={`Discard the local draft for ${draftName}; external storage resources are kept`}
-                aria-label={`Discard the storage draft for ${draftName}`}
+                title={t("sidebar.discardStorageDraftTitle", { name: draftName })}
+                aria-label={t("sidebar.discardStorageDraft", { name: draftName })}
               >
                 <Icon name="trash" size={13} />
               </button>
@@ -525,13 +524,13 @@ export default function ProjectSidebar({
         {/* Five destinations, one glyph each. They carry no text, so the
             active one is named with aria-current rather than only drawn, and
             every tab states its destination in its own accessible name. */}
-        <nav className="sidebar-root-tabs" aria-label="Project sync navigation">
+        <nav className="sidebar-root-tabs" aria-label={t("roots.navigation")}>
           <button
             type="button"
             className={tabClass(openRoot === "projects")}
             aria-current={openRoot === "projects" ? "page" : undefined}
-            aria-label="Projects"
-            title="Projects"
+            aria-label={t("roots.projects")}
+            title={t("roots.projects")}
             onClick={onOpenProjects}
             disabled={busy}
           >
@@ -541,8 +540,8 @@ export default function ProjectSidebar({
             type="button"
             className={tabClass(openRoot === "catalog")}
             aria-current={openRoot === "catalog" ? "page" : undefined}
-            aria-label="Catalog"
-            title="Catalog"
+            aria-label={t("roots.catalog")}
+            title={t("roots.catalog")}
             onClick={onOpenCatalogIndex}
             disabled={busy}
           >
@@ -552,8 +551,8 @@ export default function ProjectSidebar({
             type="button"
             className={tabClass(openRoot === "storages")}
             aria-current={openRoot === "storages" ? "page" : undefined}
-            aria-label="Storages"
-            title="Storages"
+            aria-label={t("roots.storages")}
+            title={t("roots.storages")}
             onClick={onOpenStorageIndex}
             disabled={busy}
           >
@@ -563,8 +562,8 @@ export default function ProjectSidebar({
             type="button"
             className={tabClass(settingsOpen)}
             aria-current={settingsOpen ? "page" : undefined}
-            aria-label="Settings"
-            title="Settings"
+            aria-label={t("common:settings")}
+            title={t("common:settings")}
             onClick={onOpenSettings}
             disabled={busy}
           >
@@ -576,8 +575,8 @@ export default function ProjectSidebar({
             className={tabClass(activityOpen)}
             /* The unread count is drawn as a badge with no text beside it to
                be read with, so it belongs in the button's own name. */
-            aria-label={unreadLogs > 0 && !activityOpen ? `Logs, ${unreadLogs} unread` : "Logs"}
-            title="Logs"
+            aria-label={unreadLogs > 0 && !activityOpen ? t("roots.logsUnread", { unread: unreadLogs }) : t("roots.logs")}
+            title={t("roots.logs")}
             onClick={onToggleActivity}
             aria-controls="activity-log-drawer"
             aria-expanded={activityOpen}
@@ -590,8 +589,8 @@ export default function ProjectSidebar({
         </nav>
       </div>
 
-      <section className="sync-sidebar-rail" aria-label={SECTION_TITLES[railRoot]}>
-        <RailHeading title={SECTION_TITLES[railRoot]} count={railCount}>
+      <section className="sync-sidebar-rail" aria-label={t(`roots.${railRoot}`)}>
+        <RailHeading title={t(`roots.${railRoot}`)} count={railCount}>
           <button
             type="button"
             className="sidebar-section-action sidebar-add-action"
@@ -610,7 +609,7 @@ export default function ProjectSidebar({
         </div>
       </section>
 
-      <footer className="sync-sidebar-product-mark" aria-label={`Mallard version ${packageMetadata.version}`}>
+      <footer className="sync-sidebar-product-mark" aria-label={t("sidebar.version", { version: packageMetadata.version })}>
         <img src="/mallard-logo-duck.svg" alt="" />
         <span>v{packageMetadata.version}</span>
         {versionAction}

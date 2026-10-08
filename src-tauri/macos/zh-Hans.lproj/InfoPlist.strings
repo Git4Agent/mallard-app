@@ -1,0 +1,2 @@
+/* Simplified Chinese: the system prompt that asks to let Mallard control Terminal and the Codex app. */
+"NSAppleEventsUsageDescription" = "Mallard 会在“终端”中打开会话命令，并在刷新 Codex 数据前请求 Codex 应用退出。";

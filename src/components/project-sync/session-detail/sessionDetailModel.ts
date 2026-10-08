@@ -11,6 +11,9 @@ import type {
   ThreadSyncEntry,
 } from "../../../types";
 import { isPushReviewDecision } from "../../sync-review/pullReviewStatus";
+import { formatCompactNumber, formatNumber } from "../../../format";
+import { t, uiLocale } from "../../../i18n";
+import { syncDecisionReason, syncStatusDetail } from "../syncDetailText";
 import type { PushSessionFacts } from "../ProjectActivityPage";
 import {
   clockOptions,
@@ -45,14 +48,20 @@ export type SessionDetailSource =
   | { kind: "stored"; storageId: string; storageName: string };
 
 export function sessionPushDisabledReason(entry: ThreadSyncEntry | undefined): string | null {
-  if (!entry) return "This session cannot be pushed independently.";
-  if (!entry.local_present) return "No local session to push.";
+  if (!entry) return t("session:push.notIndependent");
+  if (!entry.local_present) return t("session:push.noLocal");
   if (isPushReviewDecision(entry.push_decision)) return null;
   switch (entry.push_decision.action) {
-    case "no_changes": return "This session is up to date.";
-    case "require_pull": return "Storage has changes. Review Pull before pushing this session.";
-    case "require_pull_metadata": return "Review storage metadata in Pull before pushing this session.";
-    default: return entry.push_decision.blocked_reason ?? entry.status_detail ?? "This session is not available to push.";
+    case "no_changes": return t("session:push.upToDate");
+    case "require_pull": return t("session:push.requirePull");
+    case "require_pull_metadata": return t("session:push.requirePullMetadata");
+    default: {
+      // A reason the service words itself is translated by its code, a
+      // blocker's own sentence by the blocker; an error reads as written.
+      const reason = syncDecisionReason(entry.push_decision);
+      if (reason != null) return reason;
+      return syncStatusDetail(entry) ?? t("session:push.unavailable");
+    }
   }
 }
 
@@ -71,14 +80,14 @@ export function sessionPushGate(
   entry: ThreadSyncEntry | undefined,
   comparisonError: string | null,
 ): SessionPushGate | null {
-  if (comparisonError) return { tone: "danger", label: "Can't compare", detail: comparisonError };
+  if (comparisonError) return { tone: "danger", label: t("session:push.cantCompare"), detail: comparisonError };
   if (!entry?.local_present) return null;
   const { action, blocker } = entry.push_decision;
   if (action !== "require_pull" && action !== "require_pull_metadata" && blocker !== "detached_requires_pull") {
     return null;
   }
   const detail = sessionPushDisabledReason(entry);
-  return detail ? { tone: "info", label: "Pull first", detail } : null;
+  return detail ? { tone: "info", label: t("session:push.pullFirst"), detail } : null;
 }
 
 /** What the session's page reports for the row of its own Push review: the
@@ -88,7 +97,7 @@ export function sessionPushFacts(detail: ProjectSessionDetail): PushSessionFacts
   const { prompts, responses, tool_calls: toolCalls } = detail.event_counts;
   const startedAt = detail.started_at ?? detail.ended_at ?? 0;
   return {
-    title: detail.title || "Untitled session",
+    title: detail.title || t("session:untitled"),
     metrics: {
       started_at: startedAt,
       ended_at: Math.max(detail.ended_at ?? startedAt, startedAt),
@@ -127,33 +136,21 @@ export const ALL_SESSION_TOOL_CATEGORIES: readonly SessionToolCategory[] = [
  * provider's own name, so this entry is only the fallback for a provider that
  * reports none.
  */
-export const SESSION_EVENT_KIND_LABELS: Record<SessionTimelineEventKind, string> = {
-  prompt: "You",
-  response: "Response",
-  intermediate_step: "Step",
-  checkpoint: "Checkpoint",
-  tool_call: "Tool call",
-  agent_call: "Agent",
-};
-
-const SESSION_FILTER_LABELS: Record<SessionFilterKey, string> = {
-  prompts: "Prompts",
-  responses: "Replies",
-  intermediateSteps: "Steps",
-  checkpoints: "Checkpoints",
-  toolCalls: "Tool calls",
-  agents: "Agents",
-};
+export function sessionEventKindLabel(kind: SessionTimelineEventKind): string {
+  switch (kind) {
+    case "prompt": return t("session:speaker.prompt");
+    case "response": return t("session:speaker.response");
+    case "intermediate_step": return t("session:speaker.intermediateStep");
+    case "checkpoint": return t("session:speaker.checkpoint");
+    case "tool_call": return t("session:speaker.toolCall");
+    case "agent_call": return t("session:speaker.agentCall");
+  }
+}
 
 /** What the row prints for a run that is not simply done. */
-export const SESSION_AGENT_STATUS_LABELS: Record<SessionAgentStatus, string> = {
-  completed: "completed",
-  running: "running",
-  failed: "failed",
-  interrupted: "interrupted",
-  incomplete: "incomplete",
-  unavailable: "no transcript",
-};
+export function sessionAgentStatusLabel(status: SessionAgentStatus): string {
+  return t(`session:agentStatus.${status}`);
+}
 
 function sessionCountSupported(count: SessionCount): boolean {
   return count.quality !== "unsupported";
@@ -220,7 +217,7 @@ export function sessionDetailFilterToggles(
   counts: SessionEventCounts,
 ): SessionFilterToggle[] {
   return SESSION_FILTER_ORDER
-    .map((key) => ({ key, label: SESSION_FILTER_LABELS[key], count: sessionFilterCount(counts, key) }))
+    .map((key) => ({ key, label: t(`session:filter.${key}`), count: sessionFilterCount(counts, key) }))
     .filter((toggle) => sessionCountSupported(toggle.count) && !sessionCountEmpty(toggle.count));
 }
 
@@ -265,24 +262,9 @@ export function sessionDetailFilterFingerprint(filters: SessionDetailFilters): s
 }
 
 export function formatSessionCount(count: SessionCount): string {
-  if (count.quality === "unsupported" || count.value == null) return "Unavailable";
-  const value = new Intl.NumberFormat().format(count.value);
+  if (count.quality === "unsupported" || count.value == null) return t("session:count.unavailable");
+  const value = formatNumber(count.value);
   return count.quality === "lower_bound" ? `${value}+` : value;
-}
-
-/**
- * The one compaction rule for counts of tokens and turns, everywhere they
- * appear: exact below 10K, whole K to 1M, hundredths of M above. The activity
- * row a session is launched from and the page it opens must agree on the
- * number — two thresholds made 9,432 read "9.4K" in one and "9,432" in the
- * other.
- */
-export function formatCompactNumber(value: number): string {
-  return value >= 1_000_000
-    ? `${(value / 1_000_000).toFixed(2)}M`
-    : value >= 10_000
-      ? `${Math.round(value / 1_000)}K`
-      : new Intl.NumberFormat().format(value);
 }
 
 /**
@@ -290,7 +272,7 @@ export function formatCompactNumber(value: number): string {
  * they are abbreviated; the exact value stays in the element's title.
  */
 export function formatCompactCount(count: SessionCount): string {
-  if (count.quality === "unsupported" || count.value == null) return "Unavailable";
+  if (count.quality === "unsupported" || count.value == null) return t("session:count.unavailable");
   const compact = formatCompactNumber(count.value);
   return count.quality === "lower_bound" ? `${compact}+` : compact;
 }
@@ -298,9 +280,9 @@ export function formatCompactCount(count: SessionCount): string {
 export function sessionCountQualityLabel(count: SessionCount): string | null {
   switch (count.quality) {
     case "exact": return null;
-    case "lower_bound": return "At least";
-    case "inferred": return "Inferred";
-    case "unsupported": return "Unavailable";
+    case "lower_bound": return t("session:count.atLeast");
+    case "inferred": return t("session:count.inferred");
+    case "unsupported": return t("session:count.unavailable");
   }
 }
 
@@ -325,7 +307,7 @@ export function eventAnchorId(eventId: string): string {
 const toMilliseconds = toEpochMilliseconds;
 
 export function formatSessionDetailTimestamp(value?: number | null): string {
-  if (value == null) return "Time unavailable";
+  if (value == null) return t("session:time.unavailable");
   return formatDateTime(toMilliseconds(value));
 }
 
@@ -343,7 +325,7 @@ export function sessionDetailDateTime(value?: number | null): string | undefined
  */
 export function formatSessionDetailClock(value?: number | null): string {
   if (value == null) return "--:--";
-  return new Date(toMilliseconds(value)).toLocaleTimeString(undefined, clockOptions());
+  return new Date(toMilliseconds(value)).toLocaleTimeString(uiLocale(), clockOptions());
 }
 
 function sessionDetailDayKey(value?: number | null): string | null {
@@ -353,8 +335,8 @@ function sessionDetailDayKey(value?: number | null): string | null {
 }
 
 function formatSessionDetailDay(value?: number | null): string {
-  if (value == null) return "Undated";
-  return new Date(toMilliseconds(value)).toLocaleDateString(undefined, {
+  if (value == null) return t("session:time.undated");
+  return new Date(toMilliseconds(value)).toLocaleDateString(uiLocale(), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -435,7 +417,7 @@ export function formatSessionLengthDetail(
   const end = sameDay
     ? formatSessionDetailClock(ended)
     : `${formatSessionDetailDay(ended)} · ${formatSessionDetailClock(ended)}`;
-  return `Ran ${length}, ending ${end}`;
+  return t("session:time.lengthDetail", { length, end });
 }
 
 /**
@@ -451,10 +433,10 @@ export function formatSessionGap(
   const seconds = elapsedSeconds(previous, current);
   if (seconds < 60) return null;
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `+${minutes}m`;
+  if (minutes < 60) return t("session:time.gapMinutes", { value: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `+${hours}h`;
-  return `+${Math.round(hours / 24)}d`;
+  if (hours < 24) return t("session:time.gapHours", { value: hours });
+  return t("session:time.gapDays", { value: Math.round(hours / 24) });
 }
 
 export interface SessionDayGroup {
@@ -743,11 +725,16 @@ export function markdownPlayerType(path: string): string | null {
 
 /** Why a picture does not show or a track or a clip does not play, in the file's own words. */
 export function markdownMediaFailureMessage(kind: MarkdownMediaKind, path: string, failure: SessionDetailFailure): string {
-  const format = markdownExtension(path).toUpperCase() || "This file";
+  const format = markdownExtension(path).toUpperCase();
   switch (failure.code) {
-    case "not_found": return `The linked ${kind} no longer exists.`;
-    case "response_too_large": return kind === "image" ? "Too large to show here." : "Too large to play here.";
-    case "invalid_request": return kind === "image" ? `${format} can't show in Mallard.` : `${format} can't play in Mallard.`;
+    case "not_found":
+      return kind === "image"
+        ? t("session:media.notFoundImage")
+        : kind === "audio" ? t("session:media.notFoundAudio") : t("session:media.notFoundVideo");
+    case "response_too_large": return kind === "image" ? t("session:media.tooLargeToShow") : t("session:media.tooLargeToPlay");
+    case "invalid_request":
+      if (kind === "image") return format ? t("session:media.cantShow", { format }) : t("session:media.cantShowFile");
+      return format ? t("session:media.cantPlay", { format }) : t("session:media.cantPlayFile");
     default: return failure.message;
   }
 }
@@ -784,5 +771,5 @@ export function normalizeSessionDetailFailure(reason: unknown): SessionDetailFai
       message: reason,
     };
   }
-  return { code: null, message: "Session details could not be loaded." };
+  return { code: null, message: t("session:loadFailed") };
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Icon from "../Icons";
 import { writeClipboardText } from "../sync-review/clipboard";
+import { Trans, useTranslation } from "../../i18n";
 
 /** How long Copy says Copied, as the Cloud panel's rows do. */
 const COPIED_FOR_MS = 2_000;
@@ -17,6 +18,7 @@ export default function ManagedCloudAddress({ account, onOpenUrl }: {
   account: { login: string; origin: string; host: string };
   onOpenUrl: (url: string) => void;
 }) {
+  const { t } = useTranslation(["cloud", "common"]);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   useEffect(() => {
@@ -38,14 +40,14 @@ export default function ManagedCloudAddress({ account, onOpenUrl }: {
   // The scheme recedes; the host is what the browser's address bar shows.
   const scheme = account.origin.slice(0, account.origin.length - account.host.length);
   return (
-    <section className="managed-cloud-address" aria-label="Mallard Cloud website">
+    <section className="managed-cloud-address" aria-label={t("address.label")}>
       <div className="managed-cloud-address-bar">
         <span className="managed-cloud-address-mark"><Icon name="link" size={16} /></span>
         <button
           type="button"
           className="managed-cloud-address-url"
           tabIndex={-1}
-          title={`Open ${account.origin} in your browser`}
+          title={t("address.open", { origin: account.origin })}
           onClick={open}
         >
           <span className="managed-cloud-address-scheme">{scheme}</span>
@@ -55,24 +57,24 @@ export default function ManagedCloudAddress({ account, onOpenUrl }: {
           <button
             type="button"
             className={`btn${copied ? " storage-setup-copied-flash" : ""}`}
-            title={`Copy ${account.origin}`}
+            title={t("address.copy", { origin: account.origin })}
             onClick={() => void copy()}
           >
-            <Icon name={copied ? "check" : "copy"} size={13} /> {copied ? "Copied" : "Copy"}
+            <Icon name={copied ? "check" : "copy"} size={13} /> {copied ? t("common:copied") : t("common:copy")}
           </button>
-          <button type="button" className="btn" title={`Open ${account.origin} in your browser`} onClick={open}>
-            <Icon name="external-link" size={13} /> Open website
+          <button type="button" className="btn" title={t("address.open", { origin: account.origin })} onClick={open}>
+            <Icon name="external-link" size={13} /> {t("address.openWebsite")}
           </button>
         </span>
       </div>
       <p className="managed-cloud-address-account">
-        <Icon name="user" size={12} /> Signed in as <b>{account.login}</b>
+        <Icon name="user" size={12} /> <Trans t={t} i18nKey="cloud:address.signedInAs" components={{ b: <b />, login: <>{account.login}</> }} />
       </p>
       <span className="sync-visually-hidden" role="status" aria-live="polite">
-        {copyFailed ? "Couldn't copy the address." : copied ? "Copied the address." : ""}
+        {copyFailed ? t("address.copyFailed") : copied ? t("address.copied") : ""}
       </span>
       {copyFailed && (
-        <p className="managed-cloud-address-error" aria-hidden="true">Couldn't copy the address.</p>
+        <p className="managed-cloud-address-error" aria-hidden="true">{t("address.copyFailed")}</p>
       )}
     </section>
   );

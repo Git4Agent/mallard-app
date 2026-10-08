@@ -33,7 +33,14 @@ import {
   uniqueStorageName,
 } from "../../src/components/project-sync/StorageSettings";
 import type { StorageSetupMode } from "../../src/components/project-sync/StorageSettings";
-import { StorageDiscoveryPanel, type DiscoveryState } from "../../src/components/project-sync/StorageDiscovery";
+import {
+  CandidateRow,
+  discoveryScope,
+  discoveryWords,
+  ScanIncompleteNotice,
+  StorageDiscoveryPanel,
+  type DiscoveryState,
+} from "../../src/components/project-sync/StorageDiscovery";
 import { writeClipboardTextOf } from "../../src/components/sync-review/clipboard";
 import {
   CatalogStorageRepositoryRow,
@@ -61,11 +68,14 @@ import type {
 } from "../../src/components/storage-catalog/types";
 import StorageIndexPage from "../../src/components/project-sync/StorageIndexPage";
 import StorageProviderPicker from "../../src/components/project-sync/StorageProviderPicker";
+import StorageLinkDialog from "../../src/components/project-sync/StorageLinkDialog";
 import ProjectSidebar from "../../src/components/project-sync/ProjectSidebar";
 import { shouldReloadConfigRevision } from "../../src/components/project-sync/ProjectSync";
 import { StorageDraftSaveQueue } from "../../src/components/project-sync/storageDraftSaveQueue";
 import { iconNameFromHint } from "../../src/components/Icons";
 import { storageAccessErrorMessage } from "../../src/storageError";
+import { i18n } from "../../src/i18n";
+import { BACKEND_ZH, backendText } from "../../src/i18n/backend";
 import type {
   RemoteBundleSummary,
   StorageConnectionHealth,
@@ -302,7 +312,7 @@ test("a settled storage opens as the locked form: read-only fields, a masked sec
   // beside it (the project rename's pair), Enter submits, Escape cancels.
   assert.doesNotMatch(html, /sync-storage-name-verbs/);
   const form = readFileSync("src/components/project-sync/StorageSettings.tsx", "utf8");
-  assert.match(form, /\{nameDirty && \(\s*<span className="sync-storage-name-verbs">\s*<button type="submit" className="btn btn-primary"[\s\S]*?Save[\s\S]*?<button type="button" className="btn btn-ghost"[^>]*onClick=\{cancelName\}>\s*Cancel/);
+  assert.match(form, /\{nameDirty && \(\s*<span className="sync-storage-name-verbs">\s*<button type="submit" className="btn btn-primary"[\s\S]*?t\("common:save"\)[\s\S]*?<button type="button" className="btn btn-ghost"[^>]*onClick=\{cancelName\}>\s*\{t\("common:cancel"\)\}/);
   assert.doesNotMatch(form, /onBlur=\{\(\) => void commitName\(\)\}/);
   assert.doesNotMatch(html, /sync-segmented|Save storage|Remove storage|storage-setup-route-row/);
   // Every declared field is readonly with its saved value; never disabled.
@@ -371,9 +381,11 @@ test("a settled storage opens as the locked form: read-only fields, a masked sec
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /onRevealSecret=\{\(secretId\) => projectSyncApi\.revealStorageSecret\(pageStorageId, secretId\)\}/);
   assert.doesNotMatch(workspace, /Save storage|settingsExpanded\) void ensureStorageEditSession/);
+  assert.doesNotMatch(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /Save storage/);
   // One storage page: the card is unconditional, over the repositories.
   assert.match(workspace, /\{!creatingStorage && savedEditedStorage && descriptor && \(\s*<StorageLockedForm/);
-  assert.doesNotMatch(workspace, /storageDetailsExpanded|Hide storage settings|label: "Repositories"/);
+  assert.doesNotMatch(workspace, /storageDetailsExpanded|Hide storage settings|label: "Repositories"|label: t\("storagePage\.repositories"\)/);
+  assert.doesNotMatch(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /Hide storage settings/);
   const api = readFileSync("src/components/project-sync/api.ts", "utf8");
   assert.match(api, /invoke<string>\("reveal_storage_secret", \{ storageId, secretId \}\)/);
   assert.match(api, /invoke<TestStorageResult>\("test_storage", \{ storageId \}\)/);
@@ -1273,6 +1285,8 @@ function clearHarness(approve: boolean, changeRevision = false, failOnce = false
     refresh: async () => { refreshes++; },
     setStorageRefreshEpoch: noop, notify: noop,
     errorMessage: (reason: Error) => reason.message,
+    // The shell's own `t`: its namespace first, then the shared words.
+    t: i18n.getFixedT(null, ["shell", "common"]),
   };
   const run = new Function("context", `const { ${Object.keys(context).join(", ")} } = context; ${handler}; return clearStorageData("storage-local");`);
   return { run: () => run(context) as Promise<void>, calls, errors, confirmations, refreshes: () => refreshes };
@@ -1315,7 +1329,8 @@ test("the existing clear menu supports both clear modes and hides unavailable st
   assert.equal(visible(true, { ...cloudProvider, clear_mode: "unavailable" }), false);
   assert.equal(visible(false, cloudProvider), false);
   assert.equal(visible(true, undefined), false);
-  assert.match(source, /supportsManagedClear \? \[\{\s*id: "clear",\s*label: "Clear storage data…"/);
+  assert.match(source, /supportsManagedClear \? \[\{\s*id: "clear",\s*label: t\("storagePage\.clear"\)/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /clear: "Clear storage data…",/);
 });
 
 const dropboxProvider: StorageProviderDescriptor = {
@@ -1555,7 +1570,8 @@ test("a refused credential badges the index and the rail and leads to the settin
   }
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /<DropboxSetupLane/);
-  assert.match(workspace, /connectionSuspends\(storage\.connection\) \? \([\s\S]*?onClick=\{\(\) => onOpenStorage\(storage\.storage_id\)\}[\s\S]*?Reconnect \{storage\.provider_label\}/);
+  assert.match(workspace, /connectionSuspends\(storage\.connection\) \? \([\s\S]*?onClick=\{\(\) => onOpenStorage\(storage\.storage_id\)\}[\s\S]*?\{t\("notices\.reconnect", \{ provider: storageProviderName\(storage\) \}\)\}/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /reconnect: "Reconnect \{\{provider\}\}",/);
   assert.match(workspace, /key: "storage-connection",[\s\S]*?message: connectionDetail\(storageConnection\)/);
   assert.match(workspace, /<StorageReconnectBand[\s\S]*?connection=\{storageConnection\}/);
   assert.match(workspace, /const beginReconnect = \(\) => \{[\s\S]*?ensureStorageEditSession\(savedEditedStorage\)/);
@@ -1600,8 +1616,8 @@ function scanResult(patch: Partial<StorageDiscoveryResult> = {}): StorageDiscove
     status: "partial",
     issues: ["1 bucket could not be read (team-archive: access denied)."],
     candidates: [
-      { candidate_id: "c-1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "Default" }], cautions: [], connected_storage_id: "storage-cloud" },
-      { candidate_id: "c-2", name: "mallard-brave", identity: "ns 1234567890", marker: "storage", marker_detail: "layout 1", facts: [{ label: "Jurisdiction", value: "EU" }, { label: "Created", value: "Sep 2" }], cautions: ["Viewer — Push will be refused"] },
+      { candidate_id: "c-1", name: "mallard-otter", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "Default", value_code: "default" }], cautions: [], connected_storage_id: "storage-cloud" },
+      { candidate_id: "c-2", name: "mallard-brave", identity: "ns 1234567890", marker: "storage", marker_detail: "layout 1", facts: [{ key: "jurisdiction", label: "Jurisdiction", value: "EU", value_code: "eu" }, { key: "created", label: "Created", value: "Sep 2" }], cautions: ["Viewer — Push will be refused"] },
       { candidate_id: "c-3", name: "mallard-gently", marker: "unsupported", marker_detail: "layout 2", facts: [], cautions: [] },
       { candidate_id: "c-4", name: "assets-prod", marker: "missing", facts: [], cautions: [] },
       { candidate_id: "c-5", name: "www-static", marker: "missing", facts: [], cautions: [] },
@@ -1919,7 +1935,7 @@ test("browser steps hand the link over, count down its budget, and never open a 
   // The link is opened only by the Open browser button, never on arrival.
   const source = readFileSync("src/components/project-sync/R2Setup.tsx", "utf8");
   assert.equal(source.match(/openExternalUrl\(/g)?.length, 1);
-  assert.match(source, /Open browser<\/>, \(\) => void openExternalUrl\(url\)/);
+  assert.match(source, /\{t\("lane\.openBrowser"\)\}<\/>, \(\) => void openExternalUrl\(url\)/);
 });
 
 test("the account is confirmed before anything is listed or made, with Change login beside Continue", () => {
@@ -2812,7 +2828,8 @@ test("a settled Mallard Cloud storage leads with its website: Copy, Open website
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   assert.match(workspace, /const cloudAccount = savedEditedStorage && isManagedCloudStorage\(savedEditedStorage\)\s*\? managedCloudAccount\(savedEditedStorage\)/);
   assert.match(workspace, /lead=\{cloudAccount \? \{\s*band: <ManagedCloudAddress account=\{cloudAccount\} onOpenUrl=\{\(url\) => void openExternalUrl\(url\)\} \/>/);
-  assert.match(workspace, /id: "open-website",\s*label: "Open website",\s*detail: cloudAccount\.host,[^]*?onSelect: \(\) => void openExternalUrl\(cloudAccount\.origin\)/);
+  assert.match(workspace, /id: "open-website",\s*label: t\("storagePage\.openWebsite"\),\s*detail: cloudAccount\.host,[^]*?onSelect: \(\) => void openExternalUrl\(cloudAccount\.origin\)/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /openWebsite: "Open website",/);
 });
 
 // The website bridge: one chip in the path bar for whatever the service
@@ -2844,7 +2861,8 @@ test("the Cloud verbs live in the chip's panel, and the project menu keeps only 
   assert.doesNotMatch(workspace, /managedCloudMenuItems|open-managed-cloud|view-published-cloud|request-managed-cloud-release|discard-managed-cloud-draft/);
   // Publish asks in its sheet, sends once, says so once, and compares again.
   assert.match(workspace, /onPublishVersion=\{\(\) => setPublishSheetKey\(managedCloudKey\)\}/);
-  assert.match(workspace, /const publishCloudVersion = \(name: string \| null\) => \{[^]*?publishManagedCloudVersion\(projectId, storageId, name\);[^]*?onNotify\(`Published version \$\{published\.version\}\.`\);[^]*?cloudRefreshRef\.current\?\.\(\);/);
+  assert.match(workspace, /const publishCloudVersion = \(name: string \| null\) => \{[^]*?publishManagedCloudVersion\(projectId, storageId, name\);[^]*?onNotify\(t\("publishHolds\.published", \{ version: published\.version \}\)\);[^]*?cloudRefreshRef\.current\?\.\(\);/);
+  assert.match(readFileSync("src/i18n/en/projectPage.ts", "utf8"), /published: "Published version \{\{version\}\}\.",/);
   assert.equal(workspace.match(/publishManagedCloudVersion\(/g)?.length, 1);
   assert.match(workspace, /sessionsToPush=\{cloudActivity\?\.counts\.push \?\? 0\}/);
   assert.match(workspace, /const discardCloudDraftNow = \(\) => \{[^]*?discardCloudDraft\(cloudStatus, \{[^]*?discardManagedCloudDraft\(/);
@@ -3448,4 +3466,595 @@ test("only R2 offers Copy all fields in setup and saved details", () => {
       assert.equal(html.includes("Copy all fields"), key === "r2", key);
     }
   }
+});
+
+/* ── Simplified Chinese ──
+   The storage screens speak Chinese around what they were given: storage,
+   account and bucket names, paths, URLs and backend sentences stay as they
+   arrived. */
+
+/** Renders in Simplified Chinese, then puts English back. */
+function inChinese<T>(render: () => T): T {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    return render();
+  } finally {
+    void i18n.changeLanguage("en");
+  }
+}
+
+test("in Chinese, the Storages index words its own chrome and keeps names, places and backend issues as given", () => {
+  const page = () => renderToStaticMarkup(
+    <StorageIndexPage
+      storages={[
+        folderSummary(),
+        cloudSummary(),
+        cloudSummary({ storage_id: "storage-future", name: "Future storage", provider: "dropbox", provider_label: "dropbox", icon: "storage", available: false, summary: [] }),
+      ]}
+      links={[{ local_project_id: "p1", storage_id: "storage-local", state: "active", revision: 1, updated_at: 1 }] as never}
+      storageIssues={{ "storage-cloud": "Bucket unreachable" }}
+      drafts={[
+        cloudDraft({ name: "Half-typed cloud" }),
+        cloudDraft({ draft_id: "storagedraft-edit", storage_id: "storage-cloud", name: "Cloud storage", edits_existing: true }),
+      ]}
+      storageProviders={[cloudProvider, folderProvider]}
+      busy={false}
+      appActions={[]}
+      onOpenStorage={() => undefined}
+      onOpenStorageDraft={() => undefined}
+      onAddStorage={() => undefined}
+    />,
+  );
+  const html = inChinese(page);
+  assert.match(html, /aria-label="存储路径"/);
+  assert.match(html, /landing-picker-head[\s\S]*?本机 5 个[\s\S]*?class="btn btn-primary"[^>]*>[\s\S]*?添加存储…/);
+  // The cards keep each storage's name, place and the backend's issue.
+  assert.match(html, /aria-label="打开 Local storage 1"[\s\S]*?<strong>Local storage 1<\/strong>[\s\S]*?landing-picker-card-location">~\/storage</);
+  assert.match(html, /sync-storage-repo-chip[^>]*><span>项目<\/span><b>1<\/b>/);
+  assert.match(html, /aria-label="打开 Cloud storage。存储问题：Bucket unreachable"[\s\S]*?landing-picker-card-location">mallard-team</);
+  assert.match(html, /class="notice-chip warning"><svg[\s\S]*?<\/svg>问题<\/span>/);
+  assert.match(html, /aria-label="打开 Future storage。不可用：此构建没有 dropbox 适配器"/);
+  assert.match(html, /class="notice-chip warning"><svg[\s\S]*?<\/svg>不可用<\/span>/);
+  assert.match(html, /aria-label="继续设置 Half-typed cloud——可恢复的存储草稿"/);
+  assert.match(html, /landing-picker-card-location">设置未完成——尚未连接到 Mallard</);
+  assert.match(html, /landing-picker-card-location">重新连接未完成——Cloud A 凭据尚未保存</);
+  assert.equal((html.match(/sync-draft-badge">草稿/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /on this machine|Add storage|Storage issue|Unavailable|>Draft</);
+  // English comes back whole once the language does.
+  assert.match(page(), /landing-picker-head[\s\S]*?5 on this machine/);
+
+  // Empty, each door names its provider: Chinese by the provider key, the
+  // backend's own name for a provider without any.
+  const empty = inChinese(() => renderToStaticMarkup(
+    <StorageIndexPage
+      storages={[]} links={[] as never} storageIssues={{}} drafts={[]}
+      storageProviders={[cloudProvider, folderProvider]} busy={false} appActions={[]}
+      onOpenStorage={() => undefined} onOpenStorageDraft={() => undefined} onAddStorage={() => undefined}
+    />,
+  ));
+  assert.match(empty, /本机 0 个/);
+  const doors = [...empty.matchAll(/class="landing-picker-door" aria-label="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(doors, ["添加 Cloud A 存储", "添加本地文件夹存储"]);
+  assert.match(empty, /<strong>Cloud A<\/strong>/);
+  assert.match(empty, /landing-picker-caption"[\s\S]*?项目和资源库同步到这里/);
+});
+
+test("in Chinese, the provider picker and the link chooser keep provider and storage names", () => {
+  const picker = inChinese(() => renderToStaticMarkup(
+    <StorageProviderPicker providers={[cloudProvider, folderProvider]} busy={false} appActions={[]} onChoose={() => undefined} onCancel={() => undefined} />,
+  ));
+  assert.match(picker, /选择存储类型/);
+  assert.match(picker, /aria-label="设置 Cloud A 存储"[\s\S]*?<strong>Cloud A<\/strong>[\s\S]*?A bucket reached through its object API\./);
+  assert.match(picker, /aria-label="全部存储"/);
+  const dialog = inChinese(() => renderToStaticMarkup(
+    <StorageLinkDialog
+      projectName="mallard-app"
+      storages={[cloudSummary({ connection: { state: "reconnect_required", code: "reconnect_required", message: "Cloud A rejected the saved key.", observed_at: 1 } })]}
+      busy={false}
+      onLink={() => undefined}
+      onAddStorage={() => undefined}
+      onCancel={() => undefined}
+    />,
+  ));
+  assert.match(dialog, /sync-eyebrow">mallard-app</);
+  assert.match(dialog, /关联存储/);
+  assert.match(dialog, /此项目的会话上传和下载到哪里。一个项目可以关联多个存储。/);
+  assert.match(dialog, /aria-label="关联 Cloud storage。Cloud A，mallard-team。存储问题：Cloud A 需要重新连接"/);
+  assert.match(dialog, /<strong>Cloud storage<\/strong>[\s\S]*?Cloud A · mallard-team/);
+  assert.match(dialog, /1 个可用/);
+  assert.doesNotMatch(dialog, /Link a storage|available<|Reconnect</);
+});
+
+test("in Chinese, an R2 setup step speaks Chinese around the account, bucket and link it was handed", () => {
+  const naming = inChinese(() => renderLane("create", { phase: "bucket", accounts: [account], account, name: "Team_Backups" }));
+  assert.match(naming, /r2-step-title">账户<[\s\S]*?Personal · <code>11111111…11111111<\/code>/);
+  assert.match(naming, /r2-step-title">存储桶</);
+  assert.match(naming, /aria-label="存储桶名称"[^>]*value="Team_Backups"/);
+  assert.match(naming, /· 只能包含小写字母、数字或连字符/);
+  assert.match(naming, /role="radiogroup" aria-label="管辖区"/);
+  assert.match(naming, /aria-checked="true"[^>]*>默认</);
+  for (const label of ["EU", "US", "FedRAMP"]) assert.match(naming, new RegExp(`role="radio" aria-checked="false"[^>]*>${label}<`));
+  assert.match(naming, /<button[^>]*disabled=""[^>]*>创建并授权</);
+  assert.match(naming, /> 换一个<\/button>/);
+  const creating = inChinese(() => renderLane("create", { phase: "create", running: true, account, name: "mallard-fox" }));
+  assert.match(creating, /正在创建 <code>mallard-fox<\/code>…/);
+  assert.match(creating, /class="btn storage-setup-guide-button btn-ghost"[^>]*>取消</);
+  const link = { stage: "login" as const, url: "https://example.test/private-link-canary" };
+  const login = inChinese(() => renderLane("create", { phase: "login", running: true, link }, true));
+  assert.match(login, /在浏览器中登录 Cloudflare · <span class="r2-countdown">3:00<\/span>/);
+  assert.match(login, /复制链接[\s\S]*?打开浏览器[\s\S]*?取消/);
+  assert.doesNotMatch(login, /private-link-canary/);
+  const failed = inChinese(() => renderLane("create", { phase: "bucket", account, failed: "creation_unknown", bucket: "mallard-fox" }));
+  assert.match(failed, /Cloudflare 未确认存储桶 · 请检查账户，然后重试或使用已有的存储桶 · mallard-fox 已保留/);
+  assert.match(failed, />重试</);
+  const ready = inChinese(() => renderLane("existing", { phase: "review", account, scan: r2Scan(), chosen: r2Scan().candidates[1] }));
+  assert.match(ready, /已就绪，请确认。/);
+  assert.match(ready, /<span>存储桶<\/span><b>mallard-brave<\/b>[\s\S]*?<span>管辖区<\/span><b>EU<\/b>[\s\S]*?<span>账户<\/span><b>Personal<\/b>[\s\S]*?<span>密钥<\/span><b>仅此存储桶<\/b>/);
+  assert.doesNotMatch(naming + creating + login + failed + ready, /Bucket name|Create &amp; authorize|Copy link|Ready for review|Cancel</);
+});
+
+test("in Chinese, the Mallard Cloud and Dropbox lanes keep the signed-in account and the service address", () => {
+  const cloud = inChinese(() => renderManagedCloud({ phase: "review", account: managedCloudLogin.account, serviceOrigin: managedCloudLogin.service_origin }));
+  assert.match(cloud, /已就绪，请确认。/);
+  assert.match(cloud, /<span>账户<\/span><b>octocat<\/b>[\s\S]*?<span>服务<\/span><b>mallard-ai\.com<\/b>[\s\S]*?<span>访问权限<\/span><b>90 天会话 · 私有上传<\/b>/);
+  const mismatch = inChinese(() => renderManagedCloud({ phase: "login", error: "managed_cloud_account_mismatch", account: managedCloudLogin.account }));
+  assert.match(mismatch, /此存储属于另一个 GitHub 账户 · 请使用该账户登录/);
+  const dropbox = inChinese(() => renderDropbox({ phase: "prepare", login: dropboxLogin, account: dropboxLogin.account, name: "Mallard backup" }));
+  assert.match(dropbox, /r2-step-title">账户<[\s\S]*?Test User · <code>test@example\.test<\/code>/);
+  assert.match(dropbox, /正在创建 <code>Mallard backup<\/code>…/);
+  const consent = inChinese(() => renderDropbox({ phase: "login", running: true, link: "https://example.test/dropbox-link-canary" }));
+  assert.match(consent, /在浏览器中批准 · <span class="r2-countdown">3:00<\/span>/);
+  assert.doesNotMatch(consent, /dropbox-link-canary/);
+});
+
+test("in Chinese, a storage's page words its frame and keeps the name, URL, field labels and backend sentences", () => {
+  const page = (patch: Partial<StorageSummary> = {}, verifiedAt: number | null = null) => renderToStaticMarkup(
+    <StorageLockedForm
+      storage={cloudSummary(patch)}
+      descriptor={cloudProvider}
+      disabled={false}
+      onRename={async () => true}
+      onRevealSecret={async () => "never-rendered"}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={verifiedAt}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
+    />,
+  );
+  const html = inChinese(() => page());
+  assert.match(html, /<input[^>]*aria-label="存储名称"[^>]*value="Cloud storage"/);
+  assert.match(html, /sync-storage-editor-provider">Cloud A</);
+  assert.match(html, /aria-label="Cloud A 连接信息"/);
+  // A provider this build has no Chinese for keeps its descriptor's labels;
+  // summary facts are worded by their field id; saved values arrive as given.
+  assert.match(html, /API URL[\s\S]*Access Key ID[\s\S]*Region hint[\s\S]*存储桶[\s\S]*账户 ID[\s\S]*API Secret/);
+  assert.match(html, /<input type="url"[^>]*readOnly=""[^>]*value="https:\/\/example\.test\/team"/);
+  assert.match(html, /value="mallard-team"/);
+  assert.match(html, /title="复制 API URL"/);
+  assert.match(html, /sync-secret-reveal" aria-pressed="false">显示</);
+  assert.match(html, /role="note"[\s\S]*?尚未测试。/);
+  assert.match(html, /设置后不可更改。要同步到别处，请添加新的存储。/);
+  assert.match(html, /<button type="button" class="btn">测试连接<\/button>/);
+  assert.doesNotMatch(html, /Not tested|Test connection|Fixed after setup|>Show</);
+  const verified = inChinese(() => page({}, Date.now() - 5 * 60_000));
+  assert.match(verified, /已连接 · 5分钟前已验证。/);
+  assert.match(verified, /storage-setup-verified[^>]*>[\s\S]*?连接已验证/);
+  const refused = inChinese(() => page({ connection: { state: "reconnect_required", code: "reconnect_required", message: "Cloud A rejected the saved key.", observed_at: 1 } }));
+  assert.match(refused, /storage-setup-guide-error">Cloud A rejected the saved key\.</);
+  assert.match(refused, /sync-storage-refused-chip"><svg[\s\S]*?<\/svg> 被拒绝</);
+  assert.match(refused, /重新连接…/);
+});
+
+/* ── Backend labels in Chinese (D7) ──
+   The descriptors below are the backend's own, as `list_storage_providers`
+   serves them (crates/mallard-infrastructure/src/storage_providers): Chinese
+   is looked up by the provider key and the field, secret or fact id beside
+   each label, and English is the backend's text, untouched. */
+const R2_DESCRIPTOR: StorageProviderDescriptor = {
+  key: "r2",
+  config_version: 1,
+  display_name: "Cloudflare R2",
+  description: "Store snapshots in your R2 bucket.",
+  default_name: "R2 storage",
+  display_rank: 10,
+  icon: "cloud",
+  clear_mode: "unconditional",
+  fields: [
+    { field_id: "api_url", label: "S3 API URL", kind: "url", required: true, placeholder: "Example: https://9cc0c910ec***41511aca1.r2.cloudflarestorage.com/agent", help: "How to find the Cloudflare R2 S3 API URL", help_url: "https://developers.cloudflare.com/r2/" },
+    { field_id: "bucket", label: "Bucket name", kind: "text", required: true, placeholder: "Example: codex-sync-backups", help: "How to create a Cloudflare R2 bucket" },
+    { field_id: "account_id", label: "Account ID", kind: "text", required: true, placeholder: "Example: 023e105f4ecef8ad9ca31a8372d0c353", help: "Where to find your Cloudflare Account ID" },
+    { field_id: "access_key_id", label: "Access Key ID", kind: "text", required: true, placeholder: "Example: 4a2b…91ef", help: "How to create an R2 Access Key ID" },
+  ],
+  secrets: [
+    { secret_id: "secret_access_key", label: "Secret Access Key", required: true, placeholder: "Example: a1B2…x9Y0", help: "How to create an R2 Secret Access Key" },
+  ],
+  managed_secret_id: null,
+  local_setup: "wrangler",
+  manual_setup_hint: "Enter an existing R2 connection in the fields below.",
+  setup_doors: {
+    create_hint: "A new bucket in your Cloudflare account.",
+    existing_hint: "A bucket Mallard already uses.",
+    existing_help: { label: "Set up team access", url: "https://mallard.example/docs/r2" },
+  },
+};
+
+const DROPBOX_DESCRIPTOR: StorageProviderDescriptor = {
+  key: "dropbox",
+  config_version: 1,
+  display_name: "Dropbox",
+  description: "A Dropbox folder. Up to 150 MiB per object.",
+  default_name: "Dropbox storage",
+  display_rank: 20,
+  icon: "cloud",
+  clear_mode: "unconditional",
+  fields: [
+    { field_id: "namespace_id", label: "Namespace ID", kind: "text", required: true, placeholder: "Shared or team namespace ID", help: "Use the same namespace ID on each machine. This value cannot change after setup." },
+  ],
+  secrets: [
+    { secret_id: "access_token", label: "Access token", required: true, placeholder: "User-linked Dropbox access token", help: "For manual setup, supply account_info.read, files.metadata.read, files.content.read, and files.content.write. Replace this token when it expires. Browser setup renews access automatically." },
+    { secret_id: "refresh_token", label: "Refresh token", required: true, placeholder: "Dropbox refresh token", help: "Browser setup saves this token to renew access automatically. Show it to review the value, or enter a replacement issued for this Mallard app and Dropbox account." },
+  ],
+  managed_secret_id: "refresh_token",
+  local_setup: "dropbox",
+  manual_setup_hint: "Enter an existing shared or team namespace and a user-linked token. Mallard stores data in .mallard within that namespace.",
+  setup_doors: { create_hint: "A new shared folder in your Dropbox.", existing_hint: "A shared folder Mallard already uses." },
+};
+
+const FEISHU_DESCRIPTOR: StorageProviderDescriptor = {
+  key: "feishu",
+  config_version: 1,
+  display_name: "Feishu",
+  description: "A Feishu Drive folder. Up to 100 MiB per object.",
+  default_name: "Feishu storage",
+  display_rank: 25,
+  icon: "cloud",
+  clear_mode: "unavailable",
+  fields: [
+    { field_id: "folder_token", label: "Folder token", kind: "text", required: true, placeholder: "The Drive folder's token", help: "The Drive folder this storage lives in. Fixed after setup; share it in Feishu with each user who connects." },
+  ],
+  secrets: [],
+  managed_secret_id: null,
+  local_setup: "feishu",
+  setup_doors: { create_hint: "A new folder in your My Space.", existing_hint: "A folder shared with you in Feishu." },
+};
+
+const MANAGED_CLOUD_DESCRIPTOR: StorageProviderDescriptor = {
+  key: "managed_cloud",
+  config_version: 1,
+  display_name: "Mallard Cloud",
+  description: "Private snapshots with team sharing and web access.",
+  default_name: "Mallard Cloud",
+  display_rank: 0,
+  icon: "cloud",
+  clear_mode: "unavailable",
+  fields: [],
+  secrets: [
+    { secret_id: "account_token", label: "Sign-in token", required: true, placeholder: "Issued by the browser sign-in", help: "Issued at sign-in and valid 90 days. Reconnect to renew it." },
+  ],
+  managed_secret_id: "account_token",
+  local_setup: "managed_cloud",
+};
+
+const LOCAL_DESCRIPTOR: StorageProviderDescriptor = {
+  key: "local",
+  config_version: 1,
+  display_name: "Local folder",
+  description: "A local folder or mounted drive.",
+  default_name: "Local storage",
+  display_rank: 30,
+  icon: "drive",
+  clear_mode: "revision_checked",
+  fields: [
+    { field_id: "directory", label: "Location path", kind: "directory", required: true, placeholder: "e.g. /Volumes/backup/mallard-storage" },
+  ],
+  secrets: [],
+  managed_secret_id: null,
+};
+
+function r2Summary(patch: Partial<StorageSummary> = {}): StorageSummary {
+  return {
+    storage_id: "storage-r2",
+    name: "Attic R2",
+    provider: "r2",
+    config_version: 1,
+    provider_label: "Cloudflare R2",
+    icon: "cloud",
+    available: true,
+    summary: [
+      { field_id: "bucket", label: "Bucket", value: "mallard-otter", is_path: false },
+      { field_id: "account_id", label: "Account ID", value: "0123456789abcdef0123456789abcdef", is_path: false },
+      { field_id: "endpoint", label: "S3 endpoint", value: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com", is_path: false },
+      { field_id: "access_key_id", label: "Access Key ID", value: "key-id", is_path: false },
+    ],
+    settings: {
+      api_url: "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/mallard-otter",
+      bucket: "mallard-otter",
+      account_id: "0123456789abcdef0123456789abcdef",
+      access_key_id: "key-id",
+    },
+    secrets: [{ secret_id: "secret_access_key", present: true }],
+    ...patch,
+  };
+}
+
+test("in Chinese, the provider picker words each backend descriptor by its key and English stays the backend's", () => {
+  const providers = [MANAGED_CLOUD_DESCRIPTOR, R2_DESCRIPTOR, DROPBOX_DESCRIPTOR, FEISHU_DESCRIPTOR, LOCAL_DESCRIPTOR];
+  const page = () => renderToStaticMarkup(
+    <StorageProviderPicker providers={providers} busy={false} appActions={[]} onChoose={() => undefined} onCancel={() => undefined} />,
+  );
+  const zh = inChinese(page);
+  assert.match(zh, /aria-label="设置 Mallard Cloud 存储"[\s\S]*?<strong>Mallard Cloud<\/strong>[\s\S]*?私有快照，可与团队共享并在网页上查看。/);
+  assert.match(zh, /<strong>Cloudflare R2<\/strong>[\s\S]*?将快照存放在你的 R2 存储桶中。/);
+  assert.match(zh, /<strong>Dropbox<\/strong>[\s\S]*?Dropbox 文件夹。单个对象最大 150 MiB。/);
+  assert.match(zh, /aria-label="设置本地文件夹存储"[\s\S]*?<strong>本地文件夹<\/strong>[\s\S]*?本地文件夹或已挂载的磁盘。/);
+  assert.doesNotMatch(zh, /Local folder|Store snapshots|Private snapshots|per object/);
+  const en = page();
+  assert.match(en, /aria-label="Set up Local folder storage"[\s\S]*?<strong>Local folder<\/strong>[\s\S]*?A local folder or mounted drive\./);
+  assert.match(en, /<strong>Cloudflare R2<\/strong>[\s\S]*?Store snapshots in your R2 bucket\./);
+
+  // A New-storage form: the doors, field and secret labels, placeholders,
+  // help marks and Copy buttons, and the type switch.
+  const editor = (descriptor: StorageProviderDescriptor, presence: Record<string, boolean> = {}) => renderToStaticMarkup(
+    <StorageEditor
+      descriptor={descriptor}
+      providers={providers}
+      form={{ name: "Attic", settings: { bucket: "mallard-otter" }, typedSecrets: {} }}
+      secretPresence={presence}
+      disabled={false}
+      onChange={() => undefined}
+      onSwitchProvider={() => undefined}
+      setupMode={{ mode: "create", onChoose: () => undefined }}
+    />,
+  );
+  const r2 = inChinese(() => editor(R2_DESCRIPTOR));
+  assert.match(r2, /在你的 Cloudflare 账户中新建存储桶。[\s\S]*?Mallard 已在使用的存储桶。[\s\S]*?设置团队访问/);
+  assert.match(r2, /role="radio"[^>]*>本地文件夹<\/button>/);
+  assert.match(r2, /aria-label="Cloudflare R2 连接信息"/);
+  assert.match(r2, /<label[^>]*>S3 API URL<\/label><button[^>]*title="如何找到 Cloudflare R2 的 S3 API URL"/);
+  assert.match(r2, /<label[^>]*>存储桶名称<\/label><button[^>]*title="如何创建 Cloudflare R2 存储桶"/);
+  assert.match(r2, /placeholder="例如：codex-sync-backups"/);
+  assert.match(r2, /<label[^>]*>账户 ID<\/label>/);
+  assert.match(r2, /<label[^>]*>访问密钥 ID<\/label>[\s\S]*?placeholder="例如：4a2b…91ef"/);
+  assert.match(r2, /<label[^>]*>私有访问密钥<\/label><button[^>]*title="如何创建 R2 私有访问密钥"[\s\S]*?placeholder="例如：a1B2…x9Y0"/);
+  assert.match(r2, /title="复制存储桶名称"/);
+  // The typed value is the user's and stays as typed.
+  assert.match(r2, /value="mallard-otter"/);
+  assert.doesNotMatch(r2, /Bucket name|Secret Access Key|A new bucket|Set up team access|Example:/);
+  const r2English = editor(R2_DESCRIPTOR);
+  assert.match(r2English, /<label[^>]*>Bucket name<\/label>[\s\S]*?placeholder="Example: codex-sync-backups"/);
+  assert.match(r2English, /A new bucket in your Cloudflare account\.[\s\S]*?Set up team access/);
+
+  // Dropbox past its lane: the manual hint and the secrets in Chinese.
+  const dropbox = inChinese(() => editor(DROPBOX_DESCRIPTOR, { access_token: true }));
+  assert.match(dropbox, /填写已有的共享或团队命名空间，以及关联到用户的令牌。Mallard 会把数据存放在该命名空间的 \.mallard 中。/);
+  assert.match(dropbox, /<label[^>]*>命名空间 ID<\/label>[\s\S]*?placeholder="共享或团队命名空间 ID"/);
+  assert.match(dropbox, /<label[^>]*>访问令牌<\/label>/);
+  assert.match(dropbox, /在你的 Dropbox 中新建共享文件夹。/);
+
+  // A folder provider's folder field.
+  const local = inChinese(() => editor(LOCAL_DESCRIPTOR));
+  assert.match(local, /<span class="sync-field-name">位置路径<\/span>[\s\S]*?placeholder="例如：\/Volumes\/backup\/mallard-storage"/);
+});
+
+test("in Chinese, a settled storage's page, Copy all and listings word the backend's labels by key", () => {
+  const locked = (storage: StorageSummary, descriptor: StorageProviderDescriptor) => renderToStaticMarkup(
+    <StorageLockedForm
+      storage={storage}
+      descriptor={descriptor}
+      disabled={false}
+      onRename={async () => true}
+      onRevealSecret={async () => "never-rendered"}
+      onTest={() => undefined}
+      testing={false}
+      verifiedAt={null}
+      reconnect={{ open: false, onOpen: () => undefined, band: null }}
+    />,
+  );
+  const r2 = inChinese(() => locked(r2Summary(), R2_DESCRIPTOR));
+  assert.match(r2, /sync-storage-editor-provider">Cloudflare R2</);
+  assert.match(r2, /<label[^>]*>存储桶名称<\/label>[\s\S]*?<label[^>]*>账户 ID<\/label>[\s\S]*?<label[^>]*>访问密钥 ID<\/label>/);
+  // The one fact beyond the typed fields, worded by its id; its value as sent.
+  assert.match(r2, /<label[^>]*>S3 端点<\/label>[\s\S]*?value="https:\/\/0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com"/);
+  assert.match(r2, /title="复制 S3 端点"/);
+  assert.match(r2, /<label[^>]*>私有访问密钥<\/label>/);
+  assert.doesNotMatch(r2, /S3 endpoint|Bucket name|Secret Access Key/);
+  assert.match(locked(r2Summary(), R2_DESCRIPTOR), /<label[^>]*>S3 endpoint<\/label>/);
+
+  // Feishu is 飞书; its facts read in Chinese and their values stay as sent.
+  const feishu = inChinese(() => locked({
+    ...r2Summary(),
+    storage_id: "storage-feishu",
+    name: "Team folder",
+    provider: "feishu",
+    provider_label: "Feishu",
+    summary: [
+      { field_id: "folder_name", label: "Folder", value: "Mallard fox", is_path: false },
+      { field_id: "folder_token", label: "Folder token", value: "fldcnAbC123", is_path: false },
+      { field_id: "account_name", label: "Account", value: "Test User", is_path: false },
+      { field_id: "reauthorize_by", label: "Sign in again by", value: "reconnect needed", is_path: false },
+    ],
+    settings: { folder_token: "fldcnAbC123" },
+    secrets: [],
+  }, FEISHU_DESCRIPTOR));
+  assert.match(feishu, /sync-storage-editor-provider">飞书</);
+  assert.match(feishu, /aria-label="飞书连接信息"/);
+  assert.match(feishu, /<label[^>]*>文件夹令牌<\/label><button[^>]*title="此存储所在的 Drive 文件夹。设置后不可更改；请在飞书中把它共享给每位要连接的用户。"/);
+  assert.match(feishu, /<label[^>]*>文件夹<\/label>[\s\S]*?value="Mallard fox"/);
+  assert.match(feishu, /<label[^>]*>账户<\/label>[\s\S]*?value="Test User"/);
+  assert.match(feishu, /<label[^>]*>重新登录期限<\/label>[\s\S]*?value="reconnect needed"/);
+
+  // Copy all writes the labels the page shows.
+  const lines = inChinese(() => lockedCopyLines(R2_DESCRIPTOR, r2Summary()));
+  assert.deepEqual(lines.map((line) => line.label), ["S3 API URL", "存储桶名称", "账户 ID", "访问密钥 ID", "S3 端点", "私有访问密钥"]);
+  assert.deepEqual(lockedCopyLines(R2_DESCRIPTOR, r2Summary()).map((line) => line.label), ["S3 API URL", "Bucket name", "Account ID", "Access Key ID", "S3 endpoint", "Secret Access Key"]);
+  assert.deepEqual(
+    inChinese(() => editorCopyLines(R2_DESCRIPTOR, { settings: { bucket: "mallard-otter" }, typedSecrets: { secret_access_key: "s" } })),
+    [{ label: "存储桶名称", value: "mallard-otter" }, { label: "私有访问密钥", value: "s" }],
+  );
+
+  // Listings name the provider by its key; a storage with no adapter keeps its raw key.
+  const local: StorageSummary = { ...r2Summary(), storage_id: "storage-local", provider: "local", provider_label: "Local folder", summary: [] };
+  const denied = { ...local, connection: { state: "permission_denied" as const, code: "denied", message: "Denied.", observed_at: 1 } };
+  assert.equal(inChinese(() => storageSubtitle(local)), "本地文件夹");
+  assert.equal(storageSubtitle(local), "Local folder");
+  assert.equal(inChinese(() => storageConnectionIssue(denied)), "本地文件夹拒绝访问");
+  assert.equal(storageConnectionIssue(denied), "Local folder denied access");
+  assert.equal(inChinese(() => storageSubtitle({ ...local, provider: "dropbox", provider_label: "dropbox", available: false })), "dropbox");
+  assert.equal(
+    inChinese(() => storageAccessErrorMessage(local, "S3 get 'x': service error: unhandled error (AccessDenied)")),
+    "本地文件夹拒绝了凭据。请用当前有效的密钥重新连接存储，然后重试。",
+  );
+});
+
+test("every backend label keyed by an id the backend already sends has Chinese", () => {
+  const field = (provider: string, id: string, parts: readonly string[]) => parts.map((part) => `storageProvider.${provider}.field.${id}.${part}`);
+  const secret = (provider: string, id: string, parts: readonly string[]) => parts.map((part) => `storageProvider.${provider}.secret.${id}.${part}`);
+  const all = ["label", "placeholder", "help"] as const;
+  const provider = (key: string) => [`storageProvider.${key}.displayName`, `storageProvider.${key}.description`];
+  const doors = (key: string, help = false) => [
+    `storageProvider.${key}.doors.createHint`,
+    `storageProvider.${key}.doors.existingHint`,
+    ...(help ? [`storageProvider.${key}.doors.existingHelpLabel`] : []),
+  ];
+  const capability = (icon: string) => ["label", "singular", "kindLabel", "formatLabel"].map((part) => `capability.${icon}.${part}`);
+  const sessionAction = (id: string) => [`sessionAction.${id}`, `sessionAction.${id}.disabledReason`];
+  const keys = [
+    // 1. Storage provider descriptors, all five providers.
+    ...provider("local"), ...field("local", "directory", ["label", "placeholder"]),
+    ...provider("r2"),
+    ...field("r2", "api_url", all), ...field("r2", "bucket", all), ...field("r2", "account_id", all), ...field("r2", "access_key_id", all),
+    ...secret("r2", "secret_access_key", all),
+    "storageProvider.r2.manualSetupHint", ...doors("r2", true),
+    ...provider("dropbox"), ...field("dropbox", "namespace_id", all),
+    ...secret("dropbox", "access_token", all), ...secret("dropbox", "refresh_token", all),
+    "storageProvider.dropbox.manualSetupHint", ...doors("dropbox"),
+    ...provider("feishu"), ...field("feishu", "folder_token", all), ...doors("feishu"),
+    ...provider("managed_cloud"), ...secret("managed_cloud", "account_token", all),
+    // 2. Storage summary facts, by field id.
+    ...["directory", "bucket", "account_id", "endpoint", "access_key_id", "folder_name", "namespace_id", "folder_token", "account_name", "reauthorize_by", "account_login", "service_origin"]
+      .map((id) => `storageSummary.${id}`),
+    // 4. Resource kinds and apply policies.
+    ...["conversation", "provider_state", "project_content_file", "project_content_directory", "requirement"].map((key) => `resourceKind.${key}`),
+    ...["safe_file", "merge", "explicit_review", "manual_only", "never"].map((key) => `applyPolicy.${key}`),
+    // 5. Library capabilities, by presentation hint.
+    ...capability("skill"), ...capability("plugin"), ...capability("pet"), ...capability("pet-v2"),
+    // 6. Agent profiles, maintenance and session actions.
+    "agentProfile.codex", "agentProfile.claude",
+    ...["codex.app.restart", "codex.app.close"].flatMap((id) => [`maintenance.${id}.label`, `maintenance.${id}.description`]),
+    ...sessionAction("codex.open-in-app"), ...sessionAction("codex.open-in-terminal"),
+    ...sessionAction("claude.open-in-app"), ...sessionAction("claude.open-in-terminal"),
+    // 7. Conversation blockers whose sentence the service never rewrites.
+    ...["ambiguous_binding", "busy", "detached_requires_pull", "unknown_evidence", "redaction_ruleset_mismatch", "path_map_codec_mismatch"]
+      .map((blocker) => `blocker.${blocker}`),
+  ];
+  for (const key of keys) {
+    const chinese = BACKEND_ZH.get(key);
+    assert.ok(chinese && chinese.trim().length > 0, `${key} has Chinese`);
+  }
+  // These three blockers arrive with a formatted sentence of the service's
+  // under the same code ("View only — …", a capture failure, a read error):
+  // keyed Chinese would replace it with the generic one. They stay the
+  // backend's English until the backend sends a code of their own.
+  for (const blocker of ["codec_unsupported", "missing_binding", "observation_failed"]) {
+    assert.equal(BACKEND_ZH.has(`blocker.${blocker}`), false, `blocker.${blocker} is deliberately absent`);
+  }
+  // Nothing else lives in these groups: a misspelt key would never be read.
+  const groups = /^(storageProvider|storageSummary|resourceKind|applyPolicy|capability|agentProfile|maintenance|sessionAction|blocker)\./;
+  const listed = new Set(keys);
+  for (const key of BACKEND_ZH.keys()) {
+    if (groups.test(key)) assert.ok(listed.has(key), `${key} is one of the listed backend ids`);
+  }
+  // Product names stay; Feishu is 飞书; Skill stays English and singular.
+  assert.equal(BACKEND_ZH.get("storageProvider.r2.displayName"), "Cloudflare R2");
+  assert.equal(BACKEND_ZH.get("storageProvider.managed_cloud.displayName"), "Mallard Cloud");
+  assert.equal(BACKEND_ZH.get("storageProvider.feishu.displayName"), "飞书");
+  assert.equal(BACKEND_ZH.get("capability.skill.label"), "Skill");
+  // English is always the backend's own text, and an unknown key falls back to it.
+  assert.equal(backendText("storageProvider.r2.field.bucket.label", "Bucket name"), "Bucket name");
+  assert.equal(inChinese(() => backendText("storageProvider.r2.field.bucket.label", "Bucket name")), "存储桶名称");
+  assert.equal(inChinese(() => backendText("storageProvider.s3.displayName", "S3")), "S3");
+});
+
+/* D7: the scan's sentences arrive in English with a code (and the values
+   they were built from) beside each; Chinese is looked up by the code. */
+test("a discovery result keeps the backend's English and is worded by its codes in Chinese", () => {
+  const scan: StorageDiscoveryResult = {
+    scan_id: "scan-9",
+    scope: "Default and EU",
+    scope_code: "jurisdictions",
+    jurisdictions: ["default", "eu"],
+    status: "partial",
+    issues: ["2 buckets could not be checked.", "Not every bucket could be listed."],
+    issue_codes: [{ code: "unreadable_buckets", count: 2 }, { code: "listing_cut" }],
+    candidates: [
+      {
+        candidate_id: "0", name: "mallard-otter", marker: "storage",
+        marker_detail: "layout 1", marker_detail_code: "layout", marker_layout_version: 1,
+        facts: [
+          { key: "jurisdiction", label: "Jurisdiction", value: "EU", value_code: "eu" },
+          { key: "created", label: "Created", value: "Sep 2, 2026", at: 1_788_343_872 },
+        ],
+        cautions: [], caution_codes: [], connected_storage_id: null,
+      },
+      {
+        candidate_id: "1", name: "Team 共享", marker: "unreadable",
+        marker_detail: "Access denied", marker_detail_code: "access_denied", marker_layout_version: null,
+        facts: [
+          { key: "access", label: "Access", value: "viewer_no_comment", value_code: "viewer_no_comment" },
+          { key: "location", label: "Location", value: "Not mounted", value_code: "not_mounted" },
+        ],
+        cautions: ["Read access does not permit Push."], caution_codes: ["read_only"], connected_storage_id: null,
+      },
+    ],
+  };
+  const r2Discovery = {
+    unit: "bucket",
+    unit_plural: "buckets",
+    place: "your Cloudflare account",
+    find_label: "Find in my account",
+    access_hint: "Uses your Wrangler sign-in. Read-only: lists the buckets and reads one marker file in each.",
+    scanning_hint: "Looking through your Cloudflare account…",
+    prepare_hint: "Cloudflare issues an access key for this bucket only.",
+  };
+  const row = (index: number) => renderToStaticMarkup(
+    <CandidateRow
+      descriptor={{ key: "r2", icon: "r2" }}
+      candidate={scan.candidates[index]}
+      disabled={false}
+      connectedName={null}
+      onOpenStorage={() => undefined}
+    />,
+  );
+  const notice = () => renderToStaticMarkup(<ScanIncompleteNotice issues={scan.issues} codes={scan.issue_codes} />);
+
+  // English is the backend's own text, byte for byte.
+  assert.match(row(0), /<\/svg> Mallard storage · layout 1<\/span>/);
+  assert.match(row(0), /<span>Jurisdiction<\/span><b>EU<\/b><\/span><span class="sync-storage-repo-chip"><span>Created<\/span><b>Sep 2, 2026<\/b>/);
+  assert.match(row(1), /<\/svg> Could not read the marker · Access denied<\/span>/);
+  assert.match(row(1), /<span>Access<\/span><b>viewer_no_comment<\/b>[\s\S]*?<span>Location<\/span><b>Not mounted<\/b>/);
+  assert.match(row(1), /<\/svg> Read access does not permit Push\.<\/span>/);
+  assert.match(notice(), /Scan incomplete\.<\/strong> 2 buckets could not be checked\. Not every bucket could be listed\. A Mallard storage there would not be listed\./);
+  assert.equal(discoveryScope(scan), "Default and EU");
+  assert.equal(discoveryWords("r2", r2Discovery).find_label, "Find in my account");
+
+  // Chinese is looked up by code; names stay as the backend sent them.
+  const otter = inChinese(() => row(0));
+  assert.match(otter, /<\/svg> Mallard 存储 · 布局 1<\/span>/);
+  assert.match(otter, /<span>管辖区<\/span><b>EU<\/b>[\s\S]*?<span>创建于<\/span><b>2026年9月2日<\/b>/);
+  assert.match(otter, />mallard-otter</);
+  const shared = inChinese(() => row(1));
+  assert.match(shared, />Team 共享</);
+  assert.match(shared, /<\/svg> 无法读取标记 · 访问被拒绝<\/span>/);
+  assert.match(shared, /<span>访问权限<\/span><b>可查看（不可评论）<\/b>[\s\S]*?<span>位置<\/span><b>未挂载<\/b>/);
+  assert.match(shared, /<\/svg> 只读权限无法上传。<\/span>/);
+  assert.match(inChinese(notice), /2 个存储桶无法检查。未能列出所有存储桶。其中的 Mallard 存储不会被列出。/);
+  assert.equal(inChinese(() => discoveryScope(scan)), "默认和 EU");
+  assert.equal(
+    inChinese(() => discoveryScope({ scope: "Accessible Dropbox shared folders", scope_code: "dropbox_shared_folders" })),
+    "可访问的 Dropbox 共享文件夹",
+  );
+  assert.equal(inChinese(() => discoveryWords("r2", r2Discovery).find_label), "在我的账户中查找");
+  assert.equal(inChinese(() => discoveryWords("r2", r2Discovery).unit), "存储桶");
+  // A sentence the backend sent without a code stays English in Chinese.
+  assert.match(inChinese(() => renderToStaticMarkup(<ScanIncompleteNotice issues={["1 bucket was skipped."]} />)), /1 bucket was skipped\./);
 });

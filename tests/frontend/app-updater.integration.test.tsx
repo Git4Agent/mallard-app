@@ -10,6 +10,7 @@ import {
   type AppUpdates,
 } from "../../src/components/AppUpdater";
 import SettingsPage, { appVersionLine } from "../../src/components/project-sync/SettingsPage";
+import { i18n } from "../../src/i18n";
 
 /* An update shows in one place, the sidebar's version mark, and never as a
  * failure. These tests pin the corner's states, the busy gate that keeps a
@@ -35,6 +36,22 @@ test("the corner is the plain version mark until a release is ready", () => {
   assert.equal(corner({}), "");
   // A check in flight, scheduled or manual, is not news.
   assert.equal(corner({ checking: true }), "");
+});
+
+test("in Chinese the corner speaks Chinese and the version stays as released", () => {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const ready = corner({ readyVersion: "0.2.0" });
+    assert.match(ready, /title="重启 Mallard 以安装 0\.2\.0"/);
+    assert.match(ready, /<span>更新<\/span><\/button>$/);
+    assert.match(corner({ readyVersion: "0.2.0", operationRunning: true }), /title="Mallard 0\.2\.0 已就绪。完成当前操作后，重启即可更新。"/);
+    assert.match(corner({ restarting: true }), /<span>正在重启<\/span>/);
+    const receipt = corner({ receiptVersion: "0.2.0" });
+    assert.match(receipt, /title="查看 Mallard 0\.2\.0 的更新内容"/);
+    assert.match(receipt, />新功能<\/button>$/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });
 
 test("a ready release is one Update button that names the version", () => {

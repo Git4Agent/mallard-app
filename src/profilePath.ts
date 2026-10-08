@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 /**
  * Resolve a typed `~` before sending a profile path to the backend. The home
  * path supplies the host separator, so this works for both POSIX and Windows
@@ -52,7 +54,7 @@ export interface ProfilePathHint {
  */
 function readableProbeError(message: string): string {
   if (/no such file or directory|cannot find the path|os error 2/i.test(message)) {
-    return "No folder at this path yet.";
+    return t("shell:profilePath.missing");
   }
   return message.replace(/^inspect (?:provider|catalog) profile '[^']*':\s*/, "");
 }
@@ -68,13 +70,13 @@ export function profilePathHint(
 ): ProfilePathHint {
   const expanded = expandHomePath(rawPath, home);
   if (!expanded) {
-    return { tone: "mute", message: "Type or paste a path, or Browse. ~ means your home folder." };
+    return { tone: "mute", message: t("shell:profilePath.empty") };
   }
   if (!isAbsoluteProfilePath(expanded)) {
-    return { tone: "mute", message: "Paths must be absolute — start with ~/, / or a drive letter." };
+    return { tone: "mute", message: t("shell:profilePath.relative") };
   }
   if (!state || state.status === "checking") {
-    return { tone: "mute", message: "Checking", path: expanded };
+    return { tone: "mute", message: t("shell:profilePath.checking"), path: expanded };
   }
   if (state.status === "error") {
     return { tone: "bad", message: readableProbeError(state.message) };
@@ -84,17 +86,17 @@ export function profilePathHint(
     ? profiles.find((profile) => profile.profile_id === probe.existing_profile_id) ?? null
     : null;
   if (registered) {
-    return { tone: "ok", message: `Already set up as “${registered.display_name}” — setup will reuse it.` };
+    return { tone: "ok", message: t("shell:profilePath.registered", { name: registered.display_name }) };
   }
   if (!probe.readable) {
-    return { tone: "warn", message: "This folder can’t be read. Check its permissions.", path: probe.canonical_path };
+    return { tone: "warn", message: t("shell:profilePath.unreadable"), path: probe.canonical_path };
   }
   if (probe.detected_child && descriptor.default_profile_directory) {
     return {
       tone: "ok",
-      message: `Found ${descriptor.default_profile_directory} inside — using`,
+      message: t("shell:profilePath.foundInside", { directory: descriptor.default_profile_directory }),
       path: probe.canonical_path,
     };
   }
-  return { tone: "ok", message: `${descriptor.display_name} profile ·`, path: probe.canonical_path };
+  return { tone: "ok", message: t("shell:profilePath.profile", { name: descriptor.display_name }), path: probe.canonical_path };
 }

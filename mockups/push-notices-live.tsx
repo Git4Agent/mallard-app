@@ -4,7 +4,7 @@ import { NoticeZone } from "../src/components/notice/Notice";
 import { clearedStorageNotice } from "../src/components/project-sync/clearedStorageNotice";
 import SyncOutcomeNotice from "../src/components/sync-review/SyncOutcomeNotice";
 import { REVIEW_EXPIRED, REVIEW_SUPERSEDED } from "../src/components/project-sync/pullReviewFlow";
-import { PUSH_FINISHED, ownUnfinishedPushSentence, unfinishedPushSentence } from "../src/unfinishedPush";
+import { ownUnfinishedPushSentence, pushFinished, unfinishedPushSentence } from "../src/unfinishedPush";
 import { pushFailureNotice } from "../src/components/project-sync/pushFailureNotice";
 import type { SyncOutcome } from "../src/components/project-sync/syncOutcome";
 import type { ScopeContinuity, ThreadSyncComparison } from "../src/types";
@@ -221,7 +221,7 @@ createRoot(document.getElementById("root")!).render(
       >
         <ShellBanner error={unfinishedPushSentence("Attic R2")} />
         <ShellBanner error={ownUnfinishedPushSentence("Attic R2")} />
-        <ShellBanner error={PUSH_FINISHED} />
+        <ShellBanner error={pushFinished()} />
       </Specimen>
       <Specimen
         when="A Pull refused after its review"

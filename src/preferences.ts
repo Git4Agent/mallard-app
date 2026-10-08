@@ -13,12 +13,17 @@ import type { AppTheme } from "./types";
 
 export type ThemeChoice = "system" | AppTheme;
 
+/** The interface language: the system's, or one picked in Settings. */
+export type UiLanguage = "en" | "zh-CN";
+export type LanguageChoice = "system" | UiLanguage;
+
 export type BooleanPreferenceName =
   | "openLogsOnSync"
   | "refreshOnFocus"
   | "clock24";
 
 const THEME_KEY = "mallard.theme";
+const LANGUAGE_KEY = "mallard.language";
 
 /** Sync preferences default off; the 24-hour clock defaults on. */
 const BOOLEAN_KEYS: Record<BooleanPreferenceName, string> = {
@@ -96,6 +101,19 @@ export function setThemeChoice(choice: ThemeChoice): boolean {
   return saved;
 }
 
+export function getLanguageChoice(): LanguageChoice {
+  const stored = readKey(LANGUAGE_KEY);
+  return stored === "en" || stored === "zh-CN" ? stored : "system";
+}
+
+/** Returns whether the choice was saved; `src/i18n` applies what storage
+ *  then holds, the way the theme does. */
+export function setLanguageChoice(choice: LanguageChoice): boolean {
+  const saved = writeKey(LANGUAGE_KEY, choice);
+  notify();
+  return saved;
+}
+
 export function getPreference(name: BooleanPreferenceName): boolean {
   const stored = readKey(BOOLEAN_KEYS[name]);
   return name === "clock24" ? stored !== "off" : stored === "on";
@@ -168,4 +186,8 @@ export function usePreference(name: BooleanPreferenceName): boolean {
 
 export function useThemeChoice(): ThemeChoice {
   return useSyncExternalStore(subscribePreferences, getThemeChoice, getThemeChoice);
+}
+
+export function useLanguageChoice(): LanguageChoice {
+  return useSyncExternalStore(subscribePreferences, getLanguageChoice, getLanguageChoice);
 }

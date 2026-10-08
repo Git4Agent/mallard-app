@@ -15,6 +15,7 @@ import { nameMatchesSearch } from "../sync-review/nameSearch";
 import { formatBytes } from "../../format";
 import { formatFullDateTime } from "../../clock";
 import { errorMessage } from "../../storageError";
+import { t, Trans, useTranslation } from "../../i18n";
 import { PROJECT_FILE_CARD_RENDER_LIMIT, fileKindLabel, fileNoun, projectFileWarningLabel } from "./model";
 import { projectSyncApi } from "./api";
 import { ProjectFilesLockedNotice } from "./ProjectFilesReviewPage";
@@ -142,29 +143,31 @@ function filePresentation(
   storageName: string,
 ): { icon: ThreadStatusIconName; tone: string; sentence: string } {
   if (entry.blocked_reason || entry.state === "blocked") {
-    return { icon: "unavailable", tone: "unavailable", sentence: `Unavailable for sync. ${entry.blocked_reason ?? ""}`.trim() };
+    return {
+      icon: "unavailable",
+      tone: "unavailable",
+      sentence: entry.blocked_reason
+        ? t("projects:status.unavailableWithReason", { reason: entry.blocked_reason })
+        : t("projects:status.unavailable"),
+    };
   }
   switch (entry.state) {
     case "synced":
-      return { icon: "synced", tone: "synced", sentence: `Up to date here and in ${storageName}.` };
+      return { icon: "synced", tone: "synced", sentence: t("projects:status.synced", { storage: storageName }) };
     case "local_only":
-      return { icon: "local-outstanding", tone: "local", sentence: `Only on this computer. Push to save it in ${storageName}.` };
+      return { icon: "local-outstanding", tone: "local", sentence: t("projects:status.localOnly", { storage: storageName }) };
     case "local_ahead":
-      return { icon: "local-outstanding", tone: "local", sentence: `Newer on this computer. Push to update ${storageName}.` };
+      return { icon: "local-outstanding", tone: "local", sentence: t("projects:status.localAhead", { storage: storageName }) };
     case "storage_only":
-      return { icon: "cloud-outstanding", tone: "storage", sentence: `Only in ${storageName}. Pull to download it here.` };
+      return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:status.storageOnly", { storage: storageName }) };
     case "storage_ahead":
-      return { icon: "cloud-outstanding", tone: "storage", sentence: `Newer in ${storageName}. Pull to update this computer.` };
+      return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:status.storageAhead", { storage: storageName }) };
     case "diverged":
-      return { icon: "divergent", tone: "diverged", sentence: `Changed here and in ${storageName}. Review before syncing.` };
+      return { icon: "divergent", tone: "diverged", sentence: t("projects:status.diverged", { storage: storageName }) };
     case "missing":
-      return {
-        icon: "cloud-outstanding",
-        tone: "storage",
-        sentence: `Not in this folder. It remains in ${storageName}. Pull to download it here, or remove it during Push.`,
-      };
+      return { icon: "cloud-outstanding", tone: "storage", sentence: t("projects:status.missing", { storage: storageName }) };
     default:
-      return { icon: "unknown", tone: "unknown", sentence: "State unknown. Rescan to compare." };
+      return { icon: "unknown", tone: "unknown", sentence: t("projects:status.unknown") };
   }
 }
 
@@ -230,8 +233,9 @@ export function buildProjectFilesActivityProjection(
 
 function groupFacts(entries: ProjectContentEntry[]): string {
   const bytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
-  const count = `${entries.length} ${fileNoun(entries.length)}`;
-  return bytes > 0 ? `${count} · ${formatBytes(bytes)}` : count;
+  return bytes > 0
+    ? t("projects:files.groupFactsSize", { count: entries.length, size: formatBytes(bytes) })
+    : t("projects:files.groupFacts", { count: entries.length });
 }
 
 /** One file, the two-line session-grammar card: title line (status mark,
@@ -248,6 +252,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
   onRevealPath?: (path: string) => void;
   withPathPrefix?: boolean;
 }) {
+  const { t } = useTranslation("projects");
   const presentation = filePresentation(entry, storageName);
   const warningLabel = entry.warning_code ? projectFileWarningLabel(entry.warning_code) : null;
   const directory = parentPath(entry.relative_path);
@@ -267,7 +272,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
             <button
               type="button"
               className="sync-history-session-title-button"
-              title={`Open ${entry.relative_path}`}
+              title={t("files.open", { path: entry.relative_path })}
               onClick={() => onOpenFile(entry.relative_path)}
             >
               {withPathPrefix && directory !== "" && <span>{directory}/</span>}
@@ -280,7 +285,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
             </strong>
           )}
           {entry.blocked_reason && (
-            <span className="sync-history-branch-state history-only" title={entry.blocked_reason}>Blocked</span>
+            <span className="sync-history-branch-state history-only" title={entry.blocked_reason}>{t("files.blocked")}</span>
           )}
           {warningLabel && (
             <NoticeChip severity="warning">{warningLabel}</NoticeChip>
@@ -291,10 +296,10 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
             type="button"
             className="btn btn-ghost sync-history-launch-action"
             disabled={!entry.local_present || !onRevealPath}
-            title={entry.local_present ? `Show ${entry.relative_path} in Finder` : "Not on this Mac"}
+            title={entry.local_present ? t("files.reveal", { path: entry.relative_path }) : t("files.notHere")}
             aria-label={entry.local_present
-              ? `Show ${entry.relative_path} in Finder`
-              : `Cannot show ${entry.relative_path}: not on this Mac`}
+              ? t("files.reveal", { path: entry.relative_path })
+              : t("files.cannotReveal", { path: entry.relative_path })}
             onClick={() => onRevealPath?.(`${projectRoot}/${entry.relative_path}`)}
           >
             <Icon name="folder" size={14} />
@@ -303,10 +308,10 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
       </div>
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
-          <div className="sync-history-thread-meta" aria-label={`${entry.relative_path} details`}>
+          <div className="sync-history-thread-meta" aria-label={t("files.details", { path: entry.relative_path })}>
             <span
               className="sync-history-thread-metric"
-              data-tooltip={`Kind · ${fileKindLabel(entry.relative_path)}`}
+              data-tooltip={t("files.kind", { kind: fileKindLabel(entry.relative_path) })}
               tabIndex={0}
             >
               <SessionRowIcon name="file" /><b>{fileKindLabel(entry.relative_path)}</b>
@@ -315,7 +320,9 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
               ? (
                 <span
                   className="sync-history-thread-metric"
-                  data-tooltip={`${entry.local_present ? "On disk" : `In ${storageName}`} · ${formatBytes(entry.size)}`}
+                  data-tooltip={entry.local_present
+                    ? t("files.onDisk", { size: formatBytes(entry.size) })
+                    : t("files.inStorage", { storage: storageName, size: formatBytes(entry.size) })}
                   tabIndex={0}
                 >
                   <SessionRowIcon name="size" /><b>{formatBytes(entry.size)}</b>
@@ -328,7 +335,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
             <ProjectFileDetailsMenu
               relativePath={entry.relative_path}
               projectRoot={projectRoot}
-              entryTypeLabel={entry.entry_type === "blocked" ? "Blocked entry" : "Regular file"}
+              entryTypeLabel={entry.entry_type === "blocked" ? t("fileDetails.blockedEntry") : t("fileDetails.regularFile")}
               mode={formatMode(entry.mode)}
               modified={entry.source_mtime == null ? null : formatFullDateTime(entry.source_mtime)}
               blockedReason={entry.blocked_reason}
@@ -337,7 +344,9 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
           {entry.source_mtime != null && (
             <span
               className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-              data-tooltip={`${entry.local_present ? "Modified" : `Updated in ${storageName}`} · ${formatFullDateTime(entry.source_mtime)}`}
+              data-tooltip={entry.local_present
+                ? t("files.modified", { when: formatFullDateTime(entry.source_mtime) })
+                : t("files.updatedIn", { storage: storageName, when: formatFullDateTime(entry.source_mtime) })}
               tabIndex={0}
             >
               <time dateTime={new Date(entry.source_mtime * 1_000).toISOString()}>{formatFullDateTime(entry.source_mtime)}</time>
@@ -373,6 +382,7 @@ export function ProjectFilesActivityView({
   statusScope?: StatusScope | null;
   onStatusScopeChange?: (scope: StatusScope | null) => void;
 }) {
+  const { t } = useTranslation("projects");
   const [search, setSearch] = useState("");
   const [localStatusScope, setLocalStatusScope] = useState<StatusScope | null>(null);
   const pageRef = useRef<HTMLElement>(null);
@@ -419,7 +429,7 @@ export function ProjectFilesActivityView({
 
   if (error) {
     return (
-      <section className="sync-project-files-page" aria-label="Project files">
+      <section className="sync-project-files-page" aria-label={t("files.label")}>
         {switchRow}
         {/* The scan the reader asked for did not happen; the box interrupts. */}
         <Notice severity="danger" timing="blocking">{error}</Notice>
@@ -428,15 +438,15 @@ export function ProjectFilesActivityView({
   }
   if (!inventory) {
     return (
-      <section className="sync-project-files-page" aria-label="Project files">
+      <section className="sync-project-files-page" aria-label={t("files.label")}>
         {switchRow}
         {loading
-          ? <LoadingScaffold shape="rows" label="Scanning project files" />
+          ? <LoadingScaffold shape="rows" label={t("files.scanning")} />
           : (
             /* Standing, not an event: there was no storage to compare against
                the moment the page rendered. */
-            <Notice severity="info" timing="standing" label="Why file states are unavailable">
-              Link a storage to scan this folder and compare its files.
+            <Notice severity="info" timing="standing" label={t("files.unavailableLabel")}>
+              {t("files.linkStorage")}
             </Notice>
           )}
       </section>
@@ -444,7 +454,7 @@ export function ProjectFilesActivityView({
   }
   if (inventory.eligibility.state !== "eligible") {
     return (
-      <section className="sync-project-files-page" aria-label="Project files">
+      <section className="sync-project-files-page" aria-label={t("files.label")}>
         {switchRow}
         <ProjectFilesLockedNotice eligibility={inventory.eligibility} withDetectedRoot />
       </section>
@@ -452,7 +462,7 @@ export function ProjectFilesActivityView({
   }
 
   return (
-    <section ref={pageRef} className="sync-project-files-page" aria-label="Project files">
+    <section ref={pageRef} className="sync-project-files-page" aria-label={t("files.label")}>
       {fileEntries.length > 0 ? (
         /* The Sessions face's own search row: the switch leads it, and the
            path bar's refresh is this face's rescan, so neither face carries
@@ -460,7 +470,7 @@ export function ProjectFilesActivityView({
         <NameSearchField
           query={search}
           onChange={setSearch}
-          label="Search files"
+          label={t("files.search")}
           matches={matchingCount}
           total={fileEntries.length}
           noun={fileNoun}
@@ -473,7 +483,7 @@ export function ProjectFilesActivityView({
            falls in has no place on it — unless it is the one in force,
            which stays, at zero, so it can be released. */
         <StatusScopeBar
-          label="Show files by status"
+          label={t("files.scopeLabel")}
           noun={fileNoun}
           total={fileEntries.length}
           active={statusScope}
@@ -486,13 +496,13 @@ export function ProjectFilesActivityView({
       {fileEntries.length === 0 ? (
         <div className="sync-pull-empty">
           <Icon name="check-circle" size={16} />
-          <span><strong>No files</strong><small>Nothing in this folder syncs yet.</small></span>
+          <span><strong>{t("files.empty")}</strong><small>{t("files.emptyHint")}</small></span>
         </div>
       ) : matchingCount === 0 ? (
         <div className="sync-history-state">
-          No matching files.
+          {t("files.noMatches")}
           {scopeEmptiedList && (
-            <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>Clear filter</button>
+            <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>{t("list.clearFilter")}</button>
           )}
         </div>
       ) : (
@@ -500,7 +510,10 @@ export function ProjectFilesActivityView({
           {cloudEntries.length > 0 && (
             /* No counts and no phrase in the head — each row's badge already
                says "Pull to download it here" against the storage by name. */
-            <ListTile icon="cloud" cloud label={<>Only in <span className="sync-history-storage-name">{storageName}</span></>}>
+            <ListTile icon="cloud" cloud label={(
+              <Trans t={t} i18nKey="list.onlyIn" values={{ storage: storageName }}
+                components={{ name: <span className="sync-history-storage-name" /> }} />
+            )}>
               {cloudEntries.map((entry) => (
                 <FileActivityCard
                   key={entry.descriptor.resource_id}
@@ -522,7 +535,7 @@ export function ProjectFilesActivityView({
             <ListTile
               key={group.directory || "(root)"}
               icon="folder"
-              label={group.directory === "" ? "Project root" : <span>{group.directory}/</span>}
+              label={group.directory === "" ? t("files.projectRoot") : <span>{group.directory}/</span>}
               facts={groupFacts(group.entries)}
             >
               {group.entries.map((entry) => (
@@ -539,8 +552,10 @@ export function ProjectFilesActivityView({
           ))}
           {matchingCount > PROJECT_FILE_CARD_RENDER_LIMIT && (
             <div className="sync-project-file-limit">
-              First {PROJECT_FILE_CARD_RENDER_LIMIT} of {matchingCount} files shown.
-              {scopeBarShown ? " Search or choose a status to narrow the list." : " Search to narrow the list."}
+              {t(scopeBarShown ? "files.limitScope" : "files.limitSearch", {
+                limit: PROJECT_FILE_CARD_RENDER_LIMIT,
+                total: matchingCount,
+              })}
             </div>
           )}
         </>
@@ -548,7 +563,11 @@ export function ProjectFilesActivityView({
       {(inventory.ignored_count > 0 || inventory.blocked_count > 0 || inventory.warnings.length > 0) && (
         <details className="sync-project-files-scan-summary">
           <summary>
-            {inventory.ignored_count} ignored · {inventory.blocked_count} blocked · {inventory.warnings.length} scan warning{inventory.warnings.length === 1 ? "" : "s"}
+            {t("files.scanSummary", {
+              ignored: inventory.ignored_count,
+              blocked: inventory.blocked_count,
+              count: inventory.warnings.length,
+            })}
           </summary>
           {inventory.warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </details>

@@ -1,4 +1,5 @@
 import type { KeyboardEvent } from "react";
+import { useTranslation } from "../../i18n";
 import Icon from "../Icons";
 
 export type ProjectView = "sessions" | "files";
@@ -8,10 +9,11 @@ export const PROJECT_VIEW_PANEL_ID = "project-history-panel";
 
 export const projectViewTabId = (view: ProjectView) => `project-view-${view}-tab`;
 
-/** The two faces of a non-Git project, in the order the switch shows them. */
+/** The two faces of a non-Git project, in the order the switch shows them;
+ *  each is named by `shell:projectView.<id>`. */
 const PROJECT_VIEWS = [
-  { id: "sessions", label: "Sessions", icon: "message" },
-  { id: "files", label: "Files", icon: "file" },
+  { id: "sessions", icon: "message" },
+  { id: "files", icon: "file" },
 ] as const;
 
 /**
@@ -28,6 +30,7 @@ export default function ProjectViewSwitch({
   view: ProjectView;
   onChange: (view: ProjectView) => void;
 }) {
+  const { t } = useTranslation("shell");
   const select = (next: ProjectView, keepFocus: boolean) => {
     onChange(next);
     if (!keepFocus) return;
@@ -52,7 +55,7 @@ export default function ProjectViewSwitch({
   };
 
   return (
-    <div className="sync-segmented sync-project-view-tabs" role="tablist" aria-label="Project view">
+    <div className="sync-segmented sync-project-view-tabs" role="tablist" aria-label={t("projectView.label")}>
       {PROJECT_VIEWS.map((candidate) => {
         const active = view === candidate.id;
         return (
@@ -69,7 +72,7 @@ export default function ProjectViewSwitch({
             onKeyDown={handleKeyDown}
           >
             <Icon name={candidate.icon} size={13} />
-            <span>{candidate.label}</span>
+            <span>{t(`projectView.${candidate.id}`)}</span>
           </button>
         );
       })}

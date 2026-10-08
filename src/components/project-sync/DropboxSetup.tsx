@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ParseKeys } from "i18next";
 import type { DropboxSetupLogin, DropboxSetupMode, StorageDiscoveryCandidate, StorageDiscoveryResult, StorageProviderDescriptor, StorageSetupDraft, StorageSummary } from "../../types";
 import { writeClipboardText } from "../sync-review/clipboard";
 import { projectSyncApi } from "./api";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Icon from "../Icons";
+import { t as translate, Trans, useTranslation } from "../../i18n";
 import { CandidateGroups, CandidateRow, candidateSelectable, DiscoveryEmpty, ScanIncompleteNotice } from "./StorageDiscovery";
 import { Step, useCountdown, type StepStatus, type StepView, type StorageSetupPort } from "./StorageSetupStep";
 
@@ -24,29 +26,31 @@ interface State {
 }
 const idle = (): State => ({ phase: "idle", running: false, cancelling: false, error: null, link: null, login: null, account: null, name: "", scan: null, chosen: null });
 type Api = Pick<typeof projectSyncApi, "authorizeDropboxSetup" | "proposeDropboxFolderName" | "discoverDropboxStorage" | "prepareDropboxStorage" | "cancelDropboxSetup">;
+type StorageKey = ParseKeys<"storage">;
 
 export function dropboxFolderNameIssue(name: string): string | null {
   return !name || new TextEncoder().encode(name).length > 255 || name.trim() !== name
     || name === "." || name === ".." || /[\x00-\x1f\x7f-\x9f/\\]/u.test(name)
-    ? "one name, up to 255 bytes, no slashes or control characters" : null;
+    ? translate("storage:dropbox.folderNameIssue") : null;
 }
 
-const errors: Record<string, string> = {
-  dropbox_authorization_timeout: "Expired after 3 minutes",
-  dropbox_consent_denied: "Dropbox access was not approved",
-  dropbox_callback_unavailable: "The authorization port is in use · close the other setup attempt",
-  dropbox_setup_cancelled: "Stopped",
-  dropbox_new_setup_required: "This setup already has its folder · start a new setup for another account",
-  dropbox_folder_name_invalid: "The folder name is not valid",
-  dropbox_session_expired: "The sign-in expired · sign in again",
-  dropbox_scan_expired: "Scan expired · sign in and scan again",
-  dropbox_folder_changed: "The folder changed or could not be verified · scan again",
-  dropbox_draft_changed: "The draft changed · sign in again for the current draft",
-  dropbox_already_connected: "This folder is already connected · open its storage settings",
-  dropbox_reconnect_required: "Dropbox access is no longer valid · reconnect to continue",
-  dropbox_permission_denied: "Dropbox denied access · check the account and folder permissions",
-  dropbox_setup_share_pending: "Dropbox is still preparing the folder · find it in your Dropbox once it appears, or choose another name",
-  dropbox_cancel_failed: "Could not stop the setup",
+/** What a failed line says, by the backend's error code. */
+const errors: Partial<Record<string, StorageKey>> = {
+  dropbox_authorization_timeout: "laneError.expired3Minutes",
+  dropbox_consent_denied: "dropboxError.consentDenied",
+  dropbox_callback_unavailable: "dropboxError.callbackUnavailable",
+  dropbox_setup_cancelled: "lane.stopped",
+  dropbox_new_setup_required: "dropboxError.newSetupRequired",
+  dropbox_folder_name_invalid: "laneError.folderNameInvalid",
+  dropbox_session_expired: "laneError.sessionExpired",
+  dropbox_scan_expired: "dropboxError.scanExpired",
+  dropbox_folder_changed: "dropboxError.folderChanged",
+  dropbox_draft_changed: "laneError.draftChanged",
+  dropbox_already_connected: "laneError.alreadyConnected",
+  dropbox_reconnect_required: "dropboxError.reconnectRequired",
+  dropbox_permission_denied: "dropboxError.permissionDenied",
+  dropbox_setup_share_pending: "dropboxError.sharePending",
+  dropbox_cancel_failed: "laneError.cancelFailed",
 };
 function errorCode(reason: unknown): string {
   const value = reason && typeof reason === "object" && "code" in reason ? reason.code : "dropbox_setup_failed";
@@ -185,7 +189,6 @@ const PHASES: Phase[] = ["idle", "login", "account", "folder", "find", "pick", "
 const chip = (label: string, value: string) => (
   <span key={label} className="sync-storage-repo-chip"><span>{label}</span><b>{value}</b></span>
 );
-const RESET_TITLE = "Discards this setup draft and all of its progress, then opens a fresh one. A folder already created in Dropbox is kept.";
 
 /** The Dropbox lane in the R2 lane's grammar: one line per step with its
  *  glyph, fact and the controls that step owns; a failure said on its own
@@ -203,8 +206,9 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
   /** Reset setup: this draft goes, a fresh one opens on the doors. */
   onReset: () => void;
 }) {
+  const { t } = useTranslation(["storage", "common"]);
   const { state } = flow;
-  const [copyNotice, setCopyNotice] = useState<{ text: string; url?: string } | null>(null);
+  const [copyNotice, setCopyNotice] = useState<{ key: StorageKey; url?: string } | null>(null);
   useEffect(() => { setCopyNotice(null); }, [state.link, state.phase, state.error]);
   const budget = useCountdown(state.link, 180);
   const button = (label: ReactNode, onClick: () => void, tone: "plain" | "primary" | "ghost" = "plain", inert = disabled) => (
@@ -218,41 +222,41 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     </button>
   );
   /* Cancel belongs to the run, so it ignores the page's lock. */
-  const cancelButton = button(state.cancelling ? "Cancelling…" : "Cancel", () => void flow.cancel(), "ghost", state.cancelling);
+  const cancelButton = button(state.cancelling ? t("lane.cancelling") : t("common:cancel"), () => void flow.cancel(), "ghost", state.cancelling);
   const copy = async (url: string) => {
     try {
       await writeClipboardText(url);
-      setCopyNotice({ text: "Link copied." });
+      setCopyNotice({ key: "lane.linkCopied" });
     } catch {
-      setCopyNotice({ text: "Could not copy. Select and copy the link.", url });
+      setCopyNotice({ key: "lane.copyLinkFailed", url });
     }
   };
   const open = async (url: string) => {
     try {
       await openUrl(url);
     } catch {
-      setCopyNotice({ text: "Could not open a browser. Copy the link into a browser on this computer.", url });
+      setCopyNotice({ key: "lane.openFailed", url });
     }
   };
   const copyStatus = copyNotice && (
     <>
-      <span role="status">{copyNotice.text}</span>
-      {copyNotice.url && <input aria-label="Dropbox authorization link" readOnly value={copyNotice.url} />}
+      <span role="status">{t(copyNotice.key)}</span>
+      {copyNotice.url && <input aria-label={t("dropbox.authorizationLink")} readOnly value={copyNotice.url} />}
     </>
   );
   /* The browser step is the user's turn, in whichever browser or profile
      they choose: the link is theirs to copy; opening it here is the shortcut. */
   const browserControls = (url: string) => (
     <>
-      {button(<><Icon name="copy" size={12} /> Copy link</>, () => void copy(url), "primary", false)}
-      {button(<><Icon name="external-link" size={12} /> Open browser</>, () => void open(url), "plain", false)}
+      {button(<><Icon name="copy" size={12} /> {t("lane.copyLink")}</>, () => void copy(url), "primary", false)}
+      {button(<><Icon name="external-link" size={12} /> {t("lane.openBrowser")}</>, () => void open(url), "plain", false)}
       {cancelButton}
       {copyStatus}
     </>
   );
   const resetButton = (
-    <button type="button" className="btn btn-ghost storage-setup-guide-button" disabled={disabled} title={RESET_TITLE} onClick={onReset}>
-      <Icon name="refresh" size={12} /> Reset setup
+    <button type="button" className="btn btn-ghost storage-setup-guide-button" disabled={disabled} title={t("dropbox.resetTitle")} onClick={onReset}>
+      <Icon name="refresh" size={12} /> {t("lane.reset")}
     </button>
   );
 
@@ -260,13 +264,13 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     return (
       <>
         <span className="storage-setup-guide-copy">
-          {mode === "create" ? "Covers your whole Dropbox account."
-            : mode === "existing" ? "Lists your shared folders, read-only. Covers your whole Dropbox account."
-            : "Renews access to this storage’s folder. Covers your whole Dropbox account."}
+          {mode === "create" ? t("dropbox.createIntro")
+            : mode === "existing" ? t("dropbox.existingIntro")
+            : t("dropbox.reconnectIntro")}
         </span>
         <button type="button" className="btn storage-setup-guide-button storage-setup-agent-cta" disabled={disabled} onClick={() => flow.start()}>
           <Icon name="link" size={13} />{" "}
-          {mode === "create" ? "Connect Dropbox" : mode === "existing" ? "Find in my Dropbox" : "Reconnect Dropbox"}
+          {mode === "create" ? t("dropbox.connect") : mode === "existing" ? t("dropbox.find") : t("dropbox.reconnect")}
         </button>
       </>
     );
@@ -276,12 +280,12 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     return (
       <>
         <span className="r2-ready" role="status">
-          <span className="storage-setup-guide-connected"><Icon name="check-circle" size={13} /> Ready for review.</span>
+          <span className="storage-setup-guide-connected"><Icon name="check-circle" size={13} /> {t("lane.ready")}</span>
           <span className="r2-facts">
-            {folder && chip("Folder", folder)}
-            {state.chosen?.identity && chip("Namespace", state.chosen.identity)}
-            {state.account && chip("Account", state.account.name || state.account.email)}
-            {chip("Access", "account-wide · renews")}
+            {folder && chip(t("lane.folder"), folder)}
+            {state.chosen?.identity && chip(t("dropbox.namespace"), state.chosen.identity)}
+            {state.account && chip(t("lane.account"), state.account.name || state.account.email)}
+            {chip(t("lane.access"), t("dropbox.accessFact"))}
           </span>
         </span>
         {resetButton}
@@ -302,22 +306,22 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     : "folder";
   const statusOf = (key: string, first: number, last = first): StepStatus =>
     index > last ? "done" : index < first ? "todo" : failedKey === key ? "failed" : "doing";
-  const reason = () => errors[state.error ?? ""] ?? "Dropbox setup could not finish";
+  const reason = () => t(errors[state.error ?? ""] ?? "dropbox.failed");
   const settled = !state.running;
-  const retryButton = state.error && FINAL_CODES.has(state.error) ? null : button("Try again", () => flow.start(), "primary");
+  const retryButton = state.error && FINAL_CODES.has(state.error) ? null : button(t("common:tryAgain"), () => flow.start(), "primary");
   const newSetupButton = mode === "create" && state.error === "dropbox_new_setup_required"
-    ? button("New setup for another account", onNewSetup) : null;
+    ? button(t("dropbox.newSetup"), onNewSetup) : null;
   /* A draft that already holds its folder is fixed to it, so the way to
      another account is a new setup, offered where Change login was. */
-  const changeLoginButton = newSetupButton ?? button(<><Icon name="user" size={12} /> Change login</>, () => flow.start(true));
+  const changeLoginButton = newSetupButton ?? button(<><Icon name="user" size={12} /> {t("lane.changeLogin")}</>, () => flow.start(true));
 
   const signIn: StepView = (() => {
     const status = statusOf("login", 1);
     return {
-      key: "login", title: "Sign in", status,
+      key: "login", title: t("lane.signIn"), status,
       fact: status === "failed" ? reason()
-        : status === "doing" ? (state.link ? <>Approve in your browser · <span className="r2-countdown">{budget}</span></> : "Starting sign-in…")
-        : "Approved · whole account",
+        : status === "doing" ? (state.link ? <>{t("lane.approveInBrowser")} · <span className="r2-countdown">{budget}</span></> : t("lane.startingSignIn"))
+        : t("dropbox.approved"),
       controls: status === "failed" ? <>{retryButton}{changeLoginButton}</>
         : status === "doing" ? (state.link ? browserControls(state.link) : cancelButton)
         : settled && state.phase !== "account" ? changeLoginButton
@@ -328,12 +332,12 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
   const account: StepView = (() => {
     const status = statusOf("account", 2);
     return {
-      key: "account", title: "Account", status,
+      key: "account", title: t("lane.account"), status,
       fact: status === "failed" ? reason()
         : state.account ? <>{state.account.name || state.account.email} · <code>{state.account.email}</code></>
-        : "Confirmed before anything changes",
+        : t("lane.confirmedFirst"),
       controls: status === "failed" ? <>{retryButton}{changeLoginButton}</>
-        : status === "doing" ? <>{button("Continue", flow.confirmAccount, "primary")}{changeLoginButton}</>
+        : status === "doing" ? <>{button(t("lane.continue"), flow.confirmAccount, "primary")}{changeLoginButton}</>
         : undefined,
     };
   })();
@@ -345,24 +349,24 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
     /* A changed folder wants a fresh scan of the same session; an expired
        scan wants the sign-in again, which Try again is. */
     const expired = state.error === "dropbox_folder_changed";
-    const scanAgainButton = button(<><Icon name="refresh" size={12} /> Scan again</>, flow.scan);
+    const scanAgainButton = button(<><Icon name="refresh" size={12} /> {t("shared.scanAgain")}</>, flow.scan);
     return {
-      key: "folders", title: "Folders", status,
+      key: "folders", title: t("dropbox.folders"), status,
       fact: status === "failed" ? reason()
-        : state.phase === "find" ? "Scanning · read-only"
-        : result && status === "doing" ? <>{result.candidates.length} checked · read-only</>
+        : state.phase === "find" ? t("dropbox.scanning")
+        : result && status === "doing" ? t("lane.checkedReadOnly", { count: result.candidates.length })
         : status === "done" && state.chosen ? <><code>{state.chosen.name}</code>{state.chosen.identity && <> · {state.chosen.identity}</>}</>
-        : "Your shared folders · read-only",
+        : t("dropbox.yourFolders"),
       controls: status === "failed" ? (expired ? scanAgainButton : retryButton)
         : state.phase === "find" ? cancelButton
         : state.phase === "pick" ? scanAgainButton
         : undefined,
       body: result && state.phase === "pick" && !state.error ? (
         <div className="r2-step-list">
-          {result.status === "partial" && <ScanIncompleteNotice issues={result.issues} />}
+          {result.status === "partial" && <ScanIncompleteNotice issues={result.issues} codes={result.issue_codes} />}
           <CandidateGroups
             result={result}
-            unitPlural="shared folders"
+            unitPlural={t("dropbox.units")}
             choice={false}
             row={(candidate) => (
               <CandidateRow
@@ -374,7 +378,7 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
                   ? storages.find((storage) => storage.storage_id === candidate.connected_storage_id)?.name ?? null
                   : null}
                 verb={candidateSelectable(candidate)
-                  ? button("Use & connect", () => flow.prepare(candidate), "primary")
+                  ? button(t("lane.useConnect"), () => flow.prepare(candidate), "primary")
                   : undefined}
                 onOpenStorage={onOpenStorage}
               />
@@ -382,9 +386,9 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
           />
           {found === 0 && (
             <DiscoveryEmpty
-              place="your Dropbox"
-              unit="shared folder"
-              sentence={`${result.candidates.length} shared folder${result.candidates.length === 1 ? "" : "s"} checked. Nothing was changed.`}
+              place={t("dropbox.place")}
+              unit={t("dropbox.unit")}
+              sentence={t("dropbox.noneFound", { count: result.candidates.length })}
               disabled={disabled}
               onCreateInstead={onCreateInstead}
             />
@@ -404,29 +408,29 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
         <input
           className="r2-name-input"
           value={state.name}
-          aria-label="Dropbox folder name"
+          aria-label={t("dropbox.folderName")}
           aria-invalid={issue !== null}
           spellCheck={false}
           disabled={disabled}
           onChange={(event) => flow.setName(event.target.value)}
           onKeyDown={(event) => { if (event.key === "Enter" && issue === null) flow.prepare(); }}
         />
-        {button(<><Icon name="refresh" size={12} /> Suggest</>, flow.suggest)}
+        {button(<><Icon name="refresh" size={12} /> {t("lane.suggest")}</>, flow.suggest)}
       </span>
     );
     /* Only a taken or broken name is said beside the field. */
-    const nameNote = taken ? "· already exists in your Dropbox · choose another name"
+    const nameNote = taken ? `· ${t("dropbox.nameTaken")}`
       : issue ? `· ${issue}`
       : null;
     return {
-      key: "folder", title: "Folder", status: naming ? "doing" : status,
+      key: "folder", title: t("lane.folder"), status: naming ? "doing" : status,
       fact: naming ? <>{nameField}{nameNote && <span>{nameNote}</span>}</>
         : status === "failed" ? reason()
-        : mode === "reconnect" ? "This storage’s folder"
-        : state.phase === "prepare" ? <>Creating <code>{state.name}</code>…</>
-        : status === "done" ? <><code>{state.name}</code> · created</>
-        : "New shared folder",
-      controls: naming ? button("Create & connect", () => flow.prepare(), "primary", disabled || issue !== null)
+        : mode === "reconnect" ? t("lane.thisFolder")
+        : state.phase === "prepare" ? <Trans t={t} i18nKey="storage:lane.creating" components={{ name: <code>{state.name}</code> }} />
+        : status === "done" ? <><code>{state.name}</code> · {t("lane.created")}</>
+        : t("dropbox.newFolder"),
+      controls: naming ? button(t("lane.createConnect"), () => flow.prepare(), "primary", disabled || issue !== null)
         : status === "failed" ? retryButton
         : mode === "create" && state.phase === "prepare" ? cancelButton
         : undefined,
@@ -436,18 +440,18 @@ export function DropboxSetupLane({ flow, mode, descriptor, storages, disabled, o
   const access: StepView = (() => {
     const status = mode === "create" ? (index > 6 ? "done" : "todo") : statusOf("access", 6);
     return {
-      key: "access", title: "Access", status,
+      key: "access", title: t("lane.access"), status,
       fact: status === "failed" ? reason()
-        : status === "doing" ? (mode === "reconnect" ? "Renewing access…" : <>Connecting <code>{state.chosen?.name}</code>…</>)
-        : status === "done" ? "Saved · renews automatically"
-        : "Renews automatically · whole account",
+        : status === "doing" ? (mode === "reconnect" ? t("dropbox.renewing") : <Trans t={t} i18nKey="storage:dropbox.connecting" components={{ name: <code>{state.chosen?.name}</code> }} />)
+        : status === "done" ? t("dropbox.saved")
+        : t("dropbox.renews"),
       controls: status === "failed" ? retryButton : status === "doing" ? cancelButton : undefined,
     };
   })();
 
   const review: StepView = {
-    key: "review", title: "Review", status: "todo",
-    fact: mode === "reconnect" ? "Test, then Save credential" : "Test, then Finish setup",
+    key: "review", title: t("lane.review"), status: "todo",
+    fact: mode === "reconnect" ? t("lane.reviewReconnect") : t("lane.reviewCreate"),
   };
 
   return (

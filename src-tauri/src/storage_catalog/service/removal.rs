@@ -9,7 +9,10 @@ use crate::storage_catalog::removal_files;
 #[derive(Serialize, Debug)]
 pub struct CatalogRemovalResult {
     pub removed: bool,
+    /// English; a finished removal is translated by `removed`, with
+    /// `display_name`. A failed one's message is an error.
     pub message: String,
+    pub display_name: String,
 }
 
 fn native_fingerprint(inventory: &ProviderInventory) -> String {
@@ -244,6 +247,10 @@ impl StorageCatalogService {
             Some(message.clone()),
             now_secs(),
         )?;
-        Ok(CatalogRemovalResult { removed, message })
+        Ok(CatalogRemovalResult {
+            removed,
+            message,
+            display_name: plan.display_name.clone(),
+        })
     }
 }

@@ -79,7 +79,7 @@ pub(crate) fn attach_turn_tool_summaries(
         let position = turn.first_non_tool_position.unwrap_or(turn.first_position);
         entries[position].turn_tool_summary = Some(SessionTurnToolSummary {
             turn_id,
-            tool_calls: SessionCount {
+            tool_calls: SessionTurnToolCount {
                 value: Some(turn.tool_calls),
                 quality,
                 explanation: explanation.map(ToOwned::to_owned),
@@ -131,11 +131,28 @@ pub struct AfterPullActionOffer {
     pub action_id: mallard_domain::ActionKey,
     pub label: String,
     pub message: String,
+    /// What the label and message say, for the interface to translate by,
+    /// with `app_name` and `home_path` as its values.
+    pub message_code: AfterPullOfferCode,
+    pub app_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_path: Option<String>,
     /// The action can run now; otherwise the message explains what to do
     /// by hand.
     pub available: bool,
     /// Safe, adapter-typed arguments the shell hands back on execution.
     pub arguments: mallard_domain::BoundedConfigObject,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterPullOfferCode {
+    /// The app may need a restart to refresh its conversation list.
+    RestartApp,
+    /// The same, and the restart relaunches it with `home_path`.
+    RestartAppWithHome,
+    /// Mallard could not check the app: restart it by hand if needed.
+    RestartAppManually,
 }
 
 /// Serializable provider facts for setup and Activity. The frontend iterates
@@ -313,6 +330,64 @@ pub enum SessionCountQuality {
     Unsupported,
 }
 
+/// Why a count is not exact, by code. `text` is the English the session
+/// page shows (and the CLI would); the interface translates by the code.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCountExplanation {
+    CodexRecordsUnindexed,
+    CodexToolActivityIncomplete,
+    CodexPhasesInferred,
+    CodexCheckpointsOutsideTranscript,
+    ClaudeRecordsUnindexed,
+    ClaudeToolActivityIncomplete,
+    ClaudeEndTurnMissing,
+    ClaudeCheckpointsOutsideTranscript,
+    CheckpointsNotGitWorktree,
+    CheckpointsInferred,
+    TokensMayBeIncomplete,
+    TokensUnavailable,
+}
+
+impl SessionCountExplanation {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::CodexRecordsUnindexed => "Some Codex records could not be safely indexed.",
+            Self::CodexToolActivityIncomplete => {
+                "Some Codex tool activity may be absent because the durable rollout was incomplete."
+            }
+            Self::CodexPhasesInferred => {
+                "The rollout did not record authoritative assistant phases; placement was inferred from surrounding tool activity."
+            }
+            Self::CodexCheckpointsOutsideTranscript => {
+                "Git checkpoints are correlated by Mallard outside the Codex transcript."
+            }
+            Self::ClaudeRecordsUnindexed => "Some Claude records could not be safely indexed.",
+            Self::ClaudeToolActivityIncomplete => {
+                "Some Claude tool activity may be absent because the durable transcript was incomplete or malformed."
+            }
+            Self::ClaudeEndTurnMissing => {
+                "The assistant message lacked an authoritative end-turn marker."
+            }
+            Self::ClaudeCheckpointsOutsideTranscript => {
+                "Git checkpoints are correlated by Mallard outside the Claude transcript."
+            }
+            Self::CheckpointsNotGitWorktree => {
+                "Git checkpoints are unavailable because this project is not a Git worktree."
+            }
+            Self::CheckpointsInferred => {
+                "Checkpoints are inferred from the first successor commit on the provider-recorded branch."
+            }
+            Self::TokensMayBeIncomplete => {
+                "The provider transcript may contain additional token usage."
+            }
+            Self::TokensUnavailable => {
+                "This provider transcript does not expose a reliable token total."
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SessionCount {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,6 +395,12 @@ pub struct SessionCount {
     pub quality: SessionCountQuality,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// The explanation's code, beside its English. Always written and
+    /// required on read (`deserialize_with` turns off serde's missing-field
+    /// default for an `Option`), so a count saved before codes existed — a
+    /// timeline cache entry — fails to parse and is rebuilt.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub explanation_code: Option<SessionCountExplanation>,
 }
 
 impl SessionCount {
@@ -328,14 +409,30 @@ impl SessionCount {
             value: Some(value),
             quality: SessionCountQuality::Exact,
             explanation: None,
+            explanation_code: None,
         }
     }
 
-    pub fn unsupported(explanation: impl Into<String>) -> Self {
+    /// A count of the given quality, with the reason it is not exact.
+    pub fn explained(
+        value: u64,
+        quality: SessionCountQuality,
+        explanation: Option<SessionCountExplanation>,
+    ) -> Self {
+        Self {
+            value: Some(value),
+            quality,
+            explanation: explanation.map(|code| code.text().to_string()),
+            explanation_code: explanation,
+        }
+    }
+
+    pub fn unsupported(explanation: SessionCountExplanation) -> Self {
         Self {
             value: None,
             quality: SessionCountQuality::Unsupported,
-            explanation: Some(explanation.into()),
+            explanation: Some(explanation.text().to_string()),
+            explanation_code: Some(explanation),
         }
     }
 }
@@ -506,7 +603,19 @@ pub struct SessionToolIndexEntry {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SessionTurnToolSummary {
     pub turn_id: String,
-    pub tool_calls: SessionCount,
+    pub tool_calls: SessionTurnToolCount,
+}
+
+/// A turn's tool count. It is spoken beside the turn, never explained on
+/// screen, and travels as it is in Mallard Cloud views, so it carries the
+/// English explanation alone and no code.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionTurnToolCount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<u64>,
+    pub quality: SessionCountQuality,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
 }
 
 /// Where a message's model and thinking level were read from.
@@ -1242,7 +1351,7 @@ mod tests {
             for (position, turn_id, count) in [(2, "tools-only", 2), (4, "b", 1), (6, "a", 2)] {
                 expected[position].turn_tool_summary = Some(SessionTurnToolSummary {
                     turn_id: turn_id.to_string(),
-                    tool_calls: SessionCount {
+                    tool_calls: SessionTurnToolCount {
                         value: Some(count),
                         quality,
                         explanation: explanation.map(ToOwned::to_owned),

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
+import { t } from "../../i18n";
 
 /**
  * Receipts for the Settings page. Every row applies the moment it changes, so
@@ -115,16 +116,16 @@ export interface StatusLine {
  * The bar's line. Until something changes it states the rule — a result on a
  * page nobody touched would be a small lie. A failure outranks everything and
  * stands until that setting saves; the count while stamps are up is the
- * stamps you can see.
+ * stamps you can see. Worded when the page renders, in its language.
  */
 export function statusLine(state: ReceiptsState): StatusLine {
   const failed = state.failed.size;
-  if (failed) return { tone: "failed", text: failed === 1 ? "1 change not saved" : `${failed} changes not saved`, at: null };
-  if (state.saving.size) return { tone: "saving", text: "Saving…", at: null };
+  if (failed) return { tone: "failed", text: t("settings:status.notSaved", { count: failed }), at: null };
+  if (state.saving.size) return { tone: "saving", text: t("common:saving"), at: null };
   const saved = state.saved.size;
-  if (saved) return { tone: "saved", text: saved === 1 ? "Change saved" : `${saved} changes saved`, at: null };
-  if (state.savedAt !== null) return { tone: "settled", text: "All changes saved", at: state.savedAt };
-  return { tone: "rule", text: "Changes save automatically", at: null };
+  if (saved) return { tone: "saved", text: t("settings:status.saved", { count: saved }), at: null };
+  if (state.savedAt !== null) return { tone: "settled", text: t("settings:status.allSaved"), at: state.savedAt };
+  return { tone: "rule", text: t("settings:status.rule"), at: null };
 }
 
 export interface SettingsReceipts {

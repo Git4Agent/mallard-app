@@ -1,3 +1,4 @@
+import { useTranslation } from "../../i18n";
 import Icon from "../Icons";
 import type { CatalogScopeRow } from "./types";
 
@@ -9,8 +10,9 @@ export interface CatalogRemovalAction {
 }
 
 export default function CatalogRemoveButton({ row, action }: { row: CatalogScopeRow; action?: CatalogRemovalAction }) {
+  const { t } = useTranslation("library");
   if (!action || !row.local_present) return null;
-  const reason = row.blocker ?? (!row.resource_id ? "This item cannot be identified safely." : null);
+  const reason = row.blocker ?? (!row.resource_id ? t("removal.unidentified") : null);
   return (
     <button type="button" className="btn btn-ghost sync-history-session-detail-action"
       title={reason ?? action.label} aria-label={action.label}

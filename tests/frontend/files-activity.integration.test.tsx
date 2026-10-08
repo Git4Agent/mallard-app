@@ -16,6 +16,7 @@ import {
   projectFileSyncCounts,
 } from "../../src/components/project-sync/ProjectFilesActivityPage";
 import { PROJECT_FILE_CARD_RENDER_LIMIT } from "../../src/components/project-sync/model";
+import { i18n } from "../../src/i18n";
 
 /* The Files face of a non-git project's activity page: read-only cards in
    the catalog grammar, the storage-only partition on top, and directory
@@ -542,4 +543,47 @@ test("a chosen scope with no files stays at 0 and offers Clear filter", () => {
   const css = readFileSync("src/App.css", "utf8");
   assert.match(css, /\.sync-project-files-page > \.sync-name-search,\n\.sync-project-files-page > \.sync-list-head \{ margin-bottom: 0; \}/);
   assert.match(css, /\.sync-project-files-page > \.sync-status-scopes\.sync-project-tabs \{ margin: -12px 0 0; \}/);
+});
+
+/* The Files face in Chinese: the face's own words translate; paths, the
+   storage's name and the scanner's warning text stay exactly as given. */
+test("the Files face speaks Chinese around the user's paths and storage name", () => {
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const markup = renderView(inventoryWith([
+      entry("file-root", "cold-joke.md", "local_only"),
+      entry("file-notes", "notes/outline.md", "synced"),
+      entry("file-cloud", "archive/press-kit.pdf", "storage_only", { local_present: false, storage_present: true }),
+    ]));
+    assert.match(markup, /<section class="sync-project-files-page" aria-label="项目文件">/);
+    assert.match(markup, /aria-label="搜索文件"/);
+    assert.match(markup, /class="sync-name-search-count">3 个文件</);
+    assert.match(markup, /aria-label="按状态显示文件"/);
+    // The partitions: the storage-only tile names the storage, the local
+    // half by folder, each folder's facts counted in Chinese.
+    assert.match(markup, /仅在 <span class="sync-history-storage-name">Attic R2<\/span> 中/);
+    assert.match(markup, />项目根目录</);
+    assert.match(markup, /<span>notes\/<\/span>/);
+    assert.match(markup, /1 个文件 · 18 B/);
+    // Rows: their status against the storage by name, their readouts and actions.
+    assert.match(markup, /aria-label="仅在本机。上传后保存到 Attic R2。"/);
+    assert.match(markup, /aria-label="本机与 Attic R2 均为最新。"/);
+    assert.match(markup, /aria-label="仅在 Attic R2 中。下载后才会出现在本机。"/);
+    assert.match(markup, /title="打开 cold-joke\.md"/);
+    assert.match(markup, /aria-label="在访达中显示 cold-joke\.md"/);
+    assert.match(markup, /aria-label="无法显示 archive\/press-kit\.pdf：不在这台 Mac 上"/);
+    assert.match(markup, /data-tooltip="磁盘上 · 18 B"/);
+    assert.match(markup, /data-tooltip="Attic R2 中 · 18 B"/);
+    assert.match(markup, /aria-label="显示 cold-joke\.md 的文件信息"/);
+    // The scan's summary is the face's; the warning itself is the scanner's.
+    assert.match(markup, /1 个已忽略 · 1 个已阻止 · 1 个扫描警告/);
+    assert.match(markup, /<p>Ignore file &#x27;\.mallardignore&#x27; exceeds the metadata limit<\/p>/);
+    assert.doesNotMatch(markup, /Project root|Search files|Only in|Up to date|scan warning/);
+
+    // The empty and unlinked states.
+    assert.match(renderView(inventoryWith([])), /<strong>没有文件<\/strong><small>此文件夹中还没有要同步的内容。<\/small>/);
+    assert.match(renderView(null), /关联一个存储，即可扫描此文件夹并比较其中的文件。/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });

@@ -1,9 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { useTranslation } from "../../i18n";
 import Icon from "../Icons";
 import Notice from "../notice/Notice";
 import { errorMessage } from "../../storageError";
 import { storageCatalogApi } from "./api";
 import { useCloudRepositoryChoice, type CloudChoiceTarget } from "./CloudRepositoryChoice";
+import type { CatalogNouns } from "./model";
 import type { CatalogCapabilityDescriptor, CatalogCoordinate } from "./types";
 
 /**
@@ -32,15 +34,15 @@ export interface CatalogConnected {
 }
 
 export default function CatalogConnectDialog({
-  reason, scopeId, storageId, accountLogin, coordinate, noun, rowLabel, listed, capabilities, onClose, onConnected,
+  reason, scopeId, storageId, accountLogin, coordinate, nouns, rowLabel, listed, capabilities, onClose, onConnected,
 }: {
   reason: CatalogConnectReason;
   scopeId: string;
   storageId: string;
   accountLogin: string;
   coordinate: CatalogCoordinate;
-  /** The kind's singular noun, lowercased. */
-  noun: string;
+  /** The kind's words. */
+  nouns: CatalogNouns;
   rowLabel: string;
   /** The items the row lists, which Add leaves out. */
   listed: ReadonlySet<string>;
@@ -49,6 +51,7 @@ export default function CatalogConnectDialog({
   onClose: () => void;
   onConnected: (connected: CatalogConnected) => void;
 }) {
+  const { t } = useTranslation(["library", "common"]);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   useEffect(() => { dialogRef.current?.showModal(); }, []);
@@ -61,8 +64,8 @@ export default function CatalogConnectDialog({
   }, []);
 
   const target: CloudChoiceTarget = reason.kind === "add"
-    ? { kind: "add", coordinate, noun, rowLabel, listed }
-    : { kind: "item", coordinate, noun, resourceId: reason.resourceId, name: reason.name, offerNew: reason.kind === "connect" };
+    ? { kind: "add", coordinate, nouns, rowLabel, listed }
+    : { kind: "item", coordinate, nouns, resourceId: reason.resourceId, name: reason.name, offerNew: reason.kind === "connect" };
   const choice = useCloudRepositoryChoice({
     storageId,
     scopeId,
@@ -110,10 +113,12 @@ export default function CatalogConnectDialog({
   const close = () => {
     if (!working) dialogRef.current?.close();
   };
-  const title = reason.kind === "add" ? "Add from Mallard Cloud" : reason.kind === "several" ? "Choose a repository" : `Connect ${reason.name}`;
-  const verb = adding ? "Add" : "Connect";
+  const title = reason.kind === "add"
+    ? t("connect.addTitle")
+    : reason.kind === "several" ? t("connect.chooseTitle") : t("connect.connectTitle", { name: reason.name });
+  const verb = adding ? t("add.add") : t("connect.connect");
   /* Said before the choice is made, whichever it is. */
-  const note = selection && (selection !== "new" || ready) ? "Can’t be changed later." : null;
+  const note = selection && (selection !== "new" || ready) ? t("add.fixed") : null;
 
   return (
     <dialog
@@ -127,10 +132,12 @@ export default function CatalogConnectDialog({
         <div>
           <h1 id={titleId}>{title}</h1>
           {reason.kind === "several" && (
-            <p>{`${reason.name} is in ${ready ? choice.rows.length : "several"} repositories you can see. Choose the one this Mac uses.`}</p>
+            <p>{ready
+              ? t("connect.inCount", { name: reason.name, count: choice.rows.length })
+              : t("connect.inSeveral", { name: reason.name })}</p>
           )}
         </div>
-        <button type="button" className="btn btn-ghost" onClick={close} disabled={working} aria-label="Close repo chooser">
+        <button type="button" className="btn btn-ghost" onClick={close} disabled={working} aria-label={t("connect.close")}>
           <Icon name="x" size={17} />
         </button>
       </header>
@@ -143,14 +150,14 @@ export default function CatalogConnectDialog({
       <footer className="sync-modal-footer">
         {note ? <span>{note}</span> : null}
         <div>
-          <button type="button" className="btn" onClick={close} disabled={working}>Cancel</button>
+          <button type="button" className="btn" onClick={close} disabled={working}>{t("common:cancel")}</button>
           <button
             type="button"
             className="btn btn-primary"
             disabled={working || !selection || (selection === "new" && !ready) || (adding && !chosen)}
             onClick={() => void confirm()}
           >
-            {working ? (adding ? "Adding…" : "Connecting…") : verb}
+            {working ? (adding ? t("add.adding") : t("connect.connecting")) : verb}
           </button>
         </div>
       </footer>

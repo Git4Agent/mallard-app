@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../src/App.css";
 import "./i18n-zh-mockup.css";
@@ -15,10 +15,26 @@ import "./i18n-zh-mockup.css";
  * reloads its frame in the language picked.
  *
  * `npm run dev`, then /mockups/i18n-zh-mockup.html
- *   ?lang=zh|en  ?font=cjk|default  ?theme=light|dark
+ *   ?lang=zh|en  ?font=cjk|default  ?theme=light|dark  ?copy=app|shim
+ *
+ * Since the desktop implementation (2026-10-08) `copy=app` (the default)
+ * draws every frame from the app's own catalogs — `ui=` sets the language
+ * preference, no shim; `copy=shim` shows the round-2 draft again.
  */
 
 type Lang = "zh" | "en";
+type Copy = "app" | "shim";
+
+/* Which copy the frames show: the app's catalogs, or the specimen shim. */
+const CopyContext = createContext<Copy>("app");
+
+/** A frame's query in the chosen copy: the shim reads `lang=zh`; the app's
+ *  catalogs read the language preference the harness pages set from `ui=`. */
+function framed(params: string, copy: Copy): string {
+  if (copy === "shim") return params;
+  return params.replace(/(^|&)lang=(zh|en)(?=&|$)/, (_match, lead: string, lang: string) =>
+    `${lead}lang=en&ui=${lang === "zh" ? "zh-CN" : "en"}`);
+}
 
 function readKnobs() {
   const query = new URLSearchParams(window.location.search);
@@ -30,6 +46,7 @@ function readKnobs() {
     lang: pick<Lang>("lang", ["zh", "en"], "zh"),
     font: pick("font", ["cjk", "default"] as const, "cjk"),
     theme: pick("theme", ["light", "dark"] as const, "light"),
+    copy: pick<Copy>("copy", ["app", "shim"], "app"),
   };
 }
 
@@ -43,9 +60,10 @@ interface Frame { key: string; title: string; params: string }
 /** The shell at a real 1280×800 window; `small` shows it at 55% so two fit side by side. */
 function Live({ params, tall, small, wrap }: { params: string; tall?: boolean; small?: boolean; wrap?: boolean }) {
   const page = wrap ? "i18n-zh-wrap" : "i18n-zh-live";
+  const query = framed(params, useContext(CopyContext));
   return (
     <div className={small ? "zh-live small" : tall ? "zh-live tall" : "zh-live"}>
-      <iframe key={params} src={`/mockups/${page}.html?${params}`} title={params} loading="lazy" />
+      <iframe key={query} src={`/mockups/${page}.html?${query}`} title={params} loading="lazy" />
     </div>
   );
 }
@@ -78,22 +96,23 @@ function Specimen() {
   const [lang, setLang] = useState<Lang>(initial.lang);
   const [font, setFont] = useState(initial.font);
   const [theme, setTheme] = useState(initial.theme);
+  const [copy, setCopy] = useState<Copy>(initial.copy);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
     const query = new URLSearchParams();
-    query.set("lang", lang); query.set("font", font); query.set("theme", theme);
+    query.set("lang", lang); query.set("font", font); query.set("theme", theme); query.set("copy", copy);
     window.history.replaceState(null, "", `?${query}`);
-  }, [lang, font, theme]);
+  }, [lang, font, theme, copy]);
 
   const seg = <V extends string>(value: V, current: V, set: (value: V) => void, label: string) => (
     <button key={value} type="button" className="spec-seg" aria-pressed={value === current} onClick={() => set(value)}>{label}</button>
   );
   const common = `font=${font}&theme=${theme}`;
   const settings: Frame[] = [
-    { key: "system", title: "跟随系统 · the Mac prefers Chinese", params: `screen=settings&lang=zh&pref=system&${common}` },
-    { key: "en", title: "English, picked", params: `screen=settings&lang=en&pref=en&${common}` },
+    { key: "zh", title: "简体中文, picked", params: `screen=settings&lang=zh&${common}` },
+    { key: "en", title: "English, picked", params: `screen=settings&lang=en&${common}` },
   ];
   const flows: Frame[] = [
     { key: "storages", title: lang === "zh" ? "存储" : "Storages", params: `screen=storages&lang=${lang}&${common}` },
@@ -161,10 +180,8 @@ function Specimen() {
     { key: "confirm-delete-session", title: t("Delete local session", "删除本地会话"), params: `screen=confirm-delete-session&lang=${lang}&${common}` },
     { key: "confirm-remove-project", title: t("Remove project", "移除项目"), params: `screen=confirm-remove-project&lang=${lang}&${common}` },
     { key: "confirm-unlink", title: t("Unlink storage", "取消关联存储"), params: `screen=confirm-unlink&lang=${lang}&${common}` },
-    { key: "delete-session-in-use", title: t("Delete blocked · session in use", "删除受阻 · 会话正在使用"), params: `screen=delete-session-in-use&lang=${lang}&${common}` },
-    { key: "delete-close-codex", title: t("Delete blocked · close Codex first", "删除受阻 · 先关闭 Codex"), params: `screen=delete-close-codex&lang=${lang}&${common}` },
-    { key: "delete-codex-closed", title: t("Codex closed · try again", "Codex 已关闭 · 再试一次"), params: `screen=delete-codex-closed&lang=${lang}&${common}` },
-    { key: "delete-all-stopped", title: t("Delete all · stopped after 2", "全部删除 · 删除 2 个后停止"), params: `screen=delete-all-stopped&lang=${lang}&${common}` },
+    { key: "delete-codex-refused", title: t("Delete refused by Codex · Close Codex offered", "Codex 拒绝删除 · 提供关闭 Codex"), params: `screen=delete-codex-refused&lang=${lang}&${common}` },
+    { key: "delete-close-codex", title: t("Close Codex", "关闭 Codex"), params: `screen=delete-close-codex&lang=${lang}&${common}` },
   ];
   const screens: Frame[] = [
     { key: "sessions", title: lang === "zh" ? "项目 · 会话" : "Project · sessions", params: `screen=sessions&lang=${lang}&${common}` },
@@ -173,6 +190,7 @@ function Specimen() {
   ];
 
   return (
+    <CopyContext.Provider value={copy}>
     <div className="spec">
       <h1 className="spec-title">Mallard · 简体中文</h1>
       <p className="zh-terms">
@@ -187,6 +205,7 @@ function Specimen() {
         <div className="spec-group">{seg<Lang>("zh", lang, setLang, "中文")}{seg<Lang>("en", lang, setLang, "English")}</div>
         <div className="spec-group">{seg("cjk", font, setFont, "CJK font stack")}{seg("default", font, setFont, "Font as shipped")}</div>
         <div className="spec-group">{seg("light", theme, setTheme, "Light")}{seg("dark", theme, setTheme, "Dark")}</div>
+        <div className="spec-group">{seg<Copy>("app", copy, setCopy, "App catalogs")}{seg<Copy>("shim", copy, setCopy, "Round-2 draft")}</div>
       </div>
 
       <h2 className="spec-h2">A · Language, under Theme <em className="zh-picked">picked</em></h2>
@@ -290,6 +309,7 @@ function Specimen() {
         ))}
       </div>
     </div>
+    </CopyContext.Provider>
   );
 }
 

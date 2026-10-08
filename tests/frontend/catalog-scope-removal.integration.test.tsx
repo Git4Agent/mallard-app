@@ -32,7 +32,8 @@ test("a failed removal opens the affected row's storage menu", () => {
   const pathBar = readFileSync("src/components/sync-review/SyncPathBar.tsx", "utf8");
   assert.match(shell, /catalogRemovalErrorTarget\?\.message === shellError/);
   assert.match(shell, /openCatalogScope\(catalogRemovalErrorTarget\.scopeId\)/);
-  assert.match(shell, />\s*Open storage menu\s*<\/button>/);
+  assert.match(shell, />\s*\{t\("notices\.openStorageMenu"\)\}\s*<\/button>/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /openStorageMenu: "Open storage menu",/);
   assert.match(page, /\{ menuId: "storage", requestId: openStorageMenuRequestId \}/);
   assert.match(pathBar, /setOpenMenu\(openMenuRequest\.menuId\)/);
 });

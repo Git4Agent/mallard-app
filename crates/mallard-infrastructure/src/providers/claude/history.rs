@@ -10,11 +10,12 @@ use crate::providers::traits::{
     agent_resource_id, attach_turn_tool_summaries, most_specific_project_relative_path,
     setting_token, timeline_tool_detail_budgets, SessionAgentIndexEntry, SessionAgentMode,
     SessionAgentPreview, SessionAgentStatus, SessionChildIdentity, SessionCount,
-    SessionCountQuality, SessionDetailWarning, SessionEventCounts, SessionEventDetail,
-    SessionFileSummary, SessionMessageSettings, SessionMessageSettingsSource, SessionSourceSpan,
-    SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind, SessionTimelineIndex,
-    SessionTimelineIndexEntry, SessionTimelinePageSlice, SessionTimelineQuery,
-    SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory, SessionToolIndexEntry,
+    SessionCountExplanation, SessionCountQuality, SessionDetailWarning, SessionEventCounts,
+    SessionEventDetail, SessionFileSummary, SessionMessageSettings, SessionMessageSettingsSource,
+    SessionSourceSpan, SessionTimelineContext, SessionTimelineEvent, SessionTimelineEventKind,
+    SessionTimelineIndex, SessionTimelineIndexEntry, SessionTimelinePageSlice,
+    SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
+    SessionToolIndexEntry,
 };
 use mallard_domain::NoticeSeverity;
 use serde_json::Value;
@@ -977,7 +978,7 @@ impl ClaudeTimelineBuilder {
         attach_turn_tool_summaries(
             &mut entries,
             tool_quality,
-            claude_tool_explanation(tool_quality),
+            claude_tool_explanation(tool_quality).map(SessionCountExplanation::text),
         );
         let counts = claude_counts(
             &entries,
@@ -999,19 +1000,14 @@ impl ClaudeTimelineBuilder {
 fn claude_count(
     value: u64,
     quality: SessionCountQuality,
-    explanation: Option<&str>,
+    explanation: Option<SessionCountExplanation>,
 ) -> SessionCount {
-    SessionCount {
-        value: Some(value),
-        quality,
-        explanation: explanation.map(ToOwned::to_owned),
-    }
+    SessionCount::explained(value, quality, explanation)
 }
 
-fn claude_tool_explanation(quality: SessionCountQuality) -> Option<&'static str> {
-    (quality == SessionCountQuality::LowerBound).then_some(
-        "Some Claude tool activity may be absent because the durable transcript was incomplete or malformed.",
-    )
+fn claude_tool_explanation(quality: SessionCountQuality) -> Option<SessionCountExplanation> {
+    (quality == SessionCountQuality::LowerBound)
+        .then_some(SessionCountExplanation::ClaudeToolActivityIncomplete)
 }
 
 fn claude_counts(
@@ -1049,7 +1045,7 @@ fn claude_counts(
         SessionCountQuality::Exact
     };
     let visible_explanation = (visible_quality == SessionCountQuality::LowerBound)
-        .then_some("Some Claude records could not be safely indexed.");
+        .then_some(SessionCountExplanation::ClaudeRecordsUnindexed);
     SessionEventCounts {
         agent_calls: claude_count(
             count_kind(SessionTimelineEventKind::AgentCall),
@@ -1065,7 +1061,7 @@ fn claude_counts(
             count_kind(SessionTimelineEventKind::Response),
             response_quality,
             if response_quality == SessionCountQuality::Inferred {
-                Some("The assistant message lacked an authoritative end-turn marker.")
+                Some(SessionCountExplanation::ClaudeEndTurnMissing)
             } else {
                 visible_explanation
             },
@@ -1076,7 +1072,7 @@ fn claude_counts(
             visible_explanation,
         ),
         checkpoints: SessionCount::unsupported(
-            "Git checkpoints are correlated by Mallard outside the Claude transcript.",
+            SessionCountExplanation::ClaudeCheckpointsOutsideTranscript,
         ),
         tool_calls: claude_count(
             count_kind(SessionTimelineEventKind::ToolCall),

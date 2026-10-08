@@ -14,6 +14,13 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // ?ui=en|zh-CN: the app's own catalogs in that language, no shim.
+      try {
+        const ui = new URLSearchParams(location.search).get("ui");
+        if (ui) localStorage.setItem("mallard.language", ui);
+      } catch {}
+    </script>
     <script type="module" src="/mockups/i18n-zh-live.tsx"></script>
   </body>
 </html>

@@ -35,6 +35,8 @@ import type {
 import Icon, { storageIconName } from "../Icons";
 import { NoticeChip, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDateTime, formatRelativeTime, toEpochMilliseconds } from "../../clock";
+import { joinAnd } from "../../format";
+import { t as translate, useTranslation } from "../../i18n";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
 import ProjectActivityPage, { BranchPicker, type ActivityHeaderModel, type PushSessionFacts } from "./ProjectActivityPage";
 import { ProjectFilesActivityView, projectFileSyncCounts, useProjectFilesScan } from "./ProjectFilesActivityPage";
@@ -77,10 +79,11 @@ import {
   type StorageSetupMode,
 } from "./StorageSettings";
 import { storageCatalogApi } from "../storage-catalog/api";
-import { catalogPresentation, catalogStorageRepositoryViews } from "../storage-catalog/model";
+import { capabilityLabel, catalogPresentation, catalogStorageRepositoryViews } from "../storage-catalog/model";
 import type { CatalogStorageRepositoryView } from "../storage-catalog/types";
 import { projectSyncApi } from "./api";
 import { StorageDraftSaveQueue } from "./storageDraftSaveQueue";
+import { storageProviderName } from "./storageText";
 import { R2SetupLane, useR2Setup, type R2SetupMode } from "./R2Setup";
 import { DropboxSetupLane, useDropboxSetup } from "./DropboxSetup";
 import { FeishuSetupLane, useFeishuSetup } from "./FeishuSetup";
@@ -341,31 +344,32 @@ export async function loadPreparedR2Draft(
 /** The fold: everything the storage listing knows about a repository beyond
  * its chips. Absent facts don't render — no dash placeholders. */
 export function StorageRepositoryDetails({ bundle, id }: { bundle: RemoteBundleSummary; id?: string }) {
+  const { t } = useTranslation("projectPage");
   return (
     <dl className="sync-storage-repository-details" id={id}>
-      <dt>Repository ID</dt>
+      <dt>{t("repository.id")}</dt>
       <dd><code>{bundle.bundle_id}</code></dd>
       {typeof bundle.updated_at === "number" && (
         <>
-          <dt>Updated</dt>
+          <dt>{t("repository.updated")}</dt>
           <dd>{formatDateTime(toEpochMilliseconds(bundle.updated_at))}</dd>
         </>
       )}
       {typeof bundle.resource_count === "number" && (
         <>
-          <dt>Resources</dt>
+          <dt>{t("repository.resources")}</dt>
           <dd>{bundle.resource_count}</dd>
         </>
       )}
       {!!bundle.providers?.length && (
         <>
-          <dt>Agents</dt>
+          <dt>{t("repository.agents")}</dt>
           <dd>{bundle.providers.map((provider) => providerLabel(provider)).join(" · ")}</dd>
         </>
       )}
       {bundle.repository_fingerprint && (
         <>
-          <dt>Fingerprint</dt>
+          <dt>{t("repository.fingerprint")}</dt>
           <dd><code>{bundle.repository_fingerprint}</code></dd>
         </>
       )}
@@ -374,8 +378,12 @@ export function StorageRepositoryDetails({ bundle, id }: { bundle: RemoteBundleS
 }
 
 export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }) {
-  const name = bundle.display_name || "Unnamed repository";
+  const { t } = useTranslation("projectPage");
+  const name = bundle.display_name || t("fallback.unnamedRepository");
   const [open, setOpen] = useState(false);
+  const toggleLabel = bundle.display_name
+    ? t(open ? "repository.hideDetails" : "repository.showDetails", { name: bundle.display_name })
+    : t(open ? "repository.hideDetailsUnnamed" : "repository.showDetailsUnnamed");
   const detailsId = `repo-details-${bundle.bundle_id}`;
   return (
     <div className="sync-storage-repository-item">
@@ -388,15 +396,15 @@ export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }
         <strong className="sync-storage-repository-name">{name}</strong>
         <span className="sync-storage-repository-chips">
           <span className="sync-storage-repo-chip"><span>Version</span><b>{bundle.revision ?? "—"}</b></span>
-          <span className="sync-storage-repo-chip"><span>Updated</span><b>{formatRelativeTime(bundle.updated_at)}</b></span>
+          <span className="sync-storage-repo-chip"><span>{t("repository.updated")}</span><b>{formatRelativeTime(bundle.updated_at)}</b></span>
         </span>
         <button
           type="button"
           className="sync-history-commit-toggle"
           aria-expanded={open}
           aria-controls={detailsId}
-          aria-label={`${open ? "Hide" : "Show"} details for ${name}`}
-          title={`${open ? "Hide" : "Show"} details for ${name}`}
+          aria-label={toggleLabel}
+          title={toggleLabel}
           onClick={() => setOpen((value) => !value)}
         >
           <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
@@ -413,11 +421,12 @@ export function StorageRepositoryRow({ bundle }: { bundle: RemoteBundleSummary }
  * be read, the row states the refusal where the chips would be — on a
  * listing, a silent hole reads as "nothing stored". */
 export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepositoryView }) {
+  const { t } = useTranslation("projectPage");
   const [open, setOpen] = useState(false);
   const glyph = catalogPresentation(repo.capability);
   /* The capability's own label when this build registers the coordinate;
      the backend's raw labels for one it does not. */
-  const name = `${repo.capability?.label ?? repo.kind_label} · ${repo.provider_label}`;
+  const name = `${repo.capability ? capabilityLabel(repo.capability) : repo.kind_label} · ${repo.provider_label}`;
   const detailsId = `catalog-repo-details-${repo.repository_id}`;
   const unreadable = repo.error != null;
   const shownNames = repo.resource_names.slice(0, 12);
@@ -430,11 +439,11 @@ export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepo
         </span>
         <strong className="sync-storage-repository-name">{name}</strong>
         {unreadable ? (
-          <span className="sync-storage-repo-unreadable">Can’t be read</span>
+          <span className="sync-storage-repo-unreadable">{t("repository.unreadable")}</span>
         ) : (
           <span className="sync-storage-repository-chips">
             <span className="sync-storage-repo-chip"><span>Version</span><b>{repo.revision ?? "—"}</b></span>
-            <span className="sync-storage-repo-chip"><span>Updated</span><b>{formatRelativeTime(repo.updated_at ?? undefined)}</b></span>
+            <span className="sync-storage-repo-chip"><span>{t("repository.updated")}</span><b>{formatRelativeTime(repo.updated_at ?? undefined)}</b></span>
           </span>
         )}
         <button
@@ -442,8 +451,8 @@ export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepo
           className="sync-history-commit-toggle"
           aria-expanded={open}
           aria-controls={detailsId}
-          aria-label={`${open ? "Hide" : "Show"} details for ${name}`}
-          title={`${open ? "Hide" : "Show"} details for ${name}`}
+          aria-label={t(open ? "repository.hideDetails" : "repository.showDetails", { name })}
+          title={t(open ? "repository.hideDetails" : "repository.showDetails", { name })}
           onClick={() => setOpen((value) => !value)}
         >
           <Icon name={open ? "chevron-up" : "chevron-down"} size={12} />
@@ -451,25 +460,25 @@ export function CatalogStorageRepositoryRow({ repo }: { repo: CatalogStorageRepo
       </div>
       {open && (
         <dl className="sync-storage-repository-details" id={detailsId}>
-          <dt>Repository ID</dt>
+          <dt>{t("repository.id")}</dt>
           <dd><code>{repo.repository_id}</code></dd>
           {typeof repo.updated_at === "number" && (
             <>
-              <dt>Updated</dt>
+              <dt>{t("repository.updated")}</dt>
               <dd>{formatDateTime(toEpochMilliseconds(repo.updated_at))}</dd>
             </>
           )}
           {repo.resource_names.length > 0 && (
             <>
-              <dt>Resources</dt>
+              <dt>{t("repository.resources")}</dt>
               <dd>{repo.resource_names.length}</dd>
-              <dt>Contents</dt>
-              <dd>{shownNames.join(" · ")}{moreNames > 0 ? ` · +${moreNames} more` : ""}</dd>
+              <dt>{t("repository.contents")}</dt>
+              <dd>{shownNames.join(" · ")}{moreNames > 0 ? ` · ${t("repository.more", { number: moreNames })}` : ""}</dd>
             </>
           )}
           {repo.error && (
             <>
-              <dt>Problem</dt>
+              <dt>{t("repository.problem")}</dt>
               <dd className="sync-storage-repo-problem">{repo.error}</dd>
             </>
           )}
@@ -487,9 +496,9 @@ export function projectPushActionLabel({
   publishing: boolean;
 }): string {
   // The first click opens review; the button on that review publishes.
-  if (publishing) return "Pushing…";
-  if (preparing) return "Preparing…";
-  return "Push";
+  if (publishing) return translate("projectPage:progress.pushing");
+  if (preparing) return translate("projectPage:progress.preparing");
+  return translate("common:push");
 }
 
 export function projectPullActionLabel({
@@ -502,20 +511,19 @@ export function projectPullActionLabel({
   // Same shape as Push: the card button on an open review IS the pull — the
   // first click opens the review, the second applies it. Progress lives on
   // the button, not in a review banner.
-  if (applying) return "Pulling…";
-  if (preparing) return "Preparing…";
-  return "Pull";
+  if (applying) return translate("projectPage:progress.pulling");
+  if (preparing) return translate("projectPage:progress.preparing");
+  return translate("common:pull");
 }
 
 /** What a Pull or Push badge stands for, in the units the verb moves: the
  *  comparison's threads and, for a non-Git project, its scanned files. The
  *  badge is decorative, so the button's name has to say this. */
 export function projectSyncCountPhrase(threads: number, files: number): string {
-  const phrases = [
-    threads > 0 ? `${threads} newer thread${threads === 1 ? "" : "s"}` : null,
-    files > 0 ? `${files} changed file${files === 1 ? "" : "s"}` : null,
-  ].filter((phrase): phrase is string => phrase !== null);
-  return phrases.join(" and ");
+  const phrases: string[] = [];
+  if (threads > 0) phrases.push(translate("projectPage:countPhrase.threads", { count: threads }));
+  if (files > 0) phrases.push(translate("projectPage:countPhrase.files", { count: files }));
+  return joinAnd(phrases);
 }
 
 /** What the Publish sheet says the version holds: the draft as the pair's
@@ -526,20 +534,30 @@ export function publishVersionHolds(
   inventory: ProjectContentInventory | null | undefined,
   publication: ManagedCloudPublicationStatus | null | undefined,
 ): PublishVersionFact[] {
-  const count = (total: number, one: string, many: string) => `${total} ${total === 1 ? one : many}`;
   const facts: PublishVersionFact[] = [];
   if (comparison) {
-    facts.push({ icon: "message", word: count(comparison.entries.filter((entry) => entry.storage_present).length, "session", "sessions") });
+    const sessions = comparison.entries.filter((entry) => entry.storage_present).length;
+    facts.push({ icon: "message", word: translate("projectPage:publishHolds.sessions", { count: sessions }) });
   }
   if (inventory?.eligibility.state === "eligible") {
     const files = inventory.entries.filter((entry) => entry.entry_type === "file" && entry.storage_present).length;
-    facts.push({ icon: "file", word: count(files, "file", "files") });
+    facts.push({ icon: "file", word: translate("projectPage:publishHolds.files", { count: files }) });
   }
   if (publication?.latest_version != null && publication.draft_ahead) {
-    facts.push({ icon: "upload", word: `${count(publication.draft_ahead, "push", "pushes")} since version ${publication.latest_version}` });
+    facts.push({
+      icon: "upload",
+      word: translate("projectPage:publishHolds.pushesSince", { count: publication.draft_ahead, version: publication.latest_version }),
+    });
   }
   return facts;
 }
+
+/** The project crumb's way back out of a session, per page it returns to. */
+const SECTION_BACK_KEYS = {
+  git: "projectMenu.backToGit",
+  files: "projectMenu.backToFiles",
+  sessions: "projectMenu.backToSessions",
+} as const;
 
 export function storageActionLockedForReview(
   reviewKind: StorageReviewKind | null,
@@ -608,6 +626,7 @@ export default function ProjectLinksWorkspace({
   onDismissStorageNotice,
   onProjectFilesToPullChange,
 }: Props) {
+  const { t } = useTranslation(["projectPage", "common"]);
   const [linkingProjectId, setLinkingProjectId] = useState<string | null>(null);
   const [runningAction, setRunningAction] = useState<string | null>(null);
   /* The storage page: the settled storage it shows, or — for a draft that
@@ -1050,15 +1069,13 @@ export default function ProjectLinksWorkspace({
   const persistStorageSetupDraftForAction = async (
     session: number,
     editVersion: number,
-    action: "testing the connection" | "finishing setup" | "preparing the connection",
+    action: "test" | "finish",
   ): Promise<StorageSetupDraft | null> => {
     try {
       const saved = await persistStorageSetupDraft(session, editVersion);
       if (!saved || draftSessionRef.current !== session) return null;
       if (draftEditVersionRef.current !== editVersion) {
-        setStorageDraftActionError(
-          `The storage form changed while Mallard was preparing it for ${action}. Review the latest values and try again.`,
-        );
+        setStorageDraftActionError(t(action === "test" ? "storageDraft.changedBeforeTest" : "storageDraft.changedBeforeFinish"));
         return null;
       }
       setStorageDraftActionError(null);
@@ -1068,9 +1085,10 @@ export default function ProjectLinksWorkspace({
         // Preserve the autosave safety net after a failed action save. A
         // later edit or another explicit action will retry this snapshot.
         draftDirtyRef.current = true;
-        setStorageDraftActionError(
-          `Mallard could not save the current storage draft before ${action}: ${errorMessage(reason)}`,
-        );
+        setStorageDraftActionError(t(
+          action === "test" ? "storageDraft.saveFailedBeforeTest" : "storageDraft.saveFailedBeforeFinish",
+          { message: errorMessage(reason) },
+        ));
       }
       return null;
     }
@@ -1092,7 +1110,7 @@ export default function ProjectLinksWorkspace({
             !saved
             || draftSessionRef.current !== session
             || draftEditVersionRef.current !== editVersion
-          ) throw new Error("storage form changed while saving");
+          ) throw new Error(t("storageDraft.changedWhileSaving"));
           return saved;
         },
         resetStorageSession,
@@ -1102,8 +1120,8 @@ export default function ProjectLinksWorkspace({
       if (draftSessionRef.current === session) {
         draftDirtyRef.current = true;
         setStorageDraftActionError(draftEditVersionRef.current !== editVersion
-          ? "The storage form changed while Mallard was saving it. Review the latest values and try again."
-          : `Mallard could not save the current storage draft before leaving: ${errorMessage(reason)}`);
+          ? t("storageDraft.changedBeforeLeaving")
+          : t("storageDraft.saveFailedBeforeLeaving", { message: errorMessage(reason) }));
       }
       return false;
     }
@@ -1141,7 +1159,7 @@ export default function ProjectLinksWorkspace({
     } catch (reason) {
       if (requestId !== editSessionRequestRef.current) return;
       setStorageSessionLoading(false);
-      setStorageDraftActionError(`Mallard could not open the storage settings: ${errorMessage(reason)}`);
+      setStorageDraftActionError(t("storageDraft.openFailed", { message: errorMessage(reason) }));
     }
   };
 
@@ -1195,7 +1213,7 @@ export default function ProjectLinksWorkspace({
           await persistStorageSetupDraft(session, editVersion);
         } catch (reason) {
           if (draftSessionRef.current === session) {
-            setStorageDraftActionError(`Mallard could not save the storage draft: ${errorMessage(reason)}`);
+            setStorageDraftActionError(t("storageDraft.saveFailed", { message: errorMessage(reason) }));
           }
         }
       })();
@@ -1298,16 +1316,19 @@ export default function ProjectLinksWorkspace({
   const workspaceProfileReady = workspaceProfiles.length > 0
     && workspaceProfiles.every(({ profile }) => !!profile?.available && profile.readable);
   const workspaceProfileLabel = workspaceProfiles.length === 0
-    ? "No agent configured"
+    ? t("profile.none")
     : workspaceProfiles
       .map(({ provider, profile }) => profile?.display_name ?? providerLabel(provider))
       .join(" · ");
   const workspaceProfileTitle = workspaceProfiles.length === 0
-    ? "No agent profile is assigned"
+    ? t("profile.noneTitle")
     : workspaceProfiles
       .map(({ provider, profile }) => (profile
-        ? `${providerLabel(provider)} agent home: ${profile.path}${profile.available && profile.readable ? "" : " (unavailable)"}`
-        : `${providerLabel(provider)} profile is missing on this machine`))
+        ? t(profile.available && profile.readable ? "profile.home" : "profile.homeUnavailable", {
+          provider: providerLabel(provider),
+          path: profile.path,
+        })
+        : t("profile.missing", { provider: providerLabel(provider) })))
       .join("\n");
   const proposedProjectAlias = workspaceProject
     ? projectAliasDraft.trim() && projectAliasDraft.trim() !== workspaceProject.display_name
@@ -1342,12 +1363,14 @@ export default function ProjectLinksWorkspace({
   const workspaceCanSync = workspaceBindingActive && workspaceProfilesReadable;
   const workspaceCanRestore = workspaceBindingActive && workspaceProfilesWritable;
   const workspaceProfileIssue = workspaceBindingActive && !workspaceProfilesReadable
-    ? "No selected agent profile is available on this machine"
+    ? t("profile.noneAvailable")
     : null;
   // Push and Pull stand down on a storage this build has no adapter for.
   const workspaceStorageUnavailable = !!workspaceStorage && !workspaceStorage.available;
   const workspaceStorageIssue = workspaceStorage && workspaceStorageUnavailable
-    ? `This build has no ${workspaceStorage.provider_label} adapter, so ${workspaceStorage.name || "this storage"} cannot sync`
+    ? workspaceStorage.name
+      ? t("storageMenu.noAdapter", { provider: storageProviderName(workspaceStorage), name: workspaceStorage.name })
+      : t("storageMenu.noAdapterUnnamed", { provider: storageProviderName(workspaceStorage) })
     : null;
 
   const workspaceActionPrefix = workspaceProject && workspaceStorage
@@ -1422,7 +1445,7 @@ export default function ProjectLinksWorkspace({
         projectSyncApi.invalidateProjectActivity(projectId, storageId);
         const published = await projectSyncApi.publishManagedCloudVersion(projectId, storageId, name);
         setCloudActionError(null);
-        onNotify(`Published version ${published.version}.`);
+        onNotify(t("publishHolds.published", { version: published.version }));
       } catch (reason) {
         // The sheet closes itself once answered; a refusal is read on the page.
         setCloudActionError({ key: linkKey, message: reason instanceof Error ? reason.message : String(reason) });
@@ -1474,9 +1497,10 @@ export default function ProjectLinksWorkspace({
     || storageActionLockedForReview(workspaceReviewKind, "storage");
 
   // Name the destination when returning from a session to its project.
-  const workspaceSectionLabel = workspaceProject?.is_git_repository
-    ? "Git history"
-    : activityView === "files" ? "Files" : "Sessions";
+  const workspaceSection: keyof typeof SECTION_BACK_KEYS = workspaceProject?.is_git_repository
+    ? "git"
+    : activityView === "files" ? "files" : "sessions";
+  const workspaceSectionLabel = t(`section.${workspaceSection}`);
   // One switch for a non-Git project's two faces. Each face seats it at the
   // start of its own search row, so the trail ends at the project and the
   // choice sits on the page it changes.
@@ -1528,11 +1552,10 @@ export default function ProjectLinksWorkspace({
     /* Nothing yet to name a draft that is being created; an edit draft's
        storage is named by the settled record. */
     const storageName = creatingStorage
-      ? storageSession?.form.name || "(unnamed)"
-      : savedEditedStorage?.name || "(unnamed)";
-    const providerLabelForPage = savedEditedStorage?.provider_label
-      ?? storageSession?.draft.provider_label
-      ?? "";
+      ? storageSession?.form.name || t("fallback.unnamed")
+      : savedEditedStorage?.name || t("fallback.unnamed");
+    const pageStorageRecord = savedEditedStorage ?? storageSession?.draft ?? null;
+    const providerLabelForPage = pageStorageRecord ? storageProviderName(pageStorageRecord) : "";
     const storageAvailable = savedEditedStorage?.available ?? storageSession?.draft.available ?? false;
     const supportsManagedClear = storageAvailable && (descriptor?.clear_mode === "revision_checked" || descriptor?.clear_mode === "unconditional");
     const storageLinkCount = links.filter((link) => link.storage_id === pageStorageId).length;
@@ -1554,7 +1577,7 @@ export default function ProjectLinksWorkspace({
       const savedDraft = await persistStorageSetupDraftForAction(
         session,
         editVersion,
-        "finishing setup",
+        "finish",
       );
       if (!savedDraft) return;
       setStorageTestVerified(false);
@@ -1597,7 +1620,7 @@ export default function ProjectLinksWorkspace({
       const savedDraft = await persistStorageSetupDraftForAction(
         session,
         editVersion,
-        "testing the connection",
+        "test",
       );
       if (!savedDraft) return;
       const verified = await onTestStorageDraft(savedDraft.draft_id, savedDraft.revision);
@@ -1612,8 +1635,14 @@ export default function ProjectLinksWorkspace({
       // it may hold an afternoon of setup.
       if (wasNew) {
         const approved = await confirm(
-          `Discard the storage draft for ${session.form.name || "(unnamed)"}?\n\nThis removes only Mallard’s local setup draft; external storage resources are not changed.`,
-          { title: "Discard storage draft" },
+          session.form.name
+            ? t("storageDraft.discardConfirm", { name: session.form.name })
+            : t("storageDraft.discardConfirmUnnamed"),
+          {
+            title: t("storageDraft.discardTitle"),
+            okLabel: t("common:ok"),
+            cancelLabel: t("common:cancel"),
+          },
         );
         if (!approved) return;
       }
@@ -1622,7 +1651,7 @@ export default function ProjectLinksWorkspace({
           () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
         );
       } catch (reason) {
-        setStorageDraftActionError(`Mallard could not discard the storage draft: ${errorMessage(reason)}`);
+        setStorageDraftActionError(t("storageDraft.discardFailed", { message: errorMessage(reason) }));
         return;
       }
       resetStorageSession();
@@ -1642,7 +1671,7 @@ export default function ProjectLinksWorkspace({
           () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
         );
       } catch (reason) {
-        setStorageDraftActionError(`Mallard could not discard the storage draft: ${errorMessage(reason)}`);
+        setStorageDraftActionError(t("storageDraft.discardFailed", { message: errorMessage(reason) }));
         return;
       }
       resetStorageSession();
@@ -1663,7 +1692,7 @@ export default function ProjectLinksWorkspace({
           () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
         );
       } catch (reason) {
-        setStorageDraftActionError(`Mallard could not discard the storage draft: ${errorMessage(reason)}`);
+        setStorageDraftActionError(t("storageDraft.discardFailed", { message: errorMessage(reason) }));
         return;
       }
       resetStorageSession();
@@ -1696,21 +1725,21 @@ export default function ProjectLinksWorkspace({
     const storagePathCrumbs: PathBarCrumb[] = [
       {
         id: "storages",
-        label: "Storages",
+        label: t("storagePage.storages"),
         icon: "storage",
         tone: "root",
-        title: "All storages",
-        ariaLabel: "All storages",
+        title: t("storagePage.allStorages"),
+        ariaLabel: t("storagePage.allStorages"),
         onActivate: onOpenStorageIndex,
         disabled: busy,
       },
       creatingStorage || !savedEditedStorage
-        ? { id: "storage", label: "New storage" }
+        ? { id: "storage", label: t("storagePage.newStorage") }
         : {
             id: "storage",
             label: storageName,
             title: `${storageName} · ${storageSubtitle(savedEditedStorage)}`,
-            ariaLabel: `${storageName}. Storage menu`,
+            ariaLabel: t("bar.storageMenu", { name: storageName }),
             // The page below is this storage, so its verbs stay in the page's
             // overflow; the crumb menu is the header naming where you are and
             // the ways to be somewhere else.
@@ -1722,12 +1751,12 @@ export default function ProjectLinksWorkspace({
             },
             menu: [
               ...(storages.some((candidate) => candidate.storage_id !== pageStorageId) ? [{
-                label: "Switch to",
+                label: t("bar.switchTo"),
                 items: storages
                   .filter((candidate) => candidate.storage_id !== pageStorageId)
                   .map((candidate) => ({
                     id: candidate.storage_id,
-                    label: candidate.name || "(unnamed)",
+                    label: candidate.name || t("fallback.unnamed"),
                     detail: storageSubtitle(candidate),
                     detailIsPath: storageSubtitleIsPath(candidate),
                     icon: storageIconName(candidate.provider, candidate.icon),
@@ -1738,14 +1767,14 @@ export default function ProjectLinksWorkspace({
               {
                 items: [{
                   id: "add-storage",
-                  label: "Add storage…",
+                  label: t("bar.addStorage"),
                   icon: "plus" as const,
                   disabled: busy,
                   onSelect: () => onAddStorage(),
                 }],
               },
             ],
-            menuLabel: "Storage",
+            menuLabel: t("bar.storage"),
             disabled: busy,
           },
     ];
@@ -1756,25 +1785,25 @@ export default function ProjectLinksWorkspace({
     // clearing its data.
     const storagePathOverflow: PathBarMenuGroup[] = creatingStorage ? appActions : [
       {
-        label: "Storage",
+        label: t("bar.storage"),
         items: [
           ...(pathFact ? [{
             id: "reveal",
-            label: "Reveal in Finder",
+            label: t("bar.revealInFinder"),
             detail: compactProjectPath(pathFact.value),
             icon: "folder" as const,
             onSelect: () => revealPath(pathFact.value),
           }] : []),
           ...(cloudAccount ? [{
             id: "open-website",
-            label: "Open website",
+            label: t("storagePage.openWebsite"),
             detail: cloudAccount.host,
             icon: "external-link" as const,
             onSelect: () => void openExternalUrl(cloudAccount.origin),
           }] : []),
           {
             id: "rename",
-            label: "Rename storage…",
+            label: t("storagePage.rename"),
             icon: "edit" as const,
             disabled: busy,
             // The name is the settings card's one live field.
@@ -1782,7 +1811,7 @@ export default function ProjectLinksWorkspace({
           },
           ...(supportsManagedClear ? [{
             id: "clear",
-            label: "Clear storage data…",
+            label: t("storagePage.clear"),
             icon: "trash" as const,
             danger: true,
             disabled: busy,
@@ -1790,16 +1819,16 @@ export default function ProjectLinksWorkspace({
           }] : []),
           {
             id: "remove",
-            label: "Remove storage…",
+            label: t("storagePage.remove"),
             icon: "x" as const,
             danger: true,
             disabled: busy || storageLinkCount > 0,
             disabledReason: storageLinkCount > 0
-              ? `Linked to ${storageLinkCount} project${storageLinkCount === 1 ? "" : "s"} — unlink first`
+              ? t("storagePage.removeLinked", { count: storageLinkCount })
               : undefined,
             title: storageLinkCount > 0
-              ? `${storageName} is linked to ${storageLinkCount} project${storageLinkCount === 1 ? "" : "s"}; unlink it before removing`
-              : `Remove ${storageName}; synced files stay in storage`,
+              ? t("storagePage.removeLinkedTitle", { name: storageName, count: storageLinkCount })
+              : t("storagePage.removeTitle", { name: storageName }),
             onSelect: () => onRemoveStorage(pageStorageId),
           },
         ],
@@ -1814,12 +1843,12 @@ export default function ProjectLinksWorkspace({
         type="button"
         className="sync-path-sync"
         disabled={busy || bundleLoading || !storageAvailable}
-        title={`Refresh repositories in ${storageName}`}
-        aria-label={`Refresh repositories in ${storageName}`}
+        title={t("storagePage.refreshRepositories", { name: storageName })}
+        aria-label={t("storagePage.refreshRepositories", { name: storageName })}
         onClick={() => void loadStorageBundles(savedEditedStorage)}
       >
         <Icon name="refresh" size={14} className={bundleLoading ? "icon-spin" : undefined} />
-        <span className="sync-path-sync-label">Refresh</span>
+        <span className="sync-path-sync-label">{t("common:refresh")}</span>
       </button>
     );
 
@@ -1835,7 +1864,7 @@ export default function ProjectLinksWorkspace({
       storageNotices.push({
         key: "storage-provider-unavailable",
         severity: "warning",
-        message: `This build has no ${providerLabelForPage} adapter (configuration version ${storageSession.draft.config_version}), so this draft cannot be edited, tested, or finished here.`,
+        message: t("storagePage.noDescriptor", { provider: providerLabelForPage, version: storageSession.draft.config_version }),
       });
     }
     /* A refused credential is the one standing fact about this storage:
@@ -1867,7 +1896,7 @@ export default function ProjectLinksWorkspace({
     const storageNoticeTiming: NoticeTiming = storageDraftActionError
       || revealError
       ? { timing: "blocking" }
-      : { timing: "standing", label: "Problems with this storage" };
+      : { timing: "standing", label: t("storagePage.problems") };
 
     /* On an existing storage the agent's job is regaining access to the
        same destination, so its verb says so whether or not access has
@@ -1885,7 +1914,7 @@ export default function ProjectLinksWorkspace({
             () => projectSyncApi.discardStorageSetupDraft(session.draft.draft_id),
           );
         } catch {
-          setStorageDraftActionError("Mallard could not reset setup. Select Reset setup to try again.");
+          setStorageDraftActionError(t("storageDraft.resetFailed"));
           return;
         }
         resetStorageSession();
@@ -1943,10 +1972,10 @@ export default function ProjectLinksWorkspace({
       <SyncPathBar
         crumbs={storagePathCrumbs}
         overflow={storagePathOverflow}
-        overflowLabel={creatingStorage ? "App actions" : "Storage and app actions"}
+        overflowLabel={creatingStorage ? t("bar.appActions") : t("storagePage.storageAndAppActions")}
         overflowDisabled={busy}
         actions={storagePathActions}
-        ariaLabel={`${creatingStorage ? "New storage" : storageName} path`}
+        ariaLabel={creatingStorage ? t("storagePage.newStoragePath") : t("bar.path", { name: storageName })}
         notices={{
           items: storageNotices.map((item) => ({ ...item, key: `storage:${pageStorageId}:${item.key}` })),
           ...storageNoticeTiming,
@@ -1955,7 +1984,7 @@ export default function ProjectLinksWorkspace({
       <main className="sync-main sync-project-links-page sync-storage-settings-page">
         <section
           className="profile-links-section"
-          aria-label={creatingStorage ? "New storage" : storageName}
+          aria-label={creatingStorage ? t("storagePage.newStorage") : storageName}
         >
           <div
             ref={storageSettingsRef}
@@ -2014,23 +2043,23 @@ export default function ProjectLinksWorkspace({
                           <>
                             {storageTestVerified && (
                               <span className="storage-setup-verified" role="status">
-                                <Icon name="check-circle" size={13} /> Connection verified
+                                <Icon name="check-circle" size={13} /> {t("storagePage.connectionVerified")}
                               </span>
                             )}
                             <button type="button" className="btn btn-ghost" disabled={formLocked} onClick={() => void discardStorageDraftAndClose()}>
-                              Cancel
+                              {t("common:cancel")}
                             </button>
                             <button type="button" className="btn" disabled={storageActionBlocked} onClick={() => void testStorageConnection()}>
-                              {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
+                              {runningAction === `test-storage:${pageStorageId}` ? t("progress.testing") : t("storagePage.testConnection")}
                             </button>
                             <button type="button" className="btn btn-primary" disabled={storageActionBlocked} onClick={() => void saveEditedStorage()}>
-                              {runningAction === `storage:${pageStorageId}` ? "Saving…" : "Save credential"}
+                              {runningAction === `storage:${pageStorageId}` ? t("common:saving") : t("storagePage.saveCredential")}
                             </button>
                           </>
                         )}
                       />
                     ) : (
-                      <div className="sync-storage-repository-state"><span className="status-loader" /> Opening the reconnect…</div>
+                      <div className="sync-storage-repository-state"><span className="status-loader" /> {t("storagePage.openingReconnect")}</div>
                     ),
                   }}
                   lead={cloudAccount ? {
@@ -2046,7 +2075,7 @@ export default function ProjectLinksWorkspace({
               <footer className="sync-storage-setup-footer">
                 {progress && progress.total > 0 && (descriptor?.secrets.length ?? 0) > 0 && (
                   <span className="sync-storage-editor-progress" aria-live="polite">
-                    {progress.set} of {progress.total} set
+                    {t("storagePage.fieldsSet", { set: progress.set, total: progress.total })}
                   </span>
                 )}
                 <div>
@@ -2057,7 +2086,7 @@ export default function ProjectLinksWorkspace({
                       glance rather than reading as more chrome. */}
                   {storageTestVerified && (
                     <span className="storage-setup-verified" role="status">
-                      <Icon name="check-circle" size={13} /> Connection verified
+                      <Icon name="check-circle" size={13} /> {t("storagePage.connectionVerified")}
                     </span>
                   )}
                   <button
@@ -2066,16 +2095,16 @@ export default function ProjectLinksWorkspace({
                     disabled={formLocked}
                     onClick={() => void discardStorageDraftAndClose()}
                   >
-                    Discard draft…
+                    {t("storagePage.discardDraft")}
                   </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
                     disabled={formLocked}
                     onClick={onOpenStorageIndex}
-                    aria-label="Close setup; the draft is kept"
+                    aria-label={t("storagePage.closeSetup")}
                   >
-                    Cancel
+                    {t("common:cancel")}
                   </button>
                   <button
                     type="button"
@@ -2083,7 +2112,7 @@ export default function ProjectLinksWorkspace({
                     disabled={storageActionBlocked}
                     onClick={() => void testStorageConnection()}
                   >
-                    {runningAction === `test-storage:${pageStorageId}` ? "Testing…" : "Test connection"}
+                    {runningAction === `test-storage:${pageStorageId}` ? t("progress.testing") : t("storagePage.testConnection")}
                   </button>
 
                     <button
@@ -2093,8 +2122,8 @@ export default function ProjectLinksWorkspace({
                       onClick={() => void saveEditedStorage()}
                     >
                       {descriptor && (descriptor.secrets.length > 0 || descriptor.local_setup)
-                        ? runningAction === `storage:${pageStorageId}` ? "Finishing…" : "Finish setup"
-                        : runningAction === `storage:${pageStorageId}` ? "Creating…" : "Create storage"}
+                        ? runningAction === `storage:${pageStorageId}` ? t("progress.finishing") : t("storagePage.finishSetup")
+                        : runningAction === `storage:${pageStorageId}` ? t("progress.creating") : t("storagePage.createStorage")}
                     </button>
 
                 </div>
@@ -2104,14 +2133,14 @@ export default function ProjectLinksWorkspace({
             {!creatingStorage && (
               <section className="sync-storage-repositories" aria-labelledby="storage-repositories-heading">
                 <div className="sync-storage-repositories-heading">
-                  <h2 id="storage-repositories-heading">Repositories</h2>
+                  <h2 id="storage-repositories-heading">{t("storagePage.repositories")}</h2>
                 </div>
 
                 {bundleLoading ? (
-                  <div className="sync-storage-repository-state"><span className="status-loader" /> Loading repositories…</div>
+                  <div className="sync-storage-repository-state"><span className="status-loader" /> {t("storagePage.loadingRepositories")}</div>
                 ) : !storageAvailable ? (
                   <div className="sync-storage-repository-state">
-                    {`This build has no ${providerLabelForPage} adapter, so the repositories in this storage cannot be listed.`}
+                    {t("storagePage.noAdapterRepositories", { provider: providerLabelForPage })}
                   </div>
                 ) : orderedRemoteBundles.length === 0 && orderedCatalogRepos.length === 0 ? (
                   /* Emptiness is tested before failure, because the two lists
@@ -2124,7 +2153,7 @@ export default function ProjectLinksWorkspace({
                      the refusal itself is already a rung of the column's one
                      box above, so the card does not say it twice. */
                   bundleError || catalogRepoError ? null : (
-                    <div className="sync-storage-repository-state">No repositories in this storage.</div>
+                    <div className="sync-storage-repository-state">{t("storagePage.noRepositories")}</div>
                   )
                 ) : (
                   <div className="sync-storage-repository-list">
@@ -2176,10 +2205,10 @@ export default function ProjectLinksWorkspace({
       // why every row is inert, instead of a tooltip per greyed row.
       const storageMenuBanner = workspaceControlsLocked
         ? workspacePushProgress || workspacePushReviewOpen
-          ? "Push in progress — storage can't change until it finishes."
+          ? t("storageMenu.pushInProgress")
           : workspacePullProgress || workspacePullReviewOpen
-            ? "Pull in progress — storage can't change until it finishes."
-            : "Working — storage can't change right now."
+            ? t("storageMenu.pullInProgress")
+            : t("storageMenu.working")
         : undefined;
       const otherStorages = workspaceLinkedStorages.filter((storage) => (
         storage.storage_id !== workspaceStorage.storage_id
@@ -2189,18 +2218,18 @@ export default function ProjectLinksWorkspace({
           items: [
             {
               id: "storage-details",
-              label: "Storage details…",
+              label: t("storageMenu.details"),
               icon: "settings" as const,
               disabled: workspaceControlsLocked,
               onSelect: () => { void openStorageDetails(workspaceStorage); },
             },
             {
               id: "unlink",
-              label: `Unlink from ${projectLabel(workspaceProject)}…`,
+              label: t("storageMenu.unlink", { project: projectLabel(workspaceProject) }),
               icon: "link-off" as const,
               danger: true,
               disabled: workspaceControlsLocked,
-              title: "Stop syncing this pairing; files already in storage are kept",
+              title: t("storageMenu.unlinkTitle"),
               onSelect: () => void run(
                 `unlink:${workspaceActionPrefix}`,
                 () => onUnlinkStorage(workspaceProject.local_project_id, workspaceStorage.storage_id),
@@ -2209,10 +2238,10 @@ export default function ProjectLinksWorkspace({
           ],
         },
         ...(otherStorages.length > 0 ? [{
-          label: "Switch to",
+          label: t("bar.switchTo"),
           items: otherStorages.map((storage) => ({
             id: storage.storage_id,
-            label: storage.name || "(unnamed)",
+            label: storage.name || t("fallback.unnamed"),
             detail: storageSubtitle(storage),
             detailIsPath: storageSubtitleIsPath(storage),
             icon: storageIconName(storage.provider, storage.icon),
@@ -2229,11 +2258,11 @@ export default function ProjectLinksWorkspace({
             // from the DOM for a reason the user cannot see.
             {
               id: "link-storage",
-              label: "Link storage…",
+              label: t("storageMenu.link"),
               icon: "link" as const,
               disabled: workspaceControlsLocked || workspaceAvailableStorages.length === 0,
               disabledReason: workspaceAvailableStorages.length === 0
-                ? "Everything you've added is already linked"
+                ? t("storageMenu.allLinked")
                 : undefined,
               // Opens the chooser. Not a toggle: the menu closes on select, so
               // a second visit to this row can only mean "open it again".
@@ -2241,7 +2270,7 @@ export default function ProjectLinksWorkspace({
             },
             {
               id: "add-storage",
-              label: "Add storage…",
+              label: t("bar.addStorage"),
               icon: "plus" as const,
               disabled: workspaceControlsLocked,
               onSelect: () => {
@@ -2254,20 +2283,20 @@ export default function ProjectLinksWorkspace({
       ];
       pathCrumbs.push({
         id: "storage",
-        label: workspaceStorage.name || "(unnamed)",
+        label: workspaceStorage.name || t("fallback.unnamed"),
         icon: storageIconName(workspaceStorage.provider, workspaceStorage.icon),
         tone: "root",
-        title: `${workspaceStorage.name || "Storage"} · ${storageSubtitle(workspaceStorage)}`,
-        ariaLabel: `${workspaceStorage.name || "Unnamed storage"}. Storage menu`,
+        title: `${workspaceStorage.name || t("bar.storage")} · ${storageSubtitle(workspaceStorage)}`,
+        ariaLabel: t("bar.storageMenu", { name: workspaceStorage.name || t("fallback.unnamedStorage") }),
         menuHeader: {
-          label: workspaceStorage.name || "(unnamed)",
+          label: workspaceStorage.name || t("fallback.unnamed"),
           detail: storageSubtitle(workspaceStorage),
           detailIsPath: storageSubtitleIsPath(workspaceStorage),
           icon: storageIconName(workspaceStorage.provider, workspaceStorage.icon),
         },
         menuBanner: storageMenuBanner,
         menu: storageMenu,
-        menuLabel: "Storage",
+        menuLabel: t("bar.storage"),
       });
     }
 
@@ -2282,12 +2311,12 @@ export default function ProjectLinksWorkspace({
       icon: workspaceProject.is_git_repository ? "git-folder" : "folder",
       warning: !workspaceProfileReady,
       title: [
-        workspaceProject.project_root ?? "Folder not configured",
+        workspaceProject.project_root ?? t("projectMenu.folderNotConfigured"),
         workspaceProfileTitle,
       ].filter(Boolean).join("\n"),
       ariaLabel: sessionDetailSubview
-        ? `Back to ${workspaceSectionLabel} for ${projectLabel(workspaceProject)}`
-        : `${projectLabel(workspaceProject)}. Project menu`,
+        ? t(SECTION_BACK_KEYS[workspaceSection], { project: projectLabel(workspaceProject) })
+        : t("projectMenu.ariaLabel", { name: projectLabel(workspaceProject) }),
       // Inside a session the repo is the ancestor you came from, so its label
       // walks back out to the project's page; the menu stays on its chevron.
       onActivate: sessionDetailSubview ? closeSessionDetail : undefined,
@@ -2307,7 +2336,7 @@ export default function ProjectLinksWorkspace({
         label: projectLabel(workspaceProject),
         detail: workspaceProject.project_root
           ? compactProjectPath(workspaceProject.project_root)
-          : "Folder not configured",
+          : t("projectMenu.folderNotConfigured"),
         detailIsPath: !!workspaceProject.project_root,
         icon: workspaceProject.is_git_repository ? "git-folder" : "folder",
       },
@@ -2316,13 +2345,13 @@ export default function ProjectLinksWorkspace({
           items: [
             ...(workspaceProject.project_root ? [{
               id: "reveal",
-              label: "Reveal in Finder",
+              label: t("bar.revealInFinder"),
               icon: "folder" as const,
               onSelect: () => revealPath(workspaceProject.project_root as string),
             }] : []),
             {
               id: "agent",
-              label: "Agent profile…",
+              label: t("projectMenu.agentProfile"),
               detail: workspaceProfileLabel,
               detailIsPath: false,
               icon: "terminal" as const,
@@ -2331,7 +2360,7 @@ export default function ProjectLinksWorkspace({
             },
             {
               id: "rename",
-              label: "Rename project…",
+              label: t("projectMenu.rename"),
               icon: "edit" as const,
               disabled: busy,
               onSelect: () => {
@@ -2341,17 +2370,17 @@ export default function ProjectLinksWorkspace({
             },
             {
               id: "delete-project-sessions",
-              label: "Delete all local sessions…",
+              label: t("projectMenu.deleteSessions"),
               icon: "trash" as const,
               danger: true,
               disabled: busy,
-              title: "Delete this project’s local sessions and subagents, and clear its session bindings and local sync state",
+              title: t("projectMenu.deleteSessionsTitle"),
               onSelect: () => void onDeleteProjectSessions(workspaceProject.local_project_id),
             },
           ],
         },
         ...(otherProjects.length > 0 ? [{
-          label: "Switch to",
+          label: t("bar.switchTo"),
           items: otherProjects.map((candidate) => ({
             id: candidate.local_project_id,
             label: projectLabel(candidate),
@@ -2365,14 +2394,14 @@ export default function ProjectLinksWorkspace({
         {
           items: [{
             id: "add-project",
-            label: "Add project…",
+            label: t("projectMenu.addProject"),
             icon: "plus" as const,
             disabled: busy,
             onSelect: () => onAddProject(),
           }],
         },
       ],
-      menuLabel: "Project",
+      menuLabel: t("bar.project"),
       disabled: busy || !!inlineStorageReview,
     });
 
@@ -2385,7 +2414,7 @@ export default function ProjectLinksWorkspace({
         pathCrumbs.push({
           id: "session-parent",
           label: parent.title,
-          title: `Back to ${parent.title}`,
+          title: t("session.backTo", { title: parent.title }),
           leading: (
             <span className="sync-path-leaf-mark">
               <ProviderMark
@@ -2408,8 +2437,8 @@ export default function ProjectLinksWorkspace({
         label: sessionHeader?.state === "ready"
           ? sessionHeader.title
           : sessionHeader?.state === "failed"
-            ? "Session unavailable"
-            : "Opening session…",
+            ? t("session.unavailable")
+            : t("session.opening"),
         title: sessionHeader?.state === "ready"
           ? [sessionHeader.title, sessionHeader.providerDisplayName]
             .filter(Boolean).join(" · ")
@@ -2470,9 +2499,9 @@ export default function ProjectLinksWorkspace({
     ? activityHeader
     : null;
   const sessionPushIssue = !sessionDetailSubview ? null
-    : storedSession ? "No local session to push."
+    : storedSession ? t("session.noLocal")
     : !sessionComparison
-      ? "Checking session…"
+      ? t("session.checking")
       : sessionComparison.comparisonError
         ?? sessionPushDisabledReason(sessionPushEntry);
   // What the page says under Push: only a hold the user clears. Up to date,
@@ -2493,7 +2522,7 @@ export default function ProjectLinksWorkspace({
   const pushCount = pushThreadCount + pushFileCount;
   // The file scan holds the host-operation lock both verbs take, so a click
   // during it would only be refused; they wait it out, and say why.
-  const projectFilesScanIssue = projectFilesScan.loading ? "Scanning project files…" : null;
+  const projectFilesScanIssue = projectFilesScan.loading ? t("sync.scanningFiles") : null;
   const showPullCount = pullCount > 0 && !workspacePullReviewOpen && !workspacePullProgress;
   const showPushCount = pushCount > 0 && !workspacePushReviewOpen && !workspacePushProgress;
   const attention = activityHeader?.counts.attention ?? 0;
@@ -2505,20 +2534,22 @@ export default function ProjectLinksWorkspace({
     ? sessionHeader?.state === "ready" && {
       refreshing: sessionHeader.refreshing || !!activityHeader?.refreshing,
       onRefresh: () => { sessionHeader.onRefresh(); activityHeader?.onRefresh(); },
-      label: sessionHeader.refreshing || activityHeader?.refreshing ? "Refreshing session" : "Refresh session",
+      label: sessionHeader.refreshing || activityHeader?.refreshing ? t("refresh.sessionBusy") : t("refresh.session"),
     }
     : filesFaceShown
       ? {
         refreshing: projectFilesScan.loading,
         onRefresh: projectFilesScan.rescan,
-        label: projectFilesScan.loading ? "Rescanning project files" : "Rescan project files",
+        label: projectFilesScan.loading ? t("refresh.filesBusy") : t("refresh.files"),
       }
       : activityHeader && {
         refreshing: activityHeader.refreshing,
         onRefresh: activityHeader.onRefresh,
-        label: activityHeader.refreshing ? "Refreshing activity" : "Refresh activity",
+        label: activityHeader.refreshing ? t("refresh.activityBusy") : t("refresh.activity"),
       };
 
+  // A settled storage always has a name; the word only guards an empty one.
+  const workspaceStorageName = workspaceStorage?.name || t("fallback.storage");
   const syncPathActions = workspaceProject && workspaceStorage ? (
     <>
       {/* One chip summarizes issues that neither action can clear. */}
@@ -2572,7 +2603,7 @@ export default function ProjectLinksWorkspace({
           </span>
         </button>
       )}
-    <div className="sync-path-action-group" role="group" aria-label="Sync actions">
+    <div className="sync-path-action-group" role="group" aria-label={t("sync.actions")}>
       <button
         type="button"
         className={`sync-path-sync${workspacePullReviewOpen ? " active" : ""}`}
@@ -2609,23 +2640,23 @@ export default function ProjectLinksWorkspace({
           ?? workspaceProfileIssue
           ?? projectFilesScanIssue
           ?? (!workspaceBindingActive
-            ? "Confirm project setup before pulling"
+            ? t("sync.pullSetupFirst")
             : workspacePullReviewOpen
-            ? (inlineStorageReview?.continueTitle ?? "Pull the selected changes from this storage")
+            ? (inlineStorageReview?.continueTitle ?? t("sync.pullSelected"))
             : !workspaceProfilesWritable
-              ? "No selected agent profile is writable"
+              ? t("profile.noneWritable")
               : storedSession
-                ? "Review and pull this session from this storage"
-                : "Review the Pull actions before applying them")}
+                ? t("sync.pullSession")
+                : t("sync.pullReview"))}
         aria-label={!workspaceBindingActive
-          ? "Set up project before Pull"
+          ? t("sync.pullSetupLabel")
           : workspacePullReviewOpen
-          ? `${inlineStorageReview?.continueLabel ?? "Pull selected changes"} — ${workspaceStorage.name || "storage"}`
+          ? t("sync.reviewLabel", { label: inlineStorageReview?.continueLabel ?? t("sync.pullSelectedLabel"), name: workspaceStorageName })
           : storedSession
-            ? `Pull this session from ${workspaceStorage.name || "storage"}`
+            ? t("sync.pullSessionLabel", { name: workspaceStorageName })
             : showPullCount
-              ? `Pull ${projectSyncCountPhrase(pullThreadCount, pullFileCount)} from ${workspaceStorage.name || "storage"}`
-              : `Pull from ${workspaceStorage.name || "storage"}`}
+              ? t("sync.pullCountLabel", { phrase: projectSyncCountPhrase(pullThreadCount, pullFileCount), name: workspaceStorageName })
+              : t("sync.pullLabel", { name: workspaceStorageName })}
         aria-expanded={workspacePullReviewOpen}
       >
         <Icon
@@ -2674,15 +2705,15 @@ export default function ProjectLinksWorkspace({
           ?? workspaceProfileIssue
           ?? projectFilesScanIssue
           ?? (workspacePushReviewOpen
-            ? (inlineStorageReview?.continueTitle ?? "Push the selected resources to this storage")
+            ? (inlineStorageReview?.continueTitle ?? t("sync.pushSelected"))
             : sessionPushIssue ?? (sessionDetailSubview
-              ? "Review and push this session to this storage"
-              : "Choose resources, then push them to this storage"))}
+              ? t("sync.pushSession")
+              : t("sync.pushChoose")))}
         aria-label={workspacePushReviewOpen
-          ? `Push selected resources to ${workspaceStorage.name || "storage"}`
+          ? t("sync.pushSelectedLabel", { name: workspaceStorageName })
           : showPushCount
-            ? `Push ${projectSyncCountPhrase(pushThreadCount, pushFileCount)} to ${workspaceStorage.name || "storage"}`
-            : `Push to ${workspaceStorage.name || "storage"}`}
+            ? t("sync.pushCountLabel", { phrase: projectSyncCountPhrase(pushThreadCount, pushFileCount), name: workspaceStorageName })
+            : t("sync.pushLabel", { name: workspaceStorageName })}
         aria-expanded={workspacePushReviewOpen}
       >
         <Icon
@@ -2723,7 +2754,7 @@ export default function ProjectLinksWorkspace({
           disabled={activityHeader?.refreshing}
           onClick={() => cloudNotice.action === "storage_settings" && managedCloudStorageId ? onOpenStorage(managedCloudStorageId) : cloudRefreshRef.current?.()}
         >
-          {cloudNotice.action === "storage_settings" ? "Storage settings" : "Retry"}
+          {cloudNotice.action === "storage_settings" ? t("notices.storageSettings") : t("notices.retry")}
         </button>
       ),
     });
@@ -2733,7 +2764,7 @@ export default function ProjectLinksWorkspace({
   }
   const workspaceNoticeTiming: NoticeTiming = revealError
     ? { timing: "blocking" }
-    : { timing: "standing", label: "Notes about this workspace" };
+    : { timing: "standing", label: t("notices.workspace") };
 
   return (
     <>
@@ -2741,9 +2772,9 @@ export default function ProjectLinksWorkspace({
       <SyncPathBar
         crumbs={pathCrumbs}
         overflow={pathOverflow}
-        overflowLabel="App actions"
+        overflowLabel={t("bar.appActions")}
         actions={pathActions}
-        ariaLabel={`${projectLabel(workspaceProject)} path`}
+        ariaLabel={t("bar.path", { name: projectLabel(workspaceProject) })}
       />
     )}
     <main ref={workspaceScrollRef} className={`sync-main sync-project-links-page${workspaceProject ? " sync-project-workspace-page sync-project-combined-page" : ""}${newProjectSetup ? " sync-project-setup-page" : ""}${inlineStorageReview ? " sync-sync-review-page" : ""}`}>
@@ -2753,7 +2784,7 @@ export default function ProjectLinksWorkspace({
         inert={sessionDetailSubview != null}
         aria-hidden={sessionDetailSubview ? true : undefined}
         aria-label={newProjectSetup
-          ? "Project setup"
+          ? t("links.projectSetup")
           : workspaceProject
             ? projectLabel(workspaceProject)
             : undefined}
@@ -2762,20 +2793,20 @@ export default function ProjectLinksWorkspace({
         {!newProjectSetup && !workspaceProject && (
           <div className="profile-links-heading sync-combined-project-heading">
             <div className="profile-links-copy">
-              <h1 id="project-links-heading" className="settings-section-title">Project links</h1>
-              <div className="profile-links-subtitle">Choose where each project repo syncs.</div>
+              <h1 id="project-links-heading" className="settings-section-title">{t("links.title")}</h1>
+              <div className="profile-links-subtitle">{t("links.subtitle")}</div>
             </div>
             <div className="profile-links-heading-actions">
               <div className="profile-links-counts">
-                {projects.length} projects <span>·</span> {storages.length} storage <span>·</span> {links.length} links
+                {t("links.projects", { number: projects.length })} <span>·</span> {t("links.storages", { number: storages.length })} <span>·</span> {t("links.links", { number: links.length })}
               </div>
               <div className="profile-links-primary-actions">
                 <button type="button" className="btn profile-refresh-linkage" onClick={onRefresh} disabled={loading || busy}>
                   <Icon name="refresh" size={16} className={loading ? "icon-spin" : undefined} />
-                  {loading ? "Refreshing…" : "Refresh"}
+                  {loading ? t("progress.refreshing") : t("common:refresh")}
                 </button>
                 <button type="button" className="btn profile-add-profile" onClick={onAddProject} disabled={busy}>
-                  <Icon name="plus" size={16} /> Add project
+                  <Icon name="plus" size={16} /> {t("links.addProject")}
                 </button>
               </div>
             </div>
@@ -2792,17 +2823,17 @@ export default function ProjectLinksWorkspace({
               void saveProjectName();
             }}
           >
-            <label htmlFor="sync-path-rename-input">Project name</label>
+            <label htmlFor="sync-path-rename-input">{t("rename.label")}</label>
             <input
               id="sync-path-rename-input"
               value={projectAliasDraft}
               onChange={(event) => setProjectAliasDraft(event.target.value)}
-              aria-label="Project display name"
+              aria-label={t("rename.ariaLabel")}
               disabled={busy}
               autoFocus
             />
             <button type="submit" className="btn btn-primary" disabled={busy || !projectNameChanged}>
-              {runningAction === `rename:${workspaceProject.local_project_id}` ? "Saving…" : "Save"}
+              {runningAction === `rename:${workspaceProject.local_project_id}` ? t("common:saving") : t("common:save")}
             </button>
             <button
               type="button"
@@ -2813,7 +2844,7 @@ export default function ProjectLinksWorkspace({
                 setRenamingProjectId(null);
               }}
             >
-              Cancel
+              {t("common:cancel")}
             </button>
             {workspaceProject.local_alias && (
               <button
@@ -2834,7 +2865,7 @@ export default function ProjectLinksWorkspace({
                   },
                 )}
               >
-                Use repo name
+                {t("rename.useRepoName")}
               </button>
             )}
             {renameError && (
@@ -2847,7 +2878,7 @@ export default function ProjectLinksWorkspace({
 
         <NoticeZone
           items={workspaceNotices}
-          subject="notes about this workspace"
+          subject={t("notices.workspaceSubject")}
           {...workspaceNoticeTiming}
         />
 
@@ -2856,9 +2887,9 @@ export default function ProjectLinksWorkspace({
         {!newProjectSetup && (projects.length === 0 ? (
           <div className="profile-links-empty">
             <Icon name="folder" size={24} />
-            <span>Add a project to choose which resources and storage belong to it.</span>
+            <span>{t("links.empty")}</span>
             <button type="button" className="btn" onClick={onAddProject} disabled={busy}>
-              <Icon name="plus" size={15} /> Add project
+              <Icon name="plus" size={15} /> {t("links.addProject")}
             </button>
           </div>
         ) : workspaceProject ? (
@@ -2880,8 +2911,8 @@ export default function ProjectLinksWorkspace({
                       type="button"
                       className="sync-history-icon-action"
                       disabled={busy || !!inlineStorageReview}
-                      title="Link storage"
-                      aria-label="Link storage"
+                      title={t("storageCard.link")}
+                      aria-label={t("storageCard.link")}
                       aria-haspopup="dialog"
                       onClick={() => setLinkingProjectId(project.local_project_id)}
                     >
@@ -2892,8 +2923,8 @@ export default function ProjectLinksWorkspace({
                     type="button"
                     className="sync-history-icon-action"
                     disabled={busy || !!inlineStorageReview}
-                    title="Add storage"
-                    aria-label="Add storage"
+                    title={t("storageCard.add")}
+                    aria-label={t("storageCard.add")}
                     onClick={() => {
                       setLinkingProjectId(null);
                       onAddStorage();
@@ -2908,13 +2939,13 @@ export default function ProjectLinksWorkspace({
               // so the two card headings cannot drift apart.
               const storageHeading = (
                 <div className="sync-history-section-heading">
-                  <h2><Icon name="link" size={14} />Storage</h2>
+                  <h2><Icon name="link" size={14} />{t("storageCard.heading")}</h2>
                   <span className="project-storage-heading-actions">
                     {projectLinks.length > 0 && (
                       <span
                         className="sync-history-heading-count"
-                        title={`${projectLinks.length} linked storage location${projectLinks.length === 1 ? "" : "s"}`}
-                        aria-label={`${projectLinks.length} linked storage location${projectLinks.length === 1 ? "" : "s"}`}
+                        title={t("storageCard.linkedCount", { count: projectLinks.length })}
+                        aria-label={t("storageCard.linkedCount", { count: projectLinks.length })}
                       >
                         <Icon name="cloud" size={12} />{projectLinks.length}
                       </span>
@@ -2927,7 +2958,7 @@ export default function ProjectLinksWorkspace({
                         onClick={() => void onConfigureBinding(project.local_project_id)}
                       >
                         <Icon name="folder" size={13} />
-                        {projectBinding ? "Confirm setup" : "Set up project"}
+                        {projectBinding ? t("storageCard.confirmSetup") : t("storageCard.setUp")}
                       </button>
                     )}
                     {renderStorageConnectionActions()}
@@ -2960,13 +2991,13 @@ export default function ProjectLinksWorkspace({
                   <div className="profile-link-connections">
                     <section
                       className={`project-storage-card${project.is_git_repository ? "" : " project-storage-card-non-git"}`}
-                      aria-label={`${projectLabel(project)} storage`}
+                      aria-label={t("storageCard.ariaLabel", { name: projectLabel(project) })}
                     >
                       {!selectedStorage && storageHeading}
                     {projectLinks.length === 0 && (
                       <div className="project-storage-empty">
                         <Icon name="cloud" size={16} />
-                        <span>No storage linked yet</span>
+                        <span>{t("storageCard.empty")}</span>
                         <button
                           type="button"
                           className="btn"
@@ -2982,7 +3013,7 @@ export default function ProjectLinksWorkspace({
                           }}
                         >
                           <Icon name={workspaceAvailableStorages.length > 0 ? "link" : "plus"} size={13} />
-                          {workspaceAvailableStorages.length > 0 ? "Link storage" : "Add storage"}
+                          {workspaceAvailableStorages.length > 0 ? t("storageCard.link") : t("storageCard.add")}
                         </button>
                       </div>
                     )}
@@ -3051,7 +3082,7 @@ export default function ProjectLinksWorkspace({
                                 onClick={() => void run(`pull:${actionPrefix}`, () => onPull(project.local_project_id, storage.storage_id))}
                               >
                                 <Icon name="download" size={13} />
-                                Open Pull review
+                                {t("notices.openPullReview")}
                               </button>
                             </div>
                           ),
@@ -3073,7 +3104,7 @@ export default function ProjectLinksWorkspace({
                         gateNotices.push({
                           key: "action-failed",
                           severity: "danger",
-                          title: failedAction === "push" ? "Push couldn't start" : "Pull couldn't start",
+                          title: failedAction === "push" ? t("notices.pushFailed") : t("notices.pullFailed"),
                           message: failedMessage,
                           action: (
                             <div className="sync-sync-review-recovery-actions">
@@ -3088,7 +3119,7 @@ export default function ProjectLinksWorkspace({
                                   disabled={noticeActionsDisabled}
                                   onClick={() => onOpenStorage(storage.storage_id)}
                                 >
-                                  Reconnect {storage.provider_label}
+                                  {t("notices.reconnect", { provider: storageProviderName(storage) })}
                                 </button>
                               ) : (
                                 <button
@@ -3102,7 +3133,7 @@ export default function ProjectLinksWorkspace({
                                       : onPull(project.local_project_id, storage.storage_id, activeNotice.scope),
                                   )}
                                 >
-                                  Retry
+                                  {t("notices.retry")}
                                 </button>
                               )}
                             </div>
@@ -3137,7 +3168,7 @@ export default function ProjectLinksWorkspace({
                           )}
                           <NoticeZone
                             items={gateNotices}
-                            subject="reasons this storage is held"
+                            subject={t("notices.storageHeldSubject")}
                             className="sync-storage-notice notice-strip"
                             timing="blocking"
                           />
@@ -3160,7 +3191,7 @@ export default function ProjectLinksWorkspace({
             })}
           </div>
         ) : (
-          <div className="sync-storage-index-list" aria-label="Projects">
+          <div className="sync-storage-index-list" aria-label={t("links.projectsLabel")}>
             {projects.map((project) => {
               const projectBinding = bindingByProject.get(project.local_project_id);
               const profileMissing = Object.keys(projectBinding?.profile_ids ?? {}).length === 0;
@@ -3171,7 +3202,7 @@ export default function ProjectLinksWorkspace({
                   className="sync-storage-index-row"
                   disabled={busy}
                   onClick={() => onSelectProject(project.local_project_id)}
-                  aria-label={`Open ${projectLabel(project)}`}
+                  aria-label={t("links.open", { name: projectLabel(project) })}
                 >
                   <span className="sync-storage-repository-icon">
                     <Icon name={project.is_git_repository ? "git-folder" : "folder"} size={14} />
@@ -3181,7 +3212,7 @@ export default function ProjectLinksWorkspace({
                     <small>{compactProjectPath(project.project_root)}</small>
                   </span>
                   {profileMissing && (
-                    <NoticeChip severity="warning">Agent profile needed</NoticeChip>
+                    <NoticeChip severity="warning">{t("links.profileNeeded")}</NoticeChip>
                   )}
                   <Icon name="chevron-right" size={12} className="sync-storage-index-open" aria-hidden="true" />
                 </button>
@@ -3200,7 +3231,7 @@ export default function ProjectLinksWorkspace({
             {filesFaceShown && (
               <ProjectFilesActivityView
                 inventory={projectFilesScan.inventory}
-                storageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name.trim() || "storage"}
+                storageName={storages.find((storage) => storage.storage_id === activeStorageId)?.name.trim() || t("fallback.storage")}
                 loading={projectFilesScan.loading}
                 error={projectFilesScan.error}
                 onOpenFile={(relativePath) => openProjectFile(activeProject.local_project_id, relativePath)}
@@ -3246,7 +3277,7 @@ export default function ProjectLinksWorkspace({
           <section className="session-detail-page session-detail-entry-state">
             <PageBack target={sessionBack} />
             <span className="status-loader" />
-            <strong>Opening session detail…</strong>
+            <strong>{t("session.openingDetail")}</strong>
           </section>
         )}>
           <SessionDetailPage
@@ -3261,7 +3292,7 @@ export default function ProjectLinksWorkspace({
               ? {
                 kind: "stored",
                 storageId: sessionDetailSubview.storageId,
-                storageName: storages.find((storage) => storage.storage_id === sessionDetailSubview.storageId)?.name ?? "storage",
+                storageName: storages.find((storage) => storage.storage_id === sessionDetailSubview.storageId)?.name ?? t("fallback.storage"),
               }
               : { kind: "local" }}
             back={sessionBack}

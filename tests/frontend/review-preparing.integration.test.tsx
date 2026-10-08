@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReviewPreparing from "../../src/components/sync-review/ReviewPreparing";
+import { i18n } from "../../src/i18n";
 import {
   PREPARING_CANCELLED,
   PREPARING_GATE_MS,
@@ -127,6 +128,26 @@ test("the card is the review's own frame: its caption, placeholders from the fir
   );
   assert.match(writing, /sync-inline-push-review/);
   assert.match(writing, /class="btn btn-ghost sync-inline-action-close" disabled="" title="Changes are being written; this can&#x27;t be stopped now"/);
+
+  // In Chinese the frame words its own controls; the host's title and
+  // caption arrive already worded, and the storage name stays as given.
+  void i18n.changeLanguage("zh-CN");
+  try {
+    const chinese = renderToStaticMarkup(
+      <ReviewPreparing
+        verb="pull"
+        title="下载检查"
+        caption="正在从 Attic R2 读取最新 Version"
+        onCancel={() => undefined}
+        cancelDisabled={false}
+      />,
+    );
+    assert.match(chinese, /title="取消——没有任何更改" aria-label="取消准备下载检查"/);
+    assert.match(chinese, /disabled="" title="正在准备…">[\s\S]*?正在准备…<\/button>/);
+    assert.match(chinese, /正在从 Attic R2 读取最新 Version/);
+  } finally {
+    void i18n.changeLanguage("en");
+  }
 });
 
 test("every prepare ends the card with what replaces it, and nothing celebrates a review opening", () => {
@@ -141,7 +162,8 @@ test("every prepare ends the card with what replaces it, and nothing celebrates 
   // Pull's metadata accept is a write: Cancel is withdrawn before it.
   assert.match(sync, /preparing\?\.writing\(\);\s*await acceptPullMetadata/);
   // The card is an open review for both buttons, wearing the wait.
-  assert.match(sync, /preparing: true,\s*continueDisabled: true,[\s\S]*?continueLabel: "Preparing…",\s*continuePending: true,\s*onClose: cancelPreparing,/);
+  assert.match(sync, /preparing: true,\s*continueDisabled: true,[\s\S]*?continueLabel: t\("preparing\.label"\),\s*continuePending: true,\s*onClose: cancelPreparing,/);
+  assert.match(readFileSync("src/i18n/en/shell.ts", "utf8"), /preparing: \{[^}]*label: "Preparing…",/);
 
   const workspace = readFileSync("src/components/project-sync/ProjectLinksWorkspace.tsx", "utf8");
   // While the card is up, busy means preparing — never publishing or applying.

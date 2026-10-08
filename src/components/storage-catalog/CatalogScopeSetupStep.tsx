@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
 import Icon, { storageIconName } from "../Icons";
 import Notice, { FieldMessage } from "../notice/Notice";
 import { errorMessage } from "../../storageError";
 import { storageCatalogApi } from "./api";
 import {
+  capabilityLabel,
   catalogDefaultKind,
   catalogDefaultStorage,
   catalogKindCardFoot,
@@ -58,6 +61,7 @@ export default function CatalogScopeSetupStep({
   onClose,
   onFinished,
 }: Props) {
+  const { t } = useTranslation(["library", "common"]);
   const [inspection, setInspection] = useState<CatalogProfileInspection | null>(null);
   const [inspectError, setInspectError] = useState<string | null>(null);
   const [name, setName] = useState(profile.display_name);
@@ -134,23 +138,23 @@ export default function CatalogScopeSetupStep({
     <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-labelledby="catalog-setup-title">
       <header className="sync-modal-header">
         <div>
-          <h1 id="catalog-setup-title">Set up {shownName}</h1>
+          <h1 id="catalog-setup-title">{t("home.setUpNamed", { name: shownName })}</h1>
         </div>
-        <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting} aria-label="Close setup; nothing has been saved">
+        <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting} aria-label={t("setup.close")}>
           <Icon name="x" size={17} />
         </button>
       </header>
 
       <div className="sync-modal-body">
         <section className="sync-setup-section">
-          <div className="sync-card-heading"><div><strong>Home</strong></div></div>
+          <div className="sync-card-heading"><div><strong>{t("setup.home")}</strong></div></div>
           <div className="sync-field-grid sync-setup-project-fields">
             <label>
-              <span>Name</span>
+              <span>{t("setup.name")}</span>
               <input value={name} disabled={working} onChange={(event) => setName(event.target.value)} />
             </label>
             <label>
-              <span>Folder</span>
+              <span>{t("setup.folder")}</span>
               <input value={profile.configured_home} readOnly />
             </label>
           </div>
@@ -158,12 +162,12 @@ export default function CatalogScopeSetupStep({
 
         <section className="sync-setup-section">
           <div className="sync-card-heading">
-            <div><strong>Resource</strong></div>
+            <div><strong>{t("setup.resource")}</strong></div>
             {attentionBadge(settled && card === null)}
           </div>
           {/* The landing door, filled: the shipped Kind card, with what the
               home holds where the door wears its marks. */}
-          <div className="setup-choice-grid" role="radiogroup" aria-label="Resource kind">
+          <div className="setup-choice-grid" role="radiogroup" aria-label={t("setup.kind")}>
             {cards.map((candidate) => {
               const active = picked === candidate.key;
               const added = candidate.existingScopeId !== null;
@@ -186,8 +190,8 @@ export default function CatalogScopeSetupStep({
                       <Icon name={catalogPresentation(candidate.capability).icon} size={24} />
                     </span>
                     <strong>
-                      {candidate.capability.label}
-                      {added && <small className="sync-bundle-recommended">Added</small>}
+                      {capabilityLabel(candidate.capability)}
+                      {added && <small className="sync-bundle-recommended">{t("setup.added")}</small>}
                     </strong>
                     <span className="setup-choice-card-check" aria-hidden="true">
                       {active && <Icon name="check" size={12} />}
@@ -198,19 +202,19 @@ export default function CatalogScopeSetupStep({
               );
             })}
           </div>
-          {settled && card === null && cards.length > 0 && <FieldMessage id="catalog-setup-error-resource">Choose a kind.</FieldMessage>}
-          {inspectError && <small className="sync-setup-hint">Couldn’t read what this home holds: {inspectError}</small>}
+          {settled && card === null && cards.length > 0 && <FieldMessage id="catalog-setup-error-resource">{t("setup.chooseKind")}</FieldMessage>}
+          {inspectError && <small className="sync-setup-hint">{t("setup.inspectFailed", { error: inspectError })}</small>}
         </section>
 
         <section className="sync-setup-section">
-          <div className="sync-card-heading"><div><strong>Storage</strong></div></div>
-          <div className="setup-pill-row" role="radiogroup" aria-label="Storage">
+          <div className="sync-card-heading"><div><strong>{t("bar.storage")}</strong></div></div>
+          <div className="setup-pill-row" role="radiogroup" aria-label={t("bar.storage")}>
             <SetupPill
               active={storage === null}
               disabled={working}
               mark={<Icon name="computer" size={12} />}
-              label="None yet"
-              title="No storage linked yet — the row stays on this computer"
+              label={t("setup.noneYet")}
+              title={t("setup.noneTitle")}
               onClick={() => { storageByUser.current = true; setStorage(null); }}
             />
             {storages.map((candidate) => (
@@ -219,8 +223,8 @@ export default function CatalogScopeSetupStep({
                 active={storage === candidate.id}
                 disabled={working}
                 mark={<Icon name={storageIconName(candidate.provider, candidate.icon)} size={12} />}
-                label={candidate.name || "(unnamed)"}
-                title={`${candidate.name || "(unnamed)"} · ${candidate.provider_label}`}
+                label={candidate.name || t("bar.unnamed")}
+                title={`${candidate.name || t("bar.unnamed")} · ${backendText(`storageProvider.${candidate.provider}.displayName`, candidate.provider_label)}`}
                 onClick={() => { storageByUser.current = true; setStorage(candidate.id); }}
               />
             ))}
@@ -237,15 +241,15 @@ export default function CatalogScopeSetupStep({
 
       <footer className="sync-modal-footer sync-setup-footer">
         <button type="button" className="btn btn-ghost" onClick={onBack} disabled={submitting}>
-          <Icon name="chevron-left" size={13} /> Back
+          <Icon name="chevron-left" size={13} /> {t("common:back")}
         </button>
-        {card && <span className="sync-setup-save-state">{card.capability.label} · {shownName}</span>}
+        {card && <span className="sync-setup-save-state">{capabilityLabel(card.capability)} · {shownName}</span>}
         <div>
           <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
-            Cancel
+            {t("common:cancel")}
           </button>
           <button type="button" className="btn btn-primary" disabled={!card || working} onClick={() => void finish()}>
-            {submitting ? "Finishing…" : chosenStorage ? "Finish" : "Finish locally"}
+            {submitting ? t("setup.finishing") : chosenStorage ? t("setup.finish") : t("setup.finishLocally")}
           </button>
         </div>
       </footer>

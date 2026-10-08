@@ -1,6 +1,7 @@
 import type { ThreadSyncComparison } from "../../types";
 import type { NoticeItem } from "../notice/Notice";
 import { cloudPinMoved } from "../managed-cloud/managedCloudLink";
+import { t } from "../../i18n";
 
 /**
  * The standing notice of a storage whose history this computer is no longer
@@ -41,27 +42,30 @@ export function clearedStorageNotice(
   const pushOpen = comparison.scopes
     .filter((scope) => scope.access === "bound_ready" || scope.access === "bound_unavailable")
     .every((scope) => scope.continuity.state === "fresh" || scope.continuity.state === "in_sync");
-  const pullFirst = pushOpen ? "" : " Pull, then push again.";
   if (cloud?.link && cloudPinMoved(cloud)) {
+    const repository = { owner: cloud.link.owner_login, name: cloud.link.name };
     return {
       key: "storage-cleared",
       severity: "warning",
-      title: "Created again",
-      message: `— ${cloud.link.owner_login}/${cloud.link.name} was deleted and created again.${pullFirst}`,
+      title: t("reviews:cleared.createdAgainTitle"),
+      message: pushOpen
+        ? t("reviews:cleared.createdAgain", repository)
+        : t("reviews:cleared.createdAgainPullFirst", repository),
     };
   }
   if (continuity.state === "displaced") {
-    const saved = continuity.saved_by === "push" ? "push" : "pull";
     return {
       key: "storage-displaced",
       severity: "warning",
-      message: `Another computer pushed to ${storageName} first. This computer's last ${saved} is no longer part of its history. Compare again.`,
+      message: continuity.saved_by === "push"
+        ? t("reviews:cleared.displacedPush", { storage: storageName })
+        : t("reviews:cleared.displacedPull", { storage: storageName }),
     };
   }
   if (continuity.state !== "remote_missing" && continuity.state !== "replaced") return null;
   if (cloud) {
     if (continuity.state === "remote_missing") {
-      return { key: "storage-cleared", severity: "warning", title: "Draft discarded", message: "— Push creates a new draft." };
+      return { key: "storage-cleared", severity: "warning", title: t("reviews:cleared.draftDiscarded"), message: t("reviews:cleared.newDraft") };
     }
     // A discard returns the draft to the latest version.
     const version = cloud.publication?.draft_ahead === 0 ? cloud.publication.latest_version : null;
@@ -69,22 +73,24 @@ export function clearedStorageNotice(
       return {
         key: "storage-cleared",
         severity: "warning",
-        title: "Draft discarded",
-        message: `— Mallard Cloud holds version ${version}.${pullFirst}`,
+        title: t("reviews:cleared.draftDiscarded"),
+        message: pushOpen
+          ? t("reviews:cleared.holdsVersion", { version })
+          : t("reviews:cleared.holdsVersionPullFirst", { version }),
       };
     }
     return {
       key: "storage-cleared",
       severity: "warning",
-      title: "Draft discarded and pushed again",
-      message: pushOpen ? "" : "— Pull, then push again.",
+      title: t("reviews:cleared.pushedAgainTitle"),
+      message: pushOpen ? "" : t("reviews:cleared.pullFirst"),
     };
   }
   return {
     key: "storage-cleared",
     severity: "warning",
     message: pushOpen
-      ? `Another computer cleared ${storageName}.`
-      : `Another computer cleared ${storageName}. Pull, then push again.`,
+      ? t("reviews:cleared.cleared", { storage: storageName })
+      : t("reviews:cleared.clearedPullFirst", { storage: storageName }),
   };
 }

@@ -6,6 +6,7 @@ import type {
   RestoreResult,
 } from "../../types";
 import { errorMessage } from "../../storageError";
+import { t } from "../../i18n";
 
 export interface PullReviewApi {
   planRestore: (storageId: string, bundleId: string, binding: ProjectBinding, scope: PullScope) => Promise<PullReview>;
@@ -56,8 +57,10 @@ export interface PullReviewApplyResult {
  *  storage: the pinned version lost a race, the storage was cleared, or this
  *  computer synced past the review from another window. Printed verbatim in
  *  the review's banner, with "Compare again". */
+// i18n-ignore: backend text (service.rs REVIEW_SUPERSEDED), compared against
 export const REVIEW_SUPERSEDED = "The storage changed since this review. Compare again.";
 /** The refusal of a review older than its one-day validity. */
+// i18n-ignore: backend text (service.rs REVIEW_EXPIRED), compared against
 export const REVIEW_EXPIRED = "This review is older than a day. Compare again.";
 
 /** Whether an apply error is one that a new review resolves. */
@@ -89,7 +92,7 @@ export function canAcceptPullMetadata(plan: PullReview): boolean {
 /** Pull accepts matching data without changing files or publishing a version. */
 export async function acceptPullMetadata(api: PullReviewApplyApi, plan: PullReview): Promise<void> {
   if (!canAcceptPullMetadata(plan)) {
-    throw new Error("Review the changes before accepting this storage version.");
+    throw new Error(t("reviews:pullFlow.reviewFirst"));
   }
   const metadataIds = plan.conversation_review.flatMap((row) => (
     row.action === "adopt_cloud_metadata" && row.action_id ? [row.action_id] : []
@@ -100,7 +103,7 @@ export async function acceptPullMetadata(api: PullReviewApplyApi, plan: PullRevi
   if (session && metadataIds.length === 0) return;
   const result = await api.applyRestore(plan, metadataIds);
   if (!result.success || (!session && result.reviewed_base_advanced !== true)) {
-    throw new Error(result.message || "The storage version could not be accepted. Try again.");
+    throw new Error(result.message || t("reviews:pullFlow.notAccepted"));
   }
 }
 
@@ -127,7 +130,7 @@ export function assertPullPlansAligned(
     ...restorePlan.conversation_review.flatMap((row) => row.action_id ? [row.action_id] : []),
   ]);
   if (selection.restoreActionIds.some((actionId) => !restoreIds.has(actionId))) {
-    throw new Error("The selected restore actions no longer belong to this Pull review.");
+    throw new Error(t("reviews:pullFlow.misaligned"));
   }
 }
 
@@ -150,7 +153,7 @@ export async function applyPullReview(
   try {
     const restoreResult = await api.applyRestore(restorePlan, selection.restoreActionIds);
     const error = restoreResult.readiness_error
-      ? `Readiness verification failed: ${restoreResult.readiness_error}`
+      ? t("reviews:pullFlow.readinessFailed", { message: restoreResult.readiness_error })
       : null;
     return {
       restoreResult,
@@ -163,7 +166,7 @@ export async function applyPullReview(
       restoreResult: null,
       readiness: null,
       success: false,
-      error: `Restore failed: ${errorMessage(reason)}`,
+      error: t("reviews:pullFlow.restoreFailed", { message: errorMessage(reason) }),
     };
   } finally {
     onPhase("idle");
@@ -194,6 +197,6 @@ export async function loadPullReviewSupport(
   try {
     return { readiness: await api.getRestoreReadiness(localProjectId, storageId), errors: [] };
   } catch (reason) {
-    return { readiness: null, errors: [`Readiness checks: ${errorMessage(reason)}`] };
+    return { readiness: null, errors: [t("reviews:pullFlow.readinessChecks", { message: errorMessage(reason) })] };
   }
 }

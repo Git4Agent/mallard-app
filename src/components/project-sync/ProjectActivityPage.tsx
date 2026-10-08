@@ -1,5 +1,6 @@
 import type { ManagedCloudStatus } from "../managed-cloud/types";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   GitBranchSummary,
@@ -21,7 +22,10 @@ import Icon, { type IconName } from "../Icons";
 import SessionRowIcon from "./SessionRowIcon";
 import { NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import { formatDuration, formatFullDateTime } from "../../clock";
-import { formatBytes } from "../../format";
+import { formatBytes, formatCompactNumber, joinAnd } from "../../format";
+import { t, Trans, uiLocale, useTranslation } from "../../i18n";
+import { backendText } from "../../i18n/backend";
+import { syncDecisionReason, syncStatusDetail } from "./syncDetailText";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
 import { githubCommitUrl, openExternalUrl } from "./externalLink";
@@ -43,7 +47,7 @@ import {
   isPullReviewRow,
   isPushReviewRow,
 } from "../sync-review/pullReviewStatus";
-import { formatCompactNumber, formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
+import { formatSessionDetailTimestamp, type OpenSessionDetailRequest } from "./session-detail/sessionDetailModel";
 import ThreadStatusIcon, { type ThreadStatusIconName } from "../sync-review/ThreadStatusIcon";
 
 /**
@@ -203,10 +207,6 @@ export interface ReviewScaffold {
   storageOnly: number;
 }
 
-/** A review's reason when its list did not load: the list itself carries
- *  the error and its Try again, so the buttons only point at it. */
-export const REVIEW_LIST_FAILED_REASON = "The session list didn't load. Try again in the list.";
-
 interface BranchPickerProps {
   branches: GitBranchSummary[];
   selectedBranch: string;
@@ -215,6 +215,7 @@ interface BranchPickerProps {
 }
 
 export function BranchPicker({ branches, selectedBranch, disabled, onChange }: BranchPickerProps) {
+  const { t } = useTranslation("projects");
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -280,7 +281,9 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
   if (!selected) return null;
 
   // The whole pill — icon, name, and chevron — is one path-bar target.
-  const label = `Branch: ${selected.name}${selected.is_current ? ", current branch" : ""}`;
+  const label = selected.is_current
+    ? t("branch.labelCurrent", { name: selected.name })
+    : t("branch.label", { name: selected.name });
   const face = (
     <>
       <Icon name="git-branch" size={12} />
@@ -301,7 +304,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
         aria-expanded={open}
         aria-controls={menuId}
         aria-label={label}
-        title="Choose a branch"
+        title={t("branch.choose")}
         onClick={() => open ? closeMenu() : openMenu()}
         onKeyDown={(event) => {
           if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -317,7 +320,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
         id={menuId}
         className="sync-history-branch-menu"
         role="menu"
-        aria-label="Branches"
+        aria-label={t("branch.menu")}
         hidden={!open}
         onKeyDown={(event) => {
           const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>(
@@ -337,7 +340,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
         }}
       >
         <div className="sync-history-branch-menu-heading">
-          <span>View branch</span>
+          <span>{t("branch.heading")}</span>
           <small>{branches.length}</small>
         </div>
         <div className="sync-history-branch-options">
@@ -361,7 +364,7 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
               <span className="sync-history-branch-option-copy">
                 <strong>{branch.name}</strong>
               </span>
-              {branch.is_current && <span className="sync-history-branch-state current">Current</span>}
+              {branch.is_current && <span className="sync-history-branch-state current">{t("branch.current")}</span>}
             </button>
           ))}
         </div>
@@ -371,28 +374,37 @@ export function BranchPicker({ branches, selectedBranch, disabled, onChange }: B
 }
 
 function formatDate(value?: number | null): string {
-  if (!value) return "Not recorded";
+  if (!value) return t("projects:notRecorded");
   // Shared with the session detail page, so a row and the page it opens
   // stamp the same moment the same way.
   return formatSessionDetailTimestamp(value);
 }
 
 function formatCount(value?: number | null): string {
-  if (value == null) return "Not reported";
+  if (value == null) return t("projects:notReported");
   return formatCompactNumber(value);
 }
 
 /* Day precision, for the two places that name a boundary rather than a moment:
    the window a page covers, and the day a step backwards lands on. A clock
    time on either would claim the edge falls at that exact second. */
-let dayFormatter: Intl.DateTimeFormat | null = null;
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+function dayFormatter(): Intl.DateTimeFormat {
+  const locale = uiLocale();
+  let formatter = dayFormatters.get(locale ?? "");
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    dayFormatters.set(locale ?? "", formatter);
+  }
+  return formatter;
+}
+
 function formatDay(seconds: number): string {
-  dayFormatter ??= new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  return dayFormatter.format(new Date(seconds * 1_000));
+  return dayFormatter().format(new Date(seconds * 1_000));
 }
 
 /* `formatRange` collapses the parts two dates share — "Jul 28 – Aug 27, 2026"
@@ -405,12 +417,7 @@ interface RangeCapableFormat extends Intl.DateTimeFormat {
 
 /** The window a page covers, as one range — "Jul 28 – Aug 27, 2026". */
 function formatDayRange(fromSeconds: number, toSeconds: number): string {
-  dayFormatter ??= new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  const formatter = dayFormatter as RangeCapableFormat;
+  const formatter = dayFormatter() as RangeCapableFormat;
   const from = new Date(fromSeconds * 1_000);
   // The window is half-open, so its last covered day is the second before it
   // ends; formatting `window_end` itself would name a day the page excludes.
@@ -423,10 +430,12 @@ function formatDayRange(fromSeconds: number, toSeconds: number): string {
 /** "41 commits and 6 sessions", dropping whichever side is empty. */
 function describeOlder(older: OlderActivity): string {
   const parts: string[] = [];
-  if (older.commits > 0) parts.push(`${older.commits} commit${older.commits === 1 ? "" : "s"}`);
-  if (older.sessions > 0) parts.push(`${older.sessions} session${older.sessions === 1 ? "" : "s"}`);
-  const through = `through ${formatDay(older.newest_at)}`;
-  return parts.length ? `Load earlier history — ${through}, ${parts.join(" and ")}` : `Load earlier history — ${through}`;
+  if (older.commits > 0) parts.push(t("projects:rail.commits", { count: older.commits }));
+  if (older.sessions > 0) parts.push(t("projects:rail.sessions", { count: older.sessions }));
+  const day = formatDay(older.newest_at);
+  return parts.length
+    ? t("projects:rail.loadEarlierTitleCounts", { day, counts: joinAnd(parts) })
+    : t("projects:rail.loadEarlierTitle", { day });
 }
 
 /**
@@ -451,6 +460,7 @@ function RailFoot({ older, canShowLess, busy, railed, onLoadMore, onShowLess }: 
   onLoadMore: () => void;
   onShowLess: () => void;
 }) {
+  const { t } = useTranslation(["projects", "common"]);
   if (!older && !canShowLess) return null;
   const loadLabel = older ? describeOlder(older) : "";
   return (
@@ -463,10 +473,10 @@ function RailFoot({ older, canShowLess, busy, railed, onLoadMore, onShowLess }: 
           type="button"
           className="sync-history-rail-step"
           disabled={busy}
-          title="Drop the most recently loaded window"
+          title={t("rail.showLessTitle")}
           onClick={onShowLess}
         >
-          <strong>Show less</strong>
+          <strong>{t("rail.showLess")}</strong>
         </button>
       )}
       {older && (
@@ -479,7 +489,7 @@ function RailFoot({ older, canShowLess, busy, railed, onLoadMore, onShowLess }: 
           aria-label={loadLabel}
           onClick={onLoadMore}
         >
-          <strong>{busy ? "Loading…" : "Load earlier"}</strong>
+          <strong>{busy ? t("common:loading") : t("rail.loadEarlier")}</strong>
           <time dateTime={new Date(older.newest_at * 1_000).toISOString()}>· {formatDay(older.newest_at)}</time>
         </button>
       )}
@@ -546,8 +556,8 @@ export function sessionSyncPresentation(
       status: "pending",
       className: "pending",
       label: syncHoldDetail(pending.mode, entry)
-        ?? entry.status_detail
-        ?? "Sync is waiting for this session to become ready.",
+        ?? syncStatusDetail(entry)
+        ?? t("projects:status.waiting"),
     };
   }
   const conflict = decisionWithBlocker([
@@ -561,14 +571,14 @@ export function sessionSyncPresentation(
       status: "conflict",
       className: "conflict",
       label: syncHoldDetail(conflict.mode, entry)
-        ?? entry.status_detail
-        ?? "Mallard could not safely match the local and stored session.",
+        ?? syncStatusDetail(entry)
+        ?? t("projects:status.unmatched"),
     };
   }
   const blocked = (mode: "push" | "pull"): ComparisonPresentation => ({
     status: "unavailable",
     className: "unavailable",
-    label: syncHoldDetail(mode, entry) ?? "This thread can't be synced safely right now.",
+    label: syncHoldDetail(mode, entry) ?? t("projects:status.threadBlocked"),
   });
   switch (entry.state) {
     case "synced":
@@ -580,30 +590,30 @@ export function sessionSyncPresentation(
         return {
           status: "local-outstanding",
           className: "local",
-          label: `Pushed with your previous export settings. Push to update ${storageName}.`,
+          label: t("projects:status.republish", { storage: storageName }),
         };
       }
-      return { status: "synced", className: "synced", label: entry.status_detail ?? `Up to date here and in ${storageName}.` };
+      return { status: "synced", className: "synced", label: syncStatusDetail(entry) ?? t("projects:status.synced", { storage: storageName }) };
     case "local_only":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { status: "local-outstanding", className: "local", label: entry.status_detail ?? `Only on this computer. Push to save it in ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: syncStatusDetail(entry) ?? t("projects:status.localOnly", { storage: storageName }) };
     case "local_ahead":
       if (entry.push_decision?.action === "blocked") return blocked("push");
-      return { status: "local-outstanding", className: "local", label: entry.status_detail ?? `Newer on this computer. Push to update ${storageName}.` };
+      return { status: "local-outstanding", className: "local", label: syncStatusDetail(entry) ?? t("projects:status.localAhead", { storage: storageName }) };
     case "storage_only":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { status: "cloud-outstanding", className: "storage", label: entry.status_detail ?? `Only in ${storageName}. Pull to download it here.` };
+      return { status: "cloud-outstanding", className: "storage", label: syncStatusDetail(entry) ?? t("projects:status.storageOnly", { storage: storageName }) };
     case "storage_ahead":
       if (entry.pull_decision?.action === "blocked") return blocked("pull");
-      return { status: "cloud-outstanding", className: "storage", label: entry.status_detail ?? `Newer in ${storageName}. Pull to update this computer.` };
+      return { status: "cloud-outstanding", className: "storage", label: syncStatusDetail(entry) ?? t("projects:status.storageAhead", { storage: storageName }) };
     case "diverged":
-      return { status: "divergent", className: "diverged", label: `Changed here and in ${storageName}. Review before syncing.` };
+      return { status: "divergent", className: "diverged", label: t("projects:status.diverged", { storage: storageName }) };
     case "unavailable": {
       const name = entry.display_name.trim() || entry.provider_thread_id || entry.thread_id;
       return {
         status: "unavailable",
         className: "unavailable",
-        label: `Cannot sync “${name}”: ${entry.status_detail ?? "Mallard could not safely read this session."}`,
+        label: t("projects:status.cannotSync", { name, detail: syncStatusDetail(entry) ?? t("projects:status.unreadable") }),
       };
     }
     case "unknown":
@@ -611,7 +621,7 @@ export function sessionSyncPresentation(
       return {
         status: "conflict",
         className: "conflict",
-        label: `Comparison needs attention. ${entry.status_detail ?? "Mallard could not prove this thread's ancestry safely."}`,
+        label: t("projects:status.needsAttention", { detail: syncStatusDetail(entry) ?? t("projects:status.ancestryUnproven") }),
       };
   }
 }
@@ -652,10 +662,6 @@ export interface ActivityHeaderCounts {
   detail: string;
 }
 
-function countPhrase(count: number, singular: string, plural: string): string | null {
-  if (count === 0) return null;
-  return `${count} ${count === 1 ? singular : plural}`;
-}
 
 export function activityHeaderCounts(
   comparison: ThreadSyncComparison | null,
@@ -694,16 +700,18 @@ export function activityHeaderCounts(
     }
   }
 
-  const summary = [
-    countPhrase(review, "thread changed on both sides", "threads changed on both sides"),
-    countPhrase(waiting, "thread waiting to sync", "threads waiting to sync"),
-    countPhrase(conflict, "thread Mallard could not match", "threads Mallard could not match"),
-  ].filter((phrase): phrase is string => phrase !== null).join(", ");
-  const detail = [
-    summary ? `${summary}.` : null,
+  const summary = ([
+    review > 0 ? t("projects:header.changedBoth", { count: review }) : null,
+    waiting > 0 ? t("projects:header.waiting", { count: waiting }) : null,
+    conflict > 0 ? t("projects:header.unmatched", { count: conflict }) : null,
+  ] as (string | null)[]).filter((phrase): phrase is string => phrase !== null).join(t("projects:header.listSeparator"));
+  const detail = ([
+    summary ? t("projects:header.summary", { summary }) : null,
     ...unsyncableDetails,
-    unsyncable > unsyncableDetails.length ? `And ${unsyncable - unsyncableDetails.length} more.` : null,
-  ].filter((phrase): phrase is string => phrase !== null).join(" ");
+    unsyncable > unsyncableDetails.length
+      ? t("projects:header.andMore", { more: unsyncable - unsyncableDetails.length })
+      : null,
+  ] as (string | null)[]).filter((phrase): phrase is string => phrase !== null).join(" ");
 
   return {
     push,
@@ -744,7 +752,7 @@ function sessionRowPresentation(
     return {
       status: "unavailable",
       className: "unavailable",
-      label: `Unavailable for sync. ${session.sync_blocked_reason}`,
+      label: t("projects:status.unavailableWithReason", { reason: session.sync_blocked_reason }),
     };
   }
   return entry && storageName ? sessionSyncPresentation(entry, storageName) : fallback;
@@ -768,28 +776,30 @@ export function unresolvedSyncPresentation({
     return {
       status: "checking",
       className: "checking",
-      label: `Comparing with ${storageName ?? "storage"}…`,
+      label: storageName != null
+        ? t("projects:status.comparing", { storage: storageName })
+        : t("projects:status.comparingUnnamed"),
     };
   }
   if (comparisonError) {
     return {
       status: "unknown",
       className: "unknown",
-      label: `Not compared. ${comparisonError}`,
+      label: t("projects:status.notCompared", { error: comparisonError }),
     };
   }
   if (!storageName) {
     return {
       status: "untracked",
       className: "untracked",
-      label: "Only on this Mac. Link a storage to compare and sync it.",
+      label: t("projects:status.noStorage"),
     };
   }
   if (!hasBoundProvider) {
     return {
       status: "untracked",
       className: "untracked",
-      label: `Only on this Mac. Connect an agent profile to compare with ${storageName}.`,
+      label: t("projects:status.noProfile", { storage: storageName }),
     };
   }
   // A comparison exists and this row is not in it — a view-only session, or one
@@ -798,8 +808,8 @@ export function unresolvedSyncPresentation({
     status: "unknown",
     className: "unknown",
     label: comparisonLoaded
-      ? `Not compared with ${storageName}. Mallard cannot read this session well enough to match it.`
-      : `Not compared with ${storageName} yet.`,
+      ? t("projects:status.notComparable", { storage: storageName })
+      : t("projects:status.notComparedYet", { storage: storageName }),
   };
 }
 
@@ -809,14 +819,18 @@ export function unresolvedSyncPresentation({
    readouts. Both ends, and the last input between them — the time that places
    the session on its commit — are spelled out in full in the label. */
 function SessionTimestamp({ session }: { session: SessionRowMetrics }) {
-  const startedLabel = `Started ${formatFullDateTime(session.started_at)}`;
-  const endedLabel = `Ended ${formatFullDateTime(session.ended_at)}`;
-  const lastInputLabel = session.last_prompt_at == null
-    ? null
-    : `Last input ${formatFullDateTime(session.last_prompt_at)}`;
-  const lines = [startedLabel, ...(lastInputLabel ? [lastInputLabel] : []), endedLabel];
+  const { t } = useTranslation("projects");
+  const started = formatFullDateTime(session.started_at);
+  const ended = formatFullDateTime(session.ended_at);
+  const input = session.last_prompt_at == null ? null : formatFullDateTime(session.last_prompt_at);
+  const tooltip = input == null
+    ? t("metrics.timesTooltip", { started, ended })
+    : t("metrics.timesTooltipInput", { started, input, ended });
+  const label = input == null
+    ? t("metrics.timesLabel", { started, ended })
+    : t("metrics.timesLabelInput", { started, input, ended });
   return (
-    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={lines.join("\n")} aria-label={lines.join(". ")} tabIndex={0}>
+    <span className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end" data-tooltip={tooltip} aria-label={label} tabIndex={0}>
       <time dateTime={new Date(session.ended_at * 1_000).toISOString()}>{formatFullDateTime(session.ended_at)}</time>
     </span>
   );
@@ -830,12 +844,16 @@ function SessionTimestamp({ session }: { session: SessionRowMetrics }) {
  *  where the limit makes the number mean something. */
 export interface ReviewSizeReadout {
   bytes: number;
-  label: "Push size" | "Pull size";
+  direction: "push" | "pull";
 }
 
 function ReviewSizeMetric({ readout }: { readout: ReviewSizeReadout }) {
+  const { t } = useTranslation("projects");
+  const size = formatBytes(readout.bytes);
+  const tooltip = readout.direction === "push" ? t("metrics.pushSizeTooltip", { size }) : t("metrics.pullSizeTooltip", { size });
+  const label = readout.direction === "push" ? t("metrics.pushSizeLabel", { size }) : t("metrics.pullSizeLabel", { size });
   return (
-    <span className="sync-history-thread-metric" data-tooltip={`${readout.label} · ${formatBytes(readout.bytes)}`} aria-label={`${readout.label}: ${formatBytes(readout.bytes)}`} tabIndex={0}>
+    <span className="sync-history-thread-metric" data-tooltip={tooltip} aria-label={label} tabIndex={0}>
       <Icon name="drive" size={12} /><b>{formatBytes(readout.bytes)}</b>
     </span>
   );
@@ -862,8 +880,8 @@ export function reviewSizeReadout(
   mode: "push" | "pull" | undefined,
   entry: ThreadSyncEntry | undefined,
 ): ReviewSizeReadout | null {
-  if (mode === "push" && entry?.capture_bytes != null) return { bytes: entry.capture_bytes, label: "Push size" };
-  if (mode === "pull" && entry?.pull_bytes != null) return { bytes: entry.pull_bytes, label: "Pull size" };
+  if (mode === "push" && entry?.capture_bytes != null) return { bytes: entry.capture_bytes, direction: "push" };
+  if (mode === "pull" && entry?.pull_bytes != null) return { bytes: entry.pull_bytes, direction: "pull" };
   return null;
 }
 
@@ -881,9 +899,10 @@ export function SessionMetrics({
   /** The subagent transcripts a Push of this session carries with it. */
   subagents?: { count: number; bytes: number } | null;
 }) {
+  const { t } = useTranslation("projects");
   const durationText = formatDuration(session.started_at, session.ended_at);
   const durationLabel = durationText
-    ? `Ran for ${durationText}`
+    ? t("metrics.ranFor", { duration: durationText })
     : "";
   const totalTokens = formatCount(session.total_tokens);
   const totalInputTokens = formatCount(session.total_input_tokens);
@@ -892,27 +911,33 @@ export function SessionMetrics({
      would speak for a split the row was never given. */
   const tokenSplit = session.total_input_tokens != null || session.total_output_tokens != null;
 
-  return <div id={id} className="sync-history-thread-meta" aria-label="Session details">
+  const prompts = session.user_round_count;
+  const replies = session.agent_message_count;
+  return <div id={id} className="sync-history-thread-meta" aria-label={t("metrics.label")}>
     {/* Ordered by what the row is about: the exchange first, then the work it
         did, then what it cost, then how long it took. */}
     {/* One message count sums prompts and final replies. The tooltip shows the
         split, one value per line. */}
-    <span className="sync-history-thread-metric" data-tooltip={`Prompts · ${session.user_round_count}\nReplies · ${session.agent_message_count}`} aria-label={`Messages: ${session.user_round_count + session.agent_message_count}. Prompts: ${session.user_round_count}. Replies: ${session.agent_message_count}`} tabIndex={0}><SessionRowIcon name="message" /><b>{session.user_round_count + session.agent_message_count}</b></span>
-    {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={`Tool calls · ${session.tool_call_count}`} aria-label={`Tool calls: ${session.tool_call_count}`} tabIndex={0}><SessionRowIcon name="tool" /><b>{session.tool_call_count}</b></span>}
+    <span className="sync-history-thread-metric" data-tooltip={t("metrics.messagesTooltip", { prompts, replies })} aria-label={t("metrics.messagesLabel", { messages: prompts + replies, prompts, replies })} tabIndex={0}><SessionRowIcon name="message" /><b>{prompts + replies}</b></span>
+    {session.tool_call_count > 0 && <span className="sync-history-thread-metric" data-tooltip={t("metrics.toolCallsTooltip", { calls: session.tool_call_count })} aria-label={t("metrics.toolCallsLabel", { calls: session.tool_call_count })} tabIndex={0}><SessionRowIcon name="tool" /><b>{session.tool_call_count}</b></span>}
     <span
       className="sync-history-thread-metric"
-      data-tooltip={tokenSplit ? `Total input · ${totalInputTokens}\nTotal output · ${totalOutputTokens}` : `Total tokens · ${totalTokens}`}
-      aria-label={tokenSplit ? `Total tokens: ${totalTokens}. Total input: ${totalInputTokens}. Total output: ${totalOutputTokens}` : `Total tokens: ${totalTokens}`}
+      data-tooltip={tokenSplit
+        ? t("metrics.tokensSplitTooltip", { input: totalInputTokens, output: totalOutputTokens })
+        : t("metrics.tokensTooltip", { total: totalTokens })}
+      aria-label={tokenSplit
+        ? t("metrics.tokensSplitLabel", { total: totalTokens, input: totalInputTokens, output: totalOutputTokens })
+        : t("metrics.tokensLabel", { total: totalTokens })}
       tabIndex={0}
     ><SessionRowIcon name="token" /><b>{totalTokens}</b></span>
-    {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip="Some session metrics are unavailable" aria-label="Some session metrics are unavailable" tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
+    {!session.metrics_complete && <span className="sync-history-thread-metric sync-history-partial" data-tooltip={t("metrics.partial")} aria-label={t("metrics.partial")} tabIndex={0}><Icon name="alert-triangle" size={12} /></span>}
     {durationText && (
       <span className="sync-history-thread-metric sync-history-thread-duration" data-tooltip={durationLabel} aria-label={durationLabel} tabIndex={0}>
         <SessionRowIcon name="clock" /><b>{durationText}</b>
       </span>
     )}
     {subagents && subagents.count > 0 && (
-      <span className="sync-history-thread-metric" data-tooltip={`Subagents · ${subagents.count}\nPush size · ${formatBytes(subagents.bytes)}`} aria-label={`Subagents: ${subagents.count}. Push size: ${formatBytes(subagents.bytes)}`} tabIndex={0}>
+      <span className="sync-history-thread-metric" data-tooltip={t("metrics.subagentsTooltip", { subagents: subagents.count, size: formatBytes(subagents.bytes) })} aria-label={t("metrics.subagentsLabel", { subagents: subagents.count, size: formatBytes(subagents.bytes) })} tabIndex={0}>
         <Icon name="git-fork" size={12} /><b>{subagents.count}</b>
       </span>
     )}
@@ -926,18 +951,18 @@ function sessionAccessNote(session: ProjectSessionSummary): { label: string; det
   switch (session.access) {
     case "view_only":
       return {
-        label: "View only",
-        detail: `View only — connect a ${session.provider_display_name} profile to sync this session.`,
+        label: t("projects:access.viewOnly"),
+        detail: t("projects:access.viewOnlyDetail", { provider: session.provider_display_name }),
       };
     case "unsupported":
       return {
-        label: "View only",
-        detail: `View only — this Mallard version has no adapter for ${session.provider_display_name} sessions.`,
+        label: t("projects:access.viewOnly"),
+        detail: t("projects:access.unsupportedDetail", { provider: session.provider_display_name }),
       };
     case "bound_unavailable":
       return {
-        label: "Unavailable",
-        detail: `Unavailable — the ${session.provider_display_name} profile can't be read right now.`,
+        label: t("projects:access.unavailable"),
+        detail: t("projects:access.unavailableDetail", { provider: session.provider_display_name }),
       };
     default:
       return null;
@@ -995,12 +1020,14 @@ export function sessionDebugCopyText(
   transcriptPath: string | null,
   workingDirectory: string,
 ): string {
+  const notRecorded = t("projects:notRecorded");
+  const line = (label: string, value: string) => t("projects:debug.line", { label, value });
   return [
-    `Resource ID: ${resourceId}`,
-    `Mallard thread ID: ${logicalThreadId ?? "Not recorded"}`,
-    `Native session ID: ${providerSessionId ?? "Not recorded"}`,
-    `Transcript file: ${transcriptPath ?? "Not recorded"}`,
-    `Working directory: ${workingDirectory}`,
+    line(t("projects:debug.resourceId"), resourceId),
+    line(t("projects:debug.threadId"), logicalThreadId ?? notRecorded),
+    line(t("projects:debug.sessionId"), providerSessionId ?? notRecorded),
+    line(t("projects:debug.transcript"), transcriptPath ?? notRecorded),
+    line(t("projects:debug.workingDirectory"), workingDirectory),
   ].join("\n");
 }
 
@@ -1014,6 +1041,19 @@ type SessionDebugCopyTarget =
   | "working-directory"
   | "all";
 
+/** Each copyable field's name, its button's title and its receipt. */
+const SESSION_DEBUG_FIELDS: Record<Exclude<SessionDebugCopyTarget, "all">, {
+  label: ParseKeys<"projects">;
+  copy: ParseKeys<"projects">;
+  copied: ParseKeys<"projects">;
+}> = {
+  "resource-id": { label: "debug.resourceId", copy: "debug.copyResourceId", copied: "debug.resourceIdCopied" },
+  "logical-thread-id": { label: "debug.threadId", copy: "debug.copyThreadId", copied: "debug.threadIdCopied" },
+  "provider-session-id": { label: "debug.sessionId", copy: "debug.copySessionId", copied: "debug.sessionIdCopied" },
+  "transcript-path": { label: "debug.transcript", copy: "debug.copyTranscript", copied: "debug.transcriptCopied" },
+  "working-directory": { label: "debug.workingDirectory", copy: "debug.copyWorkingDirectory", copied: "debug.workingDirectoryCopied" },
+};
+
 function SessionDebugMenu({
   resourceId,
   logicalThreadId,
@@ -1021,6 +1061,7 @@ function SessionDebugMenu({
   transcriptPath,
   workingDirectory,
 }: SessionDebugMenuProps) {
+  const { t } = useTranslation(["projects", "common"]);
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<SessionDebugCopyTarget | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
@@ -1029,32 +1070,24 @@ function SessionDebugMenu({
   const panelRef = useRef<HTMLDivElement>(null);
   const placement = useDebugPopoverPlacement(rootRef, panelRef, open, () => closeMenu());
   const menuId = `session-debug-${useId().replace(/:/g, "")}`;
-  const rows: Array<{ key: Exclude<SessionDebugCopyTarget, "all">; label: string; value: string }> = [
-    { key: "resource-id", label: "Resource ID", value: resourceId },
+  const rows: Array<{ key: Exclude<SessionDebugCopyTarget, "all">; value: string }> = [
+    { key: "resource-id", value: resourceId },
     ...(logicalThreadId != null
-      ? [{ key: "logical-thread-id" as const, label: "Mallard thread ID", value: logicalThreadId }]
+      ? [{ key: "logical-thread-id" as const, value: logicalThreadId }]
       : []),
     ...(providerSessionId != null
-      ? [{ key: "provider-session-id" as const, label: "Native session ID", value: providerSessionId }]
+      ? [{ key: "provider-session-id" as const, value: providerSessionId }]
       : []),
     ...(transcriptPath != null
-      ? [{ key: "transcript-path" as const, label: "Transcript file", value: transcriptPath }]
+      ? [{ key: "transcript-path" as const, value: transcriptPath }]
       : []),
-    { key: "working-directory", label: "Working directory", value: workingDirectory },
+    { key: "working-directory", value: workingDirectory },
   ];
-  const copiedLabel = copied === "resource-id"
-    ? "Resource ID copied."
-    : copied === "logical-thread-id"
-      ? "Mallard thread ID copied."
-      : copied === "provider-session-id"
-        ? "Native session ID copied."
-        : copied === "transcript-path"
-          ? "Transcript file copied."
-          : copied === "working-directory"
-            ? "Working directory copied."
-            : copied === "all"
-              ? "Debug info copied."
-              : "";
+  const copiedLabel = copied === "all"
+    ? t("debug.allCopied")
+    : copied
+      ? t(SESSION_DEBUG_FIELDS[copied].copied)
+      : "";
 
   const closeMenu = (restoreFocus = false) => {
     setOpen(false);
@@ -1071,7 +1104,7 @@ function SessionDebugMenu({
       setCopied(target);
     } catch (reason) {
       setCopied(null);
-      setCopyError(`Could not copy: ${errorMessage(reason)}`);
+      setCopyError(t("debug.copyFailed", { error: errorMessage(reason) }));
     }
   };
 
@@ -1133,8 +1166,8 @@ function SessionDebugMenu({
         ref={triggerRef}
         type="button"
         className="btn btn-ghost sync-history-debug-trigger"
-        title="Session info"
-        aria-label="Show session info"
+        title={t("debug.title")}
+        aria-label={t("debug.show")}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={menuId}
@@ -1161,11 +1194,11 @@ function SessionDebugMenu({
                until then so it never shows at the window origin. */
             : { visibility: "hidden" }}
           role="dialog"
-          aria-label="Session info"
+          aria-label={t("debug.title")}
           hidden={!open}
         >
           <header>
-            <strong>Session info</strong>
+            <strong>{t("debug.title")}</strong>
           </header>
           <div className="sync-history-debug-values">
             {/* No aria-label: it would replace the row's content as the
@@ -1177,13 +1210,13 @@ function SessionDebugMenu({
                 key={row.key}
                 type="button"
                 className="sync-history-debug-copy"
-                title={`Copy ${row.label.toLowerCase()}`}
+                title={t(SESSION_DEBUG_FIELDS[row.key].copy)}
                 onClick={() => void copyValue(row.key, row.value)}
               >
-                <span>{row.label}</span>
+                <span>{t(SESSION_DEBUG_FIELDS[row.key].label)}</span>
                 <code>{row.value}</code>
                 <small className={copied === row.key ? "copied" : undefined}>
-                  {copied === row.key ? "Copied" : "Copy"}
+                  {copied === row.key ? t("common:copied") : t("common:copy")}
                 </small>
               </button>
             ))}
@@ -1210,7 +1243,7 @@ function SessionDebugMenu({
                 ),
               )}
             >
-              {copied === "all" ? "Copied all" : "Copy all"}
+              {copied === "all" ? t("copiedAll") : t("copyAll")}
             </button>
           </footer>
         </div>
@@ -1239,17 +1272,17 @@ function ReviewPullRowAction({
   if (mode !== "push" || !entry || !onReviewPull) return null;
   if (!["require_pull", "require_pull_metadata"].includes(entry.push_decision?.action)) return null;
   const detail = syncHoldDetail("push", entry)
-    ?? "Pull this conversation before pushing it.";
+    ?? t("projects:pullFirst.detail");
   return (
     <button
       type="button"
       className="btn btn-ghost sync-sync-review-pull-action"
       disabled={disabled}
       title={detail}
-      aria-label={`Open Pull review — ${detail}`}
+      aria-label={t("projects:pullFirst.openWithDetail", { detail })}
       onClick={onReviewPull}
     >
-      Open Pull review
+      {t("projects:pullFirst.open")}
     </button>
   );
 }
@@ -1264,17 +1297,17 @@ export function pullOperationChip(entry: ThreadSyncEntry | undefined): string | 
   if (!entry || entry.state === "unavailable") return null;
   if (entry.compared_against_storage) {
     switch (entry.pull_decision.action) {
-      case "materialize_cloud": return "Update session";
-      case "keep_both": return "Update session · keeps local copy";
-      case "create_local": return "Add session";
-      case "adopt_cloud_metadata": return "Mark synced";
+      case "materialize_cloud": return t("projects:pullChip.update");
+      case "keep_both": return t("projects:pullChip.updateKeep");
+      case "create_local": return t("projects:pullChip.add");
+      case "adopt_cloud_metadata": return t("projects:pullChip.markSynced");
       default: return null;
     }
   }
   switch (entry.state) {
-    case "storage_only": return "Add session";
-    case "storage_ahead": return "Update session";
-    case "diverged": return "Update session · keeps local copy";
+    case "storage_only": return t("projects:pullChip.add");
+    case "storage_ahead": return t("projects:pullChip.update");
+    case "diverged": return t("projects:pullChip.updateKeep");
     default: return null;
   }
 }
@@ -1285,38 +1318,39 @@ function syncReviewStateLabel(
   selected: boolean,
 ): string | null {
   if (!entry) return null;
-  if (entry.state === "unavailable") return "Unavailable for sync";
+  const notSelected = t("projects:reviewState.notSelected");
+  if (entry.state === "unavailable") return t("projects:reviewState.unavailable");
   if (entry.compared_against_storage) {
     const decision = mode === "push" ? entry.push_decision : entry.pull_decision;
     switch (decision.action) {
       case "no_changes": return null;
-      case "publish": return selected ? "Update storage" : "Not selected";
-      case "create_cloud": return selected ? "Publish new task" : "Not selected";
-      case "require_pull_metadata": return "Pull sync metadata";
-      case "require_pull": return "Pull required";
-      case "not_pushable": return "Not on this computer";
-      case "adopt_cloud_metadata": return selected ? "Mark synced" : "Not selected";
-      case "report_push_eligible": return "Ready to push";
-      case "materialize_cloud": return selected ? "Update this task" : "Keep local";
-      case "keep_both": return selected ? "Keep both" : "Not selected";
-      case "create_local": return selected ? "Create local task" : "Not selected";
-      case "report_local_only": return "Keep local";
-      case "not_found": return "Not found";
-      case "blocked": return "Can't sync";
+      case "publish": return selected ? t("projects:reviewState.updateStorage") : notSelected;
+      case "create_cloud": return selected ? t("projects:reviewState.publishNew") : notSelected;
+      case "require_pull_metadata": return t("projects:reviewState.pullMetadata");
+      case "require_pull": return t("projects:reviewState.pullRequired");
+      case "not_pushable": return t("projects:reviewState.notHere");
+      case "adopt_cloud_metadata": return selected ? t("projects:reviewState.markSynced") : notSelected;
+      case "report_push_eligible": return t("projects:reviewState.readyToPush");
+      case "materialize_cloud": return selected ? t("projects:reviewState.updateTask") : t("projects:reviewState.keepLocal");
+      case "keep_both": return selected ? t("projects:reviewState.keepBoth") : notSelected;
+      case "create_local": return selected ? t("projects:reviewState.createLocal") : notSelected;
+      case "report_local_only": return t("projects:reviewState.keepLocal");
+      case "not_found": return t("projects:reviewState.notFound");
+      case "blocked": return t("projects:reviewState.cantSync");
     }
   }
   if (mode === "push") {
     if (entry.state === "storage_only" || entry.state === "storage_ahead" || entry.state === "diverged") {
-      return "Pull required";
+      return t("projects:reviewState.pullRequired");
     }
-    return entry.state === "unknown" ? "Review status" : null;
+    return entry.state === "unknown" ? t("projects:reviewState.reviewStatus") : null;
   }
-  if (entry.state === "diverged") return selected ? "Keep both" : "Not selected";
+  if (entry.state === "diverged") return selected ? t("projects:reviewState.keepBoth") : notSelected;
   if (entry.state === "storage_only" || entry.state === "storage_ahead") {
-    return selected ? "Restore from storage" : "Keep local";
+    return selected ? t("projects:reviewState.restore") : t("projects:reviewState.keepLocal");
   }
-  if (entry.state === "local_only" || entry.state === "local_ahead") return "Keep local";
-  return entry.state === "synced" ? null : "Review status";
+  if (entry.state === "local_only" || entry.state === "local_ahead") return t("projects:reviewState.keepLocal");
+  return entry.state === "synced" ? null : t("projects:reviewState.reviewStatus");
 }
 
 /**
@@ -1328,45 +1362,45 @@ export function syncHoldDetail(
   mode: "push" | "pull",
   entry: ThreadSyncEntry,
 ): string | null {
-  const providerName = entry.provider_display_name ?? "the provider";
+  const provider = entry.provider_display_name;
   if (entry.state === "unavailable") {
-    return entry.status_detail ?? "Mallard could not safely read this session.";
+    return syncStatusDetail(entry) ?? t("projects:status.unreadable");
   }
   const decision = mode === "push" ? entry.push_decision : entry.pull_decision;
   if (!decision) return null;
   if (mode === "push" && entry.state === "synced" && decision.action === "publish") {
-    return entry.status_detail ?? "Export settings changed";
+    return syncStatusDetail(entry) ?? t("projects:hold.exportChanged");
   }
   if (mode === "pull" && decision.action === "keep_both" && decision.blocked_reason) {
-    return decision.blocked_reason;
+    return syncDecisionReason(decision) ?? null;
   }
   if (decision.action === "blocked") {
     switch (decision.blocker) {
       case "codec_unsupported":
         return mode === "push"
-          ? `Can't sync — Mallard can't safely capture this ${providerName} session. It still opens on this computer.`
-          : "Can't sync — this stored copy can't be restored safely on this computer.";
+          ? t("projects:hold.captureUnsupported", { provider })
+          : t("projects:hold.restoreUnsupported");
       case "ambiguous_binding":
-        return "Can't sync — more than one stored session could match this one.";
+        return t("projects:hold.ambiguous");
       case "missing_binding":
-        return "Can't sync — this session isn't linked to a stored copy yet.";
+        return t("projects:hold.unlinked");
       case "busy":
-        return `Another ${providerName} sync operation is still finishing. Wait, then refresh.`;
+        return t("projects:hold.busy", { provider });
       case "detached_requires_pull":
-        return "This session's local mapping changed. Pull to establish the current mapping.";
+        return t("projects:hold.detached");
       case "unknown_evidence":
-        return "Can't sync — Mallard could not prove the local and stored session state safely.";
+        return t("projects:hold.unknownEvidence");
       default:
-        return "Can't sync — this session can't be changed safely right now.";
+        return t("projects:hold.blocked");
     }
   }
   if (mode === "push" && decision.action === "require_pull_metadata") {
-    return "The session content matches, but storage has newer sync metadata. Pull once before pushing.";
+    return t("projects:hold.metadataNewer");
   }
   if (mode === "push" && decision.action === "require_pull") {
     return entry.state === "diverged"
-      ? "Local and stored history have diverged. Pull will keep both histories as independent sessions."
-      : "The stored session has newer messages. Pull them before pushing.";
+      ? t("projects:hold.diverged")
+      : t("projects:hold.storageNewer");
   }
   return null;
 }
@@ -1383,23 +1417,32 @@ function ReviewSyncIndicator({ entry, storageName, label, detail }: {
   const presentation = sessionSyncPresentation(entry, storageName);
   return <SessionSyncIndicator presentation={{
     ...presentation,
-    label: detail ? `${label}. ${detail}` : label,
+    label: detail ? t("projects:reviewState.withDetail", { label, detail }) : label,
   }} />;
+}
+
+/** A session action's label in the interface language, by its id. */
+function actionLabel(action: SessionActionDescriptor): string {
+  return backendText(`sessionAction.${action.action_id}`, action.label);
 }
 
 /** Disabled reason wins over the busy phrase, which wins over the plain label. */
 function actionTitle(action: SessionActionDescriptor, busy = false): string {
-  if (!action.enabled) return action.disabled_reason ?? action.label;
-  return busy ? `${action.label}…` : action.label;
+  if (!action.enabled && action.disabled_reason != null) {
+    return backendText(`sessionAction.${action.action_id}.disabledReason`, action.disabled_reason);
+  }
+  if (!action.enabled) return actionLabel(action);
+  return busy ? `${actionLabel(action)}…` : actionLabel(action);
 }
 
 function ChildOmissionIcon() {
+  const { t } = useTranslation("projects");
   const tooltipId = useId();
   return (
-    <span className="sync-child-omission" tabIndex={0} aria-label="Child rollouts excluded" aria-describedby={tooltipId}>
+    <span className="sync-child-omission" tabIndex={0} aria-label={t("child.label")} aria-describedby={tooltipId}>
       <Icon name="info" size={14} />
       <span id={tooltipId} role="tooltip" className="sync-child-omission-tooltip">
-        Child conversations are excluded from this Push. Pull restores the children stored in the cloud.
+        {t("child.detail")}
       </span>
     </span>
   );
@@ -1411,7 +1454,8 @@ function SessionCard({
   syncEntry, reviewResourceId, storageName, storageId = null, syncFallback, selectionMode, selected = false, selectable = false,
   selectionDisabled = false, onToggleResource, onReviewPull,
 }: SessionCardProps) {
-  const fullTitle = session.title || "Untitled session";
+  const { t } = useTranslation("projects");
+  const fullTitle = session.title || t("untitledSession");
   const visibleTitle = compactThreadTitle(fullTitle);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, syncEntry, selected) : null;
   const holdDetail = selectionMode && syncEntry ? syncHoldDetail(selectionMode, syncEntry) : null;
@@ -1445,13 +1489,15 @@ function SessionCard({
           {selectionMode && selectable && (
             <label
               className="sync-sync-row-choice"
-              title={`${selected ? "Exclude" : "Include"} ${session.title || "this session"}`}
+              title={session.title
+                ? t(selected ? "select.exclude" : "select.include", { name: session.title })
+                : t(selected ? "select.excludeThis" : "select.includeThis")}
             >
               <input
                 type="checkbox"
                 checked={selected}
                 disabled={selectionDisabled}
-                aria-label={`${selected ? "Exclude" : "Include"} ${session.title || "Untitled session"}`}
+                aria-label={t(selected ? "select.exclude" : "select.include", { name: session.title || t("untitledSession") })}
                 onChange={() => onToggleResource?.(reviewResourceId)}
               />
             </label>
@@ -1459,7 +1505,7 @@ function SessionCard({
           {!session.sync_blocked_reason && selectionMode && reviewStateLabel && syncEntry ? (
             <ReviewSyncIndicator
               entry={syncEntry}
-              storageName={storageName ?? "storage"}
+              storageName={storageName ?? t("storageFallback")}
               label={reviewStateLabel}
               detail={holdDetail}
             />
@@ -1481,7 +1527,7 @@ function SessionCard({
             <button
               type="button"
               className="sync-history-session-title-button"
-              title={visibleTitle === fullTitle ? "View session details" : `${fullTitle} · View session details`}
+              title={visibleTitle === fullTitle ? t("row.viewDetails") : t("row.viewDetailsTitled", { title: fullTitle })}
               onClick={(clickEvent) => openSessionDetail(clickEvent.currentTarget)}
             >
               {visibleTitle}
@@ -1493,13 +1539,13 @@ function SessionCard({
           {session.preserved && (
             <span
               className="sync-history-preserved-badge"
-              title={`Local branch preserved during a divergent Pull of thread ${session.preserved.preserved_from.slice(0, 8)}.`}
+              title={t("row.preservedTitle", { thread: session.preserved.preserved_from.slice(0, 8) })}
             >
-              Preserved {session.preserved.ordinal}
+              {t("row.preserved", { ordinal: session.preserved.ordinal })}
             </span>
           )}
           {selectionMode === "push" && syncEntry?.state === "synced" && syncEntry.push_decision.action === "publish" && (
-            <span className="sync-history-branch-state history-only">{syncEntry.status_detail ?? "Export settings changed"}</span>
+            <span className="sync-history-branch-state history-only">{syncStatusDetail(syncEntry) ?? t("hold.exportChanged")}</span>
           )}
           {selectionMode === "pull" && pullOperationChip(syncEntry) && (
             <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
@@ -1524,7 +1570,7 @@ function SessionCard({
               disabled={!openAction.enabled || busy}
               onClick={() => onSessionAction(session, openAction)}
               title={actionTitle(openAction)}
-              aria-label={openAction.label}
+              aria-label={actionLabel(openAction)}
             >
               {busy && busyActionId === openAction.action_id
                 ? <Icon name="refresh" size={14} className="icon-spin" />
@@ -1536,8 +1582,8 @@ function SessionCard({
             // provider identity as well as its button.
             <span
               className="sync-history-launch-action sync-history-provider-inert"
-              title={`${session.provider_display_name} session`}
-              aria-label={`${session.provider_display_name} session`}
+              title={t("row.providerSession", { provider: session.provider_display_name })}
+              aria-label={t("row.providerSession", { provider: session.provider_display_name })}
             >
               <ProviderMark provider={session.provider} displayName={session.provider_display_name} />
             </span>
@@ -1552,7 +1598,7 @@ function SessionCard({
                 disabled={!action.enabled || busy}
                 onClick={() => onSessionAction(session, action)}
                 title={actionTitle(action, actionBusy)}
-                aria-label={action.label}
+                aria-label={actionLabel(action)}
               >
                 <Icon
                   name={actionBusy ? "refresh" : SESSION_ACTION_ICONS[action.kind]}
@@ -1585,8 +1631,8 @@ function SessionCard({
               <button
                 type="button"
                 className="btn btn-ghost sync-history-session-detail-action"
-                aria-label="Delete local session"
-                title="Delete local session and its subagents"
+                aria-label={t("row.delete")}
+                title={t("row.deleteTitle")}
                 disabled={busy}
                 onClick={() => onDeleteSession(session)}
               >
@@ -1605,8 +1651,8 @@ function SessionCard({
               <button
                 type="button"
                 className="btn btn-ghost sync-history-session-detail-action"
-                aria-label="View session details"
-                title="View session details"
+                aria-label={t("row.viewDetails")}
+                title={t("row.viewDetails")}
                 onClick={(clickEvent) => openSessionDetail(clickEvent.currentTarget)}
               >
                 <SessionRowIcon name="chevron-right" />
@@ -1639,13 +1685,14 @@ function SyncEntryCard({
   onToggleResource?: (resourceId: string) => void;
   onReviewPull?: () => void;
 }) {
+  const { t } = useTranslation("projects");
   const fullTitle = entry.display_name.trim() && entry.display_name !== entry.thread_id
     ? entry.display_name
-    : "Untitled thread";
+    : t("untitledThread");
   // Local threads already drop the provenance timestamp their title carries;
   // stored threads get the same treatment so both lists read alike.
   const title = compactThreadTitle(fullTitle);
-  const identityLabel = `${title}, ${entry.provider_display_name} thread ${entry.thread_id}`;
+  const identityLabel = t("row.threadIdentity", { title, provider: entry.provider_display_name, id: entry.thread_id });
   const updatedAt = entry.storage_updated_at ?? entry.local_updated_at;
   const sizeReadout = reviewSizeReadout(selectionMode, entry);
   const reviewStateLabel = selectionMode ? syncReviewStateLabel(selectionMode, entry, selected) : null;
@@ -1658,12 +1705,12 @@ function SyncEntryCard({
             OS tooltip on the same hover. The id lives on the sha chip. */}
         <div className="sync-history-thread-title">
           {selectionMode && selectable && (
-            <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${identityLabel}`}>
+            <label className="sync-sync-row-choice" title={t(selected ? "select.exclude" : "select.include", { name: identityLabel })}>
               <input
                 type="checkbox"
                 checked={selected}
                 disabled={selectionDisabled}
-                aria-label={`${selected ? "Exclude" : "Include"} ${identityLabel}`}
+                aria-label={t(selected ? "select.exclude" : "select.include", { name: identityLabel })}
                 onChange={() => onToggleResource?.(entry.resource_id)}
               />
             </label>
@@ -1683,14 +1730,14 @@ function SyncEntryCard({
               the provider, which is why it renders at all. */}
           <span
             className="sync-history-launch-action sync-history-provider-inert"
-            title={`${entry.provider_display_name} thread`}
-            aria-label={`${entry.provider_display_name} thread`}
+            title={t("row.providerThread", { provider: entry.provider_display_name })}
+            aria-label={t("row.providerThread", { provider: entry.provider_display_name })}
           >
             <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
           </span>
           <strong title={title === fullTitle ? undefined : fullTitle}>{title}</strong>
           {selectionMode === "push" && entry.state === "synced" && entry.push_decision.action === "publish" && (
-            <span className="sync-history-branch-state history-only">{entry.status_detail ?? "Export settings changed"}</span>
+            <span className="sync-history-branch-state history-only">{syncStatusDetail(entry) ?? t("hold.exportChanged")}</span>
           )}
           {selectionMode === "pull" && pullOperationChip(entry) && (
             <span className="sync-history-branch-state history-only" title={holdDetail ?? reviewStateLabel ?? undefined}>
@@ -1738,10 +1785,13 @@ export interface SessionPushHistory {
 /** The ↑N pill's words: the rail's commit chip sentence, with the count and
  *  the branch, since the commits themselves are not on this review. */
 export function sessionPushHistoryTitle(storageName: string, history: SessionPushHistory): string {
-  const commits = history.outgoing.new_commits === 1 ? "1 commit" : `${history.outgoing.new_commits} commits`;
-  const head = `${commits} new since the last Push to ${storageName} · ${history.branch}`;
+  const head = t("projects:pushHistory.head", {
+    count: history.outgoing.new_commits,
+    storage: storageName,
+    branch: history.branch,
+  });
   return history.outgoing.rewritten
-    ? `${head}\nHistory was rewritten: ${storageName}'s latest commit is no longer on this branch.`
+    ? `${head}\n${t("projects:pushHistory.rewritten", { storage: storageName })}`
     : head;
 }
 
@@ -1757,11 +1807,12 @@ export function SessionPushRow({ entry, storageName, facts, history = null }: {
   facts: PushSessionFacts | null;
   history?: SessionPushHistory | null;
 }) {
+  const { t } = useTranslation("projects");
   const historyTitle = history && history.outgoing.new_commits > 0
     ? sessionPushHistoryTitle(storageName, history)
     : null;
   const fullTitle = facts?.title
-    ?? (entry.display_name.trim() && entry.display_name !== entry.thread_id ? entry.display_name : "Untitled session");
+    ?? (entry.display_name.trim() && entry.display_name !== entry.thread_id ? entry.display_name : t("untitledSession"));
   const title = compactThreadTitle(fullTitle);
   const reviewStateLabel = syncReviewStateLabel("push", entry, true);
   const sizeReadout = reviewSizeReadout("push", entry);
@@ -1794,7 +1845,7 @@ export function SessionPushRow({ entry, storageName, facts, history = null }: {
           )}
           {entry.subagent_selection.omitted && <ChildOmissionIcon />}
           {entry.state === "synced" && entry.push_decision.action === "publish" && (
-            <span className="sync-history-branch-state history-only">{entry.status_detail ?? "Export settings changed"}</span>
+            <span className="sync-history-branch-state history-only">{syncStatusDetail(entry) ?? t("hold.exportChanged")}</span>
           )}
         </div>
         {/* The session's page already opens it elsewhere, so the mark is the
@@ -1802,8 +1853,8 @@ export function SessionPushRow({ entry, storageName, facts, history = null }: {
         <div className="sync-history-thread-actions">
           <span
             className="sync-history-launch-action sync-history-provider-inert"
-            title={`${entry.provider_display_name} session`}
-            aria-label={`${entry.provider_display_name} session`}
+            title={t("row.providerSession", { provider: entry.provider_display_name })}
+            aria-label={t("row.providerSession", { provider: entry.provider_display_name })}
           >
             <ProviderMark provider={entry.provider} displayName={entry.provider_display_name} />
           </span>
@@ -1818,7 +1869,7 @@ export function SessionPushRow({ entry, storageName, facts, history = null }: {
             </>
           ) : (
             <>
-              <div className="sync-history-thread-meta" aria-label="Session details">
+              <div className="sync-history-thread-meta" aria-label={t("metrics.label")}>
                 {sizeReadout && <ReviewSizeMetric readout={sizeReadout} />}
               </div>
               {entry.local_updated_at != null && (
@@ -1875,11 +1926,11 @@ function compareSessions(left: ProjectSessionSummary, right: ProjectSessionSumma
 function providerNoticeCopy(state: ProviderActivityState): string {
   switch (state.access) {
     case "view_only":
-      return `View only — connect a ${state.display_name} profile to sync these sessions.`;
+      return t("projects:notice.viewOnly", { provider: state.display_name });
     case "unsupported":
-      return `View only — this Mallard version has no adapter for ${state.display_name} sessions.`;
+      return t("projects:access.unsupportedDetail", { provider: state.display_name });
     case "bound_unavailable":
-      return `The ${state.display_name} profile can't be read right now. Its sessions fail closed until it is reachable again.`;
+      return t("projects:notice.unreadable", { provider: state.display_name });
     default:
       return "";
   }
@@ -1913,6 +1964,7 @@ export function ProjectChatHistoryContent({
   onStartSession,
   startSessionBusy = false,
 }: ContentProps) {
+  const { t, i18n: { language } } = useTranslation(["projects", "common"]);
   const [localQuery, setLocalQuery] = useState("");
   const [localStatusScope, setLocalStatusScope] = useState<StatusScope | null>(null);
   const listRef = useRef<HTMLElement>(null);
@@ -1923,9 +1975,9 @@ export function ProjectChatHistoryContent({
   const reviewLoadingLabel = !selectionMode
     ? null
     : activity === null && loadError === null
-      ? "Loading sessions"
+      ? t("list.loadingSessions")
       : comparison === null && comparisonError === null
-        ? "Comparing with this computer"
+        ? t("list.comparingComputer")
         : null;
   const comparisonStorageId = comparison?.storage_id ?? "";
   const dismissedClearedNotice = useDismissedStorageWarning(project.local_project_id, comparisonStorageId);
@@ -1954,7 +2006,7 @@ export function ProjectChatHistoryContent({
         : isPushReviewRow(status, entry.push_decision);
     });
   }, [allSessions, reviewResourceIds, selectionMode, syncIndex]);
-  const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? "selected storage";
+  const comparisonStorageName = comparison?.storage_name ?? activeStorageName ?? t("selectedStorage");
   /* What every row's badge is resolved against, settled before the list is
      narrowed: the scope bar sorts rows by the badge they draw. */
   const rowStorageName = comparison ? comparisonStorageName : activeStorageName;
@@ -1967,7 +2019,7 @@ export function ProjectChatHistoryContent({
     comparisonError,
     storageName: comparison?.storage_name ?? activeStorageName,
     hasBoundProvider,
-  }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider]);
+  }), [comparison, comparisonLoading, comparisonError, activeStorageName, hasBoundProvider, language]);
   const scopeBySession = useMemo(() => new Map(reviewSessions.map((session) => [
     session.resource_id,
     sessionStatusScope(sessionRowPresentation(
@@ -1997,9 +2049,9 @@ export function ProjectChatHistoryContent({
   const sessions = useMemo(
     () => reviewSessions.filter((session) => (
       (statusScope === null || scopeBySession.get(session.resource_id) === statusScope)
-      && nameMatchesSearch(session.title || "Untitled session", query)
+      && nameMatchesSearch(session.title || t("untitledSession"), query)
     )),
-    [reviewSessions, query, statusScope, scopeBySession],
+    [reviewSessions, query, statusScope, scopeBySession, t, language],
   );
   const sessionsByResource = useMemo(
     () => new Map(sessions.map((session) => [session.resource_id, session])),
@@ -2025,7 +2077,7 @@ export function ProjectChatHistoryContent({
   );
   // Resolved the same way the rows' status badges resolve it, so the group
   // heading and the tooltips under it can never name two different storages.
-  const storageOnlyName = rowStorageName ?? "storage";
+  const storageOnlyName = rowStorageName ?? t("storageFallback");
   // Unmapped rows split by where the session lives. A storage-only session
   // stays in its storage group; a local session states only that this branch
   // has no matching commit.
@@ -2071,8 +2123,8 @@ export function ProjectChatHistoryContent({
   }, [comparison?.entries, reviewResourceIds, selectionMode, renderedSyncEntryIds]);
   const unlistedEntries = useMemo(() => allUnlistedEntries.filter((entry) => (
     nameMatchesSearch(entry.display_name.trim() && entry.display_name !== entry.thread_id
-      ? entry.display_name : "Untitled thread", query)
-  )), [allUnlistedEntries, query]);
+      ? entry.display_name : t("untitledThread"), query)
+  )), [allUnlistedEntries, query, t, language]);
   const searchResults = useMemo<NameSearchResults>(() => ({
     query,
     resourceIds: new Set([
@@ -2090,23 +2142,25 @@ export function ProjectChatHistoryContent({
   )).length : 0;
   /* Releasing the scope brings rows back only if the name alone matches some. */
   const scopeEmptiedList = statusScope !== null && searchResults.resourceIds.size === 0
-    && reviewSessions.some((session) => nameMatchesSearch(session.title || "Untitled session", query));
-  const sectionTitle = activity?.git ? "Git history" : activity ? "Sessions" : "Activity";
+    && reviewSessions.some((session) => nameMatchesSearch(session.title || t("untitledSession"), query));
+  const sectionTitle = activity?.git ? t("list.gitHistory") : activity ? t("list.sessions") : t("list.activity");
   const windowRange = activity ? formatDayRange(activity.window_start, activity.window_end) : "";
   /* An empty rail either belongs to an unborn branch or to a loaded range
      without commits. Branch choices come only from the local repository. */
   const emptyRail = useMemo(() => {
     if ((activity?.older?.commits ?? 0) === 0) {
-      return { icon: "git-commit" as IconName, title: "No commits yet", meta: null };
+      return { icon: "git-commit" as IconName, title: t("list.noCommitsYet"), meta: null };
     }
-    return { icon: "range" as IconName, title: "No commits", meta: windowRange };
-  }, [activity?.older?.commits, windowRange]);
+    return { icon: "range" as IconName, title: t("list.noCommits"), meta: windowRange };
+  }, [activity?.older?.commits, windowRange, t, language]);
   const refreshStatus = storageLoading
-    ? "Loading cloud sessions…"
+    ? t("list.loadingCloudStatus")
     : comparisonLoading
-      ? `Comparing threads with ${activeStorageName ?? "storage"}`
+      ? (activeStorageName != null
+        ? t("list.comparingThreads", { storage: activeStorageName })
+        : t("list.comparingThreadsUnnamed"))
       : loading
-        ? "Refreshing project activity"
+        ? t("list.refreshing")
         : null;
   const renderSession = (session: ProjectSessionSummary, key: string) => {
     const entry = syncBySessionResource.get(session.resource_id);
@@ -2115,7 +2169,7 @@ export function ProjectChatHistoryContent({
       || binding?.canonical_project_root
       || binding?.project_root
       || project.project_root
-      || "Not configured";
+      || t("notConfigured");
     const selectable = !!selectionMode
       && session.access === "bound_ready"
       && !session.sync_blocked_reason
@@ -2144,8 +2198,12 @@ export function ProjectChatHistoryContent({
     });
   const outgoingCommits = pushGitHistory?.outgoing;
   const outgoingTitle = pushGitHistory?.rewritten
-    ? `New since the last Push to ${activeStorageName ?? "storage"}. History was rewritten: storage's latest commit is no longer on this branch.`
-    : `New since the last Push to ${activeStorageName ?? "storage"}`;
+    ? (activeStorageName != null
+      ? t("list.outgoingRewritten", { storage: activeStorageName })
+      : t("list.outgoingRewrittenUnnamed"))
+    : (activeStorageName != null
+      ? t("list.outgoing", { storage: activeStorageName })
+      : t("list.outgoingUnnamed"));
   const commits = useMemo(() => {
     const candidates = activity?.git?.commits ?? [];
     if (!selectionMode && !narrowing) return candidates;
@@ -2187,10 +2245,10 @@ export function ProjectChatHistoryContent({
     notices.push({
       key: "refresh-failed",
       severity: "danger",
-      message: `Couldn't refresh activity: ${loadError}`,
+      message: t("notice.refreshFailed", { error: loadError ?? "" }),
       action: (
         <button type="button" className="btn btn-ghost" onClick={onRetryLoad} disabled={loading}>
-          Try again
+          {t("common:tryAgain")}
         </button>
       ),
     });
@@ -2199,8 +2257,32 @@ export function ProjectChatHistoryContent({
      nothing about the clear. */
   const storageNotice = clearedStorageNotice(comparison, comparisonStorageName);
   const clearedNotice = selectionMode === "pull" ? null : storageNotice;
+  /* The dismissal names the condition, never its sentence: a sentence is in
+     whichever language was on, and the same condition must stay dismissed
+     across a switch. The condition is what the sentence reads — the storage
+     and its name, its continuity, the state of each area this computer
+     writes (whether a Pull comes first), and on Mallard Cloud the repository
+     and the version a discard returned to — so a changed instruction shows
+     again. */
+  const clearedCloud = comparison?.managed_cloud_status ?? null;
   const clearedNoticeId = comparison && clearedNotice?.key === "storage-cleared"
-    ? JSON.stringify([project.local_project_id, comparison.storage_id, comparison.remote_continuity, clearedNotice.message])
+    ? JSON.stringify([
+      project.local_project_id,
+      comparison.storage_id,
+      comparison.remote_continuity,
+      comparison.storage_name,
+      comparison.scopes
+        .filter((scope) => scope.access === "bound_ready" || scope.access === "bound_unavailable")
+        .map((scope) => [scope.scope, scope.continuity.state]),
+      clearedCloud && [
+        clearedCloud.repository_id,
+        clearedCloud.link?.repository_id ?? null,
+        clearedCloud.link?.owner_login ?? null,
+        clearedCloud.link?.name ?? null,
+        clearedCloud.publication?.latest_version ?? null,
+        clearedCloud.publication?.draft_ahead ?? null,
+      ],
+    ])
     : null;
   const continuityState = comparison?.remote_continuity?.state;
   const storageWarningResolved = !comparisonLoading && !comparisonError && (
@@ -2229,7 +2311,9 @@ export function ProjectChatHistoryContent({
       key: `provider-notice:${state.provider}`,
       severity: providerNoticeSeverity(state),
       title: state.display_name,
-      message: `— ${providerNoticeCopy(state)}${state.detail ? ` ${state.detail}` : ""}`,
+      message: state.detail
+        ? t("notice.messageDetail", { message: providerNoticeCopy(state), detail: state.detail })
+        : t("notice.message", { message: providerNoticeCopy(state) }),
     });
   }
   /* A whole-comparison failure belongs in the shared notice zone, separate
@@ -2239,8 +2323,8 @@ export function ProjectChatHistoryContent({
     notices.push({
       key: "comparison-failed",
       severity: "warning",
-      title: `Comparison with ${comparisonStorageName} failed`,
-      message: `— ${comparisonError} Every row below falls back to an unknown status.`,
+      title: t("notice.comparisonFailedTitle", { storage: comparisonStorageName }),
+      message: t("notice.comparisonFailed", { error: comparisonError }),
     });
   }
   /* Comparison failures are isolated per provider: one failed provider warns
@@ -2250,7 +2334,7 @@ export function ProjectChatHistoryContent({
       key: `provider-error:${provider}`,
       severity: "warning",
       title: providerNames.get(provider) ?? provider,
-      message: `comparison failed: ${message}`,
+      message: t("notice.providerFailed", { error: message }),
     });
   }
   /* Only one of those five is an event. A `loadError` sitting over a loaded
@@ -2263,7 +2347,7 @@ export function ProjectChatHistoryContent({
    * status message. It gets a named region instead. */
   const noticeTiming: NoticeTiming = refreshFailed
     ? { timing: "blocking" }
-    : { timing: "standing", label: "Notes about this project activity" };
+    : { timing: "standing", label: t("notice.label") };
 
   /* "New session" closes the standing list's search row. A review shows
      what one verb will move, not where work begins, so it has none. An
@@ -2290,7 +2374,7 @@ export function ProjectChatHistoryContent({
     && !(selectionMode === "push" && selectionReviewEmpty)
     ? (
       <NameSearchField query={query} onChange={onSearchQueryChange ?? setLocalQuery}
-        label={selectionMode ? "Search sessions" : "Search loaded sessions"}
+        label={selectionMode ? t("list.searchSessions") : t("list.searchLoaded")}
         matches={searchResults.resourceIds.size} total={searchableIds.size} noun={sessionNoun} hiddenSelected={hiddenSelected}
         narrowed={statusScope !== null} leading={viewSwitch}
         trailing={startInBox ? undefined : newSession(false) ?? undefined} />
@@ -2301,7 +2385,7 @@ export function ProjectChatHistoryContent({
      stays, at zero, so it can be released. */
   const scopeBar = searchField && scopeBarShown ? (
     <StatusScopeBar
-      label="Show sessions by status"
+      label={t("list.scopeLabel")}
       noun={sessionNoun}
       total={searchableIds.size}
       active={statusScope}
@@ -2340,7 +2424,7 @@ export function ProjectChatHistoryContent({
         <NoticeZone
           key={JSON.stringify([project.local_project_id, comparisonStorageId])}
           items={notices}
-          subject="notes about this project activity"
+          subject={t("notice.subject")}
           className="sync-history-notices"
           {...noticeTiming}
         />
@@ -2350,8 +2434,8 @@ export function ProjectChatHistoryContent({
           <div className="sync-history-state sync-history-profile-state">
             <Icon name="alert-triangle" size={18} />
             <div>
-              <strong>No agent profile is connected.</strong>
-              <span>Choose an Agent profile to load this project’s sessions.</span>
+              <strong>{t("list.noProfile")}</strong>
+              <span>{t("list.noProfileHint")}</span>
             </div>
             {onChooseAgentProfile && (
               <button
@@ -2360,7 +2444,7 @@ export function ProjectChatHistoryContent({
                 disabled={continuityActionBusy}
                 onClick={onChooseAgentProfile}
               >
-                Choose Agent profile
+                {t("list.chooseProfile")}
               </button>
             )}
           </div>
@@ -2382,11 +2466,11 @@ export function ProjectChatHistoryContent({
           <div className="sync-history-state sync-history-profile-state" role="alert">
             <Icon name="alert-triangle" size={18} />
             <div>
-              <strong>{`Couldn't compare this computer with ${comparisonStorageName}.`}</strong>
+              <strong>{t("list.compareFailed", { storage: comparisonStorageName })}</strong>
               <span>{comparisonError}</span>
             </div>
             <button type="button" className="btn" onClick={onRetryLoad} disabled={loading || comparisonLoading}>
-              <Icon name="refresh" size={13} /> Try again
+              <Icon name="refresh" size={13} /> {t("common:tryAgain")}
             </button>
           </div>
         ) : (loading && !activity) || (storageLoading && allSessions.length === 0) ? (
@@ -2397,7 +2481,7 @@ export function ProjectChatHistoryContent({
              the list — the visually hidden line above is already announcing
              the refresh politely. Claiming a live region here only made a
              screen reader say it twice. */
-          <LoadingScaffold shape="rows" label={storageLoading ? "Loading cloud sessions" : "Loading project activity"} />
+          <LoadingScaffold shape="rows" label={storageLoading ? t("list.loadingCloud") : t("list.loadingActivity")} />
         ) : !activity ? (
           /* A failed first load is a page of its own, never a blank one: it
              names what failed and carries its own retry, because the trail's
@@ -2412,11 +2496,11 @@ export function ProjectChatHistoryContent({
             <div className="sync-history-state sync-history-profile-state" role="alert">
               <Icon name="alert-triangle" size={18} />
               <div>
-                <strong>{`Couldn't load activity for ${label}.`}</strong>
+                <strong>{t("list.loadFailed", { project: label })}</strong>
                 <span>{loadError}</span>
               </div>
               <button type="button" className="btn" onClick={onRetryLoad} disabled={loading}>
-                <Icon name="refresh" size={13} /> Try again
+                <Icon name="refresh" size={13} /> {t("common:tryAgain")}
               </button>
             </div>
           ) : null
@@ -2424,9 +2508,9 @@ export function ProjectChatHistoryContent({
           <>
             {narrowing && searchResults.resourceIds.size === 0 && (
               <div className="sync-history-state">
-                {selectionMode ? "No matching sessions." : "No matching loaded sessions."}
+                {selectionMode ? t("list.noMatches") : t("list.noMatchesLoaded")}
                 {scopeEmptiedList && (
-                  <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>Clear filter</button>
+                  <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>{t("list.clearFilter")}</button>
                 )}
               </div>
             )}
@@ -2436,14 +2520,14 @@ export function ProjectChatHistoryContent({
                  are not part of it. */
               <div className="sync-pull-empty compact">
                 <Icon name="check-circle" size={16} />
-                <span><strong>{pushGitHistory?.changed ? "No session changes" : "Nothing to push"}</strong></span>
+                <span><strong>{pushGitHistory?.changed ? t("list.noSessionChanges") : t("list.nothingToPush")}</strong></span>
               </div>
             ) : (
               <div className="sync-pull-empty">
                 <Icon name="check-circle" size={16} />
                 <span>
-                  <strong>No session changes</strong>
-                  <small>Sessions already match this storage.</small>
+                  <strong>{t("list.noSessionChanges")}</strong>
+                  <small>{t("list.alreadyMatch")}</small>
                 </span>
               </div>
             ))}
@@ -2458,12 +2542,15 @@ export function ProjectChatHistoryContent({
                   collapsed={storageOnlyCollapsed}
                   controls="storage-only-list"
                   disabled={narrowing}
-                  label={`${storageOnlyCollapsed ? "Expand" : "Collapse"} ${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} only in ${storageOnlyName}`}
+                  label={t(storageOnlyCollapsed ? "list.expandStorageOnly" : "list.collapseStorageOnly", {
+                    count: storageOnlyReferences.length,
+                    storage: storageOnlyName,
+                  })}
                   onToggle={() => setStorageOnlyCollapsed(!storageOnlyCollapsed)}
                 />
                 <div className="sync-history-section-heading">
-                  <h2 id="storage-only-heading"><Icon name="cloud" size={13} />Only in <span className="sync-history-storage-name">{storageOnlyName}</span></h2>
-                  <span className="sync-history-heading-count" title={`${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} not on this computer`} aria-label={`${storageOnlyReferences.length} session${storageOnlyReferences.length === 1 ? "" : "s"} not on this computer`}><Icon name="message" size={12} />{storageOnlyReferences.length}</span>
+                  <h2 id="storage-only-heading"><Icon name="cloud" size={13} /><Trans t={t} i18nKey="list.onlyIn" values={{ storage: storageOnlyName }} components={{ name: <span className="sync-history-storage-name" /> }} /></h2>
+                  <span className="sync-history-heading-count" title={t("list.storageOnlyCount", { count: storageOnlyReferences.length })} aria-label={t("list.storageOnlyCount", { count: storageOnlyReferences.length })}><Icon name="message" size={12} />{storageOnlyReferences.length}</span>
                 </div>
                 {!storageOnlyCollapsed && (
                   <div id="storage-only-list" className="sync-history-thread-list flat">{storageOnlyReferences.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `storage-only:${session.resource_id}`) : null; })}</div>
@@ -2480,11 +2567,13 @@ export function ProjectChatHistoryContent({
                       collapsed={branchUnmappedCollapsed}
                       controls="branch-unmapped-list"
                       disabled={narrowing}
-                      label={`${branchUnmappedCollapsed ? "Expand" : "Collapse"} ${branchUnmappedReferences.length} uncommitted session${branchUnmappedReferences.length === 1 ? "" : "s"}`}
+                      label={t(branchUnmappedCollapsed ? "list.expandUncommitted" : "list.collapseUncommitted", {
+                        count: branchUnmappedReferences.length,
+                      })}
                       onToggle={() => setBranchUnmappedCollapsed(!branchUnmappedCollapsed)}
                     />
                     <div className="sync-history-section-heading">
-                      <h2 id="branch-unmapped-heading"><Icon name="edit" size={13} />Uncommitted</h2>
+                      <h2 id="branch-unmapped-heading"><Icon name="edit" size={13} />{t("list.uncommitted")}</h2>
                     </div>
                     {!branchUnmappedCollapsed && (
                       <div id="branch-unmapped-list" className="sync-history-thread-list flat">{branchUnmappedReferences.map((reference) => { const session = sessionsByResource.get(reference.resource_id); return session ? renderSession(session, `branch-unmapped:${session.resource_id}`) : null; })}</div>
@@ -2492,7 +2581,7 @@ export function ProjectChatHistoryContent({
                   </section>
                 )}
                 {((!narrowing && selectionMode !== "pull") || commits.length > 0) && (
-                  <section className="sync-history-commit-section" aria-label={`First-parent commits on ${activity.git.selected_branch}`}>
+                  <section className="sync-history-commit-section" aria-label={t("list.commitsOn", { branch: activity.git.selected_branch })}>
                   {commits.length === 0 ? (
                     /* An empty rail is still the rail: the gap draws as a card
                        on it, so the page keeps the spine every other state is
@@ -2530,7 +2619,7 @@ export function ProjectChatHistoryContent({
                           <SectionFold
                             collapsed={collapsed}
                             controls={sessionListId}
-                            label={`${collapsed ? "Expand" : "Collapse"} commit ${displaySha}`}
+                            label={t(collapsed ? "list.expandCommit" : "list.collapseCommit", { sha: displaySha })}
                             disabled={narrowing || references.length === 0}
                             onToggle={() => toggleCommit(commit.sha)}
                           />
@@ -2556,7 +2645,7 @@ export function ProjectChatHistoryContent({
                               )}
                               {commitUrl ? (
                                 <a className="sync-history-commit-link" href={commitUrl} target="_blank" rel="noopener noreferrer"
-                                  title={`Open ${commit.sha} on GitHub`} aria-label={`Open commit ${displaySha} on GitHub`}
+                                  title={t("list.openOnGitHub", { sha: commit.sha })} aria-label={t("list.openCommitOnGitHub", { sha: displaySha })}
                                   onClick={(event) => { event.preventDefault(); void openExternalUrl(commitUrl); }}>
                                   <Icon name="external-link" size={12} />
                                   <code>{displaySha}</code>
@@ -2604,19 +2693,22 @@ export function ProjectChatHistoryContent({
                         "Load earlier" control, so blaming its window would
                         promise a step the page cannot offer. */}
                     <div className={`sync-history-state${startProviders.length > 0 ? " with-start" : ""}`}>
-                      {(activity.older?.sessions ?? 0) > 0 ? `No sessions in ${windowRange}.` : "No sessions yet."}
+                      {(activity.older?.sessions ?? 0) > 0 ? t("list.noSessionsIn", { range: windowRange }) : t("list.noSessionsYet")}
                       {newSession(true)}
                     </div>
                   </div>
                 )) : (
                   <>
                     {cloudSessions.length > 0 && (
-                      <ListTile icon="cloud" cloud label={<>Only in <span className="sync-history-storage-name">{storageOnlyName}</span></>}>
+                      <ListTile icon="cloud" cloud label={(
+                        <Trans t={t} i18nKey="list.onlyIn" values={{ storage: storageOnlyName }}
+                          components={{ name: <span className="sync-history-storage-name" /> }} />
+                      )}>
                         {cloudSessions.map((session) => renderSession(session, `storage-only:${session.resource_id}`))}
                       </ListTile>
                     )}
                     {localSessions.length > 0 && (cloudSessions.length > 0 ? (
-                      <ListTile icon="message" label="Sessions">
+                      <ListTile icon="message" label={t("list.sessions")}>
                         {localSessions.map((session) => renderSession(session, session.resource_id))}
                       </ListTile>
                     ) : (
@@ -2641,7 +2733,7 @@ export function ProjectChatHistoryContent({
                 here is "older": it is what the comparison knows and the
                 activity scan does not, offered rather than silently dropped. */}
             {!selectionReviewEmpty && selectionMode && unlistedEntries.length > 0 && (
-              <div className="sync-history-thread-list flat" aria-label="Sessions without an activity row">
+              <div className="sync-history-thread-list flat" aria-label={t("list.unlisted")}>
                 {unlistedEntries.map((entry) => (
                   <SyncEntryCard key={`unlisted:${entry.resource_id}`} entry={entry} storageName={comparisonStorageName}
                     selectionMode={selectionMode} selected={selectedResourceIds.has(entry.resource_id)}
@@ -2719,6 +2811,7 @@ export default function ProjectActivityPage({
   searchQuery, onSearchQueryChange, onSearchResultsChange,
   viewSwitch,
 }: PageProps) {
+  const { i18n: { language } } = useTranslation();
   /* Keep loaded windows as a stack so Show less is a pop instead of a refetch. */
   const [pages, setPages] = useState<ProjectActivity[]>([]);
   const activity = useMemo(
@@ -2951,12 +3044,13 @@ export default function ProjectActivityPage({
     void latest.current.loadWorkspace(latest.current.branch);
   }, [project.local_project_id, activeStorageId]);
 
+  // The chip's breakdown is copy, so a language switch recounts it.
   const headerCounts = useMemo(
     () => activityHeaderCounts(
       comparison,
-      comparison?.storage_name ?? activeStorageName ?? "selected storage",
+      comparison?.storage_name ?? activeStorageName ?? t("projects:selectedStorage"),
     ),
-    [comparison, activeStorageName],
+    [comparison, activeStorageName, language],
   );
   const headerModel = useMemo<ActivityHeaderModel>(() => ({
     projectId: project.local_project_id,
@@ -2998,8 +3092,13 @@ export default function ProjectActivityPage({
     actionInFlightRef.current = true;
     try {
       const approved = await confirm(
-        `Permanently delete “${session.title || "Untitled session"}” and its subagents from this machine?\n\nThis removes the local session files and Mallard binding. Cloud copies are kept. This action cannot be undone.`,
-        { title: "Delete local session?", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
+        t("projects:deleteConfirm.message", { title: session.title || t("projects:untitledSession") }),
+        {
+          title: t("projects:deleteConfirm.title"),
+          kind: "warning",
+          okLabel: t("common:delete"),
+          cancelLabel: t("common:cancel"),
+        },
       );
       if (!approved) return;
       reportActionError(null);

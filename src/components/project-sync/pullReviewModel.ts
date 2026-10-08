@@ -5,15 +5,16 @@ import type {
   PullReview,
 } from "../../types";
 import type { PullReviewSelection } from "./pullReviewFlow";
+import { t } from "../../i18n";
 
 type PullReviewCategory = "project_data" | "project_content";
 
 export interface PullReviewItem {
   resourceId: string;
   category: PullReviewCategory;
-  /** What kind of thing this is, and what the review list prints. Conversations
-   *  share the one label "Conversation" — itemKindLabel and the review's
-   *  grouping both read it, so it is not a place to put a session's name. */
+  /** What the review list prints. Conversations share the one label
+   *  "Conversation", so it is not a place to put a session's name; what kind
+   *  of thing the item is comes from `itemKind`, never from this text. */
   title: string;
   /** A conversation's own name: "" when the stored thread has none, and null
    *  when the item is not a conversation at all. */
@@ -55,12 +56,12 @@ function humanize(value: string): string {
 function conversationActionDetail(row: ConversationReviewRow): string {
   switch (row.action) {
     case "materialize_cloud":
-      return "Brings the reviewed storage history into this task. Existing provider files are retained.";
+      return t("reviews:pullDetail.materializeCloud");
     case "keep_both":
       if (row.blocked_reason) return row.blocked_reason;
-      return "Keeps the current local history as an independent task and brings the storage history into this task. No messages are deleted.";
+      return t("reviews:pullDetail.keepBoth");
     case "create_local":
-      return "Creates a local task from the reviewed storage history.";
+      return t("reviews:pullDetail.createLocal");
     default:
       return humanize(row.action);
   }
@@ -81,8 +82,14 @@ function isPinnedProjectContentNoop(action: RestoreAction): boolean {
     && action.expected_target_mode === action.kind.mode;
 }
 
+/** Conversations sort among the other items under this word in every
+ *  language, so the order a Pull applies in never follows the language. */
+// i18n-ignore: sort key, never shown
+const CONVERSATION_SORT_KEY = "Conversation";
+
 function restoreActionCopy(action: RestoreAction): {
-  title: string;
+  /** Null for a conversation: the item wears the shared conversation label. */
+  title: string | null;
   detail: string;
   provider: ProviderKey | null;
   category: PullReviewCategory;
@@ -96,7 +103,7 @@ function restoreActionCopy(action: RestoreAction): {
   const provider = "provider" in action.kind ? action.kind.provider : null;
   if (kind === "materialize_conversation") {
     return {
-      title: "Conversation",
+      title: null,
       detail: action.kind.logical_path,
       provider,
       category: "project_data",
@@ -146,13 +153,16 @@ function restoreActionCopy(action: RestoreAction): {
   };
 }
 
-/** Group file comparisons and conversation review rows by resource ID. */
+/** Group file comparisons and conversation review rows by resource ID. The
+ *  items carry their words in the language active when they were built, so a
+ *  view that keeps them rebuilds them when the language changes. */
 export function buildPullReviewItems(plan: PullReview): PullReviewItem[] {
   const items = new Map<string, PullReviewItem>();
+  const sortKeys = new Map<string, string>();
   const ensure = (
     resourceId: string,
     category: PullReviewCategory,
-    title: string,
+    title: string | null,
     detail: string,
     provider: ProviderKey | null,
   ) => {
@@ -161,10 +171,11 @@ export function buildPullReviewItems(plan: PullReview): PullReviewItem[] {
       if (provider) existing.provider = provider;
       return existing;
     }
+    sortKeys.set(resourceId, title ?? CONVERSATION_SORT_KEY);
     const item: PullReviewItem = {
       resourceId,
       category,
-      title,
+      title: title ?? t("reviews:kind.conversation"),
       threadTitle: null,
       detail,
       provider,
@@ -208,11 +219,14 @@ export function buildPullReviewItems(plan: PullReview): PullReviewItem[] {
 
   for (const row of plan.conversation_review) {
     if (!VISIBLE_PULL_CONVERSATION_ACTIONS.has(row.action)) continue;
-    const detail = conversationActionDetail(row) + (row.stored_without_credential_redaction ? " Stored without credential redaction." : "");
+    const actionDetail = conversationActionDetail(row);
+    const detail = row.stored_without_credential_redaction
+      ? t("reviews:pullDetail.unredacted", { detail: actionDetail })
+      : actionDetail;
     const item = ensure(
       row.resource_id,
       "project_data",
-      "Conversation",
+      null,
       detail,
       row.provider,
     );
@@ -234,7 +248,9 @@ export function buildPullReviewItems(plan: PullReview): PullReviewItem[] {
     if (left.category !== right.category) {
       return categoryRank[left.category] - categoryRank[right.category];
     }
-    return (left.projectContentPath ?? left.title).localeCompare(right.projectContentPath ?? right.title);
+    const leftKey = left.projectContentPath ?? sortKeys.get(left.resourceId)!;
+    const rightKey = right.projectContentPath ?? sortKeys.get(right.resourceId)!;
+    return leftKey.localeCompare(rightKey);
   });
 }
 
@@ -320,7 +336,7 @@ export function pullBudgetTotal(
   for (const item of items) {
     if (!selected.has(item.resourceId) || item.pullBytes == null) continue;
     if (item.category === "project_content") projectFiles += item.pullBytes;
-    else if (itemKindLabel(item) === "Conversation") sessions += item.pullBytes;
+    else if (itemKind(item) === "conversation") sessions += item.pullBytes;
     else other += item.pullBytes;
   }
   return { sessions, other, projectFiles, total: sessions + other + projectFiles, limit };
@@ -344,7 +360,7 @@ export function fitPullRecommendation(
   const stepIds = new Set(stepItems.map((item) => item.resourceId));
   const safe = stepItems.filter(recommendedPullSelection);
   const fitted = new Set(safe
-    .filter((item) => itemKindLabel(item) !== "Conversation")
+    .filter((item) => itemKind(item) !== "conversation")
     .map((item) => item.resourceId));
   const charged = new Set([
     ...[...selected].filter((resourceId) => !stepIds.has(resourceId)),
@@ -353,7 +369,7 @@ export function fitPullRecommendation(
   const room = limit - pullBudgetTotal(items, charged, limit).total;
   let remaining = room;
   const sessions = safe
-    .filter((item) => itemKindLabel(item) === "Conversation")
+    .filter((item) => itemKind(item) === "conversation")
     .sort((left, right) => (
       (right.storedEndedAt ?? 0) - (left.storedEndedAt ?? 0)
       || (left.resourceId < right.resourceId ? -1 : left.resourceId > right.resourceId ? 1 : 0)
@@ -370,16 +386,31 @@ export function fitPullRecommendation(
   return fitted;
 }
 
-export function itemKindLabel(item: PullReviewItem): string {
+export type PullItemKind = "conversation" | "projectFolder" | "projectFile" | "file" | "definition";
+
+export function itemKind(item: PullReviewItem): PullItemKind {
   if (
     item.conversationReviewRows.length > 0
     || /^(codex|claude):session:/.test(item.resourceId)
     || item.restoreActions.some((action) => action.kind.kind === "materialize_conversation")
-  ) return "Conversation";
-  if (item.projectContentEntryType === "directory") return "Project folder";
-  if (item.projectContentEntryType === "file") return "Project file";
-  if (item.restoreActions.some((action) => action.kind.kind === "write_file" || action.kind.kind === "merge_file")) return "File";
-  return "Definition";
+  ) return "conversation";
+  if (item.projectContentEntryType === "directory") return "projectFolder";
+  if (item.projectContentEntryType === "file") return "projectFile";
+  if (item.restoreActions.some((action) => action.kind.kind === "write_file" || action.kind.kind === "merge_file")) return "file";
+  return "definition";
+}
+
+const ITEM_KIND_LABELS: Record<PullItemKind, () => string> = {
+  conversation: () => t("reviews:kind.conversation"),
+  projectFolder: () => t("reviews:kind.projectFolder"),
+  projectFile: () => t("reviews:kind.projectFile"),
+  file: () => t("reviews:kind.file"),
+  definition: () => t("reviews:kind.definition"),
+};
+
+/** The item's kind as the review prints it; decisions read `itemKind`. */
+export function itemKindLabel(item: PullReviewItem): string {
+  return ITEM_KIND_LABELS[itemKind(item)]();
 }
 
 export function buildPullReviewSelection(

@@ -1,3 +1,4 @@
+import { t, useTranslation } from "../../i18n";
 import type { LocalProjectSummary, ProviderProfileSummary, StorageSummary } from "../../types";
 import Icon, { storageIconName } from "../Icons";
 import { NoticeChip } from "../notice/Notice";
@@ -38,6 +39,7 @@ export default function ProjectPicker({
   onAddCloudProject: () => void;
   onSelectProject: (projectId: string) => void;
 }) {
+  const { t } = useTranslation("shell");
   if (projects.length === 0) {
     return <ProjectsWelcome onAddProject={onAddProject} onAddCloudProject={onAddCloudProject} />;
   }
@@ -45,9 +47,9 @@ export default function ProjectPicker({
   const profileNames = new Map(profiles.map((profile) => [profile.profile_id, profile.display_name]));
   return (
     <LandingPicker
-      title="Projects"
-      count={projects.length === 1 ? "1 on this machine" : `${projects.length} on this machine`}
-      actionLabel="Add project…"
+      title={t("roots.projects")}
+      count={t("landing.count", { count: projects.length })}
+      actionLabel={t("landing.addProject")}
       onAction={onAddProject}
       cards={projects.map((project) => {
         const label = projectLabel(project);
@@ -65,7 +67,10 @@ export default function ProjectPicker({
           icon: project.is_git_repository === true ? "git-folder" : "folder",
           title: label,
           // The stack shows one name; the door's name carries every one.
-          ariaLabel: `${project.is_git_repository === true ? `${label}, Git repository` : label}. ${spokenStorages(linked)}`,
+          ariaLabel: t(project.is_git_repository === true ? "landing.cardGit" : "landing.card", {
+            name: label,
+            storages: spokenStorages(linked),
+          }),
           marks: boundProviders.length > 0
             ? boundProviders.map(([provider, profileId]) => (
               <ProviderMark
@@ -88,22 +93,22 @@ export default function ProjectPicker({
 /** The one word a storage needing attention carries: its tile's colour
  *  names the transport, never its state. */
 function attentionWord(storage: StorageSummary): string | null {
-  if (!storage.available) return "Unavailable";
-  return storageConnectionIssue(storage) ? "Reconnect" : null;
+  if (!storage.available) return t("shell:landing.unavailable");
+  return storageConnectionIssue(storage) ? t("shell:landing.reconnect") : null;
 }
 
 function storageName(storage: StorageSummary): string {
-  return storage.name || "(unnamed)";
+  return storage.name || t("shell:fallback.unnamed");
 }
 
 function spokenStorages(linked: StorageSummary[]): string {
-  if (linked.length === 0) return "No storage linked";
+  if (linked.length === 0) return t("shell:landing.noStorage");
   const spoken = linked.map((storage, index) => [
     storageName(storage),
-    index === 0 && linked.length > 1 ? "opens here" : null,
+    index === 0 && linked.length > 1 ? t("shell:landing.opensHere") : null,
     attentionWord(storage),
-  ].filter(Boolean).join(", "));
-  return `${linked.length === 1 ? "Storage" : "Storages"}: ${spoken.join("; ")}`;
+  ].filter(Boolean).join(t("shell:landing.partSeparator")));
+  return t("shell:landing.storages", { count: linked.length, list: spoken.join(t("shell:landing.listSeparator")) });
 }
 
 /**
@@ -113,11 +118,12 @@ function spokenStorages(linked: StorageSummary[]): string {
  * counted, never pinned to the name shown.
  */
 function StorageStack({ linked }: { linked: StorageSummary[] }) {
+  const { t } = useTranslation("shell");
   if (linked.length === 0) {
     return (
       <span className="landing-picker-storages none">
         <Icon name="link-off" size={12} />
-        <span>No storage linked</span>
+        <span>{t("landing.noStorage")}</span>
       </span>
     );
   }
@@ -126,8 +132,8 @@ function StorageStack({ linked }: { linked: StorageSummary[] }) {
   const unavailable = others.filter((storage) => !storage.available).length;
   const reconnect = others.filter((storage) => storage.available && storageConnectionIssue(storage)).length;
   const othersWord = unavailable > 0
-    ? `${unavailable} unavailable`
-    : reconnect > 0 ? `${reconnect} to reconnect` : null;
+    ? t("landing.othersUnavailable", { number: unavailable })
+    : reconnect > 0 ? t("landing.othersReconnect", { number: reconnect }) : null;
   return (
     <span className="landing-picker-storages" title={linked.map(storageName).join("\n")}>
       <span className="landing-picker-storages-tiles">

@@ -1,0 +1,55 @@
+import type { TranslatedCatalog } from "../catalog";
+import type en from "../en/logs";
+
+export default {
+  drawer: {
+    label: "日志",
+    resize: "调整日志高度",
+  },
+  types: {
+    repair: "修复",
+    storage: "存储",
+    configuration: "配置",
+    history: "历史",
+    system: "系统",
+  },
+  tag: {
+    push: "上传",
+    pull: "下载",
+    repair: "修复",
+    storage: "存储",
+    configuration: "配置",
+    history: "历史",
+    system: "系统",
+  },
+  levels: {
+    info: "信息",
+    success: "成功",
+    warning: "警告",
+    error: "错误",
+  },
+  panel: {
+    title: "日志",
+    typeFilter: "按类型筛选日志：{{selection}}",
+    type: "类型",
+    types: "日志类型",
+    allTypes: "全部",
+    noTypes: "无",
+    typesSelected: "已选 {{count}} 个",
+    selectAll: "全选",
+    deselectAll: "全不选",
+    level: "级别",
+    levelFilter: "按级别筛选日志",
+    allLevels: "全部",
+    searchPlaceholder: "搜索日志（仅匹配英文）",
+    search: "搜索日志",
+    manage: "管理日志",
+    clear: "清除",
+    clearLabel: "清除日志",
+    closeLabel: "关闭日志",
+    loadOlder: "载入更早的日志",
+    loadFailed: "无法载入保留的日志：{{error}}",
+    loadingRetained: "正在载入保留的日志…",
+    noMatches: "没有符合筛选条件的记录。",
+  },
+} satisfies TranslatedCatalog<typeof en>;

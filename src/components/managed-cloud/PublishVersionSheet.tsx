@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import Icon, { type IconName } from "../Icons";
 import ThreadStatusIcon from "../sync-review/ThreadStatusIcon";
+import { useTranslation } from "../../i18n";
 
 /**
  * The sheet Publish version asks in (docs/PLAN_CLOUD_VERSIONS.md), in the
@@ -35,6 +36,7 @@ export default function PublishVersionSheet({ version, holds, sessionsToPush, bu
   onPublish: (name: string | null) => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation(["cloud", "common"]);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const titleId = useId();
@@ -60,7 +62,7 @@ export default function PublishVersionSheet({ version, holds, sessionsToPush, bu
     wasBusy.current = busy;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy]);
-  const verb = `Publish version ${version}`;
+  const verb = t("publish.title", { version });
 
   return (
     <dialog
@@ -72,7 +74,7 @@ export default function PublishVersionSheet({ version, holds, sessionsToPush, bu
     >
       <header className="sync-modal-header">
         <div><h1 id={titleId}>{verb}</h1></div>
-        <button type="button" className="btn btn-ghost" onClick={close} disabled={busy} aria-label="Close without publishing">
+        <button type="button" className="btn btn-ghost" onClick={close} disabled={busy} aria-label={t("publish.close")}>
           <Icon name="x" size={17} />
         </button>
       </header>
@@ -81,8 +83,8 @@ export default function PublishVersionSheet({ version, holds, sessionsToPush, bu
           <>
             <span className="app-link-mark" aria-hidden="true"><Icon name="storage-mallard" size={14} /></span>
             <span className="app-link-facts">
-              {holds.map((fact) => (
-                <span key={fact.word} className="app-link-fact"><Icon name={fact.icon} size={12} />{fact.word}</span>
+              {holds.map((fact, index) => (
+                <span key={index} className="app-link-fact"><Icon name={fact.icon} size={12} />{fact.word}</span>
               ))}
             </span>
           </>
@@ -91,19 +93,19 @@ export default function PublishVersionSheet({ version, holds, sessionsToPush, bu
           <>
             <span className="app-link-mark warning" aria-hidden="true"><ThreadStatusIcon status="local-outstanding" size={16} /></span>
             <span className="app-link-here">
-              {sessionsToPush === 1 ? "1 session here is not pushed, so not in it" : `${sessionsToPush} sessions here are not pushed, so not in it`}
+              {t("publish.notPushed", { count: sessionsToPush })}
             </span>
           </>
         )}
         <span className="app-link-mark" aria-hidden="true"><Icon name="edit" size={14} /></span>
         <label className="publish-version-name">
-          <span className="sync-visually-hidden">Name, optional</span>
+          <span className="sync-visually-hidden">{t("publish.nameLabel")}</span>
           <input
             ref={nameRef}
             type="text"
             value={name}
             maxLength={NAME_CHARS}
-            placeholder="Name (optional)"
+            placeholder={t("publish.namePlaceholder")}
             spellCheck={false}
             onChange={(event) => setName(event.target.value)}
             onKeyDown={(event) => {
@@ -115,8 +117,8 @@ export default function PublishVersionSheet({ version, holds, sessionsToPush, bu
       </div>
       <footer className="sync-modal-footer">
         <div>
-          <button type="button" className="btn" onClick={close} disabled={busy}>Cancel</button>
-          <button type="button" className="btn btn-primary" disabled={busy} onClick={publish}>{busy ? "Publishing…" : verb}</button>
+          <button type="button" className="btn" onClick={close} disabled={busy}>{t("common:cancel")}</button>
+          <button type="button" className="btn btn-primary" disabled={busy} onClick={publish}>{busy ? t("publish.publishing") : verb}</button>
         </div>
       </footer>
     </dialog>

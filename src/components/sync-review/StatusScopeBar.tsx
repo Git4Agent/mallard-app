@@ -1,4 +1,5 @@
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import { useTranslation } from "../../i18n";
 
 /**
  * One resource-neutral scope: a part of a list that a status sets apart.
@@ -17,7 +18,8 @@ export interface StatusScopeDefinition<Id extends string> {
 interface Props<Id extends string> {
   /** Names the group: "Show sessions by status". */
   label: string;
-  /** What the count counts, in the count's number: "1 session", "3 sessions". */
+  /** What the count counts, in the count's number: "session", "sessions";
+   *  in Chinese it opens on its measure word, 个会话. */
   noun: (count: number) => string;
   /** Every row of the list: the count on All. */
   total: number;
@@ -34,6 +36,7 @@ interface Props<Id extends string> {
 export default function StatusScopeBar<Id extends string>({
   label, noun, total, scopes, active, onChange,
 }: Props<Id>) {
+  const { t } = useTranslation("syncReview");
   const ids: readonly (Id | null)[] = [null, ...scopes.map((scope) => scope.id)];
 
   /* A radio group moves its selection with focus. */
@@ -64,7 +67,7 @@ export default function StatusScopeBar<Id extends string>({
         type="button"
         role="radio"
         aria-checked={checked}
-        aria-label={`${name}, ${count} ${noun(count)}`}
+        aria-label={t("scopes.option", { name, count, noun: noun(count) })}
         tabIndex={checked ? 0 : -1}
         className={checked ? "active" : undefined}
         onClick={() => onChange(id)}
@@ -79,7 +82,7 @@ export default function StatusScopeBar<Id extends string>({
 
   return (
     <div className="sync-project-tabs sync-status-scopes" role="radiogroup" aria-label={label}>
-      {radio(null, "All", total, null)}
+      {radio(null, t("scopes.all"), total, null)}
       {scopes.map((scope) => radio(scope.id, scope.label, scope.count, scope.mark))}
     </div>
   );

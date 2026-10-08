@@ -8,6 +8,7 @@ import type {
   StorageSummary,
 } from "../../types";
 import Icon from "../Icons";
+import { useTranslation } from "../../i18n";
 import ProviderMark from "../sync-review/ProviderMark";
 import { projectSyncApi } from "./api";
 import CloudProjectSource, { type CloneFallback } from "./CloudProjectSource";
@@ -109,6 +110,7 @@ export default function NewProjectFolderStep({
   onAddCloudAccount,
   onCloudProjectDone,
 }: Props) {
+  const { t } = useTranslation(["projectSetup", "common"]);
   const [source, setSource] = useState<NewProjectSource>(initialSource);
   const homePath = useHomePath();
   const [text, setText] = useState("");
@@ -174,27 +176,27 @@ export default function NewProjectFolderStep({
   };
 
   const primaryLabel = choice?.kind === "open"
-    ? `Open ${choice.name}`
+    ? t("newProject.open", { name: choice.name })
     : choice?.kind === "setup" && choice.resumes
-      ? "Resume setup"
-      : "Use this folder";
+      ? t("newProject.resume")
+      : t("newProject.useFolder");
   const providerName = (key: string) => (
     providers.find((descriptor) => descriptor.key === key)?.display_name ?? key
   );
   const doors = (
-    <div className="storage-mode-doors" role="radiogroup" aria-label="Where the project comes from">
+    <div className="storage-mode-doors" role="radiogroup" aria-label={t("newProject.doors")}>
       <ModeDoor
         icon="folder"
-        title="On this computer"
-        detail="A folder you have."
+        title={t("newProject.local")}
+        detail={t("newProject.localDetail")}
         checked={source === "folder"}
         disabled={busy}
         onChoose={() => setSource("folder")}
       />
       <ModeDoor
         icon="storage-mallard"
-        title="From Mallard Cloud"
-        detail="A repository you can open."
+        title={t("newProject.cloud")}
+        detail={t("newProject.cloudDetail")}
         checked={source === "cloud"}
         disabled={busy}
         onChoose={() => setSource("cloud")}
@@ -205,9 +207,9 @@ export default function NewProjectFolderStep({
     <section className="sync-inline-new-project sync-setup-workspace" role="region" aria-labelledby="sync-new-project-title">
       <header className="sync-modal-header">
         <div>
-          <h1 id="sync-new-project-title">New project</h1>
+          <h1 id="sync-new-project-title">{t("newProject.title")}</h1>
         </div>
-        <button type="button" className="btn btn-ghost" onClick={onCancel} aria-label="Close; nothing has been saved">
+        <button type="button" className="btn btn-ghost" onClick={onCancel} aria-label={t("newProject.close")}>
           <Icon name="x" size={17} />
         </button>
       </header>
@@ -235,7 +237,7 @@ export default function NewProjectFolderStep({
             {doors}
             <section className="sync-setup-section">
               <div className="sync-card-heading">
-                <div><strong>Folder</strong></div>
+                <div><strong>{t("sections.folder")}</strong></div>
               </div>
               <ProjectFolderField
                 value={text}
@@ -243,7 +245,7 @@ export default function NewProjectFolderStep({
                 disabled={busy}
                 autoFocus
                 labelHidden
-                placeholder={folders && folders.length > 0 ? "Path or search" : "Path, such as ~/code/app"}
+                placeholder={folders && folders.length > 0 ? t("newProject.placeholderSearch") : t("newProject.placeholderPath")}
                 onChange={(next) => {
                   setText(next);
                   setPicked(null);
@@ -256,17 +258,17 @@ export default function NewProjectFolderStep({
               />
               {folders === null ? (
                 <div className="sync-folder-choices-state">
-                  <span className="status-loader" /> Finding recent folders…
+                  <span className="status-loader" /> {t("newProject.finding")}
                 </div>
               ) : folders.length > 0 && (
                 /* A machine with no sessions yet has nothing to offer: the field alone. */
                 <div className="sync-folder-choices">
                   <div className="sync-folder-choices-head" id="sync-folder-choices-title">
-                    Recent
+                    {t("newProject.recent")}
                     <small>{listed.length}</small>
                   </div>
                   {listed.length === 0 ? (
-                    <div className="sync-folder-choices-state">No recent folder matches.</div>
+                    <div className="sync-folder-choices-state">{t("newProject.noMatch")}</div>
                   ) : (
                     <div className="sync-bundle-match-options" role="radiogroup" aria-labelledby="sync-folder-choices-title">
                       {visible.map((folder) => {
@@ -276,15 +278,15 @@ export default function NewProjectFolderStep({
                         const stamp = formatRecentStamp(folder.last_active);
                         const isGit = folder.probe.kind === "folder" && folder.probe.is_git_repository;
                         const badge = rowTarget?.kind === "open"
-                          ? "Added"
-                          : rowTarget?.kind === "setup" && rowTarget.resumes ? "Draft" : null;
+                          ? t("newProject.added")
+                          : rowTarget?.kind === "setup" && rowTarget.resumes ? t("newProject.draft") : null;
                         return (
                           <button
                             key={folder.path}
                             type="button"
                             role="radio"
                             aria-checked={active}
-                            aria-label={[name, badge, compact(folder.path), stamp].filter(Boolean).join(", ")}
+                            aria-label={[name, badge, compact(folder.path), stamp].filter(Boolean).join(t("shared.labelSeparator"))}
                             className={`sync-bundle-match-option${active ? " active" : ""}`}
                             disabled={busy}
                             onClick={() => setPicked(folder.path)}
@@ -318,7 +320,7 @@ export default function NewProjectFolderStep({
                           disabled={busy}
                         >
                           <Icon name={showAll ? "chevron-up" : "chevron-down"} size={12} />
-                          {showAll ? "Show less" : `Show all ${listed.length}`}
+                          {showAll ? t("newProject.showLess") : t("newProject.showAll", { count: listed.length })}
                         </button>
                       )}
                     </div>
@@ -331,7 +333,7 @@ export default function NewProjectFolderStep({
           <footer className="sync-modal-footer sync-setup-footer">
             <div>
               <button type="button" className="btn btn-ghost" onClick={onCancel}>
-                Cancel
+                {t("common:cancel")}
               </button>
               <button type="button" className="btn btn-primary" disabled={!choice || busy} onClick={() => commit(choice)}>
                 {primaryLabel}

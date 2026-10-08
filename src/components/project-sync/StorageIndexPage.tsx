@@ -1,4 +1,5 @@
 import { storageIconName } from "../Icons";
+import { useTranslation } from "../../i18n";
 import { NoticeChip } from "../notice/Notice";
 import type {
   ProjectStorageLink,
@@ -15,6 +16,7 @@ import {
   storageConnectionIssue,
   storageSubtitle,
 } from "./StorageSettings";
+import { storageProviderName } from "./storageText";
 
 /**
  * The page the storage trail is rooted at: every storage page begins its path
@@ -62,21 +64,23 @@ export default function StorageIndexPage({
   onOpenStorageDraft,
   onAddStorage,
 }: Props) {
+  const { t } = useTranslation("storage");
   const cards: LandingCard[] = [
     ...storages.map((storage): LandingCard => {
-      const name = storage.name || "(unnamed)";
+      const name = storage.name || t("shared.unnamed");
       const reconnect = storageConnectionIssue(storage);
       const issue = storageIssues[storage.storage_id] ?? null;
+      const issueSentence = reconnect ?? issue;
       const linked = links.filter((link) => link.storage_id === storage.storage_id).length;
       return {
         key: storage.storage_id,
         icon: storageIconName(storage.provider, storage.icon),
         title: name,
         ariaLabel: [
-          `Open ${name}`,
-          storage.available ? null : `Unavailable: this build has no ${storage.provider_label} adapter`,
-          reconnect ? `Storage issue: ${reconnect}` : issue ? `Storage issue: ${issue}` : null,
-        ].filter(Boolean).join(". "),
+          t("shared.openNamed", { name }),
+          storage.available ? null : t("index.unavailableAdapter", { provider: storageProviderName(storage) }),
+          issueSentence ? t("shared.storageIssue", { issue: issueSentence }) : null,
+        ].filter(Boolean).join(t("shared.labelSeparator")),
         location: storageSubtitle(storage),
         /* The tally and the issue word are the card's two facts; the word is
            the second channel beyond colour (WCAG 1.4.1), and it stays one
@@ -85,13 +89,13 @@ export default function StorageIndexPage({
         detail: (
           <span className="landing-picker-card-chips">
             <span className="sync-storage-repo-chip">
-              <span>Projects</span>
+              <span>{t("index.projects")}</span>
               <b>{linked}</b>
             </span>
-            {!storage.available && <NoticeChip severity="warning">Unavailable</NoticeChip>}
+            {!storage.available && <NoticeChip severity="warning">{t("index.unavailable")}</NoticeChip>}
             {reconnect
-              ? <NoticeChip severity="warning">Reconnect</NoticeChip>
-              : issue && <NoticeChip severity="warning">Issue</NoticeChip>}
+              ? <NoticeChip severity="warning">{t("shared.reconnect")}</NoticeChip>
+              : issue && <NoticeChip severity="warning">{t("index.issue")}</NoticeChip>}
           </span>
         ),
         onOpen: () => onOpenStorage(storage.storage_id),
@@ -100,7 +104,7 @@ export default function StorageIndexPage({
     // A persisted setup draft is content too: badged, tally-less, opening
     // its draft — and never leaking a secret (drafts carry presence only).
     ...drafts.map((draft): LandingCard => {
-      const name = draft.name || "(unnamed)";
+      const name = draft.name || t("shared.unnamed");
       return {
         key: draft.draft_id,
         icon: storageIconName(
@@ -108,13 +112,13 @@ export default function StorageIndexPage({
           findStorageProvider(storageProviders, draft.provider, draft.config_version)?.icon,
         ),
         title: name,
-        ariaLabel: `Continue setting up ${name} — resumable storage draft`,
+        ariaLabel: t("index.draftLabel", { name }),
         location: draft.edits_existing
-          ? `Reconnect not finished — ${draft.provider_label} credential not saved yet`
-          : "Setup not finished — not connected to Mallard yet",
+          ? t("index.draftReconnect", { provider: storageProviderName(draft) })
+          : t("index.draftSetup"),
         detail: (
           <span className="landing-picker-card-chips">
-            <span className="sync-draft-badge">Draft</span>
+            <span className="sync-draft-badge">{t("index.draft")}</span>
           </span>
         ),
         onOpen: () => onOpenStorageDraft(draft.draft_id),
@@ -125,22 +129,22 @@ export default function StorageIndexPage({
     key: door.key,
     icon: door.icon,
     label: door.label,
-    ariaLabel: `Add ${door.label} storage`,
+    ariaLabel: t("index.addProvider", { provider: door.label }),
     onOpen: () => onAddStorage(door.key),
   }));
   return (
     <>
       <SyncPathBar
-        crumbs={[{ id: "storages", label: "Storages", icon: "storage", tone: "root" }]}
+        crumbs={[{ id: "storages", label: t("shared.storages"), icon: "storage", tone: "root" }]}
         overflow={appActions}
-        overflowLabel="App actions"
-        ariaLabel="Storages path"
+        overflowLabel={t("shared.appActions")}
+        ariaLabel={t("index.pathLabel")}
       />
       <main className="sync-main sync-project-links-page sync-landing-page">
         <LandingPicker
-          title="Storages"
-          count={cards.length === 1 ? "1 on this machine" : `${cards.length} on this machine`}
-          actionLabel="Add storage…"
+          title={t("shared.storages")}
+          count={t("index.count", { count: cards.length })}
+          actionLabel={t("shared.addStorageMore")}
           busy={busy}
           onAction={() => onAddStorage()}
           /* A build whose descriptors have not arrived still leaves one door:
@@ -148,11 +152,11 @@ export default function StorageIndexPage({
           doors={doors.length > 0 ? doors : [{
             key: "any",
             icon: "storage",
-            label: "Add storage…",
-            ariaLabel: "Add storage",
+            label: t("shared.addStorageMore"),
+            ariaLabel: t("shared.addStorage"),
             onOpen: () => onAddStorage(),
           }]}
-          caption={{ icons: ["folder", "catalog"], text: "Projects & Catalog sync here" }}
+          caption={{ icons: ["folder", "catalog"], text: t("index.caption") }}
           cards={cards}
         />
       </main>

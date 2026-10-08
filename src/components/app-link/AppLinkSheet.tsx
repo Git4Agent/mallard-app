@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef } from "react";
+import { useTranslation } from "../../i18n";
 import Icon, { type IconName } from "../Icons";
 import type { LinkStop, LinkVerdict } from "./appLink";
 
@@ -14,10 +15,10 @@ export type AppLinkSheetState =
   | { phase: "looking" }
   | { phase: "answered"; verdict: LinkVerdict };
 
-const STOP_VERB: Record<NonNullable<LinkStop["action"]>, string> = {
-  set_up: "Set up Mallard Cloud",
-  retry: "Try again",
-};
+const STOP_VERB = {
+  set_up: "shell:link.setUpCloud",
+  retry: "common:tryAgain",
+} as const satisfies Record<NonNullable<LinkStop["action"]>, string>;
 
 function Mark({ icon, tone, large = false }: { icon: IconName | null; tone?: string; large?: boolean }) {
   return (
@@ -35,6 +36,7 @@ export default function AppLinkSheet({ subject, state, onVerb, onClose }: {
   onVerb: (verdict: LinkVerdict) => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation(["shell", "common"]);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const verbRef = useRef<HTMLButtonElement>(null);
   const exitRef = useRef<HTMLButtonElement>(null);
@@ -49,13 +51,13 @@ export default function AppLinkSheet({ subject, state, onVerb, onClose }: {
   };
 
   const verdict = state.phase === "answered" ? state.verdict : null;
-  const verb = !verdict ? null : verdict.kind === "landing" ? verdict.verb : verdict.action ? STOP_VERB[verdict.action] : null;
+  const verb = !verdict ? null : verdict.kind === "landing" ? verdict.verb : verdict.action ? t(STOP_VERB[verdict.action]) : null;
   // Return presses the verb once there is one; until then, the exit.
   useEffect(() => { (verbRef.current ?? exitRef.current)?.focus(); }, [verb]);
 
   const stop = verdict?.kind === "stop" ? verdict : null;
   const landing = verdict?.kind === "landing" ? verdict : null;
-  const title = stop ? stop.title : landing ? landing.found.address : subject ?? "Link";
+  const title = stop ? stop.title : landing ? landing.found.address : subject ?? t("link.title");
 
   return (
     <dialog
@@ -71,7 +73,7 @@ export default function AppLinkSheet({ subject, state, onVerb, onClose }: {
           <h1 id={titleId} title={stop?.message} role={stop ? (stop.severity === "danger" ? "alert" : "status") : undefined}>{title}</h1>
           {stop && <span id={reasonId} className="sync-visually-hidden">{stop.message}</span>}
         </div>
-        <button type="button" className="btn btn-ghost" onClick={close} aria-label="Close without opening the link">
+        <button type="button" className="btn btn-ghost" onClick={close} aria-label={t("link.close")}>
           <Icon name="x" size={17} />
         </button>
       </header>
@@ -91,7 +93,7 @@ export default function AppLinkSheet({ subject, state, onVerb, onClose }: {
             </span>
           ) : (
             <span className="app-link-facts">
-              <span className="sync-visually-hidden">Looking up {subject ?? "the link"}…</span>
+              <span className="sync-visually-hidden">{subject != null ? t("link.lookingUp", { subject }) : t("link.lookingUpLink")}</span>
               <span className="app-link-placeholder" aria-hidden="true" /><span className="app-link-placeholder short" aria-hidden="true" />
             </span>
           )}
@@ -107,11 +109,11 @@ export default function AppLinkSheet({ subject, state, onVerb, onClose }: {
       )}
       <footer className="sync-modal-footer">
         <div>
-          <button ref={exitRef} type="button" className="btn" onClick={close}>{verb || !verdict ? "Cancel" : "Close"}</button>
+          <button ref={exitRef} type="button" className="btn" onClick={close}>{verb || !verdict ? t("common:cancel") : t("common:close")}</button>
           {verdict && verb ? (
             <button ref={verbRef} type="button" className="btn btn-primary" onClick={() => onVerb(verdict)}>{verb}</button>
           ) : !verdict && (
-            <button type="button" className="btn btn-primary" disabled>Open…</button>
+            <button type="button" className="btn btn-primary" disabled>{t("link.open")}</button>
           )}
         </div>
       </footer>

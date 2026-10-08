@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { nameKey } from "./repositoryAddress";
+import { cloudRoleWord } from "./managedCloudLink";
 import type { ManagedCloudListingPage, ManagedCloudListingRow, ManagedCloudPublicSort } from "./types";
 import { formatRelativeTime } from "../../clock";
 import { errorMessage } from "../../storageError";
 import Icon, { type IconName } from "../Icons";
 import Notice from "../notice/Notice";
+import { t as translate, useTranslation } from "../../i18n";
 
 /**
  * The parts both Mallard Cloud pickers share once they look beyond the
@@ -35,12 +37,11 @@ export function matchesFilter(needle: string, address: string, description: stri
   return nameKey(address).includes(wanted) || nameKey(displayName ?? "").includes(wanted) || nameKey(description ?? "").includes(wanted);
 }
 
-const capitalize = (value: string) => (value ? `${value[0].toUpperCase()}${value.slice(1)}` : value);
-
 /** The account's standing on a listed repository, in a word or two. */
 export function listingRoleWord(row: Pick<ManagedCloudListingRow, "role" | "visibility">): string {
-  if (row.role === null) return "Public";
-  return `${row.visibility === "public" ? "Public · " : ""}${capitalize(row.role)}`;
+  if (row.role === null) return translate("cloud:scopes.public");
+  const role = cloudRoleWord(row.role);
+  return row.visibility === "public" ? translate("cloud:scopes.publicRole", { role }) : role;
 }
 
 export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort }: {
@@ -52,8 +53,9 @@ export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort 
   sort?: ManagedCloudPublicSort;
   onSort?: (sort: ManagedCloudPublicSort) => void;
 }) {
+  const { t } = useTranslation("cloud");
   return (
-    <div className="sync-project-tabs sync-sync-review-tabs repo-scope-tabs" role="tablist" aria-label="Where to look">
+    <div className="sync-project-tabs sync-sync-review-tabs repo-scope-tabs" role="tablist" aria-label={t("scopes.tabs")}>
       {tabs.map((tab) => {
         const current = tab.id === active;
         return (
@@ -77,9 +79,9 @@ export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort 
         );
       })}
       {active === "public" && sort && onSort && (
-        <div className="sync-segmented repo-scope-sort" role="radiogroup" aria-label="Sort">
-          <button type="button" role="radio" aria-checked={sort === "newest"} className={sort === "newest" ? "active" : undefined} disabled={disabled} onClick={() => onSort("newest")}>Newest</button>
-          <button type="button" role="radio" aria-checked={sort === "stars"} className={sort === "stars" ? "active" : undefined} disabled={disabled} onClick={() => onSort("stars")}>Most stars</button>
+        <div className="sync-segmented repo-scope-sort" role="radiogroup" aria-label={t("scopes.sort")}>
+          <button type="button" role="radio" aria-checked={sort === "newest"} className={sort === "newest" ? "active" : undefined} disabled={disabled} onClick={() => onSort("newest")}>{t("scopes.newest")}</button>
+          <button type="button" role="radio" aria-checked={sort === "stars"} className={sort === "stars" ? "active" : undefined} disabled={disabled} onClick={() => onSort("stars")}>{t("scopes.mostStars")}</button>
         </div>
       )}
     </div>
@@ -189,12 +191,13 @@ export function RepoRowCopy({ address, displayName, github, kind, badge, blurb, 
   blurb: ReactNode;
   skin: "choice" | "match";
 }) {
+  const { t } = useTranslation("cloud");
   return (
     <span className={skin === "choice" ? "sync-bundle-choice-copy" : "sync-bundle-match-copy"}>
       <strong>
         <span>{displayName || address}</span>
         {badge}
-        {github && <Icon name="git-branch" size={12} aria-label="On GitHub" />}
+        {github && <Icon name="git-branch" size={12} aria-label={t("scopes.onGitHub")} />}
         {kind && <code>{kind}</code>}
       </strong>
       <span className="repo-row-blurb">
@@ -228,7 +231,7 @@ export function RepoRowMeta({ role, stars, starred, age, skin }: {
 }
 
 export const rowAge = (row: { registration_only?: boolean; updated_at: number }) =>
-  (row.registration_only ? "not pushed yet" : formatRelativeTime(row.updated_at));
+  (row.registration_only ? translate("cloud:scopes.notPushedYet") : formatRelativeTime(row.updated_at));
 
 /** The Starred and Public rows: the same anatomy as the account's own,
  *  picked by address. */
@@ -245,6 +248,7 @@ export function ListingRows({ rows, skin, selectedId, resolvingId, disabled, ari
   kindFor?: (row: ManagedCloudListingRow) => string | null;
   onPick: (row: ManagedCloudListingRow) => void;
 }) {
+  const { t } = useTranslation("cloud");
   const listClass = skin === "choice" ? "sync-bundle-choice-list" : "sync-bundle-match-options";
   const rowClass = skin === "choice" ? "sync-bundle-choice" : "sync-bundle-match-option";
   return (
@@ -261,7 +265,7 @@ export function ListingRows({ rows, skin, selectedId, resolvingId, disabled, ari
             <RepoRowTile mark={markFor(row)} pet={row.catalog?.resource_kind === "desktop_pet"} skin={skin} />
             <RepoRowCopy address={row.address} displayName={row.display_name} github={row.github_url} kind={kindFor?.(row)} skin={skin}
               blurb={row.description ?? (skin === "match" ? role : null)}
-              badge={resolving ? <small className="sync-bundle-recommended">Looking up…</small> : undefined} />
+              badge={resolving ? <small className="sync-bundle-recommended">{t("scopes.lookingUp")}</small> : undefined} />
             <RepoRowMeta role={role} stars={row.star_count} starred={row.viewer_starred} age={rowAge(row)} skin={skin} />
           </button>
         );
@@ -282,6 +286,7 @@ export function ScopeEmpty({ skin, icon, words, elsewhere, onJump, onBrowsePubli
   onBrowsePublic?: () => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation("cloud");
   const listClass = skin === "choice" ? "sync-bundle-choice-list" : "sync-bundle-match-options";
   return (
     <div className={listClass}>
@@ -293,14 +298,14 @@ export function ScopeEmpty({ skin, icon, words, elsewhere, onJump, onBrowsePubli
             {elsewhere.map((scope, index) => (
               <span key={scope.id}>
                 {index > 0 && " · "}
-                <button type="button" className="btn-link" disabled={disabled} onClick={() => onJump?.(scope.id)}>{scope.count} in {scope.label}</button>
+                <button type="button" className="btn-link" disabled={disabled} onClick={() => onJump?.(scope.id)}>{t("scopes.countIn", { count: scope.count, scope: scope.label })}</button>
               </span>
             ))}
           </span>
         )}
         {onBrowsePublic && (
           <span className="storage-found-empty-verbs">
-            <button type="button" className="btn" disabled={disabled} onClick={onBrowsePublic}><Icon name="cloud" size={13} /> Browse Public</button>
+            <button type="button" className="btn" disabled={disabled} onClick={onBrowsePublic}><Icon name="cloud" size={13} /> {t("scopes.browsePublic")}</button>
           </span>
         )}
       </div>
@@ -310,12 +315,13 @@ export function ScopeEmpty({ skin, icon, words, elsewhere, onJump, onBrowsePubli
 
 /** The next page: the Activity page's Load-earlier foot, under the list. */
 export function ListingFoot({ listing, onMore, disabled }: { listing: Listing; onMore: () => void; disabled?: boolean }) {
+  const { t } = useTranslation(["cloud", "common"]);
   if (listing.state !== "ready" || !listing.next) return null;
   return (
     <div className="sync-history-rail-foot no-rail repo-list-foot">
       <span className="sync-history-rail-foot-node" aria-hidden="true"><Icon name="chevron-down" size={12} /></span>
       <button type="button" className="sync-history-rail-step" disabled={disabled || listing.loadingMore} aria-busy={listing.loadingMore || undefined} onClick={onMore}>
-        <strong>{listing.loadingMore ? "Loading…" : "Show more"}</strong>
+        <strong>{listing.loadingMore ? t("common:loading") : t("scopes.showMore")}</strong>
       </button>
     </div>
   );
@@ -324,14 +330,15 @@ export function ListingFoot({ listing, onMore, disabled }: { listing: Listing; o
 /** A listing that is not ready yet: the shipped inline status, or the
  *  blocking notice with its one retry. */
 export function ListingStatus({ listing, onRetry }: { listing: Listing; onRetry?: () => void }) {
+  const { t } = useTranslation("common");
   if (listing.state === "loading" || listing.state === "idle") {
-    return <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> Loading…</small>;
+    return <small className="sync-setup-inline-status" role="status"><span className="status-loader" /> {t("loading")}</small>;
   }
   if (listing.state === "error") {
     return (
       <Notice severity="danger" timing="blocking">
         {listing.message}
-        {onRetry && <> <button type="button" className="btn-link" onClick={onRetry}>Try again</button></>}
+        {onRetry && <> <button type="button" className="btn-link" onClick={onRetry}>{t("tryAgain")}</button></>}
       </Notice>
     );
   }

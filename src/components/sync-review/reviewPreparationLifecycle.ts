@@ -12,6 +12,7 @@
  * its own state.
  */
 
+// i18n-ignore: the symbol's debug description, never shown
 export const PREPARING_CANCELLED = Symbol("preparing cancelled");
 
 export const PREPARING_GATE_MS = 150;

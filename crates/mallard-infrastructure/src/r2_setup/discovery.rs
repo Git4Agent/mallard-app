@@ -8,7 +8,7 @@ pub const MAX_BUCKETS: usize = 256;
 const MAX_MARKER_DETAIL_CHARS: usize = 64;
 
 use crate::storage_core::classify_storage_marker as classify_marker;
-pub use crate::storage_core::MarkerState;
+pub use crate::storage_core::{MarkerDetail, MarkerDetailCode, MarkerState};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -19,7 +19,7 @@ pub struct DiscoveredBucket {
     pub jurisdiction: String,
     pub marker: MarkerState,
     /// The layout the marker declares, or the fixed reason it could not be read.
-    pub marker_detail: Option<String>,
+    pub marker_detail: Option<MarkerDetail>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,7 +48,10 @@ impl BucketScan {
                 R2Jurisdiction::parse(&bucket.jurisdiction).is_some_and(|jurisdiction| {
                     destination(account, jurisdiction, &bucket.name).is_ok()
                 }) && valid_date(&bucket.creation_date)
-                    && bucket.marker_detail.as_deref().is_none_or(valid_detail)
+                    && bucket
+                        .marker_detail
+                        .as_ref()
+                        .is_none_or(|detail| detail.is_valid(MAX_MARKER_DETAIL_CHARS))
             })
             && self
                 .buckets
@@ -58,12 +61,6 @@ impl BucketScan {
                 .len()
                 == self.buckets.len()
     }
-}
-
-fn valid_detail(detail: &str) -> bool {
-    !detail.is_empty()
-        && detail.chars().count() <= MAX_MARKER_DETAIL_CHARS
-        && !detail.chars().any(char::is_control)
 }
 
 /// How one jurisdiction's listing ended.
@@ -76,6 +73,10 @@ enum Listing {
     Unavailable,
     /// A page, a read, or a limit stopped the listing short.
     Cut,
+}
+
+fn read_failed() -> MarkerDetail {
+    MarkerDetail::reason(MarkerDetailCode::ReadFailed, "read failed")
 }
 
 impl R2SetupClient {
@@ -118,7 +119,7 @@ impl R2SetupClient {
         account: &str,
         jurisdiction: R2Jurisdiction,
         bucket: &str,
-    ) -> (MarkerState, Option<String>) {
+    ) -> (MarkerState, Option<MarkerDetail>) {
         if destination(account, jurisdiction, bucket).is_err() {
             return (MarkerState::Invalid, None);
         }
@@ -126,7 +127,7 @@ impl R2SetupClient {
             "{}/accounts/{account}/r2/buckets/{bucket}/objects/{STORAGE_MARKER_KEY}",
             self.api
         )) else {
-            return (MarkerState::Unreadable, Some("read failed".into()));
+            return (MarkerState::Unreadable, Some(read_failed()));
         };
         match self
             .discovery_get(url, jurisdiction, MAX_STORAGE_MARKER_BYTES as usize)
@@ -134,8 +135,14 @@ impl R2SetupClient {
         {
             Ok((404, _)) => (MarkerState::Missing, None),
             Ok((200, bytes)) => classify_marker(&bytes),
-            Err(SetupError::Permission) => (MarkerState::Unreadable, Some("access denied".into())),
-            _ => (MarkerState::Unreadable, Some("read failed".into())),
+            Err(SetupError::Permission) => (
+                MarkerState::Unreadable,
+                Some(MarkerDetail::reason(
+                    MarkerDetailCode::AccessDenied,
+                    "access denied",
+                )),
+            ),
+            _ => (MarkerState::Unreadable, Some(read_failed())),
         }
     }
 
@@ -239,7 +246,13 @@ impl R2SetupClient {
                 let (marker, marker_detail) =
                     tokio::time::timeout_at(deadline, self.marker(account, jurisdiction, name))
                         .await
-                        .unwrap_or((MarkerState::Unreadable, Some("timed out".into())));
+                        .unwrap_or((
+                            MarkerState::Unreadable,
+                            Some(MarkerDetail::reason(
+                                MarkerDetailCode::TimedOut,
+                                "timed out",
+                            )),
+                        ));
                 scan.partial |= marker == MarkerState::Unreadable;
                 scan.buckets.push(DiscoveredBucket {
                     name: name.into(),

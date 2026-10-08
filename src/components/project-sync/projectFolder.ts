@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LocalProjectSummary, ProjectFolderProbe } from "../../types";
+import { formatElapsed } from "../../clock";
+import { t, uiLocale } from "../../i18n";
 import { expandHomePath, isAbsoluteProfilePath } from "../../profilePath";
 import { errorMessage } from "../../storageError";
 import { projectSyncApi } from "./api";
@@ -142,38 +144,38 @@ export function folderVerdict(
   if (input.kind === "search") {
     return context.draftId === undefined
       ? null
-      : { tone: "mute", message: "Paths must be absolute — start with ~/, / or a drive letter." };
+      : { tone: "mute", message: t("projectSetup:verdict.absolute") };
   }
   if (state.status === "error" && state.path === input.path) {
     return { tone: "bad", message: state.message };
   }
   const probe = settledProbe(input, state);
-  if (!probe) return { tone: "mute", message: "Checking", path: context.compact(input.path) };
+  if (!probe) return { tone: "mute", message: t("projectSetup:verdict.checking"), path: context.compact(input.path) };
   switch (probe.kind) {
     case "invalid":
-      return { tone: "mute", message: "Write the whole path, without . or .. parts." };
+      return { tone: "mute", message: t("projectSetup:verdict.invalid") };
     case "missing":
-      return { tone: "bad", message: "No folder at this path yet." };
+      return { tone: "bad", message: t("projectSetup:verdict.missing") };
     case "unreadable":
-      return { tone: "warn", message: "This folder can’t be read. Check its permissions." };
+      return { tone: "warn", message: t("projectSetup:verdict.unreadable") };
     case "not_a_directory":
       return probe.parent
         ? {
           tone: "bad",
-          message: "This is a file.",
-          actions: [{ label: `Use ${context.compact(probe.parent)}`, value: context.compact(probe.parent) }],
+          message: t("projectSetup:verdict.file"),
+          actions: [{ label: t("projectSetup:folder.use", { path: context.compact(probe.parent) }), value: context.compact(probe.parent) }],
         }
-        : { tone: "bad", message: "This is a file." };
+        : { tone: "bad", message: t("projectSetup:verdict.file") };
     case "mallard_data":
       return probe.contains
-        ? { tone: "bad", message: "This folder holds Mallard’s own data. Choose a folder inside it." }
-        : { tone: "bad", message: "This is Mallard’s own data folder." };
+        ? { tone: "bad", message: t("projectSetup:verdict.mallardInside") }
+        : { tone: "bad", message: t("projectSetup:verdict.mallardData") };
     case "folder": {
       const otherDraft = probe.existing_draft_id && probe.existing_draft_id !== context.draftId;
       if (otherDraft) {
         return context.draftId === undefined
-          ? { tone: "ok", message: "Setup already started for this folder." }
-          : { tone: "warn", message: "Another setup draft already uses this folder." };
+          ? { tone: "ok", message: t("projectSetup:verdict.setupStarted") }
+          : { tone: "warn", message: t("projectSetup:verdict.otherDraft") };
       }
       const project = context.projects.find((candidate) => (
         probe.existing_project_ids.includes(candidate.local_project_id)
@@ -183,16 +185,20 @@ export function folderVerdict(
         return context.draftId === undefined
           ? {
             tone: "ok",
-            message: `Already added as “${name}”.`,
-            actions: [{ label: "Set it up with another agent profile", run: "another-profile" }],
+            message: t("projectSetup:verdict.alreadyAdded", { name }),
+            actions: [{ label: t("projectSetup:verdict.anotherProfile"), run: "another-profile" }],
           }
-          : { tone: "ok", message: `“${name}” uses this folder too, with its own agent profiles.` };
+          : { tone: "ok", message: t("projectSetup:verdict.sharedFolder", { name }) };
       }
-      const kind = probe.is_git_repository ? "Git repository" : "Folder · not a Git repository";
       const resolved = context.compact(probe.canonical_path);
-      return resolved === context.compact(input.path)
-        ? { tone: "ok", message: kind }
-        : { tone: "ok", message: `${kind} · resolves to`, path: resolved };
+      if (resolved === context.compact(input.path)) {
+        return { tone: "ok", message: probe.is_git_repository ? t("projectSetup:verdict.git") : t("projectSetup:verdict.plain") };
+      }
+      return {
+        tone: "ok",
+        message: probe.is_git_repository ? t("projectSetup:verdict.gitResolves") : t("projectSetup:verdict.plainResolves"),
+        path: resolved,
+      };
     }
   }
 }
@@ -211,23 +217,32 @@ export function isAppScratchFolder(path: string): boolean {
     || /^\/(?:private\/)?(?:tmp|var\/folders)\//.test(normalized);
 }
 
-let recentDayFormatter: Intl.DateTimeFormat | null = null;
-let recentYearFormatter: Intl.DateTimeFormat | null = null;
+/* Built once per locale: constructing an Intl formatter costs far more than
+   formatting with one. */
+const recentDayFormatters = new Map<string, Intl.DateTimeFormat>();
+const recentYearFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function recentFormatter(cache: Map<string, Intl.DateTimeFormat>, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const locale = uiLocale();
+  const key = locale ?? "";
+  let formatter = cache.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, options);
+    cache.set(key, formatter);
+  }
+  return formatter;
+}
 
 /** When a folder was last used, at a glance: `just now`, `12m ago`, `3h ago`,
  *  then the day — with the year only when it is not this one. */
 export function formatRecentStamp(seconds: number, now = Date.now()): string {
-  const elapsed = Math.max(0, now - seconds * 1_000);
-  if (elapsed < 60_000) return "just now";
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m ago`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h ago`;
+  const elapsed = formatElapsed(Math.max(0, now - seconds * 1_000));
+  if (elapsed !== null) return elapsed;
   const when = new Date(seconds * 1_000);
   if (when.getFullYear() === new Date(now).getFullYear()) {
-    recentDayFormatter ??= new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
-    return recentDayFormatter.format(when);
+    return recentFormatter(recentDayFormatters, { month: "short", day: "numeric" }).format(when);
   }
-  recentYearFormatter ??= new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
-  return recentYearFormatter.format(when);
+  return recentFormatter(recentYearFormatters, { month: "short", day: "numeric", year: "numeric" }).format(when);
 }
 
 /** What committing a probed folder does from the New project step. */

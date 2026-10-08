@@ -9,12 +9,13 @@ import PushResourceWorkspace, {
   recommendedPushSelection,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
-import { PUSH_FINISHED, unfinishedPushSentence } from "../../src/unfinishedPush";
+import { pushFinished, unfinishedPushSentence } from "../../src/unfinishedPush";
 import { pushFailureNotice } from "../../src/components/project-sync/pushFailureNotice";
 import { NoticeZone } from "../../src/components/notice/Notice";
 import ResourceInventory from "../../src/components/project-sync/ResourceInventory";
 import SyncReviewSelectionBar from "../../src/components/sync-review/SyncReviewSelectionBar";
 import { recipeWithSelection } from "../../src/components/project-sync/model";
+import { en } from "../../src/i18n/en";
 import type {
   BundleRecipe,
   ConversationReviewAction,
@@ -383,10 +384,14 @@ test("a resource named by its own id states that id once, and says why once", ()
   const inventory = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
   assert.match(
     inventory,
-    /\{resource\.resource_id !== resource\.display_name && \(\s*<><dt>Resource ID<\/dt><dd><code>\{resource\.resource_id\}<\/code><\/dd><\/>\s*\)\}/,
+    /\{resource\.resource_id !== resource\.display_name && \(\s*<><dt>\{t\("inventory\.resourceId"\)\}<\/dt><dd><code>\{resource\.resource_id\}<\/code><\/dd><\/>\s*\)\}/,
   );
-  assert.match(inventory, /<dt>Kind<\/dt><dd>\{resource\.kind_label\}<\/dd>/);
-  assert.match(inventory, /<dt>Apply<\/dt><dd>\{resource\.apply_policy_label\}<\/dd>/);
+  // The DTO's labels, read in the interface language by the key beside them.
+  assert.match(inventory, /<dt>\{t\("inventory\.kind"\)\}<\/dt><dd>\{backendText\(`resourceKind\.\$\{resource\.kind\.key\}`, resource\.kind_label\)\}<\/dd>/);
+  assert.match(inventory, /<dt>\{t\("inventory\.apply"\)\}<\/dt><dd>\{backendText\(`applyPolicy\.\$\{resource\.apply_policy\.key\}`, resource\.apply_policy_label\)\}<\/dd>/);
+  assert.equal(en.reviews.inventory.resourceId, "Resource ID");
+  assert.equal(en.reviews.inventory.kind, "Kind");
+  assert.equal(en.reviews.inventory.apply, "Apply");
   assert.doesNotMatch(inventory, /providerLabel|kindLabel\(|applyPolicyLabel\(/);
 });
 
@@ -419,7 +424,8 @@ test("an unknown kind coordinate renders by its backend label and stays unselect
   // The fold is internal state, so static markup cannot open it: pin at the
   // source that its Kind and Apply readouts are the DTO's labels, verbatim.
   const row = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
-  assert.match(row, /<dt>Kind<\/dt><dd>\{resource\.kind_label\}<\/dd>\s*<dt>Apply<\/dt><dd>\{resource\.apply_policy_label\}<\/dd>/);
+  // An unknown key has no Chinese, so `backendText` hands the label back as sent.
+  assert.match(row, /<dt>\{t\("inventory\.kind"\)\}<\/dt><dd>\{backendText\(`resourceKind\.\$\{resource\.kind\.key\}`, resource\.kind_label\)\}<\/dd>\s*<dt>\{t\("inventory\.apply"\)\}<\/dt><dd>\{backendText\(`applyPolicy\.\$\{resource\.apply_policy\.key\}`, resource\.apply_policy_label\)\}<\/dd>/);
   // The recipe rejects it too, for the same backend-supplied reason.
   const recipe = recipeWithSelection(
     { schema_version: 1, revision: 1, entries: {} },
@@ -433,7 +439,8 @@ test("an unknown kind coordinate renders by its backend label and stays unselect
   const model = readFileSync("src/components/project-sync/model.ts", "utf8");
   const inventory = readFileSync("src/components/project-sync/ResourceInventory.tsx", "utf8");
   for (const source of [model, inventory]) {
-    assert.doesNotMatch(source, /\bKIND_LABELS\b|CATEGORY_BY_KIND|APPLY_POLICY_LABELS|kind\.key|apply_policy\.key|"requirement"|"never"/);
+    // A key may name a translation; it never decides anything.
+    assert.doesNotMatch(source, /\bKIND_LABELS\b|CATEGORY_BY_KIND|APPLY_POLICY_LABELS|kind\.key\s*[!=]==?|apply_policy\.key\s*[!=]==?|"requirement"|"never"/);
   }
 });
 
@@ -577,7 +584,7 @@ test("a push that did not finish offers Finish that push, and a finished one rea
   assert.doesNotMatch(renderPushFailure(unfinishedPushSentence("Other storage")), /Finish that push/);
   assert.doesNotMatch(renderPushFailure("The storage changed while pushing. Compare again."), /Finish that push/);
   // Once the record was written, the box reads done, not error, and still closes.
-  const finished = renderPushFailure(PUSH_FINISHED);
+  const finished = renderPushFailure(pushFinished());
   assert.match(finished, /notice success/);
   assert.match(finished, /Done ·/);
   assert.match(finished, /Finished\. Compare again\./);

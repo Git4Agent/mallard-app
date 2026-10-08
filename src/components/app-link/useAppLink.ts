@@ -7,7 +7,7 @@ import type { CatalogCloudPlace } from "../storage-catalog/types";
 import type { AppLinkSheetState } from "./AppLinkSheet";
 import {
   catalogSeers,
-  INVALID_LINK,
+  invalidLink,
   linkVerdict,
   listingVerdict,
   unanswered,
@@ -140,7 +140,7 @@ export function useAppLink({ ready, waits, context, go }: {
   /* An answer belongs to the asking it came from: until this round's is in,
      the sheet is looking. A link that could not be read has nothing to ask. */
   const sheet: AppLinkSheetState = held?.link.kind === "invalid"
-    ? { phase: "answered", verdict: INVALID_LINK }
+    ? { phase: "answered", verdict: invalidLink() }
     : held && answered?.round === held.round ? { phase: "answered", verdict: answered.verdict } : { phase: "looking" };
 
   return {

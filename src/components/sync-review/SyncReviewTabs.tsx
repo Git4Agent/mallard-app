@@ -1,5 +1,6 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import Icon, { type IconName } from "../Icons";
+import { useTranslation } from "../../i18n";
 
 /**
  * One resource-neutral review tab. Features supply their own vocabulary —
@@ -27,6 +28,7 @@ export default function SyncReviewTabs({
   disabled = false,
   onChange,
 }: Props) {
+  const { t } = useTranslation("syncReview");
   // A single tab is not a choice; the strip only renders when there are tabs
   // to switch between.
   if (tabs.length < 2) return null;
@@ -61,7 +63,7 @@ export default function SyncReviewTabs({
   };
 
   return (
-    <div className="sync-project-tabs sync-sync-review-tabs" role="tablist" aria-label="Sync review steps">
+    <div className="sync-project-tabs sync-sync-review-tabs" role="tablist" aria-label={t("tabs.label")}>
       {tabs.map((tab) => {
         const active = activeId === tab.id;
         const warning = tab.warning ?? false;
@@ -74,7 +76,7 @@ export default function SyncReviewTabs({
             role="tab"
             aria-selected={active}
             aria-controls={`sync-review-${tab.id}-panel`}
-            aria-label={`${tab.label}, ${tab.count} selected${warning ? ", needs attention" : ""}`}
+            aria-label={t(warning ? "tabs.tabWarning" : "tabs.tab", { label: tab.label, count: tab.count })}
             tabIndex={active ? 0 : -1}
             className={`${active ? "active" : ""}${warning ? " warning" : ""}`}
             disabled={disabled}

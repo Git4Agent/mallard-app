@@ -242,7 +242,11 @@ test("desktop release builds verified Apple Silicon, Intel, and Windows artifact
     hardenedRuntime: true,
     entitlements: "Entitlements.plist",
     minimumSystemVersion: "12.0",
+    // macOS's own panels and the Apple Events prompt speak Simplified Chinese
+    // on a Chinese Mac.
+    files: { "Resources/zh-Hans.lproj/InfoPlist.strings": "macos/zh-Hans.lproj/InfoPlist.strings" },
   });
+  assert.match(infoPlist, /<key>CFBundleLocalizations<\/key>\s*<array>\s*<string>en<\/string>\s*<string>zh-Hans<\/string>\s*<\/array>/);
   // osascript Apple Events (Open in Terminal, Codex App refresh) are refused
   // under the hardened runtime without this entitlement.
   assert.match(entitlements, /<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\/>/);

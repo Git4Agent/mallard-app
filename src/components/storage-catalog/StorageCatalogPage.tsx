@@ -10,7 +10,16 @@ import { useCatalogItemFile } from "./CatalogFileView";
 import { baseName } from "./skillFiles";
 import SyncOutcomeNotice from "../sync-review/SyncOutcomeNotice";
 import type { SyncOutcomeView } from "../sync-review/outcome";
-import { cloudPullOutcome, cloudPushOutcome, pushOutcome, pullOutcome, type CatalogOutcomeAction } from "./outcomes";
+import {
+  catalogActionMessage,
+  catalogProgressText,
+  catalogRemovalMessage,
+  cloudPullOutcome,
+  cloudPushOutcome,
+  pushOutcome,
+  pullOutcome,
+  type CatalogOutcomeAction,
+} from "./outcomes";
 import ReviewPreparing from "../sync-review/ReviewPreparing";
 import { createReviewPreparing, PREPARING_CANCELLED } from "../sync-review/reviewPreparationLifecycle";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -19,8 +28,9 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import Icon, { storageIconName, type IconName } from "../Icons";
 import { formatFullDateTime } from "../../clock";
 import { formatBytes } from "../../format";
+import { t as translate, Trans, useTranslation } from "../../i18n";
 import { errorMessage, storageAccessErrorMessage } from "../../storageError";
-import { PUSH_FINISHED, finishPushOffered } from "../../unfinishedPush";
+import { finishPushOffered, pushFinished } from "../../unfinishedPush";
 import Notice, { Acknowledgement, NoticeZone, type NoticeItem, type NoticeTiming } from "../notice/Notice";
 import LoadingScaffold from "../LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
@@ -39,11 +49,12 @@ import { storageCatalogApi } from "./api";
 import {
   actionLabel,
   catalogMatchingRows,
-  catalogNoun,
   catalogPresentation,
   catalogPullRecommendation,
   catalogScopeIcon,
+  catalogScopeKindLabel,
   catalogScopeLabel,
+  catalogScopeNouns,
   catalogStatusScope,
   catalogStatusScopeCounts,
   filterCatalogPullReviewItems,
@@ -52,11 +63,13 @@ import {
   rowStamp,
   rowStatus,
   rowStatusLabel,
+  type CatalogNouns,
 } from "./model";
 import type {
   CatalogCapabilityDescriptor,
   CatalogPullItem,
   CatalogPullSource,
+  CatalogPullAction,
   CatalogPushDestination,
   CatalogResourceWarning,
   CatalogScopePullOutcome,
@@ -113,9 +126,6 @@ function forkNameRuleBroken(value: string): boolean {
   return !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) || value.endsWith(".");
 }
 
-const FORK_RULE_MESSAGE =
-  "Letters and digits, plus dots, dashes and underscores after the first character — this becomes the copy’s folder name.";
-
 /** The suggested fork name, seeded the way the backend seeds generated copy
  * names: from the directory name, valid by construction. Display names are
  * free text — "Mallard Duck-copy" is not a folder name — so a row that never
@@ -135,38 +145,47 @@ function forkSeed(row: CatalogScopeRow): string {
  * mints `executable_content` and `secret_shaped` today (inventory.rs) — with
  * the prefix its message is known to carry. An unknown code, or a message
  * that stopped matching its prefix, keeps the whole backend sentence: the
- * backend stays the authority on what a warning says. */
-const WARNING_LEADS: Record<string, { lead: string; prefix: string }> = {
-  executable_content: { lead: "Executable content", prefix: "contains executable content: " },
-  secret_shaped: { lead: "Credential-shaped content", prefix: "contains credential-shaped content: " },
+ * backend stays the authority on what a warning says, and its words stay as
+ * it wrote them; only the lead is the interface's. */
+const WARNING_LEADS: Record<string, { lead: () => string; prefix: string }> = {
+  // i18n-ignore: backend text
+  executable_content: { lead: () => translate("library:warning.executable"), prefix: "contains executable content: " },
+  // i18n-ignore: backend text
+  secret_shaped: { lead: () => translate("library:warning.secretShaped"), prefix: "contains credential-shaped content: " },
 };
 
 function warningParts(warning: CatalogResourceWarning): { lead: string | null; body: string } {
   const known = WARNING_LEADS[warning.code];
   if (known && warning.message.startsWith(known.prefix)) {
-    return { lead: known.lead, body: warning.message.slice(known.prefix.length) };
+    return { lead: known.lead(), body: warning.message.slice(known.prefix.length) };
   }
   return { lead: null, body: warning.message };
 }
 
+/** What a Pull action does, by the plan's own kind; null is Skip, which the
+ * row words as an update. */
+type ActionKind = CatalogPullAction["kind"]["kind"] | null;
+
 /** The verb a local action reduces to, for the row's trailing readout. The
  * whole sentence stays in the choice list; the row gets the word. */
-function actionVerb(label: string): string {
-  if (label.startsWith("Keep local as")) return "Keep copy";
-  if (label.startsWith("Overwrite")) return "Overwrite";
-  if (label.startsWith("Install")) return "Install";
-  return "Update";
+function actionVerb(kind: ActionKind): string {
+  if (kind === "preserve_as_copy_and_overwrite") return translate("library:action.keepCopy");
+  if (kind === "overwrite_with_storage") return translate("library:action.overwrite");
+  if (kind === "install") return translate("library:action.install");
+  return translate("library:action.update");
 }
 
 /** The row's operation label, in the files review's chip grammar — "Install
  * skill", "Update pet · keeps local copy" — so every pull review names its
- * operations in one voice. The full backend sentence stays in the tooltip
- * and the choice list. */
-function actionChipLabel(label: string, kindNoun: string): string {
-  if (label.startsWith("Keep local as")) return `Update ${kindNoun} · keeps local copy`;
-  if (label.startsWith("Overwrite")) return `Overwrite ${kindNoun}`;
-  if (label.startsWith("Install")) return `Install ${kindNoun}`;
-  return `Update ${kindNoun}`;
+ * operations in one voice. The full sentence stays in the tooltip and the
+ * choice list. */
+function actionChipLabel(kind: ActionKind, nouns: CatalogNouns): string {
+  return nouns.say((noun) => {
+    if (kind === "preserve_as_copy_and_overwrite") return translate("library:chip.keepCopy", { noun });
+    if (kind === "overwrite_with_storage") return translate("library:chip.overwrite", { noun });
+    if (kind === "install") return translate("library:chip.install", { noun });
+    return translate("library:chip.update", { noun });
+  }, 1);
 }
 
 /** The project page's Storage card, as its outcome and its open review use
@@ -174,8 +193,9 @@ function actionChipLabel(label: string, kindNoun: string): string {
  *  heading; its name is the bar's storage crumb. Mallard Cloud only: any
  *  other storage keeps the Catalog's own strip and page. */
 function StorageCard({ name, review, children }: { name: string; review?: boolean; children: ReactNode }) {
+  const { t } = useTranslation("library");
   return (
-    <section className="project-storage-card project-storage-card-non-git" aria-label={`${name} storage`}>
+    <section className="project-storage-card project-storage-card-non-git" aria-label={t("page.storageCard", { name })}>
       <div className="project-profile-storage-list">
         <div className={`storage-link-block selected${review ? " sync-review-open" : ""}`}>{children}</div>
       </div>
@@ -189,7 +209,9 @@ function pushRepository(destination?: CatalogPushDestination | null) {
   if (!destination) return undefined;
   return {
     address: destination.address,
-    detail: destination.create ? `This Push creates ${destination.address}, private to you.` : `Pushes to ${destination.address}`,
+    detail: destination.create
+      ? translate("library:repository.creates", { address: destination.address })
+      : translate("library:repository.pushesTo", { address: destination.address }),
     creates: destination.create,
   };
 }
@@ -198,7 +220,13 @@ function pushRepository(destination?: CatalogPushDestination | null) {
  *  version: the draft for a collaborator, the public one for anyone else. */
 function pullRepository(source?: CatalogPullSource | null) {
   if (!source) return undefined;
-  return { address: source.address, detail: `Pulls ${source.reads} v${source.revision} from ${source.address}` };
+  const values = { address: source.address, version: source.revision };
+  return {
+    address: source.address,
+    detail: source.reads === "public"
+      ? translate("library:repository.pullsPublic", values)
+      : translate("library:repository.pullsDraft", values),
+  };
 }
 
 /** The indicator's colour class, keyed by badge — the project's own pairing. */
@@ -217,9 +245,16 @@ const TONE: Record<string, string> = {
 
 /** What the Pull review hangs off a row: the chosen action, and the way to
  * change it when the plan offers more than one. */
+interface RowActionOption {
+  id: string;
+  label: string;
+  kind: ActionKind;
+}
+
 interface RowAction {
-  chosen: string;
-  options: Array<{ id: string; label: string }>;
+  /** The chosen action, or Skip. */
+  chosen: RowActionOption;
+  options: RowActionOption[];
   expanded: boolean;
   destructive: boolean;
   onToggle: () => void;
@@ -258,9 +293,11 @@ function Metric({ icon, value, detail, muted }: { icon: IconName; value: string;
 
 /** The ⓘ, carrying what a session card's debug menu carries: the row's paths
  * and digests, each a click to copy. Same wrapper, same popover. */
-function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; storageRevision: number | null; kindNoun: string }) {
-  const title = `${kindNoun.charAt(0).toUpperCase()}${kindNoun.slice(1)} info`;
+function InfoMenu({ row, storageRevision, nouns }: { row: CatalogScopeRow; storageRevision: number | null; nouns: CatalogNouns }) {
+  const { t } = useTranslation(["library", "common"]);
+  const title = nouns.lead((noun) => t("info.title", { noun }));
   const [open, setOpen] = useState(false);
+  /* Which value was copied, by its id; "failed" when the clipboard refused. */
   const [copied, setCopied] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -332,24 +369,31 @@ function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; st
 
   const values = [
     {
-      label: "Local path",
+      id: "localPath",
+      label: t("info.localPath"),
+      copyLabel: t("info.copyLocalPath"),
       value: row.local_path
-        ?? (row.local_present ? "In this provider home — not captured" : "Not on this Mac"),
+        ?? (row.local_present ? t("info.notCaptured") : t("card.notOnMac")),
     },
     {
-      label: "Stored copy",
+      id: "storedCopy",
+      label: t("info.storedCopy"),
+      copyLabel: t("info.copyStoredCopy"),
       value: !row.remote_present
-        ? "Not stored yet"
+        ? t("info.notStored")
         : [
-          storageRevision == null ? null : `Version ${storageRevision}`,
-          row.remote_updated_at == null ? null : `updated ${formatFullDateTime(row.remote_updated_at)}`,
-        ].filter(Boolean).join(" · ") || "In this storage",
+          storageRevision == null ? null : t("common:version", { version: storageRevision }),
+          row.remote_updated_at == null ? null : t("info.updated", { when: formatFullDateTime(row.remote_updated_at) }),
+        ].filter(Boolean).join(" · ") || t("info.inStorage"),
     },
     {
-      label: "Content digest",
-      value: row.content_sha256 ? `sha256:${row.content_sha256}` : "Nothing captured",
+      id: "digest",
+      label: t("info.digest"),
+      copyLabel: t("info.copyDigest"),
+      value: row.content_sha256 ? `sha256:${row.content_sha256}` : t("info.nothingCaptured"),
     },
   ];
+  const copiedLabel = values.find((entry) => entry.id === copied)?.label;
 
   return (
     <div ref={rootRef} className="sync-history-debug-menu">
@@ -358,7 +402,7 @@ function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; st
         type="button"
         className="btn btn-ghost sync-history-session-detail-action"
         title={title}
-        aria-label={`${title} for ${row.display_name}`}
+        aria-label={nouns.lead((noun) => t("info.label", { noun, name: row.display_name }))}
         aria-haspopup="dialog"
         aria-controls={menuId}
         aria-expanded={open}
@@ -402,30 +446,30 @@ function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; st
                 and stays navigable with a reading cursor. */}
             {values.map((entry) => (
               <button
-                key={entry.label}
+                key={entry.id}
                 type="button"
                 className="sync-history-debug-copy"
-                title={`Copy ${entry.label.toLowerCase()}`}
+                title={entry.copyLabel}
                 onClick={() => {
                   void writeClipboardText(entry.value)
-                    .then(() => setCopied(entry.label))
-                    .catch(() => setCopied("__failed__"));
+                    .then(() => setCopied(entry.id))
+                    .catch(() => setCopied("failed"));
                 }}
               >
                 <span>{entry.label}</span>
                 <code>{entry.value}</code>
-                <small className={copied === entry.label ? "copied" : undefined}>
-                  {copied === entry.label
-                    ? "Copied"
-                    : copied === "__failed__" ? "Couldn’t copy" : "Copy"}
+                <small className={copied === entry.id ? "copied" : undefined}>
+                  {copied === entry.id
+                    ? t("common:copied")
+                    : copied === "failed" ? t("info.copyFailed") : t("common:copy")}
                 </small>
               </button>
             ))}
           </div>
           <span className="sync-visually-hidden" role="status" aria-live="polite">
-            {copied === "__failed__"
-              ? "Could not copy."
-              : copied ? `${copied} copied.` : ""}
+            {copied === "failed"
+              ? t("info.copyFailedStatus")
+              : copiedLabel ? t("info.copied", { label: copiedLabel }) : ""}
           </span>
         </div>
 
@@ -436,7 +480,7 @@ function InfoMenu({ row, storageRevision, kindNoun }: { row: CatalogScopeRow; st
 
 /** The fork drawer preselects its suggested name. Validation and backend
  * errors share the hint line. */
-function ForkDrawer({
+export function ForkDrawer({
   displayName,
   seed,
   maxLength,
@@ -457,6 +501,7 @@ function ForkDrawer({
   onSubmit: (name: string) => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation(["library", "common"]);
   const [name, setName] = useState(seed);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -480,7 +525,9 @@ function ForkDrawer({
       }}
     >
       <span className="catalog-fork-lead">
-        Fork <strong>“{displayName}”</strong> as
+        {/* The name is a component's text, not a value: Trans parses tags
+            after it interpolates, and a name is never markup. */}
+        <Trans t={t} i18nKey="library:fork.lead" components={{ b: <strong />, name: <>{displayName}</> }} />
       </span>
       <input
         ref={inputRef}
@@ -489,7 +536,7 @@ function ForkDrawer({
         spellCheck={false}
         autoCapitalize="off"
         autoCorrect="off"
-        aria-label={`Name for the fork of ${displayName}`}
+        aria-label={t("fork.nameLabel", { name: displayName })}
         aria-invalid={broken || undefined}
         readOnly={busy}
         onChange={(event) => {
@@ -498,20 +545,17 @@ function ForkDrawer({
         }}
       />
       <button type="submit" className="btn btn-primary" disabled={busy || broken || trimmed === ""}>
-        <Icon name="git-fork" size={13} /> Fork
+        <Icon name="git-fork" size={13} /> {t("fork.verb")}
       </button>
       <button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>
-        Cancel
+        {t("common:cancel")}
       </button>
       {broken || error ? (
         <span className="catalog-fork-note danger" role="alert">
-          <Icon name="alert-triangle" size={13} /> {broken ? FORK_RULE_MESSAGE : error}
+          <Icon name="alert-triangle" size={13} /> {broken ? t("fork.rule") : error}
         </span>
       ) : (
-        <span className="catalog-fork-note">
-          An independent copy beside the original, under this name — its own row, only on this
-          computer until you push it.
-        </span>
+        <span className="catalog-fork-note">{t("fork.note")}</span>
       )}
     </form>
   );
@@ -522,14 +566,14 @@ function ForkDrawer({
  * Finder. Line two: files and size, the rule, the ⓘ, and the full stamp.
  * Reviews put the checkbox where a session's review puts it — inside the
  * title line — and hang the Pull action pill after the name. */
-function ResourceCard({
+export function ResourceCard({
   removal,
   row,
   storageName,
   storageRevision,
   provider,
   providerLabel,
-  kindNoun,
+  nouns,
   onOpenApp,
   onOpenTerminal,
   preview,
@@ -553,9 +597,9 @@ function ResourceCard({
   /** The profile's provider key, and the backend's label for it. */
   provider: string;
   providerLabel: string;
-  /** The capability's noun, lowercased, for the operation chip: "skill",
-   * "pet v1"… */
-  kindNoun: string;
+  /** The capability's words, for the operation chip ("Install skill") and
+   * the card's titles. */
+  nouns: CatalogNouns;
   /** The session card's launch pair, minus the session: the provider mark
    * opens the desktop app on this row's profile home, and Terminal opens the
    * provider CLI there — both at the default path. */
@@ -592,6 +636,7 @@ function ResourceCard({
    *  marks a repository the Push makes. */
   repository?: { address: string; detail: string; creates?: boolean };
 }) {
+  const { t } = useTranslation("library");
   const stamp = rowStamp(row);
   /* The same test the fork action itself applies: there has to be a local copy
      to duplicate, and a resource id to name it by. */
@@ -606,30 +651,30 @@ function ResourceCard({
           aria-hidden={row.description ? undefined : true}
         >
           {preview
-            ? <img src={preview} alt={`${row.display_name} preview`} />
+            ? <img src={preview} alt={t("card.preview", { name: row.display_name })} />
             : <Icon name="catalog-pet-v1" size={16} />}
         </span>
       )}
       <div className="sync-history-thread-topline">
         <div className="sync-history-thread-title">
           {selectable && (
-            <label className="sync-sync-row-choice" title={`${selected ? "Exclude" : "Include"} ${row.display_name}`}>
+            <label className="sync-sync-row-choice" title={selected ? t("card.exclude", { name: row.display_name }) : t("card.include", { name: row.display_name })}>
               <input
                 type="checkbox"
                 checked={!!selected}
-                aria-label={`${selected ? "Exclude" : "Include"} ${row.display_name}`}
+                aria-label={selected ? t("card.exclude", { name: row.display_name }) : t("card.include", { name: row.display_name })}
                 onChange={() => onToggle?.()}
               />
             </label>
           )}
           {badge(row, storageName)}
           {onOpen ? (
-            <button type="button" className="sync-history-session-title-button" title={`${row.display_name} · View ${kindNoun} details`} onClick={onOpen}>
+            <button type="button" className="sync-history-session-title-button" title={nouns.say((noun) => t("card.viewDetails", { name: row.display_name, noun }), 1)} onClick={onOpen}>
               {row.display_name}
             </button>
           ) : <strong title={row.display_name}>{row.display_name}</strong>}
           {repository?.creates && (
-            <span className="sync-history-branch-state current" title={repository.detail}>New repository</span>
+            <span className="sync-history-branch-state current" title={repository.detail}>{t("card.newRepository")}</span>
           )}
           {action && (action.options.length > 1 ? (
             <span className="catalog-row-action-shell">
@@ -638,10 +683,10 @@ function ResourceCard({
                 className={`catalog-row-action is-choice${action.destructive ? " destructive" : ""}`}
                 aria-expanded={action.expanded}
                 aria-haspopup="menu"
-                title={`${action.chosen} — choose a different local action`}
+                title={t("action.chooseOther", { action: action.chosen.label })}
                 onClick={action.onToggle}
               >
-                {actionChipLabel(action.chosen, kindNoun)}
+                {actionChipLabel(action.chosen.kind, nouns)}
                 <Icon name={action.expanded ? "chevron-up" : "chevron-down"} size={10} />
               </button>
               {action.expanded && (
@@ -651,7 +696,7 @@ function ResourceCard({
                 <div
                   className="sync-path-menu end"
                   role="menu"
-                  aria-label={`Local action for ${row.display_name}`}
+                  aria-label={t("action.menu", { name: row.display_name })}
                   ref={(node) => focusMenuEdge(node, "first")}
                   onKeyDown={(event) => {
                     if (event.key === "Tab") {
@@ -667,15 +712,15 @@ function ResourceCard({
                         key={option.id}
                         type="button"
                         role="menuitemcheckbox"
-                        aria-checked={action.chosen === option.label}
-                        className={`sync-path-menu-item${option.label.startsWith("Overwrite") ? " danger" : ""}`}
+                        aria-checked={action.chosen.id === option.id}
+                        className={`sync-path-menu-item${option.kind === "overwrite_with_storage" ? " danger" : ""}`}
                         onClick={() => action.onChoose(option.id)}
                       >
                         <span className="sync-path-menu-copy">
-                          <span>{actionVerb(option.label)}</span>
+                          <span>{actionVerb(option.kind)}</span>
                           <small className="phrase">{option.label}</small>
                         </span>
-                        {action.chosen === option.label && (
+                        {action.chosen.id === option.id && (
                           <Icon name="check" size={13} className="sync-path-menu-check" />
                         )}
                       </button>
@@ -685,8 +730,8 @@ function ResourceCard({
               )}
             </span>
           ) : (
-            <span className="sync-history-branch-state history-only" title={action.chosen}>
-              {actionVerb(action.chosen)}
+            <span className="sync-history-branch-state history-only" title={action.chosen.label}>
+              {actionVerb(action.chosen.kind)}
             </span>
           ))}
         </div>
@@ -698,8 +743,8 @@ function ResourceCard({
           <button
             type="button"
             className="btn btn-ghost sync-history-launch-action"
-            title={`Open in ${providerLabel}`}
-            aria-label={`Open in ${providerLabel}`}
+            title={t("card.openIn", { provider: providerLabel })}
+            aria-label={t("card.openIn", { provider: providerLabel })}
             onClick={onOpenApp}
           >
             <ProviderMark provider={provider} displayName={providerLabel} />
@@ -707,8 +752,8 @@ function ResourceCard({
           <button
             type="button"
             className="btn btn-ghost sync-history-launch-action"
-            title="Open in Terminal"
-            aria-label="Open in Terminal"
+            title={t("card.openInTerminal")}
+            aria-label={t("card.openInTerminal")}
             onClick={onOpenTerminal}
           >
             <Icon name="terminal" size={14} />
@@ -721,8 +766,8 @@ function ResourceCard({
                  the same four controls as every other row, so the cluster does
                  not reflow and the eye keeps its column down the list. */
               disabled={!canFork}
-              title={canFork ? forkTitle : `Not on this Mac, so there is nothing to fork`}
-              aria-label={canFork ? forkTitle : `Cannot fork ${row.display_name}: not on this Mac`}
+              title={canFork ? forkTitle : t("card.nothingToFork")}
+              aria-label={canFork ? forkTitle : t("card.cannotFork", { name: row.display_name })}
               aria-expanded={canFork ? !!forkOpen : undefined}
               onClick={onFork}
             >
@@ -733,8 +778,8 @@ function ResourceCard({
             type="button"
             className="btn btn-ghost sync-history-launch-action"
             disabled={!row.local_path}
-            title={row.local_path ? `Reveal ${row.local_path} in Finder` : "Not on this Mac"}
-            aria-label={`Reveal ${row.display_name} in Finder`}
+            title={row.local_path ? t("card.reveal", { target: row.local_path }) : t("card.notOnMac")}
+            aria-label={t("card.reveal", { target: row.display_name })}
             onClick={onReveal}
           >
             <Icon name="folder" size={14} />
@@ -743,20 +788,20 @@ function ResourceCard({
       </div>
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
-          <div className="sync-history-thread-meta" aria-label={`${row.display_name} details`}>
+          <div className="sync-history-thread-meta" aria-label={t("card.details", { name: row.display_name })}>
             <Metric
               icon="file"
               value={row.local_files == null ? "—" : String(row.local_files)}
               detail={row.local_files == null
-                ? (row.local_present ? "On this Mac, but nothing could be captured" : "Not on this Mac, so nothing was counted")
-                : `Files · ${row.local_files}`}
+                ? (row.local_present ? t("card.notCaptured") : t("card.notCounted"))
+                : t("card.files", { files: row.local_files })}
             />
             <Metric
               icon="drive"
               value={row.local_bytes == null ? "—" : formatBytes(row.local_bytes)}
               detail={row.local_bytes == null
-                ? (row.local_present ? "On this Mac, but nothing could be captured" : "Not on this Mac, so nothing was measured")
-                : `On disk · ${formatBytes(row.local_bytes)}`}
+                ? (row.local_present ? t("card.notCaptured") : t("card.notMeasured"))
+                : t("card.onDisk", { size: formatBytes(row.local_bytes) })}
             />
             {repository && <Metric icon="cloud" value={repository.address} detail={repository.detail} />}
             {row.warnings.length > 0
@@ -774,7 +819,7 @@ function ResourceCard({
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
             <CatalogRemoveButton row={row} action={removal} />
-            <InfoMenu row={row} storageRevision={storageRevision} kindNoun={kindNoun} />
+            <InfoMenu row={row} storageRevision={storageRevision} nouns={nouns} />
           </div>
           {/* The tooltip is the whole point of this stop — which time this is
               — so it has to be the accessible name too, or a screen reader
@@ -850,19 +895,15 @@ export default function StorageCatalogPage({
    * remain on this page until dismissed or another review is opened. */
   notify: (message: string, tone?: CatalogNoticeTone) => void;
 }) {
+  const { t, i18n } = useTranslation(["library", "common"]);
   const label = catalogScopeLabel(scope);
   const glyph = catalogPresentation(scope.capability);
-  const plural = scope.label.toLowerCase();
-  const singular = scope.capability?.singular_label ?? scope.label;
-  const noun = useCallback(
-    (count: number) => catalogNoun(scope.label, singular, count),
-    [scope.label, singular],
-  );
+  /* The kind's words; each call reads the interface's language. */
+  const nouns = useMemo(() => catalogScopeNouns(scope), [scope]);
   const artwork = glyph.artwork;
   const forkable = scope.capability?.capture === "directory_tree";
   const unavailable = !scope.available;
-  const unavailableReason = scope.unavailable_reason
-    ?? "This row's coordinate is not supported by this build.";
+  const unavailableReason = scope.unavailable_reason ?? t("page.unsupported");
   const [page, setPage] = useState<CatalogScopeResources | null>(null);
   const [chosenStorageId, setChosenStorageId] = useState<string | null>(initialStorageId ?? null);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
@@ -969,6 +1010,7 @@ export default function StorageCatalogPage({
       setPage(next);
     } catch (reason) {
       if (epoch !== epochRef.current) return;
+      // i18n-ignore: backend text
       if (errorMessage(reason).startsWith("unknown catalog scope")) {
         onScopeGoneRef.current();
         return;
@@ -1112,16 +1154,16 @@ export default function StorageCatalogPage({
   }, { push: 0, pull: 0, attention: 0 }), [barRows]);
 
   const attentionDetail = useMemo(() => ([
-    ["divergent", "changed on both sides"],
-    ["pending", "waiting to sync"],
-    ["unavailable", "can't be synced"],
-  ] as Array<[string, string]>)
+    ["divergent", (count: number, noun: string) => t("attention.diverged", { count, noun })],
+    ["pending", (count: number, noun: string) => t("attention.pending", { count, noun })],
+    ["unavailable", (count: number, noun: string) => t("attention.unavailable", { count, noun })],
+  ] as const)
     .map(([status, phrase]) => {
       const count = rows.filter((row) => rowStatus(row) === status).length;
-      return count === 0 ? null : `${count} ${noun(count)} ${phrase}`;
+      return count === 0 ? null : nouns.say((noun) => phrase(count, noun), count);
     })
     .filter((phrase): phrase is string => phrase !== null)
-    .join(", "), [noun, rows]);
+    .join(t("attention.separator")), [nouns, rows, t, i18n.language]);
 
   /* Outside-click and Escape dismiss the action menu, the same contract the
      path bar's own menus keep. */
@@ -1210,9 +1252,9 @@ export default function StorageCatalogPage({
   const ensureLink = useCallback(async (): Promise<void> => {
     if (page?.link) return;
     if (!scope.available) throw new Error(unavailableReason);
-    if (!storageId) throw new Error("choose a storage first");
+    if (!storageId) throw new Error(t("page.chooseStorageFirst"));
     await storageCatalogApi.linkScopeStorage(scope.scope.scope_id, storageId);
-  }, [page, scope.available, scope.scope.scope_id, storageId, unavailableReason]);
+  }, [page, scope.available, scope.scope.scope_id, storageId, unavailableReason, t]);
 
   const openReview = async (verb: "push" | "pull", remaining?: string[]) => {
     if (!storageId || prepareInFlight.current || applyInFlight.current) return;
@@ -1254,7 +1296,7 @@ export default function StorageCatalogPage({
    *  from the account's listing is saved first, as the item's next Push or
    *  Pull would save it. */
   const savedItemRepository = async (): Promise<string> => {
-    if (!itemId || !itemRepository || !storageId) throw new Error("This item has no repository yet.");
+    if (!itemId || !itemRepository || !storageId) throw new Error(t("page.noRepository"));
     if (!itemSaved) {
       const link = await storageCatalogApi.linkScopeStorage(scope.scope.scope_id, storageId);
       await storageCatalogApi.connectCloudRepository(scope.scope.scope_id, storageId, itemId, itemRepository, link.revision);
@@ -1283,7 +1325,7 @@ export default function StorageCatalogPage({
      repository's version leads, and each row names its repository. */
   const pushResult = (plan: CatalogScopePushPlan, result: CatalogScopePushOutcome) => (managedCloud
     ? cloudPushOutcome(result, {
-      noun,
+      nouns,
       addressOf: (resourceId) => plan.destinations?.[resourceId]?.address,
       at: Math.floor(Date.now() / 1_000),
     })
@@ -1292,7 +1334,7 @@ export default function StorageCatalogPage({
     if (!managedCloud) return pullOutcome(result);
     const pulled = Object.keys(choices);
     return cloudPullOutcome(result, {
-      noun,
+      nouns,
       addressOf: (resourceId) => plan.sources?.[resourceId]?.address,
       at: Math.floor(Date.now() / 1_000),
       keptAs: (resourceId) => {
@@ -1309,11 +1351,11 @@ export default function StorageCatalogPage({
     applyInFlight.current = true;
     const epoch = operationEpoch.current;
     setBusy(true); setError(null); setFailures([]);
-    setProgress({ text: `Pushing ${pushSelected.size} ${noun(pushSelected.size)}…`, done: 0, total: pushSelected.size });
+    setProgress({ text: nouns.say((noun) => t("progress.pushing", { count: pushSelected.size, noun }), pushSelected.size), done: 0, total: pushSelected.size });
     try {
       const result = await storageCatalogApi.applyPush(pushPlan.plan_id, [...pushSelected], [...pushAcks], (event) => {
         if (epoch === operationEpoch.current && event.plan_id === pushPlan.plan_id) {
-          setProgress({ text: `${event.message} (${event.completed}/${event.total})`, done: event.completed, total: event.total });
+          setProgress({ text: catalogProgressText(event), done: event.completed, total: event.total });
         }
       });
       if (epoch !== operationEpoch.current) return;
@@ -1326,7 +1368,7 @@ export default function StorageCatalogPage({
       if (epoch !== operationEpoch.current) return;
       setMode({ kind: "list" }); setPushPlan(null);
       await load();
-      if (epoch === operationEpoch.current) setError(`${storageFailureMessage(reason)} Review again before retrying.`);
+      if (epoch === operationEpoch.current) setError(t("page.reviewAgain", { message: storageFailureMessage(reason) }));
     } finally {
       applyInFlight.current = false;
       if (epoch === operationEpoch.current) { setProgress(null); setBusy(false); }
@@ -1343,7 +1385,7 @@ export default function StorageCatalogPage({
     try {
       await storageCatalogApi.finishUnfinishedPush(scope.scope.scope_id, storageId);
       setFailures([]);
-      notify(PUSH_FINISHED);
+      notify(pushFinished());
     } catch (reason) {
       setFailures([storageFailureMessage(reason)]);
     } finally {
@@ -1364,11 +1406,11 @@ export default function StorageCatalogPage({
       if (pullSelected.has(item.resource_id) && pullChoice[item.resource_id]) choices[item.resource_id] = pullChoice[item.resource_id];
     }
     setBusy(true); setError(null); setFailures([]);
-    setProgress({ text: `Pulling ${Object.keys(choices).length} ${noun(Object.keys(choices).length)}…`, done: 0, total: Object.keys(choices).length });
+    setProgress({ text: nouns.say((noun) => t("progress.pulling", { count: Object.keys(choices).length, noun }), Object.keys(choices).length), done: 0, total: Object.keys(choices).length });
     try {
       const result = await storageCatalogApi.applyPull(pullPlan.plan_id, choices, [...pullAcks].filter((id) => choices[id] != null), (event) => {
         if (epoch === operationEpoch.current && event.plan_id === pullPlan.plan_id) {
-          setProgress({ text: `${event.message} (${event.completed}/${event.total})`, done: event.completed, total: event.total });
+          setProgress({ text: catalogProgressText(event), done: event.completed, total: event.total });
         }
       });
       if (epoch !== operationEpoch.current) return;
@@ -1379,7 +1421,7 @@ export default function StorageCatalogPage({
       if (epoch !== operationEpoch.current) return;
       setMode({ kind: "list" }); setPullPlan(null);
       await load();
-      if (epoch === operationEpoch.current) setError(`${storageFailureMessage(reason)} Compare again to check completed changes.`);
+      if (epoch === operationEpoch.current) setError(t("page.compareToCheck", { message: storageFailureMessage(reason) }));
     } finally {
       applyInFlight.current = false;
       if (epoch === operationEpoch.current) { setProgress(null); setBusy(false); }
@@ -1389,8 +1431,8 @@ export default function StorageCatalogPage({
   const unlinkStorage = async () => {
     if (!storageId || !pageLink) return;
     const approved = await confirm(
-      `Unlink “${storageName}” from ${label}?\n\nPush and Pull stop for these ${plural}. Content already stored there and local content are left untouched, and you can link again later.`,
-      { title: "Unlink storage" },
+      nouns.say((noun) => t("unlink.message", { storage: storageName ?? t("status.anyStorage"), label, noun })),
+      { title: t("unlink.title"), okLabel: t("unlink.ok"), cancelLabel: t("common:cancel") },
     );
     if (!approved) return;
     setBusy(true);
@@ -1398,7 +1440,7 @@ export default function StorageCatalogPage({
     setFailures([]);
     try {
       await storageCatalogApi.unlinkScopeStorage(pageLink.link_id, pageLink.revision);
-      notify("Storage link removed. Local and stored content were left untouched.");
+      notify(t("unlink.done"));
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -1416,7 +1458,7 @@ export default function StorageCatalogPage({
     setError(null);
     try {
       const result = await removeLocalCatalogResource({
-        kindNoun: noun(1),
+        nouns,
         prepare: () => storageCatalogApi.prepareRemoval(scope.scope.scope_id, row.resource_id!),
         confirm,
         apply: storageCatalogApi.applyRemoval,
@@ -1431,7 +1473,7 @@ export default function StorageCatalogPage({
         },
       });
       if (result && epoch === operationEpoch.current) {
-        if (result.removed) notify(result.message);
+        if (result.removed) notify(catalogRemovalMessage(result));
         else setError(result.message);
       }
     } catch (reason) {
@@ -1444,7 +1486,9 @@ export default function StorageCatalogPage({
   };
 
   const removalAction = (row: CatalogScopeRow): CatalogRemovalAction => ({
-    label: `${scope.capability?.capture === "provider_inventory" ? "Uninstall" : "Delete"} local ${noun(1)}`,
+    label: nouns.say((noun) => (scope.capability?.capture === "provider_inventory"
+      ? t("removal.uninstallLabel", { noun })
+      : t("removal.deleteLabel", { noun })), 1),
     busy,
     removing: removingId === row.resource_id,
     onRemove: () => void runRemoval(row),
@@ -1460,7 +1504,7 @@ export default function StorageCatalogPage({
       const plan = await storageCatalogApi.prepareFork(scope.scope.scope_id, row.resource_id, name.trim());
       const result = await storageCatalogApi.applyFork(scope.scope.scope_id, plan.plan_id);
       setForkFor(null);
-      notify(result.message ?? `Created ${result.display_name}`);
+      notify(catalogActionMessage(result) ?? t("fork.created", { name: result.display_name }));
       await load();
     } catch (reason) {
       setForkError(errorMessage(reason));
@@ -1480,15 +1524,15 @@ export default function StorageCatalogPage({
   const crumbs: PathBarCrumb[] = [
     {
       id: "storage",
-      label: storage?.name || (storageId ? "(unnamed)" : "No storage"),
+      label: storage?.name || (storageId ? t("bar.unnamed") : t("bar.noStorage")),
       icon: storageIconName(storage?.provider, storage?.icon),
       tone: "root",
       warning: !storageId,
-      title: storage ? `${storage.name || "Storage"} · ${storage.detail}` : undefined,
-      ariaLabel: `${storage?.name ?? "No storage"}. Storage menu`,
-      menuLabel: "Storage",
+      title: storage ? `${storage.name || t("bar.storage")} · ${storage.detail}` : undefined,
+      ariaLabel: t("bar.storageMenu", { name: storage?.name ?? t("bar.noStorage") }),
+      menuLabel: t("bar.storage"),
       menuHeader: {
-        label: storage?.name || "No storage linked",
+        label: storage?.name || t("bar.noStorageLinked"),
         detail: storage?.detail,
         detailIsPath: storage?.detailIsPath,
         icon: storageIconName(storage?.provider, storage?.icon),
@@ -1496,36 +1540,36 @@ export default function StorageCatalogPage({
       /* A row that can never push or pull is not invited to add a storage. */
       menuBanner: storageId || unavailable
         ? undefined
-        : `Add a storage to compare these ${plural} and turn on Push and Pull.`,
+        : nouns.say((noun) => t("bar.addStorageBanner", { noun })),
       menu: [
         {
           items: [
             {
               id: "details",
-              label: "Storage details…",
+              label: t("bar.storageDetails"),
               icon: "settings",
               disabled: !storageId || busy,
               onSelect: () => storageId && onOpenStorageDetails(storageId),
             },
             {
               id: "unlink",
-              label: `Unlink from ${label}…`,
+              label: t("bar.unlinkFrom", { label }),
               icon: "link-off",
               danger: true,
               disabled: !storageId || busy || !pageLink,
-              disabledReason: storageId ? "This row is not linked to it yet" : undefined,
-              title: "Stop syncing this pairing; content already in storage is kept",
+              disabledReason: storageId ? t("bar.notLinked") : undefined,
+              title: t("bar.unlinkTitle"),
               onSelect: () => void unlinkStorage(),
             },
           ],
         },
         ...(storages.filter((candidate) => candidate.id !== storageId).length > 0 ? [{
-          label: "Switch to",
+          label: t("bar.switchTo"),
           items: storages
             .filter((candidate) => candidate.id !== storageId)
             .map((candidate) => ({
               id: candidate.id,
-              label: candidate.name || "(unnamed)",
+              label: candidate.name || t("bar.unnamed"),
               detail: candidate.detail,
               detailIsPath: candidate.detailIsPath,
               icon: storageIconName(candidate.provider, candidate.icon),
@@ -1540,7 +1584,7 @@ export default function StorageCatalogPage({
         {
           items: [{
             id: "add-storage",
-            label: "Add storage…",
+            label: t("bar.addStorage"),
             icon: "plus",
             disabled: busy,
             onSelect: onAddStorage,
@@ -1553,10 +1597,10 @@ export default function StorageCatalogPage({
       label,
       icon: glyph.icon,
       title: `${label}\n${scope.profile.configured_home}`,
-      ariaLabel: itemRow ? `${label}. Back to the list` : `${label}. Catalog row menu`,
+      ariaLabel: itemRow ? t("bar.backToList", { label }) : t("bar.rowMenu", { label }),
       /* On an item's page the row is the way back, and keeps its menu. */
       onActivate: itemRow ? closeItem : undefined,
-      menuLabel: "Catalog row",
+      menuLabel: t("bar.row"),
       menuHeader: {
         label,
         detail: scope.profile.configured_home,
@@ -1568,17 +1612,17 @@ export default function StorageCatalogPage({
           items: [
             {
               id: "rescan",
-              label: "Rescan this provider home",
+              label: t("bar.rescan"),
               icon: "refresh",
               disabled: busy || loading,
               onSelect: () => void load(),
             },
             {
               id: "rename",
-              label: "Rename profile…",
+              label: t("bar.rename"),
               icon: "edit",
               disabled: busy,
-              title: `Renames “${profile.display_name}” for every Catalog row that uses this home`,
+              title: t("bar.renameTitle", { name: profile.display_name }),
               onSelect: () => {
                 setMode({ kind: "list" });
                 setProfileNameDraft(profile.display_name);
@@ -1588,17 +1632,17 @@ export default function StorageCatalogPage({
             },
             {
               id: "remove",
-              label: "Remove this Catalog row…",
+              label: t("bar.remove"),
               icon: "trash",
               danger: true,
               disabled: busy,
-              title: "Stop listing this home's resources; nothing on disk or in storage is deleted",
+              title: t("bar.removeTitle"),
               onSelect: onRemoveScope,
             },
           ],
         },
         ...(scopes.filter((candidate) => candidate.scope.scope_id !== scope.scope.scope_id).length > 0 ? [{
-          label: "Switch to",
+          label: t("bar.switchTo"),
           items: scopes
             .filter((candidate) => candidate.scope.scope_id !== scope.scope.scope_id)
             .map((candidate) => ({
@@ -1614,7 +1658,7 @@ export default function StorageCatalogPage({
         {
           items: [{
             id: "add-scope",
-            label: "Add Catalog resource…",
+            label: t("bar.addResource"),
             icon: "plus",
             disabled: busy,
             onSelect: onAddScope,
@@ -1625,7 +1669,7 @@ export default function StorageCatalogPage({
     ...(itemRow ? [{
       id: "item",
       label: itemRow.display_name,
-      ariaLabel: openFilePath ? `${itemRow.display_name}. Back to its page` : undefined,
+      ariaLabel: openFilePath ? t("bar.backToItem", { name: itemRow.display_name }) : undefined,
       /* The item's own preview at a leaf's size, where a session leaf wears
          its provider's mark. */
       leading: artwork && (itemRow.preview_png ?? remotePreviews[itemRow.row_id])
@@ -1641,10 +1685,10 @@ export default function StorageCatalogPage({
       label: baseName(openFilePath),
       title: openFilePath,
       icon: "file" as const,
-      menuLabel: "Files",
+      menuLabel: t("bar.files"),
       menuHeader: { label: openFilePath, icon: "file" as const },
       menu: [{
-        label: "Files",
+        label: t("bar.files"),
         items: itemFiles.filter((file) => file.path !== openFilePath).map((file) => ({
           id: file.path,
           label: file.path,
@@ -1661,11 +1705,11 @@ export default function StorageCatalogPage({
      Push creates it again), or an item waiting for its repository to be
      chosen. */
   const cloudClosedReason = pageCloud
-    ? pageCloud.message ?? "Mallard Cloud refused this account."
+    ? pageCloud.message ?? t("cloud.refused")
     : managedCloud && itemRow?.state === "blocked"
-      ? itemRow.blocker ?? "Choose this item's repository first."
+      ? itemRow.blocker ?? t("cloud.chooseRepositoryFirst")
       : itemRow && cloudSyncBlocked(itemStatus)
-        ? itemStatus?.message ?? "Mallard Cloud isn't ready for this item."
+        ? itemStatus?.message ?? t("cloud.notReady")
         : null;
   /* Mallard Cloud's bar speaks as a project's does: Preparing… while its
      review is read, the review's own verb while it is open (Push, Pull N),
@@ -1676,12 +1720,12 @@ export default function StorageCatalogPage({
     if (cloudRunning(verb) && progress && progress.total > 1) {
       return <span className="sync-btn-readout">{`${progress.done}/${progress.total}…`}</span>;
     }
-    const word = verb === "push" ? "Push" : "Pull";
+    const word = verb === "push" ? t("common:push") : t("common:pull");
     const label = preparing === verb
-      ? "Preparing…"
+      ? t("verb.preparing")
       : cloudRunning(verb)
-        ? `${word === "Push" ? "Pushing" : "Pulling"}…`
-        : verb === "pull" && mode.kind === "pull" ? `Pull ${pullReviewSelectedCount}` : word;
+        ? (verb === "push" ? t("verb.pushing") : t("verb.pulling"))
+        : verb === "pull" && mode.kind === "pull" ? t("verb.pullCount", { count: pullReviewSelectedCount }) : word;
     return <span className="sync-path-sync-label">{label}</span>;
   };
   const cloudCount = (verb: "push" | "pull") => {
@@ -1697,7 +1741,7 @@ export default function StorageCatalogPage({
   const syncDisabledReason = unavailable
     ? unavailableReason
     : cloudClosedReason
-      ?? (storageId ? undefined : `Add a storage to these ${plural} before pushing or pulling`);
+      ?? (storageId ? undefined : nouns.say((noun) => t("bar.addStorageFirst", { noun })));
   /* The landing of a link that named this item, once: when its row has
      loaded, the review its Pull button opens; with nothing to pull, one line.
      A page whose sync is closed says why itself. */
@@ -1707,7 +1751,7 @@ export default function StorageCatalogPage({
     landingPull.current = false;
     if (syncDisabled) return;
     if (pullRows.length > 0) void openPull();
-    else notify("Already here and up to date.", "note");
+    else notify(t("page.upToDate"), "note");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemRow, loading, busy, mode.kind]);
   const pushReviewWarnings = pushPlan?.rows
@@ -1719,9 +1763,9 @@ export default function StorageCatalogPage({
     || pushSelected.size === 0
     || pushReviewUnacknowledged;
   const pushReviewDisabledReason = pushSelected.size === 0
-    ? `Select at least one ${noun(1)} to push`
+    ? nouns.say((noun) => t("push.selectOne", { noun }), 1)
     : pushReviewUnacknowledged
-      ? "Acknowledge the selected warnings before pushing"
+      ? t("push.ackSelected")
       : undefined;
   const pullReviewBlocked = pullReviewItems.some((item) => {
     const resourceId = item.item.resource_id;
@@ -1735,19 +1779,19 @@ export default function StorageCatalogPage({
     || pullReviewSelectedCount === 0
     || pullReviewBlocked;
   const pullReviewDisabledReason = pullReviewSelectedCount === 0
-    ? `Select at least one ${noun(1)} to pull`
+    ? nouns.say((noun) => t("pull.selectOne", { noun }), 1)
     : pullReviewBlocked
-      ? "Acknowledge the selected overwrite before pulling"
+      ? t("pull.ackSelected")
       : undefined;
   const bar = (
     <SyncPathBar
       crumbs={crumbs}
       overflow={appActions}
-      overflowLabel="App actions"
+      overflowLabel={t("bar.appActions")}
       openMenuRequest={openStorageMenuRequestId == null
         ? undefined
         : { menuId: "storage", requestId: openStorageMenuRequestId }}
-      ariaLabel={`${label} path`}
+      ariaLabel={t("bar.path", { label })}
       actions={(
         <>
           {/* An item's repository lives in its bar, as a project's does. */}
@@ -1772,7 +1816,7 @@ export default function StorageCatalogPage({
               className="sync-path-attention warning"
               tabIndex={0}
               data-tooltip={attentionDetail}
-              aria-label={`${counts.attention} needing attention. ${attentionDetail}`}
+              aria-label={t("bar.attention", { count: counts.attention, detail: attentionDetail })}
             >
               <Icon name="alert-triangle" size={13} /><b>{counts.attention}</b>
             </span>
@@ -1780,8 +1824,8 @@ export default function StorageCatalogPage({
           <button
             type="button"
             className="sync-path-icon-action"
-            title="Refresh comparison"
-            aria-label="Refresh comparison"
+            title={t("bar.refresh")}
+            aria-label={t("bar.refresh")}
             disabled={busy || loading}
             onClick={() => void load()}
           >
@@ -1789,7 +1833,7 @@ export default function StorageCatalogPage({
               <Icon name="refresh" size={16} />
             </span>
           </button>
-          <div className="sync-path-action-group" role="group" aria-label="Sync actions">
+          <div className="sync-path-action-group" role="group" aria-label={t("bar.syncActions")}>
             <button
               type="button"
               className={`sync-path-sync${mode.kind === "pull" || (managedCloud && preparing === "pull") ? " active" : ""}`}
@@ -1801,7 +1845,7 @@ export default function StorageCatalogPage({
               onClick={() => void (mode.kind === "pull" ? runPull() : openPull())}
             >
               <Icon name={cloudSpinning("pull") ? "refresh" : "download"} size={14} className={cloudSpinning("pull") ? "icon-spin" : undefined} />
-              {managedCloud ? cloudVerb("pull") : <span className="sync-path-sync-label">Pull</span>}
+              {managedCloud ? cloudVerb("pull") : <span className="sync-path-sync-label">{t("common:pull")}</span>}
               {managedCloud
                 ? cloudCount("pull")
                 : mode.kind === "pull"
@@ -1821,7 +1865,7 @@ export default function StorageCatalogPage({
               onClick={() => void (mode.kind === "push" ? runPush() : openPush())}
             >
               <Icon name={cloudSpinning("push") ? "refresh" : "upload"} size={14} className={cloudSpinning("push") ? "icon-spin" : undefined} />
-              {managedCloud ? cloudVerb("push") : <span className="sync-path-sync-label">Push</span>}
+              {managedCloud ? cloudVerb("push") : <span className="sync-path-sync-label">{t("common:push")}</span>}
               {managedCloud
                 ? cloudCount("push")
                 : mode.kind === "push"
@@ -1848,7 +1892,7 @@ export default function StorageCatalogPage({
   }
   if (error && page) {
     pageNotices.push({ key: "error", severity: "danger", message: error,
-      action: mode.kind !== "list" ? <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openReview(mode.kind as "push" | "pull")}>Compare again</button> : undefined,
+      action: mode.kind !== "list" ? <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openReview(mode.kind as "push" | "pull")}>{t("verb.compareAgain")}</button> : undefined,
     });
   }
   for (const failure of failures) {
@@ -1862,7 +1906,7 @@ export default function StorageCatalogPage({
         ? (
           <button type="button" className="btn btn-ghost" onClick={() => void finishUnfinishedPush()} disabled={busy}>
             <Icon name="upload" size={13} />
-            Finish that push
+            {t("page.finishPush")}
           </button>
         )
         : undefined,
@@ -1894,7 +1938,7 @@ export default function StorageCatalogPage({
           disabled={busy}
           onClick={() => (note.action === "storage_settings" ? storageId && onOpenStorageDetails(storageId) : retry())}
         >
-          {note.action === "storage_settings" ? "Storage settings" : "Retry"}
+          {note.action === "storage_settings" ? t("cloud.storageSettings") : t("page.retry")}
         </button>
       ),
     });
@@ -1906,8 +1950,8 @@ export default function StorageCatalogPage({
     cloudNotes.push({
       key: "several",
       severity: "warning",
-      title: `${itemRow.display_name} is in more than one repository you can see.`,
-      message: "Choose the one this Mac uses. Pull and Push wait until then.",
+      title: t("cloud.several", { name: itemRow.display_name }),
+      message: t("cloud.severalHint"),
       action: (
         <button
           type="button"
@@ -1915,19 +1959,19 @@ export default function StorageCatalogPage({
           disabled={busy || !storageId}
           onClick={() => setConnectReason({ kind: "several", resourceId, name: itemRow.display_name })}
         >
-          Choose repository
+          {t("cloud.chooseRepository")}
         </button>
       ),
     });
   }
   const notices = (
     <>
-      <NoticeZone items={pageNotices} subject="problems with this sync" {...noticeTiming} />
+      <NoticeZone items={pageNotices} subject={t("notices.problems")} {...noticeTiming} />
       <NoticeZone
         items={cloudNotes}
         timing="standing"
-        label={`Notes about ${itemRow ? itemRow.display_name : "Mallard Cloud"}`}
-        subject="Mallard Cloud notes"
+        label={t("notices.notesAbout", { name: itemRow ? itemRow.display_name : "Mallard Cloud" })}
+        subject={t("notices.cloudSubject")}
       />
     </>
   );
@@ -1968,12 +2012,12 @@ export default function StorageCatalogPage({
     return reviewFrame(
       <ReviewPreparing
         verb={preparing}
-        title={`${preparing === "push" ? "Push" : "Pull"} review`}
+        title={preparing === "push" ? t("review.pushTitle") : t("review.pullTitle")}
         caption={!managedCloud
-          ? `Comparing ${plural}`
+          ? nouns.say((noun) => t("review.comparing", { noun }))
           : preparing === "pull"
-            ? `Reading the latest version from ${storageWord}`
-            : `Comparing this computer with ${storageWord}`}
+            ? t("review.readingLatest", { storage: storageWord })
+            : t("review.comparingWith", { storage: storageWord })}
         onCancel={() => reviewPreparing.cancel()}
         cancelDisabled={false}
       />,
@@ -1996,28 +2040,30 @@ export default function StorageCatalogPage({
     return reviewFrame(
       <section className="sync-inline-action-review sync-inline-push-review sync-sync-review-workspace" aria-labelledby="catalog-push-title">
         <header className="sync-inline-action-header sync-sync-review-header">
-          <div className="sync-sync-review-title"><h2 id="catalog-push-title">Push review</h2></div>
+          <div className="sync-sync-review-title"><h2 id="catalog-push-title">{t("review.pushTitle")}</h2></div>
           <SyncReviewSelectionBar
             count={pushSelected.size}
             total={selectableRows.length}
             busy={busy}
             recommendedCount={visibleRows.length}
-            recommendedTitle={`Use the recommended selection${searchActive ? " for matching names" : ""} (${visibleRows.length})`}
+            recommendedTitle={searchActive
+              ? t("push.recommendedMatching", { count: visibleRows.length })
+              : t("push.recommended", { count: visibleRows.length })}
             recommendedDisabled={matchingSelected === visibleRows.length}
             onRecommended={() => setPushSelected((current) => replaceSearchSelection(current, matchingIds, new Set(matchingIds)))}
             searchActive={searchActive}
             clearDisabled={matchingSelected === 0}
             onClear={() => setPushSelected((current) => replaceSearchSelection(current, matchingIds))}
-            close={{ ariaLabel: "Close Push review", onClose: () => setMode({ kind: "list" }) }}
+            close={{ ariaLabel: t("push.close"), onClose: () => setMode({ kind: "list" }) }}
           />
         </header>
         <div className="sync-inline-action-content sync-sync-review-content">
           <div className="sync-inline-action-scroll sync-sync-review-scroll">
             {notices}
-            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
-              matches={visibleRows.length} total={selectableRows.length} noun={noun}
+            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={nouns.say((noun) => t("review.search", { noun }))}
+              matches={visibleRows.length} total={selectableRows.length} noun={nouns.counted}
               hiddenSelected={pushSelected.size - matchingSelected} disabled={busy} />
-            {searchActive && visibleRows.length === 0 && <div className="sync-history-state">No matching {plural}.</div>}
+            {searchActive && visibleRows.length === 0 && <div className="sync-history-state">{nouns.say((noun) => t("review.noMatches", { noun }))}</div>}
             {heldRows.length > 0 && (
               <div className="sync-review-banners">
                 {/* The held rows are the pinned plan's own facts — on
@@ -2029,15 +2075,15 @@ export default function StorageCatalogPage({
                 <Notice
                   severity="warning"
                   timing="standing"
-                  label="Notes about this Push review"
-                  title={`${heldRows.length} ${noun(heldRows.length)} held for Pull`}
+                  label={t("push.notes")}
+                  title={nouns.say((noun) => t("push.held", { count: heldRows.length, noun }), heldRows.length)}
                   action={(
                     <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void openPull()}>
-                      Open Pull review
+                      {t("push.openPull")}
                     </button>
                   )}
                 >
-                  {`${storageName ?? "Storage"} has versions this Mac has not reviewed, so their local changes cannot push yet. Selected ${plural} still push.`}
+                  {nouns.say((noun) => t("push.heldBody", { storage: storageName ?? t("bar.storage"), noun }))}
                 </Notice>
               </div>
             )}
@@ -2062,7 +2108,7 @@ export default function StorageCatalogPage({
                     storageRevision={storageRevision}
                     provider={scope.scope.provider}
                     providerLabel={profile.provider_label}
-                    kindNoun={noun(1)}
+                    nouns={nouns}
                     onOpenApp={openProfileApp}
                     onOpenTerminal={openProfileTerminal}
                     preview={artwork ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
@@ -2087,8 +2133,8 @@ export default function StorageCatalogPage({
                           key={warning.digest}
                           title={parts.lead ?? undefined}
                           checked={pushAcks.has(warning.digest)}
-                          ariaLabel={`Reviewed: ${warning.message}`}
-                          verbs={["Mark reviewed", "Reviewed"]}
+                          ariaLabel={t("push.reviewedLabel", { message: warning.message })}
+                          verbs={[t("push.markReviewed"), t("push.reviewed")]}
                           onChange={(checked) => setPushAcks((current) => {
                             const next = new Set(current);
                             if (checked) next.add(warning.digest);
@@ -2107,8 +2153,8 @@ export default function StorageCatalogPage({
                 <div className="sync-pull-empty">
                   <Icon name="check-circle" size={16} />
                   <span>
-                    <strong>Nothing to push</strong>
-                    <small>{`This Mac already matches ${storageName ?? "storage"}.`}</small>
+                    <strong>{t("push.nothing")}</strong>
+                    <small>{t("push.matches", { storage: storageName ?? t("status.anyStorage") })}</small>
                   </span>
                 </div>
               )}
@@ -2124,10 +2170,10 @@ export default function StorageCatalogPage({
               type="button"
               className="btn sync-review-exit"
               disabled={busy}
-              title={`Close Push review — back to ${itemRow?.display_name ?? scope.label}`}
+              title={t("push.exitTitle", { name: itemRow?.display_name ?? catalogScopeKindLabel(scope) })}
               onClick={() => setMode({ kind: "list" })}
             >
-              <span>{`Back to ${itemRow?.display_name ?? scope.label}`}</span>
+              <span>{t("review.backTo", { name: itemRow?.display_name ?? catalogScopeKindLabel(scope) })}</span>
             </button>
           ) : (
             <>
@@ -2135,10 +2181,10 @@ export default function StorageCatalogPage({
                   current selection, and it is on screen beside the button it
                   explains — the button's own disabled state is what a reader
                   arrives at. */}
-              {pushReviewUnacknowledged && <span><small>Acknowledge the warnings above before pushing.</small></span>}
+              {pushReviewUnacknowledged && <span><small>{t("push.ackAbove")}</small></span>}
               {/* On Mallard Cloud, the project's contract: a running push
                   seals every exit, and says so. */}
-              {pushing && <span role="status"><small>A running push finishes or fails whole — it can’t be cancelled midway.</small></span>}
+              {pushing && <span role="status"><small>{t("push.cantCancel")}</small></span>}
               {/* The count rides the verb — the number at the point of
                   commitment, the way a Git client's commit button carries it.
                   On Mallard Cloud the verb is the project's: Push, with the
@@ -2152,7 +2198,7 @@ export default function StorageCatalogPage({
                 {pushing
                   ? <Icon name="refresh" size={16} className="icon-spin" />
                   : <ThreadStatusIcon status="local-outstanding" size={16} />}
-                {managedCloud ? (pushing ? "Pushing…" : "Push") : `Push ${pushSelected.size}`}
+                {managedCloud ? (pushing ? t("verb.pushing") : t("common:push")) : t("verb.pushCount", { count: pushSelected.size })}
               </button>
             </>
           )}
@@ -2169,10 +2215,15 @@ export default function StorageCatalogPage({
     const matchingIds = visibleItems.map((item) => item.item.resource_id);
     const matchingSelected = matchingIds.filter((id) => pullSelected.has(id)).length;
     const recommendation = catalogPullRecommendation(visibleItems, pullSelected, pullChoice);
-    const chosenLabel = (item: (typeof reviewItems)[number]) => {
+    const actionOption = (action: CatalogPullAction): RowActionOption => ({
+      id: action.action_id,
+      label: actionLabel(action),
+      kind: action.kind.kind,
+    });
+    const chosenOption = (item: (typeof reviewItems)[number]): RowActionOption => {
       const actionId = pullChoice[item.item.resource_id];
       const action = item.item.actions.find((candidate) => candidate.action_id === actionId);
-      return action ? actionLabel(action) : "Skip";
+      return action ? actionOption(action) : { id: "", label: t("action.skip"), kind: null };
     };
     const needsAck = (item: (typeof reviewItems)[number]) => {
       const actionId = pullChoice[item.item.resource_id];
@@ -2191,15 +2242,17 @@ export default function StorageCatalogPage({
       <section className="sync-inline-action-review sync-inline-pull-review sync-sync-review-workspace" aria-labelledby="catalog-pull-title">
         <header className="sync-inline-action-header sync-sync-review-header">
           <div className="sync-sync-review-title">
-            <h2 id="catalog-pull-title">Pull review</h2>
-            {pullVersion != null && <span className="sync-pull-review-meta">Version {pullVersion}</span>}
+            <h2 id="catalog-pull-title">{t("review.pullTitle")}</h2>
+            {pullVersion != null && <span className="sync-pull-review-meta">{t("common:version", { version: pullVersion })}</span>}
           </div>
           <SyncReviewSelectionBar
             count={pullReviewSelectedCount}
             total={reviewItems.length}
             busy={busy}
             recommendedCount={recommendation.items.length}
-            recommendedTitle={`Use the recommended local actions${searchActive ? " for matching names" : ""} (${recommendation.items.length})`}
+            recommendedTitle={searchActive
+              ? t("pull.recommendedMatching", { count: recommendation.items.length })
+              : t("pull.recommended", { count: recommendation.items.length })}
             recommendedDisabled={recommendation.matches}
             onRecommended={() => {
               setPullSelected((current) => replaceSearchSelection(current, matchingIds,
@@ -2215,16 +2268,16 @@ export default function StorageCatalogPage({
             searchActive={searchActive}
             clearDisabled={matchingSelected === 0}
             onClear={() => setPullSelected((current) => replaceSearchSelection(current, matchingIds))}
-            close={{ ariaLabel: "Close Pull review", onClose: () => setMode({ kind: "list" }) }}
+            close={{ ariaLabel: t("pull.close"), onClose: () => setMode({ kind: "list" }) }}
           />
         </header>
         <div className="sync-inline-action-content sync-sync-review-content">
           <div className="sync-inline-action-scroll sync-sync-review-scroll">
             {notices}
-            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
-              matches={visibleItems.length} total={reviewItems.length} noun={noun}
+            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={nouns.say((noun) => t("review.search", { noun }))}
+              matches={visibleItems.length} total={reviewItems.length} noun={nouns.counted}
               hiddenSelected={pullReviewSelectedCount - matchingSelected} disabled={busy} />
-            {searchActive && visibleItems.length === 0 && <div className="sync-history-state">No matching {plural}.</div>}
+            {searchActive && visibleItems.length === 0 && <div className="sync-history-state">{nouns.say((noun) => t("review.noMatches", { noun }))}</div>}
             {/* One banner zone above the list, the way the project
                 reviews place plan-derived facts — never a zone per row. */}
             {claimed.length > 0 && (
@@ -2234,16 +2287,18 @@ export default function StorageCatalogPage({
                     box holds all claims. */}
                 <NoticeZone
                   timing="standing"
-                  label="Notes about this Pull review"
-                  subject={`${plural} claimed elsewhere`}
+                  label={t("pull.notes")}
+                  subject={nouns.say((noun) => t("pull.claimedSubject", { noun }))}
                   items={claimed.map((item) => ({
                     key: item.item.resource_id,
                     severity: "warning" as const,
-                    title: `${item.item.display_name} is claimed by ${item.conflicting_claims
-                      .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
-                      .join(", ")}`,
-                    message:
-                      "A different version of this local target is pinned there. Preserve a copy, acknowledge overwrite, or Skip.",
+                    title: t("pull.claimedBy", {
+                      name: item.item.display_name,
+                      storages: item.conflicting_claims
+                        .map((claim) => storages.find((storage) => storage.id === claim.storage_id)?.name ?? claim.storage_id)
+                        .join(t("list.separator")),
+                    }),
+                    message: t("pull.claimedMessage"),
                   }))}
                 />
               </div>
@@ -2254,7 +2309,7 @@ export default function StorageCatalogPage({
                 const row = rowForItem(item.item);
                 const included = pullSelected.has(resourceId);
                 const expanded = openChoices === resourceId;
-                const chosen = chosenLabel(item);
+                const chosen = chosenOption(item);
                 const executable = item.item.disposition.kind === "executable";
                 return (
                   <ResourceCard
@@ -2264,7 +2319,7 @@ export default function StorageCatalogPage({
                     storageRevision={storageRevision}
                     provider={scope.scope.provider}
                     providerLabel={profile.provider_label}
-                    kindNoun={noun(1)}
+                    nouns={nouns}
                     onOpenApp={openProfileApp}
                     onOpenTerminal={openProfileTerminal}
                     preview={artwork ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
@@ -2280,10 +2335,7 @@ export default function StorageCatalogPage({
                     })}
                     action={executable && included ? {
                       chosen,
-                      options: item.item.actions.map((action) => ({
-                        id: action.action_id,
-                        label: actionLabel(action),
-                      })),
+                      options: item.item.actions.map(actionOption),
                       expanded,
                       destructive: needsAck(item),
                       onToggle: () => setOpenChoices(expanded ? null : resourceId),
@@ -2304,10 +2356,10 @@ export default function StorageCatalogPage({
                       /* A Warning, not an Error: nothing has failed; the
                          verb carries the risk. */
                       <Acknowledgement
-                        title="Overwrites this Mac’s copy"
+                        title={t("pull.overwritesTitle")}
                         checked={pullAcks.has(resourceId)}
-                        ariaLabel={`Approve overwriting ${item.item.display_name}`}
-                        verbs={["Approve overwrite", "Approved"]}
+                        ariaLabel={t("pull.approveLabel", { name: item.item.display_name })}
+                        verbs={[t("pull.approve"), t("pull.approved")]}
                         onChange={(checked) => setPullAcks((current) => {
                           const next = new Set(current);
                           if (checked) next.add(resourceId);
@@ -2315,7 +2367,7 @@ export default function StorageCatalogPage({
                           return next;
                         })}
                       >
-                        {`— replaces the current ${item.item.display_name} here with the stored version`}
+                        {t("pull.replaces", { name: item.item.display_name })}
                       </Acknowledgement>
                     )}
                   />
@@ -2325,8 +2377,8 @@ export default function StorageCatalogPage({
                 <div className="sync-pull-empty">
                   <Icon name="check-circle" size={16} />
                   <span>
-                    <strong>Nothing to pull</strong>
-                    <small>{`These ${plural} already match ${storageName ?? "storage"}.`}</small>
+                    <strong>{t("pull.nothing")}</strong>
+                    <small>{nouns.say((noun) => t("pull.matches", { noun, storage: storageName ?? t("status.anyStorage") }))}</small>
                   </span>
                 </div>
               )}
@@ -2341,10 +2393,10 @@ export default function StorageCatalogPage({
               type="button"
               className="btn sync-review-exit"
               disabled={busy}
-              title={`Close Pull review — back to ${itemRow?.display_name ?? scope.label}`}
+              title={t("pull.exitTitle", { name: itemRow?.display_name ?? catalogScopeKindLabel(scope) })}
               onClick={() => setMode({ kind: "list" })}
             >
-              <span>{`Back to ${itemRow?.display_name ?? scope.label}`}</span>
+              <span>{t("review.backTo", { name: itemRow?.display_name ?? catalogScopeKindLabel(scope) })}</span>
             </button>
           ) : (
             <>
@@ -2353,8 +2405,8 @@ export default function StorageCatalogPage({
                   button goes disabled. A polite region does not announce what
                   is already present, so the case where the plan opens blocked
                   costs nothing. */}
-              {blocked && <span role="status"><small>Acknowledge the overwrite above before pulling.</small></span>}
-              {pulling && <span role="status"><small>Pull cannot be cancelled while changes are being applied.</small></span>}
+              {blocked && <span role="status"><small>{t("pull.ackAbove")}</small></span>}
+              {pulling && <span role="status"><small>{t("pull.cantCancel")}</small></span>}
               <button
                 type="button"
                 className="btn btn-primary sync-pull-apply-button"
@@ -2364,7 +2416,7 @@ export default function StorageCatalogPage({
                 {pulling
                   ? <Icon name="refresh" size={16} className="icon-spin" />
                   : <ThreadStatusIcon status="cloud-outstanding" size={16} />}
-                {pulling ? "Pulling…" : `Pull ${pullReviewSelectedCount}`}
+                {pulling ? t("verb.pulling") : t("verb.pullCount", { count: pullReviewSelectedCount })}
               </button>
             </>
           )}
@@ -2418,7 +2470,7 @@ export default function StorageCatalogPage({
         storageRevision={storageRevision}
         provider={scope.scope.provider}
         providerLabel={profile.provider_label}
-        kindNoun={noun(1)}
+        nouns={nouns}
         onOpenApp={openProfileApp}
         onOpenTerminal={openProfileTerminal}
         preview={artwork ? row.preview_png ?? remotePreviews[row.row_id] ?? null : undefined}
@@ -2428,7 +2480,7 @@ export default function StorageCatalogPage({
           setForkFor(forkOpen ? null : row.resource_id!);
         } : undefined}
         forkOpen={forkOpen}
-        forkTitle={`Fork ${row.display_name} — duplicate this ${noun(1)} under a new name`}
+        forkTitle={nouns.say((noun) => t("fork.title", { name: row.display_name, noun }), 1)}
         footer={forkOpen && (
           <ForkDrawer
             displayName={row.display_name}
@@ -2455,11 +2507,11 @@ export default function StorageCatalogPage({
     <div className="sync-history-section-heading">
       {managedCloud ? (
         <>
-          <h2 title={`Only in ${storageName ?? "Mallard Cloud"}`}><Icon name="storage-mallard" size={14} />Not downloaded</h2>
+          <h2 title={t("list.onlyIn", { storage: storageName ?? "Mallard Cloud" })}><Icon name="storage-mallard" size={14} />{t("list.notDownloaded")}</h2>
           <span
             className="sync-history-heading-count"
-            title={`${count} ${noun(count)} only in ${storageName ?? "Mallard Cloud"}`}
-            aria-label={`${count} ${noun(count)} only in ${storageName ?? "Mallard Cloud"}`}
+            title={nouns.say((noun) => t("list.countOnlyIn", { count, noun, storage: storageName ?? "Mallard Cloud" }), count)}
+            aria-label={nouns.say((noun) => t("list.countOnlyIn", { count, noun, storage: storageName ?? "Mallard Cloud" }), count)}
           >
             <Icon name={glyph.icon} size={12} />{count}
           </span>
@@ -2467,14 +2519,18 @@ export default function StorageCatalogPage({
       ) : (
         <h2>
           <Icon name="cloud" size={14} />
-          Only in <span className="sync-history-storage-name">{storageName ?? "storage"}</span>
+          <Trans
+            t={t}
+            i18nKey="library:list.onlyInHeading"
+            components={{ name: <span className="sync-history-storage-name">{storageName ?? t("status.anyStorage")}</span> }}
+          />
         </h2>
       )}
     </div>
   );
   const kindHeading = (
     <div className="sync-history-section-heading">
-      <h2><Icon name={glyph.icon} size={14} />{scope.label}</h2>
+      <h2><Icon name={glyph.icon} size={14} />{catalogScopeKindLabel(scope)}</h2>
     </div>
   );
 
@@ -2504,32 +2560,32 @@ export default function StorageCatalogPage({
         {outcomeCard}
         {managedCloud && !itemRepository && itemRow.state !== "blocked" && !pageCloud && (
           <div className="sync-history-thread-list">
-            <article className="sync-history-thread-card catalog-card" aria-label={`${name} repository`}>
+            <article className="sync-history-thread-card catalog-card" aria-label={t("item.repository", { name })}>
               <div className="sync-history-thread-topline">
                 <div className="sync-history-thread-title">
                   <span
                     className="sync-thread-sync-indicator untracked"
-                    data-tooltip={`Not in ${storageName ?? "Mallard Cloud"} yet`}
-                    aria-label={`Not in ${storageName ?? "Mallard Cloud"} yet`}
+                    data-tooltip={t("item.notInYet", { storage: storageName ?? "Mallard Cloud" })}
+                    aria-label={t("item.notInYet", { storage: storageName ?? "Mallard Cloud" })}
                     tabIndex={0}
                   >
                     <Icon name="cloud" size={18} />
                   </span>
                   <strong title={address}>{address}</strong>
-                  <span className="sync-history-branch-state current" title="Your first Push creates it">New</span>
-                  <span className="sync-history-branch-state current" title="Only you and your collaborators can see it">Private</span>
+                  <span className="sync-history-branch-state current" title={t("item.firstPush")}>{t("item.new")}</span>
+                  <span className="sync-history-branch-state current" title={t("item.privateTitle")}>{t("item.private")}</span>
                 </div>
                 <div className="sync-history-thread-actions">
                   <button
                     type="button"
                     className="btn"
                     aria-haspopup="dialog"
-                    aria-label="Change repository"
+                    aria-label={t("item.changeRepository")}
                     disabled={busy || !storageId}
                     onClick={() => setConnectReason({ kind: "connect", resourceId, name })}
                   >
                     <Icon name="link" size={13} />
-                    Change…
+                    {t("item.change")}
                   </button>
                 </div>
               </div>
@@ -2540,15 +2596,15 @@ export default function StorageCatalogPage({
             no badge, and Pull and Push have nothing to take. Mallard Cloud's
             own note covers its case. */}
         {!managedCloud && itemRow.state === "blocked" && (
-          <Notice severity="warning" timing="standing" label={`Why ${name} can't be synced`} title={`${name} can't be synced.`}>
-            {itemRow.blocker ?? "This Mac and the storage cannot be compared for it."}
+          <Notice severity="warning" timing="standing" label={t("item.whyBlocked", { name })} title={t("item.blocked", { name })}>
+            {itemRow.blocker ?? t("item.cannotCompare")}
           </Notice>
         )}
         <CatalogItemPage
           row={itemRow}
           back={openFilePath
             ? { voice: "name", label: name, onActivate: closeItemFile }
-            : { voice: "app", label: scope.label, onActivate: closeItem }}
+            : { voice: "app", label: catalogScopeKindLabel(scope), onActivate: closeItem }}
           detail={itemDetail ?? { status: "loading" }}
           files={itemPageFiles}
           actions={{
@@ -2562,7 +2618,7 @@ export default function StorageCatalogPage({
               setForkFor(itemForkOpen ? null : resourceId);
             } : undefined,
             forkOpen: itemForkOpen,
-            forkTitle: `Fork ${name} — duplicate this ${noun(1)} under a new name`,
+            forkTitle: nouns.say((noun) => t("fork.title", { name, noun }), 1),
             onReveal: () => reveal(itemRow),
           }}
           onOpenExternal={(url) => void openUrl(url).catch((reason) => setError(errorMessage(reason)))}
@@ -2594,7 +2650,7 @@ export default function StorageCatalogPage({
       storageId={storageId}
       accountLogin={accountLogin}
       coordinate={scope.scope}
-      noun={noun(1)}
+      nouns={nouns}
       rowLabel={label}
       listed={new Set(rows.flatMap((row) => (row.resource_id ? [row.resource_id] : [])))}
       capabilities={capabilities}
@@ -2602,8 +2658,8 @@ export default function StorageCatalogPage({
       onConnected={(connected) => {
         setConnectReason(null);
         notify(connectReason.kind === "add"
-          ? `${connected.name} added from ${connected.address}.`
-          : `${connected.name} connected to ${connected.address}.`);
+          ? t("cloud.added", { name: connected.name, address: connected.address })
+          : t("cloud.connected", { name: connected.name, address: connected.address }));
         setOutcome(null);
         setItemId(connected.resourceId);
         void load();
@@ -2619,12 +2675,12 @@ export default function StorageCatalogPage({
       type="button"
       className="btn"
       aria-haspopup="dialog"
-      title={`Someone else’s ${noun(1)}: shared with you, or by address or invitation code`}
+      title={nouns.say((noun) => t("cloud.addTitle", { noun }), 1)}
       disabled={busy || loading || mode.kind !== "list" || !storageId || !!pageCloud}
       onClick={() => setConnectReason({ kind: "add" })}
     >
       <Icon name="plus" size={13} />
-      Add from Mallard Cloud…
+      {t("cloud.addFrom")}
     </button>
   );
 
@@ -2643,12 +2699,12 @@ export default function StorageCatalogPage({
               void saveProfileName();
             }}
           >
-            <label htmlFor="catalog-profile-rename-input">Profile name</label>
+            <label htmlFor="catalog-profile-rename-input">{t("rename.label")}</label>
             <input
               id="catalog-profile-rename-input"
               value={profileNameDraft}
               onChange={(event) => setProfileNameDraft(event.target.value)}
-              aria-label="Profile name"
+              aria-label={t("rename.label")}
               disabled={busy}
               autoFocus
             />
@@ -2657,7 +2713,7 @@ export default function StorageCatalogPage({
               className="btn btn-primary"
               disabled={busy || !profileNameChanged}
             >
-              Save
+              {t("common:save")}
             </button>
             <button
               type="button"
@@ -2669,7 +2725,7 @@ export default function StorageCatalogPage({
                 setRenameError(null);
               }}
             >
-              Cancel
+              {t("common:cancel")}
             </button>
             {profileFolderName && profileFolderName !== profileNameDraft.trim() && (
               <button
@@ -2678,7 +2734,7 @@ export default function StorageCatalogPage({
                 disabled={busy}
                 onClick={() => setProfileNameDraft(profileFolderName)}
               >
-                Use folder name
+                {t("rename.useFolder")}
               </button>
             )}
             {renameError && (
@@ -2693,8 +2749,8 @@ export default function StorageCatalogPage({
             content in one named box. */}
         <NoticeZone
           timing="standing"
-          label="Notes about this Catalog row"
-          subject="notes about this Catalog row"
+          label={t("notices.rowNotes")}
+          subject={t("notices.rowSubject")}
           items={(page?.recovery ?? []).map((message) => ({
             key: message,
             severity: "warning" as const,
@@ -2707,13 +2763,13 @@ export default function StorageCatalogPage({
           <Notice
             severity="danger"
             timing="standing"
-            label="Why this Catalog row is unavailable"
-            title={`${label} can’t be used in this build.`}
+            label={t("page.whyUnavailable")}
+            title={t("page.cantUse", { label })}
           >
             {unavailableReason}
           </Notice>
         ) : loading && !page ? (
-          <LoadingScaffold shape="rows" label={`Loading ${label}`} />
+          <LoadingScaffold shape="rows" label={t("page.loading", { label })} />
         ) : error && !page ? (
           /* "None stored yet" is a fact about the storage. When the request
              that would have listed them failed, we know no such thing — and
@@ -2725,10 +2781,10 @@ export default function StorageCatalogPage({
           <Notice
             severity="danger"
             timing="blocking"
-            title={`Couldn’t load ${label}.`}
+            title={t("page.loadFailed", { label })}
             action={(
               <button type="button" className="btn" onClick={() => void load()}>
-                <Icon name="refresh" size={14} /> Retry
+                <Icon name="refresh" size={14} /> {t("page.retry")}
               </button>
             )}
           >
@@ -2741,7 +2797,7 @@ export default function StorageCatalogPage({
              second border around it. Nor does it name the home or the
              storage — the crumb bar above is already saying both. */
           <div className="sync-history-state">
-            {`No ${noun(1)} on this Mac, and none stored yet.`}
+            {nouns.say((noun) => t("list.empty", { noun }), 1)}
             {addFromCloud}
           </div>
         ) : (
@@ -2750,16 +2806,16 @@ export default function StorageCatalogPage({
             {/* On Mallard Cloud the head gains Add from Mallard Cloud…
                 beside the search, outside its rule, and holds the count
                 back. Any other storage keeps today's head. */}
-            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={`Search ${plural}`}
-              matches={matchingRows.length} total={rows.length} noun={noun} disabled={busy}
+            <NameSearchField query={searchQuery} onChange={setSearchQuery} label={nouns.say((noun) => t("review.search", { noun }))}
+              matches={matchingRows.length} total={rows.length} noun={nouns.counted} disabled={busy}
               narrowed={statusScope !== null} count={!managedCloud} trailing={addFromCloud} />
             {scopeBarShown && (
               /* The project faces' strip, under the field it narrows with. A
                  scope no row falls in has no place on it — unless it is the
                  one in force, which stays, at zero, so it can be released. */
               <StatusScopeBar
-                label={`Show ${plural} by status`}
-                noun={noun}
+                label={nouns.say((noun) => t("list.showByStatus", { noun }))}
+                noun={nouns.counted}
                 total={rows.length}
                 active={statusScope}
                 onChange={setChosenStatusScope}
@@ -2770,9 +2826,9 @@ export default function StorageCatalogPage({
             )}
             {matchingRows.length === 0 && (
               <div className="sync-history-state">
-                No matching {plural}.
+                {nouns.say((noun) => t("review.noMatches", { noun }))}
                 {scopeEmptiedList && (
-                  <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>Clear filter</button>
+                  <button type="button" className="btn btn-ghost" onClick={clearStatusScope}>{t("list.clearFilter")}</button>
                 )}
               </div>
             )}

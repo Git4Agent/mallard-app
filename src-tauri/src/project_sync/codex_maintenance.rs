@@ -7,7 +7,7 @@ use super::service::committed_conversation_receipt;
 use mallard_domain::{BoundedConfigObject, ConversationOperationId, LocalProviderProfileId};
 use mallard_infrastructure::codex_app_refresh::{
     refresh_offer as codex_app_refresh_offer, restart_after_pull, CodexAppKind,
-    CodexAppRefreshState, CodexAppRestartResult,
+    CodexAppRefreshState, CodexAppRestartOutcome, CodexAppRestartResult,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
 use serde::Deserialize;
@@ -45,13 +45,7 @@ pub(super) fn restart_codex_app_after_pull_with_repository(
     if offer.state != CodexAppRefreshState::RestartAvailable || offer.app_kind != app_kind {
         return Err("Codex App restart capability changed after Pull".to_string());
     }
-    Ok(match restart_after_pull(app_kind, &codex_home) {
-        Ok(result) => result,
-        Err(message) => CodexAppRestartResult {
-            success: false,
-            message,
-        },
-    })
+    Ok(restart_after_pull(app_kind, &codex_home).unwrap_or_else(CodexAppRestartResult::failed))
 }
 
 /// Register Codex app maintenance actions.
@@ -86,6 +80,9 @@ impl MaintenanceExecutor for CloseApp {
             action_id: request.action_id.clone(),
             ready: true,
             summary: "Close requested. Try Delete again after Codex closes.".into(),
+            summary_code: Some("close_requested"),
+            app_name: None,
+            home_path: None,
             facts: BoundedConfigObject::empty(),
         })
     }
@@ -114,12 +111,67 @@ impl MaintenanceExecutor for RestartApp {
             arguments.app_kind,
             request.confirmed,
         )?;
-        Ok(MaintenanceActionResult {
-            provider: request.provider.clone(),
-            action_id: request.action_id.clone(),
-            ready: restarted.success,
-            summary: restarted.message,
-            facts: BoundedConfigObject::empty(),
-        })
+        Ok(restart_result(request, restarted))
+    }
+}
+
+/// A restart's result as every maintenance action reports one: its English,
+/// and for a finished restart the code and values it was worded from.
+fn restart_result(
+    request: &MaintenanceActionRequest,
+    restarted: CodexAppRestartResult,
+) -> MaintenanceActionResult {
+    MaintenanceActionResult {
+        provider: request.provider.clone(),
+        action_id: request.action_id.clone(),
+        ready: restarted.success,
+        summary: restarted.message,
+        summary_code: restarted.outcome.map(|outcome| match outcome {
+            CodexAppRestartOutcome::AlreadyClosed => "app_already_closed",
+            CodexAppRestartOutcome::Restarted => "app_restarted",
+            CodexAppRestartOutcome::RestartedWithHome => "app_restarted_with_home",
+        }),
+        app_name: restarted.app_name,
+        home_path: restarted.home_path,
+        facts: BoundedConfigObject::empty(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restart_reports_its_code_and_values_and_a_failure_only_its_error() {
+        let request = MaintenanceActionRequest {
+            provider: mallard_infrastructure::providers::codex::provider_key(),
+            action_id: action("codex.app.restart"),
+            arguments: BoundedConfigObject::empty(),
+            confirmed: true,
+        };
+        let done = restart_result(
+            &request,
+            CodexAppRestartResult {
+                success: true,
+                message: "Codex restarted with this project's Codex home (/work/.codex).".into(),
+                outcome: Some(CodexAppRestartOutcome::RestartedWithHome),
+                app_name: Some("Codex".into()),
+                home_path: Some("/work/.codex".into()),
+            },
+        );
+        assert!(done.ready);
+        assert_eq!(done.summary_code, Some("app_restarted_with_home"));
+        assert_eq!(done.app_name.as_deref(), Some("Codex"));
+        assert_eq!(done.home_path.as_deref(), Some("/work/.codex"));
+        let value = serde_json::to_value(&done).unwrap();
+        assert_eq!(value["summary_code"], "app_restarted_with_home");
+        let failed = restart_result(
+            &request,
+            CodexAppRestartResult::failed("Codex did not quit".into()),
+        );
+        assert!(!failed.ready);
+        assert_eq!(failed.summary, "Codex did not quit");
+        let value = serde_json::to_value(&failed).unwrap();
+        assert!(value.get("summary_code").is_none() && value.get("app_name").is_none());
     }
 }

@@ -1,8 +1,9 @@
+import { useTranslation } from "../../i18n";
 import SyncPathBar, { type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import ProviderMark from "../sync-review/ProviderMark";
 import LandingPicker, { type LandingDoor } from "../project-sync/LandingPicker";
 import { compactProjectPath } from "../project-sync/model";
-import { catalogDoors, catalogScopeIcon, catalogScopeLabel } from "./model";
+import { catalogDoors, catalogScopeIcon, catalogScopeKindLabel, catalogScopeLabel } from "./model";
 import type { CatalogCapabilityDescriptor, CatalogScopeView } from "./types";
 
 interface Props {
@@ -29,11 +30,12 @@ export default function CatalogIndexPage({
   onOpenScope,
   onAddScope,
 }: Props) {
+  const { t } = useTranslation("library");
   const doors: LandingDoor[] = catalogDoors(capabilities).map((door) => ({
     key: door.key,
     icon: door.icon,
     label: door.label,
-    ariaLabel: `Add ${door.label}`,
+    ariaLabel: t("index.add", { label: door.label }),
     marks: door.providers.map((capability) => (
       <ProviderMark key={capability.provider} provider={capability.provider} displayName={capability.provider_label} />
     )),
@@ -42,16 +44,16 @@ export default function CatalogIndexPage({
   return (
     <>
       <SyncPathBar
-        crumbs={[{ id: "catalog", label: "Catalog", icon: "catalog", tone: "root" }]}
+        crumbs={[{ id: "catalog", label: t("index.title"), icon: "catalog", tone: "root" }]}
         overflow={appActions}
-        overflowLabel="App actions"
-        ariaLabel="Catalog path"
+        overflowLabel={t("bar.appActions")}
+        ariaLabel={t("index.path")}
       />
       <main className="sync-main sync-project-links-page sync-landing-page">
         <LandingPicker
-          title="Catalog"
-          count={scopes.length === 1 ? "1 on this machine" : `${scopes.length} on this machine`}
-          actionLabel="Add resource…"
+          title={t("index.title")}
+          count={t("index.count", { count: scopes.length })}
+          actionLabel={t("index.addResource")}
           busy={busy}
           onAction={() => onAddScope()}
           /* A registry that has not answered yet still leaves one door: the
@@ -59,19 +61,19 @@ export default function CatalogIndexPage({
           doors={doors.length > 0 ? doors : [{
             key: "any",
             icon: "catalog",
-            label: "Add resource…",
-            ariaLabel: "Add resource",
+            label: t("index.addResource"),
+            ariaLabel: t("index.addResourceLabel"),
             onOpen: () => onAddScope(),
           }]}
-          caption={{ icons: ["cloud"], text: "Shared through your storages" }}
+          caption={{ icons: ["cloud"], text: t("index.caption") }}
           cards={scopes.map((scope) => {
             const label = catalogScopeLabel(scope);
             const mark = <ProviderMark provider={scope.scope.provider} displayName={scope.profile.display_name} />;
             return {
               key: scope.scope.scope_id,
               icon: catalogScopeIcon(scope),
-              title: scope.label,
-              ariaLabel: `Open ${label}`,
+              title: catalogScopeKindLabel(scope),
+              ariaLabel: t("index.open", { label }),
               marks: mark,
               location: compactProjectPath(scope.profile.configured_home),
               /* A row this build cannot operate on says so where its profile
@@ -81,7 +83,7 @@ export default function CatalogIndexPage({
                 <>
                   <ProviderMark provider={scope.scope.provider} displayName={scope.profile.display_name} size={13} />
                   {scope.profile.display_name}
-                  {!scope.available && ` — ${scope.unavailable_reason ?? "not supported by this build"}`}
+                  {!scope.available && ` — ${scope.unavailable_reason ?? t("index.unsupported")}`}
                 </>
               ),
               onOpen: () => onOpenScope(scope.scope.scope_id),

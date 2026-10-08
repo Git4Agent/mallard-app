@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "./i18n";
 import ProjectSync from "./components/project-sync/ProjectSync";
 import type { AppTheme } from "./types";
 import {
@@ -10,6 +11,9 @@ import {
 import "./App.css";
 
 export default function App() {
+  // A language switch re-renders the whole tree from here, in place: the
+  // shell's startup work and open views stay as they are.
+  useTranslation();
   const choice = useThemeChoice();
   const [osTheme, setOsTheme] = useState<AppTheme>(systemTheme);
 

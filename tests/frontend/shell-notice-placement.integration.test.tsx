@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import SyncPathBar, { PathBarBelow } from "../../src/components/sync-review/SyncPathBar";
 import type { NoticeZoneProps } from "../../src/components/notice/Notice";
 import { connectionDetail, connectionSuspends } from "../../src/components/project-sync/StorageSettings";
+import { i18n } from "../../src/i18n";
 import StorageIndexPage from "../../src/components/project-sync/StorageIndexPage";
 import SettingsPage from "../../src/components/project-sync/SettingsPage";
 import type { AppUpdates } from "../../src/components/AppUpdater";
@@ -133,6 +134,7 @@ function storageBanner(options: {
   assert.doesNotMatch(source.slice(barEnd, pageEnd), /items=\{storageNotices\}/, "no second storage error box in page content");
   const context = {
     React: { createElement }, SyncPathBar, connectionDetail, connectionSuspends,
+    t: i18n.getFixedT(null, ["projectPage", "common"]),
     storageDraftActionError: options.storageDraftActionError ?? null,
     storageSession: null, descriptor: null, providerLabelForPage: "Mallard Cloud",
     savedEditedStorage: { connection: options.refused ? {

@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+import { backendText } from "./i18n/backend";
 import type { StorageSummary } from "./types";
 import { userFacingRepoTerms } from "./terminology";
 
@@ -19,32 +21,37 @@ export function errorMessage(error: unknown): string {
  * prose can sit behind a caller's prefix ("register the repo in 'X': S3 …"),
  * so it is matched anywhere in the message. When the shape matches, say the
  * cause and the next step instead, naming the storage by the label its
- * provider descriptor gave it. The raw text stays in Logs, where the
- * backend already records it.
+ * provider descriptor gave it — in Chinese, looked up by the provider key
+ * when the caller has it. The raw text stays in Logs, where the backend
+ * already records it.
  */
 export function storageAccessErrorMessage(
-  storage: Pick<StorageSummary, "provider_label"> | null | undefined,
+  storage: (Pick<StorageSummary, "provider_label"> & { provider?: string; available?: boolean }) | null | undefined,
   error: unknown,
 ): string {
   const message = errorMessage(error);
   const kind = storageFailureKind(message);
   if (!storage || !kind) return message;
-  const label = storage.provider_label;
+  // A storage with no adapter carries its raw key, which stays.
+  const label = storage.provider && storage.available !== false
+    ? backendText(`storageProvider.${storage.provider}.displayName`, storage.provider_label)
+    : storage.provider_label;
   switch (kind) {
     case "unreachable":
-      return `Couldn’t reach ${label}. Check the network and try again.`;
+      return t("shell:storageError.unreachable", { label });
     case "credentials":
-      return `${label} rejected the credentials. Reconnect the storage with a current key, then try again.`;
+      return t("shell:storageError.credentials", { label });
     case "missing_bucket":
-      return `The ${label} bucket can’t be found. Check the bucket name in the storage settings.`;
+      return t("shell:storageError.missingBucket", { label });
     case "service":
-      return `Couldn’t connect to ${label}. Check the connection settings and credentials, then try again.`;
+      return t("shell:storageError.service", { label });
   }
 }
 
 export type StorageFailureKind = "unreachable" | "credentials" | "missing_bucket" | "service";
 
-/** The cause an S3-shaped failure names, or null when the text is not one. */
+/** The cause an S3-shaped failure names, or null when the text is not one.
+ *  It reads the backend's English, which stays English in every language. */
 export function storageFailureKind(message: string): StorageFailureKind | null {
   if (!/\bS3 (?:get|body|put|record put|list|delete|head)\b/i.test(message)) return null;
   if (/no such bucket|nosuchbucket/i.test(message)) return "missing_bucket";

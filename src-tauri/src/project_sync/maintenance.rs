@@ -29,6 +29,15 @@ pub struct MaintenanceActionResult {
     pub action_id: ActionKey,
     pub ready: bool,
     pub summary: String,
+    /// What a finished action did, for the interface to translate `summary`
+    /// by, with `app_name` and `home_path` as its values. A failed action's
+    /// summary is an error and carries no code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_path: Option<String>,
     #[serde(default)]
     pub facts: BoundedConfigObject,
 }
@@ -180,6 +189,9 @@ mod test_provider {
                 action_id: request.action_id.clone(),
                 ready: true,
                 summary: "Test provider home inspected.".to_string(),
+                summary_code: None,
+                app_name: None,
+                home_path: None,
                 facts: BoundedConfigObject::from_json(&serde_json::json!({"inspected": true}))?,
             })
         }
