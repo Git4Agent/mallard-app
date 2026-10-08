@@ -1,6 +1,7 @@
 import type {
   BundleRecipe,
   InventoryResource,
+  LocalSessionDeleteResult,
   MaintenanceActionDescriptor,
   ProjectContentEntry,
   ProjectResourceCategory,
@@ -37,6 +38,17 @@ export const PROJECT_FILE_CARD_RENDER_LIMIT = 500;
 /** The nouns the project lists count in — the search row and tile heads. */
 export const sessionNoun = (count: number) => (count === 1 ? "session" : "sessions");
 export const fileNoun = (count: number) => (count === 1 ? "file" : "files");
+
+export const CODEX_DELETE_ERROR = "Codex provider request failed (code -32600).";
+export const CODEX_DELETE_CLOSE_NOTICE = "Delete failed. Close Codex, then try Delete again.";
+
+export function localSessionDeleteError(provider: ProviderKey, result: LocalSessionDeleteResult): string | null {
+  if (provider === "codex" && result.provider_error === CODEX_DELETE_ERROR) return CODEX_DELETE_CLOSE_NOTICE;
+  return [
+    result.provider_error && `Session files: ${result.provider_error}`,
+    result.metadata_error && `Mallard binding: ${result.metadata_error}`,
+  ].filter(Boolean).join(" ") || null;
+}
 
 export function projectLabel(project: { display_name: string; local_alias?: string | null }): string {
   return project.local_alias?.trim() || project.display_name;

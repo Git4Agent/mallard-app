@@ -31,7 +31,7 @@ import NameSearchField from "../sync-review/NameSearchField";
 import StatusScopeBar from "../sync-review/StatusScopeBar";
 import { STATUS_SCOPES, type StatusScope } from "../sync-review/statusScopes";
 import { nameMatchesSearch, type NameSearchResults } from "../sync-review/nameSearch";
-import { projectLabel, sessionNoun } from "./model";
+import { localSessionDeleteError, projectLabel, sessionNoun } from "./model";
 import { clearedStorageNotice } from "./clearedStorageNotice";
 import { clearStorageWarningDismissal, dismissStorageWarning, useDismissedStorageWarning } from "../../preferences";
 import ProviderMark from "../sync-review/ProviderMark";
@@ -3008,10 +3008,7 @@ export default function ProjectActivityPage({
       let failure: string | null = null;
       try {
         const result = await projectSyncApi.deleteLocalProjectSession(project.local_project_id, session.resource_id);
-        failure = [
-          result.provider_error && `Session files: ${result.provider_error}`,
-          result.metadata_error && `Mallard binding: ${result.metadata_error}`,
-        ].filter(Boolean).join(" ") || null;
+        failure = localSessionDeleteError(session.provider, result);
       } catch (reason) { failure = errorMessage(reason); }
       await loadWorkspace(branch);
       reportActionError(failure);

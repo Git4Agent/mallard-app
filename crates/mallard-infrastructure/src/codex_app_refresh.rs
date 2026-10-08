@@ -203,6 +203,32 @@ pub fn restart_after_pull(
     }
 }
 
+/// Send a graceful quit request after the user selects Close Codex.
+pub fn request_close() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let app = find_installed_mac_app()
+            .ok_or("Codex App was not found. Close it manually, then try Delete again.")?;
+        if mac_app_is_running(&app)? {
+            request_mac_app_quit(&app)?;
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        let app = find_installed_windows_app()
+            .ok_or("Codex App was not found. Close it manually, then try Delete again.")?;
+        if windows_app_is_running(&app)? {
+            request_windows_app_quit(&app)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        Err("Close Codex manually, then try Delete again.".into())
+    }
+}
+
 #[cfg(windows)]
 const WINDOWS_CODEX_APP_NAME: &str = "Codex App";
 

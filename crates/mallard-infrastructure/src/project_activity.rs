@@ -1652,6 +1652,10 @@ pub struct ProjectSessionsDeleteResult {
     pub metadata_error: Option<String>,
 }
 
+fn codex_delete_blocked(provider: &ProviderKey, error: &str) -> bool {
+    provider.as_str() == "codex" && error == "Codex provider request failed (code -32600)."
+}
+
 /// Delete discovered sessions in the project's bound profiles, then reset all
 /// project sync metadata. Each provider and the metadata reset are best effort.
 pub fn delete_local_project_sessions(
@@ -1711,6 +1715,9 @@ pub fn delete_local_project_sessions(
                                         "{provider} session {}: {error}",
                                         session.session_id
                                     ));
+                                    if codex_delete_blocked(provider, &error) {
+                                        return Ok(result);
+                                    }
                                 }
                             }
                         }
@@ -1721,8 +1728,7 @@ pub fn delete_local_project_sessions(
         }
         Err(error) => result.provider_errors.push(error),
     }
-    // Do not return early on provider failures: stale and restored bindings
-    // for this project must also be removed when files are unavailable.
+    // Other provider failures still allow stale binding cleanup.
     match repository.reset_project_sync_metadata(local_project_id, expected_project_revision) {
         Ok(reset) => result.metadata_reset = Some(reset),
         Err(error) => result.metadata_error = Some(error),
@@ -1760,6 +1766,15 @@ pub fn delete_local_project_session(
         Err(error) if bound => Some(error),
         Err(error) => return Err(error),
     };
+    if provider_error
+        .as_deref()
+        .is_some_and(|error| codex_delete_blocked(&provider, error))
+    {
+        return Ok(LocalSessionDeleteResult {
+            provider_error,
+            metadata_error: None,
+        });
+    }
     let metadata_error = repository
         .forget_local_session(local_project_id, &home.profile_id, &provider, &thread_id)
         .err();

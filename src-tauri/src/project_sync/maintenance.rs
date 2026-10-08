@@ -206,13 +206,19 @@ mod tests {
     }
 
     #[test]
-    fn production_declares_only_the_codex_restart_action() {
+    fn production_declares_confirmed_codex_app_actions() {
         let registry = MaintenanceRegistry::production();
         let codex = codex_key();
         let restart = registry
             .descriptor(&codex, &action("codex.app.restart"))
             .unwrap();
         assert!(restart.requires_confirmation);
+        assert!(
+            registry
+                .descriptor(&codex, &action("codex.app.close"))
+                .unwrap()
+                .requires_confirmation
+        );
     }
 
     #[test]
@@ -231,6 +237,10 @@ mod tests {
             )
             .unwrap_err();
         assert!(unconfirmed.contains("requires confirmation"));
+        assert!(registry
+            .execute(&repository, &request(codex_key(), "codex.app.close", false))
+            .unwrap_err()
+            .contains("requires confirmation"));
     }
 
     #[test]

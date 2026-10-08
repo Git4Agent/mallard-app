@@ -1030,6 +1030,8 @@ pub async fn delete_local_project_sessions(
         Ok(summary) => {
             let metadata = if summary.metadata_reset.is_some() {
                 "completed"
+            } else if summary.metadata_error.is_none() {
+                "skipped; existing metadata kept"
             } else {
                 "failed"
             };

@@ -164,15 +164,27 @@ impl SessionAdapter for CodexAdapter {
 
     fn maintenance_actions(&self) -> Vec<MaintenanceActionDescriptor> {
         let action = |id: &str| mallard_domain::ActionKey::parse(id).expect("static action key");
-        vec![MaintenanceActionDescriptor {
-            action_id: action("codex.app.restart"),
-            label: "Restart Codex App".to_string(),
-            description: "Relaunch the Codex desktop app so restored sessions appear.".to_string(),
-            scope: MaintenanceActionScope::AfterPull,
-            requires_confirmation: true,
-            read_only: false,
-            display_rank: 10,
-        }]
+        vec![
+            MaintenanceActionDescriptor {
+                action_id: action("codex.app.restart"),
+                label: "Restart Codex App".to_string(),
+                description: "Relaunch the Codex desktop app so restored sessions appear."
+                    .to_string(),
+                scope: MaintenanceActionScope::AfterPull,
+                requires_confirmation: true,
+                read_only: false,
+                display_rank: 10,
+            },
+            MaintenanceActionDescriptor {
+                action_id: action("codex.app.close"),
+                label: "Close Codex".to_string(),
+                description: "Closing Codex can interrupt running chats.".to_string(),
+                scope: MaintenanceActionScope::Profile,
+                requires_confirmation: true,
+                read_only: false,
+                display_rank: 20,
+            },
+        ]
     }
 
     fn project_open_commands(

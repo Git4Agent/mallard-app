@@ -138,6 +138,8 @@ import {
 } from "./pullReviewFlow";
 import {
   inventoryResources,
+  CODEX_DELETE_ERROR,
+  CODEX_DELETE_CLOSE_NOTICE,
   maintenanceActionFor,
   projectContentReviewRow,
   projectLabel,
@@ -434,6 +436,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
   /* A session action (open, resume, delete) that failed in an Activity or
      review list. The list page reports it and clears it when it goes. */
   const [sessionActionError, setSessionActionError] = useState<string | null>(null);
+  const [closingCodex, setClosingCodex] = useState(false);
   const [pushReviewStep, setPushReviewStep] = useState<SyncReviewStep>("history");
   const pushFilesScanned = pendingPush?.projectContentScanned ?? false;
   useEffect(() => {
@@ -3029,7 +3032,8 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         ...(result.metadata_error ? [`Local sync state: ${result.metadata_error}`] : []),
       ];
       if (failures.length > 0) {
-        setError(`${outcome} ${failures.join(" ")}`);
+        const offerClose = result.provider_errors.some((message) => message.startsWith("codex session ") && message.endsWith(CODEX_DELETE_ERROR));
+        setError(`${outcome} ${failures.join(" ")}${offerClose ? ` ${CODEX_DELETE_CLOSE_NOTICE}` : ""}`);
       } else {
         notify(`${outcome} All project session bindings and local sync state cleared.`);
       }
@@ -3039,6 +3043,36 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       if (hostWorkflowEpoch.current === workflowEpoch) setBusy(false);
     }
   }
+
+  async function closeCodex(): Promise<void> {
+    if (closingCodex) return;
+    const workflowEpoch = hostWorkflowEpoch.current;
+    setClosingCodex(true);
+    try {
+      const approved = await confirm("Closing Codex can interrupt running chats. Close the app?", {
+        title: "Close Codex", kind: "warning", okLabel: "Close Codex", cancelLabel: "Cancel",
+      });
+      if (!approved || hostWorkflowEpoch.current !== workflowEpoch) return;
+      const result = await projectSyncApi.executeProviderMaintenanceAction({
+        provider: "codex", action_id: "codex.app.close", arguments: {}, confirmed: true,
+      });
+      if (hostWorkflowEpoch.current !== workflowEpoch) return;
+      if (!result.ready) throw new Error(result.summary);
+      setError((current) => current?.includes(CODEX_DELETE_CLOSE_NOTICE) ? null : current);
+      setSessionActionError((current) => current?.includes(CODEX_DELETE_CLOSE_NOTICE) ? null : current);
+      notify(result.summary, "note");
+    } catch (reason) {
+      if (hostWorkflowEpoch.current === workflowEpoch) setError(errorMessage(reason));
+    } finally {
+      setClosingCodex(false);
+    }
+  }
+
+  const closeCodexButton = (
+    <button type="button" className="btn" disabled={busy || closingCodex} onClick={() => void closeCodex()}>
+      {closingCodex ? "Closing…" : "Close Codex"}
+    </button>
+  );
 
   // App commands in the path-bar overflow: Settings and a full reload.
   const appActions: PathBarMenuGroup[] = [{
@@ -3897,7 +3931,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       message: shellError,
       /* Shell-owned failures stay visible on every non-modal screen,
          including failures from destructive actions, until closed. */
-      action: catalogRemovalErrorTarget?.message === shellError ? (
+      action: shellError.includes(CODEX_DELETE_CLOSE_NOTICE) ? closeCodexButton : catalogRemovalErrorTarget?.message === shellError ? (
         <button
           type="button"
           className="btn"
@@ -3942,6 +3976,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       severity: "danger",
       message: listActionError,
       onDismiss: () => setSessionActionError(null),
+      action: listActionError.includes(CODEX_DELETE_CLOSE_NOTICE) ? closeCodexButton : undefined,
     });
   }
   if (notice) {

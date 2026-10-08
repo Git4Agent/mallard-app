@@ -1,6 +1,151 @@
 // Bulk deletion uses the same provider operations as a session-row deletion.
 #[test]
 #[cfg(unix)]
+fn codex_delete_32600_keeps_metadata_and_stops_bulk_deletion() {
+    use mallard_infrastructure::app_settings::{save_app_settings, AppSettings};
+    use std::os::unix::fs::PermissionsExt;
+    for bulk in [false, true] {
+        for code in [-32600, -32601] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = repository(&temp);
+            let storage = StorageId::parse("delete-retry-store").unwrap();
+            add_local_storage(&repo, &storage, &temp.path().join("store"));
+            let project = register(&repo);
+            let root = temp.path().join("project");
+            std::fs::create_dir_all(&root).unwrap();
+            let home = temp.path().join("codex");
+            let profile = add_profile(&repo, &codex_key(), &home);
+            save_project_binding_with_repository(
+                &repo,
+                SaveProjectBindingRequest {
+                    local_project_id: project.local_project_id.clone(),
+                    project_root: root.to_string_lossy().into_owned(),
+                    profile_ids: BTreeMap::from([(codex_key(), profile)]),
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+            save_project_link_with_repository(
+                &repo,
+                SaveProjectLinkRequest {
+                    local_project_id: project.local_project_id.clone(),
+                    storage_id: storage.clone(),
+                    pinned: true,
+                },
+            )
+            .unwrap();
+            let ids = [
+                "019f7798-5437-7632-9dbc-5b589cf68bf0",
+                "019f7798-5437-7632-9dbc-5b589cf68bf1",
+            ];
+            for id in ids {
+                write_codex_session(&home, id, &root);
+                let sessions = home.join("sessions/2026/07/22");
+                std::fs::rename(
+                    sessions.join(format!("rollout-{id}.jsonl")),
+                    sessions.join(format!("rollout-2026-07-22T00-00-00-{id}.jsonl")),
+                )
+                .unwrap();
+            }
+            let executable = temp.path().join("fake-codex");
+            std::fs::write(
+                &executable,
+                r#"#!/bin/sh
+read -r init
+printf '%s\n' '{"id":1,"result":{}}'
+read -r initialized
+read -r delete
+printf '%s\n' "$delete" >> requests
+printf '%s\n' '{"id":2,"error":{"code":ERROR_CODE,"message":"fixture"}}'
+"#
+                .replace("ERROR_CODE", &code.to_string()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            save_app_settings(
+                &repo,
+                &AppSettings {
+                    codex_cli_path: Some(executable.to_string_lossy().into_owned()),
+                    ..AppSettings::default()
+                },
+            )
+            .unwrap();
+            let service = ProjectSyncService::new(&repo);
+            let review = service
+                .prepare_push_review(&project.local_project_id, &storage)
+                .unwrap();
+            assert!(
+                service
+                    .push_reviewed(
+                        &project.local_project_id,
+                        &storage,
+                        PushApproval::recommended(&review, &storage)
+                    )
+                    .unwrap()
+                    .success
+            );
+            let bindings = repo.load_conversation_bindings().unwrap();
+            let selected = bindings
+                .bindings
+                .iter()
+                .find(|row| row.provider_thread_id.as_deref() == Some(ids[0]))
+                .unwrap();
+            let config = repo.load_config().unwrap();
+            let materials = repo.load_materializations().unwrap();
+            if bulk {
+                let result = delete_local_project_sessions_with_repository(
+                    &repo,
+                    &project.local_project_id,
+                    config.project(&project.local_project_id).unwrap().revision,
+                )
+                .unwrap();
+                assert_eq!(result.sessions_deleted, 0);
+                assert_eq!(result.sessions_failed, if code == -32600 { 1 } else { 2 });
+                assert_eq!(result.metadata_reset.is_none(), code == -32600);
+            } else {
+                let resource = conversation_resource_id(&codex_key(), &selected.thread_id).unwrap();
+                let result = delete_local_project_session_with_repository(
+                    &repo,
+                    &project.local_project_id,
+                    resource.as_str(),
+                )
+                .unwrap();
+                assert_eq!(
+                    result.provider_error,
+                    Some(format!("Codex provider request failed (code {code})."))
+                );
+                assert!(result.metadata_error.is_none());
+            }
+            assert_eq!(
+                std::fs::read_to_string(home.join("requests"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                if bulk && code != -32600 { 2 } else { 1 }
+            );
+            if code == -32600 {
+                assert_eq!(repo.load_conversation_bindings().unwrap(), bindings);
+                assert_eq!(repo.load_config().unwrap(), config);
+                assert_eq!(repo.load_materializations().unwrap(), materials);
+            } else {
+                assert!(!repo
+                    .load_conversation_bindings()
+                    .unwrap()
+                    .bindings
+                    .contains(selected));
+            }
+            assert_eq!(
+                std::fs::read_dir(home.join("sessions/2026/07/22"))
+                    .unwrap()
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn project_sessions_delete_preserves_other_projects_and_reports_partial_failures() {
     use std::os::unix::fs::{symlink, PermissionsExt};
     for failure in ["none", "provider", "unavailable", "metadata"] {

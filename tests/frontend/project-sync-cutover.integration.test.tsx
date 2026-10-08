@@ -7,6 +7,9 @@ import Icon from "../../src/components/Icons";
 import StartupLoadingScreen from "../../src/components/project-sync/StartupLoadingScreen";
 import SyncPathBar from "../../src/components/sync-review/SyncPathBar";
 import {
+  CODEX_DELETE_ERROR,
+  CODEX_DELETE_CLOSE_NOTICE,
+  localSessionDeleteError,
   orderStorages,
   repositoryFingerprintMatches,
   repositoryFingerprintsRequireAcknowledgement,
@@ -1060,6 +1063,14 @@ test("the connection flow has no separate Finish step or persisted schema change
   assert.match(dialog, /"Connect"/);
   assert.match(workspace, /await connectStorageBundle\(projectId, storageId, project\.bundle_id\)/, "same-bundle local storage links use the same connection flow");
   assert.equal(PROJECT_SYNC_SCHEMA, 1);
+});
+
+test("only a Codex deletion rejected with -32600 offers Close Codex", () => {
+  assert.equal(localSessionDeleteError("codex", { provider_error: CODEX_DELETE_ERROR, metadata_error: null }), CODEX_DELETE_CLOSE_NOTICE);
+  assert.equal(localSessionDeleteError("claude", { provider_error: CODEX_DELETE_ERROR, metadata_error: null }), `Session files: ${CODEX_DELETE_ERROR}`);
+  assert.equal(localSessionDeleteError("codex", { provider_error: "Codex provider request failed (code -32601).", metadata_error: "Disk full" }),
+    "Session files: Codex provider request failed (code -32601). Mallard binding: Disk full");
+  assert.equal(localSessionDeleteError("codex", { provider_error: null, metadata_error: null }), null);
 });
 
 test("project session deletion requires warning approval and replaces metadata-only reset", () => {

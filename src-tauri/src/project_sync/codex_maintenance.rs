@@ -1,4 +1,4 @@
-//! Codex post-Pull desktop restart.
+//! Codex app close and post-Pull restart.
 
 use super::maintenance::{
     action, MaintenanceActionRequest, MaintenanceActionResult, MaintenanceExecutor, Registration,
@@ -54,14 +54,40 @@ pub(super) fn restart_codex_app_after_pull_with_repository(
     })
 }
 
-/// Register the one Codex maintenance action.
+/// Register Codex app maintenance actions.
 pub(super) fn registration() -> Registration {
     Registration {
-        executors: vec![(
-            mallard_infrastructure::providers::codex::provider_key(),
-            action("codex.app.restart"),
-            Arc::new(RestartApp),
-        )],
+        executors: vec![
+            (
+                mallard_infrastructure::providers::codex::provider_key(),
+                action("codex.app.restart"),
+                Arc::new(RestartApp),
+            ),
+            (
+                mallard_infrastructure::providers::codex::provider_key(),
+                action("codex.app.close"),
+                Arc::new(CloseApp),
+            ),
+        ],
+    }
+}
+
+struct CloseApp;
+
+impl MaintenanceExecutor for CloseApp {
+    fn execute(
+        &self,
+        _repository: &LocalStateRepository,
+        request: &MaintenanceActionRequest,
+    ) -> Result<MaintenanceActionResult, String> {
+        mallard_infrastructure::codex_app_refresh::request_close()?;
+        Ok(MaintenanceActionResult {
+            provider: request.provider.clone(),
+            action_id: request.action_id.clone(),
+            ready: true,
+            summary: "Close requested. Try Delete again after Codex closes.".into(),
+            facts: BoundedConfigObject::empty(),
+        })
     }
 }
 
