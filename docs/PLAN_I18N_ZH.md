@@ -85,9 +85,15 @@ user-visible strings live in the desktop frontend and 1,650 in the website.
 - **What the user typed is never translated:** project, storage and
   repository names, repository and GitHub descriptions, session titles,
   commit subjects, branch names, paths, transcript content, skill, plugin
-  and pet names and descriptions.
+  and pet names and descriptions. Sample sessions in pictures and demos
+  count as typed (owner, 2026-10-08): the landing demo's and the docs'
+  session titles, prompts and agent replies stay in English as constants
+  (`landing/demoStory.ts`, `docs/pages.tsx`), never catalog keys.
 
 ### Glossary
+
+Owner, October 8: "Go with your recommendations" — every proposed term below is
+decided as written.
 
 | English | 中文 | |
 |---|---|---|
@@ -98,22 +104,31 @@ user-visible strings live in the desktop frontend and 1,650 in the website.
 | Claimed by another storage | 同时关联了 … | decided 2026-10-08: never 固定 |
 | Credential redaction | 密钥隐藏 | decided |
 | Mallard, Mallard Cloud, Codex, Claude, GitHub | unchanged | product names |
-| Session | 会话 | to confirm |
-| Repository | 仓库 | to confirm (GitHub Docs and JetBrains UI use 存储库) |
-| Storage | 存储 | to confirm |
-| Library (Catalog) | 资源库 | to confirm |
-| Subagent | 子代理 | to confirm |
-| Snapshot | 快照 | to confirm |
-| Draft | 草稿 | to confirm |
-| Release (make public) | 公开发布 | to confirm |
-| Project | 项目 | to confirm |
-| Prompt / Reply / Step | 提示词 / 回复 / 步骤 | to confirm (session page filters) |
-| Checkpoint (a commit made in a session) | 检查点 | to confirm |
-| Agent (a delegated run) | 代理 | to confirm; the row's word, beside Subagent 子代理 |
-| Brief / Report / Transcript | 任务说明 / 报告 / 对话记录 | to confirm |
-| async / sync / spawn | 异步 / 同步 / 派生 | to confirm (printed raw today) |
-| Fork | 复刻 | to confirm (GitHub's Chinese UI word) |
+| Session | 会话 | decided 2026-10-08 |
+| Repository | 仓库 | decided 2026-10-08 (GitHub Docs and JetBrains UI use 存储库) |
+| Storage | 存储 | decided 2026-10-08 |
+| Library (Catalog) | 资源库 | decided 2026-10-08 |
+| Subagent | 子代理 | decided 2026-10-08 |
+| Snapshot | 快照 | decided 2026-10-08 |
+| Draft | 草稿 | decided 2026-10-08 |
+| Release (make public) | 公开发布 | decided 2026-10-08 |
+| Project | 项目 | decided 2026-10-08 |
+| Prompt / Reply / Step | 提示词 / 回复 / 步骤 | decided 2026-10-08 (session page filters) |
+| Checkpoint (a commit made in a session) | 检查点 | decided 2026-10-08 |
+| Agent (a delegated run) | 代理 | decided 2026-10-08; the row's word, beside Subagent 子代理 |
+| Brief / Report / Transcript | 任务说明 / 报告 / 对话记录 | decided 2026-10-08 |
+| async / sync / spawn | 异步 / 同步 / 派生 | decided 2026-10-08 |
+| Fork | 复刻 | decided 2026-10-08 (GitHub's Chinese UI word) |
 | Bash, Read, Edit, web_search; model ids; effort (high, medium) | unchanged | the agent's own names, shown as recorded |
+| Website Reviews (a release request waiting on approval) | 审核 | decided 2026-10-08; Approve 批准, Decline 拒绝 — a different act from a Push/Pull 检查 |
+| Provider (Codex, Claude) | 提供方 | decided 2026-10-08 |
+| Item (a Library item) | 资源 (资源库资源) | decided 2026-10-08, as the desktop |
+| Download (a file) | 下载 | decided 2026-10-08: the same word as Pull; the object (下载 .zip) tells them apart |
+| Versions (the tab) | Version 列表 | decided 2026-10-08 |
+| Review a PR (landing use case) | 审查 PR | decided 2026-10-08 |
+| Super Admin | Super Admin | decided 2026-10-08: stays English, in prose too |
+| Feishu · App version · Requirements | 飞书 · 软件更新 · 依赖 | decided 2026-10-08 (desktop) |
+| Public on Mallard (landing section) | Mallard 上的公开仓库 | decided 2026-10-08 (owner wording) |
 
 ## Open decisions (recommendation first)
 
