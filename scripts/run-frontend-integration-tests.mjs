@@ -34,8 +34,12 @@ try {
     });
     outputs.push(outputFile);
   }
+  // The suite asserts English output. Node takes `navigator.languages` and its
+  // default number and date locale from the system's, so on a Chinese machine
+  // the app's System language would be Chinese; pin the run to English.
   const result = spawnSync(process.execPath, ["--test", ...outputs], {
     cwd: projectRoot,
+    env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
     stdio: "inherit",
   });
   if (result.error) throw result.error;

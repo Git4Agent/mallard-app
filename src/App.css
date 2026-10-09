@@ -10880,6 +10880,8 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
     "Segoe UI", var(--font-cjk), system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-display: "Baloo 2", var(--font-cjk), "Arial Rounded MT Bold", var(--font-sans);
+  --font-mono: "SFMono-Regular", "SF Mono", "Cascadia Mono", "Roboto Mono",
+    "Liberation Mono", Menlo, Consolas, var(--font-cjk), monospace;
   --type-3xs: 0.6875rem;
   --type-2xs: 0.6875rem;
 }

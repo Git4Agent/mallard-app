@@ -1,7 +1,19 @@
 # Simplified Chinese for Mallard — desktop and website
 
-Status: **desktop implemented October 8, 2026 (uncommitted); website not
-started.** Owner: "Looks good, implement the desktop first" — the
+Status: **desktop and website implemented October 8, 2026 (website not
+deployed).** Website: W1–W4 done in
+`mallardInternal/cloudflare/managed-cloud/web` — 9 namespaces (shell, common,
+format, hub, repository, content, session, landing, docs incl. ≈2.9k words of
+docs), zh-CN offered; the bar's Auto · English · 简体中文 switch, a Language row
+in ⋯, one button naming the other language on phones. Checks: 413 web tests
+(also under `LANG=zh_CN`), 233 Worker tests, `tsc`, `build:web`, the guard at 0
+over every translated source; 86 harness screens (`web/i18n-live.html`,
+`output/i18n-impl/harvest-site.mjs`) give English identical to HEAD except the
+switch and two plural fixes ("1 prompt · 1 reply · 1 tool call", "1 agent
+spawned"), and Chinese leaves only user data, transcripts, product names,
+service sentences, log lines, Super Admin and the Privacy body in English.
+Website-only terms: Reviews (release approval) = 审核; Provider = 提供方; an
+item = 资源 (as the desktop). Owner: "Looks good, implement the desktop first" — the
 recommended option of every open decision below was taken. Desktop D1–D8 are
 in the tree: i18next 26.4.2 + react-i18next 17.0.15 with plain string keys
 (measured: tsc 13.5 s with a 2.8k-key typed catalog vs 15.2 s for selectors);
@@ -203,9 +215,16 @@ user-visible strings live in the desktop frontend and 1,650 in the website.
 - System = the first entry of `navigator.languages` that is English or
   Chinese; Simplified Chinese (`zh`, `zh-CN`, `zh-Hans*`, `zh-SG`) → zh-CN;
   Traditional per decision 2; else English.
-- Website: the same key and rule in a module beside `web/src/theme.ts`; a
-  tiny inline script picks the boot screen's line before React loads (the
-  boot markup is written into `index.html` at build time).
+- Website: the same key and rule in `web/src/language.ts` beside `theme.ts`.
+  The site's CSP (`script-src 'self'`) refuses inline scripts, so a same-origin
+  classic script, `web/public/boot-language.js`, sets `<html lang>` in `<head>`
+  before the first paint; the boot markup carries one line per language and
+  `html:lang(zh)` picks it. A test runs the script against `resolveLanguage`
+  for a matrix of choices and browser lists, and pins its offered list.
+- Tests on both sides pin an English locale (desktop runner, website
+  `web/vitest.config.ts`): Node reports `navigator.languages` from the system
+  locale, and under `LANG=zh_CN.UTF-8` 341 of 682 desktop tests rendered
+  Chinese.
 
 ### Formatting
 
@@ -322,7 +341,12 @@ Desktop (mallard-app):
 
 Website (mallardInternal/cloudflare/managed-cloud):
 1. **W1 Foundations** — the same pieces, boot-screen line, bar and ⋯ menu
-   switch built but zh not offered.
+   switch built but zh not offered (the switch renders nothing while English
+   is the only language offered). Done: i18next 26.4.2 + react-i18next
+   17.0.15 pinned; 9 namespaces in `web/src/i18n`; `{{count, number}}` formats
+   like `toLocaleString()`; the guard is `scripts/i18n-guard.mjs` on oxc's
+   parser through `vite` (TypeScript 7 has no script API); TypeScript 7
+   rejects a missing, extra or unknown key.
 2. **W2 Hub** — home, repository tabs, session page, release and versions,
    settings, invitations, reviews, profile.
 3. **W3 Landing and docs** — headline, demo scene strings (`scene.ts`,
