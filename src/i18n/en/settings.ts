@@ -83,13 +83,22 @@ export default {
   /** One row per provider CLI; `provider` is the backend's display name. */
   cli: {
     label: "{{provider}} CLI",
-    selected: "Selected",
-    automatic: "Automatic",
+    pathLabel: "{{provider}} CLI path",
+    /** Where discovery found the CLI, tagged beside the row's name. */
+    custom: "Custom",
+    inheritedPath: "Mallard's PATH",
+    shellPath: "shell PATH",
+    standardLocation: "install folder",
     detecting: "Detecting…",
+    /** The empty field's placeholder: what automatic detection runs. */
+    autoDetected: "Auto-detected: {{path}}",
+    notFound: "Not found. Type the path to {{provider}}.",
+    emptyMeansAutomatic: "Leave empty to detect automatically",
+    pressEnter: "Press Enter to save.",
     testFailed: "Test failed: {{message}}",
     useAutomatic: "Use automatic",
-    choose: "Choose…",
-    chooseTitle: "Pick the {{provider}} executable this computer runs",
+    browse: "Browse…",
+    browseTitle: "Pick the {{provider}} executable this computer runs",
     pickerTitle: "Choose the {{provider}} executable",
     test: "Test",
     testTitle: "Run --version against a throwaway home",

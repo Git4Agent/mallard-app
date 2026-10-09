@@ -134,8 +134,9 @@ refresh asks for Automation permission; allow it. Mallard finds the Codex and Cl
 way your terminal does, including the `PATH` your shell sets: it asks your
 login shell once per launch, in the background, with
 `MALLARD_RESOLVING_ENVIRONMENT=1` set so a startup file can skip slow work
-when it sees it. If a machine keeps a CLI somewhere else, pick the executable
-under Settings › Agent CLIs, where **Test** runs its `--version`. Mallard
+when it sees it. If a machine keeps a CLI somewhere else, type or browse to
+the executable under Settings › Agent CLIs (an empty field means automatic),
+where **Test** runs its `--version`. Mallard
 downloads newer releases in the
 background; **Update** in the sidebar's version mark restarts into one, and
 quitting installs it for the next launch. **Automatic updates** can be

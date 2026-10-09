@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent CLI path — directions</title>
+    <style>
+      /* App.css locks html, body and #root for the app shell; #root scrolls. */
+      html, body { height: 100%; overflow: hidden !important; }
+      body { display: block !important; padding: 0 !important; background: var(--bg-0) !important; color: var(--text-0); }
+      #root { height: 100%; overflow-y: auto !important; }
+
+      /* ——— specimen chrome (not app CSS) ——————————————————————— */
+      .spec { max-width: 1720px; margin: 0 auto; padding: 16px 20px 80px; display: grid; gap: 12px; font: 13px/1.45 system-ui, sans-serif; }
+      .spec-title { margin: 0; font: 700 20px/1.2 system-ui; }
+      .spec-controls { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-card); }
+      .spec-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+      .spec-group > span { margin-right: 4px; color: var(--text-2); font-weight: 600; }
+      .spec-seg { padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-1); font: 600 12px/1.2 system-ui; cursor: pointer; }
+      .spec-seg[aria-pressed="true"] { background: var(--text-0); color: var(--bg-0); border-color: var(--text-0); }
+      .spec-col-title { margin: 0 0 2px; font: 700 14px/1.3 system-ui; }
+      .spec-seen { margin: 0 0 8px; color: var(--text-2); font-size: 12px; }
+      .spec-seen a { color: var(--text-1); }
+      .spec-against { color: var(--text-2); }
+      .spec-backend { color: var(--warning-text); font-weight: 600; }
+      .spec-grid { display: flex; flex-wrap: wrap; gap: 28px 26px; align-items: start; }
+      .spec-grid > [data-dir] { width: min-content; }
+
+      /* One frame: the Settings column at its real cap, the app's own page
+         classes around it so the cascade is the shipped one. */
+      .mk-frame { box-sizing: content-box; padding: 18px 22px 22px; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--bg-0); font-family: var(--font-sans); }
+      .mk-frame .sync-main.sync-settings-page { overflow: visible; padding: 0; height: auto; }
+      .mk-frame .sync-main.sync-settings-page .profile-links-section { max-width: none; }
+
+      /* Before: the real SettingsPage, every group but Agent CLIs hidden. */
+      .mk-before .sync-pathbar,
+      .mk-before .sync-settings-group:not([aria-labelledby="settings-cli"]) { display: none !important; }
+      .mk-before .profile-links-section > :not(.sync-settings-group) { display: none !important; }
+
+      /* ——— proposed app CSS (mock-only) ——————————————————————————— */
+
+      /* A path is a value, not a sentence: mono, selectable, wraps anywhere. */
+      .mk-path {
+        color: var(--text-1);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        line-height: var(--leading-snug);
+        overflow-wrap: anywhere;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      .mk-path.dim { color: var(--text-3); }
+
+      /* Where discovery found it: a quiet tag, not a sentence. */
+      .mk-src {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 7px;
+        border: 1px solid var(--border);
+        border-radius: var(--r-pill);
+        background: var(--surface-muted);
+        color: var(--text-2);
+        font-family: var(--font-sans);
+        font-size: var(--type-2xs);
+        font-weight: var(--weight-medium);
+        white-space: nowrap;
+      }
+      .mk-src.custom { color: var(--text-0); border-color: var(--border-mid); }
+      .mk-ver { color: var(--success-text); font-family: var(--font-mono); font-size: var(--type-2xs); white-space: nowrap; display: inline-flex; gap: 3px; align-items: center; }
+      .mk-bad { color: var(--danger-text); font-size: var(--type-2xs); }
+
+      /* A stacked row: name and tags over the value, buttons on the name's
+         line. The value line spans the row. */
+      .sync-settings-row.mk-stack {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px 16px;
+      }
+      .mk-stack > .mk-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+      .mk-stack > .mk-head > strong { color: var(--text-0); font-size: var(--type-sm); font-weight: var(--weight-semibold); }
+      .mk-stack > .sync-settings-control { justify-self: end; }
+      .mk-stack > .mk-body { grid-column: 1 / -1; min-width: 0; display: grid; gap: 5px; }
+      .mk-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--text-2); font-size: var(--type-2xs); }
+      .mk-meta .btn-link { color: var(--text-0); font-size: var(--type-2xs); text-decoration: underline; text-underline-offset: 2px; }
+
+      /* The field: ProjectFolderField's own classes, at Settings' width. */
+      .mk-body .sync-project-folder-field { max-width: none; }
+      .mk-body .sync-project-folder-field .sync-profile-select-row .btn { white-space: nowrap; }
+      .mk-body .sync-setup-path-hint { padding-top: 0; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; }
+      .mk-body .sync-setup-path-hint .btn-link { color: var(--text-0); font-size: var(--type-2xs); text-decoration: underline; text-underline-offset: 2px; }
+      /* WebKit's own placeholder grey is ~1.9:1; the app's quiet ink is 5.99:1
+         light and 7.72:1 dark on the field. */
+      .mk-body .sync-project-folder-field input::placeholder { color: var(--text-3); opacity: 1; }
+
+      /* B: the Default/Custom pop-up the project setup's agent row uses. */
+      .mk-pick { display: grid; grid-template-columns: minmax(130px, 170px) minmax(0, 1fr) auto; gap: 7px; align-items: center; }
+      .mk-pick > .mk-path { padding-left: 2px; }
+      .mk-body .sync-select-shell > select { height: 33px; border: 1px solid var(--control-border); border-radius: 7px; background: var(--surface-row); color: var(--text-0); font: inherit; font-size: var(--type-sm); }
+      .mk-pick > .sync-project-folder-field { grid-column: 2 / -1; }
+
+      /* E: the reset sits inside the field's line, after it. */
+      .mk-reset { color: var(--text-1); }
+
+      /* F: a list under the field. */
+      .mk-combo { position: relative; }
+      .mk-combo-list {
+        position: absolute;
+        z-index: 5;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        margin: 0;
+        padding: 4px;
+        list-style: none;
+        border: var(--box-border);
+        border-radius: 10px;
+        background: var(--surface-card);
+        box-shadow: var(--shadow-card);
+      }
+      .mk-combo-list button {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 8px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--text-0);
+        text-align: left;
+        cursor: pointer;
+      }
+      .mk-combo-list button:hover,
+      .mk-combo-list button[aria-selected="true"] { background: var(--surface-row-hover); }
+      .mk-combo-list .mk-combo-other { color: var(--text-1); font-size: var(--type-xs); font-weight: var(--weight-medium); }
+      .mk-combo-list li + li.mk-sep { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
+      .mk-combo .sync-profile-select-row > .btn.mk-caret { padding: 0 8px; }
+
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // ?ui=zh-CN|en: the app's own catalogs; Chinese by default, as the
+      // owner runs it.
+      try {
+        const ui = new URLSearchParams(location.search).get("ui") || "zh-CN";
+        localStorage.setItem("mallard.language", ui);
+      } catch {}
+    </script>
+    <script type="module" src="/mockups/cli-path-mockup.tsx"></script>
+  </body>
+</html>

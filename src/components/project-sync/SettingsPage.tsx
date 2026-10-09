@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useState, type ReactNode } from "react";
 import type { ParseKeys } from "i18next";
 import { confirm, open as openFile } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -6,6 +6,7 @@ import type {
   ActivityLogPolicy,
   ActivityLogStats,
   AppSettings,
+  CliSelectionSource,
   LocalStateSummary,
   ProviderCliStatus,
   ProviderDescriptor,
@@ -149,22 +150,47 @@ const rowId = (key: SettingKey) => `settings-row-${key}`;
 const cliSettingKey = (provider: ProviderDescriptor): TuningKey =>
   `${provider.key}_cli_path` as TuningKey;
 
-/** What a provider's CLI row says: where the CLI is, then the test result. */
-export function cliStatusLine(
-  status: ProviderCliStatus | null | undefined,
-  test: CliTestResult | undefined,
-): string {
-  const mode = status?.selected_path ? t("settings:cli.selected") : t("settings:cli.automatic");
-  const where = !status
-    ? t("settings:cli.detecting")
-    : status.error
-      ? `${mode} · ${status.error}`
-      : `${mode} · ${status.launcher}`;
-  if (!test) return where;
-  return `${where} · ${test.kind === "version" ? t("common:version", { version: test.text }) : t("settings:cli.testFailed", { message: test.text })}`;
+const CLI_SOURCE_LABELS: Record<CliSelectionSource, ParseKeys<"settings">> = {
+  selected: "cli.custom",
+  inherited_path: "cli.inheritedPath",
+  shell_path: "cli.shellPath",
+  standard_location: "cli.standardLocation",
+};
+
+/** The tag beside a CLI row's name: where the CLI it runs came from. */
+export function cliSourceLabel(status: ProviderCliStatus | null | undefined): string | null {
+  if (!status) return t("settings:cli.detecting");
+  if (status.selected_path) return t("settings:cli.custom");
+  return status.source ? t(CLI_SOURCE_LABELS[status.source], { ns: "settings" }) : null;
 }
 
-type CliTestResult = { kind: "version" | "failed"; text: string };
+/** What an empty CLI path field says: the CLI automatic detection runs,
+ *  or, with a path saved, what emptying the field does. */
+export function cliPlaceholder(status: ProviderCliStatus | null | undefined, provider: string): string {
+  if (!status) return t("settings:cli.detecting");
+  if (status.selected_path) return t("settings:cli.emptyMeansAutomatic");
+  if (status.launcher) return t("settings:cli.autoDetected", { path: status.launcher });
+  return t("settings:cli.notFound", { provider });
+}
+
+/** The one line under a CLI path field, loudest fact first: an unsaved
+ *  edit, then why nothing runs, then a failed test. A saved path always
+ *  offers the way back to automatic. */
+export function cliHint(
+  status: ProviderCliStatus | null | undefined,
+  test: CliTestResult | undefined,
+  dirty: boolean,
+): { tone: "bad" | null; text: string | null; useAutomatic: boolean } | null {
+  if (dirty) return { tone: null, text: t("settings:cli.pressEnter"), useAutomatic: false };
+  const useAutomatic = Boolean(status?.selected_path);
+  if (status?.error) return { tone: "bad", text: status.error, useAutomatic };
+  if (test?.kind === "failed") {
+    return { tone: "bad", text: t("settings:cli.testFailed", { message: test.text }), useAutomatic };
+  }
+  return useAutomatic ? { tone: null, text: null, useAutomatic } : null;
+}
+
+export type CliTestResult = { kind: "version" | "failed"; text: string };
 
 function formatOldest(timestamp?: number | null): string | null {
   if (!timestamp) return null;
@@ -259,6 +285,112 @@ function SettingSwitch({
       />
       <span className="sync-settings-state" aria-hidden="true">{checked ? t("switch.on") : t("switch.off")}</span>
     </label>
+  );
+}
+
+/**
+ * One provider's CLI as a path field: empty means automatic, and the
+ * placeholder names what automatic detection runs. Like the project folder
+ * field it never saves as it is typed — every prefix of a path is an
+ * absolute path too — so Enter saves the field and Browse saves its pick.
+ */
+function CliPathRow({
+  provider,
+  setting,
+  savedPath,
+  status,
+  test,
+  receipt,
+  disabled,
+  testDisabled,
+  onSave,
+  onBrowse,
+  onTest,
+}: {
+  provider: ProviderDescriptor;
+  setting: SettingKey;
+  /** The saved path as settings hold it; null is automatic. */
+  savedPath: string | null;
+  status: ProviderCliStatus | null | undefined;
+  test: CliTestResult | undefined;
+  receipt: RowReceipt | null;
+  disabled: boolean;
+  testDisabled: boolean;
+  onSave: (path: string | null) => void;
+  onBrowse: () => void;
+  onTest: () => void;
+}) {
+  const { t } = useTranslation(["settings", "common"]);
+  const inputId = useId();
+  const hintId = `${inputId}-hint`;
+  const [draft, setDraft] = useState(savedPath ?? "");
+  // A save from Browse or Use automatic replaces the text; a refused save
+  // leaves the saved path, and so the typed text, as it was.
+  useEffect(() => setDraft(savedPath ?? ""), [savedPath]);
+  const typed = draft.trim();
+  const dirty = typed !== (savedPath ?? "");
+  const source = cliSourceLabel(status);
+  const hint = cliHint(status, test, dirty);
+  const name = provider.display_name;
+  return (
+    <div className="sync-settings-row settings-cli-row" id={rowId(setting)}>
+      <div className="settings-cli-head">
+        <strong>{t("cli.label", { provider: name })}</strong>
+        {source && <span className={`settings-cli-source${status?.selected_path ? " custom" : ""}`}>{source}</span>}
+        {test?.kind === "version" && (
+          <span className="settings-cli-version" title={t("common:version", { version: test.text })}>
+            <Icon name="check" size={11} />
+            {test.text}
+          </span>
+        )}
+      </div>
+      <div className="sync-settings-control">
+        <SettingReceipt receipt={receipt} />
+        {/* Test runs the saved CLI, so it waits while the field says otherwise. */}
+        <button type="button" className="btn" disabled={testDisabled || dirty} onClick={onTest} title={t("cli.testTitle")}>
+          {t("cli.test")}
+        </button>
+      </div>
+      <div className="sync-project-folder-field settings-cli-field">
+        <label htmlFor={inputId} className="sync-visually-hidden">{t("cli.pathLabel", { provider: name })}</label>
+        <div className="sync-profile-select-row">
+          <input
+            id={inputId}
+            value={draft}
+            placeholder={cliPlaceholder(status, name)}
+            // Read-only rather than disabled while a save runs, so Enter
+            // keeps the focus in the field.
+            readOnly={disabled}
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+            autoComplete="off"
+            aria-invalid={hint?.tone === "bad" || undefined}
+            aria-describedby={hint ? hintId : undefined}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              if (dirty && !disabled) onSave(typed || null);
+            }}
+          />
+          <button type="button" className="btn" disabled={disabled} onClick={onBrowse} title={t("cli.browseTitle", { provider: name })}>
+            <Icon name="folder" size={13} /> {t("cli.browse")}
+          </button>
+        </div>
+        {hint && (
+          /* Polite: it changes as the field is typed in. */
+          <p id={hintId} className={`sync-setup-path-hint${hint.tone ? ` ${hint.tone}` : ""}`} aria-live="polite">
+            {hint.text}
+            {hint.useAutomatic && (
+              <button type="button" className="btn-link" disabled={disabled} onClick={() => onSave(null)}>
+                {t("cli.useAutomatic")}
+              </button>
+            )}
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -457,23 +589,25 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
     return () => { cancelled = true; };
   }, [inspectCli]);
 
-  /** Settings stores the path as picked; discovery re-reads it on the next action. */
-  const chooseCli = async (provider: ProviderDescriptor) => {
-    const picked = await openFile({
-      multiple: false,
-      directory: false,
-      title: t("cli.pickerTitle", { provider: provider.display_name }),
-    });
-    if (typeof picked !== "string") return;
-    await applyTuning({ [cliSettingKey(provider)]: picked });
+  /** Settings stores the path as typed or picked, null for automatic;
+      discovery re-reads it on the next action. */
+  const saveCliPath = async (provider: ProviderDescriptor, path: string | null) => {
+    await applyTuning({ [cliSettingKey(provider)]: path });
     setCliTests((current) => { const next = { ...current }; delete next[provider.key]; return next; });
     void inspectCli(provider);
   };
 
-  const useAutomaticCli = async (provider: ProviderDescriptor) => {
-    await applyTuning({ [cliSettingKey(provider)]: null });
-    setCliTests((current) => { const next = { ...current }; delete next[provider.key]; return next; });
-    void inspectCli(provider);
+  const chooseCli = async (provider: ProviderDescriptor) => {
+    const status = cliStatus[provider.key];
+    const picked = await openFile({
+      multiple: false,
+      directory: false,
+      title: t("cli.pickerTitle", { provider: provider.display_name }),
+      // Opens beside the CLI in use: the panel hides dot-folders such as ~/.nvm.
+      defaultPath: status?.selected_path ?? status?.launcher ?? undefined,
+    });
+    if (typeof picked !== "string") return;
+    await saveCliPath(provider, picked);
   };
 
   /** Only `--version`, against throwaway homes; the version shows only after this. */
@@ -1008,47 +1142,24 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
               {(cliProviders ?? []).map((provider) => {
                 const key = cliSettingKey(provider);
                 const status = cliStatus[provider.key];
+                // The saved value, not the pending one: a refused save must
+                // leave the typed text in the field.
+                const saved = tuning?.[key];
                 return (
-                  <SettingsRow
+                  <CliPathRow
                     key={provider.key}
-                    label={t("cli.label", { provider: provider.display_name })}
+                    provider={provider}
                     setting={key}
+                    savedPath={typeof saved === "string" ? saved : null}
+                    status={status}
+                    test={cliTests[provider.key]}
                     receipt={receiptFor(key)}
-                    control={(
-                      <>
-                        {status?.selected_path && (
-                          <button
-                            type="button"
-                            className="btn"
-                            disabled={tuningBusy || !tuning}
-                            onClick={() => void useAutomaticCli(provider)}
-                          >
-                            {t("cli.useAutomatic")}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={tuningBusy || !tuning}
-                          onClick={() => void chooseCli(provider)}
-                          title={t("cli.chooseTitle", { provider: provider.display_name })}
-                        >
-                          {t("cli.choose")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={cliBusy || !status?.executable}
-                          onClick={() => void testCli(provider)}
-                          title={t("cli.testTitle")}
-                        >
-                          {t("cli.test")}
-                        </button>
-                      </>
-                    )}
-                  >
-                    {cliStatusLine(status, cliTests[provider.key])}
-                  </SettingsRow>
+                    disabled={tuningBusy || !tuning}
+                    testDisabled={cliBusy || !status?.executable}
+                    onSave={(path) => void saveCliPath(provider, path)}
+                    onBrowse={() => void chooseCli(provider)}
+                    onTest={() => void testCli(provider)}
+                  />
                 );
               })}
               <SettingsRow

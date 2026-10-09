@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import SettingsPage, { cliStatusLine, languageOptions } from "../../src/components/project-sync/SettingsPage";
+import SettingsPage, { cliHint, cliPlaceholder, cliSourceLabel, languageOptions } from "../../src/components/project-sync/SettingsPage";
 import SyncPathBar from "../../src/components/sync-review/SyncPathBar";
 import type { AppUpdates } from "../../src/components/AppUpdater";
 import { i18n, OFFERED_LANGUAGES } from "../../src/i18n";
@@ -298,7 +298,7 @@ test("every export-shaping setting says that changing it re-uploads synced sessi
   }
 });
 
-test("each agent CLI row reads the selection policy, saves a chosen path as app settings, and tests only --version", () => {
+test("each agent CLI row is a path field: typed or browsed, saved on Enter as app settings, tested only with --version", () => {
   const page = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
   const api = readFileSync("src/components/project-sync/api.ts", "utf8");
   const types = readFileSync("src/types.ts", "utf8");
@@ -308,33 +308,67 @@ test("each agent CLI row reads the selection policy, saves a chosen path as app 
   const discovery = readFileSync("crates/mallard-infrastructure/src/cli_discovery.rs", "utf8");
 
   // One row per provider that declares a CLI, never a fixed provider list;
-  // the path is one more app-settings field saved through the same handler.
+  // the path is one more app-settings field saved through the same handler,
+  // typed, browsed, or cleared back to automatic (null).
   assert.match(page, /\.filter\(\(provider\) => provider\.has_cli\)/);
-  assert.match(page, /applyTuning\(\{ \[cliSettingKey\(provider\)\]: picked \}\)/);
-  assert.match(page, /applyTuning\(\{ \[cliSettingKey\(provider\)\]: null \}\)/);
-  assert.match(page, /openFile\(\{\s*multiple: false,\s*directory: false,/);
+  assert.match(page, /applyTuning\(\{ \[cliSettingKey\(provider\)\]: path \}\)/);
+  assert.match(page, /await saveCliPath\(provider, picked\);/);
+  assert.match(page, /onClick=\{\(\) => onSave\(null\)\}/);
+  // Browse opens beside the CLI in use: the macOS panel hides ~/.nvm.
+  assert.match(page, /openFile\(\{\s*multiple: false,\s*directory: false,[\s\S]*?defaultPath: status\?\.selected_path \?\? status\?\.launcher \?\? undefined,/);
+  // The field never saves as it is typed or on blur — `/Users` is absolute
+  // and would save — only on Enter, trimmed, empty meaning automatic.
+  const row = page.slice(page.indexOf("function CliPathRow("), page.indexOf("export default function SettingsPage("));
+  assert.ok(row.length > 0);
+  assert.doesNotMatch(row, /onBlur/);
+  assert.match(row, /if \(event\.key !== "Enter"\) return;/);
+  assert.match(row, /if \(dirty && !disabled\) onSave\(typed \|\| null\);/);
+  assert.match(row, /readOnly=\{disabled\}/);
+  // Test resolves the saved CLI, never the field's unsaved text.
+  assert.match(row, /disabled=\{testDisabled \|\| dirty\}/);
+  // The field follows the saved value, never the pending one: a refused save
+  // must leave the typed text in place.
+  assert.match(page, /const saved = tuning\?\.\[key\];/);
+  assert.match(page, /savedPath=\{typeof saved === "string" \? saved : null\}/);
   assert.match(types, /codex_cli_path: string \| null;/);
   assert.match(types, /claude_cli_path: string \| null;/);
   assert.match(types, /has_cli: boolean;/);
   assert.doesNotMatch(types, /ProviderCliLauncher|cli_launcher/);
 
-  // The row's sentence: mode, then where, then the test's answer.
-  const detecting = cliStatusLine(null, undefined);
-  assert.equal(detecting, "Detecting…");
+  // The tag says where the CLI came from; the empty field's placeholder
+  // names what automatic detection runs; one hint line, loudest first.
   const found = {
     provider: "codex", selected_path: null, launcher: "/opt/homebrew/bin/codex",
     executable: "/opt/homebrew/Cellar/codex/0.156.0/bin/codex", source: "inherited_path" as const, error: null,
   };
-  assert.equal(cliStatusLine(found, undefined), "Automatic · /opt/homebrew/bin/codex");
-  assert.equal(cliStatusLine(found, { kind: "version", text: "0.156.0" }), "Automatic · /opt/homebrew/bin/codex · Version 0.156.0");
-  assert.equal(
-    cliStatusLine({ ...found, selected_path: "/Users/dev/bin/codex", launcher: "/Users/dev/bin/codex", source: "selected" }, { kind: "failed", text: "Codex did not report a version." }),
-    "Selected · /Users/dev/bin/codex · Test failed: Codex did not report a version.",
+  const saved = { ...found, selected_path: "/Users/dev/bin/codex", launcher: "/Users/dev/bin/codex", source: "selected" as const };
+  const gone = { ...saved, launcher: null, executable: null, source: null, error: "Selected Codex executable is unavailable. Choose it again in Settings." };
+  const missing = { ...found, launcher: null, executable: null, source: null, error: "Codex CLI not found. Install Codex, or choose its executable in Settings." };
+
+  assert.equal(cliSourceLabel(null), "Detecting…");
+  assert.equal(cliSourceLabel(found), "Mallard's PATH");
+  assert.equal(cliSourceLabel({ ...found, source: "shell_path" }), "shell PATH");
+  assert.equal(cliSourceLabel({ ...found, source: "standard_location" }), "install folder");
+  assert.equal(cliSourceLabel(saved), "Custom");
+  assert.equal(cliSourceLabel(gone), "Custom");
+  assert.equal(cliSourceLabel(missing), null);
+
+  assert.equal(cliPlaceholder(null, "Codex"), "Detecting…");
+  assert.equal(cliPlaceholder(found, "Codex"), "Auto-detected: /opt/homebrew/bin/codex");
+  assert.equal(cliPlaceholder(missing, "Codex"), "Not found. Type the path to Codex.");
+  assert.equal(cliPlaceholder(saved, "Codex"), "Leave empty to detect automatically");
+
+  assert.equal(cliHint(found, undefined, false), null);
+  assert.deepEqual(cliHint(found, undefined, true), { tone: null, text: "Press Enter to save.", useAutomatic: false });
+  assert.deepEqual(cliHint(gone, undefined, true), { tone: null, text: "Press Enter to save.", useAutomatic: false });
+  assert.deepEqual(cliHint(saved, undefined, false), { tone: null, text: null, useAutomatic: true });
+  assert.deepEqual(cliHint(gone, undefined, false), { tone: "bad", text: gone.error, useAutomatic: true });
+  assert.deepEqual(cliHint(missing, undefined, false), { tone: "bad", text: missing.error, useAutomatic: false });
+  assert.deepEqual(
+    cliHint(saved, { kind: "failed", text: "Codex did not report a version." }, false),
+    { tone: "bad", text: "Test failed: Codex did not report a version.", useAutomatic: true },
   );
-  assert.equal(
-    cliStatusLine({ ...found, selected_path: "/Users/dev/bin/codex", launcher: null, executable: null, source: null, error: "Selected Codex executable is unavailable. Choose it again in Settings." }, undefined),
-    "Selected · Selected Codex executable is unavailable. Choose it again in Settings.",
-  );
+  assert.equal(cliHint(found, { kind: "version", text: "0.156.0" }, false), null);
 
   assert.match(api, /invoke<ProviderCliStatus>\("inspect_provider_cli", \{ provider \}\)/);
   assert.match(api, /invoke<string>\("test_provider_cli", \{ provider \}\)/);

@@ -5523,6 +5523,77 @@ span.sync-path-crumb {
 .sync-settings-control .btn { min-height: 32px; font-size: var(--type-xs); }
 .sync-settings-control .danger { color: var(--danger-text); }
 
+/* An agent CLI row stacks: its name and tags over the path, Test on the
+   name's line, the field and its one hint line across the row. A path is a
+   value the user types, so the field is the project folder field. */
+.sync-settings-row.settings-cli-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px 16px;
+}
+
+.settings-cli-head {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.settings-cli-head > strong {
+  color: var(--text-0);
+  font-size: var(--type-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.settings-cli-row > .sync-settings-control { justify-self: end; }
+
+.settings-cli-row > .settings-cli-field {
+  grid-column: 1 / -1;
+  max-width: none;
+}
+
+.settings-cli-field .sync-profile-select-row .btn { white-space: nowrap; }
+
+/* The placeholder names the CLI automatic detection runs, so it must read:
+   WebKit's own placeholder grey is ~1.9:1 on the field, the quiet ink 5.99:1
+   light and 7.72:1 dark. */
+.settings-cli-field input::placeholder {
+  color: var(--text-3);
+  opacity: 1;
+}
+
+/* Where the CLI came from: a quiet tag beside the name, not a sentence. */
+.settings-cli-source {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.settings-cli-source.custom {
+  color: var(--text-0);
+  border-color: var(--border-mid);
+}
+
+/* The last Test's answer: the version alone, a check before it. */
+.settings-cli-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--success-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-2xs);
+  white-space: nowrap;
+}
+
 /* Proof that a row saved. Every row applies the moment it changes, so the
    stamp beside the control is the receipt: Saved; Saving… for a write still
    running after 400 ms; Not saved when the write failed. The skin tweens
