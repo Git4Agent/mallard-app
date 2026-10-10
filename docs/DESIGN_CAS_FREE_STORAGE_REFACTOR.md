@@ -1,5 +1,9 @@
 # Mallard: CAS-free storage publication — implementation plan
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: Implemented, steps 1 to 7, 9 and 10 (the claim of decision 11 and
   section 7.2, and the publishing part of decision 12, both on September 22)
   and the automated part of step 8; the live two-machine pass on R2 and on

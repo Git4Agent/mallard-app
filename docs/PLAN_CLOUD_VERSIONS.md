@@ -1,5 +1,9 @@
 # Plan: versions of a Mallard Cloud repository
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: implemented on 2026-10-05 in both trees, uncommitted and not
   deployed. *What was built* at the end says where the code differs from
   this text. It replaces `PLAN_CLOUD_PRIVATE_REVISIONS.md`, the first text

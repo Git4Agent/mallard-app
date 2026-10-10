@@ -1,5 +1,9 @@
 # Mallard: push again instead of reset — implementation plan
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: Implemented and committed: steps 1 to 10 on September 20, steps 11 to 14 on September 22. Step 11 fixed a gap found at review on September 22: after another computer's clear, the project's files read "unknown" and held the Push (section 4.7). Steps 12 and 13 applied the decision of September 22 (CAS-free plan, decision 12: recovery is a user action), which withdrew two built behaviors, the rollback of R3 and the Library reset at load of B1 and B2; both are the read rule of section 4. None of steps 11 to 14 needed the claims of the CAS-free plan. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026, against the working tree
 - Scope: the desktop app — how Push and Pull behave when this computer's sync record cannot be used, and when two computers race

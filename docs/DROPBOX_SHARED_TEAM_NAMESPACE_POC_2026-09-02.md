@@ -1,5 +1,9 @@
 # Dropbox shared namespace POC
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Updated: 2026-09-07.
 
 The standalone POC tests two authorized users against one existing writable

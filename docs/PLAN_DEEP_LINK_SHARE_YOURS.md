@@ -1,5 +1,9 @@
 # Plan: Share yours — a link from the listing into Mallard
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 **Status (2026-10-03): implemented on both sides**, uncommitted and not
 deployed. The owner took all four recommendations at the end: straight to
 the page, the kind chip steers, **Open Mallard** is the primary, and the band

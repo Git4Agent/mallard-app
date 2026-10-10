@@ -1,5 +1,9 @@
 # Pull carries the same 512 MB limit as Push
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: implemented 2026-09-26 (see "What landed")
 - Date: 2026-09-26
 - Scope: the project Pull review and Pull apply. Rust, the IPC DTOs, the

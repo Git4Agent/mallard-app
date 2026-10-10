@@ -1,5 +1,9 @@
 # Claude SDK session deletion POC
 
+> Historical reference: The standalone deletion probe was removed on 2026-10-09.
+> The run commands below no longer work in this checkout. Git history retains
+> the probe; the results below describe its original run.
+
 Date: 2026-09-26
 
 The published TypeScript SDK can delete one local session and its session

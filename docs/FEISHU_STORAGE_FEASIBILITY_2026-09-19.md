@@ -1,5 +1,9 @@
 # Feishu Drive storage under Mallard's current publication model
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Research date: 2026-09-19. Scope: Feishu China Drive file storage.
 
 Follow-up: see the [2026-09-23 CAS-free rerun](FEISHU_CAS_FREE_POC_2026-09-23.md)

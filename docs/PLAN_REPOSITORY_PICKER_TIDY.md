@@ -1,5 +1,9 @@
 # Repository picker: the empty box and the stacked fields
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: **B implemented 2026-09-27** (see section 4). The mock
 (`repo-picker-mockup.html` + `src/repo-picker-mockup.tsx`) showed Before, A,
 B and C across eight scenes. Its Before column drove the shipped two-field

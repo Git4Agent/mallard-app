@@ -1,5 +1,9 @@
 # Google Drive with non-CAS publication
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Research and local verification: 19 September 2026.
 
 **Decision:** Google Drive is a feasible experimental storage adapter. The

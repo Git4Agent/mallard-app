@@ -84,12 +84,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Departure Mono
+## Baloo 2
 
-Mallard bundles Departure Mono by Helena Zhang, from
-[departuremono.com](https://departuremono.com). It is licensed under the SIL
-Open Font License 1.1. The complete license text is included at
-`public/fonts/DepartureMono-OFL.txt`.
+Mallard bundles Baloo 2 by Ek Type. The font is licensed under the SIL Open
+Font License 1.1. The complete license text is included at
+`public/fonts/Baloo2-OFL.txt`.
 
 ## Compact pixel icon design mockups
 

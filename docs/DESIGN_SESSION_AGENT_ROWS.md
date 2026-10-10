@@ -1,5 +1,9 @@
 # Session detail: agent rows
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Date: 2026-09-09. Status: implemented (uncommitted). Clean cutover: no
 migration, no legacy path; local state and cloud schemas stay at 1. The
 timeline parser versions moved (Claude 1 → 2, Codex 4 → 5), so cached

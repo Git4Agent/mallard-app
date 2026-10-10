@@ -1,5 +1,9 @@
 # Plan: Open in Mallard — where a link from the website lands
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 **Status (2026-10-02): implemented**, uncommitted. The owner picked on
 `mockups/deep-link-mockup.html`: **B · Sheet first**; each account on the link's host
 is asked; a link waits while an operation, a review or a dialog is open;

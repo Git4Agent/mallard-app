@@ -1,5 +1,9 @@
 # Mallard: a Pull applies the version it reviewed — implementation plan
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: Implemented on September 22, 2026, steps 1 to 9, and committed. The live two-computer pass on R2 and on Dropbox is still to be run and recorded. *Implementation notes* at the end list what differs from the plan
 - Last reviewed: September 22, 2026
 - Scope: the desktop app — how a Pull behaves when the storage changes after its review or while it applies, what it keeps when it cannot finish, and what it asks of the user

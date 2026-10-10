@@ -14,7 +14,7 @@ fn claude_svg_widget_survives_push_pull_and_cloud_preview() {
     let source_home = temp.path().join("source-claude");
     bind_and_link_claude_replica(&repo, &source, &storage, &source_root, &source_home);
     let parent = "11111111-1111-4111-8111-111111111111";
-    let svg = include_str!("../../../poc/claude-widgets/web/diagram.svg");
+    let svg = include_str!("../../../tests/fixtures/claude-widgets/diagram.svg");
     let mermaid = "Here is the diagram.\n\n```mermaid\nflowchart TD\nA[Portable 🦆] --> B[Local and Cloud]\n```";
     let mut bytes = claude_test_transcript(
         parent,
@@ -295,8 +295,8 @@ fn mermaid_native_ui_fixture() {
     let claude_home = root.join("claude");
     bind_and_link_claude_replica(&repo, &project, &storage, &project_root, &claude_home);
     let parent = "11111111-1111-4111-8111-111111111111";
-    let diagram = include_str!("../../../poc/mermaid-flowcharts/supplied-flowchart.mmd");
-    let svg = include_str!("../../../poc/mermaid-flowcharts/child-transcripts.svg");
+    let diagram = include_str!("../../../tests/fixtures/mermaid-flowcharts/supplied-flowchart.mmd");
+    let svg = include_str!("../../../tests/fixtures/mermaid-flowcharts/child-transcripts.svg");
     let text =
         format!("The saved flowchart follows the session theme.\n\n```mermaid\n{diagram}```");
     let mut bytes = claude_test_transcript(

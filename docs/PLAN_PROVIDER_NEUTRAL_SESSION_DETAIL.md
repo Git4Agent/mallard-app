@@ -325,27 +325,9 @@ of bordered message cards.
 
 #### 4.1.2 Prototype images
 
-These images are layout and visual-direction references, not alternate theme
-definitions. Implementation must consume semantic CSS tokens instead of
-copying sampled pixels from the PNGs.
-
-**Prototype correction:** the current PNGs predate D14 and D15. Their
-first-paint tool rows and bordered response bodies are superseded by this plan.
-Use them for shell, rail, inspector, spacing, and RetroTheme direction only;
-the next prototype revision and implementation must show tool-call summaries
-with individual rows hidden initially and assistant responses as open prose.
-
-**Wide session timeline**
-
-![Wide Mallard session-detail timeline](prototypes/session-detail/01-wide-session-timeline.png)
-
-**Expanded tool call**
-
-![Mallard session detail with an expanded Read tool call](prototypes/session-detail/02-expanded-tool-call.png)
-
-**Narrow workspace**
-
-![Narrow Mallard session-detail timeline](prototypes/session-detail/03-narrow-session-timeline.png)
+The old prototype images were removed on 2026-10-09. Git history retains them.
+They predate D14 and D15 and do not describe the current tool rows or response
+bodies. Use this plan's requirements and semantic CSS tokens.
 
 ### 4.2 Layout
 

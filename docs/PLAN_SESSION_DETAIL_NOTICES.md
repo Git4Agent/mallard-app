@@ -1,5 +1,9 @@
 # Session page messages: chips, not boxes
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: owner picked **Chips only** on 2026-10-03, after ruling earlier the
   same day that *up to date* is not shown ("Up to date one doesn't have to
   show"). Implemented, uncommitted. The live Tauri pass is still open.

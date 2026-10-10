@@ -1,5 +1,9 @@
 # Push footer refusal
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: the owner picked **C · Warning pill**, and it is implemented
 (uncommitted, 2026-10-02). What shipped is listed under "As built (C)" at the
 end; the sections before it are the plan as proposed.

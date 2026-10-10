@@ -1,5 +1,9 @@
 # Unicode Names for Repositories and Library Items
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented October 7, 2026 (uncommitted in both trees) with the
 recommended choice of every decision below; staging and production still
 owe the D1 reset, and the live pass (Verification) is open. Spans the

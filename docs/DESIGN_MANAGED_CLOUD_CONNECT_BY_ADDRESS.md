@@ -1,5 +1,9 @@
 # Managed Cloud: connect a project by address
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented 2026-09-15 (proposed and mocked the same day; section
 8 lists what was built). Frozen mock: `mockups/cloud-connect-mockup.html`
 (`mockups/cloud-connect-mockup.tsx`; `npm run dev`, then

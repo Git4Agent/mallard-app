@@ -1,5 +1,9 @@
 # Legacy and dead-code scan — 2026-09-09
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Scan only. No file in the working tree was modified by this pass.
 
 **Baseline:** working tree on top of `f9628b0`, 176 uncommitted paths. Line

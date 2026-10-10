@@ -1,5 +1,9 @@
 # Plan: one Mallard Cloud picker for pets and projects (S1 · Tabs + rows)
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Picked by the owner, 2026-10-02, on `mockups/cloud-add-mockup.html` (`?style=rows`).
 Round 1 settled the flow; round 2 the style. This is the cutover.
 

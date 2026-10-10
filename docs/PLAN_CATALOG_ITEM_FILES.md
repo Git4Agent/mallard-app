@@ -1,5 +1,9 @@
 # Opening a Skill's Files: B · Crumb, Desktop and Mallard Cloud
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: the owner picked **B · Crumb** for both the desktop app and the
 website. Both are implemented, uncommitted, as of October 8, 2026.
 - **Desktop**: a live Tauri pass on real Codex and Claude homes is still open.

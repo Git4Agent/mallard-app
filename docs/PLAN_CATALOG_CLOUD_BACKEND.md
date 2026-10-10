@@ -1,5 +1,9 @@
 # Backend changes: Catalog items on Mallard Cloud, the way projects are
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 What the backend needs for
 [PLAN_CATALOG_CLOUD_LIKE_PROJECTS.md](PLAN_CATALOG_CLOUD_LIKE_PROJECTS.md)
 (specimen: `mockups/cloud-pet-mockup.html`). Mallard Cloud (`managed_cloud`) only:

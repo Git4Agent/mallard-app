@@ -1,5 +1,9 @@
 # Plan: which project files a non-Git Push ticks by default
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: owner picked A on 2026-10-02. Both layers are implemented
 (uncommitted); see "As built" at the end for where the code differs from the
 plan below.

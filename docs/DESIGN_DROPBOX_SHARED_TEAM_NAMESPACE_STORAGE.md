@@ -1,5 +1,9 @@
 # Dropbox storage
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented, including agent setup and refresh. Local mock and native
 setup checks pass. The one-account authorization POC passed; full live storage
 transport verification is pending.

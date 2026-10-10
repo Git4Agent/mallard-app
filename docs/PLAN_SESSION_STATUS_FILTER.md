@@ -1,5 +1,9 @@
 # Filter the activity list by session status
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: the owner picked **C, the scope bar**, on 2026-10-03 ("Go with C").
   Implemented the same day, uncommitted. Open: a pass in the running Tauri
   app. The plan below is kept as written; *As built* at the end records what

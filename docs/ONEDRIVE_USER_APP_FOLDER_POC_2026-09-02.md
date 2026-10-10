@@ -1,5 +1,9 @@
 # OneDrive user App Folder proof of concept
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 **5 October update:** This document tests the former mutable-head protocol.
 Use the [current OneDrive assessment](ONEDRIVE_FEASIBILITY_2026-10-05.md) for
 today's immutable-record requirements and the new create-only probe.

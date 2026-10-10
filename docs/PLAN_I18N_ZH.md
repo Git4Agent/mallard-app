@@ -1,5 +1,9 @@
 # Simplified Chinese for Mallard — desktop and website
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: **desktop and website implemented October 8, 2026 (website not
 deployed).** Website: W1–W4 done in
 `mallardInternal/cloudflare/managed-cloud/web` — 9 namespaces (shell, common,

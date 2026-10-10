@@ -1,5 +1,9 @@
 # Plan: Add Catalog resource, the way New project is
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Proposal, 2026-10-02. Specimen: `mockups/catalog-add-home-mockup.html` (`npm run dev`,
 then `/mockups/catalog-add-home-mockup.html`; `?stock=some|none&profiles=one|two&
 storages=none|one|many&catalog=empty|some&door=any|skill|pet-v1&

@@ -1,5 +1,9 @@
 # OneDrive support feasibility
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Research date: 5 October 2026. Scope: research and an isolated POC.
 
 OneDrive is a feasible storage-provider candidate for current Mallard. This

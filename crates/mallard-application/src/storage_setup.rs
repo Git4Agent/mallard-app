@@ -2407,9 +2407,9 @@ mod dropbox_tests {
 
     #[test]
     fn dropbox_agent_poc_prepares_only_the_exact_schema_one_draft() {
-        // Shared with the HTTP POC. All fixture credentials are synthetic.
+        // All fixture credentials are synthetic.
         let prepared_config: StorageProviderConfig = serde_json::from_str(include_str!(
-            "../../../poc/dropbox-agent-setup/mock-provider-config.json"
+            "../../../tests/fixtures/dropbox/mock-provider-config.json"
         ))
         .unwrap();
         let temp = tempfile::tempdir().unwrap();

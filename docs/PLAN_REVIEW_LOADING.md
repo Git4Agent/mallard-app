@@ -1,5 +1,9 @@
 # Push and Pull open in place, with one loading caption
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: implemented 2026-09-26, uncommitted (owner picked direction A with
   the Caption progress style); see "What landed"
 - Date: 2026-09-26

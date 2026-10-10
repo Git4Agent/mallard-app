@@ -1,5 +1,9 @@
 # New Codex or Claude Session in a Project
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented October 7, 2026 (owner picked A). Not committed. Live
 Tauri pass not yet run. Specimen: `mockups/new-session-mockup.html`
 (`?dir=all|today|a..f&kind=flat|git&agents=both|codex&theme=light|dark`,

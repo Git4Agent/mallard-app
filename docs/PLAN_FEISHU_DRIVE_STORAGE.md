@@ -1,5 +1,13 @@
 # Feishu Drive storage provider
 
+> Historical reference: The `feishu_publication_selector` example was
+> removed on 2026-10-09 with the obsolete POC tools. The production
+> publication parser and selector remain.
+
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Date: 2026-09-23; D1 settled on 2026-09-24 after four revisions (Mallard's
 own app, no service, the key on the computer), D4 revised once more, D11
 added. Status: steps 1 to 6 implemented on the mock; step 0 and the live

@@ -1,5 +1,9 @@
 # Open a stored session's page
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: the owner picked **A, the status chip**, on 2026-10-07 ("Go with A,
   don't use cache for the cloud session"). Implemented the same day,
   uncommitted; see *As built* at the end for what landed and where it

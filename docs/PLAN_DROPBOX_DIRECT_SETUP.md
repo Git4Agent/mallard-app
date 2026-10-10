@@ -1,5 +1,13 @@
 # Dropbox create and discovery setup without an agent
 
+> Historical reference: The `dropbox_direct_setup` example was removed on
+> 2026-10-09. Its test command below no longer works in this checkout.
+> The production Dropbox setup code and tests remain.
+
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Date: 2026-09-11. Status: implemented and verified with local fixtures. Live cloud retest is pending.
 
 ## Cutover

@@ -1,5 +1,9 @@
 # Browser sign-in for SharePoint
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Research date: 5 October 2026.
 
 Yes. Mallard can offer **Connect SharePoint → Microsoft sign-in → choose a

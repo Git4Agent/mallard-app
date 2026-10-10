@@ -1,5 +1,9 @@
 # Plan: Pull this session — a link from a session page into Mallard
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 **Status (2026-10-03): implemented on both sides with every recommended
 option, uncommitted, not deployed.** Layer 2 of
 `docs/PLAN_DEEP_LINK_DESTINATIONS.md` (session links), on the same scheme and

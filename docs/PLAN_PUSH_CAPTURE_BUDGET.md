@@ -1,5 +1,9 @@
 # Push what fits, say what waits
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 2026-09-01. Proposal, not implemented. Follows the same-day evaluation of the
 "Load earlier does not bypass the review plan" write-up and replaces its
 five-step correction. Two decisions were taken the same day and are built in:

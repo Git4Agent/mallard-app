@@ -1,5 +1,9 @@
 # Existing R2 and Dropbox storage discovery: POC handoff for Claude
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Date: 2026-09-10. Status: live discovery passed for both providers.
 
 The user asked whether Mallard can find existing storage in R2 and Dropbox.

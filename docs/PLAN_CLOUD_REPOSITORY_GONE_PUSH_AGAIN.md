@@ -1,5 +1,9 @@
 # Mallard Cloud: a repository gone or being deleted, a draft discarded — push again, no relink
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: implemented on 2026-09-26, on the owner's word ("Go and implement
   PLAN_CLOUD_REPOSITORY_GONE_PUSH_AGAIN.md. Use your pick for the UI
   change"), after "DON'T IMPLEMENT YET" earlier the same day. Steps 1 to 11

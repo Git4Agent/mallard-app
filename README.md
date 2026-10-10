@@ -1157,9 +1157,9 @@ implementation notes, and safety contract.
 
 ## Code map
 
-- `mockups/` — standalone mock pages, browser fixtures, and their source files.
-  Run `npm run dev`, then open `/mockups/<page>.html`. These files use the
-  shared app components and styles, but are not app entry points.
+- `mockups/` and `poc/` — empty local directories reserved for future work.
+  Git does not retain empty directories in a fresh clone.
+- `tests/fixtures/` — data used by frontend and Rust tests.
 - `src/components/project-sync/` — project setup, Activity, storage, Push/Pull
   review, project files, and status UI.
 - `src/components/project-sync/api.ts` and `src/types.ts` — Tauri command and

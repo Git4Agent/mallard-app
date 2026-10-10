@@ -1,5 +1,9 @@
 # Managed Cloud: open push on public repositories, one invitation code per private repository
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented 2026-09-16 (service, website, desktop, documents; see
 section 7 for what differs from the plan, and section 8 for the 2026-09-17
 change that keeps the code readable). Section numbers refer to

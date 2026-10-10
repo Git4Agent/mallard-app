@@ -1,5 +1,9 @@
 # Session Push Carries Git History
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented October 6, 2026 (owner picked mark B). Live Tauri pass
 against a Mallard Cloud storage not yet run.
 

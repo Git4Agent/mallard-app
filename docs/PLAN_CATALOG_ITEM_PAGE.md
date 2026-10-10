@@ -1,5 +1,9 @@
 # A Catalog Item's Page, Like Mallard Cloud's
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented October 6, 2026 (owner picked A, every storage, the desk
 for pets). Live Tauri pass against real provider homes not yet run. Specimen:
 `mockups/catalog-item-page-mockup.html`. Nothing in `src/` or `src-tauri/`

@@ -1,5 +1,9 @@
 # Plan: delete the draft of a Mallard Cloud repository, on both sides
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: picked on 2026-10-06 ("Go with A1 and B, keep Discard, implement
   both") and implemented the same day in both trees, uncommitted. *What was
   built* at the end says where the code differs from this text.

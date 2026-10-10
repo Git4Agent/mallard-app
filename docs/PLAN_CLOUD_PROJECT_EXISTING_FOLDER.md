@@ -1,5 +1,9 @@
 # An existing folder for a Mallard Cloud project
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented 2026-09-27 (B, pills, the tick kept), uncommitted.
 Builds on `docs/PLAN_CLOUD_PROJECT_FROM_LINK.md` (implemented, uncommitted).
 Specimen, kept as the record: `mockups/cloud-project-existing-mockup.html`

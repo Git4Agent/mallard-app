@@ -1,5 +1,9 @@
 # Agent setup for Dropbox
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Status: implemented. Frontend, CLI, and workspace library tests pass.
 The authorization POC passed with one live account. Native macOS verification
 uses an isolated home and a local HTTP mock. Windows and full live transport

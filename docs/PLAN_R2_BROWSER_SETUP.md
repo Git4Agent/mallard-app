@@ -1,5 +1,9 @@
 # R2 browser setup plan
 
+> Historical reference: The standalone R2 and Dropbox CLI examples were
+> removed on 2026-10-09. References to those example targets below are
+> historical. The production CLI and its tests remain.
+
 Date: 2026-10-03. Status: blocked by the live S3 authorization POC.
 This document does not authorize implementation.
 

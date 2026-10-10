@@ -1,5 +1,9 @@
 # Filter the Library by status
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: the owner picked **L1** on 2026-10-07. Implemented the same day,
   uncommitted. *As built* at the end records what landed. Open: a pass in the
   running Tauri app.

@@ -47,7 +47,7 @@ import {
 } from "../../src/components/project-sync/session-detail/sessionDetailModel";
 import { safeMarkdownUrl, safeRelativeMarkdownPath } from "../../src/components/markdown/markdownUrl";
 
-import { diagram as suppliedFlowchart, fenced } from "../../poc/mermaid-flowcharts/fixtures";
+import { diagram as suppliedFlowchart, fenced } from "../fixtures/mermaid-flowcharts/fixtures";
 
 const exact = (value: number) => ({ value, quality: "exact" as const });
 

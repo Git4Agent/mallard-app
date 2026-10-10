@@ -1,5 +1,9 @@
 # Session detail: agent rows v2 — a delegation is an exchange
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 Date: 2026-09-17. Status: **proposed**. Mock first: pick a direction in
 `mockups/subagent-exchange-mockup.html` before any code moves. Clean cutover when it
 lands: no migration, local state and cloud schemas stay at 1; the timeline

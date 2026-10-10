@@ -1,5 +1,9 @@
 # The startup screen: the mark bobs, six cells count the real stages
 
+> Historical reference: The contents of `mockups/` and `poc/` were removed
+> on 2026-10-09. Paths and commands below that use those files are historical
+> and no longer work in this checkout. Git history retains the tracked files.
+
 - Status: planned 2026-10-03; the owner picked direction A ("Go with A").
   Not implemented.
 - Date: 2026-10-03
