@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Review footer</title>
+    <style>
+      :root {
+        --page: #f6eedb; --ink: #2b2118; --muted: #6f604c; --rule: #dccdab; --card: #fffaf0; --accent: #8a5a00;
+        color-scheme: light;
+      }
+      :root[data-theme="dark"] {
+        --page: #1d1914; --ink: #f1e7d4; --muted: #b5a68e; --rule: #3d342a; --card: #26211b; --accent: #e3b45c;
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 20px 24px 60px; background: var(--page); color: var(--ink); font: 13px/1.45 system-ui, -apple-system, "PingFang SC", sans-serif; }
+      header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; margin-bottom: 6px; }
+      h1 { margin: 0; font-size: 18px; }
+      h2 { margin: 26px 0 4px; font-size: 15px; }
+      .toggles { display: flex; gap: 6px; }
+      .toggles button { font: inherit; padding: 3px 10px; border: 1.5px solid var(--ink); border-radius: 999px; background: var(--card); color: var(--ink); cursor: pointer; }
+      .toggles button[aria-pressed="true"] { background: var(--ink); color: var(--page); }
+      .rule { color: var(--muted); margin: 0; }
+      .row { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); }
+      .row h3 { margin: 0; font-size: 14px; display: flex; gap: 8px; align-items: baseline; }
+      .row h3 .pick { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--accent); color: var(--page); }
+      .row p { margin: 2px 0 0; color: var(--muted); }
+      .row p a { color: inherit; }
+      .row p .against { color: var(--ink); }
+      .frames { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
+      figure { margin: 0; }
+      figcaption { margin-bottom: 4px; color: var(--muted); font-size: 12px; display: flex; gap: 8px; }
+      figcaption b { color: var(--ink); }
+      figcaption .bad { color: #b3261e; font-weight: 600; }
+      figcaption .ok { color: #2e7d32; font-weight: 600; }
+      .crop { position: relative; overflow: hidden; width: 612px; height: 300px; border-radius: 22px; }
+      .crop iframe { position: absolute; border: 0; width: 1000px; height: 700px; }
+      .crop.loading::after { content: "loading…"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); background: var(--page); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Review footer · Push &amp; Pull</h1>
+      <div class="toggles" id="theme"></div>
+      <div class="toggles" id="lang"></div>
+    </header>
+    <p class="rule">Real app on mock IPC, non-Git folder, 1 session + 1 new file, review 598px wide (as in the screenshot).</p>
+    <p class="rule">Pull count rule (new): unticked file rows, folders excluded — adds read “N new”, replaces “N changed”.</p>
+    <main id="rows"></main>
+    <script type="module" src="./specimen.ts"></script>
+  </body>
+</html>

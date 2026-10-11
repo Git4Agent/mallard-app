@@ -28,6 +28,7 @@ import {
   itemKindLabel,
   includeRequiredPullProjectDirectories,
   pullBudgetTotal,
+  pullWaitingFiles,
   recommendedPullSelection,
   requiredPullProjectDirectoryIds,
   requiresApproval,
@@ -485,6 +486,12 @@ export default function RestorePlanView({
       onDismiss: onDismissError,
     });
   }
+  /* The files that wait, counted on the step button that opens their list.
+     A folder that cannot sync has no rows to tick, so nothing waits. */
+  const waitingFiles = projectContentEligible
+    ? pullWaitingFiles(projectContentItems, selected)
+    : { added: 0, changed: 0 };
+  const waitingFileCount = waitingFiles.added + waitingFiles.changed;
   const projectContentRows: ProjectFileReviewRow[] = projectContentItems
     .filter((item) => item.projectContentPath && item.projectContentEntryType)
     .map((item) => {
@@ -683,16 +690,27 @@ export default function RestorePlanView({
         />
         {showProjectFiles && (
           /* The step navigator, not a gate: Pull stays live on both steps —
-             the same footer contract the Push review carries. */
+             the same footer contract, box and waiting count the Push review
+             carries. */
           <button
             type="button"
-            className="btn btn-ghost"
+            className="btn"
             disabled={busy}
-            title={activeStep === "history" ? t("review.filesNext") : t("review.backToSessions")}
+            title={activeStep !== "history"
+              ? t("review.backToSessions")
+              : waitingFileCount > 0
+                ? t("pull.waitingFiles", { count: waitingFileCount })
+                : t("review.filesNext")}
             onClick={() => setActiveStep(activeStep === "history" ? "project_files" : "history")}
           >
             {activeStep !== "history" && <Icon name="chevron-left" size={14} />}
             {activeStep === "history" ? t("review.projectFiles") : historyStepLabel(showProjectFiles)}
+            {activeStep === "history" && waitingFiles.added > 0 && (
+              <span className="sync-path-count">{t("pull.newCount", { count: waitingFiles.added })}</span>
+            )}
+            {activeStep === "history" && waitingFiles.changed > 0 && (
+              <span className="sync-path-count">{t("pull.changedCount", { count: waitingFiles.changed })}</span>
+            )}
             {activeStep === "history" && <Icon name="chevron-right" size={14} />}
           </button>
         )}

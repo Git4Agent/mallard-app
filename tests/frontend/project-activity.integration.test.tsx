@@ -1314,6 +1314,23 @@ test("sync tooltip hover keeps the sibling icon rail geometry stable", () => {
   );
 });
 
+test("a review's last row has one bottom gutter, the scroller's own 12px", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const scrollRule = css.match(/^\.sync-sync-review-scroll\s*\{[^}]+\}/m)?.[0] ?? "";
+  const contentRule = css.match(/^\.sync-sync-review-content\s*\{[^}]+\}/m)?.[0] ?? "";
+  // A tile's 4px hard shadow plus 8px of air, inside the scroller.
+  assert.match(scrollRule, /padding-bottom:\s*12px/);
+  assert.match(contentRule, /padding:\s*0 20px;/);
+  // Nothing adds to it or takes it away: a push-only 2px on the wrapper and
+  // a narrow-panel zero once left the last tile's shadow under the footer.
+  assert.equal((css.match(/\.sync-sync-review-scroll\s*\{[^}]*padding-bottom/g) ?? []).length, 1);
+  assert.doesNotMatch(css, /\.sync-sync-review-content\s*\{\s*padding-bottom/);
+  // The review's Files step sheds its own bottom padding; the project page's
+  // Files view keeps it.
+  assert.match(css, /\.sync-sync-review-scroll > \.sync-project-files-page\s*\{\s*padding-bottom:\s*0;/);
+  assert.match(css, /^\.sync-project-files-page\s*\{[^}]*padding: 14px 16px 22px;/m);
+});
+
 test("Push and Pull reviews use only the outer workspace scroll", () => {
   const css = readFileSync("src/App.css", "utf8");
   const workspaceRule = css.match(/\.sync-main\.sync-sync-review-page\s*\{[^}]+\}/s)?.[0] ?? "";

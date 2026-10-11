@@ -148,6 +148,9 @@ export default {
     checking: "正在检查…",
     selectedCount: "已选 {{count}} 个",
     eligibilityUnrecorded: "此下载计划没有记录项目文件能否同步。",
+    waitingFiles_other: "{{count}} 个项目文件不在此次下载中",
+    newCount: "新增 {{count}}",
+    changedCount: "更改 {{count}}",
   },
   item: {
     replaceFile: "替换文件",

@@ -34,6 +34,7 @@ import { applyPullReview } from "../../src/components/project-sync/pullReviewFlo
 import {
   buildPullReviewItems,
   includeRequiredPullProjectDirectories,
+  pullWaitingFiles,
   recommendedPullSelection,
 } from "../../src/components/project-sync/pullReviewModel";
 import { i18n } from "../../src/i18n";
@@ -226,8 +227,9 @@ test("the scan ticks no new file: it opens unticked and New, and the Sessions st
 
   // The file that waits is counted on the button that opens its list, and
   // Push stays live: nothing here needs the file to travel.
+  // A box, not a ghost: as a ghost its count was easy to push past.
   const onSessions = render("history", new Set());
-  assert.match(onSessions, /title="1 new project file is not in this push"/);
+  assert.match(onSessions, /<button type="button" class="btn" title="1 new project file is not in this push">/);
   assert.match(onSessions, /<span class="sync-path-count">1 new<\/span>/);
 
   // Ticked, it no longer waits.
@@ -944,6 +946,52 @@ test("Pull review omits project content that already matches storage", () => {
   assert.equal(items[0]?.projectContentOperation, "add");
 });
 
+test("Pull counts the files that wait unticked: adds as new, replaces as changed, never a folder", () => {
+  const replace: PullReview["actions"][number] = {
+    action_id: "write-b",
+    resource_id: "file-b",
+    kind: { kind: "write_project_file", logical_path: "project/b.md", mode: 0o644, source_mtime: 1 },
+    target_path: "/tmp/project-b/b.md",
+    source_sha256: "e".repeat(64),
+    expected_target_sha256: "f".repeat(64),
+    expected_target_mode: 0o644,
+    requires_explicit_approval: true,
+  };
+  const plan: PullReview = { ...pullPlan, actions: [...pullPlan.actions, replace] };
+  const items = buildPullReviewItems(plan);
+  assert.deepEqual(pullWaitingFiles(items, new Set()), { added: 1, changed: 1 });
+  assert.deepEqual(
+    pullWaitingFiles(items, includeRequiredPullProjectDirectories(items, new Set(["file-a"]))),
+    { added: 0, changed: 1 },
+  );
+  assert.deepEqual(pullWaitingFiles(items, new Set(["file-a", "file-b"])), { added: 0, changed: 0 });
+
+  const render = (reviewed: PullReview) => renderToStaticMarkup(
+    <RestorePlanView onSessionActionError={() => undefined}
+      projectName="Project B"
+      plan={reviewed}
+      binding={binding}
+      phase="idle"
+      supportLoading={false}
+      busy={false}
+      error={null}
+      onDismissError={() => undefined}
+      onApply={() => undefined}
+      onBack={() => undefined}
+      onRefreshPlan={() => undefined}
+    />,
+  );
+  // Both kinds wait: a chip each, one sentence for the button.
+  const html = render(plan);
+  assert.match(html, /title="2 project files are not in this pull"/);
+  assert.match(html, /<span class="sync-path-count">1 new<\/span><span class="sync-path-count">1 changed<\/span>/);
+
+  // A folder that cannot sync has no rows to tick, so nothing waits.
+  const ineligible = render({ ...plan, project_content_eligibility: { state: "git_managed", reason: "Inside a Git work tree." } });
+  assert.match(ineligible, /title="Review project files next"/);
+  assert.doesNotMatch(ineligible, /not in this pull|sync-path-count">\d+ (new|changed)/);
+});
+
 test("Pull project content starts as keep-local and selecting a nested file requires its folders", () => {
   const items = buildPullReviewItems(pullPlan);
   assert.ok(items.every((item) => item.category === "project_content"));
@@ -991,7 +1039,11 @@ test("Pull project content starts as keep-local and selecting a nested file requ
     /class="btn btn-primary sync-pull-apply-button">/,
     "undecided file entries keep Pull available so keep-local can advance the base",
   );
-  assert.match(html, /title="Review project files next"/, "the footer carries the step navigator");
+  // The footer carries the step navigator, a box like Push's, counting the
+  // file that waits unticked (its folders are not counted).
+  assert.match(html, /<button type="button" class="btn" title="1 project file is not in this pull">/);
+  assert.match(html, /<span class="sync-path-count">1 new<\/span>/);
+  assert.doesNotMatch(html, /changed<\/span>/);
 
   const filesHtml = renderToStaticMarkup(
     <ProjectFilesReviewPage

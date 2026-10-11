@@ -1313,9 +1313,9 @@ export default function PushResourceWorkspace({
         {emptyReview ? (
           /* Nothing to commit, so the commit's slot holds the way out — the
              way Settings' Done leaves a page with nothing to save. A box, not
-             the gold (nothing is committed) and not a ghost (the ghost is the
-             step navigator, which has nothing to walk between here: both
-             tabs read 0 and the strip above already switches). The path
+             the gold (nothing is committed); it stands where the step
+             navigator would, which has nothing to walk between here: both
+             tabs read 0 and the strip above already switches. The path
              bar's Push stays, disabled, as the review's verb. */
           <button
             type="button"
@@ -1331,10 +1331,12 @@ export default function PushResourceWorkspace({
             {showProjectFiles && (
               /* The step navigator, not a gate: Push stays live on both steps.
                  It reads forward on the sessions step and back on the files one,
-                 so the footer is always "keep reviewing, or publish now". */
+                 so the footer is always "keep reviewing, or publish now". A
+                 box, not a ghost: as a ghost its count of waiting files was
+                 easy to push past. */
               <button
                 type="button"
-                className="btn btn-ghost"
+                className="btn"
                 disabled={busy}
                 title={activeStep !== "history"
                   ? t("review.backToSessions")

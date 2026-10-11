@@ -321,6 +321,25 @@ export function recommendedPullSelection(item: PullReviewItem): boolean {
     && actions.every((action) => !action.requires_explicit_approval);
 }
 
+/** The project files a Pull leaves as they are: file rows not ticked (a
+ *  folder follows its files), split by what the row would do. A project's
+ *  Pull opens with nothing ticked, so at first these are every file storage
+ *  would write. */
+export function pullWaitingFiles(
+  items: PullReviewItem[],
+  selected: ReadonlySet<string>,
+): { added: number; changed: number } {
+  const waiting = items.filter((item) => (
+    item.category === "project_content"
+    && item.projectContentEntryType === "file"
+    && !selected.has(item.resourceId)
+  ));
+  return {
+    added: waiting.filter((item) => item.projectContentOperation === "add").length,
+    changed: waiting.filter((item) => item.projectContentOperation === "replace").length,
+  };
+}
+
 /** What the current selection would pull: the selected sessions, the selected
  *  agent setup & tools files and the selected project files, each by the
  *  storage-side bytes the review carries for it. Nothing is reserved — a Pull

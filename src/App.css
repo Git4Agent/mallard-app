@@ -7396,16 +7396,23 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 0 20px 8px;
+  padding: 0 20px;
 }
 
-.sync-inline-push-review .sync-sync-review-content {
-  padding-bottom: 2px;
-}
-
+/* The one gutter between the last row and the footer rule: a tile's 4px
+   hard shadow and 8px of air, on every step and at every width. It sits
+   inside the scroller, so a list scrolled to its end keeps it too. Split
+   across the wrapper, the push content and a narrow-panel zero, it once
+   left the last tile's shadow 2px under the footer. */
 .sync-sync-review-scroll {
   max-height: min(62vh, 720px);
-  padding-bottom: 6px;
+  padding-bottom: 12px;
+}
+
+/* In a review the scroller owns the bottom gutter; the project page's own
+   Files view keeps its padding. */
+.sync-sync-review-scroll > .sync-project-files-page {
+  padding-bottom: 0;
 }
 
 /* A bare row list contributes no top padding. Put its gutter on the scroll so
@@ -7474,11 +7481,22 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 /* The step navigator counts the project files that wait for a tick: the
-   path bar's count chip, wide enough for its word. */
+   path bar's count chip, wide enough for its word, in its review's
+   direction ink — the gauge fill's 34% wash, laid over the card so the
+   button's surface cannot read through. --text-0 on it measures 8.52 (push)
+   and 8.68 (pull) light, 5.77 and 6.05 dark. */
 .sync-sync-review-footer > .btn .sync-path-count {
   margin: 0 -1px 0 2px;
   padding: 0 6px;
   white-space: nowrap;
+}
+
+.sync-push-resource-footer > .btn .sync-path-count {
+  background: color-mix(in srgb, var(--thread-status-local) 34%, var(--surface-card));
+}
+
+.sync-pull-apply-bar > .btn .sync-path-count {
+  background: color-mix(in srgb, var(--thread-status-cloud) 34%, var(--surface-card));
 }
 
 /* An empty review's one button is the way out, in the apply button's
@@ -7651,21 +7669,6 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 }
 
 .sync-review-footer-note.danger { color: var(--danger-text); }
-
-/* Unredacted sessions: by Push while the setting is off, by Pull when the
-   storage holds sessions pushed with it off. The note's muted ink, with only
-   the warning rung's glyph: a consequence of a setting, not a message box. */
-.sync-review-footer-note.redaction-off {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 5px;
-}
-
-.sync-review-footer-note.redaction-off > svg {
-  flex: 0 0 auto;
-  color: var(--warning-text);
-}
 
 /* What stops Push among the selected rows: the gauge pill's shape in the
    warning ink, beside the gauge and the button it disables. It reads a
@@ -8035,25 +8038,7 @@ button.sync-history-branch-trigger:hover:not(:disabled),
     flex-direction: column;
     gap: 4px;
   }
-
-  /* Three separate rules each contributed a couple of pixels below the last
-     row, which read as one unexplained band above the footer. */
-
-  .sync-sync-review-scroll {
-    padding-bottom: 0;
-  }
 }
-
-/* The review step is a table, not prose: its rows carry their own 12px and a
-   background that is meant to meet the panel edge the way the tab strip above
-   it does. The wrapper's 20px reading gutter left it floating in a channel of
-   empty space at every width. Scoped by :has so the history and project-file
-   steps — which are prose-width content in the same wrapper — keep theirs. */
-
-/* The scroll wrapper's own bottom padding sits outside the table's background,
-   so unlike the summary's it does not read as breathing room inside the block —
-   it reads as a band of panel showing through between the last row and the
-   footer rule. The table meets the footer the way it meets the sides. */
 
 /* Sized by its content and its padding, not by a fixed track: pinned to a
    240px width the label and icon floated in the middle of an empty slab and

@@ -165,6 +165,10 @@ export default {
     checking: "Checking…",
     selectedCount: "{{count}} selected",
     eligibilityUnrecorded: "Project-file eligibility was not recorded in this Pull plan.",
+    waitingFiles_one: "{{count}} project file is not in this pull",
+    waitingFiles_other: "{{count}} project files are not in this pull",
+    newCount: "{{count}} new",
+    changedCount: "{{count}} changed",
   },
   /** A row of the Pull review's fallback list. */
   item: {
