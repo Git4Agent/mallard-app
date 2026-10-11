@@ -81,6 +81,11 @@ Public on Mallard Cloud. Open one, or pull it into Mallard.
 
 [Download Mallard](https://github.com/Git4Agent/mallard-app/releases/latest) for macOS or Windows, then:
 
+On Windows, CLI actions open Windows Terminal with Windows PowerShell. Install
+Windows Terminal with its `wt.exe` app execution alias enabled.
+Install the Codex CLI separately from the Codex desktop app; select that CLI
+under Settings › Agent CLIs if automatic detection finds the app's internal binary.
+
 ### 1. [Add a storage](https://mallard-ai.com/docs/add-a-storage)
 
 Where your sessions live: Mallard Cloud, a folder, Cloudflare R2 or Dropbox.

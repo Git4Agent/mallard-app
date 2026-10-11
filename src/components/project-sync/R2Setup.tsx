@@ -52,6 +52,22 @@ export const WRANGLER_INSTALL_AGENT_MESSAGE =
   // i18n-ignore: a prompt for the agent
   + "I will return to Mallard to continue R2 setup.";
 
+// i18n-ignore: a shell command, not copy
+export const WRANGLER_WINDOWS_INSTALL_COMMAND = "npm.cmd install --global wrangler@latest";
+export const WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE =
+  // i18n-ignore: a prompt for the agent
+  "Check `node --version` and `npm.cmd --version` first. "
+  // i18n-ignore: a prompt for the agent
+  + "If Node.js or npm is missing, help me install Node.js LTS for Windows. "
+  // i18n-ignore: a prompt for the agent
+  + `Install Cloudflare Wrangler globally with \`${WRANGLER_WINDOWS_INSTALL_COMMAND}\`. `
+  // i18n-ignore: a prompt for the agent
+  + "After installation, verify `wrangler.cmd --version`, then stop. "
+  // i18n-ignore: a prompt for the agent
+  + "I will restart Mallard to continue R2 setup.";
+
+const NODE_DOWNLOAD_URL = "https://nodejs.org/en/download";
+
 /** How the lane is used: a new bucket, one found in the account, or a new
  *  key for the bucket a storage already names. */
 export type R2SetupMode = "create" | "existing" | "reconnect";
@@ -501,15 +517,18 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
   const wrangler: StepView = (() => {
     const status = statusOf("check");
     const dependency = state.failed === "wrangler_not_found" || state.failed === "wrangler_update_required";
+    const windowsNotice = status === "failed" && dependency
+      && typeof navigator !== "undefined" && /^Win/.test(navigator.platform);
     return {
       key: "wrangler", title: t("r2.wrangler"), status,
-      fact: status === "failed" ? (dependency ? <>{failure()} · <code>{WRANGLER_INSTALL_COMMAND}</code></> : failure())
+      fact: windowsNotice ? (state.failed === "wrangler_not_found" ? t("r2.windowsNotFound") : failure())
+        : status === "failed" ? (dependency ? <>{failure()} · <code>{WRANGLER_INSTALL_COMMAND}</code></> : failure())
         : status === "stopped" ? t("lane.stopped")
         : status === "doing" ? t("lane.checking")
         : state.wrangler ? <>{state.wrangler.version} · <code>{state.wrangler.path}</code></>
         : status === "done" ? t("r2.checked")
         : t("r2.checksInstall"),
-      controls: status === "failed" ? (
+      controls: windowsNotice ? undefined : status === "failed" ? (
         <>
           {dependency && button(t("r2.copyCommand"), () => void copy(WRANGLER_INSTALL_COMMAND, "r2.commandCopied"))}
           {dependency && button(t("r2.copyAgentMessage"), () => void copy(WRANGLER_INSTALL_AGENT_MESSAGE, "r2.agentMessageCopied"))}
@@ -519,6 +538,40 @@ export function R2SetupLane({ mode, flow, disabled, descriptor, storages, bucket
       ) : status === "stopped" ? retryButton
         : status === "doing" ? cancelButton
         : undefined,
+      body: windowsNotice ? (
+        <div className="r2-wrangler-install">
+          <p>
+            <Trans t={t} i18nKey="storage:r2.windowsInstallHint" components={{
+              node: <a
+                href={NODE_DOWNLOAD_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => { event.preventDefault(); void openExternalUrl(NODE_DOWNLOAD_URL); }}
+              />,
+            }} />
+          </p>
+          <div className="r2-wrangler-command">
+            <code>{WRANGLER_WINDOWS_INSTALL_COMMAND}</code>
+            <button
+              type="button"
+              className="btn storage-setup-guide-button"
+              aria-label={t("r2.copyCommand")}
+              disabled={disabled}
+              onClick={() => void copy(WRANGLER_WINDOWS_INSTALL_COMMAND, "r2.commandCopied")}
+            >
+              <Icon name="copy" size={12} /> {t("common:copy")}
+            </button>
+          </div>
+          <div className="r2-wrangler-footer">
+            <p>{t("r2.windowsRestartHint")}</p>
+            <span className="r2-step-controls">
+              {button(t("r2.copyAgentMessage"), () => void copy(WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE, "r2.agentMessageCopied"))}
+              {retryButton}
+            </span>
+          </div>
+          {copyStatus}
+        </div>
+      ) : undefined,
     };
   })();
 

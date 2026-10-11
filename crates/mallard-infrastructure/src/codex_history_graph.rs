@@ -38,6 +38,9 @@ pub struct ResolvedSegment {
     pub consumed_byte_len: u64,
     /// Non-empty JSONL records inside the consumed bytes.
     pub consumed_record_count: u64,
+    /// Native cursor after these records. A resumed settings event may rewind
+    /// it; physical record counts still include every event.
+    pub end_ordinal_exclusive: u64,
 }
 
 /// A fully resolved and flattened logical root.
@@ -283,7 +286,7 @@ pub fn resolve_captured_codex_root(
             },
         )
         .collect();
-    let resolved = resolve_segments(segments, leaf_meta, leaf_file_size, leaf_safe_end)?;
+    let resolved = resolve_segments(segments, leaf_meta, leaf_file_size, leaf_safe_end, true)?;
     Ok((resolved, sources))
 }
 
@@ -320,7 +323,31 @@ pub(crate) fn resolve_standalone_codex_bytes(bytes: &[u8]) -> Result<ResolvedCod
         declared_end_ordinal_exclusive: None,
         meta: leaf_meta.clone(),
     };
-    resolve_segments(vec![segment], leaf_meta, bytes.len() as u64, leaf_safe_end)
+    resolve_segments(
+        vec![segment],
+        leaf_meta,
+        bytes.len() as u64,
+        leaf_safe_end,
+        false,
+    )
+}
+
+/// Codex may resume at an earlier ordinal with a settings event. Preserve
+/// every record and follow the resumed sequence from that event's ordinal.
+/// Ordinal zero remains reserved for the initial session metadata; gaps and
+/// repeated or regressed ordinals on other records remain invalid.
+pub(crate) fn next_native_ordinal(record: &serde_json::Value, expected: u64) -> Option<u64> {
+    let actual = record.get("ordinal")?.as_u64()?;
+    if actual == expected
+        || (actual > 0
+            && actual < expected
+            && record["type"].as_str() == Some("event_msg")
+            && record["payload"]["type"].as_str() == Some("thread_settings_applied"))
+    {
+        actual.checked_add(1)
+    } else {
+        None
+    }
 }
 
 fn resolve_segments(
@@ -328,6 +355,7 @@ fn resolve_segments(
     leaf_meta: CodexSessionMetaRecord,
     leaf_file_size: u64,
     leaf_safe_end: u64,
+    native: bool,
 ) -> Result<ResolvedCodexRoot, String> {
     // One shared canonical projection across every segment, base -> leaf.
     crate::sync_metrics::record_transcript_analysis(
@@ -358,6 +386,7 @@ fn resolve_segments(
             .history_base
             .as_ref()
             .map_or(0, |base| base.end_ordinal_exclusive);
+        let mut next_ordinal = start_ordinal;
         let mut byte_offset = 0;
         for raw in segment.bytes.split(|byte| *byte == b'\n') {
             let record_offset = byte_offset;
@@ -373,10 +402,7 @@ fn resolve_segments(
                 )
             })?;
             if paginated {
-                let expected_ordinal =
-                    start_ordinal.checked_add(record_count).ok_or_else(|| {
-                        format!("Codex segment '{}' ordinal overflow", segment.meta.id)
-                    })?;
+                let expected_ordinal = next_ordinal;
                 let actual_ordinal = value
                     .get("ordinal")
                     .and_then(serde_json::Value::as_u64)
@@ -387,7 +413,9 @@ fn resolve_segments(
                             record_count + 1
                         )
                     })?;
-                if actual_ordinal != expected_ordinal {
+                let next = next_native_ordinal(&value, expected_ordinal)
+                    .filter(|_| native || actual_ordinal == expected_ordinal);
+                let Some(next) = next else {
                     return Err(format!(
                         "Codex paginated segment '{}' record {} expected ordinal {}, found {}",
                         segment.meta.id,
@@ -395,7 +423,8 @@ fn resolve_segments(
                         expected_ordinal,
                         actual_ordinal
                     ));
-                }
+                };
+                next_ordinal = next;
             }
             if index == leaf_index {
                 crate::codex_subagents::record_creation(
@@ -415,9 +444,11 @@ fn resolve_segments(
         structure
             .finalize()
             .map_err(|error| format!("Codex segment '{}': {}", segment.meta.id, error))?;
-        let end_ordinal_exclusive = start_ordinal
-            .checked_add(record_count)
-            .ok_or_else(|| format!("Codex segment '{}' ordinal overflow", segment.meta.id))?;
+        let end_ordinal_exclusive = if paginated {
+            next_ordinal
+        } else {
+            record_count
+        };
         if let Some(declared) = segment.declared_end_ordinal_exclusive {
             if declared != end_ordinal_exclusive {
                 return Err(format!(
@@ -439,6 +470,7 @@ fn resolve_segments(
             path: segment.path,
             consumed_byte_len: segment.consumed_byte_len,
             consumed_record_count: record_count,
+            end_ordinal_exclusive,
         });
     }
 
@@ -524,18 +556,6 @@ pub fn seed_codex_root(
         .last()
         .ok_or_else(|| "resolved Codex root has no segments".to_string())?;
     let consumed = resolved.leaf_safe_end;
-    let consumed_record_ordinal = if resolved.leaf_meta.history_mode.as_deref() == Some("paginated")
-    {
-        resolved
-            .leaf_meta
-            .history_base
-            .as_ref()
-            .map_or(0, |base| base.end_ordinal_exclusive)
-            .checked_add(leaf.consumed_record_count)
-            .ok_or_else(|| "Codex leaf ordinal overflow".to_string())?
-    } else {
-        leaf.consumed_record_count
-    };
     let probe_window_len = consumed.min(PROBE_WINDOW_BYTES);
     let window_start = (consumed - probe_window_len) as usize;
     let probe_window_sha256 = sha256_hex(&leaf_bytes[window_start..consumed as usize]);
@@ -548,7 +568,7 @@ pub fn seed_codex_root(
             .to_string(),
         source_file_size: resolved.leaf_file_size,
         consumed_byte_offset: consumed,
-        consumed_record_ordinal,
+        consumed_record_ordinal: leaf.end_ordinal_exclusive,
         probe_window_len,
         probe_window_sha256,
         last_canonical_message_id: resolved
@@ -660,7 +680,7 @@ pub fn refresh_codex_tail_with_records(
             });
         };
         on_record(&value, offset)?;
-        let Some(actual_ordinal) = value.get("ordinal").and_then(serde_json::Value::as_u64) else {
+        let Some(_) = value.get("ordinal").and_then(serde_json::Value::as_u64) else {
             if appended_records == 0 {
                 // Codex 0.147 emits both legacy and paginated histories. An
                 // ordinal-less first append must be re-read with its session
@@ -673,12 +693,7 @@ pub fn refresh_codex_tail_with_records(
                 reason: CodexTailInvalidReason::MalformedAppend,
             });
         };
-        if actual_ordinal != next_record_ordinal {
-            return Ok(CodexTailRefresh::Invalid {
-                reason: CodexTailInvalidReason::MalformedAppend,
-            });
-        }
-        let Some(next_ordinal) = next_record_ordinal.checked_add(1) else {
+        let Some(next_ordinal) = next_native_ordinal(&value, next_record_ordinal) else {
             return Ok(CodexTailRefresh::Invalid {
                 reason: CodexTailInvalidReason::MalformedAppend,
             });
@@ -1133,6 +1148,170 @@ mod tests {
         );
         let error = resolve_codex_root(&leaf, &graph.lookup()).unwrap_err();
         assert!(error.contains("outside paginated mode"), "{error}");
+    }
+
+    #[test]
+    fn repeated_settings_ordinals_preserve_physical_records_and_native_cursors() {
+        settings_ordinal_sequence(100, &[100, 101], 102);
+    }
+
+    #[test]
+    fn rewound_settings_ordinals_preserve_records_and_resume_the_native_sequence() {
+        settings_ordinal_sequence(124, &[123], 124);
+    }
+
+    fn settings_ordinal_sequence(last_original: u64, appended: &[u64], native_next: u64) {
+        let mut graph = graph();
+        let mut lines = vec![meta_line("solo", None), message_line("m1", "one")];
+        for ordinal in 2..=last_original {
+            lines.push(
+                json!({
+                    "type": "event_msg",
+                    "payload": {"type": "thread_settings_applied", "setting": ordinal},
+                })
+                .to_string(),
+            );
+        }
+        let leaf = graph.write("solo", &lines);
+        let mut bytes = fs::read(&leaf).unwrap();
+        let original = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        let seeded = seed_codex_root(&original, &bytes, None).unwrap();
+        assert_eq!(seeded.mapping.consumed_record_ordinal, last_original + 1);
+        for ordinal in appended {
+            serde_json::to_writer(
+                &mut bytes,
+                &json!({
+                    "ordinal": ordinal,
+                    "type": "event_msg",
+                    "payload": {"type": "thread_settings_applied", "setting": "changed"},
+                }),
+            )
+            .unwrap();
+            bytes.push(b'\n');
+        }
+        fs::write(&leaf, &bytes).unwrap();
+        let resolved = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        let physical_count = last_original + 1 + appended.len() as u64;
+        assert_eq!(resolved.segments[0].consumed_record_count, physical_count);
+        assert_eq!(resolved.segments[0].end_ordinal_exclusive, native_next);
+        assert_eq!(resolved.chain, original.chain);
+        let cold = seed_codex_root(&resolved, &bytes, None).unwrap();
+        let CodexTailRefresh::Extended {
+            observed_tail,
+            mapping,
+        } = refresh_codex_tail(
+            &seeded.layout,
+            &seeded.observed_tail,
+            &seeded.mapping,
+            &tail_window_from(&seeded.mapping, &bytes),
+        )
+        .unwrap()
+        else {
+            panic!("settings append must advance the byte cursor")
+        };
+        assert_eq!(observed_tail, seeded.observed_tail);
+        assert_eq!(mapping, cold.mapping);
+        assert_eq!(mapping.consumed_byte_offset, bytes.len() as u64);
+        assert_eq!(mapping.consumed_record_ordinal, native_next);
+        // Portable output is still a strictly numbered sequence.
+        assert!(resolve_standalone_codex_bytes(&bytes).is_err());
+
+        // A history-base boundary uses native ordinals, not physical counts.
+        let fork = graph.write(
+            "fork",
+            &[
+                meta_line("fork", Some(("solo", native_next, bytes.len() as u64))),
+                message_line("fork-m2", "fork two"),
+            ],
+        );
+        let fork = resolve_codex_root(&fork, &graph.lookup()).unwrap();
+        assert_eq!(fork.chain.len(), 2);
+        assert_eq!(fork.segments[0].consumed_record_count, physical_count);
+        assert_eq!(fork.segments[1].end_ordinal_exclusive, native_next + 2);
+        let bad_fork = graph.write(
+            "bad-fork",
+            &[meta_line(
+                "bad-fork",
+                Some(("solo", physical_count, bytes.len() as u64)),
+            )],
+        );
+        assert!(resolve_codex_root(&bad_fork, &graph.lookup())
+            .unwrap_err()
+            .contains("cutoffs disagree"));
+
+        // A real message at the next native ordinal must work after either
+        // a cold resolve or a warm refresh of the repeated settings events.
+        append_paginated_line(&mut bytes, &message_line("m2", "two"));
+        fs::write(&leaf, &bytes).unwrap();
+        let full = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        let full = seed_codex_root(&full, &bytes, None).unwrap();
+        let CodexTailRefresh::Extended {
+            observed_tail,
+            mapping,
+        } = refresh_codex_tail(
+            &cold.layout,
+            &cold.observed_tail,
+            &mapping,
+            &tail_window_from(&mapping, &bytes),
+        )
+        .unwrap()
+        else {
+            panic!("message append must extend the tail")
+        };
+        assert_eq!(observed_tail, full.observed_tail);
+        assert_eq!(mapping, full.mapping);
+        assert_eq!(observed_tail.accepted_end_record_count, 2);
+        assert_eq!(mapping.consumed_record_ordinal, native_next + 1);
+    }
+
+    #[test]
+    fn repeated_ordinal_exception_rejects_other_records_regressions_and_gaps() {
+        let mut graph = graph();
+        let leaf = graph.write(
+            "solo",
+            &[meta_line("solo", None), message_line("m1", "one")],
+        );
+        let bytes = fs::read(&leaf).unwrap();
+        let root = resolve_codex_root(&leaf, &graph.lookup()).unwrap();
+        let seeded = seed_codex_root(&root, &bytes, None).unwrap();
+        let settings = json!({"type": "event_msg", "payload": {"type": "thread_settings_applied"}});
+        let mut cases = vec![
+            (settings.clone(), Some(0)), // The initial session metadata owns ordinal zero.
+            (settings.clone(), Some(3)), // Gap.
+            (settings, None),
+            (
+                serde_json::from_str(&message_line("m2", "two")).unwrap(),
+                Some(1),
+            ),
+            (
+                json!({"type": "event_msg", "payload": {"type": "task_complete"}}),
+                Some(1),
+            ),
+        ];
+        for (record, ordinal) in &mut cases {
+            if let Some(ordinal) = ordinal {
+                record["ordinal"] = json!(ordinal);
+            }
+            let mut changed = bytes.clone();
+            serde_json::to_writer(&mut changed, record).unwrap();
+            changed.push(b'\n');
+            fs::write(&leaf, &changed).unwrap();
+            assert!(resolve_codex_root(&leaf, &graph.lookup()).is_err());
+            assert!(matches!(
+                refresh_codex_tail(
+                    &seeded.layout,
+                    &seeded.observed_tail,
+                    &seeded.mapping,
+                    &tail_window_from(&seeded.mapping, &changed),
+                )
+                .unwrap(),
+                CodexTailRefresh::Invalid { .. } | CodexTailRefresh::NeedsFullResolve
+            ));
+        }
+        assert_eq!(
+            next_native_ordinal(&json!({"ordinal": u64::MAX}), u64::MAX),
+            None
+        );
     }
 
     #[test]

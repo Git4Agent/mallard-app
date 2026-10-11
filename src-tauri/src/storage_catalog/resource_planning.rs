@@ -1319,7 +1319,8 @@ mod tests {
         assert!(item.item.actions[1].requires_destructive_approval);
         let pin = item.item.actions[0].kind.preservation().unwrap();
         assert_eq!(pin.copy_name, "review-local-copy");
-        assert!(pin.copy_target_path.ends_with("skills/review-local-copy"));
+        assert!(Path::new(&pin.copy_target_path)
+            .ends_with(Path::new("skills").join("review-local-copy")));
         // The copy keeps its content transform reproducible: renaming the
         // same capture again yields the same identity and digest.
         let inventory = inventory(vec![skill_record(
@@ -1514,7 +1515,9 @@ mod tests {
         assert_eq!(plan.scope_id, scope.scope_id);
         assert_eq!(plan.copy_name, "review-fork");
         assert_eq!(plan.source_coordinate, fixture.capability.coordinate());
-        assert!(plan.copy_target_path.ends_with("skills/review-fork"));
+        assert!(
+            Path::new(&plan.copy_target_path).ends_with(Path::new("skills").join("review-fork"))
+        );
         assert_ne!(plan.copy_resource_id, resource_id);
 
         // A row of another coordinate cannot fork this record even if the

@@ -391,7 +391,10 @@ fn parse_session_meta(value: &Value) -> Result<CodexSessionMetaRecord, CodexStru
     let cwd = string_field(payload, &["cwd", "working_directory", "workingDirectory"])
         .ok_or_else(|| malformed_meta("has no cwd"))
         .and_then(|value| validate_text("cwd", value, 4096))?;
-    if !std::path::Path::new(&cwd).is_absolute() {
+    // A stored or imported transcript can have been recorded on either OS.
+    if !std::path::Path::new(&cwd).is_absolute()
+        && crate::session_path_map::root_family(&cwd).is_none()
+    {
         return Err(malformed_meta("has a non-absolute cwd"));
     }
     optional_text(payload, &["session_id", "sessionId"], "session ID", 128)?;
@@ -556,6 +559,23 @@ mod tests {
                 "cwd": cwd,
             },
         })
+    }
+
+    #[test]
+    fn accepts_session_roots_from_either_platform_and_rejects_relative_paths() {
+        for cwd in ["/tmp/project", r"C:\Projects\mallard"] {
+            let structure =
+                analyze_codex_rollout_structure(&rollout(vec![meta("p", None, cwd)]), Some("p"))
+                    .unwrap();
+            assert_eq!(structure.current.cwd, cwd);
+        }
+        for cwd in ["project", r"C:project", r"\project"] {
+            assert!(analyze_codex_rollout_structure(
+                &rollout(vec![meta("p", None, cwd)]),
+                Some("p"),
+            )
+            .is_err());
+        }
     }
 
     #[test]

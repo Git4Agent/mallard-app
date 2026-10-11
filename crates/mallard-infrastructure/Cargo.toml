@@ -10,6 +10,8 @@ mallard-domain = { path = "../mallard-domain" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 dirs = "5"
+# Safe Windows drive spelling for persisted paths; already used by Tauri.
+dunce = "1"
 walkdir = "2"
 tokio = { version = "1", features = ["full"] }
 aws-sdk-s3 = "1"
@@ -49,7 +51,7 @@ unicode-normalization = "0.1"
 plist = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_RestartManager", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [features]
 # Exposes test-only helpers (apply/recover conversation fixtures, capture

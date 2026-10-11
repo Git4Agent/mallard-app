@@ -144,7 +144,7 @@ function validateWorkdir(value) {
     /[\u0000-\u001f\u007f-\u009f]/u.test(value) ||
     !isAbsolute(value) ||
     resolve(value) !== value ||
-    value === "/"
+    dirname(value) === value
   ) {
     throw new Error("tool_workdir");
   }
@@ -172,7 +172,7 @@ function validateResponse(value, label) {
     }
     assertExactKeys(value.arguments, ["cmd", "workdir"], `${label}_arguments`);
     validateWorkdir(value.arguments.workdir);
-    const read = /^cat -- '([^'\r\n]+\/mixed-read\.txt)'$/u.exec(value.arguments.cmd);
+    const read = /^cat -- '([^'\r\n]+[\\/]mixed-read\.txt)'$/u.exec(value.arguments.cmd);
     if (read) {
       if (!isAbsolute(read[1]) || resolve(read[1]) !== read[1] || dirname(read[1]) !== value.arguments.workdir) {
         throw new Error("tool_read_path");

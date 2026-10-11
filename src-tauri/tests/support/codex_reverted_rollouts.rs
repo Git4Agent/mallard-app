@@ -63,10 +63,11 @@ pub(super) fn run(provider: &LocalAimockProvider) {
     }
     create_secure_codex_home(&source_home);
     create_secure_codex_home(&target_home);
-    let source_home = std::fs::canonicalize(source_home).unwrap();
-    let target_home = std::fs::canonicalize(target_home).unwrap();
-    let source_project = std::fs::canonicalize(source_project).unwrap();
-    let target_project = std::fs::canonicalize(target_project).unwrap();
+    // Match the local path spelling used by Codex and Mallard on Windows.
+    let source_home = canonicalize(source_home).unwrap();
+    let target_home = canonicalize(target_home).unwrap();
+    let source_project = canonicalize(source_project).unwrap();
+    let target_project = canonicalize(target_project).unwrap();
     let source_repository =
         LocalStateRepository::from_home_dir(&root.path().join("source-machine")).unwrap();
     let target_repository =
@@ -138,12 +139,14 @@ pub(super) fn run(provider: &LocalAimockProvider) {
             .and_then(Value::as_str),
         Some(thread_id.as_str())
     );
-    let selected_path = PathBuf::from(
+    // Codex can return a verbatim Windows path for the same local file.
+    let selected_path = canonicalize(
         response
             .pointer("/result/thread/path")
             .and_then(Value::as_str)
             .expect("revert response has no physical path"),
-    );
+    )
+    .expect("canonicalize reverted rollout path");
     assert_ne!(
         selected_path, old_path,
         "revert must create a distinct physical rollout"

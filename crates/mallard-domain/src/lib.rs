@@ -2154,6 +2154,7 @@ pub fn fallback_origin_host_label(token: &OriginHostToken) -> String {
 #[serde(deny_unknown_fields)]
 pub struct ConversationPublicationApply {
     pub export_settings_changed: bool,
+    pub local_metadata_changed: bool,
     pub candidate_commit_id: String,
     pub candidate_manifest_sha256: String,
     pub artifact_sha256: String,
@@ -2178,7 +2179,8 @@ impl ConversationPublicationApply {
             (TailClassification::LocalOutstanding, Some(before))
             | (TailClassification::Sync(SyncCurrency::Current), Some(before))
                 if self.planned_relation == TailClassification::LocalOutstanding
-                    || self.export_settings_changed =>
+                    || self.export_settings_changed
+                    || self.local_metadata_changed =>
             {
                 before.validate()?;
                 if !before.layout().matches(&self.tail_after) {
@@ -3555,6 +3557,9 @@ pub struct ConversationActionPins {
     pub subagent_selection: SubagentSelection,
     pub credential_redaction_enabled: bool,
     pub export_settings_changed: bool,
+    /// Complete local records await publication without changing the accepted
+    /// message tail. The raw range pins those records for Apply.
+    pub local_metadata_changed: bool,
     pub context: ConversationContextPins,
     pub revision: ConversationRevisionPins,
     pub tail: ConversationTailPins,
@@ -3568,6 +3573,19 @@ impl ConversationActionPins {
         self.subagent_selection.validate()?;
         self.revision.validate()?;
         self.tail.validate()?;
+        if self.local_metadata_changed
+            && (self.tail.accepted_local.is_none()
+                || self.tail.local != self.tail.accepted_local
+                || !self
+                    .tail
+                    .raw_range
+                    .as_ref()
+                    .is_some_and(|range| range.start_byte_offset < range.end_byte_offset))
+        {
+            return Err(
+                "conversation metadata publication lacks its unchanged tail and raw range".into(),
+            );
+        }
         self.target.validate()?;
         validate_display_text("conversation plan codec", &self.codec, false)
     }
@@ -3606,7 +3624,7 @@ impl ConversationPlanAction {
         if !self.action.matches_relation(relation)
             && !(self.action == ConversationPlanActionType::Publish
                 && relation == TailClassification::Sync(SyncCurrency::Current)
-                && self.pins.export_settings_changed)
+                && (self.pins.export_settings_changed || self.pins.local_metadata_changed))
             && !(self.action == ConversationPlanActionType::KeepBoth
                 && relation == TailClassification::Unknown
                 && self.pins.tail.validate_missing_child_recovery().is_ok())

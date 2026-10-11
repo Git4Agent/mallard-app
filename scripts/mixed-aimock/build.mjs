@@ -18,7 +18,8 @@ export async function buildWorker(repository, root, debug, baselineRef) {
     const artifact = output.split("\n").filter(Boolean).map((line) => JSON.parse(line))
       .find((item) => item.reason === "compiler-artifact" && item.target.name === "live_mixed_aimock_e2e" && item.executable);
     assert.ok(artifact, "mixed worker executable missing");
-    const destination = join(root, name); await copyFile(artifact.executable, destination); await chmod(destination, 0o700); return destination;
+    const destination = join(root, process.platform === "win32" ? `${name}.exe` : name);
+    await copyFile(artifact.executable, destination); await chmod(destination, 0o700); return destination;
   };
   const binary = await build(repository, "candidate-worker");
   let baselineBinary;

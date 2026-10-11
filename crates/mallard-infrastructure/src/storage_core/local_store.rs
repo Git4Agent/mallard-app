@@ -91,6 +91,7 @@ impl LocalObjectStore {
     }
 
     fn lock(&self) -> Result<fs::File, String> {
+        check_store_root(&self.root)?;
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -106,6 +107,7 @@ impl LocalObjectStore {
         &self,
         key: &ObjectKey,
     ) -> Result<Option<(fs::File, fs::Metadata)>, String> {
+        check_store_root(&self.root)?;
         let path = checked_existing_object_path(&self.root, key)?;
         let Some(path) = path else {
             return Ok(None);
@@ -241,6 +243,7 @@ impl LocalObjectStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<StoreKeyPage, String> {
+        check_store_root(&self.root)?;
         if limit == 0 || limit > MAX_LIST_PAGE {
             return Err(format!(
                 "list limit must be between 1 and {}",
@@ -459,6 +462,18 @@ pub(crate) fn open_read_only_no_follow(path: &Path, label: &str) -> Result<fs::F
         .map_err(|error| format!("open {}: {}", label, error))
 }
 
+fn check_store_root(root: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(root)
+        .map_err(|error| format!("inspect local store '{}': {error}", root.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!(
+            "local store '{}' must be a real directory",
+            root.display()
+        ));
+    }
+    Ok(())
+}
+
 fn checked_existing_object_path(root: &Path, key: &ObjectKey) -> Result<Option<PathBuf>, String> {
     let mut cursor = root.to_path_buf();
     for component in key.as_str().split('/') {
@@ -542,6 +557,31 @@ fn normalized_relative_path(root: &Path, path: &Path) -> Result<String, String> 
 mod tests {
     use super::super::MAX_STORAGE_MARKER_BYTES;
     use super::*;
+
+    #[test]
+    fn missing_namespace_is_empty_but_a_replaced_store_root_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("store");
+        let store = LocalObjectStore::open(&root).unwrap();
+        let prefix = ObjectPrefix::parse(format!(
+            "{}/{:032x}",
+            super::super::REPOSITORY_COMMITS_PREFIX,
+            7
+        ))
+        .unwrap();
+        let key = ObjectKey::parse(format!("{}/a.json", prefix.as_str())).unwrap();
+        assert!(store.list_keys(&prefix, None, 10).unwrap().keys.is_empty());
+        assert!(store
+            .get_metadata(&key, MAX_STORAGE_MARKER_BYTES)
+            .unwrap()
+            .is_none());
+        fs::rename(&root, temp.path().join("moved-store")).unwrap();
+        assert!(store.list_keys(&prefix, None, 10).is_err());
+        fs::write(&root, b"not a directory").unwrap();
+        assert!(store.list_keys(&prefix, None, 10).is_err());
+        assert!(store.get_metadata(&key, MAX_STORAGE_MARKER_BYTES).is_err());
+        assert!(store.put_immutable(&key, b"test").is_err());
+    }
 
     #[test]
     fn local_store_keeps_its_native_immutable_write() {

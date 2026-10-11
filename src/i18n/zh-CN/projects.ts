@@ -34,6 +34,7 @@ export default {
     unmatched: "Mallard 无法安全地匹配本地会话和存储中的会话。",
     threadBlocked: "此会话目前无法安全同步。",
     republish: "上传时使用的是之前的导出设置。上传以更新 {{storage}}。",
+    metadataPending: "会话元数据已更改。上传即可更新 {{storage}}。",
     synced: "本机与 {{storage}} 均为最新。",
     localOnly: "仅在本机。上传后保存到 {{storage}}。",
     localAhead: "本机较新。上传以更新 {{storage}}。",

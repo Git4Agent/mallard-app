@@ -3496,6 +3496,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn conversation_capture_failure_is_isolated_per_resource() {
         use std::os::unix::fs::PermissionsExt;

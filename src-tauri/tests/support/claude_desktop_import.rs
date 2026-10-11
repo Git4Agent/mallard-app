@@ -295,12 +295,18 @@ fn replacement_is_atomic_and_confined_to_the_fixture() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("transcript.jsonl");
     write_private_new(&path, b"{}\n");
+    // Unix retains the old inode through replacement; Windows requires
+    // readers to close before replacing the file.
+    #[cfg(unix)]
     let opened = std::fs::File::open(&path).unwrap();
     replace_fixture(root.path(), &path, b"{\"new\":true}\n");
     assert_eq!(std::fs::read(&path).unwrap(), b"{\"new\":true}\n");
-    let mut old = Vec::new();
-    opened.take(32).read_to_end(&mut old).unwrap();
-    assert_eq!(old, b"{}\n");
+    #[cfg(unix)]
+    {
+        let mut old = Vec::new();
+        opened.take(32).read_to_end(&mut old).unwrap();
+        assert_eq!(old, b"{}\n");
+    }
     let outside = tempfile::NamedTempFile::new().unwrap();
     assert!(std::panic::catch_unwind(|| assert_fixture_path(root.path(), outside.path())).is_err());
 }
@@ -334,7 +340,7 @@ fn live_claude_aimock_repeated_desktop_import() {
     ] {
         secure_directory(path);
     }
-    let projects = projects.map(|path| path.canonicalize().unwrap());
+    let projects = projects.map(|path| canonicalize(path).unwrap());
     let _home = EnvironmentGuard::set("HOME", &process_home);
     let _user = EnvironmentGuard::set("USERPROFILE", &process_home);
     let _codex = EnvironmentGuard::set("CODEX_HOME", &codex_home);

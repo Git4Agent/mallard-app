@@ -4620,11 +4620,11 @@ mod tests {
     fn current_codex_0147_patch_paths_accept_a_validated_project_root_alias() {
         let temp = tempfile::tempdir().unwrap();
         let transcript = temp.path().join("rollout.jsonl");
-        let canonical_root = PathBuf::from("/private/var/folders/run/project1_copy");
-        let selected_root = PathBuf::from("/var/folders/run/project1_copy");
+        let canonical_root = temp.path().join("canonical/project1_copy");
+        let selected_root = temp.path().join("selected/project1_copy");
         let aliases = vec![canonical_root.clone(), selected_root.clone()];
         let inside = selected_root.join("generated/session-paths/inside-alpha.txt");
-        let outside = PathBuf::from("/var/folders/run/project1_copy_external/outside-alpha.txt");
+        let outside = temp.path().join("selected/project1_copy_external/outside-alpha.txt");
         write_jsonl(
             &transcript,
             vec![

@@ -4,8 +4,10 @@ use super::cli_version::{require_session_resume, ResumeCli};
 use crate::cli_discovery::ResolvedCli;
 #[cfg(target_os = "macos")]
 use crate::codex_app::{find_installed_mac_app, InstalledMacApp};
+#[cfg(target_os = "macos")]
+use crate::providers::launch::shell_quote;
 use crate::providers::launch::{
-    launch_terminal, percent_encode_uri_component, shell_quote, TerminalCommand,
+    launch_terminal, percent_encode_uri_component, TerminalCommand,
 };
 use crate::providers::traits::{
     NewSessionRequest, NewSessionSurface, SessionActionContext, SessionActionDescriptor,
@@ -15,15 +17,15 @@ use std::ffi::OsStr;
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::process::Command;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 use std::time::{Duration, SystemTime};
 
 pub(super) const OPEN_IN_APP: &str = "codex.open-in-app";
 pub(super) const OPEN_IN_TERMINAL: &str = "codex.open-in-terminal";
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 const CODEX_PROJECT_ROUTE_TIMEOUT: Duration = Duration::from_millis(2500);
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 const CODEX_PROJECT_ROUTE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) fn validate_thread_uuid(value: &str) -> Result<(), String> {
@@ -48,10 +50,7 @@ fn codex_app_deep_links(
         return Err("Project root and Codex home must be absolute".to_string());
     }
     Ok([
-        format!(
-            "codex://threads/new?path={}",
-            percent_encode_uri_component(&project_root.to_string_lossy())
-        ),
+        codex_project_deep_link(project_root),
         format!("codex://threads/{thread_id}"),
     ])
 }
@@ -68,6 +67,8 @@ fn codex_app_open_command(bundle_path: &Path, codex_home: &Path, deep_link: &str
 
 /// The new-thread deep link for a project.
 pub(crate) fn codex_project_deep_link(project_root: &Path) -> String {
+    // Codex rejects the verbatim Windows prefix added by fs::canonicalize.
+    let project_root = dunce::simplified(project_root);
     format!(
         "codex://threads/new?path={}",
         percent_encode_uri_component(&project_root.to_string_lossy())
@@ -85,9 +86,9 @@ pub fn codex_app_project_open_command(codex_home: &Path, project_root: &Path) ->
     let deep_link = codex_project_deep_link(project_root);
     #[cfg(windows)]
     {
-        let executable = crate::providers::windows_app::scheme_handler_executable("codex").ok()?;
+        let app = crate::providers::windows_app::scheme_handler("codex").ok()?;
         Some(crate::providers::windows_app::display_launch(
-            &executable,
+            &app,
             &[("CODEX_HOME", codex_home)],
             &[deep_link.as_str()],
         ))
@@ -130,13 +131,13 @@ fn run_codex_app_deep_link(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 fn file_stamp(path: &Path) -> Option<(u64, SystemTime)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.len(), metadata.modified().ok()?))
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 fn wait_for_file_change(path: &Path, initial: Option<(u64, SystemTime)>) {
     let started = std::time::Instant::now();
     while started.elapsed() < CODEX_PROJECT_ROUTE_TIMEOUT {
@@ -151,10 +152,12 @@ pub(crate) fn launch_codex_app(
     thread_id: &str,
     project_root: &Path,
     codex_home: &Path,
+    cli_path: Option<&Path>,
     before_launch: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        let _ = cli_path;
         let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
         let app = find_installed_mac_app().ok_or_else(|| {
             "the official Codex desktop app is not installed or its bundle identity is invalid"
@@ -170,35 +173,27 @@ pub(crate) fn launch_codex_app(
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{
-            display_launch, launch_app, scheme_handler_executable,
-        };
-        let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
-        let executable = scheme_handler_executable("codex")?;
+        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler};
+        let _ = cli_path;
+        codex_app_deep_links(thread_id, project_root, codex_home)?;
+        let app = scheme_handler("codex")?;
         let env = [("CODEX_HOME", codex_home)];
 
-        // Same two-step route as macOS: the new-thread link selects the
-        // project, the thread link then replaces the composer.
-        let state_path = codex_home.join(".codex-global-state.json");
-        let initial_state = file_stamp(&state_path);
-        before_launch(&display_launch(
-            &executable,
-            &env,
-            &[deep_links[0].as_str()],
-        ));
-        launch_app(&executable, &env, &[deep_links[0].as_str()])?;
-        wait_for_file_change(&state_path, initial_state);
-
-        before_launch(&display_launch(
-            &executable,
-            &env,
-            &[deep_links[1].as_str()],
-        ));
-        launch_app(&executable, &env, &[deep_links[1].as_str()])
+        // A running Desktop can ignore the launch environment. Start/focus it
+        // without a route, then verify its actual profile before any move or
+        // navigation. Both operations use that same native connection.
+        before_launch(&display_launch(&app, &env, &[]));
+        launch_app(&app, &env, &[])?;
+        super::project_assignment::assign_and_open(
+            &app.executable,
+            codex_home,
+            thread_id,
+            project_root,
+        )
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (thread_id, project_root, codex_home, before_launch);
+        let _ = (thread_id, project_root, codex_home, cli_path, before_launch);
         Err(CODEX_APP_UNAVAILABLE.to_string())
     }
 }
@@ -337,14 +332,12 @@ fn open_app_new_thread(
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{
-            display_launch, launch_app, scheme_handler_executable,
-        };
+        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler};
         let deep_link = codex_project_deep_link(workspace);
-        let executable = scheme_handler_executable("codex")?;
+        let app = scheme_handler("codex")?;
         let env = [("CODEX_HOME", codex_home)];
-        before_launch(&display_launch(&executable, &env, &[deep_link.as_str()]));
-        launch_app(&executable, &env, &[deep_link.as_str()])
+        before_launch(&display_launch(&app, &env, &[deep_link.as_str()]));
+        launch_app(&app, &env, &[deep_link.as_str()])
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -448,6 +441,7 @@ pub(super) fn execute_action(
                 request.provider_session_id,
                 request.project_root,
                 request.provider_home,
+                request.cli_path,
                 request.before_launch,
             )?;
             Ok(SessionActionOutcome::Launched)
@@ -487,13 +481,30 @@ mod tests {
 
     #[test]
     fn deep_links_and_commands_are_argument_safe() {
+        let (cli, project, home) = if cfg!(windows) {
+            (
+                r"C:\bin\codex.exe",
+                r"C:\Users\dev\my project",
+                r"C:\Users\dev\.codex",
+            )
+        } else {
+            (
+                "/usr/local/bin/codex",
+                "/Users/dev/my project",
+                "/Users/dev/.codex",
+            )
+        };
         let links = codex_app_deep_links(
             "0193b6c1-5352-7b12-9c6e-000000000001",
-            Path::new("/Users/dev/my project"),
-            Path::new("/Users/dev/.codex"),
+            Path::new(project),
+            Path::new(home),
         )
         .unwrap();
-        assert!(links[0].contains("%2FUsers%2Fdev%2Fmy%20project"));
+        assert!(links[0].contains(if cfg!(windows) {
+            "C%3A%5CUsers%5Cdev%5Cmy%20project"
+        } else {
+            "%2FUsers%2Fdev%2Fmy%20project"
+        }));
         assert_eq!(
             links[1],
             "codex://threads/0193b6c1-5352-7b12-9c6e-000000000001"
@@ -503,35 +514,65 @@ mod tests {
         );
 
         let command = terminal_resume_command(
-            Path::new("/usr/local/bin/codex"),
+            Path::new(cli),
             "0193b6c1-5352-7b12-9c6e-000000000001",
-            Path::new("/Users/dev/my project"),
-            Path::new("/Users/dev/.codex"),
+            Path::new(project),
+            Path::new(home),
         )
         .unwrap();
         assert_eq!(
-            command.shell_line(),
-            "CODEX_HOME='/Users/dev/.codex' '/usr/local/bin/codex' resume \
-             0193b6c1-5352-7b12-9c6e-000000000001 -C '/Users/dev/my project'"
+            command.display_line(),
+            if cfg!(windows) {
+                r"$env:CODEX_HOME = 'C:\Users\dev\.codex'; & 'C:\bin\codex.exe' resume 0193b6c1-5352-7b12-9c6e-000000000001 -C 'C:\Users\dev\my project'"
+            } else {
+                "CODEX_HOME='/Users/dev/.codex' '/usr/local/bin/codex' resume \
+                 0193b6c1-5352-7b12-9c6e-000000000001 -C '/Users/dev/my project'"
+            }
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn app_deep_links_accept_native_canonical_project_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project with spaces & 测试");
+        std::fs::create_dir(&project).unwrap();
+        let canonical = std::fs::canonicalize(&project).unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+        let ordinary = crate::local_paths::canonicalize(&project).unwrap();
+        let expected = format!(
+            "codex://threads/new?path={}",
+            percent_encode_uri_component(&ordinary.to_string_lossy())
+        );
+
+        assert_eq!(codex_project_deep_link(&canonical), expected);
+        let links = codex_app_deep_links(
+            "0193b6c1-5352-7b12-9c6e-000000000001",
+            &canonical,
+            &temp.path().join("selected codex home"),
+        )
+        .unwrap();
+        assert_eq!(links[0], expected);
     }
 
     #[test]
     fn home_terminal_command_carries_only_the_home_and_cli() {
-        let command = codex_home_terminal_command(
-            Path::new("/usr/local/bin/codex"),
-            Path::new("/Users/dev/my codex's home"),
-        )
-        .unwrap();
+        let (cli, home) = if cfg!(windows) {
+            (r"C:\bin\codex.exe", r"C:\Users\dev\my codex's home")
+        } else {
+            ("/usr/local/bin/codex", "/Users/dev/my codex's home")
+        };
+        let command = codex_home_terminal_command(Path::new(cli), Path::new(home)).unwrap();
         assert_eq!(
-            command.shell_line(),
-            "CODEX_HOME='/Users/dev/my codex'\\''s home' '/usr/local/bin/codex'"
+            command.display_line(),
+            if cfg!(windows) {
+                r"$env:CODEX_HOME = 'C:\Users\dev\my codex''s home'; & 'C:\bin\codex.exe'"
+            } else {
+                "CODEX_HOME='/Users/dev/my codex'\\''s home' '/usr/local/bin/codex'"
+            }
         );
         assert!(command.args.is_empty());
-        assert!(
-            codex_home_terminal_command(Path::new("codex"), Path::new("/Users/dev/.codex"))
-                .is_err()
-        );
+        assert!(codex_home_terminal_command(Path::new("codex"), Path::new(home)).is_err());
         assert!(launch_codex_home_app(Path::new("relative"), Path::new("/Users/dev")).is_err());
     }
 

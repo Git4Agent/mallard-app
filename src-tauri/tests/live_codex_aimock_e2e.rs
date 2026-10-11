@@ -36,6 +36,7 @@ use mallard_infrastructure::codex_standalone_builder::{
     decode_standalone_codex_root, encode_standalone_codex_root,
 };
 use mallard_infrastructure::codex_thread_allocator::validate_uuid_v7;
+use mallard_infrastructure::local_paths::canonicalize;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::providers::{
     AgentProviderRegistry, SessionCountQuality, SessionTimelineContext, SessionTimelineQuery,
@@ -280,6 +281,10 @@ impl LocalAimockProvider {
             REASONING_OVERRIDE.to_string(),
             "features.plugins=false".to_string(),
             "features.enable_request_compression=false".to_string(),
+            // Disposable homes have no elevated sandbox setup. Use the native
+            // restricted-token sandbox for the requested filesystem policy.
+            #[cfg(windows)]
+            "windows.sandbox=\"unelevated\"".to_string(),
             format!("model_providers.{PROVIDER_ID}.name=\"Mallard deterministic local aimock\""),
             format!(
                 "model_providers.{PROVIDER_ID}.base_url={}",
@@ -785,7 +790,7 @@ fn create_secure_codex_home(path: &Path) {
     assert!(!path.join("config.toml").exists());
 }
 
-fn clean_fixture_relative_path(value: &str) -> &Path {
+fn clean_fixture_relative_path(value: &str) -> PathBuf {
     let path = Path::new(value);
     assert!(
         !path.as_os_str().is_empty()
@@ -795,7 +800,7 @@ fn clean_fixture_relative_path(value: &str) -> &Path {
                 .all(|component| matches!(component, std::path::Component::Normal(_))),
         "live path fixture has an unsafe relative path"
     );
-    path
+    path.components().collect()
 }
 
 fn assert_no_follow_directory_chain(root: &Path, relative: &Path) {
@@ -820,14 +825,14 @@ fn prepare_fixture_parents(root: &Path, fixtures: &[(&str, &[u8])]) {
         root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
         "live path fixture root must be a regular directory"
     );
-    let canonical_root = std::fs::canonicalize(root).expect("canonicalize live path fixture root");
+    let canonical_root = canonicalize(root).expect("canonicalize live path fixture root");
     for (relative, _) in fixtures {
         let relative = clean_fixture_relative_path(relative);
         let parent = relative.parent().expect("fixture path has a parent");
         std::fs::create_dir_all(root.join(parent)).expect("create live path fixture parent");
         assert_no_follow_directory_chain(root, parent);
         let canonical_parent =
-            std::fs::canonicalize(root.join(parent)).expect("canonicalize fixture parent");
+            canonicalize(root.join(parent)).expect("canonicalize fixture parent");
         assert!(
             canonical_parent.starts_with(&canonical_root),
             "live path fixture parent escaped its root"
@@ -876,7 +881,7 @@ fn fixture_file_states(
     fixtures
         .iter()
         .map(|(relative, expected)| {
-            let relative = clean_fixture_relative_path(relative).to_path_buf();
+            let relative = clean_fixture_relative_path(relative);
             let state = fixture_file_state(&root.join(&relative), expected);
             (relative, state)
         })
@@ -886,7 +891,7 @@ fn fixture_file_states(
 fn assert_exact_fixture_tree(root: &Path, fixtures: &[(&str, &[u8])]) {
     let expected_files = fixtures
         .iter()
-        .map(|(relative, _)| clean_fixture_relative_path(relative).to_path_buf())
+        .map(|(relative, _)| clean_fixture_relative_path(relative))
         .collect::<BTreeSet<_>>();
     let mut expected_directories = BTreeSet::new();
     for relative in &expected_files {
@@ -942,8 +947,8 @@ fn assert_exact_fixture_tree(root: &Path, fixtures: &[(&str, &[u8])]) {
 }
 
 fn copy_in_project_fixtures(source_root: &Path, target_root: &Path) {
-    let source_root = std::fs::canonicalize(source_root).expect("canonicalize source project");
-    let target_root = std::fs::canonicalize(target_root).expect("canonicalize target project");
+    let source_root = canonicalize(source_root).expect("canonicalize source project");
+    let target_root = canonicalize(target_root).expect("canonicalize target project");
     assert_ne!(source_root, target_root, "project replicas share one root");
     assert!(
         !source_root.starts_with(&target_root) && !target_root.starts_with(&source_root),
@@ -952,9 +957,9 @@ fn copy_in_project_fixtures(source_root: &Path, target_root: &Path) {
 
     for (relative, expected) in IN_PROJECT_FIXTURES {
         let relative = clean_fixture_relative_path(relative);
-        let source = source_root.join(relative);
+        let source = source_root.join(&relative);
         let source_state = fixture_file_state(&source, expected);
-        let target = target_root.join(relative);
+        let target = target_root.join(&relative);
         assert!(!target.exists(), "fixture copy would overwrite a target");
         let target_parent = target.parent().expect("fixture target has a parent");
         std::fs::create_dir_all(target_parent).expect("create copied fixture parent");
@@ -965,7 +970,7 @@ fn copy_in_project_fixtures(source_root: &Path, target_root: &Path) {
                 .expect("copied fixture parent remains below target"),
         );
         let canonical_parent =
-            std::fs::canonicalize(target_parent).expect("canonicalize copied fixture parent");
+            canonicalize(target_parent).expect("canonicalize copied fixture parent");
         assert!(
             canonical_parent.starts_with(&target_root),
             "copied fixture parent escaped the target project"
@@ -995,7 +1000,7 @@ fn copy_in_project_fixtures(source_root: &Path, target_root: &Path) {
 }
 
 fn canonical_fixture_paths(root: &Path, fixtures: &[(&str, &[u8])]) -> Vec<PathBuf> {
-    let root = std::fs::canonicalize(root).expect("canonicalize live path fixture root");
+    let root = canonicalize(root).expect("canonicalize live path fixture root");
     fixtures
         .iter()
         .map(|(relative, _)| root.join(clean_fixture_relative_path(relative)))
@@ -1005,8 +1010,8 @@ fn canonical_fixture_paths(root: &Path, fixtures: &[(&str, &[u8])]) -> Vec<PathB
 fn fixture_path_spellings(root: &Path, relative: &str) -> BTreeSet<PathBuf> {
     let relative = clean_fixture_relative_path(relative);
     let canonical_root =
-        std::fs::canonicalize(root).expect("canonicalize live path fixture root spelling");
-    [root.join(relative), canonical_root.join(relative)]
+        canonicalize(root).expect("canonicalize live path fixture root spelling");
+    [root.join(&relative), canonical_root.join(&relative)]
         .into_iter()
         .collect()
 }
@@ -1205,7 +1210,7 @@ fn remove_exact_generated_project_trust(codex_home: &Path, project_root: &Path) 
     if !config_path.exists() {
         return;
     }
-    let canonical_project = std::fs::canonicalize(project_root)
+    let canonical_project = canonicalize(project_root)
         .expect("canonicalize generated Codex project trust path");
     let quoted_project = serde_json::to_string(canonical_project.to_string_lossy().as_ref())
         .expect("serialize generated Codex project trust path");
@@ -1309,8 +1314,8 @@ fn run_codex(
                 "write-capable Codex roots must be no-follow directories"
             );
             let canonical_project =
-                std::fs::canonicalize(project_root).expect("canonicalize live Codex project");
-            let canonical_additional = std::fs::canonicalize(additional_dir)
+                canonicalize(project_root).expect("canonicalize live Codex project");
+            let canonical_additional = canonicalize(additional_dir)
                 .expect("canonicalize live Codex additional directory");
             assert_eq!(
                 canonical_project.parent(),
@@ -2517,7 +2522,7 @@ fn validate_paginated_rollout(
         encode_standalone_codex_root(
             &resolved,
             &project_root.to_string_lossy().into_owned(),
-            (std::fs::canonicalize(project_root)
+            (canonicalize(project_root)
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()))
             .as_deref(),
@@ -2866,7 +2871,7 @@ fn append_paginated_turn(
         encode_standalone_codex_root(
             &refreshed,
             &project_root.to_string_lossy().into_owned(),
-            (std::fs::canonicalize(project_root)
+            (canonicalize(project_root)
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()))
             .as_deref(),
@@ -3188,7 +3193,7 @@ fn run_paginated_mutation(
     encode_standalone_codex_root(
         &resolved,
         &project_root.to_string_lossy().into_owned(),
-        (std::fs::canonicalize(project_root)
+        (canonicalize(project_root)
             .ok()
             .map(|path| path.to_string_lossy().into_owned()))
         .as_deref(),
@@ -3337,7 +3342,7 @@ fn timeline_history_from_standalone(
     std::fs::write(&rollout, root_bytes).map_err(|_| failure(3, 0, 0, 0))?;
 
     let canonical_project_root =
-        std::fs::canonicalize(project_root).map_err(|_| failure(4, 0, 0, 0))?;
+        canonicalize(project_root).map_err(|_| failure(4, 0, 0, 0))?;
     let mut project_root_aliases = vec![project_root.to_path_buf(), canonical_project_root.clone()];
     project_root_aliases.sort();
     project_root_aliases.dedup();
@@ -3497,7 +3502,7 @@ fn resolved_local_alias_history(
         encode_standalone_codex_root(
             &resolved,
             &project_root.to_string_lossy().into_owned(),
-            (std::fs::canonicalize(project_root)
+            (canonicalize(project_root)
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()))
             .as_deref(),
@@ -4074,6 +4079,8 @@ fn assert_bytes_contain_path(bytes: &[u8], path: &Path, label: &str) {
     let path = path
         .to_str()
         .expect("live path assertion requires a UTF-8 path");
+    let encoded = serde_json::to_string(path).unwrap();
+    let path = encoded.trim_matches('"');
     assert!(
         byte_slice_contains(bytes, path.as_bytes()),
         "{label} does not contain an expected path"
@@ -4084,6 +4091,8 @@ fn assert_bytes_exclude_path(bytes: &[u8], path: &Path, label: &str) {
     let path = path
         .to_str()
         .expect("live path assertion requires a UTF-8 path");
+    let encoded = serde_json::to_string(path).unwrap();
+    let path = encoded.trim_matches('"');
     assert!(
         !byte_slice_contains(bytes, path.as_bytes()),
         "{label} retained a forbidden path"
@@ -4158,7 +4167,7 @@ fn local_file_change_key_candidates(
     outside_root: &Path,
 ) -> Vec<BTreeSet<String>> {
     let canonical_project =
-        std::fs::canonicalize(project_root).expect("canonicalize patch-key project root");
+        canonicalize(project_root).expect("canonicalize patch-key project root");
     let outside = canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -4196,7 +4205,13 @@ fn assert_portable_file_change_keys(bytes: &[u8], outside_root: &Path) {
     let candidates = ["b", "c"].map(|style| {
         IN_PROJECT_FIXTURES
             .iter()
-            .map(|(relative, _)| format!("/__mallard_root__/{style};/{relative}"))
+            .map(|(relative, _)| {
+                format!(
+                    "/__mallard_root__/{style};{}{}",
+                    std::path::MAIN_SEPARATOR,
+                    clean_fixture_relative_path(relative).display()
+                )
+            })
             .chain(
                 canonical_fixture_paths(outside_root, &OUTSIDE_PROJECT_FIXTURES)
                     .into_iter()
@@ -4228,7 +4243,10 @@ fn assert_raw_rollout_paths(
         assert!(
             spellings
                 .iter()
-                .any(|path| byte_slice_contains(&bytes, path.to_string_lossy().as_bytes())),
+                .any(|path| {
+                    let encoded = serde_json::to_string(path).unwrap();
+                    byte_slice_contains(&bytes, encoded.trim_matches('"').as_bytes())
+                }),
             "provider rollout does not contain an expected project-path spelling"
         );
     }
@@ -4318,10 +4336,15 @@ fn assert_portable_rollout_paths(
     assert_portable_file_change_keys(&bytes, outside_root);
     for (relative, _) in IN_PROJECT_FIXTURES {
         assert!(
-            ["b", "c"].iter().any(|style| byte_slice_contains(
-                &bytes,
-                format!("/__mallard_root__/{style};/{relative}").as_bytes()
-            )),
+            ["b", "c"].iter().any(|style| {
+                let token = format!(
+                    "/__mallard_root__/{style};{}{}",
+                    std::path::MAIN_SEPARATOR,
+                    clean_fixture_relative_path(relative).display()
+                );
+                let encoded = serde_json::to_string(&token).unwrap();
+                byte_slice_contains(&bytes, encoded.trim_matches('"').as_bytes())
+            }),
             "portable rollout lacks an expected tokenized project path"
         );
     }
@@ -4581,12 +4604,20 @@ fn assert_session_detail_paths(
     }
     let transcript = rollout_path(codex_home, provider_thread_id);
     let canonical_project =
-        std::fs::canonicalize(project_root).expect("canonicalize Session Details project root");
+        canonicalize(project_root).expect("canonicalize Session Details project root");
     let canonical_home =
-        std::fs::canonicalize(codex_home).expect("canonicalize Session Details provider home");
+        canonicalize(codex_home).expect("canonicalize Session Details provider home");
     let mut privacy_view = visible.clone();
     for external in &external_paths {
         privacy_view = privacy_view.replace(external, "<expected-outside-path>");
+    }
+    // Patch arguments retain their authored separators; native file-change
+    // records use the platform spelling of those same expected outside files.
+    for (relative, _) in OUTSIDE_PROJECT_FIXTURES {
+        privacy_view = privacy_view.replace(
+            &format!("{}/{relative}", outside_root.display()),
+            "<expected-outside-path>",
+        );
     }
     for forbidden in [
         project_root.to_string_lossy(),
@@ -4895,7 +4926,7 @@ fn assert_pulled_standalone_rollout(
         encode_standalone_codex_root(
             &resolved,
             &project_root.to_string_lossy().into_owned(),
-            (std::fs::canonicalize(project_root)
+            (canonicalize(project_root)
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned()))
             .as_deref(),
@@ -4998,7 +5029,7 @@ fn assert_generated_codex_symlink_is_safe(
         sensitive,
         "generated Codex symlink target",
     );
-    let canonical_target = std::fs::canonicalize(path).expect("resolve generated Codex symlink");
+    let canonical_target = canonicalize(path).expect("resolve generated Codex symlink");
     if is_plugin_cache {
         assert!(
             canonical_target.starts_with(canonical_root),
@@ -5017,7 +5048,7 @@ fn assert_generated_codex_symlink_is_safe(
             "generated plugin-cache resolved target",
         );
     } else {
-        let expected_binary = std::fs::canonicalize(codex_binary())
+        let expected_binary = canonicalize(codex_binary())
             .expect("canonicalize the installed Codex binary for wrapper validation");
         assert!(
             canonical_target == expected_binary,
@@ -5038,7 +5069,7 @@ fn assert_sensitive_state_tree(
         "isolated provider state must be a no-follow directory"
     );
     let canonical_root =
-        std::fs::canonicalize(root).expect("canonicalize isolated provider-state root");
+        canonicalize(root).expect("canonicalize isolated provider-state root");
     let mut entries = 0_usize;
     let mut inspected_bytes = 0_u64;
     for entry in WalkDir::new(root).follow_links(false) {
@@ -5081,6 +5112,12 @@ fn assert_sensitive_state_tree(
             entry.file_type().is_file(),
             "isolated Codex provider state contains a special file"
         );
+        #[cfg(windows)]
+        if allow_generated_cache_symlinks
+            && codex_home::native_runtime_digest(root, relative).is_some()
+        {
+            continue;
+        }
         let file_metadata =
             std::fs::symlink_metadata(entry.path()).expect("inspect Codex provider-state file");
         inspected_bytes = inspected_bytes.saturating_add(file_metadata.len());
@@ -5446,8 +5483,16 @@ fn provider_state_scan_covers_cache_bodies_and_validates_generated_symlinks() {
 
 #[test]
 fn revision_one_prompt_and_diagnostics_preserve_only_safe_evidence() {
-    let selected_project = Path::new("/var/folders/mallard-live/project1");
-    let canonical_external = Path::new("/private/var/folders/mallard-live/project1_external");
+    let selected_project = Path::new(if cfg!(windows) {
+        "C:/var/folders/mallard-live/project1"
+    } else {
+        "/var/folders/mallard-live/project1"
+    });
+    let canonical_external = Path::new(if cfg!(windows) {
+        "C:/private/var/folders/mallard-live/project1_external"
+    } else {
+        "/private/var/folders/mallard-live/project1_external"
+    });
     let prompt = revision_one_file_prompt(selected_project, canonical_external);
     let patch = revision_one_patch_body(canonical_external);
     let command = revision_one_patch_command(canonical_external);
@@ -5460,28 +5505,27 @@ fn revision_one_prompt_and_diagnostics_preserve_only_safe_evidence() {
     assert_eq!(patch.matches("*** Add File:").count(), 4);
     assert!(patch.contains("*** Add File: ./generated/session-paths/inside-alpha.txt\n"));
     assert!(patch.contains("*** Add File: ./generated/session-paths/nested/inside-beta.json\n"));
-    assert!(patch.contains(
-        "*** Add File: /private/var/folders/mallard-live/project1_external/outside-alpha.txt\n"
-    ));
-    assert!(patch.contains(
-        "*** Add File: /private/var/folders/mallard-live/project1_external/nested/outside-beta.json\n"
-    ));
+    assert!(patch.contains(&format!(
+        "*** Add File: {}/outside-alpha.txt\n", canonical_external.display()
+    )));
+    assert!(patch.contains(&format!(
+        "*** Add File: {}/nested/outside-beta.json\n", canonical_external.display()
+    )));
     assert!(patch.contains("+MALLARD_IN_PROJECT_ALPHA\n"));
     assert!(patch.contains("+{\"fixture\":\"MALLARD_IN_PROJECT_BETA\",\"version\":1}\n"));
     assert!(patch.contains("+MALLARD_OUTSIDE_ALPHA\n"));
     assert!(patch.contains("+{\"fixture\":\"MALLARD_OUTSIDE_BETA\",\"version\":1}\n"));
     assert!(!patch.contains("/var/folders/mallard-live/project1/"));
     for (relative, _) in IN_PROJECT_FIXTURES {
-        assert!(prompt.contains(selected_project.join(relative).to_string_lossy().as_ref()));
-        assert!(!prompt.contains(
-            Path::new("/private/var/folders/mallard-live/project1")
-                .join(relative)
-                .to_string_lossy()
-                .as_ref()
-        ));
+        let relative = clean_fixture_relative_path(relative);
+        assert!(prompt.contains(&serde_json::to_string(&selected_project.join(&relative)).unwrap()));
+        assert!(!prompt.contains(&serde_json::to_string(
+            &canonical_external.with_file_name("project1").join(&relative)
+        ).unwrap()));
     }
     for (relative, _) in OUTSIDE_PROJECT_FIXTURES {
-        assert!(prompt.contains(canonical_external.join(relative).to_string_lossy().as_ref()));
+        let relative = clean_fixture_relative_path(relative);
+        assert!(prompt.contains(&serde_json::to_string(&canonical_external.join(relative)).unwrap()));
     }
 
     let stdout = br#"{"type":"thread.started","thread_id":"safe-thread"}
@@ -5707,11 +5751,11 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     for directory in [&project1, &project1_copy, &project1_external] {
         std::fs::create_dir_all(directory).expect("create current Codex path fixture directory");
     }
-    let project1 = std::fs::canonicalize(project1).expect("canonicalize source fixture project");
+    let project1 = canonicalize(project1).expect("canonicalize source fixture project");
     let project1_copy =
-        std::fs::canonicalize(project1_copy).expect("canonicalize target fixture project");
+        canonicalize(project1_copy).expect("canonicalize target fixture project");
     let project1_external =
-        std::fs::canonicalize(project1_external).expect("canonicalize outside fixture root");
+        canonicalize(project1_external).expect("canonicalize outside fixture root");
     let source_thread_id = fixture_uuid(0x401);
     let target_thread_id = fixture_uuid(0x402);
     let inside_paths = canonical_fixture_paths(&project1, &IN_PROJECT_FIXTURES);
@@ -5792,10 +5836,15 @@ fn current_codex_nested_file_edit_paths_survive_wire_projection() {
     .expect("encode current Codex path fixture");
     assert_portable_file_change_keys(&wire.root_bytes, &project1_external);
     for (relative, _) in IN_PROJECT_FIXTURES {
-        assert!(byte_slice_contains(
+        assert_bytes_contain_path(
             &wire.root_bytes,
-            format!("/__mallard_root__/b;/{relative}").as_bytes()
-        ));
+            Path::new(&format!(
+                "/__mallard_root__/b;{}{}",
+                std::path::MAIN_SEPARATOR,
+                clean_fixture_relative_path(relative).display()
+            )),
+            "offline portable rollout",
+        );
     }
     for path in &inside_paths {
         assert_bytes_exclude_path(&wire.root_bytes, path, "offline portable rollout");
@@ -5869,7 +5918,7 @@ fn current_codex_paginated_graph_fixture_passes_production_validators() {
     let wire = encode_standalone_codex_root(
         &resolved,
         &project_root.to_string_lossy().into_owned(),
-        (std::fs::canonicalize(&project_root)
+        (canonicalize(&project_root)
             .ok()
             .map(|path| path.to_string_lossy().into_owned()))
         .as_deref(),
@@ -5884,7 +5933,7 @@ fn current_codex_paginated_graph_fixture_passes_production_validators() {
         &wire_resolved,
         &P2,
         &project_root.to_string_lossy().into_owned(),
-        (std::fs::canonicalize(&project_root)
+        (canonicalize(&project_root)
             .ok()
             .map(|path| path.to_string_lossy().into_owned()))
         .as_deref(),
@@ -5946,13 +5995,13 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     create_secure_codex_home(&myconf1);
     create_secure_codex_home(&myconf2);
     create_secure_codex_home(&aimock_control);
-    let project1 = std::fs::canonicalize(project1).expect("canonicalize source fixture project");
+    let project1 = canonicalize(project1).expect("canonicalize source fixture project");
     let project1_copy =
-        std::fs::canonicalize(project1_copy).expect("canonicalize target fixture project");
+        canonicalize(project1_copy).expect("canonicalize target fixture project");
     let project1_external =
-        std::fs::canonicalize(project1_external).expect("canonicalize external fixture root");
+        canonicalize(project1_external).expect("canonicalize external fixture root");
     let canonical_live_root =
-        std::fs::canonicalize(root.path()).expect("canonicalize isolated live-test root");
+        canonicalize(root.path()).expect("canonicalize isolated live-test root");
     let _home_guard = EnvironmentGuard::set("HOME", &process_home);
     let _userprofile_guard = EnvironmentGuard::set("USERPROFILE", &process_home);
     let scenario = aimock_scenario_document(&project1, &project1_external);

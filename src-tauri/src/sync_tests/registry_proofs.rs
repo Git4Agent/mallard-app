@@ -228,7 +228,7 @@ fn a_larger_registry_writes_nothing_until_a_new_provider_is_configured() {
         .strip_prefix(&home)
         .unwrap()
         .to_string_lossy()
-        .into_owned();
+        .replace('\\', "/");
     let mut changed = Vec::new();
     for (path, digest) in &before {
         if after.get(path) != Some(digest) {

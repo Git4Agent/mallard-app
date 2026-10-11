@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile, lstat } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile, lstat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { platform } from "node:os";
@@ -31,7 +31,23 @@ export async function nativePreflight(replica) {
   const claude = (await runBounded("claude", ["--version"], options, 15_000)).trim();
   assert.equal(codex, "codex-cli 0.162.1", "Codex version pin");
   assert.ok(claude === "2.1.266 (Claude Code)", "Claude version pin");
-  await runBounded("codex", ["sandbox", "--", "/usr/bin/true"], options, 15_000);
+  const probe = process.platform === "win32" ? ["cmd.exe", "/d", "/c", "exit", "0"] : ["/usr/bin/true"];
+  await runBounded("codex", ["sandbox", "--", ...probe], options, 15_000);
+  // The graph-fault checks require a real file symlink on every platform.
+  const target = join(replica.home, "symlink-probe-target");
+  const link = join(replica.home, "symlink-probe-link");
+  await writeFile(target, "fixture", { mode: 0o600, flag: "wx" });
+  let linked = false;
+  try {
+    await symlink(target, link, "file"); linked = true;
+    assert.ok((await lstat(link)).isSymbolicLink(), "file symlink preflight");
+  } catch (error) {
+    if (["EPERM", "EACCES"].includes(error.code)) throw new Error("native_file_symlink_permission_denied");
+    throw error;
+  } finally {
+    if (linked) await rm(link);
+    await rm(target);
+  }
   return { codex, claude };
 }
 
@@ -142,7 +158,7 @@ export class NativeDriver {
       this.audits.push(await mock.finish());
       assert.equal(await digestFiles(authoritative), before, "native snapshot resume changed authoritative files");
       this.times.push({ provider: node.provider, operation: "native_resume", ms: performance.now() - started });
-    } finally { mock.kill(); await rm(snapshot, { recursive: true, force: true }); }
+    } finally { mock.kill(); await rm(snapshot, { recursive: true, force: true, maxRetries: 10 }); }
   }
 }
 

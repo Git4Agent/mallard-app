@@ -3339,11 +3339,11 @@ mod tests {
     fn edit_paths_choose_the_most_specific_root_alias_and_reject_a_prefix_sibling() {
         let temp = tempfile::tempdir().unwrap();
         let transcript = temp.path().join("session.jsonl");
-        let canonical_root = PathBuf::from("/tmp/project");
-        let selected_root = PathBuf::from("/tmp/project/alias");
+        let canonical_root = temp.path().join("project");
+        let selected_root = canonical_root.join("alias");
         let aliases = vec![canonical_root.clone(), selected_root.clone()];
         let inside = selected_root.join("src/lib.rs");
-        let outside = PathBuf::from("/tmp/project_external/alias_external/outside.rs");
+        let outside = temp.path().join("project_external/alias_external/outside.rs");
         write_jsonl(
             &transcript,
             vec![

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, toNamespacedPath } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -17,7 +17,7 @@ import {
 } from "./live-claude-aimock-server.mjs";
 
 const model = "claude-sonnet-4-6";
-const readPath = "/private/tmp/mallard-claude-read-marker.txt";
+const readPath = join(tmpdir(), "mallard-claude-read-marker.txt");
 const readCallId = "mallard_claude_read_r1";
 const readMarker = "MALLARD_CLAUDE_READ_FILE";
 const placeholderApiKey = "mallard-local-aimock-placeholder";
@@ -133,7 +133,8 @@ async function startHarness(t, document) {
   const child = spawn(
     process.execPath,
     [
-      resolve("scripts/live-claude-aimock-server.mjs"),
+      // Cargo can embed a Windows verbatim checkout path in the native harness.
+      toNamespacedPath(resolve("scripts/live-claude-aimock-server.mjs")),
       "--scenario",
       scenarioPath,
       "--audit",
@@ -242,6 +243,8 @@ test("scenario parser rejects unsafe Read paths and invalid prompt pairs", () =>
   const unsafe = readScenarios();
   unsafe[0].response.file_path = "relative/read-marker.txt";
   assert.throws(() => parse(documentFor(unsafe)), /read_file_path/u);
+  unsafe[0].response.file_path = resolve("/");
+  assert.throws(() => parse(documentFor(unsafe)), /read_file_path/u);
 
   const unpaired = documentFor([readScenarios()[0]]);
   assert.throws(() => parse(unpaired), /read_scenario_pair/u);
@@ -303,7 +306,7 @@ test("history validation requires exact markers, the Read round, and only Read e
 
   const relocatedMessages = structuredClone(messages);
   relocatedMessages[1].tool_calls[0].function.arguments = JSON.stringify({
-    file_path: "/private/tmp/replica-b/mallard-claude-read-marker.txt",
+    file_path: join(tmpdir(), "replica-b", "mallard-claude-read-marker.txt"),
   });
   const relocatedReplay = validateScenarioRequest(
     document,
@@ -404,17 +407,17 @@ test("argument, environment, and shutdown parsers reject ambiguous input", async
   assert.deepEqual(
     parseArguments([
       "--scenario",
-      "/private/tmp/aimock-scenario.json",
+      join(tmpdir(), "aimock-scenario.json"),
       "--audit",
-      "/private/tmp/aimock-audit.json",
+      join(tmpdir(), "aimock-audit.json"),
     ]),
     {
-      scenarioPath: "/private/tmp/aimock-scenario.json",
-      auditPath: "/private/tmp/aimock-audit.json",
+      scenarioPath: join(tmpdir(), "aimock-scenario.json"),
+      auditPath: join(tmpdir(), "aimock-audit.json"),
     },
   );
   assert.throws(
-    () => parseArguments(["--scenario", "relative", "--audit", "/tmp/audit"]),
+    () => parseArguments(["--scenario", "relative", "--audit", join(tmpdir(), "audit")]),
     /arguments/u,
   );
 

@@ -38,6 +38,7 @@ export default {
     unmatched: "Mallard could not safely match the local and stored session.",
     threadBlocked: "This thread can't be synced safely right now.",
     republish: "Pushed with your previous export settings. Push to update {{storage}}.",
+    metadataPending: "Session metadata changed. Push to update {{storage}}.",
     synced: "Up to date here and in {{storage}}.",
     localOnly: "Only on this computer. Push to save it in {{storage}}.",
     localAhead: "Newer on this computer. Push to update {{storage}}.",

@@ -26,6 +26,7 @@ use mallard_domain::{
     LocalProjectId, ProjectBinding, ProjectSetupDraft, ProviderKey, ResourceId, RestoreActionKind,
     RestorePlan, StorageConfig, StorageId, ThreadId, MAX_CONVERSATION_FILE_BYTES,
 };
+use mallard_infrastructure::local_paths::canonicalize;
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::project_activity::{ProjectSessionSummary, SessionSourceState};
 use mallard_infrastructure::providers::claude::{encode_claude_project_path, ClaudeAdapter};
@@ -286,6 +287,11 @@ fn closed_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let path = std::env::var_os("PATH").unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
     let mut command = Command::new(program);
     command.env_clear().env("PATH", path);
+    // Node needs the Windows runtime directory to initialize its secure RNG.
+    #[cfg(windows)]
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", system_root);
+    }
     command
 }
 
@@ -3499,9 +3505,10 @@ fn session_detail_history(
         .expect("Read marker path has no project parent");
     let arguments_value = serde_json::from_str::<Value>(arguments)
         .expect("Session Detail Read arguments are not JSON");
+    let relative_read_marker = format!(".{}read-marker.txt", std::path::MAIN_SEPARATOR);
     assert_eq!(
         arguments_value.get("file_path").and_then(Value::as_str),
-        Some("./read-marker.txt"),
+        Some(relative_read_marker.as_str()),
         "Session Detail Read arguments have the wrong local path presentation"
     );
     assert!(
@@ -4152,15 +4159,15 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         secure_directory(directory);
     }
     let project_a =
-        std::fs::canonicalize(&project_a_input).expect("canonicalize replica-A Claude project");
-    let foreign_project = std::fs::canonicalize(&foreign_project_input)
+        canonicalize(&project_a_input).expect("canonicalize replica-A Claude project");
+    let foreign_project = canonicalize(&foreign_project_input)
         .expect("canonicalize foreign colliding Claude project");
     let project_b =
-        std::fs::canonicalize(&project_b_input).expect("canonicalize replica-B Claude project");
+        canonicalize(&project_b_input).expect("canonicalize replica-B Claude project");
     let canonical_root =
         std::fs::canonicalize(root.path()).expect("canonicalize Claude live-test root");
-    assert_eq!(std::fs::canonicalize(&project_a).unwrap(), project_a);
-    assert_eq!(std::fs::canonicalize(&project_b).unwrap(), project_b);
+    assert_eq!(canonicalize(&project_a).unwrap(), project_a);
+    assert_eq!(canonicalize(&project_b).unwrap(), project_b);
     assert_ne!(project_a, foreign_project);
     assert_eq!(
         encode_claude_project_path(project_a.to_string_lossy().as_ref()),

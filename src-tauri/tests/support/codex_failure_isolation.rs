@@ -119,8 +119,7 @@ impl Replica {
             std::fs::create_dir_all(path).expect("create isolation fixture directory");
         }
         create_secure_codex_home(&codex_home);
-        let project_root =
-            std::fs::canonicalize(project_root).expect("canonicalize isolation project");
+        let project_root = canonicalize(project_root).expect("canonicalize isolation project");
         let repository = redacted(
             LocalStateRepository::from_home_dir(&root.join("machine")),
             "create isolation repository",

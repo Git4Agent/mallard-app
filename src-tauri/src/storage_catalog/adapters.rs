@@ -1147,12 +1147,12 @@ mod tests {
         std::fs::create_dir_all(&install_root).unwrap();
         std::fs::write(
             home.join("plugins/installed_plugins.json"),
-            format!(
-                r#"{{"plugins":{{"tools@acme":[{{"installPath":"{}","version":"2.0.0"}}],"proj@acme":[{{"installPath":"{}","scope":"project"}}],"draft@skills-dir":[{{"installPath":"{}"}}]}}}}"#,
-                install_root.display(),
-                install_root.display(),
-                install_root.display(),
-            ),
+            serde_json::to_vec(&serde_json::json!({"plugins": {
+                "tools@acme": [{"installPath": install_root, "version": "2.0.0"}],
+                "proj@acme": [{"installPath": install_root, "scope": "project"}],
+                "draft@skills-dir": [{"installPath": install_root}]
+            }}))
+            .unwrap(),
         )
         .unwrap();
         std::fs::write(

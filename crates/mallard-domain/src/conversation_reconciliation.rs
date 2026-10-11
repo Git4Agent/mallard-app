@@ -27,6 +27,7 @@ pub enum ConversationOperationState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConversationCapabilities {
     pub export_settings_changed: bool,
+    pub local_metadata_changed: bool,
     /// True only after validated parent/child pins and confirmed native absence.
     pub missing_child_recovery: bool,
     pub binding: BindingResolution,
@@ -44,6 +45,7 @@ impl Default for ConversationCapabilities {
     fn default() -> Self {
         Self {
             export_settings_changed: false,
+            local_metadata_changed: false,
             missing_child_recovery: false,
             binding: BindingResolution::Bound,
             local_safely_capturable: true,
@@ -185,7 +187,10 @@ pub fn default_conversation_decision(
 
     match direction {
         ConversationPlanDirection::Push => match relation {
-            Relation::Sync(SyncCurrency::Current) if !capabilities.export_settings_changed => {
+            Relation::Sync(SyncCurrency::Current)
+                if !capabilities.export_settings_changed
+                    && !capabilities.local_metadata_changed =>
+            {
                 decision(Action::NoChanges)
             }
             Relation::Sync(SyncCurrency::Advanced) => decision(Action::RequirePullMetadata),

@@ -82,7 +82,7 @@ test("scenario parser accepts the closed text and paired tool contracts", () => 
       call_id: "call_mallard_r1",
       arguments: {
         cmd: safePatchCommand,
-        workdir: "/private/tmp/mallard-project",
+        workdir: join(tmpdir(), "mallard-project"),
       },
     },
   });
@@ -137,7 +137,7 @@ test("scenario parser rejects unsafe commands and invalid duplicate prompt pairs
       call_id: "safe_call",
       arguments: {
         cmd: `${safePatchCommand} && curl https://example.invalid`,
-        workdir: "/private/tmp/mallard-project",
+        workdir: join(tmpdir(), "mallard-project"),
       },
     },
   });
@@ -158,6 +158,8 @@ test("scenario parser rejects unsafe commands and invalid duplicate prompt pairs
       arguments: { cmd: safePatchCommand, workdir: "relative/project" },
     },
   });
+  assert.throws(() => parse(documentFor([relative])), /tool_workdir/u);
+  relative.response.arguments.workdir = resolve("/");
   assert.throws(() => parse(documentFor([relative])), /tool_workdir/u);
 });
 
@@ -272,17 +274,17 @@ test("argument and shutdown parsers reject ambiguous input", async () => {
   assert.deepEqual(
     parseArguments([
       "--scenario",
-      "/private/tmp/aimock-scenario.json",
+      join(tmpdir(), "aimock-scenario.json"),
       "--audit",
-      "/private/tmp/aimock-audit.json",
+      join(tmpdir(), "aimock-audit.json"),
     ]),
     {
-      scenarioPath: "/private/tmp/aimock-scenario.json",
-      auditPath: "/private/tmp/aimock-audit.json",
+      scenarioPath: join(tmpdir(), "aimock-scenario.json"),
+      auditPath: join(tmpdir(), "aimock-audit.json"),
     },
   );
   assert.throws(
-    () => parseArguments(["--scenario", "relative", "--audit", "/tmp/audit"]),
+    () => parseArguments(["--scenario", "relative", "--audit", join(tmpdir(), "audit")]),
     /arguments/u,
   );
 

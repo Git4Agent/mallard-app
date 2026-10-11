@@ -218,7 +218,7 @@ function verifyCargo(environment) {
   return !result.error && result.status === 0;
 }
 
-async function verifyClaudeVersion(environment) {
+async function verifyClaudeVersion() {
   let disposableRoot;
   try {
     disposableRoot = await mkdtemp(
@@ -234,7 +234,8 @@ async function verifyClaudeVersion(environment) {
     const result = spawnSync("claude", ["--version"], {
       cwd: disposableRoot,
       env: {
-        PATH: environment.PATH ?? "/usr/bin:/bin",
+        // process.env retains Windows' case-insensitive Path lookup.
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
         HOME: processHome,
         USERPROFILE: processHome,
         CLAUDE_CONFIG_DIR: claudeConfig,
@@ -297,7 +298,7 @@ try {
 
 const childEnvironment = sanitizedChildEnvironment();
 try {
-  if (!(await verifyClaudeVersion(childEnvironment))) {
+  if (!(await verifyClaudeVersion())) {
     fail(
       `Live Claude aimock integration testing requires Claude Code ${requiredClaudeVersion} exactly.`,
     );

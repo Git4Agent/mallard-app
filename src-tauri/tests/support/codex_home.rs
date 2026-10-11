@@ -8,6 +8,45 @@ use walkdir::WalkDir;
 
 type FileInventory = BTreeMap<PathBuf, [u8; 32]>;
 
+#[cfg(windows)]
+fn verified_runtime_copy(path: &Path, executable: &Path) -> [u8; 32] {
+    use std::io::Read as _;
+
+    fn digest(path: &Path) -> [u8; 32] {
+        const MAX_RUNTIME_BYTES: u64 = 512 * 1024 * 1024;
+        let metadata = std::fs::symlink_metadata(path).expect("inspect native sandbox executable");
+        assert!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() <= MAX_RUNTIME_BYTES,
+            "native sandbox executable must be a bounded regular file"
+        );
+        let mut file = std::fs::File::open(path)
+            .expect("open native sandbox executable")
+            .take(MAX_RUNTIME_BYTES + 1);
+        let mut hasher = Sha256::new();
+        let count = std::io::copy(&mut file, &mut hasher).expect("hash native sandbox executable");
+        assert_eq!(count, metadata.len(), "native sandbox executable changed");
+        hasher.finalize().into()
+    }
+
+    let actual = digest(path);
+    assert_eq!(
+        actual,
+        digest(executable),
+        "native sandbox copy differs from the installed Codex executable"
+    );
+    actual
+}
+
+/// Windows stages its executable in each sandbox home. Verify the exact
+/// runtime copy separately from the much smaller provider-data byte budget.
+#[cfg(windows)]
+pub fn native_runtime_digest(home: &Path, relative: &Path) -> Option<[u8; 32]> {
+    (relative == Path::new(".sandbox-bin/codex.exe"))
+        .then(|| verified_runtime_copy(&home.join(relative), &super::codex_binary()))
+}
+
 pub fn inventory(home: &Path) -> FileInventory {
     let metadata = std::fs::symlink_metadata(home).expect("cannot inspect isolated Codex home");
     assert!(
@@ -49,6 +88,11 @@ pub fn inventory(home: &Path) -> FileInventory {
             .path()
             .strip_prefix(home)
             .expect("Codex home entry escaped its root");
+        #[cfg(windows)]
+        if let Some(digest) = native_runtime_digest(home, relative) {
+            inventory.insert(relative.to_path_buf(), digest);
+            continue;
+        }
         let bytes =
             super::read_bounded_file(entry.path(), 64 * 1024 * 1024, "isolated Codex home file");
         inventory.insert(relative.to_path_buf(), Sha256::digest(bytes).into());
@@ -89,6 +133,29 @@ pub fn conversations(home: &Path) -> ConversationInventory {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_sandbox_runtime_copy_must_match_the_installed_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("installed.exe");
+        let copied = root.path().join("copy.exe");
+        fs::write(&executable, b"native executable").unwrap();
+        fs::copy(&executable, &copied).unwrap();
+        assert_eq!(
+            verified_runtime_copy(&copied, &executable),
+            <[u8; 32]>::from(Sha256::digest(b"native executable")),
+        );
+        fs::write(&copied, b"forged executable").unwrap();
+        assert!(std::panic::catch_unwind(|| verified_runtime_copy(&copied, &executable)).is_err());
+        assert!(native_runtime_digest(root.path(), Path::new("sessions/codex.exe")).is_none());
+        assert!(native_runtime_digest(root.path(), Path::new(".sandbox-bin/other.exe")).is_none());
+        let directory = root.path().join("directory.exe");
+        fs::create_dir(&directory).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| verified_runtime_copy(&directory, &executable)).is_err()
+        );
+    }
 
     fn fixture() -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();

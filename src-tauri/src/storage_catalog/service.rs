@@ -7095,7 +7095,7 @@ mod tests {
         )
         .unwrap();
         fs::write(fixture.skill_path.join("notes.bin"), [0xff, 0xfe, 0x41]).unwrap();
-        fs::write(fixture.skill_path.join("nul.txt"), b"a\0b").unwrap();
+        fs::write(fixture.skill_path.join("contains-nul.txt"), b"a\0b").unwrap();
         let skills = skill_scope(&fixture);
         let scope_id = skills.scope.scope_id.clone();
         let listed = page(&fixture, &scope_id, None).unwrap();
@@ -7122,7 +7122,14 @@ mod tests {
         // Invalid UTF-8 and a NUL byte are not text.
         let binary = open_file(&fixture, &scope_id, storage, &resource_id, "notes.bin").unwrap();
         assert_eq!((binary.size, binary.text), (3, None));
-        let nul = open_file(&fixture, &scope_id, storage, &resource_id, "nul.txt").unwrap();
+        let nul = open_file(
+            &fixture,
+            &scope_id,
+            storage,
+            &resource_id,
+            "contains-nul.txt",
+        )
+        .unwrap();
         assert_eq!(nul.text, None);
         // Only an exact path among the envelope's files opens.
         for path in [

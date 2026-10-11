@@ -5,7 +5,7 @@ import { options } from "./mixed-aimock/options.mjs";
 import * as codex from "./live-codex-aimock-server.mjs";
 import * as claude from "./live-claude-aimock-server.mjs";
 import { environment, inspectClaudeTranscript, CLAUDE_ISOLATION_ARGUMENTS } from "./mixed-aimock/process.mjs";
-import { appendedRecords, nextRolloutName, rewrittenBytes } from "./mixed-aimock/reconciliation.mjs";
+import { appendedRecords, nextRolloutName, rewrittenBytes, sourcePath } from "./mixed-aimock/reconciliation.mjs";
 
 const source = "/fixture/source/project";
 const destination = "/fixture/destination/project";
@@ -131,13 +131,14 @@ for (const [provider, api] of [["codex", codex], ["claude", claude]]) {
 }
 
 test("Codex fixture reads cannot name another directory or arbitrary file", () => {
+  const readRoot = resolve(source);
   const fixture = textScenario("codex", "read_check", "MIXED_USER_READ", [], "MIXED_RESPONSE_READ");
-  fixture.response = { kind: "tool_call", name: "exec_command", call_id: "mixed_read", arguments: { cmd: `cat -- '${source}/mixed-read.txt'`, workdir: source } };
+  fixture.response = { kind: "tool_call", name: "exec_command", call_id: "mixed_read", arguments: { cmd: `cat -- '${join(readRoot, "mixed-read.txt")}'`, workdir: readRoot } };
   const final = textScenario("codex", "read_final", fixture.prompt_marker, [], "MIXED_RESPONSE_READ");
   final.require_tool_result = true; final.expected_tool_call_id = "mixed_read";
   const parse = () => codex.parseScenarioDocument(JSON.stringify(scenarioDocument("codex", [fixture, final])));
   assert.doesNotThrow(parse);
-  fixture.response.arguments.workdir = destination;
+  fixture.response.arguments.workdir = resolve(destination);
   assert.throws(parse);
   fixture.response.arguments.cmd = "cat -- '/etc/passwd'";
   assert.throws(parse);
@@ -173,10 +174,33 @@ test("benchmark percentiles, injected slowdown, and baseline mismatch cannot pas
   assert.equal(compareBenchmark(benchmark(), missing).status, "invalid");
 });
 
-import { mkdtemp, rm, writeFile, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { startMock } from "./mixed-aimock/process.mjs";
+
+test("Claude reconciliation finds native paths and rejects missing or duplicate sources", async () => {
+  const parent = resolve(tmpdir());
+  const root = await mkdtemp(join(parent, "mallard-reconciliation-unit-"));
+  const replica = { claude: root };
+  try {
+    const project = join(root, "projects", "project");
+    await mkdir(project, { recursive: true });
+    await assert.rejects(sourcePath(replica, "claude", "fixture"), /claude_source_not_unique/u);
+    const path = join(project, "fixture.jsonl");
+    await writeFile(path, "{}\n");
+    await writeFile(join(project, "other-fixture.jsonl"), "{}\n");
+    assert.equal(await sourcePath(replica, "claude", "fixture"), path);
+    const duplicate = join(root, "projects", "duplicate");
+    await mkdir(duplicate);
+    await writeFile(join(duplicate, "fixture.jsonl"), "{}\n");
+    await assert.rejects(sourcePath(replica, "claude", "fixture"), /claude_source_not_unique/u);
+  } finally {
+    assert.equal(dirname(resolve(root)), parent);
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
+  }
+});
+
 for (const provider of ["codex", "claude"]) {
   test(`${provider} shared mock lifecycle checks readiness and final request audit`, async () => {
     const root = await mkdtemp(join(tmpdir(), "mallard-mixed-unit-"));
@@ -282,7 +306,9 @@ test("Claude transcript checks distinguish missing files, incomplete JSONL, and 
     await writeFile(path, encode(user, { ...assistant, parentUuid: "missing-parent" }));
     await assert.rejects(inspect(), /missing message parent/u);
     const link = join(root, "link.jsonl");
-    await symlink(path, link);
+    // A Windows junction exercises no-follow rejection without elevation.
+    await symlink(process.platform === "win32" ? root : path, link,
+      process.platform === "win32" ? "junction" : "file");
     await assert.rejects(inspectClaudeTranscript(link, "MIXED_USER_1", "MIXED_RESPONSE_1"), /type or size/u);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

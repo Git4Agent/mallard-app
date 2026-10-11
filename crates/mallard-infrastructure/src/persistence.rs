@@ -2819,7 +2819,7 @@ fn now_secs() -> Result<u64, String> {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     let directory = fs::File::open(path)
         .map_err(|error| format!("open directory '{}' for sync: {}", path.display(), error))?;
     directory
@@ -2828,7 +2828,7 @@ fn sync_directory(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 

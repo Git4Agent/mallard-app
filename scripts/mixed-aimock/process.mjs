@@ -154,6 +154,7 @@ export function codexArguments(url) {
   const provider = "mallard_aimock";
   return [
     `model_provider="${provider}"`, 'model_reasoning_effort="low"', "features.plugins=false",
+    ...(process.platform === "win32" ? ['windows.sandbox="unelevated"'] : []),
     "features.enable_request_compression=false", `model_providers.${provider}.name="Mallard local mock"`,
     `model_providers.${provider}.base_url=${JSON.stringify(url)}`, `model_providers.${provider}.wire_api="responses"`,
     `model_providers.${provider}.requires_openai_auth=false`, `model_providers.${provider}.request_max_retries=0`,

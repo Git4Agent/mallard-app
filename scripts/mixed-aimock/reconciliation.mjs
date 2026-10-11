@@ -62,9 +62,9 @@ function truncatedBytes(provider, bytes) {
   return encode(records.slice(0, firstAssistant));
 }
 
-async function sourcePath(replica, provider, id) {
+export async function sourcePath(replica, provider, id) {
   if (provider === "codex") return (await nativeCutoff(replica.codex, id)).path;
-  const candidates = (await files(join(replica.claude, "projects"))).filter((path) => path.endsWith(`/${id}.jsonl`));
+  const candidates = (await files(join(replica.claude, "projects"))).filter((path) => basename(path) === `${id}.jsonl`);
   check(candidates.length === 1, "claude_source_not_unique");
   return candidates[0];
 }

@@ -188,10 +188,8 @@ fn resolved_boundary(
         && metadata.history_start_ordinal.is_some_and(|start| {
             resolved
                 .segments
-                .iter()
-                .map(|segment| segment.consumed_record_count)
-                .sum::<u64>()
-                >= start
+                .last()
+                .is_some_and(|segment| segment.end_ordinal_exclusive >= start)
         })
 }
 
@@ -628,7 +626,11 @@ impl RolloutLookup {
     }
 
     pub fn verify_current(&self, thread_id: &str, path: &Path) -> Result<(), String> {
-        if Self::new(&self.home).find_current(thread_id)?.as_deref() != Some(path) {
+        if !Self::new(&self.home)
+            .find_current(thread_id)?
+            .as_deref()
+            .is_some_and(|current| crate::local_paths::same_canonical_path(current, path))
+        {
             return Err(PUSH_CHANGED.into());
         }
         Ok(())
@@ -1173,13 +1175,9 @@ impl ChildMetadata {
             let ordinal = record["ordinal"]
                 .as_u64()
                 .ok_or("Codex paginated child lacks a record ordinal")?;
-            if end.is_some_and(|expected| ordinal != expected) {
-                return Err("Codex child record ordinals are not contiguous".to_string());
-            }
             end = Some(
-                ordinal
-                    .checked_add(1)
-                    .ok_or("Codex child ordinal overflow")?,
+                crate::codex_history_graph::next_native_ordinal(&record, end.unwrap_or(ordinal))
+                    .ok_or("Codex child record ordinals are not contiguous")?,
             );
         }
         Ok(end
@@ -1243,6 +1241,56 @@ mod tests {
         std::fs::create_dir_all(home.join("sessions")).unwrap();
         std::fs::write(home.join(format!("sessions/rollout-{id}.jsonl")), &bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn child_boundary_uses_native_ordinals_when_settings_repeat() {
+        let home = tempfile::tempdir().unwrap();
+        let fixture = fixture(home.path(), "child", Some("parent"), &[]);
+        let mut records = parsed_records(&fixture)
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        records[0]["payload"]["subagent_history_start_ordinal"] = json!(3);
+        records.extend([
+            json!({"ordinal": 1, "type": "event_msg", "payload": {"type": "thread_settings_applied"}}),
+            json!({"ordinal": 2, "type": "event_msg", "payload": {"type": "thread_settings_applied"}}),
+            json!({"ordinal": 3, "type": "event_msg", "payload": {"type": "thread_settings_applied"}}),
+            json!({"ordinal": 2, "type": "event_msg", "payload": {"type": "thread_settings_applied"}}),
+        ]);
+        let bytes = records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        let metadata = ChildMetadata::from_bytes(bytes.as_bytes(), "child").unwrap();
+        let path = home.path().join("sessions/rollout-child.jsonl");
+        std::fs::write(&path, &bytes).unwrap();
+        let lookup = RolloutLookup::new(home.path());
+        let resolved =
+            crate::codex_history_graph::resolve_codex_root(&path, &|id| lookup.find_rollout(id))
+                .unwrap();
+        assert!(metadata.has_supported_boundary(bytes.as_bytes()).unwrap());
+        assert!(resolved_boundary(&metadata, &resolved));
+        let outside = ChildMetadata {
+            history_start_ordinal: Some(4),
+            ..metadata
+        };
+        assert!(!outside.has_supported_boundary(bytes.as_bytes()).unwrap());
+        assert!(!resolved_boundary(&outside, &resolved));
+        let gap = bytes.replace("\"ordinal\":2", "\"ordinal\":3");
+        assert!(outside.has_supported_boundary(gap.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn current_rollout_accepts_native_and_saved_windows_path_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = crate::local_paths::canonicalize(temp.path()).unwrap();
+        fixture(&home, "T", None, &[]);
+        let source = std::fs::canonicalize(home.join("sessions/rollout-T.jsonl")).unwrap();
+        let lookup = RolloutLookup::new(&home);
+        lookup.verify_current("T", &source).unwrap();
+        assert!(lookup
+            .verify_current("T", &source.with_file_name("other.jsonl"))
+            .is_err());
     }
 
     #[test]

@@ -133,6 +133,9 @@ pub fn validate_conversation_action_pins(
     {
         return Err(ConversationStalePin::Redaction);
     }
+    if current.pins.local_metadata_changed != action.pins.local_metadata_changed {
+        return Err(ConversationStalePin::Tail(Tail::RawRange));
+    }
     let planned_context = &action.pins.context;
     let current_context = &current.pins.context;
     if current_context.host_id != planned_context.host_id {
@@ -480,6 +483,57 @@ mod tests {
         );
         assert!(keep_both.selectable);
     }
+    #[test]
+    fn metadata_republish_keeps_relation_and_capture_safety_gates() {
+        use ConversationReviewAction as Action;
+        let changed = ConversationCapabilities {
+            local_metadata_changed: true,
+            ..Default::default()
+        };
+        let decision = |relation, capabilities| {
+            default_conversation_decision(ConversationPlanDirection::Push, relation, capabilities)
+                .action
+        };
+        let current = TailClassification::Sync(SyncCurrency::Current);
+        assert_eq!(decision(current, changed), Action::Publish);
+        assert_eq!(
+            decision(
+                current,
+                ConversationCapabilities {
+                    local_safely_capturable: false,
+                    ..changed
+                }
+            ),
+            Action::Blocked
+        );
+        assert_eq!(
+            decision(
+                current,
+                ConversationCapabilities {
+                    binding: BindingResolution::Missing,
+                    ..changed
+                }
+            ),
+            Action::Blocked
+        );
+        assert_eq!(
+            decision(TailClassification::Unknown, changed),
+            Action::Blocked
+        );
+        assert_eq!(
+            decision(TailClassification::Divergent, changed),
+            Action::RequirePull
+        );
+        assert_eq!(
+            decision(TailClassification::CloudOutstanding, changed),
+            Action::RequirePull
+        );
+        assert_eq!(
+            decision(TailClassification::Sync(SyncCurrency::Advanced), changed),
+            Action::RequirePullMetadata
+        );
+    }
+
     #[test]
     fn mode_change_publishes_only_current_capturable_bound_sessions() {
         use ConversationReviewAction as Action;

@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-#[cfg(windows)]
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -302,16 +300,16 @@ const WINDOWS_CODEX_APP_NAME: &str = "Codex App";
 /// rather than a fixed install path; its image name drives process checks.
 #[cfg(windows)]
 struct InstalledWindowsApp {
-    executable: PathBuf,
+    handler: crate::providers::windows_app::WindowsApp,
     image_name: String,
 }
 
 #[cfg(windows)]
 fn find_installed_windows_app() -> Option<InstalledWindowsApp> {
-    let executable = crate::providers::windows_app::scheme_handler_executable("codex").ok()?;
-    let image_name = executable.file_name()?.to_str()?.to_string();
+    let handler = crate::providers::windows_app::scheme_handler("codex").ok()?;
+    let image_name = handler.executable.file_name()?.to_str()?.to_string();
     Some(InstalledWindowsApp {
-        executable,
+        handler,
         image_name,
     })
 }
@@ -374,9 +372,9 @@ fn relaunch_windows_app(
     let manual_guidance = format!(
         "{WINDOWS_CODEX_APP_NAME} closed, but relaunching it did not complete. Start it \
          manually, for example: {}",
-        display_launch(&app.executable, pinned, &[])
+        display_launch(&app.handler, pinned, &[])
     );
-    if launch_app(&app.executable, pinned, &[]).is_err() {
+    if launch_app(&app.handler, pinned, &[]).is_err() {
         return Err(manual_guidance);
     }
     let deadline = Instant::now() + APP_QUIT_TIMEOUT;

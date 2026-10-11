@@ -2008,7 +2008,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         binding.validate_structure()?;
         let project = canonical_real_dir(Path::new(&binding.project_root), "project root")?;
         let recorded = PathBuf::from(&binding.canonical_project_root);
-        if project != recorded {
+        if !crate::local_paths::same_canonical_path(&project, &recorded) {
             return Err(format!(
                 "project binding changed: '{}' now resolves to '{}'",
                 binding.project_root,
@@ -2337,7 +2337,7 @@ mod tests {
             local_project_id: LocalProjectId::parse("project-test").unwrap(),
             bundle_id: id,
             project_root: project_root.to_str().unwrap().to_string(),
-            canonical_project_root: fs::canonicalize(project_root)
+            canonical_project_root: crate::local_paths::canonicalize(project_root)
                 .unwrap()
                 .to_str()
                 .unwrap()
@@ -3021,6 +3021,32 @@ mod tests {
         // manifest or payload read.
         assert_eq!(engine.store().inner.listings(), 11);
         assert_eq!(engine.store().inner.reads(), 1_005);
+    }
+
+    #[test]
+    fn provider_restore_targets_use_the_saved_home_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let home = temp.path().join("claude");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&home).unwrap();
+        let binding = active_binding(bundle_id(3), &project);
+        let home = crate::local_paths::canonicalize(home).unwrap();
+        let home_text = home.to_string_lossy().into_owned();
+        let homes = BTreeMap::from([(claude_key(), home_text.clone())]);
+        let logical = LogicalPath::parse("state/providers/claude/memory/topic.md").unwrap();
+        let target =
+            provider_state_target(registry(), &claude_key(), &home_text, &binding, &logical)
+                .unwrap();
+        validate_target_for_logical(&target, &logical, &binding, &homes).unwrap();
+        let native_target = fs::canonicalize(&home)
+            .unwrap()
+            .join(target.strip_prefix(&home).unwrap());
+        validate_target_for_logical(&native_target, &logical, &binding, &homes).unwrap();
+        assert!(
+            validate_target_for_logical(&project.join("topic.md"), &logical, &binding, &homes)
+                .is_err()
+        );
     }
 
     #[test]
@@ -5898,7 +5924,7 @@ fn validate_target_for_logical(
         let home = provider_homes
             .get(provider)
             .expect("provider key came from this map");
-        canonical_real_dir(Path::new(home), &format!("{} home", provider))?
+        PathBuf::from(home)
     } else {
         return Err(format!(
             "logical path '{}' has no writable target root",
@@ -5906,7 +5932,7 @@ fn validate_target_for_logical(
         ));
     };
     let canonical_root = canonical_real_dir(&root, "restore root")?;
-    if !target.starts_with(&root) {
+    if crate::local_paths::strip_prefix(target, &root).is_err() {
         return Err(format!(
             "restore target '{}' escapes '{}';",
             target.display(),

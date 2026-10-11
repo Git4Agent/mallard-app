@@ -3243,12 +3243,19 @@ mod tests {
             .contains("accepted a different repository"));
     }
 
-    fn target(root: &str, member: &str) -> CatalogTargetConfig {
+    fn local_path(relative: &str) -> String {
+        std::env::temp_dir()
+            .join(relative)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn target(member: &str) -> CatalogTargetConfig {
         CatalogTargetConfig::new(
             ProviderKey::parse("codex").unwrap(),
             CatalogTargetKey::parse("provider-home.skills").unwrap(),
             &CatalogTargetIdentity {
-                canonical_root: root.to_string(),
+                canonical_root: local_path("codex/skills"),
                 root_class: "provider-home".to_string(),
                 member: member.to_string(),
             },
@@ -3258,12 +3265,15 @@ mod tests {
 
     #[test]
     fn targets_round_trip_their_typed_identity_and_stay_loadable_when_foreign() {
-        let target = target("/tmp/codex/skills", "review");
+        let target = target("review");
         let identity = target.decode().unwrap();
         assert_eq!(identity.member, "review");
         let copy = target.with_member("review-local-copy").unwrap();
         assert_eq!(copy.decode().unwrap().member, "review-local-copy");
-        assert_eq!(copy.decode().unwrap().canonical_root, "/tmp/codex/skills");
+        assert_eq!(
+            copy.decode().unwrap().canonical_root,
+            local_path("codex/skills")
+        );
         assert_ne!(copy, target);
 
         // A target shape this build does not decode still loads as part of a
@@ -3298,7 +3308,7 @@ mod tests {
     #[test]
     fn claims_dedupe_per_target_and_storage() {
         let claim = |storage: &str| CatalogClaim {
-            target: target("/tmp/codex/skills", "review"),
+            target: target("review"),
             coordinate: codex_skills(),
             storage_id: StorageId::parse(storage).unwrap(),
             resource_id: named_envelope(&codex_skills(), "review").resource_id,
@@ -3328,8 +3338,8 @@ mod tests {
             resource_id: named_envelope(&codex_skills(), "review").resource_id,
             kind: CatalogPullActionKind::Install,
             requires_destructive_approval: false,
-            target: target("/tmp/codex/skills", "review"),
-            target_path: Some("/tmp/codex/skills/review".to_string()),
+            target: target("review"),
+            target_path: Some(local_path("codex/skills/review")),
             native: Some(NativePluginPlan {
                 provider: ProviderKey::parse("codex").unwrap(),
                 argv: vec!["plugin".to_string()],
@@ -3449,12 +3459,12 @@ mod tests {
             source_coordinate: codex_skills(),
             source_resource_id: named_envelope(&codex_skills(), "review").resource_id,
             source_display_name: "review".to_string(),
-            source_target: target("/tmp/codex/skills", "review"),
-            source_path: "/tmp/codex/skills/review".to_string(),
+            source_target: target("review"),
+            source_path: local_path("codex/skills/review"),
             source_content_sha256: sha(8),
             copy_name: "review-local-copy".to_string(),
             copy_resource_id: named_envelope(&codex_skills(), "review-local-copy").resource_id,
-            copy_target_path: "/tmp/codex/skills/review-local-copy".to_string(),
+            copy_target_path: local_path("codex/skills/review-local-copy"),
             transformed_content_sha256: sha(9),
             created_at: 1,
             expires_at: 2,
@@ -3580,7 +3590,7 @@ mod tests {
             profile_id: LocalCatalogProfileId::generate().unwrap(),
             provider: ProviderKey::parse("codex").unwrap(),
             display_name: "Codex".to_string(),
-            configured_home: "/tmp/codex".to_string(),
+            configured_home: local_path("codex"),
             provider_config: CatalogProviderConfig::version_1(),
             revision: 1,
             created_at: 1,

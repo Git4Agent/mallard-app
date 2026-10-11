@@ -37,6 +37,39 @@ The backend suite includes Rust and aimock server tests that bind localhost.
 Restricted environments may require permission for these test servers. The
 aimock server tests use fixed local responses and require no credentials.
 
+## Codex Desktop project placement
+
+Windows Open in Codex uses Desktop's native project move and navigation
+operations. It verifies the selected profile before either operation: Windows
+Restart Manager identifies the Core process holding a state database in the
+selected `CODEX_HOME`, that process must be a live child of the registered
+Desktop executable, and the native pipe must belong to that same Desktop.
+Only query APIs are used; Mallard never shuts down or restarts Desktop.
+
+Codex Desktop must be installed and running with the selected profile. The
+destination folder must already exist in Desktop's project list. Mallard
+requires one exact local project match; a missing or ambiguous destination
+returns an error. Backend project IDs and Desktop project IDs are distinct.
+Backend `thread/metadata/update` is no longer used for Windows placement.
+
+The [native placement POC](POC_CODEX_DESKTOP_PROJECT_PLACEMENT.md) documents the
+connection contract and installed Desktop version. After creating and populating
+its disposable fixture, run its production integration phase:
+
+```powershell
+node scripts/poc-codex-native-placement.mjs --phase=integration --root=<temporary-poc-root>
+```
+
+This phase starts an isolated Desktop with its own backend and invokes the Rust
+production placement code. It reproduces the backend-only failure, checks native
+membership after repeated opens, rejects another home containing the same chat,
+and checks that history stays unchanged. It repeats after restarting only that
+fixture Desktop. Tests never use personal provider homes.
+
+Windows pipe discovery and profile verification are platform guarded. macOS
+placement remains a separate, unvalidated integration task. Native membership
+readback is distinct from a screenshot or complete Mallard UI acceptance test.
+
 ## Manual test flows
 
 ### Test Flow 1: Pull the public demo project

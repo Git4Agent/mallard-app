@@ -236,15 +236,17 @@ mod tests {
     #[test]
     fn settings_are_typed_absolute_paths_without_secrets() {
         let adapter = LocalFolderAdapter;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("mallard-store");
         let settings = BoundedConfigObject::from_json(&serde_json::json!({
-            "directory": "/tmp/mallard-store"
+            "directory": directory
         }))
         .unwrap();
         assert_eq!(adapter.validate_settings(&settings).unwrap(), settings);
         for invalid in [
             serde_json::json!({"directory": "relative"}),
-            serde_json::json!({"directory": "/tmp/../x"}),
-            serde_json::json!({"directory": "/tmp", "extra": 1}),
+            serde_json::json!({"directory": temp.path().join("../x")}),
+            serde_json::json!({"directory": directory, "extra": 1}),
             serde_json::json!({}),
         ] {
             let settings = BoundedConfigObject::from_json(&invalid).unwrap();
@@ -253,7 +255,7 @@ mod tests {
                 "local_directory_invalid"
             );
         }
-        let mut config = local_provider_config("/tmp/mallard-store").unwrap();
+        let mut config = local_provider_config(&directory.to_string_lossy()).unwrap();
         adapter.validate_config(&config).unwrap();
         config
             .secrets
@@ -271,10 +273,12 @@ mod tests {
     #[test]
     fn facts_and_coordinates_derive_from_the_directory() {
         let adapter = LocalFolderAdapter;
-        let config = local_provider_config("/tmp/mallard-store").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("mallard-store");
+        let config = local_provider_config(&directory.to_string_lossy()).unwrap();
         assert_eq!(
             adapter.continuity_coordinates(&config).unwrap(),
-            vec![std::fs::canonicalize("/tmp")
+            vec![std::fs::canonicalize(temp.path())
                 .unwrap()
                 .join("mallard-store")
                 .to_string_lossy()
@@ -282,10 +286,10 @@ mod tests {
         );
         assert_eq!(
             adapter.local_root(&config).unwrap(),
-            Some(PathBuf::from("/tmp/mallard-store"))
+            Some(directory.clone())
         );
         let summary = adapter.summary(&config).unwrap();
-        assert_eq!(summary[0].value, "/tmp/mallard-store");
+        assert_eq!(summary[0].value, directory.to_string_lossy());
         assert!(summary[0].is_path);
     }
 

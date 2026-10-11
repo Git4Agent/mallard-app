@@ -7,7 +7,7 @@
 //! which the page runs next with the repository chosen; nothing here writes
 //! Mallard state.
 use super::service::{
-    origin_url, probe_project_folder_without_git, repository,
+    fs_canonicalize, origin_url, probe_project_folder_without_git, repository,
     repository_fingerprint_from_remote_url, ProjectFolderProbe,
 };
 use mallard_domain::{sha256_hex, LocalProjectId};
@@ -509,9 +509,7 @@ pub(super) async fn get_folder(
 }
 
 fn canonical(path: &Path) -> Result<String, String> {
-    fs::canonicalize(path)
-        .map(|canonical| canonical.to_string_lossy().into_owned())
-        .map_err(|error| format!("resolve '{}': {}", path.display(), error))
+    fs_canonicalize(path).map(|canonical| canonical.to_string_lossy().into_owned())
 }
 
 /// Fetch the remote's default branch into the initialized, uncommitted repository.
@@ -915,7 +913,7 @@ mod tests {
 
     fn fixture() -> Fixture {
         let temp = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(temp.path()).unwrap();
+        let root = fs_canonicalize(temp.path()).unwrap();
         let repository = LocalStateRepository::from_home_dir(root.join("home")).unwrap();
         fs::create_dir_all(root.join("code")).unwrap();
         Fixture {
@@ -950,7 +948,9 @@ mod tests {
         git(&work, &["add", "README.md"]);
         git(&work, &["commit", "-m", "first"]);
         git(root, &["clone", "--bare", "remote-work", "remote.git"]);
-        format!("file://{}", root.join("remote.git").display())
+        tauri::Url::from_directory_path(root.join("remote.git"))
+            .unwrap()
+            .to_string()
     }
 
     fn git_only() -> CloneTools {
@@ -1022,7 +1022,8 @@ mod tests {
         fs::create_dir(fixture.root.join("code/portal-2")).unwrap();
         let suggestion = fixture
             .root
-            .join("code/portal-3")
+            .join("code")
+            .join("portal-3")
             .to_string_lossy()
             .into_owned();
         assert_eq!(
@@ -1156,7 +1157,11 @@ mod tests {
         );
         assert_eq!(
             retry_command("/Users/me/My Code/portal"),
-            "git -C '/Users/me/My Code/portal' pull origin HEAD"
+            if cfg!(windows) {
+                "git -C \"/Users/me/My Code/portal\" pull origin HEAD"
+            } else {
+                "git -C '/Users/me/My Code/portal' pull origin HEAD"
+            }
         );
     }
 
@@ -1176,7 +1181,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_clone_stays_git_and_can_fetch_the_source_later() {
         let fixture = fixture();
-        let missing = format!("file://{}", fixture.root.join("remote.git").display());
+        let missing = tauri::Url::from_directory_path(fixture.root.join("remote.git"))
+            .unwrap()
+            .to_string();
         let destination = fixture.root.join("code/portal");
         let result = get(&fixture, git_only(), &destination, Some(source(&missing)))
             .await

@@ -169,7 +169,10 @@ async function verifyCodexSandbox(environment) {
       mkdir(disposableProject, { mode: 0o700 }),
     ]);
 
-    const result = spawnSync("codex", ["sandbox", "--", "/usr/bin/true"], {
+    const probeCommand = process.platform === "win32"
+      ? ["cmd.exe", "/d", "/c", "exit", "0"]
+      : ["/usr/bin/true"];
+    const result = spawnSync("codex", ["sandbox", "--", ...probeCommand], {
       cwd: disposableProject,
       env: {
         ...environment,

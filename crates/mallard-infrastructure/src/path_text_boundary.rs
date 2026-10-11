@@ -2,9 +2,11 @@
 
 use serde::de::{Deserialize as _, IgnoredAny};
 
+use crate::session_path_map::{root_family, RootFamily};
+
 /// Conservative delimiters before an absolute path spelling embedded in
 /// provider text. The decisive descendant proof is on the right side: a root
-/// match may end the value or be followed by `/`, and nothing else.
+/// match may end the value or be followed by a separator for its path grammar.
 fn is_left_boundary_byte(byte: u8) -> bool {
     byte.is_ascii()
         && matches!(
@@ -65,6 +67,10 @@ pub(crate) fn replace_boundary_valid_occurrences(
         return input.to_string();
     }
 
+    let separators: &[u8] = match root_family(needle) {
+        Some(RootFamily::Windows) => b"\\/",
+        _ => b"/",
+    };
     let bytes = input.as_bytes();
     let mut output = String::with_capacity(input.len());
     let mut last_emit = 0_usize;
@@ -77,7 +83,7 @@ pub(crate) fn replace_boundary_valid_occurrences(
         };
         let start = search_from + relative_start;
         let end = start + needle.len();
-        if boundary_valid(bytes, start, end, b"/") {
+        if boundary_valid(bytes, start, end, separators) {
             output.push_str(&input[last_emit..start]);
             output.push_str(replacement);
             last_emit = end;
@@ -113,11 +119,17 @@ pub(crate) fn replace_sensitive_path_occurrences(
     if needle.is_empty() {
         return input.to_string();
     }
-    let redacted = if valid_json_text(input) {
-        replace_json_string_closing_quote_occurrences(input, needle, replacement)
-    } else {
-        replace_sentence_period_occurrences(input, needle, replacement)
-    };
+    if valid_json_text(input) {
+        // Match the serialized spelling, including escaped Windows separators.
+        let encoded_needle = serde_json::to_string(needle).expect("path string serializes");
+        let encoded_replacement =
+            serde_json::to_string(replacement).expect("replacement string serializes");
+        let needle = &encoded_needle[1..encoded_needle.len() - 1];
+        let replacement = &encoded_replacement[1..encoded_replacement.len() - 1];
+        let redacted = replace_json_string_closing_quote_occurrences(input, needle, replacement);
+        return replace_boundary_valid_occurrences(&redacted, needle, replacement);
+    }
+    let redacted = replace_sentence_period_occurrences(input, needle, replacement);
     replace_boundary_valid_occurrences(&redacted, needle, replacement)
 }
 
@@ -268,6 +280,58 @@ mod tests {
                 ".",
             ),
             "wrote . kept /tmp/run/project1.bak/file"
+        );
+    }
+
+    #[test]
+    fn sensitive_replacement_handles_windows_descendants_without_touching_siblings() {
+        let root = r"C:\fixture\project1";
+        for (input, expected) in [
+            (r"C:\fixture\project1", "."),
+            (
+                r"A C:\fixture\project1\generated\inside.txt",
+                r"A .\generated\inside.txt",
+            ),
+            (
+                r"A C:\fixture\project1/generated/inside.txt",
+                "A ./generated/inside.txt",
+            ),
+            (
+                r"C:\fixture\project1_external\outside.txt",
+                r"C:\fixture\project1_external\outside.txt",
+            ),
+            (
+                r"C:\fixture\project1.bak\outside.txt",
+                r"C:\fixture\project1.bak\outside.txt",
+            ),
+        ] {
+            assert_eq!(
+                replace_sensitive_path_occurrences(input, root, "."),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_replacement_redacts_windows_paths_in_json_strings_and_keys() {
+        let root = r"C:\fixture\project1";
+        let input = serde_json::json!({
+            "file_path": r"C:\fixture\project1\read-marker.txt",
+            "cwd": root,
+            "changes": {r"C:\fixture\project1\src\lib.rs": true},
+            "outside": r"C:\fixture\project1_external\outside.txt",
+            "sibling": r"C:\fixture\project1.",
+        });
+        let sanitized = replace_sensitive_path_occurrences(&input.to_string(), root, ".");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sanitized).unwrap(),
+            serde_json::json!({
+                "file_path": r".\read-marker.txt",
+                "cwd": ".",
+                "changes": {r".\src\lib.rs": true},
+                "outside": r"C:\fixture\project1_external\outside.txt",
+                "sibling": r"C:\fixture\project1.",
+            }),
         );
     }
 

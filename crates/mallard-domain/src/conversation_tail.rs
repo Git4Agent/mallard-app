@@ -368,6 +368,7 @@ pub struct RootPhysicalMapping {
     pub root_path: String,
     pub source_file_size: u64,
     pub consumed_byte_offset: u64,
+    /// Next native ordinal, independent of the number of physical records.
     pub consumed_record_ordinal: u64,
     pub probe_window_len: u64,
     pub probe_window_sha256: String,

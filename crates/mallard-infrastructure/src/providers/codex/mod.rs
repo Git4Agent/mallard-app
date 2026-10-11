@@ -11,6 +11,8 @@ pub mod discovery;
 pub mod history;
 pub mod materialization;
 pub mod naming;
+#[cfg(any(windows, test))]
+mod project_assignment;
 mod timeline_sources;
 
 use super::traits::{

@@ -582,15 +582,15 @@ export function sessionSyncPresentation(
   });
   switch (entry.state) {
     case "synced":
-      /* Current on both sides, but exported under settings that have since
-         changed (redaction, child sessions): the storage holds the earlier
-         copy until the next Push replaces it, so this is Push work and
-         counts as such — a synced check here would hide it. */
+      /* The message tail is current, but metadata or export settings await
+         publication. The next Push updates the stored copy. */
       if (entry.push_decision?.action === "publish") {
         return {
           status: "local-outstanding",
           className: "local",
-          label: t("projects:status.republish", { storage: storageName }),
+          label: t(entry.status_detail_code === "local_metadata_changed"
+            ? "projects:status.metadataPending"
+            : "projects:status.republish", { storage: storageName }),
         };
       }
       return { status: "synced", className: "synced", label: syncStatusDetail(entry) ?? t("projects:status.synced", { storage: storageName }) };

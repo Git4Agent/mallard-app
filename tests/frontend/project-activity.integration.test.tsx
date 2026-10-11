@@ -3684,6 +3684,34 @@ test("a review shows the whole span at once: no paging, no fold, unlisted entrie
   assert.match(standing, /<strong>Load earlier<\/strong>/);
 });
 
+test("metadata pending republish is Local outstanding and remains selectable", () => {
+  const entry: ThreadSyncEntry = {
+    provider: "codex", provider_display_name: "Codex", access: "bound_ready",
+    thread_id: "metadata-pending", conversation_resource_id: "codex:conversation:metadata-pending",
+    resource_id: "codex:conversation:metadata-pending", display_name: "Session with new metadata",
+    state: "synced", local_present: true, storage_present: true, compared_against_storage: true,
+    subagent_selection: { wire_children: "on", keys: [], omitted: false, estimated_bytes: 0 },
+    status_detail: "Session metadata changed. Push to update storage.",
+    status_detail_code: "local_metadata_changed",
+    push_decision: { action: "publish", selectable: true },
+    pull_decision: { action: "no_changes", selectable: false },
+  };
+  const presentation = sessionSyncPresentation(entry, "Storage");
+  assert.equal(presentation.status, "local-outstanding");
+  assert.equal(presentation.className, "local");
+  assert.equal(presentation.label, "Session metadata changed. Push to update Storage.");
+  const html = renderToStaticMarkup(
+    <ProjectChatHistoryContent {...contentDefaults} activity={activity} selectionMode="push"
+      comparison={emptyComparison({ entries: [entry] })} selectableResourceIds={new Set([entry.resource_id])} />,
+  );
+  assert.match(html, /Session with new metadata/);
+  assert.match(html, /Session metadata changed/);
+  assert.match(html, /type="checkbox"/);
+  assert.doesNotMatch(html, /Export settings changed|Status unavailable|cannot sync/i);
+  assert.equal(sessionSyncPresentation({ ...entry, status_detail: null, status_detail_code: null,
+    push_decision: { action: "no_changes", selectable: false } }, "Storage").status, "synced");
+});
+
 test("a Push candidate missing from the selected branch projection remains visible", () => {
   const nativeId = "claude-off-rail";
   const sessionResourceId = `claude:conversation:${nativeId}`;

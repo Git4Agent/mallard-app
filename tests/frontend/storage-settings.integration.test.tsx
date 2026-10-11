@@ -56,6 +56,8 @@ import {
   R2SetupLane,
   WRANGLER_INSTALL_COMMAND,
   WRANGLER_INSTALL_AGENT_MESSAGE,
+  WRANGLER_WINDOWS_INSTALL_COMMAND,
+  WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE,
   r2SetupErrorCode,
   type R2SetupFlow,
   type R2SetupMode,
@@ -1787,15 +1789,22 @@ function r2Flow(state: Partial<R2SetupState>): R2SetupFlow {
     createAndAuthorize: noop, useBucket: noop, cancel: async () => undefined, retry: noop, scanAgain: noop, dismiss: noop,
   };
 }
-function renderLane(mode: R2SetupMode, state: Partial<R2SetupState>, disabled = false, bucketName?: string) {
-  return renderToStaticMarkup(
-    <div className="storage-setup-route-row agent r2-lane">
-      <R2SetupLane
-        mode={mode} flow={r2Flow(state)} disabled={disabled} descriptor={wranglerProvider} storages={[cloudSummary()]}
-        bucketName={bucketName} onOpenStorage={noop} onCreateInstead={noop} onReset={noop}
-      />
-    </div>,
-  );
+function renderLane(mode: R2SetupMode, state: Partial<R2SetupState>, disabled = false, bucketName?: string, platform = "MacIntel") {
+  const savedNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { platform } });
+  try {
+    return renderToStaticMarkup(
+      <div className="storage-setup-route-row agent r2-lane">
+        <R2SetupLane
+          mode={mode} flow={r2Flow(state)} disabled={disabled} descriptor={wranglerProvider} storages={[cloudSummary()]}
+          bucketName={bucketName} onOpenStorage={noop} onCreateInstead={noop} onReset={noop}
+        />
+      </div>,
+    );
+  } finally {
+    if (savedNavigator) Object.defineProperty(globalThis, "navigator", savedNavigator);
+    else delete (globalThis as { navigator?: unknown }).navigator;
+  }
 }
 const r2Scan = (patch: Partial<StorageDiscoveryResult> = {}) => scanResult({ scope: "Default, EU, US and FedRAMP", ...patch });
 
@@ -1900,6 +1909,48 @@ test("Wrangler dependency failures supply the install command and its agent mess
   assert.equal(r2SetupErrorCode({ code: "cancelled" }), "cancelled");
 });
 
+test("Windows Wrangler dependency failures show the compact PowerShell notice", () => {
+  for (const failed of ["wrangler_not_found", "wrangler_update_required"] as const) {
+    const html = renderLane("create", { phase: "check", failed }, false, undefined, "Win32");
+    assert.match(html, /class="r2-wrangler-install"/);
+    assert.match(html, /With <a href="https:\/\/nodejs\.org\/en\/download" target="_blank" rel="noopener noreferrer">Node\.js LTS<\/a> installed, run in PowerShell:/);
+    assert.ok(html.includes(`<code>${WRANGLER_WINDOWS_INSTALL_COMMAND}</code>`));
+    assert.match(html, /aria-label="Copy command"/);
+    assert.match(html, /Copy agent message/);
+    assert.match(html, /Then restart Mallard and try again\./);
+    assert.match(html, /Try again/);
+    assert.match(html, failed === "wrangler_not_found" ? /Not found/ : /Update needed/);
+    assert.doesNotMatch(html, /Not on PATH|npm install --global/);
+  }
+  for (const platform of ["MacIntel", "Linux x86_64"]) {
+    const html = renderLane("create", { phase: "check", failed: "wrangler_not_found" }, false, undefined, platform);
+    assert.ok(html.includes(WRANGLER_INSTALL_COMMAND));
+    assert.doesNotMatch(html, /PowerShell|npm\.cmd|r2-wrangler-install/);
+  }
+  for (const failed of ["wrangler_runtime_unavailable", "helper_unavailable"] as const) {
+    assert.doesNotMatch(renderLane("create", { phase: "check", failed }, false, undefined, "Win32"), /r2-wrangler-install/);
+  }
+  const disabled = renderLane("create", { phase: "check", failed: "wrangler_not_found" }, true, undefined, "Win32");
+  assert.match(disabled, /aria-label="Copy command" disabled=""/);
+  assert.match(disabled, /disabled=""[^>]*>Copy agent message/);
+  assert.match(disabled, /disabled=""[^>]*>Try again/);
+  assert.ok(WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE.includes(WRANGLER_WINDOWS_INSTALL_COMMAND));
+  assert.match(WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE, /node --version/);
+  assert.match(WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE, /npm\.cmd --version/);
+  assert.match(WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE, /wrangler\.cmd --version.*then stop/);
+  assert.match(WRANGLER_WINDOWS_INSTALL_AGENT_MESSAGE, /restart Mallard/);
+});
+
+test("the Windows Wrangler notice is translated without changing the command", () => {
+  const html = inChinese(() => renderLane("create", { phase: "check", failed: "wrangler_not_found" }, false, undefined, "Win32"));
+  assert.match(html, /未找到/);
+  assert.match(html, /安装 <a[^>]+>Node\.js LTS<\/a> 后，在 PowerShell 中运行：/);
+  assert.match(html, /然后重启 Mallard 并重试。/);
+  assert.match(html, /aria-label="复制命令"/);
+  assert.ok(html.includes(WRANGLER_WINDOWS_INSTALL_COMMAND));
+  assert.doesNotMatch(html, /With |Then restart|Copy agent message/);
+});
+
 test("browser steps hand the link over, count down its budget, and never open a browser themselves", () => {
   const link = { stage: "login" as const, url: "https://example.test/private-link-canary" };
   const login = renderLane("create", { phase: "login", running: true, link }, true);
@@ -1932,9 +1983,9 @@ test("browser steps hand the link over, count down its budget, and never open a 
   assert.match(stopped, /Try again/);
   assert.doesNotMatch(stopped, /Open browser|Copy link/);
   assert.match(renderLane("create", { phase: "login", failed: "sign_in_required" }), /Sign-in did not complete[\s\S]*?Try again/);
-  // The link is opened only by the Open browser button, never on arrival.
+  // The sign-in link is opened only by its button; Node.js has a separate download link.
   const source = readFileSync("src/components/project-sync/R2Setup.tsx", "utf8");
-  assert.equal(source.match(/openExternalUrl\(/g)?.length, 1);
+  assert.deepEqual([...source.matchAll(/openExternalUrl\(([^)]+)\)/g)].map((match) => match[1]), ["url", "NODE_DOWNLOAD_URL"]);
   assert.match(source, /\{t\("lane\.openBrowser"\)\}<\/>, \(\) => void openExternalUrl\(url\)/);
 });
 

@@ -1536,6 +1536,236 @@ mod session_refresh_regressions {
         );
     }
 
+    #[test]
+    fn imported_codex_settings_republish_preserves_events_and_clears_pending_only_after_push() {
+        codex_settings_republish_after_native_resume(1);
+    }
+
+    #[test]
+    fn rewound_codex_settings_republish_preserves_events_and_resumes_messages() {
+        codex_settings_republish_after_native_resume(2);
+    }
+
+    fn codex_settings_republish_after_native_resume(rewind: u64) {
+        let world = TwoComputers::of("codex");
+        let source = world.first_home.join(format!(
+            "sessions/2026/09/28/rollout-2026-09-28T00-00-00-{}.jsonl",
+            TwoComputers::SESSION,
+        ));
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source,
+            command_test_transcript(
+                TwoComputers::SESSION,
+                &world.first_root,
+                &[("m1", "user", "hello"), ("m2", "assistant", "answer")],
+            ),
+        )
+        .unwrap();
+        let append_settings = |path: &Path, ordinal: u64, setting: &str| {
+            let record = serde_json::json!({
+                "ordinal": ordinal, "type": "event_msg",
+                "payload": {"type": "thread_settings_applied", "setting": setting},
+            });
+            writeln!(
+                std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+                "{record}"
+            )
+            .unwrap();
+        };
+        let records = |bytes: &[u8]| -> Vec<serde_json::Value> {
+            bytes
+                .split(|byte| *byte == b'\n')
+                .filter(|row| !row.is_empty())
+                .map(|row| serde_json::from_slice(row).unwrap())
+                .collect()
+        };
+        let settings = |bytes: &[u8]| -> Vec<serde_json::Value> {
+            records(bytes)
+                .into_iter()
+                .filter(|row| row["type"] == "event_msg")
+                .map(|row| row["payload"].clone())
+                .collect()
+        };
+        append_settings(&source, 3, "original");
+        append_settings(&source, 4, "original-later");
+        assert!(world.push(&world.first).success);
+        assert_eq!(world.entry(&world.first).state, ThreadSyncState::Synced);
+        assert!(world.pull(&world.second).success);
+        let mut installed = Vec::new();
+        jsonl_files_under(&world.second_home.join("sessions"), &mut installed);
+        assert_eq!(installed.len(), 1);
+        let path = &installed[0];
+        let imported = std::fs::read(path).unwrap();
+        let next = records(&imported).last().unwrap()["ordinal"]
+            .as_u64()
+            .unwrap()
+            + 1;
+        assert_eq!(
+            world.entry(&world.second).push_decision.action,
+            ConversationReviewAction::NoChanges
+        );
+        let resumed_next = next - rewind + 1;
+        append_settings(path, resumed_next - 1, "changed");
+        let pending = world.entry(&world.second);
+        assert_eq!(
+            pending.state,
+            ThreadSyncState::Synced,
+            "message history remains current"
+        );
+        assert_eq!(
+            pending.push_decision.action,
+            ConversationReviewAction::Publish
+        );
+        assert!(pending.push_decision.selectable);
+        assert_eq!(pending.status_detail_code, Some("local_metadata_changed"));
+
+        // Force a full resolve as well as clearing the observation cache.
+        // Neither Refresh nor cache replacement accepts the new metadata.
+        let binding = world.binding(&world.second);
+        world
+            .repo
+            .mutate_config(|config| {
+                for checkpoint in config
+                    .links
+                    .iter_mut()
+                    .flat_map(|link| link.conversation_checkpoints.values_mut())
+                    .filter_map(|threads| threads.get_mut(&binding.thread_id))
+                {
+                    if let PhysicalMappingState::Ready { source_state, .. } =
+                        &mut checkpoint.physical
+                    {
+                        *source_state = None;
+                    }
+                    checkpoint.generation += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(world.fresh_entry(&world.second), pending);
+        assert_eq!(world.entry(&world.second), pending);
+
+        let (_, engine) = storage_engine(&world.repo, &world.storage).unwrap();
+        let before = engine.inspect(&world.bundle_id).unwrap();
+        let acceptance = || {
+            world
+                .repo
+                .load_config()
+                .unwrap()
+                .links
+                .into_iter()
+                .flat_map(|link| link.conversation_checkpoints.into_values())
+                .find_map(|threads| {
+                    threads.get(&binding.thread_id).map(|checkpoint| {
+                        (
+                            checkpoint.accepted.clone(),
+                            checkpoint.accepted_local_tail.clone(),
+                        )
+                    })
+                })
+                .unwrap()
+        };
+        let accepted_before = acceptance();
+        let review = prepare_push_review_with_repository(
+            &world.repo,
+            &world.second.local_project_id,
+            &world.storage,
+        )
+        .unwrap();
+        // Push captures a fresh plan from the approved selection. Change the
+        // source after that capture, where its content pins become binding.
+        let mut mutated = false;
+        let stale = ProjectSyncService::new(&world.repo).push_reviewed_with_progress(
+            &world.second.local_project_id,
+            &world.storage,
+            PushApproval::recommended(&review, &world.storage),
+            &mut |_| {},
+            &mut |phase, _| {
+                if phase == "review selected conversations" {
+                    append_settings(path, resumed_next - 1, "after-review");
+                    mutated = true;
+                }
+            },
+        );
+        assert!(mutated);
+        assert!(
+            stale.is_err() || stale.as_ref().is_ok_and(|result| !result.success),
+            "stale metadata must not publish"
+        );
+        // Other resources in the batch may publish; the rejected session's
+        // stored row and durable acceptance must remain exactly as before.
+        let rejected = engine.inspect(&world.bundle_id).unwrap();
+        assert_eq!(
+            rejected.manifest.all_conversations().next().unwrap().2,
+            before.manifest.all_conversations().next().unwrap().2,
+        );
+        assert_eq!(acceptance(), accepted_before);
+        assert_eq!(
+            world.entry(&world.second).push_decision.action,
+            ConversationReviewAction::Publish
+        );
+
+        let native_before = std::fs::read(path).unwrap();
+        let pushed = world.push(&world.second);
+        assert!(pushed.success, "{pushed:?}");
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            native_before,
+            "native event bytes are never rewritten"
+        );
+        let after = engine.inspect(&world.bundle_id).unwrap();
+        assert!(after.head.revision > before.head.revision);
+        let thread = after.manifest.all_conversations().next().unwrap().2;
+        let file = thread
+            .files
+            .iter()
+            .find(|file| file.role == ConversationFileRole::Transcript)
+            .unwrap();
+        let wire = engine
+            .byte_source(&after, None)
+            .read_bounded(&file.logical_path, 1024 * 1024, "fixture transcript")
+            .unwrap();
+        assert_eq!(
+            settings(&wire),
+            settings(&native_before),
+            "every event payload and its order survive"
+        );
+        let wire_records = records(&wire);
+        assert_eq!(
+            wire_records
+                .iter()
+                .map(|row| row["ordinal"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            (0..wire_records.len() as u64).collect::<Vec<_>>()
+        );
+        for entry in [world.entry(&world.second), world.fresh_entry(&world.second)] {
+            assert_eq!(entry.state, ThreadSyncState::Synced);
+            assert_eq!(
+                entry.push_decision.action,
+                ConversationReviewAction::NoChanges
+            );
+            assert_ne!(entry.status_detail_code, Some("local_metadata_changed"));
+        }
+
+        // The native cursor follows ordinals, not the portable record count.
+        let next_message = serde_json::json!({
+            "ordinal": resumed_next, "type": "response_item",
+            "payload": {"type": "message", "id": "m3", "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}]},
+        });
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{next_message}"
+        )
+        .unwrap();
+        assert_eq!(
+            world.entry(&world.second).state,
+            ThreadSyncState::LocalAhead
+        );
+        let pushed = world.push(&world.second);
+        assert!(pushed.success, "{pushed:?}");
+    }
+
     /// Two computers that share one storage: the first writes a session and
     /// pushes it, the second pulls it.
     struct TwoComputers {
@@ -1936,7 +2166,7 @@ mod session_refresh_regressions {
             .unwrap();
         let main = world.main_of(&world.second, &world.second_home);
         let installed = std::fs::read(&main).unwrap();
-        assert!(String::from_utf8_lossy(&installed).contains(&notes));
+        assert!(String::from_utf8_lossy(&installed).contains(&serde_json::to_string(&notes).unwrap()));
         let mut continued = desktop_import_bytes(&installed);
         assert!(continued.len() < installed.len());
         if !by_the_import {
@@ -2980,7 +3210,7 @@ mod session_refresh_regressions {
         let fixture = Fixture::new(provider);
         fixture.publish_and_warm();
         let writer = std::fs::OpenOptions::new()
-            .append(true)
+            .write(true)
             .open(&fixture.path)
             .unwrap();
         writer.set_len(conversation_file_limit_bytes() + 1).unwrap();

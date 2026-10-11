@@ -2599,6 +2599,23 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
 .r2-step-fact code { font-family: var(--font-mono); font-size: var(--type-xs); overflow-wrap: anywhere; }
 .r2-step-controls { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
 .r2-step-controls > input { width: 100%; }
+.r2-wrangler-install { flex: 1 0 100%; min-width: 0; display: grid; gap: 8px; margin-top: 4px; }
+.r2-wrangler-install p { margin: 0; }
+.r2-wrangler-install a { color: var(--text-0); text-decoration: underline; text-underline-offset: 3px; }
+.r2-wrangler-command {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-card);
+}
+.r2-wrangler-command code { flex: 1 1 280px; min-width: 0; color: var(--text-0); font-family: var(--font-mono); font-size: var(--type-xs); overflow-wrap: anywhere; }
+.r2-wrangler-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.r2-wrangler-footer > p { flex: 1 1 200px; }
 /* A failed line's diagnostics: values to hand over, not to act on. The fold
    draws the in-house chevron like every other fold; open, the fields sit in
    the settled storage page's read-only field (control edge, muted fill,
@@ -11492,12 +11509,6 @@ summary {
   border-radius: 0;
   background: var(--retro-frame-gutter);
   box-shadow: none;
-}
-
-.sync-app svg {
-  shape-rendering: crispEdges;
-  stroke-linecap: square;
-  stroke-linejoin: miter;
 }
 
 .sync-app .icon-git-branch-mark,

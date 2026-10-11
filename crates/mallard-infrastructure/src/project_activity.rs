@@ -8,6 +8,7 @@
 //! session never advances any scope base and never writes to a provider
 //! home.
 
+use crate::local_paths::same_canonical_path;
 use crate::persistence::{
     read_json_bounded, write_json_atomic, LocalProjectActivityStateSnapshot, LocalStateRepository,
 };
@@ -264,7 +265,7 @@ pub fn resolve_activity_project_from_state(
 
     let project_root = fs::canonicalize(&binding.project_root)
         .map_err(|error| format!("resolve project root '{}': {error}", binding.project_root))?;
-    if project_root.as_path() != Path::new(&binding.canonical_project_root) {
+    if !same_canonical_path(&project_root, Path::new(&binding.canonical_project_root)) {
         return Err(
             "project root changed since the binding was saved; open Project Settings".to_string(),
         );
@@ -286,7 +287,7 @@ pub fn resolve_activity_project_from_state(
                 let home = fs::canonicalize(&profile.path).map_err(|error| {
                     format!("resolve {} profile '{}': {error}", provider, profile.path)
                 })?;
-                if home.as_path() != Path::new(&profile.canonical_path) {
+                if !same_canonical_path(&home, Path::new(&profile.canonical_path)) {
                     return Err(format!(
                         "{} profile path changed; open Project Settings",
                         provider
@@ -310,7 +311,7 @@ pub fn resolve_activity_project_from_state(
         project_id: local_project_id.clone(),
         bundle_id: project.bundle_id.clone(),
         project_root,
-        binding: binding.clone(),
+        binding: crate::local_paths::normalized_binding(binding),
         homes,
         unavailable,
     })
@@ -888,12 +889,16 @@ pub fn resolve_local_provider_alias_thread_from_state(
     provider_thread_id: &str,
     physical_path: &Path,
 ) -> Result<Option<ThreadId>, String> {
-    if state.bindings.active_for(&resolved.project_id) != Some(&resolved.binding)
+    if state
+        .bindings
+        .active_for(&resolved.project_id)
+        .map(crate::local_paths::normalized_binding)
+        != Some(crate::local_paths::normalized_binding(&resolved.binding))
         || resolved.homes.iter().any(|(provider, home)| {
             !state.bindings.profiles.iter().any(|profile| {
                 profile.profile_id == home.profile_id
                     && &profile.provider == provider
-                    && Path::new(&profile.canonical_path) == home.home
+                    && same_canonical_path(Path::new(&profile.canonical_path), &home.home)
             })
         })
     {
@@ -2203,8 +2208,7 @@ fn is_valid_git_object_id(value: &str) -> bool {
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
     Command::new("git")
-        .arg("-C")
-        .arg(root)
+        .current_dir(root)
         .args(args)
         .output()
         .map_err(|error| format!("run Git for '{}': {error}", root.display()))
@@ -2241,6 +2245,8 @@ mod activity_only_tests {
             );
         };
         run(&["init", "-b", "main"]);
+        let native_root = fs::canonicalize(root).unwrap();
+        let root = native_root.as_path();
         let unborn = capture_git_history(root).unwrap();
         assert_eq!(unborn.branch, "main");
         assert!(unborn.head_sha.is_none());
@@ -3033,6 +3039,80 @@ mod activity_only_tests {
             .unwrap_err(),
             "codex profile path changed; open Project Settings"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn activity_resolves_saved_windows_drive_paths_and_rejects_changed_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let home = temp.path().join("codex");
+        let other = temp.path().join("other");
+        for path in [&project, &home, &other] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let project = fs::canonicalize(project).unwrap();
+        let home = fs::canonicalize(home).unwrap();
+        // Setup saves ordinary drive paths; native canonicalization returns
+        // verbatim paths. Exercise the actual persisted spelling on Windows.
+        let plain = |path: &Path| {
+            path.to_str()
+                .unwrap()
+                .strip_prefix(r"\\?\")
+                .unwrap()
+                .to_string()
+        };
+        let (resolved, provider, profile_id) = alias_test_context();
+        let project_id = resolved.project_id.clone();
+        let mut binding = resolved.binding;
+        binding.project_root = plain(&project);
+        binding.canonical_project_root = plain(&project);
+        let config = SyncConfig {
+            projects: vec![LocalProjectRegistration {
+                local_project_id: project_id.clone(),
+                bundle_id: resolved.bundle_id,
+                display_name: "Windows project".to_string(),
+                local_alias: None,
+                repository_fingerprint: None,
+                recipe: BundleRecipe::default(),
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            }],
+            ..SyncConfig::default()
+        };
+        let mut state = MachineProjectState {
+            bindings: vec![binding],
+            profiles: vec![ProviderProfile {
+                profile_id,
+                provider: provider.clone(),
+                display_name: "Codex".to_string(),
+                path: plain(&home),
+                canonical_path: plain(&home),
+                provider_config: mallard_domain::AgentProviderConfig::version_1(),
+                revision: 0,
+                created_at: 1,
+                updated_at: 1,
+            }],
+            ..MachineProjectState::default()
+        };
+        state.validate(&config).unwrap();
+
+        let loaded = resolve_activity_project_from_state(&config, &state, &project_id).unwrap();
+        assert_eq!(loaded.project_root, project);
+        assert_eq!(loaded.homes[&provider].home, home);
+        assert!(loaded.unavailable.is_empty());
+
+        state.profiles[0].path = other.to_string_lossy().into_owned();
+        let loaded = resolve_activity_project_from_state(&config, &state, &project_id).unwrap();
+        assert!(loaded.homes.is_empty());
+        assert!(loaded.unavailable[&provider].contains("profile path changed"));
+
+        state.bindings[0].project_root = other.to_string_lossy().into_owned();
+        let error = resolve_activity_project_from_state(&config, &state, &project_id)
+            .err()
+            .expect("a different project root must still be refused");
+        assert!(error.contains("project root changed"), "{error}");
     }
 
     fn alias_test_context() -> (ResolvedActivityProject, ProviderKey, LocalProviderProfileId) {

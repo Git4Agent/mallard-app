@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 
 const SCENARIO_VERSION = 1;
 const CLAUDE_MODEL = "claude-sonnet-4-6";
@@ -179,7 +179,7 @@ function validateReadPath(value) {
     !isBoundedString(value, MAX_PATH_BYTES) ||
     !isAbsolute(value) ||
     resolve(value) !== value ||
-    value === "/"
+    dirname(value) === value
   ) {
     throw new Error("read_file_path");
   }
@@ -1321,7 +1321,7 @@ async function runHarness(argv = process.argv.slice(2)) {
 
 const isMain =
   process.argv[1] !== undefined &&
-  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 
 if (isMain) {
   runHarness().catch((error) => {

@@ -139,6 +139,7 @@ export const zhBackendCodes = {
     operation_pending: "此会话还有一个未完成的 {{value}} 同步操作。请先完成或恢复它。",
     detached_requires_pull: "此会话的本地映射已被替换。请下载以重新建立。",
     export_settings_changed: "导出设置已更改",
+    local_metadata_changed: "会话元数据已更改。上传即可更新存储。",
     evidence_unproven: "无法安全确认会话状态。",
     cloud_draft_synced: "已同步到 Cloud 草稿。",
     cloud_draft_local_only: "不在 Cloud 草稿中。上传即可保存到那里。",

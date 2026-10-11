@@ -533,15 +533,22 @@ mod tests {
     #[test]
     fn marked_path_parsing_accepts_exactly_one_block() {
         let mark = "abc123";
+        let root = std::env::temp_dir();
+        let expected = vec![root.join("tool/bin"), root.join("usr/bin")];
+        let path = std::env::join_paths([
+            expected[0].as_path(),
+            Path::new("relative"),
+            expected[1].as_path(),
+            Path::new(""),
+            Path::new("~/bin"),
+        ])
+        .unwrap();
         let dirs = parse_marked_path(
-            b"motd\nabc123/opt/tool/bin:relative:/usr/bin::~/binabc123trailer",
+            format!("motd\n{mark}{}{mark}trailer", path.to_string_lossy()).as_bytes(),
             mark,
         )
         .unwrap();
-        assert_eq!(
-            dirs,
-            vec![PathBuf::from("/opt/tool/bin"), PathBuf::from("/usr/bin")]
-        );
+        assert_eq!(dirs, expected);
         for (stdout, expected) in [
             (&b"no marks"[..], ShellPathError::Malformed),
             (b"abc123/usr/bin", ShellPathError::Malformed),

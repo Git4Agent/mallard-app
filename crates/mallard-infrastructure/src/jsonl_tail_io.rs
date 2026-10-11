@@ -37,6 +37,11 @@ pub(crate) fn open_no_follow(path: &Path) -> Result<fs::File, String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     options
         .open(path)
         .map_err(|error| format!("open session transcript '{}': {}", path.display(), error))
@@ -47,26 +52,28 @@ pub(crate) fn open_no_follow(path: &Path) -> Result<fs::File, String> {
 pub struct SourceStamp {
     len: u64,
     modified: std::time::SystemTime,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     identity: (u64, u64, i64, i64),
 }
 
 impl SourceStamp {
     pub fn mtime_secs(&self) -> u64 {
-        self.modified.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+        self.modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     pub fn read(path: &Path) -> Result<Self, String> {
-        Self::from_metadata(
-            &open_no_follow(path)?
-                .metadata()
-                .map_err(|error| error.to_string())?,
-        )
+        Self::from_file(&open_no_follow(path)?)
     }
 
-    /// The same stamp from a no-follow stat of the path, without opening
-    /// the file: what a reuse check pays per file.
+    /// The same stamp without reading the body. Windows needs a no-follow
+    /// handle to query file identity and change time.
     pub fn stat(path: &Path) -> Result<Self, String> {
+        #[cfg(windows)]
+        return Self::read(path);
+        #[cfg(not(windows))]
         Self::from_metadata(&fs::symlink_metadata(path).map_err(|error| error.to_string())?)
     }
 
@@ -75,7 +82,7 @@ impl SourceStamp {
         Self {
             len,
             modified: std::time::UNIX_EPOCH,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             identity: (0, 0, 0, 0),
         }
     }
@@ -99,14 +106,14 @@ impl SourceStamp {
             size: self.len,
             modified_secs,
             modified_nanos,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             identity: Some(SourceFileIdentity {
                 device: self.identity.0,
                 inode: self.identity.1,
                 changed_secs: self.identity.2,
                 changed_nanos: self.identity.3,
             }),
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             identity: None::<SourceFileIdentity>,
         }
     }
@@ -131,6 +138,55 @@ impl SourceStamp {
         file(&now) == file(saved) && (now == *saved || now.size > saved.size)
     }
 
+    #[cfg(not(windows))]
+    fn from_file(file: &fs::File) -> Result<Self, String> {
+        Self::from_metadata(&file.metadata().map_err(|error| error.to_string())?)
+    }
+
+    #[cfg(windows)]
+    fn from_file(file: &fs::File) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO,
+        };
+
+        let meta = file.metadata().map_err(|error| error.to_string())?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            return Err("session transcript is not a regular file".to_string());
+        }
+        let mut identity = BY_HANDLE_FILE_INFORMATION::default();
+        let mut basic = FILE_BASIC_INFO::default();
+        // Both queries use this live handle, so a path replacement cannot
+        // lend its identity to the file whose bytes we read.
+        let success = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as _, &mut identity) != 0
+                && GetFileInformationByHandleEx(
+                    file.as_raw_handle() as _,
+                    FileBasicInfo,
+                    (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                ) != 0
+        };
+        if !success {
+            return Err(format!(
+                "inspect session transcript identity: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self {
+            len: meta.len(),
+            modified: meta.modified().map_err(|error| error.to_string())?,
+            identity: (
+                u64::from(identity.dwVolumeSerialNumber),
+                (u64::from(identity.nFileIndexHigh) << 32) | u64::from(identity.nFileIndexLow),
+                basic.ChangeTime.div_euclid(10_000_000) - 11_644_473_600,
+                basic.ChangeTime.rem_euclid(10_000_000) * 100,
+            ),
+        })
+    }
+
+    #[cfg(not(windows))]
     fn from_metadata(meta: &fs::Metadata) -> Result<Self, String> {
         if !meta.is_file() {
             return Err("session transcript is not a regular file".to_string());
@@ -148,8 +204,7 @@ impl SourceStamp {
 
     pub fn verify(&self, path: &Path) -> Result<(), String> {
         let file = open_no_follow(path)?;
-        let metadata = file.metadata().map_err(|error| error.to_string())?;
-        if &Self::from_metadata(&metadata)? != self {
+        if &Self::from_file(&file)? != self {
             return Err(
                 "session transcript changed after capture; refresh and push again".to_string(),
             );
@@ -241,41 +296,26 @@ pub fn read_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
     use std::io::Read;
 
     let mut file = open_no_follow(path)?;
-    let before = file
-        .metadata()
-        .map_err(|error| format!("inspect session transcript '{}': {}", path.display(), error))?;
-    if !before.is_file() {
-        return Err(format!(
-            "session transcript '{}' is not a regular file",
-            path.display()
-        ));
-    }
-    if before.len() > conversation_file_limit_bytes() {
+    let stamp = handle_stamp(&file, path)?;
+    if stamp.len > conversation_file_limit_bytes() {
         return Err(format!(
             "session transcript '{}' exceeds the bounded transcript limit",
             path.display()
         ));
     }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
+    let mut bytes = Vec::with_capacity(stamp.len as usize);
     file.by_ref()
         .take(conversation_file_limit_bytes().saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read session transcript '{}': {}", path.display(), error))?;
-    let after = file.metadata().map_err(|error| {
-        format!(
-            "reinspect session transcript '{}': {}",
-            path.display(),
-            error
-        )
-    })?;
+    let after = handle_stamp(&file, path)?;
     if bytes.len() as u64 > conversation_file_limit_bytes() {
         return Err(format!(
             "session transcript '{}' exceeds the bounded transcript limit",
             path.display()
         ));
     }
-    let stamp = SourceStamp::from_metadata(&before)?;
-    if SourceStamp::from_metadata(&after)? != stamp || bytes.len() as u64 != before.len() {
+    if after != stamp || bytes.len() as u64 != stamp.len {
         return Err(format!(
             "session transcript '{}' changed while it was read",
             path.display()
@@ -289,16 +329,8 @@ pub fn read_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
 /// The open handle's stamp, for a read that must name the exact file state
 /// its bytes came from.
 fn handle_stamp(file: &fs::File, path: &Path) -> Result<SourceStamp, String> {
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("stat session transcript '{}': {}", path.display(), error))?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "session transcript '{}' is not a regular file",
-            path.display()
-        ));
-    }
-    SourceStamp::from_metadata(&metadata)
+    SourceStamp::from_file(file)
+        .map_err(|error| format!("stat session transcript '{}': {}", path.display(), error))
 }
 
 /// Read a saved cursor's probe window and appended tail without reading the
@@ -585,7 +617,7 @@ mod tests {
         let saved = now().file_state();
         saved.validate().unwrap();
         assert_eq!(saved.size, 10);
-        assert_eq!(saved.identity.is_some(), cfg!(unix));
+        assert_eq!(saved.identity.is_some(), cfg!(any(unix, windows)));
         assert!(now().continues(&saved), "untouched");
         assert_eq!(read_snapshot(&path).unwrap().1.file_state(), saved);
 
@@ -603,7 +635,11 @@ mod tests {
         fs::write(&path, b"aaaa\nBBBB\ncccc\n").unwrap();
         restore_modified(modified);
         assert_eq!(now().file_state().size, grown.size);
-        assert_eq!(now().continues(&grown), cfg!(not(unix)), "rewritten");
+        assert_eq!(
+            now().continues(&grown),
+            cfg!(not(any(unix, windows))),
+            "rewritten"
+        );
         // Measured from the older state the same file has only grown: an
         // edit that comes with growth is not told apart here.
         assert!(now().continues(&saved));
@@ -625,7 +661,11 @@ mod tests {
         fs::write(&replacement, b"aaaa\nbbbb\ncccc\ndddd\n").unwrap();
         fs::rename(&replacement, &path).unwrap();
         restore_modified(modified);
-        assert_eq!(now().continues(&saved), cfg!(not(unix)), "replaced");
+        assert_eq!(
+            now().continues(&saved),
+            cfg!(not(any(unix, windows))),
+            "replaced"
+        );
 
         // A modification time before the epoch keeps a forward nanosecond
         // count.

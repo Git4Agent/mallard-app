@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::payload::PayloadBytes;
 pub use crate::persistence::ConversationPublicationState;
-use crate::persistence::{LocalStateRepository, LockedConversationPull};
+use crate::persistence::{sync_directory, LocalStateRepository, LockedConversationPull};
 use crate::verified_transcript::VerifiedTranscript;
 use mallard_domain::{
     conversation_resource_id, hex_lower, sha256_hex, ActionId, ActionStatus, ApplyReceipt,
@@ -449,7 +449,7 @@ fn ensure_provider_target_parents(
     }
     let canonical_root = fs::canonicalize(&root)
         .map_err(|error| format!("resolve provider root '{}': {error}", root.display()))?;
-    if canonical_root != root {
+    if !crate::local_paths::same_canonical_path(&canonical_root, &root) {
         return Err("conversation provider root is not canonical".to_string());
     }
     for target in targets {
@@ -457,7 +457,7 @@ fn ensure_provider_target_parents(
             .target_path
             .parent()
             .ok_or_else(|| "conversation provider target has no parent".to_string())?;
-        let relative = parent.strip_prefix(&root).map_err(|_| {
+        let relative = crate::local_paths::strip_prefix(parent, &root).map_err(|_| {
             format!(
                 "conversation provider target '{}' escapes its profile",
                 target.target_path.display()
@@ -1010,7 +1010,7 @@ fn canonical_target_path(path: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "conversation provider target has no parent".to_string())?;
     let canonical_parent = fs::canonicalize(parent)
         .map_err(|error| format!("resolve conversation target parent: {error}"))?;
-    if canonical_parent != parent {
+    if !crate::local_paths::same_canonical_path(&canonical_parent, parent) {
         return Err("conversation provider target parent is not canonical".to_string());
     }
     Ok(canonical_parent.join(
@@ -1151,14 +1151,6 @@ fn create_private_directory_all(root: &Path, path: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> Result<(), String> {
-    let directory = File::open(path)
-        .map_err(|error| format!("open directory '{}': {}", path.display(), error))?;
-    directory
-        .sync_all()
-        .map_err(|error| format!("sync directory '{}': {}", path.display(), error))
-}
-
 fn path_text(path: &Path) -> Result<String, String> {
     path.to_str()
         .map(str::to_string)
@@ -1222,7 +1214,7 @@ mod tests {
     #[test]
     fn checked_transcript_is_replaced_without_another_source_read() {
         let temp = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(temp.path()).unwrap();
+        let root = crate::local_paths::canonicalize(temp.path()).unwrap();
         let transcript = target(
             &root,
             "source",

@@ -17,6 +17,9 @@ It tests service behavior. It does not measure the React UI or Tauri IPC.
 - aimock 1.39.0, installed by `npm ci`.
 - The repository Rust toolchain and native build dependencies.
 - A working native Codex sandbox. A failed preflight fails the run.
+- Permission to create file symlinks in the temporary fixture. The graph safety
+  checks require this on every platform; preflight reports
+  `native_file_symlink_permission_denied` when the host refuses it.
 
 Use temporary provider homes only. The runner removes inherited API keys,
 provider endpoints, proxies, and process injection settings from native child

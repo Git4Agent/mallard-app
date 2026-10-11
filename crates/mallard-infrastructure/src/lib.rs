@@ -30,6 +30,7 @@ pub mod dropbox_setup;
 pub mod feishu_auth;
 pub mod feishu_connections;
 pub mod jsonl_tail_io;
+pub mod local_paths;
 pub mod loopback_browser;
 pub mod managed_cloud;
 pub mod payload;

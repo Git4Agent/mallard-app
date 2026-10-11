@@ -25,6 +25,8 @@ pub(super) fn request(
             .env("CODEX_HOME", home).current_dir(home)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         #[cfg(test)]
         command.env("HOME", home);
         let mut child = command.spawn().map_err(|_| "Could not start Codex for a provider request.")?;
@@ -33,8 +35,9 @@ pub(super) fn request(
             let output = child.stdout.take().ok_or("Codex output is unavailable.")?;
             let mut lines = BufReader::new(output.take(1024 * 1024)).lines();
             let mut result = Value::Null;
+            // Project listing and thread projectId require this capability.
             for (id, request) in [
-                (1, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"mallard","version":env!("CARGO_PKG_VERSION")}}})),
+                (1, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"mallard","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}})),
                 (2, json!({"id":2,"method":method,"params":params})),
             ] {
                 input.write_all(format!("{request}\n").as_bytes()).await

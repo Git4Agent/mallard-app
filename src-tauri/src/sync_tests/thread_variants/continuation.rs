@@ -891,6 +891,7 @@ fn publish_bound_thread(
         cloud_thread_id: cloud_thread_id.clone(),
         operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
             export_settings_changed: false,
+            local_metadata_changed: false,
             candidate_commit_id: current.head.commit_id,
             candidate_manifest_sha256: current.head.manifest_sha256,
             artifact_sha256: sha256(local_transcript),

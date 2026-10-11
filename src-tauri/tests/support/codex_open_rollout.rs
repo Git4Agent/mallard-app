@@ -313,7 +313,7 @@ fn cut_before(bytes: &[u8], marker: &str) -> usize {
 pub fn run(parent: &Path, source_home: &Path, project: &Path, id: &str) {
     eprintln!("live Codex phase: external open rollout writer, two appends, Push/Pull and process restart");
     let fixture = tempfile::tempdir_in(parent).expect("open rollout fixture");
-    let root = fixture.path().canonicalize().expect("canonical fixture");
+    let root = canonicalize(fixture.path()).expect("canonical fixture");
     std::fs::write(root.join("open-rollout-owner"), b"1\n").unwrap();
     for name in [
         "machine-a",

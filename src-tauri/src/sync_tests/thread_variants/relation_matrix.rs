@@ -334,7 +334,11 @@ fn action_pins(
     );
     let provider_state = materializes
         .then(|| ProviderStateExpectation {
-            target_path: "/tmp/provider/rollout-thread-reserved.jsonl".to_string(),
+            target_path: std::env::temp_dir()
+                .join("provider")
+                .join("rollout-thread-reserved.jsonl")
+                .to_string_lossy()
+                .into_owned(),
             expectation: TargetExpectation::Absent,
         })
         .into_iter()
@@ -343,6 +347,7 @@ fn action_pins(
         subagent_selection: Default::default(),
         credential_redaction_enabled: true,
 export_settings_changed: false,
+local_metadata_changed: false,
 context: ConversationContextPins {
             host_id: HostId::parse("11111111111111111111111111111111").unwrap(),
             replica_id: ReplicaId::parse("replica-a").unwrap(),

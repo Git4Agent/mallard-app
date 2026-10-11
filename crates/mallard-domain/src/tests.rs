@@ -1,5 +1,12 @@
 use super::*;
 
+fn local_path(relative: &str) -> String {
+    std::env::temp_dir()
+        .join(relative)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[test]
 fn shared_hash_and_time_primitives_keep_the_existing_encoding_and_epoch_policy() {
     use sha2::{Digest as _, Sha256};
@@ -630,8 +637,8 @@ fn active_bindings_share_a_checkout_only_through_distinct_provider_configs() {
         profile_id: LocalProviderProfileId::parse(id).unwrap(),
         provider: provider("codex"),
         display_name: id.to_string(),
-        path: path.to_string(),
-        canonical_path: path.to_string(),
+        path: local_path(path),
+        canonical_path: local_path(path),
         provider_config: AgentProviderConfig::version_1(),
         revision: 0,
         created_at: 1,
@@ -642,8 +649,8 @@ fn active_bindings_share_a_checkout_only_through_distinct_provider_configs() {
         replica_id: ReplicaId::parse(replica).unwrap(),
         local_project_id: LocalProjectId::parse(project).unwrap(),
         bundle_id: BundleId::parse(bundle).unwrap(),
-        project_root: "/home/user/projects/health-game".to_string(),
-        canonical_project_root: "/home/user/projects/health-game".to_string(),
+        project_root: local_path("projects/health-game"),
+        canonical_project_root: local_path("projects/health-game"),
         profile_ids: BTreeMap::from([(
             provider("codex"),
             LocalProviderProfileId::parse(profile).unwrap(),
@@ -656,8 +663,8 @@ fn active_bindings_share_a_checkout_only_through_distinct_provider_configs() {
         schema: MACHINE_PROJECT_SCHEMA,
         revision: 0,
         profiles: vec![
-            profile("profile-main", "/home/user/.codex"),
-            profile("profile-alt", "/home/user/conf2/.codex"),
+            profile("profile-main", ".codex"),
+            profile("profile-alt", "conf2/.codex"),
         ],
         bindings: vec![
             binding(
@@ -699,8 +706,8 @@ fn bindings_reject_mismatched_profile_provider_keys() {
             profile_id: LocalProviderProfileId::parse("profile-claude").unwrap(),
             provider: provider("claude"),
             display_name: "Claude".to_string(),
-            path: "/home/user/.claude".to_string(),
-            canonical_path: "/home/user/.claude".to_string(),
+            path: local_path(".claude"),
+            canonical_path: local_path(".claude"),
             provider_config: AgentProviderConfig::version_1(),
             revision: 0,
             created_at: 1,
@@ -711,8 +718,8 @@ fn bindings_reject_mismatched_profile_provider_keys() {
             replica_id: ReplicaId::parse("replica-a").unwrap(),
             local_project_id: LocalProjectId::parse("project-a").unwrap(),
             bundle_id: bundle_id(),
-            project_root: "/home/user/projects/app".to_string(),
-            canonical_project_root: "/home/user/projects/app".to_string(),
+            project_root: local_path("projects/app"),
+            canonical_project_root: local_path("projects/app"),
             profile_ids: BTreeMap::from([(
                 provider("codex"),
                 LocalProviderProfileId::parse("profile-claude").unwrap(),
@@ -1946,6 +1953,7 @@ fn push_action(
             subagent_selection: Default::default(),
             credential_redaction_enabled: true,
             export_settings_changed: false,
+            local_metadata_changed: false,
             context: ConversationContextPins {
                 host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
                 replica_id: ReplicaId::parse("replica-a").unwrap(),
@@ -2615,7 +2623,7 @@ fn ready_mapping(consumed: u64) -> PhysicalMappingState {
     PhysicalMappingState::Ready {
         root_mapping: RootPhysicalMapping {
             provider_thread_id: "0199a1b2-0000-7000-8000-000000000001".to_string(),
-            root_path: "/home/user/.codex/sessions/rollout.jsonl".to_string(),
+            root_path: local_path(".codex/sessions/rollout.jsonl"),
             source_file_size: consumed + 100,
             consumed_byte_offset: consumed,
             consumed_record_ordinal: consumed / 100,
@@ -3153,7 +3161,7 @@ fn preserved_provenance_validates_on_every_carrier() {
 #[test]
 fn apply_index_rows_pair_with_the_index_fragment_role() {
     let fragment = ConversationApplyTarget {
-        target_path: "/home/user/.codex/session_index.jsonl".to_string(),
+        target_path: local_path(".codex/session_index.jsonl"),
         role: ConversationFileRole::ProviderIndexFragment,
         expected: TargetExpectation::Absent,
         staged_path: None,
@@ -3228,6 +3236,7 @@ fn publication_operation(chain: &[CanonicalConversationMessage]) -> Conversation
         cloud_thread_id: CloudThreadId::parse("cloudthread-1").unwrap(),
         operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
             export_settings_changed: false,
+            local_metadata_changed: false,
             candidate_commit_id: "commit-4".to_string(),
             candidate_manifest_sha256: "f".repeat(64),
             artifact_sha256: "a".repeat(64),
@@ -3418,6 +3427,29 @@ fn plan_actions_validate_relation_action_and_pins() {
     assert!(publish.validate().is_err());
     publish.pins.export_settings_changed = true;
     publish.validate().unwrap();
+    publish.pins.export_settings_changed = false;
+    publish.pins.local_metadata_changed = true;
+    publish.validate().unwrap();
+    let raw_range = publish.pins.tail.raw_range.clone().unwrap();
+    publish
+        .pins
+        .tail
+        .raw_range
+        .as_mut()
+        .unwrap()
+        .start_byte_offset = raw_range.end_byte_offset;
+    assert!(
+        publish.validate().is_err(),
+        "metadata publication needs unaccepted bytes"
+    );
+    publish.pins.tail.raw_range = Some(raw_range);
+    publish.pins.tail.local = Some(t5.clone());
+    assert!(
+        publish.validate().is_err(),
+        "metadata alone cannot claim a message advance"
+    );
+    publish.pins.local_metadata_changed = false;
+    publish.pins.export_settings_changed = true;
     publish.pins.tail.local = Some(t5.clone());
     publish.pins.tail.cloud = Some(t5.clone());
     assert!(

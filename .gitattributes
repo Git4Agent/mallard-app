@@ -1,0 +1,4 @@
+# Keep source assertions and wire fixture digests identical on every platform.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf

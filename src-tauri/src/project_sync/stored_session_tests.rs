@@ -286,6 +286,43 @@
         a_stored_session_opens_without_a_pull("claude");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn stored_sessions_open_and_pull_with_a_verbatim_windows_binding() {
+        for provider in ["codex", "claude"] {
+            let (world, wanted) = two_stored_sessions_with_a_prompt(provider);
+            world.repo
+                .mutate_bindings(|_, state| {
+                    let binding = state.bindings.iter_mut()
+                        .find(|binding| binding.local_project_id == world.second.local_project_id)
+                        .unwrap();
+                    binding.project_root = std::fs::canonicalize(&binding.project_root).unwrap()
+                        .to_string_lossy().into_owned();
+                    assert!(binding.project_root.starts_with(r"\\?\"));
+                    assert!(!binding.canonical_project_root.starts_with(r"\\?\"));
+                    Ok(())
+                })
+                .unwrap();
+            let saved = world.repo.load_bindings().unwrap();
+            let service = ProjectSyncService::new(&world.repo);
+            let detail = service
+                .get_stored_session_detail(&world.second.local_project_id, &world.storage, &wanted)
+                .unwrap_or_else(|error| panic!("{provider}: {error:?}"));
+            let page = service
+                .get_stored_session_timeline_page(
+                    &world.second.local_project_id,
+                    &world.storage,
+                    &wanted,
+                    whole_stored_timeline(&detail.snapshot_id),
+                )
+                .unwrap_or_else(|error| panic!("{provider}: {error:?}"));
+            assert!(!page.events.is_empty(), "{provider}");
+            assert_eq!(world.repo.load_bindings().unwrap(), saved);
+            let pulled = world.pull(&world.second);
+            assert!(pulled.success, "{provider}: {pulled:?}");
+        }
+    }
+
     /// A stored object that no longer matches its manifest entry is refused
     /// before anything of it is shown: the page shows verified bytes only.
     fn a_changed_stored_object_is_refused(provider: &'static str) {

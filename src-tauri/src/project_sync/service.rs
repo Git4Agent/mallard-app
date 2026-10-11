@@ -74,6 +74,7 @@ use mallard_infrastructure::conversation_sync::{
 };
 use mallard_infrastructure::credential_redaction;
 use mallard_infrastructure::jsonl_tail_io;
+use mallard_infrastructure::local_paths;
 use mallard_infrastructure::owned_subagents;
 use mallard_infrastructure::payload::PayloadBytes;
 use mallard_infrastructure::persistence::{
@@ -2528,7 +2529,7 @@ fn inspect_provider_profile(profile: &ProviderProfile) -> (bool, bool, bool, Opt
             return Err("profile path is not a directory".to_string());
         }
         let canonical = fs_canonicalize(path)?;
-        if canonical != profile.canonical_path {
+        if !local_paths::same_canonical_path(&canonical, Path::new(&profile.canonical_path)) {
             return Err("profile path now resolves to a different directory".to_string());
         }
         let readable = fs::read_dir(&canonical).is_ok();
@@ -3342,7 +3343,7 @@ fn project_content_warning_digest(
 
 fn project_file_sync_eligibility(binding: &ProjectBinding) -> ProjectFileSyncEligibility {
     let root = Path::new(&binding.project_root);
-    let canonical = match fs::canonicalize(root) {
+    let canonical = match local_paths::canonicalize(root) {
         Ok(canonical) => canonical,
         Err(error) => {
             return ProjectFileSyncEligibility {
@@ -3352,7 +3353,7 @@ fn project_file_sync_eligibility(binding: &ProjectBinding) -> ProjectFileSyncEli
             }
         }
     };
-    if canonical != binding.canonical_project_root {
+    if !local_paths::same_canonical_path(&canonical, Path::new(&binding.canonical_project_root)) {
         return ProjectFileSyncEligibility {
             state: ProjectFileSyncEligibilityState::Unknown,
             reason: "Project binding resolves to a different folder".to_string(),
@@ -5589,12 +5590,19 @@ fn provider_thread_review(
         (BTreeMap<ThreadId, LocalThreadReview>, BTreeSet<String>),
         String,
     > {
-        if state.bindings.active_for(&binding.local_project_id) != Some(binding)
+        if state
+            .bindings
+            .active_for(&binding.local_project_id)
+            .map(local_paths::normalized_binding)
+            != Some(local_paths::normalized_binding(binding))
             || state.host_identity.host_id != binding.host_id
             || !state.bindings.profiles.iter().any(|profile| {
                 profile.profile_id == profile_id
                     && &profile.provider == provider
-                    && Path::new(&profile.canonical_path) == provider_home
+                    && local_paths::same_canonical_path(
+                        Path::new(&profile.canonical_path),
+                        provider_home,
+                    )
             })
         {
             return Err("project binding changed; refresh before continuing".to_string());
@@ -6993,8 +7001,22 @@ fn provider_thread_review(
                             .stamp(),
                     )
         });
+        // The raw interval starts at the last accepted physical end and
+        // advances only over validated complete records. Observation refreshes
+        // preserve that start; only successful publication accepts the bytes.
+        let local_metadata_changed = provider.as_str() == "codex"
+            && checkpoint.is_some_and(|checkpoint| {
+                checkpoint.accepted.is_some()
+                    && checkpoint.accepted_local_tail.as_ref()
+                        == present_tail(&local_observation.evidence).as_ref()
+            })
+            && local_observation
+                .raw_range_pin
+                .as_ref()
+                .is_some_and(|range| range.start_byte_offset < range.end_byte_offset);
         let capabilities = ConversationCapabilities {
             export_settings_changed,
+            local_metadata_changed,
             missing_child_recovery,
             binding: if local_binding.is_some() {
                 BindingResolution::Bound
@@ -7196,6 +7218,16 @@ fn provider_thread_review(
                 })
             })
             .or_else(|| {
+                if !local_metadata_changed || push.action != ConversationReviewAction::Publish {
+                    return None;
+                }
+                Some(StatusDetail::coded(
+                    "local_metadata_changed",
+                    "Session metadata changed. Push to update storage.".to_string(),
+                    None,
+                ))
+            })
+            .or_else(|| {
                 (export_settings_changed && push.action == ConversationReviewAction::Publish).then(
                     || {
                         StatusDetail::coded(
@@ -7346,6 +7378,7 @@ fn provider_thread_review(
                     subagent_selection: subagent_selection.clone(),
                     credential_redaction_enabled,
                     export_settings_changed,
+                    local_metadata_changed,
                     context: ConversationContextPins {
                         host_id: binding.host_id.clone(),
                         replica_id: binding.replica_id.clone(),
@@ -7569,6 +7602,7 @@ fn provider_thread_review(
                                 stamp.codec != credential_redaction::REDACTION_OFF_CODEC_V1
                             }),
                         export_settings_changed: false,
+                        local_metadata_changed: false,
                         context: ConversationContextPins {
                             host_id: binding.host_id.clone(),
                             replica_id: binding.replica_id.clone(),
@@ -10401,6 +10435,7 @@ fn build_conversation_publication(
         cloud_thread_id: result_thread_id.clone(),
         operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
             export_settings_changed: action.pins.export_settings_changed,
+            local_metadata_changed: action.pins.local_metadata_changed,
             candidate_commit_id: action.pins.revision.commit_id.clone(),
             candidate_manifest_sha256: action.pins.revision.manifest_sha256.clone(),
             artifact_sha256,
@@ -12855,6 +12890,7 @@ fn prepare_pull_conversation_actions(
                     stamp.codec != credential_redaction::REDACTION_OFF_CODEC_V1
                 }),
                 export_settings_changed: false,
+                local_metadata_changed: false,
                 context: ConversationContextPins {
                     host_id: binding.host_id.clone(),
                     replica_id: binding.replica_id.clone(),
@@ -15699,7 +15735,7 @@ fn resolve_project_binding_from_state(
 ) -> Result<ResolvedBinding, String> {
     let homes = resolve_profile_paths_from_state(state, &binding.profile_ids)?;
     let resolved = ResolvedBinding {
-        binding: binding.clone(),
+        binding: local_paths::normalized_binding(binding),
         homes,
     };
     resolved.binding.validate_structure()?;
@@ -15859,19 +15895,28 @@ fn capture_request_for_resolved_binding_from_state(
     resolved: &ResolvedBinding,
 ) -> Result<CaptureRequest, String> {
     let binding = &resolved.binding;
-    if bindings.active_for(&binding.local_project_id) != Some(binding)
+    if bindings
+        .active_for(&binding.local_project_id)
+        .map(local_paths::normalized_binding)
+        != Some(local_paths::normalized_binding(binding))
         || resolved.homes.iter().any(|(provider, home)| {
             !bindings.profiles.iter().any(|profile| {
                 binding.profile_ids.get(provider) == Some(&profile.profile_id)
                     && &profile.provider == provider
-                    && &profile.canonical_path == home
+                    && local_paths::same_canonical_path(
+                        Path::new(&profile.canonical_path),
+                        Path::new(home),
+                    )
             })
         })
     {
         return Err("project binding changed; refresh before continuing".to_string());
     }
     let resolved_project = fs_canonicalize(Path::new(&binding.project_root))?;
-    if resolved_project != binding.canonical_project_root {
+    if !local_paths::same_canonical_path(
+        &resolved_project,
+        Path::new(&binding.canonical_project_root),
+    ) {
         return Err("project binding resolves to a different checkout".to_string());
     }
     // Nested bound projects are separate directory projects. Exact-home
@@ -16123,7 +16168,7 @@ fn prospective_canonical(path: &Path) -> Result<PathBuf, String> {
     loop {
         match fs::symlink_metadata(&cursor) {
             Ok(_) => {
-                let mut resolved = fs::canonicalize(&cursor)
+                let mut resolved = local_paths::canonicalize(&cursor)
                     .map_err(|error| format!("resolve '{}': {}", cursor.display(), error))?;
                 for component in missing.iter().rev() {
                     resolved.push(component);
@@ -16595,7 +16640,7 @@ fn save_project_binding_guarded(
             replica_id,
             local_project_id: request.local_project_id.clone(),
             bundle_id: project.bundle_id.clone(),
-            project_root: request.project_root.clone(),
+            project_root: local_paths::simplified(&request.project_root),
             canonical_project_root: validated.clone(),
             profile_ids: request.profile_ids.clone(),
             state: BindingState::Active,
@@ -17008,7 +17053,7 @@ fn resolve_project_folder(
             message,
         });
     }
-    let canonical = match fs::canonicalize(project_root) {
+    let canonical = match local_paths::canonicalize(project_root) {
         Ok(canonical) => canonical,
         Err(error) => {
             let probe = if matches!(
@@ -17404,7 +17449,7 @@ pub(super) fn create_setup_draft_with_repository(
         draft_id: SetupDraftId::parse(generated_named_id("draft")?)?,
         local_project_id: LocalProjectId::parse(generated_named_id("project")?)?,
         new_bundle_id: BundleId::generate()?,
-        project_root: project_root.to_string(),
+        project_root: local_paths::simplified(project_root),
         canonical_project_root: canonical_text,
         display_name,
         repository_fingerprint: repository_fingerprint(&canonical),
@@ -18296,33 +18341,8 @@ fn fs_profile_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
 }
 
 pub(super) fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|error| format!("resolve '{}': {}", path.display(), error))?;
-    Ok(strip_windows_verbatim_prefix(canonical))
-}
-
-/// `std::fs::canonicalize` on Windows returns verbatim paths (`\\?\C:\…`).
-/// Bindings, the path-map root grammar, and provider `cwd` fields all use
-/// the ordinary drive spelling, so strip the prefix for plain drive paths.
-#[cfg(windows)]
-fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
-    use std::path::{Component, Prefix};
-    match path.components().next() {
-        Some(Component::Prefix(prefix)) => match prefix.kind() {
-            Prefix::VerbatimDisk(drive) => {
-                let mut plain = PathBuf::from(format!("{}:\\", drive as char));
-                plain.extend(path.components().skip(2));
-                plain
-            }
-            _ => path,
-        },
-        _ => path,
-    }
-}
-
-#[cfg(not(windows))]
-fn strip_windows_verbatim_prefix(path: PathBuf) -> PathBuf {
-    path
+    local_paths::canonicalize(path)
+        .map_err(|error| format!("resolve '{}': {}", path.display(), error))
 }
 
 #[cfg(test)]
@@ -21368,13 +21388,26 @@ mod tests {
 
     #[test]
     fn project_open_commands_pin_the_checkout_and_assigned_profiles() {
+        let (root, codex_home, claude_home) = if cfg!(windows) {
+            (
+                r"C:\tmp\client's project",
+                r"C:\tmp\custom codex\.codex",
+                r"C:\tmp\custom claude\.claude",
+            )
+        } else {
+            (
+                "/tmp/client's project",
+                "/tmp/custom codex/.codex",
+                "/tmp/custom claude/.claude",
+            )
+        };
         let binding = ProjectBinding {
             host_id: HostId::parse("00112233445566778899aabbccddeeff").unwrap(),
             replica_id: ReplicaId::parse("replica-test").unwrap(),
             local_project_id: LocalProjectId::parse("project-test").unwrap(),
             bundle_id: BundleId::parse("0123456789abcdef0123456789abcdef").unwrap(),
-            project_root: "/tmp/client's project".to_string(),
-            canonical_project_root: "/tmp/client's project".to_string(),
+            project_root: root.to_string(),
+            canonical_project_root: root.to_string(),
             profile_ids: BTreeMap::from([
                 (
                     codex_key(),
@@ -21392,10 +21425,10 @@ mod tests {
         let resolved = ResolvedBinding {
             binding,
             homes: BTreeMap::from([
-                (codex_key(), "/tmp/custom codex/.codex".to_string()),
+                (codex_key(), codex_home.to_string()),
                 (
                     ProviderKey::parse("claude").unwrap(),
-                    "/tmp/custom claude/.claude".to_string(),
+                    claude_home.to_string(),
                 ),
             ]),
         };
@@ -21445,6 +21478,16 @@ mod tests {
                     .to_string(),
             ),
         ]);
+        #[cfg(windows)]
+        {
+            expected = vec![
+                ("Codex — new", r"$env:CODEX_HOME = 'C:\tmp\custom codex\.codex'; & codex -C 'C:\tmp\client''s project'".to_string()),
+                ("Codex — resume", r"$env:CODEX_HOME = 'C:\tmp\custom codex\.codex'; & codex resume -C 'C:\tmp\client''s project'".to_string()),
+                ("Codex app — resume", "use Open in Codex (one deep link cannot carry both project and chat)".to_string()),
+                ("Claude — new", r"Set-Location -LiteralPath 'C:\tmp\client''s project' -ErrorAction Stop; $env:CLAUDE_CONFIG_DIR = 'C:\tmp\custom claude\.claude'; & claude".to_string()),
+                ("Claude — resume", r"Set-Location -LiteralPath 'C:\tmp\client''s project' -ErrorAction Stop; $env:CLAUDE_CONFIG_DIR = 'C:\tmp\custom claude\.claude'; & claude --resume".to_string()),
+            ];
+        }
         assert_eq!(
             commands
                 .into_iter()
@@ -30028,6 +30071,7 @@ mod tests {
         // stays out of the first *user* message deliberately — the title
         // fallback is a documented path-remap non-goal.
         let a_root_text = a_root.to_string_lossy().into_owned();
+        let json_text = |text: &str| serde_json::to_string(text).unwrap();
         let literal_text = format!(
             "literal {} /__mallard_root__/bt; /__mallard_escape__/e 🦆 e\u{301}\u{0}\n\t\"\\",
             temp.path().join("proj-b").display()
@@ -30151,7 +30195,10 @@ mod tests {
         assert!(!store_contains(&store_root, SECRET_A_PASSWORD));
         assert!(store_contains(&store_root, "<anthropic-api-key>"));
         assert!(store_contains(&store_root, "DB_PASSWORD=<password>"));
-        assert!(!store_contains(&store_root, &a_root_text));
+        assert!(!store_contains(
+            &store_root,
+            json_text(&a_root_text).trim_matches('"')
+        ));
         assert!(store_contains(&store_root, "/__mallard_root__/b;/readme"));
         assert!(
             store_contains(&store_root, "APP=demo"),
@@ -30277,9 +30324,14 @@ mod tests {
         // B's root — no dead source-machine spelling survives anywhere in
         // the installed transcript.
         let b_root_text = b_root.to_string_lossy().into_owned();
-        assert!(!b_installed.contains(&a_root_text));
-        assert!(b_installed.contains(&format!("editing {b_root_text}/readme per your ask")));
-        assert!(b_installed.contains(&format!("\"file_path\":\"{b_root_text}/readme\"")));
+        assert!(!b_installed.contains(json_text(&a_root_text).trim_matches('"')));
+        assert!(b_installed.contains(&json_text(&format!(
+            "editing {b_root_text}/readme per your ask"
+        ))));
+        assert!(b_installed.contains(&format!(
+            "\"file_path\":{}",
+            json_text(&format!("{b_root_text}/readme"))
+        )));
 
         let first: serde_json::Value =
             serde_json::from_str(b_installed.lines().next().unwrap()).unwrap();
@@ -30312,7 +30364,7 @@ mod tests {
         assert_eq!(write_tool.affected_paths, vec!["readme".to_string()]);
         assert!(!serde_json::to_string(&index)
             .unwrap()
-            .contains(&a_root_text));
+            .contains(json_text(&a_root_text).trim_matches('"')));
         // The session's attachments arrive with it, renamed under B's
         // minted id and exactly as they shipped: the file-history snapshot
         // as raw bytes, the todos list as JSON, both scrubbed. Nothing under
@@ -30369,7 +30421,7 @@ mod tests {
         assert!(!store_contains(&store_root, SECRET_B));
         assert!(store_contains(&store_root, "<openai-api-key>"));
         assert!(
-            store_contains(&store_root, &b_root_text),
+            store_contains(&store_root, json_text(&b_root_text).trim_matches('"')),
             "the pre-existing destination path is literal"
         );
         assert!(store_contains(&store_root, "/__mallard_root__/b;/readme2"));
@@ -30451,8 +30503,12 @@ mod tests {
             .find(|record| record["uuid"] == "a-1")
             .unwrap();
         assert_eq!(assistant["message"]["content"][1]["text"], literal_text);
-        assert!(a_after.contains(&format!("editing {a_root_text}/readme per your ask")));
-        assert!(a_after.contains(&format!("update {a_root_text}/readme2")));
+        assert!(a_after.contains(&json_text(&format!(
+            "editing {a_root_text}/readme per your ask"
+        ))));
+        assert!(a_after.contains(
+            json_text(&format!("update {a_root_text}/readme2")).trim_matches('"')
+        ));
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &machine_a.local_project_id,
@@ -30860,7 +30916,7 @@ mod tests {
         const SECRET: &str = "sk-ant-api03-aaaabbbbccccddddeeee";
         let temp = tempfile::tempdir().unwrap();
         let repo = LocalStateRepository::from_home_dir(temp.path().join("home")).unwrap();
-        let project_dir = temp.path().join("work/app");
+        let project_dir = temp.path().join("work").join("app");
         let claude_home = temp.path().join("claude-profile/.claude");
         let storage_dir = temp.path().join("bucket");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -33229,12 +33285,12 @@ mod tests {
             *rename_calls.borrow(),
             vec![
                 (
-                    source_codex.canonicalize().unwrap(),
+                    fs_canonicalize(&source_codex).unwrap(),
                     relocated_source_id.clone(),
                     marker_title.clone()
                 ),
                 (
-                    source_codex.canonicalize().unwrap(),
+                    fs_canonicalize(&source_codex).unwrap(),
                     remote_provider_thread_id.clone(),
                     title.to_string()
                 ),
@@ -33952,7 +34008,7 @@ mod tests {
     fn setup_fixture() -> SetupFixture {
         let temp = tempfile::tempdir().unwrap();
         let repo = LocalStateRepository::from_home_dir(temp.path().join("home")).unwrap();
-        let project_dir = temp.path().join("work/app");
+        let project_dir = temp.path().join("work").join("app");
         let codex_home = temp.path().join("codex-profile/.codex");
         let storage_dir = temp.path().join("bucket");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -34165,7 +34221,7 @@ mod tests {
         let fixture = setup_fixture();
         fixture.repo.load_config().unwrap();
         let temp = fixture._temp.path();
-        let canonical_project = fs::canonicalize(&fixture.project_dir).unwrap();
+        let canonical_project = fs_canonicalize(&fixture.project_dir).unwrap();
         let readme = fixture.project_dir.join("README.md");
         fs::write(&readme, "notes").unwrap();
         let profiles_before = fixture.repo.load_bindings().unwrap().profiles.len();
@@ -34349,7 +34405,7 @@ mod tests {
     fn agent_folders_list_where_registered_profiles_ran() {
         let fixture = setup_fixture();
         let temp = fixture._temp.path();
-        let canonical_project = fs::canonicalize(&fixture.project_dir).unwrap();
+        let canonical_project = fs_canonicalize(&fixture.project_dir).unwrap();
         let gone = temp.join("work/gone");
         let rollouts = fixture.codex_home.join("sessions/2026/09/25");
         fs::create_dir_all(&rollouts).unwrap();
@@ -34602,6 +34658,74 @@ mod tests {
         assert_eq!(saved.revision, stale.revision + 1);
         let error = update_setup_draft_with_repository(&fixture.repo, stale).unwrap_err();
         assert!(error.contains("changed"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn finalized_setup_loads_activity_with_the_saved_project_and_profile_paths() {
+        let mut fixture = setup_fixture();
+        fixture.project_dir = std::fs::canonicalize(&fixture.project_dir).unwrap();
+        let draft = draft_ready_to_finalize(&fixture);
+        assert_eq!(
+            draft.project_root,
+            fs_canonicalize(&fixture.project_dir)
+                .unwrap()
+                .to_string_lossy()
+        );
+        let resumed = create_setup_draft_with_repository(
+            &fixture.repo,
+            &fixture.project_dir.to_string_lossy(),
+        )
+        .unwrap();
+        assert!(resumed.resumed);
+        assert_eq!(resumed.draft.draft_id, draft.draft_id);
+
+        let detail =
+            finalize_project_setup_with_repository(&fixture.repo, &draft.draft_id, draft.revision)
+                .unwrap();
+        let project_id = &detail.project.local_project_id;
+        write_codex_session(
+            &fixture.codex_home,
+            "019f7500-0000-7000-8000-0000000000ab",
+            &fixture.project_dir,
+        );
+        let activity = get_project_activity_with_repository(
+            &fixture.repo,
+            project_id,
+            Some(&detail.links[0].storage_id),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(activity.sessions.len(), 1);
+        assert!(activity.providers.iter().any(|provider| {
+            provider.provider == codex_key() && provider.access == ProviderAccessState::BoundReady
+        }));
+        let comparison = get_project_thread_sync_comparison_with_repository(
+            &fixture.repo,
+            project_id,
+            &detail.links[0].storage_id,
+        )
+        .unwrap();
+        assert_eq!(comparison.entries.len(), 1, "{comparison:?}");
+        assert_eq!(
+            comparison.entries[0].push_decision.action,
+            ConversationReviewAction::CreateCloud,
+            "{comparison:?}",
+        );
+        let pushed =
+            push_bundle_with_repository(&fixture.repo, project_id, &detail.links[0].storage_id)
+                .unwrap();
+        assert!(pushed.success, "{pushed:?}");
+        let (_, engine) = storage_engine(&fixture.repo, &detail.links[0].storage_id).unwrap();
+        let snapshot = engine.inspect(&detail.project.bundle_id).unwrap();
+        assert_eq!(snapshot.manifest.all_conversations().count(), 1);
+        let binding = detail.binding.unwrap();
+        assert_eq!(
+            project_file_sync_eligibility(&binding).state,
+            ProjectFileSyncEligibilityState::Eligible,
+        );
     }
 
     #[test]
@@ -35869,6 +35993,7 @@ mod tests {
             cloud_thread_id: CloudThreadId::parse("cloudthread-owner-check").unwrap(),
             operation: ConversationApplyKind::CloudPublication(ConversationPublicationApply {
                 export_settings_changed: false,
+                local_metadata_changed: false,
                 candidate_commit_id: "commit-owner-check".to_string(),
                 candidate_manifest_sha256: "0".repeat(64),
                 artifact_sha256: "a".repeat(64),

@@ -31,8 +31,8 @@ pub(super) fn install_scope(
     let provider_root = home.join(format!("codex-{suffix}"));
     fs::create_dir(&project_root).unwrap();
     fs::create_dir(&provider_root).unwrap();
-    let project_root = fs::canonicalize(project_root).unwrap();
-    let provider_root = fs::canonicalize(provider_root).unwrap();
+    let project_root = mallard_infrastructure::local_paths::canonicalize(project_root).unwrap();
+    let provider_root = mallard_infrastructure::local_paths::canonicalize(provider_root).unwrap();
     let project_id = LocalProjectId::parse(format!("project-{suffix}")).unwrap();
     let profile_id = LocalProviderProfileId::parse(format!("profile-{suffix}")).unwrap();
     let replica_id = ReplicaId::parse(replica).unwrap();

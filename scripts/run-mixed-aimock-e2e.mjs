@@ -205,7 +205,7 @@ try {
     await writeFile(join(destination, "summary.md"), summary(report));
     } finally {
       // Temporary data is removed even if report validation or writing fails.
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true, maxRetries: 10 });
     }
   }
 }

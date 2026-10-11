@@ -108,14 +108,12 @@ fn open_app_link(
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{
-            display_launch, launch_app, scheme_handler_executable,
-        };
+        use crate::providers::windows_app::{display_launch, launch_app, scheme_handler};
         let _ = target;
-        let executable = scheme_handler_executable("claude")?;
+        let app = scheme_handler("claude")?;
         let env = [("CLAUDE_CONFIG_DIR", claude_home)];
-        before_launch(&display_launch(&executable, &env, &[deep_link]));
-        launch_app(&executable, &env, &[deep_link])
+        before_launch(&display_launch(&app, &env, &[deep_link]));
+        launch_app(&app, &env, &[deep_link])
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -154,9 +152,9 @@ pub fn launch_claude_home_app(claude_home: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        use crate::providers::windows_app::{launch_app, scheme_handler_executable};
-        let executable = scheme_handler_executable("claude")?;
-        launch_app(&executable, &[("CLAUDE_CONFIG_DIR", claude_home)], &[])
+        use crate::providers::windows_app::{launch_app, scheme_handler};
+        let app = scheme_handler("claude")?;
+        launch_app(&app, &[("CLAUDE_CONFIG_DIR", claude_home)], &[])
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -320,31 +318,50 @@ mod tests {
 
     #[test]
     fn home_launches_pin_the_config_dir_and_nothing_else() {
-        let cli = Path::new("/Users/dev/.local/bin/claude");
-        let command = claude_home_terminal_command(cli, Path::new("/Users/dev/my claude")).unwrap();
+        let (cli, home, project) = if cfg!(windows) {
+            (
+                r"C:\bin\claude.exe",
+                r"C:\Users\dev\my claude",
+                r"C:\Users\dev\my project",
+            )
+        } else {
+            (
+                "/Users/dev/.local/bin/claude",
+                "/Users/dev/my claude",
+                "/Users/dev/my project",
+            )
+        };
+        let cli = Path::new(cli);
+        let command = claude_home_terminal_command(cli, Path::new(home)).unwrap();
         assert_eq!(
-            command.shell_line(),
-            "CLAUDE_CONFIG_DIR='/Users/dev/my claude' '/Users/dev/.local/bin/claude'"
+            command.display_line(),
+            if cfg!(windows) {
+                r"$env:CLAUDE_CONFIG_DIR = 'C:\Users\dev\my claude'; & 'C:\bin\claude.exe'"
+            } else {
+                "CLAUDE_CONFIG_DIR='/Users/dev/my claude' '/Users/dev/.local/bin/claude'"
+            }
         );
         assert!(command.args.is_empty());
         assert!(command.cwd.is_none());
         let resume = claude_resume_terminal_command(
             cli,
             "0193b6c1-5352-7b12-9c6e-000000000001",
-            Path::new("/Users/dev/my project"),
-            Path::new("/Users/dev/.claude"),
+            Path::new(project),
+            Path::new(home),
         )
         .unwrap();
         assert_eq!(
-            resume.shell_line(),
-            "cd '/Users/dev/my project' && CLAUDE_CONFIG_DIR='/Users/dev/.claude' \
-             '/Users/dev/.local/bin/claude' --resume 0193b6c1-5352-7b12-9c6e-000000000001"
+            resume.display_line(),
+            if cfg!(windows) {
+                r"Set-Location -LiteralPath 'C:\Users\dev\my project' -ErrorAction Stop; $env:CLAUDE_CONFIG_DIR = 'C:\Users\dev\my claude'; & 'C:\bin\claude.exe' --resume 0193b6c1-5352-7b12-9c6e-000000000001"
+            } else {
+                "cd '/Users/dev/my project' && CLAUDE_CONFIG_DIR='/Users/dev/my claude' \
+                 '/Users/dev/.local/bin/claude' --resume 0193b6c1-5352-7b12-9c6e-000000000001"
+            }
         );
         // The executable is the resolved one, never a bare name the terminal
         // would look up on its own.
-        assert!(
-            claude_home_terminal_command(Path::new("claude"), Path::new("/Users/dev")).is_err()
-        );
+        assert!(claude_home_terminal_command(Path::new("claude"), Path::new(home)).is_err());
         assert!(claude_home_terminal_command(cli, Path::new("relative")).is_err());
         assert!(launch_claude_home_app(Path::new("relative")).is_err());
     }

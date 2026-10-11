@@ -1702,8 +1702,7 @@ fn valid_full_sha(value: &str) -> bool {
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
     Command::new("git")
-        .arg("-C")
-        .arg(root)
+        .current_dir(root)
         .args(args)
         .output()
         .map_err(|error| error.to_string())
@@ -3022,7 +3021,9 @@ mod tests {
         // Replacing a file of the same size at the byte limit needs no eviction.
         write_timeline_cache(&repository, &second, &entry, budget).unwrap();
         assert!(load_timeline_cache(&repository, &first).0.is_some());
-        fs::File::open(directory.join(format!("{first}.json")))
+        fs::OpenOptions::new()
+            .write(true)
+            .open(directory.join(format!("{first}.json")))
             .unwrap()
             .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1))
             .unwrap();
