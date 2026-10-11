@@ -1,0 +1,2551 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>README mock</title>
+<style>
+/* light */
+[data-theme="light"] .markdown-body {
+  color-scheme: light;
+  -ms-text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  margin: 0;
+  color: #1f2328;
+  background-color: #ffffff;
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji";
+  font-size: 16px;
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+
+[data-theme="light"] .markdown-body .octicon {
+  display: inline-block;
+  fill: currentColor;
+  vertical-align: text-bottom;
+}
+
+[data-theme="light"] .markdown-body h1:hover .anchor .octicon-link:before,
+[data-theme="light"] .markdown-body h2:hover .anchor .octicon-link:before,
+[data-theme="light"] .markdown-body h3:hover .anchor .octicon-link:before,
+[data-theme="light"] .markdown-body h4:hover .anchor .octicon-link:before,
+[data-theme="light"] .markdown-body h5:hover .anchor .octicon-link:before,
+[data-theme="light"] .markdown-body h6:hover .anchor .octicon-link:before {
+  width: 16px;
+  height: 16px;
+  content: ' ';
+  display: inline-block;
+  background-color: currentColor;
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' version='1.1' aria-hidden='true'><path fill-rule='evenodd' d='M7.775 3.275a.75.75 0 001.06 1.06l1.25-1.25a2 2 0 112.83 2.83l-2.5 2.5a2 2 0 01-2.83 0 .75.75 0 00-1.06 1.06 3.5 3.5 0 004.95 0l2.5-2.5a3.5 3.5 0 00-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 010-2.83l2.5-2.5a2 2 0 012.83 0 .75.75 0 001.06-1.06 3.5 3.5 0 00-4.95 0l-2.5 2.5a3.5 3.5 0 004.95 4.95l1.25-1.25a.75.75 0 00-1.06-1.06l-1.25 1.25a2 2 0 01-2.83 0z'></path></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' version='1.1' aria-hidden='true'><path fill-rule='evenodd' d='M7.775 3.275a.75.75 0 001.06 1.06l1.25-1.25a2 2 0 112.83 2.83l-2.5 2.5a2 2 0 01-2.83 0 .75.75 0 00-1.06 1.06 3.5 3.5 0 004.95 0l2.5-2.5a3.5 3.5 0 00-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 010-2.83l2.5-2.5a2 2 0 012.83 0 .75.75 0 001.06-1.06 3.5 3.5 0 00-4.95 0l-2.5 2.5a3.5 3.5 0 004.95 4.95l1.25-1.25a.75.75 0 00-1.06-1.06l-1.25 1.25a2 2 0 01-2.83 0z'></path></svg>");
+}
+
+[data-theme="light"] .markdown-body details,
+[data-theme="light"] .markdown-body figcaption,
+[data-theme="light"] .markdown-body figure {
+  display: block;
+}
+
+[data-theme="light"] .markdown-body summary {
+  display: list-item;
+}
+
+[data-theme="light"] .markdown-body [hidden] {
+  display: none !important;
+}
+
+[data-theme="light"] .markdown-body a {
+  background-color: transparent;
+  color: #0969da;
+  text-decoration: none;
+}
+
+[data-theme="light"] .markdown-body abbr[title] {
+  border-bottom: none;
+  -webkit-text-decoration: underline dotted;
+  text-decoration: underline dotted;
+}
+
+[data-theme="light"] .markdown-body b,
+[data-theme="light"] .markdown-body strong {
+  font-weight: 600;
+}
+
+[data-theme="light"] .markdown-body dfn {
+  font-style: italic;
+}
+
+[data-theme="light"] .markdown-body h1 {
+  margin: .67em 0;
+  font-weight: 600;
+  padding-bottom: .3em;
+  font-size: 2em;
+  border-bottom: 1px solid #d1d9e0b3;
+}
+
+[data-theme="light"] .markdown-body mark {
+  background-color: #fff8c5;
+  color: #1f2328;
+}
+
+[data-theme="light"] .markdown-body small {
+  font-size: 90%;
+}
+
+[data-theme="light"] .markdown-body sub,
+[data-theme="light"] .markdown-body sup {
+  font-size: 75%;
+  line-height: 0;
+  position: relative;
+  vertical-align: baseline;
+}
+
+[data-theme="light"] .markdown-body sub {
+  bottom: -0.25em;
+}
+
+[data-theme="light"] .markdown-body sup {
+  top: -0.5em;
+}
+
+[data-theme="light"] .markdown-body img {
+  border-style: none;
+  max-width: 100%;
+  box-sizing: content-box;
+}
+
+[data-theme="light"] .markdown-body code,
+[data-theme="light"] .markdown-body kbd,
+[data-theme="light"] .markdown-body pre,
+[data-theme="light"] .markdown-body samp {
+  font-family: monospace;
+  font-size: 1em;
+}
+
+[data-theme="light"] .markdown-body figure {
+  margin: 1em 2.5rem;
+}
+
+[data-theme="light"] .markdown-body hr {
+  box-sizing: content-box;
+  overflow: hidden;
+  background: transparent;
+  border-bottom: 1px solid #d1d9e0b3;
+  height: .25em;
+  padding: 0;
+  margin: 1.5rem 0;
+  background-color: #d1d9e0;
+  border: 0;
+}
+
+[data-theme="light"] .markdown-body input {
+  font: inherit;
+  margin: 0;
+  overflow: visible;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+[data-theme="light"] .markdown-body [type=button],
+[data-theme="light"] .markdown-body [type=reset],
+[data-theme="light"] .markdown-body [type=submit] {
+  -webkit-appearance: button;
+  appearance: button;
+}
+
+[data-theme="light"] .markdown-body [type=checkbox],
+[data-theme="light"] .markdown-body [type=radio] {
+  box-sizing: border-box;
+  padding: 0;
+}
+
+[data-theme="light"] .markdown-body [type=number]::-webkit-inner-spin-button,
+[data-theme="light"] .markdown-body [type=number]::-webkit-outer-spin-button {
+  height: auto;
+}
+
+[data-theme="light"] .markdown-body [type=search]::-webkit-search-cancel-button,
+[data-theme="light"] .markdown-body [type=search]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+[data-theme="light"] .markdown-body ::-webkit-input-placeholder {
+  color: inherit;
+  opacity: .54;
+}
+
+[data-theme="light"] .markdown-body ::-webkit-file-upload-button {
+  -webkit-appearance: button;
+  appearance: button;
+  font: inherit;
+}
+
+[data-theme="light"] .markdown-body a:hover {
+  text-decoration: underline;
+}
+
+[data-theme="light"] .markdown-body ::placeholder {
+  color: #59636e;
+  opacity: 1;
+}
+
+[data-theme="light"] .markdown-body hr::before {
+  display: table;
+  content: "";
+}
+
+[data-theme="light"] .markdown-body hr::after {
+  display: table;
+  clear: both;
+  content: "";
+}
+
+[data-theme="light"] .markdown-body table {
+  border-spacing: 0;
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+  font-variant: tabular-nums;
+}
+
+[data-theme="light"] .markdown-body td,
+[data-theme="light"] .markdown-body th {
+  padding: 0;
+}
+
+[data-theme="light"] .markdown-body details summary {
+  cursor: pointer;
+}
+
+[data-theme="light"] .markdown-body a:focus,
+[data-theme="light"] .markdown-body [role=button]:focus,
+[data-theme="light"] .markdown-body input[type=radio]:focus,
+[data-theme="light"] .markdown-body input[type=checkbox]:focus {
+  outline: 2px solid #0969da;
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+[data-theme="light"] .markdown-body a:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body [role=button]:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body input[type=radio]:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body input[type=checkbox]:focus:not(:focus-visible) {
+  outline: solid 1px transparent;
+}
+
+[data-theme="light"] .markdown-body a:focus-visible,
+[data-theme="light"] .markdown-body [role=button]:focus-visible,
+[data-theme="light"] .markdown-body input[type=radio]:focus-visible,
+[data-theme="light"] .markdown-body input[type=checkbox]:focus-visible {
+  outline: 2px solid #0969da;
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+[data-theme="light"] .markdown-body a:not([class]):focus,
+[data-theme="light"] .markdown-body a:not([class]):focus-visible,
+[data-theme="light"] .markdown-body input[type=radio]:focus,
+[data-theme="light"] .markdown-body input[type=radio]:focus-visible,
+[data-theme="light"] .markdown-body input[type=checkbox]:focus,
+[data-theme="light"] .markdown-body input[type=checkbox]:focus-visible {
+  outline-offset: 0;
+}
+
+[data-theme="light"] .markdown-body kbd {
+  display: inline-block;
+  padding: 0.25rem;
+  font: 11px ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  line-height: 10px;
+  color: #1f2328;
+  vertical-align: middle;
+  background-color: #f6f8fa;
+  border: solid 1px #d1d9e0b3;
+  border-bottom-color: #d1d9e0b3;
+  border-radius: 6px;
+  box-shadow: inset 0 -1px 0 #d1d9e0b3;
+}
+
+[data-theme="light"] .markdown-body h1,
+[data-theme="light"] .markdown-body h2,
+[data-theme="light"] .markdown-body h3,
+[data-theme="light"] .markdown-body h4,
+[data-theme="light"] .markdown-body h5,
+[data-theme="light"] .markdown-body h6 {
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+[data-theme="light"] .markdown-body h2 {
+  font-weight: 600;
+  padding-bottom: .3em;
+  font-size: 1.5em;
+  border-bottom: 1px solid #d1d9e0b3;
+}
+
+[data-theme="light"] .markdown-body h3 {
+  font-weight: 600;
+  font-size: 1.25em;
+}
+
+[data-theme="light"] .markdown-body h4 {
+  font-weight: 600;
+  font-size: 1em;
+}
+
+[data-theme="light"] .markdown-body h5 {
+  font-weight: 600;
+  font-size: .875em;
+}
+
+[data-theme="light"] .markdown-body h6 {
+  font-weight: 600;
+  font-size: .85em;
+  color: #59636e;
+}
+
+[data-theme="light"] .markdown-body p {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+[data-theme="light"] .markdown-body blockquote {
+  margin: 0;
+  padding: 0 1em;
+  color: #59636e;
+  border-left: .25em solid #d1d9e0;
+}
+
+[data-theme="light"] .markdown-body ul,
+[data-theme="light"] .markdown-body ol {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-left: 2em;
+}
+
+[data-theme="light"] .markdown-body ol ol,
+[data-theme="light"] .markdown-body ul ol {
+  list-style-type: lower-roman;
+}
+
+[data-theme="light"] .markdown-body ul ul ol,
+[data-theme="light"] .markdown-body ul ol ol,
+[data-theme="light"] .markdown-body ol ul ol,
+[data-theme="light"] .markdown-body ol ol ol {
+  list-style-type: lower-alpha;
+}
+
+[data-theme="light"] .markdown-body dd {
+  margin-left: 0;
+}
+
+[data-theme="light"] .markdown-body tt,
+[data-theme="light"] .markdown-body code,
+[data-theme="light"] .markdown-body samp {
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 12px;
+}
+
+[data-theme="light"] .markdown-body pre {
+  margin-top: 0;
+  margin-bottom: 0;
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 12px;
+  word-wrap: normal;
+}
+
+[data-theme="light"] .markdown-body .octicon {
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+[data-theme="light"] .markdown-body input::-webkit-outer-spin-button,
+[data-theme="light"] .markdown-body input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+[data-theme="light"] .markdown-body .mr-2 {
+  margin-right: 0.5rem !important;
+}
+
+[data-theme="light"] .markdown-body::before {
+  display: table;
+  content: "";
+}
+
+[data-theme="light"] .markdown-body::after {
+  display: table;
+  clear: both;
+  content: "";
+}
+
+[data-theme="light"] .markdown-body>*:first-child {
+  margin-top: 0 !important;
+}
+
+[data-theme="light"] .markdown-body>*:last-child {
+  margin-bottom: 0 !important;
+}
+
+[data-theme="light"] .markdown-body a:not([href]) {
+  color: inherit;
+  text-decoration: none;
+}
+
+[data-theme="light"] .markdown-body .absent {
+  color: #d1242f;
+}
+
+[data-theme="light"] .markdown-body .anchor {
+  float: left;
+  padding-right: 0.25rem;
+  margin-left: -20px;
+  line-height: 1;
+}
+
+[data-theme="light"] .markdown-body .anchor:focus {
+  outline: none;
+}
+
+[data-theme="light"] .markdown-body p,
+[data-theme="light"] .markdown-body blockquote,
+[data-theme="light"] .markdown-body ul,
+[data-theme="light"] .markdown-body ol,
+[data-theme="light"] .markdown-body dl,
+[data-theme="light"] .markdown-body table,
+[data-theme="light"] .markdown-body pre,
+[data-theme="light"] .markdown-body details {
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+[data-theme="light"] .markdown-body blockquote>:first-child {
+  margin-top: 0;
+}
+
+[data-theme="light"] .markdown-body blockquote>:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="light"] .markdown-body h1 .octicon-link,
+[data-theme="light"] .markdown-body h2 .octicon-link,
+[data-theme="light"] .markdown-body h3 .octicon-link,
+[data-theme="light"] .markdown-body h4 .octicon-link,
+[data-theme="light"] .markdown-body h5 .octicon-link,
+[data-theme="light"] .markdown-body h6 .octicon-link {
+  color: #1f2328;
+  vertical-align: middle;
+  visibility: hidden;
+}
+
+[data-theme="light"] .markdown-body h1:hover .anchor,
+[data-theme="light"] .markdown-body h2:hover .anchor,
+[data-theme="light"] .markdown-body h3:hover .anchor,
+[data-theme="light"] .markdown-body h4:hover .anchor,
+[data-theme="light"] .markdown-body h5:hover .anchor,
+[data-theme="light"] .markdown-body h6:hover .anchor {
+  text-decoration: none;
+}
+
+[data-theme="light"] .markdown-body h1:hover .anchor .octicon-link,
+[data-theme="light"] .markdown-body h2:hover .anchor .octicon-link,
+[data-theme="light"] .markdown-body h3:hover .anchor .octicon-link,
+[data-theme="light"] .markdown-body h4:hover .anchor .octicon-link,
+[data-theme="light"] .markdown-body h5:hover .anchor .octicon-link,
+[data-theme="light"] .markdown-body h6:hover .anchor .octicon-link {
+  visibility: visible;
+}
+
+[data-theme="light"] .markdown-body h1 tt,
+[data-theme="light"] .markdown-body h1 code,
+[data-theme="light"] .markdown-body h2 tt,
+[data-theme="light"] .markdown-body h2 code,
+[data-theme="light"] .markdown-body h3 tt,
+[data-theme="light"] .markdown-body h3 code,
+[data-theme="light"] .markdown-body h4 tt,
+[data-theme="light"] .markdown-body h4 code,
+[data-theme="light"] .markdown-body h5 tt,
+[data-theme="light"] .markdown-body h5 code,
+[data-theme="light"] .markdown-body h6 tt,
+[data-theme="light"] .markdown-body h6 code {
+  padding: 0 .2em;
+  font-size: inherit;
+}
+
+[data-theme="light"] .markdown-body summary h1,
+[data-theme="light"] .markdown-body summary h2,
+[data-theme="light"] .markdown-body summary h3,
+[data-theme="light"] .markdown-body summary h4,
+[data-theme="light"] .markdown-body summary h5,
+[data-theme="light"] .markdown-body summary h6 {
+  display: inline-block;
+}
+
+[data-theme="light"] .markdown-body summary h1 .anchor,
+[data-theme="light"] .markdown-body summary h2 .anchor,
+[data-theme="light"] .markdown-body summary h3 .anchor,
+[data-theme="light"] .markdown-body summary h4 .anchor,
+[data-theme="light"] .markdown-body summary h5 .anchor,
+[data-theme="light"] .markdown-body summary h6 .anchor {
+  margin-left: -40px;
+}
+
+[data-theme="light"] .markdown-body summary h1,
+[data-theme="light"] .markdown-body summary h2 {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+[data-theme="light"] .markdown-body ul.no-list,
+[data-theme="light"] .markdown-body ol.no-list {
+  padding: 0;
+  list-style-type: none;
+}
+
+[data-theme="light"] .markdown-body ol[type="a s"] {
+  list-style-type: lower-alpha;
+}
+
+[data-theme="light"] .markdown-body ol[type="A s"] {
+  list-style-type: upper-alpha;
+}
+
+[data-theme="light"] .markdown-body ol[type="i s"] {
+  list-style-type: lower-roman;
+}
+
+[data-theme="light"] .markdown-body ol[type="I s"] {
+  list-style-type: upper-roman;
+}
+
+[data-theme="light"] .markdown-body ol[type="1"] {
+  list-style-type: decimal;
+}
+
+[data-theme="light"] .markdown-body div>ol:not([type]) {
+  list-style-type: decimal;
+}
+
+[data-theme="light"] .markdown-body ul ul,
+[data-theme="light"] .markdown-body ul ol,
+[data-theme="light"] .markdown-body ol ol,
+[data-theme="light"] .markdown-body ol ul {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+[data-theme="light"] .markdown-body li>p {
+  margin-top: 1rem;
+}
+
+[data-theme="light"] .markdown-body li+li {
+  margin-top: .25em;
+}
+
+[data-theme="light"] .markdown-body dl {
+  padding: 0;
+}
+
+[data-theme="light"] .markdown-body dl dt {
+  padding: 0;
+  margin-top: 1rem;
+  font-size: 1em;
+  font-style: italic;
+  font-weight: 600;
+}
+
+[data-theme="light"] .markdown-body dl dd {
+  padding: 0 1rem;
+  margin-bottom: 1rem;
+}
+
+[data-theme="light"] .markdown-body table th {
+  font-weight: 600;
+}
+
+[data-theme="light"] .markdown-body table th,
+[data-theme="light"] .markdown-body table td {
+  padding: 6px 13px;
+  border: 1px solid #d1d9e0;
+}
+
+[data-theme="light"] .markdown-body table td>:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="light"] .markdown-body table tr {
+  background-color: #ffffff;
+  border-top: 1px solid #d1d9e0b3;
+}
+
+[data-theme="light"] .markdown-body table tr:nth-child(2n) {
+  background-color: #f6f8fa;
+}
+
+[data-theme="light"] .markdown-body table img {
+  background-color: transparent;
+}
+
+[data-theme="light"] .markdown-body img[align=right] {
+  padding-left: 20px;
+}
+
+[data-theme="light"] .markdown-body img[align=left] {
+  padding-right: 20px;
+}
+
+[data-theme="light"] .markdown-body .emoji {
+  max-width: none;
+  vertical-align: text-top;
+  background-color: transparent;
+}
+
+[data-theme="light"] .markdown-body span.frame {
+  display: block;
+  overflow: hidden;
+}
+
+[data-theme="light"] .markdown-body span.frame>span {
+  display: block;
+  float: left;
+  width: auto;
+  padding: 7px;
+  margin: 13px 0 0;
+  overflow: hidden;
+  border: 1px solid #d1d9e0;
+}
+
+[data-theme="light"] .markdown-body span.frame span img {
+  display: block;
+  float: left;
+}
+
+[data-theme="light"] .markdown-body span.frame span span {
+  display: block;
+  padding: 5px 0 0;
+  clear: both;
+  color: #1f2328;
+}
+
+[data-theme="light"] .markdown-body span.align-center {
+  display: block;
+  overflow: hidden;
+  clear: both;
+}
+
+[data-theme="light"] .markdown-body span.align-center>span {
+  display: block;
+  margin: 13px auto 0;
+  overflow: hidden;
+  text-align: center;
+}
+
+[data-theme="light"] .markdown-body span.align-center span img {
+  margin: 0 auto;
+  text-align: center;
+}
+
+[data-theme="light"] .markdown-body span.align-right {
+  display: block;
+  overflow: hidden;
+  clear: both;
+}
+
+[data-theme="light"] .markdown-body span.align-right>span {
+  display: block;
+  margin: 13px 0 0;
+  overflow: hidden;
+  text-align: right;
+}
+
+[data-theme="light"] .markdown-body span.align-right span img {
+  margin: 0;
+  text-align: right;
+}
+
+[data-theme="light"] .markdown-body span.float-left {
+  display: block;
+  float: left;
+  margin-right: 13px;
+  overflow: hidden;
+}
+
+[data-theme="light"] .markdown-body span.float-left span {
+  margin: 13px 0 0;
+}
+
+[data-theme="light"] .markdown-body span.float-right {
+  display: block;
+  float: right;
+  margin-left: 13px;
+  overflow: hidden;
+}
+
+[data-theme="light"] .markdown-body span.float-right>span {
+  display: block;
+  margin: 13px auto 0;
+  overflow: hidden;
+  text-align: right;
+}
+
+[data-theme="light"] .markdown-body code,
+[data-theme="light"] .markdown-body tt {
+  padding: .2em .4em;
+  margin: 0;
+  font-size: 85%;
+  white-space: break-spaces;
+  background-color: #818b981f;
+  border-radius: 6px;
+}
+
+[data-theme="light"] .markdown-body code br,
+[data-theme="light"] .markdown-body tt br {
+  display: none;
+}
+
+[data-theme="light"] .markdown-body del code {
+  text-decoration: inherit;
+}
+
+[data-theme="light"] .markdown-body samp {
+  font-size: 85%;
+}
+
+[data-theme="light"] .markdown-body pre code {
+  font-size: 100%;
+}
+
+[data-theme="light"] .markdown-body pre>code {
+  padding: 0;
+  margin: 0;
+  word-break: normal;
+  white-space: pre;
+  background: transparent;
+  border: 0;
+}
+
+[data-theme="light"] .markdown-body .highlight {
+  margin-bottom: 1rem;
+}
+
+[data-theme="light"] .markdown-body .highlight pre {
+  margin-bottom: 0;
+  word-break: normal;
+}
+
+[data-theme="light"] .markdown-body .highlight pre,
+[data-theme="light"] .markdown-body pre {
+  padding: 1rem;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+  color: #1f2328;
+  background-color: #f6f8fa;
+  border-radius: 6px;
+}
+
+[data-theme="light"] .markdown-body pre code,
+[data-theme="light"] .markdown-body pre tt {
+  display: inline;
+  max-width: auto;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  line-height: inherit;
+  word-wrap: normal;
+  background-color: transparent;
+  border: 0;
+}
+
+[data-theme="light"] .markdown-body .csv-data td,
+[data-theme="light"] .markdown-body .csv-data th {
+  padding: 5px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+[data-theme="light"] .markdown-body .csv-data .blob-num {
+  padding: 10px 0.5rem 9px;
+  text-align: right;
+  background: #ffffff;
+  border: 0;
+}
+
+[data-theme="light"] .markdown-body .csv-data tr {
+  border-top: 0;
+}
+
+[data-theme="light"] .markdown-body .csv-data th {
+  font-weight: 600;
+  background: #f6f8fa;
+  border-top: 0;
+}
+
+[data-theme="light"] .markdown-body [data-footnote-ref]::before {
+  content: "[";
+}
+
+[data-theme="light"] .markdown-body [data-footnote-ref]::after {
+  content: "]";
+}
+
+[data-theme="light"] .markdown-body .footnotes {
+  font-size: 12px;
+  color: #59636e;
+  border-top: 1px solid #d1d9e0;
+}
+
+[data-theme="light"] .markdown-body .footnotes ol {
+  padding-left: 1rem;
+}
+
+[data-theme="light"] .markdown-body .footnotes ol ul {
+  display: inline-block;
+  padding-left: 1rem;
+  margin-top: 1rem;
+}
+
+[data-theme="light"] .markdown-body .footnotes li {
+  position: relative;
+}
+
+[data-theme="light"] .markdown-body .footnotes li:target::before {
+  position: absolute;
+  top: calc(0.5rem*-1);
+  right: calc(0.5rem*-1);
+  bottom: calc(0.5rem*-1);
+  left: calc(1.5rem*-1);
+  pointer-events: none;
+  content: "";
+  border: 2px solid #0969da;
+  border-radius: 6px;
+}
+
+[data-theme="light"] .markdown-body .footnotes li:target {
+  color: #1f2328;
+}
+
+[data-theme="light"] .markdown-body .footnotes .data-footnote-backref g-emoji {
+  font-family: monospace;
+}
+
+[data-theme="light"] .markdown-body body:has(:modal) {
+  padding-right: var(--dialog-scrollgutter) !important;
+}
+
+[data-theme="light"] .markdown-body .pl-c {
+  color: #59636e;
+}
+
+[data-theme="light"] .markdown-body .pl-c1,
+[data-theme="light"] .markdown-body .pl-s .pl-v {
+  color: #0550ae;
+}
+
+[data-theme="light"] .markdown-body .pl-e,
+[data-theme="light"] .markdown-body .pl-en {
+  color: #6639ba;
+}
+
+[data-theme="light"] .markdown-body .pl-smi,
+[data-theme="light"] .markdown-body .pl-s .pl-s1 {
+  color: #1f2328;
+}
+
+[data-theme="light"] .markdown-body .pl-ent {
+  color: #0550ae;
+}
+
+[data-theme="light"] .markdown-body .pl-k {
+  color: #cf222e;
+}
+
+[data-theme="light"] .markdown-body .pl-s,
+[data-theme="light"] .markdown-body .pl-pds,
+[data-theme="light"] .markdown-body .pl-s .pl-pse .pl-s1,
+[data-theme="light"] .markdown-body .pl-sr,
+[data-theme="light"] .markdown-body .pl-sr .pl-cce,
+[data-theme="light"] .markdown-body .pl-sr .pl-sre,
+[data-theme="light"] .markdown-body .pl-sr .pl-sra {
+  color: #0a3069;
+}
+
+[data-theme="light"] .markdown-body .pl-v,
+[data-theme="light"] .markdown-body .pl-smw {
+  color: #953800;
+}
+
+[data-theme="light"] .markdown-body .pl-bu {
+  color: #82071e;
+}
+
+[data-theme="light"] .markdown-body .pl-ii {
+  color: #f6f8fa;
+  background-color: #82071e;
+}
+
+[data-theme="light"] .markdown-body .pl-c2 {
+  color: #f6f8fa;
+  background-color: #cf222e;
+}
+
+[data-theme="light"] .markdown-body .pl-sr .pl-cce {
+  font-weight: bold;
+  color: #116329;
+}
+
+[data-theme="light"] .markdown-body .pl-ml {
+  color: #3b2300;
+}
+
+[data-theme="light"] .markdown-body .pl-mh,
+[data-theme="light"] .markdown-body .pl-mh .pl-en,
+[data-theme="light"] .markdown-body .pl-ms {
+  font-weight: bold;
+  color: #0550ae;
+}
+
+[data-theme="light"] .markdown-body .pl-mi {
+  font-style: italic;
+  color: #1f2328;
+}
+
+[data-theme="light"] .markdown-body .pl-mb {
+  font-weight: bold;
+  color: #1f2328;
+}
+
+[data-theme="light"] .markdown-body .pl-md {
+  color: #82071e;
+  background-color: #ffebe9;
+}
+
+[data-theme="light"] .markdown-body .pl-mi1 {
+  color: #116329;
+  background-color: #dafbe1;
+}
+
+[data-theme="light"] .markdown-body .pl-mc {
+  color: #953800;
+  background-color: #ffd8b5;
+}
+
+[data-theme="light"] .markdown-body .pl-mi2 {
+  color: #d1d9e0;
+  background-color: #0550ae;
+}
+
+[data-theme="light"] .markdown-body .pl-mdr {
+  font-weight: bold;
+  color: #8250df;
+}
+
+[data-theme="light"] .markdown-body .pl-ba {
+  color: #59636e;
+}
+
+[data-theme="light"] .markdown-body .pl-sg {
+  color: #818b98;
+}
+
+[data-theme="light"] .markdown-body .pl-corl {
+  text-decoration: underline;
+  color: #0a3069;
+}
+
+[data-theme="light"] .markdown-body [role=button]:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body [role=tabpanel][tabindex="0"]:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body button:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body summary:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body a:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+[data-theme="light"] .markdown-body [tabindex="0"]:focus:not(:focus-visible),
+[data-theme="light"] .markdown-body details-dialog:focus:not(:focus-visible) {
+  outline: none;
+}
+
+[data-theme="light"] .markdown-body g-emoji {
+  display: inline-block;
+  min-width: 1ch;
+  font-family: "Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol";
+  font-size: 1em;
+  font-style: normal !important;
+  font-weight: 400;
+  line-height: 1;
+  vertical-align: -0.075em;
+}
+
+[data-theme="light"] .markdown-body g-emoji img {
+  width: 1em;
+  height: 1em;
+}
+
+[data-theme="light"] .markdown-body .task-list-item {
+  list-style-type: none;
+}
+
+[data-theme="light"] .markdown-body .task-list-item label {
+  font-weight: 400;
+}
+
+[data-theme="light"] .markdown-body .task-list-item.enabled label {
+  cursor: pointer;
+}
+
+[data-theme="light"] .markdown-body .task-list-item+.task-list-item {
+  margin-top: 0.25rem;
+}
+
+[data-theme="light"] .markdown-body .task-list-item .handle {
+  display: none;
+}
+
+[data-theme="light"] .markdown-body .task-list-item-checkbox {
+  margin: 0 .2em .25em -1.4em;
+  vertical-align: middle;
+}
+
+[data-theme="light"] .markdown-body ul:dir(rtl) .task-list-item-checkbox {
+  margin: 0 -1.6em .25em .2em;
+}
+
+[data-theme="light"] .markdown-body ol:dir(rtl) .task-list-item-checkbox {
+  margin: 0 -1.6em .25em .2em;
+}
+
+[data-theme="light"] .markdown-body .contains-task-list:hover .task-list-item-convert-container,
+[data-theme="light"] .markdown-body .contains-task-list:focus-within .task-list-item-convert-container {
+  display: block;
+  width: auto;
+  height: 24px;
+  overflow: visible;
+  clip: auto;
+}
+
+[data-theme="light"] .markdown-body ::-webkit-calendar-picker-indicator {
+  filter: invert(50%);
+}
+
+[data-theme="light"] .markdown-body .markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  color: inherit;
+  border-left: .25em solid #d1d9e0;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert>:first-child {
+  margin-top: 0;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert>:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-note {
+  border-left-color: #0969da;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: #0969da;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-important {
+  border-left-color: #8250df;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: #8250df;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-warning {
+  border-left-color: #9a6700;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: #9a6700;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-tip {
+  border-left-color: #1a7f37;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: #1a7f37;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-caution {
+  border-left-color: #cf222e;
+}
+
+[data-theme="light"] .markdown-body .markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: #d1242f;
+}
+
+[data-theme="light"] .markdown-body>*:first-child>.heading-element:first-child {
+  margin-top: 0 !important;
+}
+
+[data-theme="light"] .markdown-body .highlight pre:has(+.zeroclipboard-container) {
+  min-height: 52px;
+}
+
+
+/* dark */
+[data-theme="dark"] .markdown-body {
+  color-scheme: dark;
+  -ms-text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+  margin: 0;
+  color: #f0f6fc;
+  background-color: #0d1117;
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji";
+  font-size: 16px;
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+
+[data-theme="dark"] .markdown-body .octicon {
+  display: inline-block;
+  fill: currentColor;
+  vertical-align: text-bottom;
+}
+
+[data-theme="dark"] .markdown-body h1:hover .anchor .octicon-link:before,
+[data-theme="dark"] .markdown-body h2:hover .anchor .octicon-link:before,
+[data-theme="dark"] .markdown-body h3:hover .anchor .octicon-link:before,
+[data-theme="dark"] .markdown-body h4:hover .anchor .octicon-link:before,
+[data-theme="dark"] .markdown-body h5:hover .anchor .octicon-link:before,
+[data-theme="dark"] .markdown-body h6:hover .anchor .octicon-link:before {
+  width: 16px;
+  height: 16px;
+  content: ' ';
+  display: inline-block;
+  background-color: currentColor;
+  -webkit-mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' version='1.1' aria-hidden='true'><path fill-rule='evenodd' d='M7.775 3.275a.75.75 0 001.06 1.06l1.25-1.25a2 2 0 112.83 2.83l-2.5 2.5a2 2 0 01-2.83 0 .75.75 0 00-1.06 1.06 3.5 3.5 0 004.95 0l2.5-2.5a3.5 3.5 0 00-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 010-2.83l2.5-2.5a2 2 0 012.83 0 .75.75 0 001.06-1.06 3.5 3.5 0 00-4.95 0l-2.5 2.5a3.5 3.5 0 004.95 4.95l1.25-1.25a.75.75 0 00-1.06-1.06l-1.25 1.25a2 2 0 01-2.83 0z'></path></svg>");
+  mask-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' version='1.1' aria-hidden='true'><path fill-rule='evenodd' d='M7.775 3.275a.75.75 0 001.06 1.06l1.25-1.25a2 2 0 112.83 2.83l-2.5 2.5a2 2 0 01-2.83 0 .75.75 0 00-1.06 1.06 3.5 3.5 0 004.95 0l2.5-2.5a3.5 3.5 0 00-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 010-2.83l2.5-2.5a2 2 0 012.83 0 .75.75 0 001.06-1.06 3.5 3.5 0 00-4.95 0l-2.5 2.5a3.5 3.5 0 004.95 4.95l1.25-1.25a.75.75 0 00-1.06-1.06l-1.25 1.25a2 2 0 01-2.83 0z'></path></svg>");
+}
+
+[data-theme="dark"] .markdown-body details,
+[data-theme="dark"] .markdown-body figcaption,
+[data-theme="dark"] .markdown-body figure {
+  display: block;
+}
+
+[data-theme="dark"] .markdown-body summary {
+  display: list-item;
+}
+
+[data-theme="dark"] .markdown-body [hidden] {
+  display: none !important;
+}
+
+[data-theme="dark"] .markdown-body a {
+  background-color: transparent;
+  color: #4493f8;
+  text-decoration: none;
+}
+
+[data-theme="dark"] .markdown-body abbr[title] {
+  border-bottom: none;
+  -webkit-text-decoration: underline dotted;
+  text-decoration: underline dotted;
+}
+
+[data-theme="dark"] .markdown-body b,
+[data-theme="dark"] .markdown-body strong {
+  font-weight: 600;
+}
+
+[data-theme="dark"] .markdown-body dfn {
+  font-style: italic;
+}
+
+[data-theme="dark"] .markdown-body h1 {
+  margin: .67em 0;
+  font-weight: 600;
+  padding-bottom: .3em;
+  font-size: 2em;
+  border-bottom: 1px solid #3d444db3;
+}
+
+[data-theme="dark"] .markdown-body mark {
+  background-color: #bb800926;
+  color: #f0f6fc;
+}
+
+[data-theme="dark"] .markdown-body small {
+  font-size: 90%;
+}
+
+[data-theme="dark"] .markdown-body sub,
+[data-theme="dark"] .markdown-body sup {
+  font-size: 75%;
+  line-height: 0;
+  position: relative;
+  vertical-align: baseline;
+}
+
+[data-theme="dark"] .markdown-body sub {
+  bottom: -0.25em;
+}
+
+[data-theme="dark"] .markdown-body sup {
+  top: -0.5em;
+}
+
+[data-theme="dark"] .markdown-body img {
+  border-style: none;
+  max-width: 100%;
+  box-sizing: content-box;
+}
+
+[data-theme="dark"] .markdown-body code,
+[data-theme="dark"] .markdown-body kbd,
+[data-theme="dark"] .markdown-body pre,
+[data-theme="dark"] .markdown-body samp {
+  font-family: monospace;
+  font-size: 1em;
+}
+
+[data-theme="dark"] .markdown-body figure {
+  margin: 1em 2.5rem;
+}
+
+[data-theme="dark"] .markdown-body hr {
+  box-sizing: content-box;
+  overflow: hidden;
+  background: transparent;
+  border-bottom: 1px solid #3d444db3;
+  height: .25em;
+  padding: 0;
+  margin: 1.5rem 0;
+  background-color: #3d444d;
+  border: 0;
+}
+
+[data-theme="dark"] .markdown-body input {
+  font: inherit;
+  margin: 0;
+  overflow: visible;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+[data-theme="dark"] .markdown-body [type=button],
+[data-theme="dark"] .markdown-body [type=reset],
+[data-theme="dark"] .markdown-body [type=submit] {
+  -webkit-appearance: button;
+  appearance: button;
+}
+
+[data-theme="dark"] .markdown-body [type=checkbox],
+[data-theme="dark"] .markdown-body [type=radio] {
+  box-sizing: border-box;
+  padding: 0;
+}
+
+[data-theme="dark"] .markdown-body [type=number]::-webkit-inner-spin-button,
+[data-theme="dark"] .markdown-body [type=number]::-webkit-outer-spin-button {
+  height: auto;
+}
+
+[data-theme="dark"] .markdown-body [type=search]::-webkit-search-cancel-button,
+[data-theme="dark"] .markdown-body [type=search]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+[data-theme="dark"] .markdown-body ::-webkit-input-placeholder {
+  color: inherit;
+  opacity: .54;
+}
+
+[data-theme="dark"] .markdown-body ::-webkit-file-upload-button {
+  -webkit-appearance: button;
+  appearance: button;
+  font: inherit;
+}
+
+[data-theme="dark"] .markdown-body a:hover {
+  text-decoration: underline;
+}
+
+[data-theme="dark"] .markdown-body ::placeholder {
+  color: #9198a1;
+  opacity: 1;
+}
+
+[data-theme="dark"] .markdown-body hr::before {
+  display: table;
+  content: "";
+}
+
+[data-theme="dark"] .markdown-body hr::after {
+  display: table;
+  clear: both;
+  content: "";
+}
+
+[data-theme="dark"] .markdown-body table {
+  border-spacing: 0;
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: auto;
+  font-variant: tabular-nums;
+}
+
+[data-theme="dark"] .markdown-body td,
+[data-theme="dark"] .markdown-body th {
+  padding: 0;
+}
+
+[data-theme="dark"] .markdown-body details summary {
+  cursor: pointer;
+}
+
+[data-theme="dark"] .markdown-body a:focus,
+[data-theme="dark"] .markdown-body [role=button]:focus,
+[data-theme="dark"] .markdown-body input[type=radio]:focus,
+[data-theme="dark"] .markdown-body input[type=checkbox]:focus {
+  outline: 2px solid #1f6feb;
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+[data-theme="dark"] .markdown-body a:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body [role=button]:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body input[type=radio]:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body input[type=checkbox]:focus:not(:focus-visible) {
+  outline: solid 1px transparent;
+}
+
+[data-theme="dark"] .markdown-body a:focus-visible,
+[data-theme="dark"] .markdown-body [role=button]:focus-visible,
+[data-theme="dark"] .markdown-body input[type=radio]:focus-visible,
+[data-theme="dark"] .markdown-body input[type=checkbox]:focus-visible {
+  outline: 2px solid #1f6feb;
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+[data-theme="dark"] .markdown-body a:not([class]):focus,
+[data-theme="dark"] .markdown-body a:not([class]):focus-visible,
+[data-theme="dark"] .markdown-body input[type=radio]:focus,
+[data-theme="dark"] .markdown-body input[type=radio]:focus-visible,
+[data-theme="dark"] .markdown-body input[type=checkbox]:focus,
+[data-theme="dark"] .markdown-body input[type=checkbox]:focus-visible {
+  outline-offset: 0;
+}
+
+[data-theme="dark"] .markdown-body kbd {
+  display: inline-block;
+  padding: 0.25rem;
+  font: 11px ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  line-height: 10px;
+  color: #f0f6fc;
+  vertical-align: middle;
+  background-color: #151b23;
+  border: solid 1px #3d444db3;
+  border-bottom-color: #3d444db3;
+  border-radius: 6px;
+  box-shadow: inset 0 -1px 0 #3d444db3;
+}
+
+[data-theme="dark"] .markdown-body h1,
+[data-theme="dark"] .markdown-body h2,
+[data-theme="dark"] .markdown-body h3,
+[data-theme="dark"] .markdown-body h4,
+[data-theme="dark"] .markdown-body h5,
+[data-theme="dark"] .markdown-body h6 {
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+[data-theme="dark"] .markdown-body h2 {
+  font-weight: 600;
+  padding-bottom: .3em;
+  font-size: 1.5em;
+  border-bottom: 1px solid #3d444db3;
+}
+
+[data-theme="dark"] .markdown-body h3 {
+  font-weight: 600;
+  font-size: 1.25em;
+}
+
+[data-theme="dark"] .markdown-body h4 {
+  font-weight: 600;
+  font-size: 1em;
+}
+
+[data-theme="dark"] .markdown-body h5 {
+  font-weight: 600;
+  font-size: .875em;
+}
+
+[data-theme="dark"] .markdown-body h6 {
+  font-weight: 600;
+  font-size: .85em;
+  color: #9198a1;
+}
+
+[data-theme="dark"] .markdown-body p {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+[data-theme="dark"] .markdown-body blockquote {
+  margin: 0;
+  padding: 0 1em;
+  color: #9198a1;
+  border-left: .25em solid #3d444d;
+}
+
+[data-theme="dark"] .markdown-body ul,
+[data-theme="dark"] .markdown-body ol {
+  margin-top: 0;
+  margin-bottom: 0;
+  padding-left: 2em;
+}
+
+[data-theme="dark"] .markdown-body ol ol,
+[data-theme="dark"] .markdown-body ul ol {
+  list-style-type: lower-roman;
+}
+
+[data-theme="dark"] .markdown-body ul ul ol,
+[data-theme="dark"] .markdown-body ul ol ol,
+[data-theme="dark"] .markdown-body ol ul ol,
+[data-theme="dark"] .markdown-body ol ol ol {
+  list-style-type: lower-alpha;
+}
+
+[data-theme="dark"] .markdown-body dd {
+  margin-left: 0;
+}
+
+[data-theme="dark"] .markdown-body tt,
+[data-theme="dark"] .markdown-body code,
+[data-theme="dark"] .markdown-body samp {
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 12px;
+}
+
+[data-theme="dark"] .markdown-body pre {
+  margin-top: 0;
+  margin-bottom: 0;
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 12px;
+  word-wrap: normal;
+}
+
+[data-theme="dark"] .markdown-body .octicon {
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+[data-theme="dark"] .markdown-body input::-webkit-outer-spin-button,
+[data-theme="dark"] .markdown-body input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+[data-theme="dark"] .markdown-body .mr-2 {
+  margin-right: 0.5rem !important;
+}
+
+[data-theme="dark"] .markdown-body::before {
+  display: table;
+  content: "";
+}
+
+[data-theme="dark"] .markdown-body::after {
+  display: table;
+  clear: both;
+  content: "";
+}
+
+[data-theme="dark"] .markdown-body>*:first-child {
+  margin-top: 0 !important;
+}
+
+[data-theme="dark"] .markdown-body>*:last-child {
+  margin-bottom: 0 !important;
+}
+
+[data-theme="dark"] .markdown-body a:not([href]) {
+  color: inherit;
+  text-decoration: none;
+}
+
+[data-theme="dark"] .markdown-body .absent {
+  color: #f85149;
+}
+
+[data-theme="dark"] .markdown-body .anchor {
+  float: left;
+  padding-right: 0.25rem;
+  margin-left: -20px;
+  line-height: 1;
+}
+
+[data-theme="dark"] .markdown-body .anchor:focus {
+  outline: none;
+}
+
+[data-theme="dark"] .markdown-body p,
+[data-theme="dark"] .markdown-body blockquote,
+[data-theme="dark"] .markdown-body ul,
+[data-theme="dark"] .markdown-body ol,
+[data-theme="dark"] .markdown-body dl,
+[data-theme="dark"] .markdown-body table,
+[data-theme="dark"] .markdown-body pre,
+[data-theme="dark"] .markdown-body details {
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+[data-theme="dark"] .markdown-body blockquote>:first-child {
+  margin-top: 0;
+}
+
+[data-theme="dark"] .markdown-body blockquote>:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="dark"] .markdown-body h1 .octicon-link,
+[data-theme="dark"] .markdown-body h2 .octicon-link,
+[data-theme="dark"] .markdown-body h3 .octicon-link,
+[data-theme="dark"] .markdown-body h4 .octicon-link,
+[data-theme="dark"] .markdown-body h5 .octicon-link,
+[data-theme="dark"] .markdown-body h6 .octicon-link {
+  color: #f0f6fc;
+  vertical-align: middle;
+  visibility: hidden;
+}
+
+[data-theme="dark"] .markdown-body h1:hover .anchor,
+[data-theme="dark"] .markdown-body h2:hover .anchor,
+[data-theme="dark"] .markdown-body h3:hover .anchor,
+[data-theme="dark"] .markdown-body h4:hover .anchor,
+[data-theme="dark"] .markdown-body h5:hover .anchor,
+[data-theme="dark"] .markdown-body h6:hover .anchor {
+  text-decoration: none;
+}
+
+[data-theme="dark"] .markdown-body h1:hover .anchor .octicon-link,
+[data-theme="dark"] .markdown-body h2:hover .anchor .octicon-link,
+[data-theme="dark"] .markdown-body h3:hover .anchor .octicon-link,
+[data-theme="dark"] .markdown-body h4:hover .anchor .octicon-link,
+[data-theme="dark"] .markdown-body h5:hover .anchor .octicon-link,
+[data-theme="dark"] .markdown-body h6:hover .anchor .octicon-link {
+  visibility: visible;
+}
+
+[data-theme="dark"] .markdown-body h1 tt,
+[data-theme="dark"] .markdown-body h1 code,
+[data-theme="dark"] .markdown-body h2 tt,
+[data-theme="dark"] .markdown-body h2 code,
+[data-theme="dark"] .markdown-body h3 tt,
+[data-theme="dark"] .markdown-body h3 code,
+[data-theme="dark"] .markdown-body h4 tt,
+[data-theme="dark"] .markdown-body h4 code,
+[data-theme="dark"] .markdown-body h5 tt,
+[data-theme="dark"] .markdown-body h5 code,
+[data-theme="dark"] .markdown-body h6 tt,
+[data-theme="dark"] .markdown-body h6 code {
+  padding: 0 .2em;
+  font-size: inherit;
+}
+
+[data-theme="dark"] .markdown-body summary h1,
+[data-theme="dark"] .markdown-body summary h2,
+[data-theme="dark"] .markdown-body summary h3,
+[data-theme="dark"] .markdown-body summary h4,
+[data-theme="dark"] .markdown-body summary h5,
+[data-theme="dark"] .markdown-body summary h6 {
+  display: inline-block;
+}
+
+[data-theme="dark"] .markdown-body summary h1 .anchor,
+[data-theme="dark"] .markdown-body summary h2 .anchor,
+[data-theme="dark"] .markdown-body summary h3 .anchor,
+[data-theme="dark"] .markdown-body summary h4 .anchor,
+[data-theme="dark"] .markdown-body summary h5 .anchor,
+[data-theme="dark"] .markdown-body summary h6 .anchor {
+  margin-left: -40px;
+}
+
+[data-theme="dark"] .markdown-body summary h1,
+[data-theme="dark"] .markdown-body summary h2 {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+[data-theme="dark"] .markdown-body ul.no-list,
+[data-theme="dark"] .markdown-body ol.no-list {
+  padding: 0;
+  list-style-type: none;
+}
+
+[data-theme="dark"] .markdown-body ol[type="a s"] {
+  list-style-type: lower-alpha;
+}
+
+[data-theme="dark"] .markdown-body ol[type="A s"] {
+  list-style-type: upper-alpha;
+}
+
+[data-theme="dark"] .markdown-body ol[type="i s"] {
+  list-style-type: lower-roman;
+}
+
+[data-theme="dark"] .markdown-body ol[type="I s"] {
+  list-style-type: upper-roman;
+}
+
+[data-theme="dark"] .markdown-body ol[type="1"] {
+  list-style-type: decimal;
+}
+
+[data-theme="dark"] .markdown-body div>ol:not([type]) {
+  list-style-type: decimal;
+}
+
+[data-theme="dark"] .markdown-body ul ul,
+[data-theme="dark"] .markdown-body ul ol,
+[data-theme="dark"] .markdown-body ol ol,
+[data-theme="dark"] .markdown-body ol ul {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+[data-theme="dark"] .markdown-body li>p {
+  margin-top: 1rem;
+}
+
+[data-theme="dark"] .markdown-body li+li {
+  margin-top: .25em;
+}
+
+[data-theme="dark"] .markdown-body dl {
+  padding: 0;
+}
+
+[data-theme="dark"] .markdown-body dl dt {
+  padding: 0;
+  margin-top: 1rem;
+  font-size: 1em;
+  font-style: italic;
+  font-weight: 600;
+}
+
+[data-theme="dark"] .markdown-body dl dd {
+  padding: 0 1rem;
+  margin-bottom: 1rem;
+}
+
+[data-theme="dark"] .markdown-body table th {
+  font-weight: 600;
+}
+
+[data-theme="dark"] .markdown-body table th,
+[data-theme="dark"] .markdown-body table td {
+  padding: 6px 13px;
+  border: 1px solid #3d444d;
+}
+
+[data-theme="dark"] .markdown-body table td>:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="dark"] .markdown-body table tr {
+  background-color: #0d1117;
+  border-top: 1px solid #3d444db3;
+}
+
+[data-theme="dark"] .markdown-body table tr:nth-child(2n) {
+  background-color: #151b23;
+}
+
+[data-theme="dark"] .markdown-body table img {
+  background-color: transparent;
+}
+
+[data-theme="dark"] .markdown-body img[align=right] {
+  padding-left: 20px;
+}
+
+[data-theme="dark"] .markdown-body img[align=left] {
+  padding-right: 20px;
+}
+
+[data-theme="dark"] .markdown-body .emoji {
+  max-width: none;
+  vertical-align: text-top;
+  background-color: transparent;
+}
+
+[data-theme="dark"] .markdown-body span.frame {
+  display: block;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .markdown-body span.frame>span {
+  display: block;
+  float: left;
+  width: auto;
+  padding: 7px;
+  margin: 13px 0 0;
+  overflow: hidden;
+  border: 1px solid #3d444d;
+}
+
+[data-theme="dark"] .markdown-body span.frame span img {
+  display: block;
+  float: left;
+}
+
+[data-theme="dark"] .markdown-body span.frame span span {
+  display: block;
+  padding: 5px 0 0;
+  clear: both;
+  color: #f0f6fc;
+}
+
+[data-theme="dark"] .markdown-body span.align-center {
+  display: block;
+  overflow: hidden;
+  clear: both;
+}
+
+[data-theme="dark"] .markdown-body span.align-center>span {
+  display: block;
+  margin: 13px auto 0;
+  overflow: hidden;
+  text-align: center;
+}
+
+[data-theme="dark"] .markdown-body span.align-center span img {
+  margin: 0 auto;
+  text-align: center;
+}
+
+[data-theme="dark"] .markdown-body span.align-right {
+  display: block;
+  overflow: hidden;
+  clear: both;
+}
+
+[data-theme="dark"] .markdown-body span.align-right>span {
+  display: block;
+  margin: 13px 0 0;
+  overflow: hidden;
+  text-align: right;
+}
+
+[data-theme="dark"] .markdown-body span.align-right span img {
+  margin: 0;
+  text-align: right;
+}
+
+[data-theme="dark"] .markdown-body span.float-left {
+  display: block;
+  float: left;
+  margin-right: 13px;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .markdown-body span.float-left span {
+  margin: 13px 0 0;
+}
+
+[data-theme="dark"] .markdown-body span.float-right {
+  display: block;
+  float: right;
+  margin-left: 13px;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .markdown-body span.float-right>span {
+  display: block;
+  margin: 13px auto 0;
+  overflow: hidden;
+  text-align: right;
+}
+
+[data-theme="dark"] .markdown-body code,
+[data-theme="dark"] .markdown-body tt {
+  padding: .2em .4em;
+  margin: 0;
+  font-size: 85%;
+  white-space: break-spaces;
+  background-color: #656c7633;
+  border-radius: 6px;
+}
+
+[data-theme="dark"] .markdown-body code br,
+[data-theme="dark"] .markdown-body tt br {
+  display: none;
+}
+
+[data-theme="dark"] .markdown-body del code {
+  text-decoration: inherit;
+}
+
+[data-theme="dark"] .markdown-body samp {
+  font-size: 85%;
+}
+
+[data-theme="dark"] .markdown-body pre code {
+  font-size: 100%;
+}
+
+[data-theme="dark"] .markdown-body pre>code {
+  padding: 0;
+  margin: 0;
+  word-break: normal;
+  white-space: pre;
+  background: transparent;
+  border: 0;
+}
+
+[data-theme="dark"] .markdown-body .highlight {
+  margin-bottom: 1rem;
+}
+
+[data-theme="dark"] .markdown-body .highlight pre {
+  margin-bottom: 0;
+  word-break: normal;
+}
+
+[data-theme="dark"] .markdown-body .highlight pre,
+[data-theme="dark"] .markdown-body pre {
+  padding: 1rem;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+  color: #f0f6fc;
+  background-color: #151b23;
+  border-radius: 6px;
+}
+
+[data-theme="dark"] .markdown-body pre code,
+[data-theme="dark"] .markdown-body pre tt {
+  display: inline;
+  max-width: auto;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  line-height: inherit;
+  word-wrap: normal;
+  background-color: transparent;
+  border: 0;
+}
+
+[data-theme="dark"] .markdown-body .csv-data td,
+[data-theme="dark"] .markdown-body .csv-data th {
+  padding: 5px;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .markdown-body .csv-data .blob-num {
+  padding: 10px 0.5rem 9px;
+  text-align: right;
+  background: #0d1117;
+  border: 0;
+}
+
+[data-theme="dark"] .markdown-body .csv-data tr {
+  border-top: 0;
+}
+
+[data-theme="dark"] .markdown-body .csv-data th {
+  font-weight: 600;
+  background: #151b23;
+  border-top: 0;
+}
+
+[data-theme="dark"] .markdown-body [data-footnote-ref]::before {
+  content: "[";
+}
+
+[data-theme="dark"] .markdown-body [data-footnote-ref]::after {
+  content: "]";
+}
+
+[data-theme="dark"] .markdown-body .footnotes {
+  font-size: 12px;
+  color: #9198a1;
+  border-top: 1px solid #3d444d;
+}
+
+[data-theme="dark"] .markdown-body .footnotes ol {
+  padding-left: 1rem;
+}
+
+[data-theme="dark"] .markdown-body .footnotes ol ul {
+  display: inline-block;
+  padding-left: 1rem;
+  margin-top: 1rem;
+}
+
+[data-theme="dark"] .markdown-body .footnotes li {
+  position: relative;
+}
+
+[data-theme="dark"] .markdown-body .footnotes li:target::before {
+  position: absolute;
+  top: calc(0.5rem*-1);
+  right: calc(0.5rem*-1);
+  bottom: calc(0.5rem*-1);
+  left: calc(1.5rem*-1);
+  pointer-events: none;
+  content: "";
+  border: 2px solid #1f6feb;
+  border-radius: 6px;
+}
+
+[data-theme="dark"] .markdown-body .footnotes li:target {
+  color: #f0f6fc;
+}
+
+[data-theme="dark"] .markdown-body .footnotes .data-footnote-backref g-emoji {
+  font-family: monospace;
+}
+
+[data-theme="dark"] .markdown-body body:has(:modal) {
+  padding-right: var(--dialog-scrollgutter) !important;
+}
+
+[data-theme="dark"] .markdown-body .pl-c {
+  color: #9198a1;
+}
+
+[data-theme="dark"] .markdown-body .pl-c1,
+[data-theme="dark"] .markdown-body .pl-s .pl-v {
+  color: #79c0ff;
+}
+
+[data-theme="dark"] .markdown-body .pl-e,
+[data-theme="dark"] .markdown-body .pl-en {
+  color: #d2a8ff;
+}
+
+[data-theme="dark"] .markdown-body .pl-smi,
+[data-theme="dark"] .markdown-body .pl-s .pl-s1 {
+  color: #f0f6fc;
+}
+
+[data-theme="dark"] .markdown-body .pl-ent {
+  color: #7ee787;
+}
+
+[data-theme="dark"] .markdown-body .pl-k {
+  color: #ff7b72;
+}
+
+[data-theme="dark"] .markdown-body .pl-s,
+[data-theme="dark"] .markdown-body .pl-pds,
+[data-theme="dark"] .markdown-body .pl-s .pl-pse .pl-s1,
+[data-theme="dark"] .markdown-body .pl-sr,
+[data-theme="dark"] .markdown-body .pl-sr .pl-cce,
+[data-theme="dark"] .markdown-body .pl-sr .pl-sre,
+[data-theme="dark"] .markdown-body .pl-sr .pl-sra {
+  color: #a5d6ff;
+}
+
+[data-theme="dark"] .markdown-body .pl-v,
+[data-theme="dark"] .markdown-body .pl-smw {
+  color: #ffa657;
+}
+
+[data-theme="dark"] .markdown-body .pl-bu {
+  color: #f85149;
+}
+
+[data-theme="dark"] .markdown-body .pl-ii {
+  color: #f0f6fc;
+  background-color: #8e1519;
+}
+
+[data-theme="dark"] .markdown-body .pl-c2 {
+  color: #f0f6fc;
+  background-color: #b62324;
+}
+
+[data-theme="dark"] .markdown-body .pl-sr .pl-cce {
+  font-weight: bold;
+  color: #7ee787;
+}
+
+[data-theme="dark"] .markdown-body .pl-ml {
+  color: #f2cc60;
+}
+
+[data-theme="dark"] .markdown-body .pl-mh,
+[data-theme="dark"] .markdown-body .pl-mh .pl-en,
+[data-theme="dark"] .markdown-body .pl-ms {
+  font-weight: bold;
+  color: #1f6feb;
+}
+
+[data-theme="dark"] .markdown-body .pl-mi {
+  font-style: italic;
+  color: #f0f6fc;
+}
+
+[data-theme="dark"] .markdown-body .pl-mb {
+  font-weight: bold;
+  color: #f0f6fc;
+}
+
+[data-theme="dark"] .markdown-body .pl-md {
+  color: #ffdcd7;
+  background-color: #67060c;
+}
+
+[data-theme="dark"] .markdown-body .pl-mi1 {
+  color: #aff5b4;
+  background-color: #033a16;
+}
+
+[data-theme="dark"] .markdown-body .pl-mc {
+  color: #ffdfb6;
+  background-color: #5a1e02;
+}
+
+[data-theme="dark"] .markdown-body .pl-mi2 {
+  color: #f0f6fc;
+  background-color: #1158c7;
+}
+
+[data-theme="dark"] .markdown-body .pl-mdr {
+  font-weight: bold;
+  color: #d2a8ff;
+}
+
+[data-theme="dark"] .markdown-body .pl-ba {
+  color: #9198a1;
+}
+
+[data-theme="dark"] .markdown-body .pl-sg {
+  color: #3d444d;
+}
+
+[data-theme="dark"] .markdown-body .pl-corl {
+  text-decoration: underline;
+  color: #a5d6ff;
+}
+
+[data-theme="dark"] .markdown-body [role=button]:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body [role=tabpanel][tabindex="0"]:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body button:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body summary:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body a:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+[data-theme="dark"] .markdown-body [tabindex="0"]:focus:not(:focus-visible),
+[data-theme="dark"] .markdown-body details-dialog:focus:not(:focus-visible) {
+  outline: none;
+}
+
+[data-theme="dark"] .markdown-body g-emoji {
+  display: inline-block;
+  min-width: 1ch;
+  font-family: "Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol";
+  font-size: 1em;
+  font-style: normal !important;
+  font-weight: 400;
+  line-height: 1;
+  vertical-align: -0.075em;
+}
+
+[data-theme="dark"] .markdown-body g-emoji img {
+  width: 1em;
+  height: 1em;
+}
+
+[data-theme="dark"] .markdown-body .task-list-item {
+  list-style-type: none;
+}
+
+[data-theme="dark"] .markdown-body .task-list-item label {
+  font-weight: 400;
+}
+
+[data-theme="dark"] .markdown-body .task-list-item.enabled label {
+  cursor: pointer;
+}
+
+[data-theme="dark"] .markdown-body .task-list-item+.task-list-item {
+  margin-top: 0.25rem;
+}
+
+[data-theme="dark"] .markdown-body .task-list-item .handle {
+  display: none;
+}
+
+[data-theme="dark"] .markdown-body .task-list-item-checkbox {
+  margin: 0 .2em .25em -1.4em;
+  vertical-align: middle;
+}
+
+[data-theme="dark"] .markdown-body ul:dir(rtl) .task-list-item-checkbox {
+  margin: 0 -1.6em .25em .2em;
+}
+
+[data-theme="dark"] .markdown-body ol:dir(rtl) .task-list-item-checkbox {
+  margin: 0 -1.6em .25em .2em;
+}
+
+[data-theme="dark"] .markdown-body .contains-task-list:hover .task-list-item-convert-container,
+[data-theme="dark"] .markdown-body .contains-task-list:focus-within .task-list-item-convert-container {
+  display: block;
+  width: auto;
+  height: 24px;
+  overflow: visible;
+  clip: auto;
+}
+
+[data-theme="dark"] .markdown-body ::-webkit-calendar-picker-indicator {
+  filter: invert(50%);
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  color: inherit;
+  border-left: .25em solid #3d444d;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert>:first-child {
+  margin-top: 0;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert>:last-child {
+  margin-bottom: 0;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-note {
+  border-left-color: #1f6feb;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: #4493f8;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-important {
+  border-left-color: #8957e5;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: #ab7df8;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-warning {
+  border-left-color: #9e6a03;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: #d29922;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-tip {
+  border-left-color: #238636;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: #3fb950;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-caution {
+  border-left-color: #da3633;
+}
+
+[data-theme="dark"] .markdown-body .markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: #f85149;
+}
+
+[data-theme="dark"] .markdown-body>*:first-child>.heading-element:first-child {
+  margin-top: 0 !important;
+}
+
+[data-theme="dark"] .markdown-body .highlight pre:has(+.zeroclipboard-container) {
+  min-height: 52px;
+}
+
+
+:root { --page:#ffffff; --ink:#1f2328; --muted:#59636e; --line:#d1d9e0; --chip:#f6f8fa; --accent:#0969da; }
+[data-theme="dark"] { --page:#0d1117; --ink:#f0f6fc; --muted:#9198a1; --line:#3d444d; --chip:#151b23; --accent:#4493f8; }
+html, body { margin:0; background:var(--page); color:var(--ink);
+  font:14px -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif; }
+.bar { position:sticky; top:0; z-index:5; background:var(--page); border-bottom:1px solid var(--line);
+  padding:10px 16px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.bar button { font:inherit; color:var(--ink); background:var(--chip); border:1px solid var(--line);
+  border-radius:6px; padding:4px 10px; cursor:pointer; }
+.bar button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
+.bar .sp { flex:1; }
+.bar .what { color:var(--muted); }
+main { padding:16px; }
+.frame { max-width:896px; margin:0 auto 24px; }
+.frame[hidden] { display:none; }
+.box { border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+.box-head { display:flex; gap:16px; padding:0 16px; height:44px; align-items:center;
+  border-bottom:1px solid var(--line); color:var(--muted); font-weight:600; }
+.tab-on { color:var(--ink); border-bottom:2px solid #fd8c73; padding:12px 0 10px; }
+.markdown-body { padding:32px; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <span class="what">B · Two-up</span><button data-tab="en">English</button><button data-tab="zh">简体中文</button>
+  <span class="sp"></span>
+  <button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button>
+</div>
+<main><section class="frame" data-lang="en"><div class="box"><div class="box-head"><span class="tab-on">README</span><span>MIT license</span></div><article class="markdown-body"><p align="center" dir="auto"><b>English</b> · <a href="#zh" data-lang-link>简体中文</a></p>
+<p align="center" dir="auto">
+  <themed-picture data-catalyst-inline="true"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/mallard-dark.png">
+    <img src="docs/readme/mallard-light.png" width="64" alt="">
+  </picture></themed-picture>
+</p>
+<h1 align="center" dir="auto">Mallard</h1>
+<p align="center" dir="auto">
+  <b>Git for agent sessions.</b><br>
+  Your code travels with Git. Your Codex and Claude sessions travel with Mallard.
+</p>
+<p align="center" dir="auto">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"  style="max-width: 100%;"></a>
+  <a href="https://linux.do" rel="nofollow"><img src="https://img.shields.io/badge/LINUX--DO-Community-blue.svg?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgdmlld0JveD0iMCAwIDEyMCAxMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI%2BPGNsaXBQYXRoIGlkPSJhIj48Y2lyY2xlIGN4PSI2MCIgY3k9IjYwIiByPSI0NyIvPjwvY2xpcFBhdGg%2BPGNpcmNsZSBmaWxsPSIjZjBmMGYwIiBjeD0iNjAiIGN5PSI2MCIgcj0iNTAiLz48cmVjdCBmaWxsPSIjMWMxYzFlIiBjbGlwLXBhdGg9InVybCgjYSkiIHg9IjEwIiB5PSIxMCIgd2lkdGg9IjEwMCIgaGVpZ2h0PSIzMCIvPjxyZWN0IGZpbGw9IiNmMGYwZjAiIGNsaXAtcGF0aD0idXJsKCNhKSIgeD0iMTAiIHk9IjQwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjQwIi8%2BPHJlY3QgZmlsbD0iI2ZmYjAwMyIgY2xpcC1wYXRoPSJ1cmwoI2EpIiB4PSIxMCIgeT0iODAiIHdpZHRoPSIxMDAiIGhlaWdodD0iMzAiLz48L3N2Zz4%3D&amp;style=flat" alt="LINUX DO"  style="max-width: 100%;"></a>
+</p>
+<p align="center" dir="auto">
+  <a href="https://github.com/Git4Agent/mallard-app/releases/latest"><b>Download</b></a> · <a href="https://mallard-ai.com" rel="nofollow">Website</a> · <a href="https://mallard-ai.com/docs" rel="nofollow">Docs</a>
+</p>
+<p align="center" dir="auto">
+  <a href="https://mallard-ai.com" rel="nofollow"><img src="docs/readme/demo.jpg" alt="Watch the 15-second demo" style="max-width: 100%;"></a>
+</p>
+<h2 dir="auto">What you can do</h2>
+<markdown-accessiblity-table><table role="table">
+<tbody><tr>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/pr-review.mp4" rel="nofollow"><img src="docs/readme/pr-review.jpg" alt="A better way to PR, 45-second video" style="max-width: 100%;"></a>
+<br><b>A better way to PR</b><br>The diff shows what. The chat shows why.
+</td>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/team.mp4" rel="nofollow"><img src="docs/readme/team.jpg" alt="What one learns, the flock knows, 46-second video" style="max-width: 100%;"></a>
+<br><b>What one learns, the flock knows</b><br>Push your chats. Teammates read them, or pull and keep going.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/laptops.mp4" rel="nofollow"><img src="docs/readme/laptops.jpg" alt="More wings for one duck, 45-second video" style="max-width: 100%;"></a>
+<br><b>More wings for one duck</b><br>Push from a busy laptop. Pull on your others.
+</td>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/new-teammate.mp4" rel="nofollow"><img src="docs/readme/new-teammate.jpg" alt="Welcome to the flock, 31-second video" style="max-width: 100%;"></a>
+<br><b>Welcome to the flock</b><br>Send the link. They pull the history and catch up.
+</td>
+</tr>
+</tbody></table></markdown-accessiblity-table>
+<h2 dir="auto">Examples</h2>
+<p dir="auto">Public on Mallard Cloud. Open one, or pull it into Mallard.</p>
+<markdown-accessiblity-table><table role="table">
+<tbody><tr>
+<td width="33%" valign="top">
+<a href="https://mallard-ai.com/rikaqu0223-arch/mallard-with-pelican" rel="nofollow"><themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/example-mallard-with-pelican-dark.jpg">
+  <img src="docs/readme/example-mallard-with-pelican.jpg" alt="The mallard-with-pelican repository on Mallard Cloud">
+</picture></themed-picture></a>
+<br><a href="https://mallard-ai.com/rikaqu0223-arch/mallard-with-pelican" rel="nofollow"><b>mallard-with-pelican</b></a><br>A Git project: Codex and Claude sessions under each commit.
+</td>
+<td width="33%" valign="top">
+<a href="https://mallard-ai.com/rikaqu0223-arch/mallardNonGit" rel="nofollow"><themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/example-mallardNonGit-dark.jpg">
+  <img src="docs/readme/example-mallardNonGit.jpg" alt="The mallardNonGit repository on Mallard Cloud">
+</picture></themed-picture></a>
+<br><a href="https://mallard-ai.com/rikaqu0223-arch/mallardNonGit" rel="nofollow"><b>mallardNonGit</b></a><br>A folder without Git: its sessions and files, together.
+</td>
+<td width="33%" valign="top">
+<a href="https://mallard-ai.com/rikaqu0223-arch/Maple" rel="nofollow"><themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/example-Maple-dark.jpg">
+  <img src="docs/readme/example-Maple.jpg" alt="The Maple desktop pet on Mallard Cloud">
+</picture></themed-picture></a>
+<br><a href="https://mallard-ai.com/rikaqu0223-arch/Maple" rel="nofollow"><b>Maple</b></a><br>A Codex desktop pet, ready to pull.
+</td>
+</tr>
+</tbody></table></markdown-accessiblity-table>
+<h2 dir="auto">Get started</h2>
+<p dir="auto"><a href="https://github.com/Git4Agent/mallard-app/releases/latest">Download Mallard</a> for macOS or Windows, then:</p>
+<h3 dir="auto">1. <a href="https://mallard-ai.com/docs/add-a-storage" rel="nofollow">Add a storage</a></h3>
+<p dir="auto">Where your sessions live: Mallard Cloud, a folder, Cloudflare R2 or Dropbox.</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/storage-dark.jpg">
+  <img src="docs/readme/storage.jpg" alt="Choosing a storage type in Mallard: Mallard Cloud, Cloudflare R2, Dropbox or a local folder">
+</picture></themed-picture>
+<h3 dir="auto">2. <a href="https://mallard-ai.com/docs/add-a-project" rel="nofollow">Add a project</a></h3>
+<p dir="auto">Pick a folder where Codex or Claude worked.</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/newproject-dark.jpg">
+  <img src="docs/readme/newproject.jpg" alt="Mallard's New project page, listing recent folders where agents worked">
+</picture></themed-picture>
+<h3 dir="auto">3. <a href="https://mallard-ai.com/docs/push-and-pull" rel="nofollow">Push and pull</a></h3>
+<p dir="auto"><strong>Push</strong>: you pick which sessions to push.</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/push-dark.jpg">
+  <img src="docs/readme/push.jpg" alt="Mallard's Push review with three sessions ticked">
+</picture></themed-picture>
+<p dir="auto"><strong>Pull</strong>: you decide which sessions to pull, too.</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/pull-dark.jpg">
+  <img src="docs/readme/pull.jpg" alt="Mallard's Pull review with two sessions ticked">
+</picture></themed-picture>
+<h2 dir="auto">Works with</h2>
+<ul dir="auto">
+<li><strong>Agents:</strong> <themed-picture data-catalyst-inline="true"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/codex-dark.svg"><img src="docs/readme/codex-light.svg" height="16" alt=""></picture></themed-picture> Codex · <a target="_blank" rel="noopener noreferrer" href="docs/readme/claude.svg"><img src="docs/readme/claude.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Claude Code</li>
+<li><strong>Also shares:</strong> Skills (Codex, Claude) and Codex pets, pushed and pulled like sessions</li>
+<li><strong>Storage:</strong> <a target="_blank" rel="noopener noreferrer" href="docs/readme/mallard-cloud.png"><img src="docs/readme/mallard-cloud.png" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Mallard Cloud · <a target="_blank" rel="noopener noreferrer" href="docs/readme/local.svg"><img src="docs/readme/local.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> A folder · <a target="_blank" rel="noopener noreferrer" href="docs/readme/r2.svg"><img src="docs/readme/r2.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Cloudflare R2 · <a target="_blank" rel="noopener noreferrer" href="docs/readme/dropbox.svg"><img src="docs/readme/dropbox.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Dropbox</li>
+<li><strong>Computers:</strong> macOS 12 or newer (Apple silicon, Intel), Windows x64</li>
+</ul>
+<h2 dir="auto">Your data stays yours</h2>
+<ul dir="auto">
+<li>You pick and review every session before anything moves.</li>
+<li>Nothing on your computer is replaced or deleted without your OK.</li>
+<li>Storage passwords and folder paths stay on your computer.</li>
+<li>Chats can hold keys you pasted. Turn on <strong>Credential redaction</strong> in Settings › Privacy to hide them.</li>
+<li>Mallard Cloud pushes stay private to you and the people you invite.</li>
+</ul>
+<h2 dir="auto">How it works</h2>
+<p dir="auto">Mallard needs only three things from a storage: List, Put and Get. No Git server.</p>
+<ul dir="auto">
+<li><strong>A push only adds.</strong> Files named by their SHA-256 go up first, then a manifest, then one small record. Until the record lands, the version doesn't exist.</li>
+<li><strong>The listing is the history.</strong> Each record names its parent; follow them from the root to the current version. When two pushes land in the same seconds, the earlier wins and the other is told to compare again.</li>
+<li><strong>A pull applies the version it reviewed,</strong> even after a newer push.</li>
+<li><strong>Sign-ins, backups and logs never go to storage.</strong></li>
+</ul>
+<p dir="auto"><a href="https://mallard-ai.com/docs/storage-layout" rel="nofollow">Read the storage layout →</a></p>
+<h2 dir="auto">FAQ</h2>
+<details>
+<summary><b>Is Mallard free?</b></summary>
+<p dir="auto">Yes. The Mallard app is free and open source under the <a href="LICENSE">MIT License</a>: use it, change it and share it, at work or at home.</p>
+</details>
+<details>
+<summary><b>Can I use my own storage?</b></summary>
+<p dir="auto">Yes. Use a folder on your computer or a mounted drive, your own Cloudflare R2 bucket, or your Dropbox. Mallard Cloud is optional: it adds GitHub sign-in and a website where your team reads sessions.</p>
+</details>
+<details>
+<summary><b>Does Mallard upload my code?</b></summary>
+<p dir="auto">No. In a Git project your code travels through Git, as always; Mallard moves the sessions. In a folder without Git, you can tick files to travel too.</p>
+</details>
+<details>
+<summary><b>Which agents does it support?</b></summary>
+<p dir="auto">Codex and Claude Code, in the terminal or in their desktop apps.</p>
+</details>
+<hr>
+<p dir="auto"><sub><a href="docs/DEVELOPMENT.md">Build from source</a> · <a href="TECHNICAL_REPORT.md">Technical report</a> · Built for <a href="https://devpost.com/software/agentgithub" rel="nofollow">OpenAI Build Week</a> · <a href="LICENSE">MIT License</a><br>Thanks to the <a href="https://linux.do" rel="nofollow">LINUX DO</a> community for its support.</sub></p></article></div></section><section class="frame" data-lang="zh"><div class="box"><div class="box-head"><span class="tab-on">README</span><span>MIT license</span></div><article class="markdown-body"><p align="center" dir="auto"><a href="#en" data-lang-link>English</a> · <b>简体中文</b></p>
+<p align="center" dir="auto">
+  <themed-picture data-catalyst-inline="true"><picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/mallard-dark.png">
+    <img src="docs/readme/mallard-light.png" width="64" alt="">
+  </picture></themed-picture>
+</p>
+<h1 align="center" dir="auto">Mallard</h1>
+<p align="center" dir="auto">
+  <b>为 Codex 和 Claude 打造的Git。</b><br>
+  代码交给 Git，Codex 和 Claude 会话交给 Mallard。
+</p>
+<p align="center" dir="auto">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"  style="max-width: 100%;"></a>
+  <a href="https://linux.do" rel="nofollow"><img src="https://img.shields.io/badge/LINUX--DO-Community-blue.svg?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgdmlld0JveD0iMCAwIDEyMCAxMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI%2BPGNsaXBQYXRoIGlkPSJhIj48Y2lyY2xlIGN4PSI2MCIgY3k9IjYwIiByPSI0NyIvPjwvY2xpcFBhdGg%2BPGNpcmNsZSBmaWxsPSIjZjBmMGYwIiBjeD0iNjAiIGN5PSI2MCIgcj0iNTAiLz48cmVjdCBmaWxsPSIjMWMxYzFlIiBjbGlwLXBhdGg9InVybCgjYSkiIHg9IjEwIiB5PSIxMCIgd2lkdGg9IjEwMCIgaGVpZ2h0PSIzMCIvPjxyZWN0IGZpbGw9IiNmMGYwZjAiIGNsaXAtcGF0aD0idXJsKCNhKSIgeD0iMTAiIHk9IjQwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjQwIi8%2BPHJlY3QgZmlsbD0iI2ZmYjAwMyIgY2xpcC1wYXRoPSJ1cmwoI2EpIiB4PSIxMCIgeT0iODAiIHdpZHRoPSIxMDAiIGhlaWdodD0iMzAiLz48L3N2Zz4%3D&amp;style=flat" alt="LINUX DO"  style="max-width: 100%;"></a>
+</p>
+<p align="center" dir="auto">
+  <a href="https://github.com/Git4Agent/mallard-app/releases/latest"><b>下载</b></a> · <a href="https://mallard-ai.com" rel="nofollow">网站</a> · <a href="https://mallard-ai.com/docs" rel="nofollow">文档</a>
+</p>
+<p align="center" dir="auto">
+  <a href="https://mallard-ai.com" rel="nofollow"><img src="docs/readme/demo.jpg" alt="观看 15 秒演示" style="max-width: 100%;"></a>
+</p>
+<h2 dir="auto">能做什么</h2>
+<markdown-accessiblity-table><table role="table">
+<tbody><tr>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/pr-review.mp4" rel="nofollow"><img src="docs/readme/pr-review.jpg" alt="更好贡献 PR 的方式，45 秒视频" style="max-width: 100%;"></a>
+<br><b>更好贡献 PR 的方式</b><br>Code Diff 说明结果，Agent session说明过程。
+</td>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/team.mp4" rel="nofollow"><img src="docs/readme/team.jpg" alt="一只学会，全群都会，46 秒视频" style="max-width: 100%;"></a>
+<br><b>一只学会，全群都会</b><br>上传你的对话，同事阅读，或下载后接着做。
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/laptops.mp4" rel="nofollow"><img src="docs/readme/laptops.jpg" alt="一只鸭，多双翅膀，45 秒视频" style="max-width: 100%;"></a>
+<br><b>一只鸭，多双翅膀</b><br>从满载的电脑上传，在其他空闲电脑上下载。
+</td>
+<td width="50%" valign="top">
+<a href="https://mallard-ai.com/landing/use-cases/new-teammate.mp4" rel="nofollow"><img src="docs/readme/new-teammate.jpg" alt="欢迎加入鸭群，31 秒视频" style="max-width: 100%;"></a>
+<br><b>欢迎加入鸭群</b><br>发一个链接，新同事下载历史，马上跟上。
+</td>
+</tr>
+</tbody></table></markdown-accessiblity-table>
+<h2 dir="auto">示例</h2>
+<p dir="auto">Mallard Cloud 上的公开仓库：在网页上打开，或下载到 Mallard。</p>
+<markdown-accessiblity-table><table role="table">
+<tbody><tr>
+<td width="33%" valign="top">
+<a href="https://mallard-ai.com/rikaqu0223-arch/mallard-with-pelican" rel="nofollow"><themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/example-mallard-with-pelican-dark-zh.jpg">
+  <img src="docs/readme/example-mallard-with-pelican-zh.jpg" alt="Mallard Cloud 上的 mallard-with-pelican 仓库">
+</picture></themed-picture></a>
+<br><a href="https://mallard-ai.com/rikaqu0223-arch/mallard-with-pelican" rel="nofollow"><b>mallard-with-pelican</b></a><br>一个 Git 项目：每个提交下的 Codex 和 Claude 会话。
+</td>
+<td width="33%" valign="top">
+<a href="https://mallard-ai.com/rikaqu0223-arch/mallardNonGit" rel="nofollow"><themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/example-mallardNonGit-dark-zh.jpg">
+  <img src="docs/readme/example-mallardNonGit-zh.jpg" alt="Mallard Cloud 上的 mallardNonGit 仓库">
+</picture></themed-picture></a>
+<br><a href="https://mallard-ai.com/rikaqu0223-arch/mallardNonGit" rel="nofollow"><b>mallardNonGit</b></a><br>没有 Git 的文件夹：会话和文件一起同步。
+</td>
+<td width="33%" valign="top">
+<a href="https://mallard-ai.com/rikaqu0223-arch/Maple" rel="nofollow"><themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/example-Maple-dark-zh.jpg">
+  <img src="docs/readme/example-Maple-zh.jpg" alt="Mallard Cloud 上的桌面宠物 Maple">
+</picture></themed-picture></a>
+<br><a href="https://mallard-ai.com/rikaqu0223-arch/Maple" rel="nofollow"><b>Maple</b></a><br>一只 Codex 桌面宠物，可直接下载。
+</td>
+</tr>
+</tbody></table></markdown-accessiblity-table>
+<h2 dir="auto">开始使用</h2>
+<p dir="auto"><a href="https://github.com/Git4Agent/mallard-app/releases/latest">下载 Mallard</a>（macOS 或 Windows），然后：</p>
+<h3 dir="auto">1. <a href="https://mallard-ai.com/docs/add-a-storage" rel="nofollow">添加存储</a></h3>
+<p dir="auto">会话存放的地方：Mallard Cloud、本地文件夹、Cloudflare R2 或 Dropbox。</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/storage-dark-zh.jpg">
+  <img src="docs/readme/storage-zh.jpg" alt="在 Mallard 中选择存储类型：Mallard Cloud、Cloudflare R2、Dropbox 或本地文件夹">
+</picture></themed-picture>
+<h3 dir="auto">2. <a href="https://mallard-ai.com/docs/add-a-project" rel="nofollow">添加项目</a></h3>
+<p dir="auto">选一个 Codex 或 Claude 工作过的文件夹。</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/newproject-dark-zh.jpg">
+  <img src="docs/readme/newproject-zh.jpg" alt="Mallard 的新项目页面，列出代理最近工作过的文件夹">
+</picture></themed-picture>
+<h3 dir="auto">3. <a href="https://mallard-ai.com/docs/push-and-pull" rel="nofollow">上传和下载</a></h3>
+<p dir="auto"><strong>上传</strong>：上传哪些会话，由你挑选。</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/push-dark-zh.jpg">
+  <img src="docs/readme/push-zh.jpg" alt="Mallard 的上传检查，已勾选三个会话">
+</picture></themed-picture>
+<p dir="auto"><strong>下载</strong>：下载哪些会话，也由你决定。</p>
+<themed-picture data-catalyst-inline="true"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/pull-dark-zh.jpg">
+  <img src="docs/readme/pull-zh.jpg" alt="Mallard 的下载检查，已勾选两个会话">
+</picture></themed-picture>
+<h2 dir="auto">支持</h2>
+<ul dir="auto">
+<li><strong>代理：</strong> <themed-picture data-catalyst-inline="true"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/codex-dark.svg"><img src="docs/readme/codex-light.svg" height="16" alt=""></picture></themed-picture> Codex · <a target="_blank" rel="noopener noreferrer" href="docs/readme/claude.svg"><img src="docs/readme/claude.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Claude Code</li>
+<li><strong>还能同步：</strong> Skill（Codex、Claude）和 Codex 桌面宠物，与会话一样上传和下载</li>
+<li><strong>存储：</strong> <a target="_blank" rel="noopener noreferrer" href="docs/readme/mallard-cloud.png"><img src="docs/readme/mallard-cloud.png" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Mallard Cloud · <a target="_blank" rel="noopener noreferrer" href="docs/readme/local.svg"><img src="docs/readme/local.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> 本地文件夹 · <a target="_blank" rel="noopener noreferrer" href="docs/readme/r2.svg"><img src="docs/readme/r2.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Cloudflare R2 · <a target="_blank" rel="noopener noreferrer" href="docs/readme/dropbox.svg"><img src="docs/readme/dropbox.svg" height="16" alt="" style="max-width: 100%; height: auto; max-height: 16px;"></a> Dropbox</li>
+<li><strong>系统：</strong> macOS 12 及以上（Apple 芯片、Intel）、Windows（x64）</li>
+</ul>
+<h2 dir="auto">数据由你掌控</h2>
+<ul dir="auto">
+<li>每个会话都由你挑选、检查后才会传输。</li>
+<li>未经你同意，电脑上的内容不会被替换或删除。</li>
+<li>存储密码和文件夹路径只保存在你的电脑上。</li>
+<li>对话里可能有你粘贴过的密钥。在 设置 › 隐私 中打开 <strong>密钥隐藏</strong> 即可隐藏。</li>
+<li>上传到 Mallard Cloud 的内容仅你和你邀请的人可见。</li>
+</ul>
+<h2 dir="auto">工作原理</h2>
+<p dir="auto">Mallard 对存储只有三个要求：List、Put 和 Get，不需要 Git 服务器。</p>
+<ul dir="auto">
+<li><strong>上传只新增，不修改。</strong> 先写入以 SHA-256 命名的对象，再写清单，最后写一条记录。记录写入之前，这个 Version 并不存在。</li>
+<li><strong>列表就是历史。</strong> 每条记录都记着它的父项，从 root 顺着往下走，尽头就是当前的 Version。同一时刻的两次上传，较早的胜出，另一方会被告知重新比较。</li>
+<li><strong>下载应用的是它检查过的那个 Version，</strong> 即使之后有新的上传。</li>
+<li><strong>登录信息、备份和日志不会存到存储里。</strong></li>
+</ul>
+<p dir="auto"><a href="https://mallard-ai.com/docs/storage-layout" rel="nofollow">阅读存储布局 →</a></p>
+<h2 dir="auto">常见问题</h2>
+<details>
+<summary><b>Mallard 免费吗？</b></summary>
+<p dir="auto">免费。Mallard 应用基于 <a href="LICENSE">MIT 许可证</a> 开源：可自由使用、修改和分享，工作和个人都可以。</p>
+</details>
+<details>
+<summary><b>可以用自己的存储吗？</b></summary>
+<p dir="auto">可以。本地文件夹或挂载的磁盘、你自己的 Cloudflare R2 存储桶，或你的 Dropbox 都行。Mallard Cloud 不是必须的：它额外提供 GitHub 登录，以及让团队阅读会话的网站。</p>
+</details>
+<details>
+<summary><b>Mallard 会上传我的代码吗？</b></summary>
+<p dir="auto">不会。Git 项目的代码照常通过 Git 传输，Mallard 只传会话。没有 Git 的文件夹，可以勾选文件一起传输。</p>
+</details>
+<details>
+<summary><b>支持哪些代理？</b></summary>
+<p dir="auto">Codex 和 Claude Code，命令行和桌面应用都支持。</p>
+</details>
+<hr>
+<p dir="auto"><sub><a href="docs/DEVELOPMENT.md">从源码构建</a> · <a href="TECHNICAL_REPORT.md">技术报告</a> · 为 <a href="https://devpost.com/software/agentgithub" rel="nofollow">OpenAI Build Week</a> 打造 · <a href="LICENSE">MIT 许可证</a><br>感谢 <a href="https://linux.do" rel="nofollow">LINUX DO</a> 社区的支持。</sub></p></article></div></section></main>
+<script>
+const root = document.documentElement;
+let lang = "en";
+function setTheme(t) {
+  root.dataset.theme = t;
+  // GitHub matches <source media="(prefers-color-scheme: dark)"> to the viewer's GitHub theme.
+  document.querySelectorAll("picture source").forEach(s => s.media = t === "dark" ? "all" : "not all");
+  document.querySelectorAll("[data-theme-set]").forEach(b => b.setAttribute("aria-pressed", b.dataset.themeSet === t));
+  sync();
+}
+function show(l) {
+  lang = l;
+  document.querySelectorAll(".frame").forEach(f => f.hidden = f.dataset.lang !== l);
+  document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-pressed", b.dataset.tab === l));
+  root.lang = l === "zh" ? "zh-CN" : "en";
+  sync();
+}
+function sync() { try { history.replaceState(null, "", "#" + lang + "-" + root.dataset.theme); } catch (e) {} }
+document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => show(b.dataset.tab));
+document.querySelectorAll("[data-lang-link]").forEach(a => a.onclick = e => { e.preventDefault(); show(a.getAttribute("href").slice(1)); scrollTo(0, 0); });
+document.querySelectorAll("[data-theme-set]").forEach(b => b.onclick = () => setTheme(b.dataset.themeSet));
+const [l0, t0] = (location.hash.slice(1) || "en-light").split("-");
+show(l0 === "zh" ? "zh" : "en"); setTheme(t0 === "dark" ? "dark" : "light");
+</script>
+</body>
+</html>

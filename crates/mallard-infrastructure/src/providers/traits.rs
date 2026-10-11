@@ -301,6 +301,11 @@ pub struct SessionDiscovery {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionFileSummary {
     pub session_id: String,
+    /// Provider-recorded creator identity; never an authentication or ownership check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_account_id: Option<String>,
     pub title: Option<String>,
     pub summary: Option<String>,
     pub started_at: Option<u64>,

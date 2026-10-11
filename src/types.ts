@@ -1612,6 +1612,9 @@ export interface ProjectSessionDetail {
   provider: ProviderKey;
   provider_display_name: string;
   provider_session_id: string;
+  /** Provider-recorded creator identity, not an ownership or authentication claim. */
+  creator_user_id?: string | null;
+  creator_account_id?: string | null;
   title: string;
   summary?: string | null;
   started_at?: number | null;

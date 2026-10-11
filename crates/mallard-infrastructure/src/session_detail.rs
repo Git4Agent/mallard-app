@@ -106,6 +106,10 @@ pub struct ProjectSessionDetail {
     pub provider_session_id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
@@ -2142,6 +2146,8 @@ fn session_detail_body(
         provider_display_name: provider_display_name(registry, &session.provider),
         provider_session_id: session.provider_session_id.clone(),
         title: sanitize_boundary_text(&title, session),
+        creator_user_id: summary.creator_user_id.clone(),
+        creator_account_id: summary.creator_account_id.clone(),
         summary: summary
             .summary
             .as_deref()
@@ -2774,6 +2780,8 @@ mod tests {
     fn summary_fixture() -> SessionFileSummary {
         SessionFileSummary {
             session_id: "thread-1".to_string(),
+            creator_user_id: None,
+            creator_account_id: None,
             title: None,
             summary: None,
             started_at: None,
@@ -2789,6 +2797,52 @@ mod tests {
             total_tokens: None,
             metrics_complete: false,
             is_internal_subagent: false,
+        }
+    }
+
+    #[test]
+    fn session_detail_carries_optional_creator_ids() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let mut session = sanitization_session();
+        session.project_root = sandbox.path().to_path_buf();
+        let registry = AgentProviderRegistry::production();
+        let index = index_with_path("safe.txt");
+        for present in [false, true] {
+            let mut summary = summary_fixture();
+            if present {
+                summary.creator_user_id = Some("user-source".into());
+                summary.creator_account_id = Some("account-source".into());
+            }
+            let detail = session_detail_body(
+                registry,
+                &session,
+                SessionDetailParts {
+                    index: &index,
+                    summary: &summary,
+                    snapshot_id: "snapshot".into(),
+                    cache_warnings: Vec::new(),
+                    agent: None,
+                    actions: Vec::new(),
+                },
+            )
+            .unwrap();
+            let value = serde_json::to_value(detail).unwrap();
+            assert_eq!(
+                value
+                    .get("creator_user_id")
+                    .and_then(serde_json::Value::as_str),
+                summary.creator_user_id.as_deref()
+            );
+            assert_eq!(
+                value
+                    .get("creator_account_id")
+                    .and_then(serde_json::Value::as_str),
+                summary.creator_account_id.as_deref()
+            );
+            if !present {
+                assert!(value.get("creator_user_id").is_none());
+                assert!(value.get("creator_account_id").is_none());
+            }
         }
     }
 

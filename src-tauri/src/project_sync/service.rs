@@ -26748,6 +26748,70 @@ mod tests {
     }
 
     #[test]
+    fn an_oversize_claude_fork_remains_unavailable_in_comparison() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("claude-oversize-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let project_root = temp.path().join("project");
+        let claude_home = temp.path().join("claude-home");
+        bind_and_link_claude_replica(&repo, &project, &storage_id, &project_root, &claude_home);
+        let session_id = "claude-oversize-fork";
+        let path = claude_home
+            .join("projects/source")
+            .join(format!("{session_id}.jsonl"));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&claude_test_transcript(
+            "ancestor",
+            &temp.path().join("other-project"),
+            &[("a-1", None, "user", "inherited history")],
+        ))
+        .unwrap();
+        file.write_all(&claude_test_transcript(
+            session_id,
+            &project_root,
+            &[("f-1", Some("a-1"), "user", "fork")],
+        ))
+        .unwrap();
+        // Valid JSON whitespace crosses the byte limit without crossing the
+        // record-count limit or putting the fork transition in the tail window.
+        let mut padding = vec![b' '; 64 * 1024];
+        *padding.last_mut().unwrap() = b'\n';
+        while file.metadata().unwrap().len() <= conversation_file_limit_bytes() {
+            file.write_all(&padding).unwrap();
+        }
+        // Later execution in a subdirectory must not change project ownership.
+        file.write_all(&claude_test_transcript(
+            session_id,
+            &project_root.join("subdirectory"),
+            &[("f-2", Some("f-1"), "assistant", "reply")],
+        ))
+        .unwrap();
+        drop(file);
+
+        for _ in 0..2 {
+            let comparison = get_project_thread_sync_comparison_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap();
+            assert_eq!(comparison.entries.len(), 1);
+            let row = &comparison.entries[0];
+            assert_eq!(row.provider_thread_id.as_deref(), Some(session_id));
+            assert_eq!(row.state, ThreadSyncState::Unavailable);
+            assert!(row.local_present);
+            assert_eq!(row.status_detail_code, Some("capture_size_limit"));
+            assert_eq!(row.status_detail.as_deref(), Some("size limit exceeded."));
+            assert!(!row.push_decision.selectable);
+            assert!(!row.pull_decision.selectable);
+        }
+    }
+
+    #[test]
     fn cloud_draft_rows_carry_their_code_beside_the_english() {
         assert_eq!(
             cloud_draft_status(ThreadSyncState::Synced),

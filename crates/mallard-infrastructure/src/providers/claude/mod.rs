@@ -22,9 +22,9 @@ use super::traits::{
     SessionTimelinePageSlice, SessionTimelineQuery,
 };
 use crate::app_settings::conversation_file_limit_bytes;
-use crate::provider_capture::validated_session_metadata;
+use crate::provider_capture::{validated_session_metadata, MAX_CAPTURE_BYTES};
 use mallard_domain::ProviderKey;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 pub use codec::{
@@ -69,14 +69,20 @@ fn scan_claude_session_metadata_with_window(
     if !metadata.is_file() {
         return Err(rejected("Claude session transcript is not a regular file"));
     }
-    if metadata.len() > conversation_file_limit_bytes() {
+    if metadata.len() > MAX_CAPTURE_BYTES {
         return Err(ScanFailure::Rejected(format!(
-            "Claude session exceeds {} bytes",
-            conversation_file_limit_bytes()
+            "Claude session exceeds {} metadata scan bytes",
+            MAX_CAPTURE_BYTES
         )));
     }
 
-    let identity = if metadata.len() > window_bytes {
+    // Prove the leaf's identity even when capture is blocked. Discovery
+    // applies the sync limit and retains an Unavailable row. The suffix
+    // reader enforces that limit too, so oversized files use the bounded
+    // metadata stream instead, including inherited fork records.
+    let identity = if metadata.len() > conversation_file_limit_bytes() {
+        scan_full_stream(file, path)?
+    } else if metadata.len() > window_bytes {
         drop(file);
         match scan_tail_window(path, window_bytes)? {
             WindowScan::Decided(identity) => identity,
@@ -180,7 +186,7 @@ fn scan_tail_window(path: &Path, window_bytes: u64) -> Result<WindowScan, ScanFa
     }
 }
 
-/// The unbounded fallback, streaming so parallel refresh workers never hold
+/// The bounded fallback, streaming so parallel refresh workers never hold
 /// whole transcripts in memory: undecidable tails — single-id files whose
 /// authorized home was established at the head, id-less chain records,
 /// chainless files — legitimately need every record.
@@ -188,7 +194,7 @@ fn scan_full_stream(
     file: std::fs::File,
     path: &Path,
 ) -> Result<codec::ClaudeSessionIdentityTracker, ScanFailure> {
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(MAX_CAPTURE_BYTES.saturating_add(1)));
     let mut identity = codec::ClaudeSessionIdentityTracker::default();
     let mut bytes_read = 0_u64;
     let mut record_count = 0_usize;
@@ -201,10 +207,10 @@ fn scan_full_stream(
             break;
         }
         bytes_read = bytes_read.saturating_add(read as u64);
-        if bytes_read > conversation_file_limit_bytes() {
+        if bytes_read > MAX_CAPTURE_BYTES {
             return Err(ScanFailure::Rejected(format!(
-                "Claude session exceeds {} bytes",
-                conversation_file_limit_bytes()
+                "Claude session exceeds {} metadata scan bytes",
+                MAX_CAPTURE_BYTES
             )));
         }
         // The provider is allowed to be appending. A non-newline-terminated
@@ -512,6 +518,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n"
+    }
+
+    #[test]
+    fn metadata_scan_keeps_its_hard_byte_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("oversize.jsonl");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_CAPTURE_BYTES + 1)
+            .unwrap();
+        let error = scan_claude_session_metadata(&path)
+            .unwrap_err()
+            .into_message();
+        assert!(error.contains("metadata scan bytes"), "{error}");
     }
 
     #[test]

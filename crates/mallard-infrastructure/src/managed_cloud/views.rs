@@ -34,6 +34,10 @@ struct SessionView<'a> {
     resource_id: &'a str,
     provider: &'a str,
     provider_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creator_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creator_account_id: Option<String>,
     title: String,
     summary: Option<String>,
     started_at: Option<u64>,
@@ -111,6 +115,8 @@ struct ViewFacts<'a> {
     resource_id: &'a str,
     provider: &'a str,
     provider_session_id: String,
+    creator_user_id: Option<String>,
+    creator_account_id: Option<String>,
     title: String,
     summary: Option<String>,
     started_at: Option<u64>,
@@ -129,6 +135,8 @@ impl<'a> ViewFacts<'a> {
             resource_id: self.resource_id,
             provider: self.provider,
             provider_session_id: self.provider_session_id.clone(),
+            creator_user_id: self.creator_user_id.clone(),
+            creator_account_id: self.creator_account_id.clone(),
             title: self.title.clone(),
             summary: self.summary.clone(),
             started_at: self.started_at,
@@ -248,6 +256,8 @@ pub fn build_view(
         resource_id,
         provider: provider.as_str(),
         provider_session_id: summary.session_id.clone(),
+        creator_user_id: summary.creator_user_id.clone(),
+        creator_account_id: summary.creator_account_id.clone(),
         title,
         summary: summary.summary.clone(),
         started_at: summary.started_at,
@@ -450,6 +460,21 @@ mod tests {
             }}
         }));
         records
+    }
+
+    #[test]
+    fn codex_view_carries_optional_creator_ids_without_changing_events() {
+        let records = mixed_codex_records();
+        let (_, _, original) = codex_view(records.clone());
+        assert!(original.get("creator_user_id").is_none());
+        assert!(original.get("creator_account_id").is_none());
+        let mut records = records;
+        records[0]["payload"]["creator_user_id"] = json!("user-source");
+        records[0]["payload"]["creator_account_id"] = json!("account-source");
+        let (_, _, view) = codex_view(records);
+        assert_eq!(view["creator_user_id"], "user-source");
+        assert_eq!(view["creator_account_id"], "account-source");
+        assert_eq!(view["events"], original["events"]);
     }
 
     fn codex_view(records: Vec<Value>) -> (Vec<u8>, BuiltView, Value) {

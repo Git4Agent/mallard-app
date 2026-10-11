@@ -711,3 +711,276 @@ but a live R2/S3 project-content smoke test remains an external release check.
   best-effort source mtime.
 - A Push publishes a new immutable snapshot from the selected recipe; storage
   history is bundle versioning, not source control.
+
+## 15. Behavior reference
+
+Session mapping, sync safety, owned children, refresh, and Pull preparation in
+detail.
+
+### How session-to-commit mapping works
+
+Mallard parses provider session archives locally to recover session metadata,
+activity windows, recorded branch provenance, and recorded commit references.
+A session's interval runs from its first user prompt to its last agent reply.
+For a Git project, every selected local branch shows the same project-session
+set for the loaded time range, and each session is placed on exactly one
+commit of that branch's first-parent history: the closest commit at or after
+the session's **last user input**, read from the provider's JSONL transcript.
+A session with no commit after its last input is listed under
+**Uncommitted**. The session's timestamp tooltip shows the time of that last
+input.
+
+Placement uses time only. A provider-recorded branch or commit never controls
+visibility, Push, or Pull.
+
+The mapping is rebuilt from `git log` whenever Activity loads: when the app
+opens, on **Reload app data**, on the refresh button, and when the open
+project's `HEAD`, branch refs, or `packed-refs` change outside Mallard, for
+example after a checkout or a commit in a terminal. Reloads follow the
+checked-out branch unless another branch was picked in the branch menu. See
+[docs/DESIGN_GIT_SESSION_MAPPING.md](docs/DESIGN_GIT_SESSION_MAPPING.md).
+
+### Push, Pull, and project-file safety
+
+- Every Push and Pull is reviewed by resource before it changes shared or
+  local state.
+- A conversation that fails during Push or Pull fails alone: the other
+  selected conversations still publish or apply, and the result names the
+  failed one with its reason.
+- Mallard captures only provider-home state; it never captures configuration
+  or instruction files from inside a Git-managed project directory. That
+  content travels with Git.
+- Non-Git project-file scans are explicit and read-only. `.gitignore`,
+  `.ignore`, and `.mallardignore` are honored.
+- VCS data, build output, Codex and Mallard metadata, symlinks, and special
+  files are excluded or blocked. Size and path limits still apply.
+- Non-Git project files can include credential files, private keys, and
+  hard-linked regular files. Credential filenames, detected secrets, and
+  executable content require an explicit warning acknowledgement.
+- Provider-home capture keeps its credential-file and hard-link exclusions.
+- Pull deletions begin unselected. Approved file deletion verifies the local
+  digest and creates a backup; approved directory deletion removes only an
+  exact empty directory and is never recursive.
+- Absolute checkout paths, Codex-home paths, storage credentials, restore
+  plans, receipts, backups, and local preferences stay on the machine.
+- A Mallard Cloud repository that was removed on the website, is being
+  deleted, or is out of the account's reach reads as empty: every session
+  shows its own state, Push and Pull stay open, and a Push creates the
+  repository again at the address it had. Nothing is unlinked, reset or
+  relinked, and a refresh saves nothing; a Push or a Pull saves the
+  repository it used on the link. Any other answer, such as a suspended
+  account, a rejected sign-in or a service that cannot be reached, never
+  reads as empty and keeps Push and Pull closed.
+- The Owner or an Admin of a Mallard Cloud repository, private or public, can
+  discard its draft from the Mallard Cloud chip's panel (**Discard draft…**),
+  after a confirmation: every push after the latest version is removed from
+  Mallard Cloud and the draft is that version again; with no version, every
+  push goes and the repository stays, empty. The row stays in view and is
+  off, with its reason, while there is nothing to remove. Nothing on any
+  computer is deleted. The website's Versions tab offers the same act.
+
+Settings > Sync has separate **Push Codex children** and **Push Claude children**
+switches. Both default to Off and control the next Push. Each cloud task carries
+an On/Off child stamp: Compare uses the cloud stamp, while Push uses this
+computer's setting. Cloud Off compares only the parent. Cloud On includes
+supported owned children in Compare. A stamp difference permits reviewed Push
+for otherwise synchronized content, including a task with no children.
+
+Pull restores exactly the child files listed in the cloud and keeps local
+settings unchanged. Claude supports direct children only and retains agent
+IDs inside the destination parent directory. Inherited children stay outside
+the task's sync scope. With Push enabled, one unsupported owned child omits
+all children and shows an information icon in review. A missing required
+child blocks Push. If that accepted child exists in storage and all other
+evidence is valid, Pull offers Keep both to restore the cloud copy and retain
+the local files.
+
+A Claude task is updated in place, so Pull can meet child files on this
+computer: those an earlier Pull installed, and those Claude wrote here. Pull
+replaces such a file only when the cloud lists that child, and only in the
+state the review saw. Any other file in the place of a listed child stops
+that task. A child that Claude wrote here stays a child of the task when the
+cloud version does not list it. A copy from an earlier Pull does not.
+
+Child changes use the same comparison rules as main changes, and a change on
+this computer beside a change in the cloud reads as diverged. One case is
+different. A child that only this computer has stands against nothing in the
+cloud when the task is updated in place, which is so for Claude: the task
+reads as behind the cloud, Pull installs what the cloud holds and leaves that
+child where it is, and the next Push stores it. So the children that two
+computers made of one task come together in one task. A main conversation or
+a child that was continued on this computer would be replaced by that Pull:
+beside a change in the cloud it reads as diverged, and Pull offers Keep both.
+A Codex update is written under a new identity and would leave the child
+behind, so for Codex every such case reads as diverged.
+
+The session page shows a card for each call of a child agent. It leaves out
+the card of a child that came with a Pull without its transcript. A child
+that was made on this computer has its card, also in a task that was pulled
+without its children.
+
+Review fixes child membership; Apply captures the latest bytes. A source
+change after capture fails that task with a request to Push again. Completed
+writes remain after an Apply error; there is no rollback of the task tree.
+
+This is a schema-1 clean cutover with required new fields. Use fresh Mallard
+state and empty test storage. See the [owned-child design](docs/PLAN_CODEX_OWNED_SUBAGENT_SYNC.md)
+and [verification results](docs/CODEX_OWNED_SUBAGENT_SYNC_VERIFICATION.md). Claude scope and validation are in
+the [Claude design](docs/PLAN_CLAUDE_OWNED_SUBAGENT_SYNC.md) and
+[Claude verification](docs/CLAUDE_OWNED_SUBAGENT_SYNC_VERIFICATION.md).
+
+Refresh reads a session from the place Mallard saved in its file, and only
+what was added after it. The saved place is used only on the same file, and
+only while that file is untouched or has grown. A session file that was
+rewritten, replaced, or shortened is read in full and judged by its content:
+an edited session shows as diverged, and Pull offers Keep both. A pulled
+session, and a session whose file was copied, is read in full each time it
+changes until it is next pushed.
+
+Refresh cannot see an edit that arrives together with new turns, because it
+reads only the new turns. Push reads the whole session. It stops that task
+once, says that earlier messages changed, and switches the saved place off.
+The next Refresh reads the session in full and shows it as diverged. An edit
+is a change to an earlier message. A rewind is not an edit, and neither is
+the rewrite the Claude desktop app makes when it imports a session. Child
+session files are read from their own saved place, under the first rule.
+
+### Architecture
+
+Mallard is a Tauri 2 desktop application. React, TypeScript, and Vite provide
+the review-focused interface; Rust handles discovery, validation, hashing,
+safe filesystem operations, local persistence, and S3/R2 transport.
+
+Every storage shares the same versioned bundle model, and a storage needs
+only three operations: write bytes at a key, read a key, list a prefix. A Push
+writes immutable payload objects, an immutable manifest, and last an immutable
+publication record. There is no mutable head: the current version is selected
+from the names of those records, the same way on every computer, with SHA-256
+checks on everything read. When two computers push on the same version within
+seconds, the earlier record is selected. The other Push counts as not made:
+it fails, or, if it had already been confirmed, the next refresh rolls it
+back and says so. Pushing again publishes the same content, and the losing
+record is kept in the storage and never selected.
+
+A storage that another computer cleared never asks for an unlink or a reset.
+What this computer wrote down about its last sync names a history the storage
+no longer has, so Mallard ignores it without deleting it and compares directly.
+Push is open when nobody has pushed since, and one Push recreates the storage
+under the ids the sessions already had. When another computer pushed first into
+an area this computer also writes, a Pull comes first. A session both computers
+hold is matched from its content: an equal copy is marked as synced, an earlier
+stored version is updated by Push, and a longer or a different stored copy is
+never replaced. Pull then keeps both copies. The activity page says which case
+applies: "Another computer cleared <storage>. Push again." or "… Pull, then
+push again."
+
+### Pull preparation, credential redaction, and path conversion
+
+Pull allocates Codex thread IDs locally during Apply. It uses the existing
+random version-7 format, validation, and bounded collision checks. ID allocation
+starts no Codex process and makes no API request. The schemas remain at 1.
+
+Pull prepares cloud transcripts in a bounded worker queue. It uses the existing
+local worker setting, which defaults to four, and a 64 MiB source-byte budget.
+Running jobs and completed results keep their reservations until installation
+finishes. One transcript above that budget runs alone if the existing file
+limit permits it. Installation follows action order. Source checks, provider
+index changes, bindings, checkpoints, and receipts stay in that serial step.
+
+Codex preparation uses downloaded bytes directly. It does not write and read
+an intermediate transcript file. Both providers analyze cloud content and the
+final local content once each. An immutable result binds the local bytes to
+their digest, provider, codec, thread ID, project root, lineage, and semantic
+digest. Materialization checks those facts against the current operation and
+binding. It verifies the staged SHA-256 without another semantic analysis.
+The output layout, path-map, redaction, shared-index, and destination checks
+remain in place. A preparation or installation failure affects that thread.
+
+Settings > Privacy controls **Credential redaction** for this machine. It is
+Off by default. On replaces detected credentials in exported sessions, child
+sessions, sidecars, provider-state content, and titles. Off preserves that
+content. Exported content can then include API keys, tokens, and passwords.
+Credential-file exclusions and diagnostic sanitization remain active.
+
+Push review shows the selected mode. A setting change before apply requires a
+new review. A save attempted during Push apply returns busy; it does not change
+the saved mode or the active Push. Retry the save after Push completes.
+
+A selected current session with a different stored mode publishes a complete
+new revision under its existing cloud ID. Pull and first-contact comparison use
+the stored revision's mode, independent of this machine's outgoing setting.
+A mode change does not purge comparison caches. On cannot remove content from
+older immutable Off revisions. Off cannot recover text already replaced with
+placeholders. All schemas remain at version 1; there is no migration path.
+
+Conversation path conversion preserves literal marker text and destination
+paths. Tagged references retain absolute, alias, tilde, and URI spellings.
+On return to the same bindings, conversation text is unchanged except for
+credential redaction when enabled. Restore IDs and record layout can change.
+
+Local bindings reference immutable path-origin files. These files hold strict
+record hashes and inverse edits. Retained history uses those edits on later
+Push; only new records are scanned. Missing or stale referenced data fails
+that thread. Origin files stay in the Mallard home and never enter a portable
+manifest. Metadata reset retains this local history data. The format remains
+schema 1 and requires a clean test-data reset for this cutover.
+See [codec details and formal checks](formal/pathmap-origins-v1/README.md).
+
+Apply phase logs report cloud verification, reconstruction, output verification,
+and serial stage/commit time. The preparation total includes its three worker
+phases. Worker durations can overlap each other and serial installation; do
+not add them to estimate wall time. The pipeline phase reports wall time and
+peak admitted jobs and source bytes. The source-byte budget is not a total
+memory limit: parsed records, output bytes, and existing capture state use
+additional memory.
+
+### Pull source checks and copy-on-write materialization
+
+Pull uses the local snapshot captured at the start of the Apply attempt as its
+fixed comparison baseline. Preparation uses that captured digest. After cloud
+verification, one bounded source read and SHA-256 comparison runs before each
+existing thread is installed. A changed, missing, or unreadable source fails
+that thread. Cloud-only creation and metadata-only adoption need no source check.
+
+The rule covers normal updates and approved Keep both actions. In-place
+replacements can overwrite a change made after the check. Their backups use
+the bytes returned by that check, with no further live transcript read.
+Cloud and staged payload verification, destination collision checks, path,
+file-type and size checks, approval checks, and identity and binding revision
+checks remain. Shared provider files, including the Codex session index, retain
+their digest checks through commit. A later write or shared-file conflict can
+still fail the thread. Only successful installation advances its accepted
+checkpoint; successful sibling threads remain applied.
+
+Source-check cost is linear in the total bytes read. The check adds at most
+one transcript buffer. Checked bytes are kept only for the backup or the
+retained-source checkpoint, then released. There is no additional cloud
+request, wait loop, or automatic retry. Internal checked bytes are not
+serialized; schemas remain at 1 without a migration or legacy execution path.
+
+Codex `MaterializeCloud` is always copy-on-write. A native fork can begin
+referencing an unchanged parent between review and apply, so neither a digest
+pin nor a dependency rescan can make replacement of that parent atomic with
+Codex's external writer. Pull instead assigns the standalone history a fresh,
+reviewed-absent alias, preserves the prior rollout bytes, and inserts the new
+index entry without clobbering the old one. Binding/receipt history suppresses
+no content by itself: it derives a domain-separated retained-branch identity,
+and an immutable whole-file checkpoint hides the displaced physical alias only
+while its exact bytes still match the reviewed source. Missing evidence, a
+read failure, or any later append fails open and surfaces that retained branch
+in review, Activity, and Session Detail; publishing it creates a direct
+binding. Revision 11 proves this for a referenced root, revision 8 proves the
+same copy-on-write rule for an unreferenced P2 control, and a focused backend
+regression exercises a changed retained branch plus repeated R1-to-R2
+displacement. Providers without Codex's physical rollout graph retain their
+existing in-place update behavior.
+
+The native POC also proved that
+`history_base.end_ordinal_exclusive` is a global top-level rollout boundary,
+not a physical JSONL row count: the child `session_meta` starts at that ordinal
+and subsequent rows are contiguous. Mallard now enforces those current
+paginated ordinals and decodes portable Codex display titles on Pull in the
+single schema-1 path. Neither correction adds a fallback, migration, old-format
+path, acceptance of ordinal-less paginated data, or schema change. Codex's
+upstream `history_mode: "legacy"` remains its separate current ordinal-less
+source mode, not a Mallard legacy execution path.

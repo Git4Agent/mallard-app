@@ -135,7 +135,7 @@ const MAX_APP_SERVER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_APP_SERVER_MESSAGES: usize = 4_096;
 const MAX_AIMOCK_CONTROL_BYTES: u64 = 512 * 1024;
 const AIMOCK_START_TIMEOUT: Duration = Duration::from_secs(30);
-const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.156.0";
+const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.162.1";
 const EXPECTED_SOURCE_CODEX_TURNS: usize = 5;
 const EXPECTED_GRAPH_APP_SERVER_TURNS: usize = 5;
 const EXPECTED_GRAPH_MUTATION_TURNS: usize = 7;
@@ -211,7 +211,7 @@ fn assert_supported_codex_version() {
     assert_eq!(
         version.trim(),
         EXPECTED_CODEX_VERSION,
-        "the live fixture requires Codex 0.156.0; update the current-format writer before running against another version"
+        "the live fixture requires Codex 0.162.1; update the current-format writer before running against another version"
     );
     assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
     assert_process_home_has_no_sensitive_state(&process_home, &[]);
@@ -2299,7 +2299,7 @@ fn session_meta_record(
             "timestamp": "2026-08-18T00:00:00Z",
             "cwd": cwd.to_string_lossy(),
             "originator": "codex_exec",
-            "cli_version": "0.156.0",
+            "cli_version": "0.162.1",
             "source": "exec",
             "model_provider": PROVIDER_ID,
             "base_instructions": null,

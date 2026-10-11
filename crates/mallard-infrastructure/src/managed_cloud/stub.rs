@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-const MAX_OBJECT_BYTES: usize = 90 * 1024 * 1024;
+const MAX_OBJECT_BYTES: usize = 100 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const LISTING_PAGE: usize = 1_000;
@@ -2423,7 +2423,7 @@ fn put_store(
         KeyClass::Marker => return error("key_invalid", "the marker is never written"),
         KeyClass::Object { sha256: expected } => {
             if too_large(MAX_OBJECT_BYTES) {
-                return error("object_too_large", "over 90 MiB");
+                return error("object_too_large", "over 100 MiB");
             }
             if expected != &sha256 {
                 return error("object_integrity_failed", "the key digest differs");

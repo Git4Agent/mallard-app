@@ -39,7 +39,7 @@ pub(crate) fn max_line_bytes() -> usize {
 const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_AFFECTED_PATHS_PER_TOOL: usize = 1_024;
-/// 6: timeline spans cover retained historical sources and the current rollout.
+/// Timeline spans cover retained historical sources and the current rollout.
 pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
 /// The head and tail of a child rollout its row is read from: the
 /// `session_meta` naming the agent, and the final message.
@@ -219,6 +219,10 @@ struct ProjectedInfo {
 #[derive(Default, Serialize, Deserialize)]
 struct ProjectedRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator_user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creator_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     r#type: Option<String>,
     #[serde(
         default,
@@ -329,8 +333,21 @@ fn is_meaningful_user_text(value: &str) -> bool {
         .any(|prefix| trimmed.starts_with(prefix))
 }
 
+/// Opaque IDs stay bounded and cannot carry paths or arbitrary display text.
+fn creator_id(value: Option<&Value>) -> Option<String> {
+    let text = value?.as_str()?;
+    (!text.is_empty()
+        && text.len() <= 256
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then(|| text.to_owned())
+}
+
 struct RolloutParser {
     thread_id: Option<String>,
+    creator_user_id: Option<String>,
+    creator_account_id: Option<String>,
     cwd: Option<String>,
     first_timestamp: Option<u64>,
     last_timestamp: Option<u64>,
@@ -361,6 +378,8 @@ impl RolloutParser {
     fn new() -> Self {
         Self {
             thread_id: None,
+            creator_user_id: None,
+            creator_account_id: None,
             cwd: None,
             first_timestamp: None,
             last_timestamp: None,
@@ -412,6 +431,8 @@ impl RolloutParser {
                 self.is_internal_subagent = session_meta_is_internal_subagent(payload);
                 self.thread_id = string_alias(payload, &["id", "thread_id", "session_id"])
                     .map(ToOwned::to_owned);
+                self.creator_user_id = creator_id(payload.get("creator_user_id"));
+                self.creator_account_id = creator_id(payload.get("creator_account_id"));
             }
             if self.cwd.is_none() {
                 self.cwd = string_alias(payload, &["cwd", "working_directory", "project_path"])
@@ -546,6 +567,8 @@ impl RolloutParser {
             .map(|ended_at| ended_at.max(started_at.unwrap_or(0)));
         Ok(SessionFileSummary {
             session_id: thread_id,
+            creator_user_id: self.creator_user_id,
+            creator_account_id: self.creator_account_id,
             title: summary.clone(),
             summary,
             started_at,
@@ -3401,6 +3424,55 @@ mod tests {
 
     fn count_value(count: &SessionCount) -> u64 {
         count.value.expect("supported count")
+    }
+
+    #[test]
+    fn creator_ids_come_only_from_the_active_session_metadata() {
+        for identity in [
+            json!({"creator_user_id":"user_source", "creator_account_id":"account-source"}),
+            json!({"creator_user_id":"user_source"}),
+            json!({"creator_user_id":null, "creator_account_id":null}),
+            json!({}),
+        ] {
+            let mut parser = RolloutParser::new();
+            let mut payload = json!({"id":"leaf", "cwd":"/tmp/project"});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(identity.as_object().unwrap().clone());
+            parser.consume(&json!({"type":"session_meta", "payload":payload}));
+            // Neither an ancestor nor a later record can retag the creator.
+            for id in ["parent", "leaf"] {
+                parser.consume(&json!({"type":"session_meta", "payload":{
+                    "id":id, "cwd":"/tmp/project", "creator_user_id":"other-user",
+                    "creator_account_id":"other-account"
+                }}));
+            }
+            let summary = parser.finish().unwrap();
+            assert_eq!(
+                summary.creator_user_id.as_deref(),
+                identity["creator_user_id"].as_str()
+            );
+            assert_eq!(
+                summary.creator_account_id.as_deref(),
+                identity["creator_account_id"].as_str()
+            );
+        }
+        for bad in [
+            json!(""),
+            json!("x".repeat(257)),
+            json!("/tmp/private"),
+            json!("two words"),
+            json!("line\nbreak"),
+            json!(123),
+            json!([]),
+        ] {
+            assert_eq!(creator_id(Some(&bad)), None);
+        }
+        assert_eq!(
+            creator_id(Some(&json!("x".repeat(256)))),
+            Some("x".repeat(256))
+        );
     }
 
     #[test]

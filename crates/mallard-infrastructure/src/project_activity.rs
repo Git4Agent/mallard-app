@@ -2800,6 +2800,8 @@ mod activity_only_tests {
             self.summary_calls.fetch_add(1, Ordering::SeqCst);
             Ok(SessionFileSummary {
                 session_id: "session-1".to_string(),
+                creator_user_id: None,
+                creator_account_id: None,
                 title: Some("One".to_string()),
                 summary: None,
                 started_at: Some(1),

@@ -1574,12 +1574,18 @@ mod tests {
     fn encode_emits_token_wire_and_decode_restores_target_paths() {
         let directory = tempfile::tempdir().unwrap();
         let mut files = BTreeMap::new();
+        let with_creator = |line: String, user: &str, account: &str| {
+            let mut value: Value = serde_json::from_str(&line).unwrap();
+            value["payload"]["creator_user_id"] = json!(user);
+            value["payload"]["creator_account_id"] = json!(account);
+            value.to_string()
+        };
         let p0 = write(
             &directory,
             &mut files,
             "p0",
             &[
-                meta_line("p0", None),
+                with_creator(meta_line("p0", None), "user-parent", "account-parent"),
                 message_line("m1", "created /tmp/project/readme"),
                 message_line("m2", "out of root: /tmp/other/readme"),
             ],
@@ -1590,7 +1596,11 @@ mod tests {
             &mut files,
             "p1",
             &[
-                meta_line("p1", Some(("p0", 3, p0_len))),
+                with_creator(
+                    meta_line("p1", Some(("p0", 3, p0_len))),
+                    "user-leaf",
+                    "account-leaf",
+                ),
                 message_line("m3", "see file:///tmp/project/read%20me"),
             ],
         );
@@ -1627,6 +1637,14 @@ mod tests {
         assert!(text.contains("/__mallard_root__/bu;/read%20me"));
         let head_cwd = output_records(&wire.root_bytes)[0]["payload"]["cwd"].clone();
         assert_eq!(head_cwd, json!(ROOT_TOKEN));
+        assert_eq!(
+            output_records(&wire.root_bytes)[0]["payload"]["creator_user_id"],
+            "user-leaf"
+        );
+        assert_eq!(
+            output_records(&wire.root_bytes)[0]["payload"]["creator_account_id"],
+            "account-leaf"
+        );
 
         // The wire parses as an ordinary rollout.
         let staged = directory.path().join("staged.jsonl");
@@ -1674,6 +1692,9 @@ mod tests {
         assert!(text.contains("/tmp/other/readme"));
         let records = output_records(&local.root_bytes);
         assert_eq!(records[0]["payload"]["cwd"], json!("/home/other/project"));
+        // A destination thread ID must not replace the recorded creator.
+        assert_eq!(records[0]["payload"]["creator_user_id"], "user-leaf");
+        assert_eq!(records[0]["payload"]["creator_account_id"], "account-leaf");
 
         // The wire tail and the local tail share coordinates but not codecs
         // or states: forms are never cross-compared.

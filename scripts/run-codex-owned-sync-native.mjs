@@ -95,7 +95,7 @@ async function main() {
     return true;
   }});
   try {
-    check((await runCli("codex", ["--version"], sourceEnv, root)).trim() === "codex-cli 0.152.0", "codex_version");
+    check((await runCli("codex", ["--version"], sourceEnv, root)).trim() === "codex-cli 0.162.1", "codex_version");
     await mock.start();
     await runCli("codex", codexArgs(mock.url), sourceEnv, join(root, "source/project"), join(root, "spawn.log"));
     check(!protocolError, protocolError ?? "protocol_failed");
@@ -140,7 +140,7 @@ async function main() {
       check(imported.children.length === 0 && !omittedChildControlled, "omitted_child_was_controlled");
     } else check((await transcripts(join(root, "target/config/sessions"))).length === 2, "unexpected_new_native_child");
     check(hash(JSON.stringify(await sourceState())) === sourceDigest, "source_tree_changed");
-    console.log(JSON.stringify({ checks_passed: true, codex: "0.152.0", native_children: imported.children.length, shared_home_omission: sharedOmission, cold_main_resume: true, cold_child_resume: !sharedOmission, child_file_appended: !sharedOmission, omitted_child_control_blocked: sharedOmission, source_tree_unchanged: true, model_requests: requests }));
+    console.log(JSON.stringify({ checks_passed: true, codex: "0.162.1", native_children: imported.children.length, shared_home_omission: sharedOmission, cold_main_resume: true, cold_child_resume: !sharedOmission, child_file_appended: !sharedOmission, omitted_child_control_blocked: sharedOmission, source_tree_unchanged: true, model_requests: requests }));
     if (process.argv.includes("--keep-fixture")) console.log(`Fixture: ${root}`);
     else await rm(root, { recursive: true, force: true });
   } catch (error) {

@@ -100,9 +100,13 @@ The integration tests intentionally enforce this cutover.
   esbuild. Rust unit and integration tests live beside their modules and under
   `src-tauri/src/sync_tests/`.
 
-`README.md` and the active code describe current behavior. Files under
-`docs/PLAN_*` and `docs/superpowers/` are design history unless a task
-explicitly names them. When documentation and implementation disagree, verify
+`README.md` (with `README.zh-CN.md`) is the short public introduction; its
+images live in `docs/readme/`. Current behavior is described by the active
+code, `docs/FEATURES.md`, `docs/STORAGE_SETUP.md`, `TECHNICAL_REPORT.md`
+(section 15 holds the sync behavior reference), and `docs/DEVELOPMENT.md`
+for building and the live and end-to-end suites. Files under `docs/PLAN_*`
+and `docs/superpowers/` are design history unless a task explicitly names
+them. When documentation and implementation disagree, verify
 the current schemas and command surface in code before editing.
 
 ## Development commands
