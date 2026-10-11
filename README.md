@@ -1,5 +1,3 @@
-<p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/readme/mallard-dark.png">
@@ -16,7 +14,7 @@
   <a href="https://linux.do"><img src="https://img.shields.io/badge/LINUX--DO-Community-blue.svg?logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgdmlld0JveD0iMCAwIDEyMCAxMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI%2BPGNsaXBQYXRoIGlkPSJhIj48Y2lyY2xlIGN4PSI2MCIgY3k9IjYwIiByPSI0NyIvPjwvY2xpcFBhdGg%2BPGNpcmNsZSBmaWxsPSIjZjBmMGYwIiBjeD0iNjAiIGN5PSI2MCIgcj0iNTAiLz48cmVjdCBmaWxsPSIjMWMxYzFlIiBjbGlwLXBhdGg9InVybCgjYSkiIHg9IjEwIiB5PSIxMCIgd2lkdGg9IjEwMCIgaGVpZ2h0PSIzMCIvPjxyZWN0IGZpbGw9IiNmMGYwZjAiIGNsaXAtcGF0aD0idXJsKCNhKSIgeD0iMTAiIHk9IjQwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjQwIi8%2BPHJlY3QgZmlsbD0iI2ZmYjAwMyIgY2xpcC1wYXRoPSJ1cmwoI2EpIiB4PSIxMCIgeT0iODAiIHdpZHRoPSIxMDAiIGhlaWdodD0iMzAiLz48L3N2Zz4%3D&style=flat" alt="LINUX DO"></a>
 </p>
 <p align="center">
-  <a href="https://github.com/Git4Agent/mallard-app/releases/latest"><b>Download</b></a> · <a href="https://mallard-ai.com">Website</a> · <a href="https://mallard-ai.com/docs">Docs</a>
+  <a href="https://github.com/Git4Agent/mallard-app/releases/latest"><b>Download</b></a> · <a href="https://mallard-ai.com">Website</a> · <a href="https://mallard-ai.com/docs">Docs</a> · <b>English</b> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 <p align="center">
   <a href="https://mallard-ai.com"><img src="docs/readme/demo.jpg" alt="Watch the 15-second demo"></a>

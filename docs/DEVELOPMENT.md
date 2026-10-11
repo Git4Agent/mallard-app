@@ -66,9 +66,31 @@ membership after repeated opens, rejects another home containing the same chat,
 and checks that history stays unchanged. It repeats after restarting only that
 fixture Desktop. Tests never use personal provider homes.
 
-Windows pipe discovery and profile verification are platform guarded. macOS
-placement remains a separate, unvalidated integration task. Native membership
-readback is distinct from a screenshot or complete Mallard UI acceptance test.
+macOS uses the same native assignment flow. Desktop rejects direct callers
+outside its trusted process tree, so Mallard registers the
+`mallard_project_placement` MCP server through Codex's config API. Its script and
+private connection records stay in `CODEX_HOME/.mallard-project-placement`.
+Desktop starts the helper with its bundled Node. The helper exposes no tools to
+the model. Mallard checks the selected home and connection token before it sends
+the native move and navigation requests.
+
+Registration occurs before the existing macOS `open -n` launch. A loaded chat
+does not reliably reload a new MCP registration. Open in Codex now opens only
+the existing chat; the former new-chat project route did not assign membership.
+Both platforms require one exact destination in Desktop's local project list.
+
+Run the macOS native test with the installed official Desktop app:
+
+```sh
+node scripts/poc-codex-macos-placement.mjs
+```
+
+The runner uses a temporary Codex home, separate Electron data, and one local
+mock response to create the fixture. It tests production registration, native
+membership, repeated opens, restart persistence, rejected requests, configuration
+preservation, and complete chat history preservation. It closes only its fixture
+processes. Native membership readback is distinct from a screenshot or complete
+Mallard UI acceptance test.
 
 ## Manual test flows
 

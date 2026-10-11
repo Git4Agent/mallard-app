@@ -344,8 +344,9 @@ changes and selected provider homes were preserved. Only disposable fixture
 profiles were changed, and the fixture Desktop was stopped afterward. No native
 Mallard end-to-end success is claimed by this experiment.
 
-That attempt left a reliable, profile-bound connection to a running Desktop
-unresolved. The Windows-only integration below avoids the MCP helper lifecycle.
+That Windows attempt left a reliable, profile-bound connection to a running
+Desktop unresolved. The Windows integration below avoids the MCP helper
+lifecycle. The later macOS integration is described at the end of this document.
 
 ## Windows production integration
 
@@ -399,3 +400,55 @@ native placement test was run explicitly by the integration phase.
 The Tauri backend library suite also passed: 571 tests, 0 failures, 15 opt-in
 tests ignored. JavaScript syntax, Rust formatting for the placement modules,
 and the whitespace diff check passed.
+
+## macOS production integration
+
+The macOS app (`26.1007.30912`, bundled CLI `0.162.0-alpha.17.2`) rejects a direct
+Mallard connection with `untrusted-process-ancestry`. A standard MCP server
+started by Desktop's own Core can use the native endpoint. The
+[upstream report](https://github.com/openai/codex/issues/47425) describes the same
+process ancestry restriction.
+
+Mallard registers one `mallard_project_placement` MCP server through Codex's
+config API with a version check. Desktop runs its script with the bundled Node. The
+script and private connection records stay under the selected Codex home. The
+connection checks the canonical home and a random token. It permits project
+listing, native membership readback, moving the selected chat, and navigation
+to that chat. It exposes no tools to the model.
+
+The adapter uses the existing `assign_with_request` flow. It resolves one exact
+local project, sends the move once, checks the reply, and opens the same chat.
+It does not edit native membership files or backend project IDs.
+
+Registration precedes the macOS `open -n` launch. A loaded chat does not reliably
+reload a new MCP entry. The early prototype replaced the fixture's complete
+configuration, which also triggered Desktop's own configuration reconciliation;
+that result did not prove that adding one entry to a running app was enough.
+The production test preserves the existing configuration and registers before
+starting the isolated Desktop.
+
+MCP discovery can close a temporary client while a placement is in progress.
+On stdin closure, the helper stops accepting connections and allows an existing
+placement connection to finish within 30 seconds. It exits when that connection
+closes. SIGTERM and SIGINT stop it immediately. It never detaches from Core. Stale
+connection records are removed only after their process is gone and their
+content digest still matches.
+
+```sh
+node scripts/poc-codex-macos-placement.mjs
+```
+
+The native test passed on the installed macOS app. It checked the initial
+projectless state, the production move and navigation, repeated opens, and
+membership after an isolated restart before another move. It also checked
+wrong-home, wrong-token, and wrong-chat rejection, idempotent registration,
+configuration preservation, and the original chat history. Desktop appended
+only its normal thread-settings events. One local mock response created the
+fixture; assignment required no model turn. All fixture processes were closed.
+This is native adapter verification, not a full Mallard UI acceptance test.
+
+The infrastructure library suite passed 899 tests, with 11 opt-in tests ignored.
+The Tauri backend library suite passed 585 tests, with 15 opt-in tests ignored.
+The macOS native test was run explicitly for the initial launch and restart.
+JavaScript syntax, Rust formatting for the changed modules, and the whitespace
+diff check also passed.

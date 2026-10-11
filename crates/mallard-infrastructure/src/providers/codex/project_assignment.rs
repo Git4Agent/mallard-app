@@ -1,6 +1,8 @@
 //! Move an existing chat through Desktop's authoritative sidebar operation.
 //! Backend thread metadata alone does not update Desktop project membership.
 
+#[cfg(target_os = "macos")]
+pub(super) mod macos;
 #[cfg(windows)]
 mod windows;
 

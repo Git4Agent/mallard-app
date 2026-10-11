@@ -11,7 +11,7 @@ pub mod discovery;
 pub mod history;
 pub mod materialization;
 pub mod naming;
-#[cfg(any(windows, test))]
+#[cfg(any(target_os = "macos", windows, test))]
 mod project_assignment;
 mod timeline_sources;
 
