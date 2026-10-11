@@ -24,6 +24,7 @@ use crate::providers::{
     SessionTimelineIndex, SessionTimelinePageSlice, SessionTimelineQuery, SessionToolCategory,
     AGENT_RESOURCE_SEGMENT,
 };
+use crate::session_path_map::{root_family, RootFamily};
 use crate::stored_session::StoredSessionTranscript;
 use mallard_domain::{
     hex_lower, parse_conversation_resource_id, sha256_hex, LocalConversationBinding,
@@ -1701,7 +1702,10 @@ fn valid_full_sha(value: &str) -> bool {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+    command
         .current_dir(root)
         .args(args)
         .output()
@@ -1839,11 +1843,16 @@ fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String
         .replace(transcript.as_ref(), "<session-transcript>")
         .replace(provider_home.as_ref(), "<provider-home>");
     for project_root in &session.project_root_aliases {
-        redacted = replace_sensitive_path_occurrences(
-            &redacted,
-            project_root.to_string_lossy().as_ref(),
-            ".",
-        );
+        let project_root = project_root.to_string_lossy();
+        redacted = replace_sensitive_path_occurrences(&redacted, &project_root, ".");
+        // Markdown also uses forward slashes for Windows project paths.
+        if root_family(&project_root) == Some(RootFamily::Windows) {
+            redacted = replace_sensitive_path_occurrences(
+                &redacted,
+                &project_root.replace('\\', "/"),
+                ".",
+            );
+        }
     }
     redacted
 }
@@ -3245,6 +3254,68 @@ mod tests {
                 "outside=/var/folders/run/project1_copy_external/outside.txt"
             )
         );
+    }
+
+    #[test]
+    fn session_text_sanitizes_windows_forward_slash_media_and_download_links() {
+        let mut session = sanitization_session();
+        session.project_root = PathBuf::from(r"D:\fixture\project1");
+        session.project_root_aliases = vec![
+            session.project_root.clone(),
+            PathBuf::from(r"D:\selected\project1"),
+        ];
+        let input = concat!(
+            "![GIF](D:/fixture/project1/animation.gif)\n",
+            "![Picture](D:/selected/project1/images/picture.png)\n",
+            "[Download GIF](D:/fixture/project1/animation.gif)\n",
+            "[Download picture](D:/selected/project1/images/picture.png)"
+        );
+        assert_eq!(
+            sanitize_boundary_text(input, &session),
+            concat!(
+                "![GIF](./animation.gif)\n",
+                "![Picture](./images/picture.png)\n",
+                "[Download GIF](./animation.gif)\n",
+                "[Download picture](./images/picture.png)"
+            )
+        );
+        let json = serde_json::json!({
+            "cwd": "D:/fixture/project1",
+            "image": "D:/fixture/project1/images/picture.png",
+            "native": r"D:\fixture\project1\animation.gif",
+            "outside": "D:/fixture/project1_external/animation.gif",
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sanitize_boundary_text(
+                &json.to_string(),
+                &session,
+            ))
+            .unwrap(),
+            serde_json::json!({
+                "cwd": ".",
+                "image": "./images/picture.png",
+                "native": r".\animation.gif",
+                "outside": "D:/fixture/project1_external/animation.gif",
+            })
+        );
+    }
+
+    #[test]
+    fn session_text_keeps_windows_forward_slash_paths_outside_project() {
+        let mut session = sanitization_session();
+        session.project_root = PathBuf::from(r"D:\fixture\project1");
+        session.project_root_aliases = vec![session.project_root.clone()];
+        for path in [
+            "D:/fixture/project1_external/animation.gif",
+            "D:/fixture/project1-copy/animation.gif",
+            "D:/fixture/project1.bak/animation.gif",
+            "D:/fixture/project10/animation.gif",
+            "E:/fixture/project1/animation.gif",
+            "prefixD:/fixture/project1/animation.gif",
+        ] {
+            let input = format!("![Outside]({path}) [Download]({path})");
+            assert_eq!(sanitize_boundary_text(&input, &session), input);
+        }
     }
 
     #[test]

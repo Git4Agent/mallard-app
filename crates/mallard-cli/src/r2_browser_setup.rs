@@ -256,6 +256,8 @@ impl WranglerClient {
 
     fn command(&self, args: &[&str], account_id: Option<&str>) -> Command {
         let mut command = Command::new(&self.program);
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
         command
             .args(&self.prefix_args)
             .args(args)

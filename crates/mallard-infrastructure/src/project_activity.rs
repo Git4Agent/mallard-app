@@ -2207,7 +2207,10 @@ fn is_valid_git_object_id(value: &str) -> bool {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    let mut command = Command::new("git");
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+    command
         .current_dir(root)
         .args(args)
         .output()

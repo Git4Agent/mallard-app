@@ -68,7 +68,7 @@ fn launch_claude_app(
 fn claude_code_new_deep_link(project_root: &Path) -> String {
     format!(
         "claude://code/new?folder={}",
-        percent_encode_uri_component(&project_root.to_string_lossy())
+        percent_encode_uri_component(&dunce::simplified(project_root).to_string_lossy())
     )
 }
 
@@ -382,6 +382,11 @@ mod tests {
         assert_eq!(
             claude_code_new_deep_link(Path::new("/Users/dev/测试 文件")),
             "claude://code/new?folder=%2FUsers%2Fdev%2F%E6%B5%8B%E8%AF%95%20%E6%96%87%E4%BB%B6"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            claude_code_new_deep_link(Path::new(r"\\?\D:\Projects\测试 文件")),
+            "claude://code/new?folder=D%3A%5CProjects%5C%E6%B5%8B%E8%AF%95%20%E6%96%87%E4%BB%B6"
         );
 
         let mut refuse = |command: &str| panic!("a refused start launched {command}");

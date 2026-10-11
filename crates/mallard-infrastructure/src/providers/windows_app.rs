@@ -190,6 +190,8 @@ pub fn launch_app(app: &WindowsApp, env: &[(&str, &Path)], args: &[&str]) -> Res
         return launch_packaged_app(package, &app.executable, env, args);
     }
     let mut command = std::process::Command::new(&app.executable);
+    // Console-subsystem launchers must show only the desktop app's own UI.
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
     for (name, value) in env {
         command.env(name, value);
     }

@@ -3360,7 +3360,10 @@ fn project_file_sync_eligibility(binding: &ProjectBinding) -> ProjectFileSyncEli
             detected_root: None,
         };
     }
-    match std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+    match command
         .env("LC_ALL", "C")
         .env("LANG", "C")
         .arg("-C")

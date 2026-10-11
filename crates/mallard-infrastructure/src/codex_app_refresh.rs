@@ -558,6 +558,8 @@ fn run_capture_bounded(
     timeout: Duration,
 ) -> Result<(bool, Vec<u8>), String> {
     command.stdout(Stdio::piped());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(command, 0x0800_0000); // CREATE_NO_WINDOW
     let mut child = command
         .spawn()
         .map_err(|_| "start Codex App platform adapter".to_string())?;
@@ -594,6 +596,8 @@ fn run_capture_bounded(
 }
 
 fn run_status_bounded(command: &mut Command, timeout: Duration) -> Result<bool, String> {
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(command, 0x0800_0000); // CREATE_NO_WINDOW
     let mut child = command
         .spawn()
         .map_err(|_| "start Codex App platform adapter".to_string())?;
@@ -614,6 +618,49 @@ fn run_status_bounded(command: &mut Command, timeout: Duration) -> Result<bool, 
 #[cfg(test)]
 mod message_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn background_helpers_run_without_a_console() {
+        const CHILD: &str = "MALLARD_TEST_BACKGROUND_CONSOLE";
+        const MARKER: &str = "background child output";
+        if std::env::var_os(CHILD).is_some() {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetConsoleWindow() -> *mut std::ffi::c_void;
+            }
+            // Query this fixture process only; no real app or provider home is used.
+            let has_console = unsafe { !GetConsoleWindow().is_null() };
+            println!("{MARKER}");
+            std::process::exit(i32::from(has_console));
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let child = || {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "codex_app_refresh::message_tests::background_helpers_run_without_a_console",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .current_dir(temp.path())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null());
+            command
+        };
+        let (success, output) = run_capture_bounded(&mut child(), APP_COMMAND_TIMEOUT).unwrap();
+        assert!(
+            success,
+            "capturing a background command allocated a console"
+        );
+        assert!(String::from_utf8_lossy(&output).contains(MARKER));
+        assert!(
+            run_status_bounded(child().stdout(Stdio::null()), APP_COMMAND_TIMEOUT).unwrap(),
+            "waiting for a background command allocated a console"
+        );
+    }
 
     #[test]
     fn offers_and_results_keep_their_english_beside_the_values() {

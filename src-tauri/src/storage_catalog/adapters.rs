@@ -122,6 +122,8 @@ impl PluginProcessRunner for NativeProcessRunner {
         let settings = mallard_infrastructure::app_settings::load_app_settings(&repository)?;
         let resolved = adapter.resolve_cli(settings.cli_path(provider))?;
         let mut command = std::process::Command::new(&resolved.executable);
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
         command
             .args(argv)
             .current_dir(home)
