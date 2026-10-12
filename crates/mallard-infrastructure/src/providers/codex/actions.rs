@@ -159,7 +159,7 @@ pub(crate) fn launch_codex_app(
     {
         use crate::providers::windows_app::{display_launch, launch_app, scheme_handler};
         let _ = cli_path;
-        let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
+        codex_app_deep_links(thread_id, project_root, codex_home)?;
         let app = scheme_handler("codex")?;
         let env = [("CODEX_HOME", codex_home)];
 
@@ -174,8 +174,9 @@ pub(crate) fn launch_codex_app(
             thread_id,
             project_root,
             || {
-                before_launch(&display_launch(&app, &env, &[deep_links[0].as_str()]));
-                launch_app(&app, &env, &[deep_links[0].as_str()])
+                let link = codex_project_deep_link(project_root);
+                before_launch(&display_launch(&app, &env, &[&link]));
+                launch_app(&app, &env, &[&link])
             },
         )
     }

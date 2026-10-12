@@ -10,6 +10,77 @@ were preserved. The Windows production integration now uses Desktop's own
 backend and verifies its profile through Windows process and file ownership;
 see the integration section below.
 
+## Automatic project registration POC
+
+Verified on Windows on 2026-10-11 with Desktop package `26.1007.2314.0`
+and `codex-app-tools` `0.1.6`: **a missing Desktop project can be registered
+automatically, and the existing chat can then be placed and opened.**
+The Windows production launch flow now uses this sequence. The
+`registration-integration` phase exercises the Rust placement code with an
+unregistered destination and a restored `notLoaded` chat, then repeats after a
+fixture Desktop restart. It uses the same installation arguments shown below.
+
+The `registration-owned` phase of
+[poc-codex-native-placement.mjs](../scripts/poc-codex-native-placement.mjs)
+starts with a fresh provider home and Desktop user-data directory. It creates
+one completed chat through a local mock model, stops that fixture backend,
+and launches Desktop with its own backend. It seeds no project or assignment
+and never patches Desktop's global-state file.
+
+The verified sequence is:
+
+1. Confirm that a live child of this isolated Desktop owns the selected
+   profile's state database, and that Desktop owns the native pipe.
+2. Complete tool discovery and a read-only readiness request. Confirm the
+   destination is absent from Desktop's project list.
+3. Open `codex://threads/new?path=<encoded-absolute-directory>` in that same
+   isolated Desktop. Poll `list_projects` for one exact local folder match,
+   with a 30-second registration deadline. Send the folder link once.
+4. Navigate to the existing chat and read its expected history. Send one
+   native project move and verify its reply, sidebar membership, and navigation.
+5. Repeat opening, then restart only the fixture Desktop and verify again.
+
+The final Desktop-owned run passed all eight checks:
+
+- verified profile ownership and native pipe ownership;
+- existing chat initially reported `notLoaded`;
+- missing project registered without a seed or manual action, in 11.049 seconds;
+- the same existing chat was read, placed, and opened through native operations;
+- repeated opening created no duplicate project or chat;
+- a different selected home was rejected before a native request;
+- a cold restart preserved the registered project ID and chat membership;
+- title, preview, complete returned turns, and all original transcript bytes
+  were preserved.
+
+**Do not require `read_thread.thread.status.type === "idle"` to establish that
+a stored chat can be read and placed.** This run returned `notLoaded` on all
+three successful opens, including after restart, while returning the complete
+expected history and successfully performing the native move. The POC checks
+chat identity, history, the move result, and membership instead. Earlier
+attempts that waited for `idle` timed out; they did not establish a failure
+of project registration.
+
+Run with the same installation variables used by the placement POC below:
+
+```powershell
+node scripts/poc-codex-native-placement.mjs --phase=registration-owned `
+  "--cli=$codexCli" "--executable=$desktopExe" `
+  "--connector=$appToolsServer" "--family=$packageFamily"
+```
+
+The runner prints the temporary fixture directory and writes
+`registration-owned-report.json` there. Its
+[profile-owner helper](../scripts/poc-windows-profile-owner.ps1) uses only
+Restart Manager query operations; cleanup targets only this fixture's recorded
+processes after checking their command lines. The ordinary user Desktop and
+provider homes are not test inputs.
+
+The separate `registration` phase also passed using an isolated external
+loopback backend, with registration in 8.910 seconds. Native membership and
+navigation replies were verified in both topologies. Screenshots and macOS
+behavior were not verified. No live model turn is needed to register, place,
+or open the chat.
+
 ## Working native POC
 
 Run [poc-codex-native-placement.mjs](../scripts/poc-codex-native-placement.mjs)
@@ -81,10 +152,10 @@ terminates a process by application name. Diagnostic phases are also available;
 use `--phase=cleanup --root=<printed temporary root>` for a manually started POC.
 
 The first automated attempts tried creating only a backend project after Desktop
-startup. Desktop registration was not reliable, so those attempts failed rather
-than reporting a false success. The final fixture starts with an existing
-Desktop project, matching the existing-project placement problem. Registering
-new Desktop projects is a separate unproved capability.
+startup. Desktop registration was not reliable, so those attempts failed.
+The original placement fixture therefore starts with an existing Desktop
+project. The automatic-registration POC above separately proves registration
+through Desktop's folder deep link without seeding a project.
 
 ### Boundaries
 
@@ -368,16 +439,21 @@ installation, provider configuration edits, or changes to the selected home.
    its server. Perform `tools/list` before the first tool call; the installed
    Desktop initializes its dispatcher during this read-only handshake. Require
    project listing, native move, and native navigation capabilities.
-5. Resolve one exact local project folder, send one native move, validate the
-   returned chat/host/project identity, then navigate through the same connection.
-   Desktop's native move hydrates old chats; production does not require them to
-   appear within `list_threads`' 50-item recency window.
+5. Resolve one exact local project folder. If missing, launch its folder deep
+   link once with the selected home and poll the native project list within the
+   placement deadline. If Desktop replaces Core, re-verify the same home and
+   Desktop before continuing on the existing connection.
+6. Navigate to the existing chat and confirm its local identity. A `notLoaded`
+   chat is ready when its stored history is readable; it need not become idle.
+   Send one native move, validate the returned chat/host/project identity, then
+   navigate through the same connection. Old chats need not appear within
+   `list_threads`' 50-item recency window.
 
-The project must already be registered in Desktop. A different profile, missing
-project, ambiguous match, unavailable capability, or unconfirmed operation fails
-explicitly. The adapter does not use inherited endpoint variables and never
-retries a move. A Desktop using a separately managed/external backend cannot
-satisfy this process-parent contract and is refused.
+A different profile, ambiguous match, unavailable capability, or unconfirmed
+operation fails explicitly. The adapter does not use inherited endpoint
+variables and never retries a move. A Desktop using a separately
+managed/external backend cannot satisfy this process-parent contract and is
+refused.
 
 After the original POC creates a populated temporary fixture, run:
 
@@ -386,19 +462,21 @@ node scripts/poc-codex-native-placement.mjs --phase=integration --root=<temporar
 ```
 
 This phase launches isolated Desktop with its own backend, invokes the Rust
-production assignment code, and verifies native membership. It reproduces the
-backend-only failure, opens the same chat twice, rejects another home containing
-a copied chat, checks complete history preservation, and repeats after a fixture
-Desktop restart. It saves a sanitized `integration-report.json` and stops only
-its recorded fixture processes. The normal app launch helper is covered
-separately; this is not a full Mallard UI or screenshot acceptance test.
+production assignment code, and verifies native membership. It opens the same
+chat twice, rejects another home containing a copied chat, checks history
+preservation, and repeats after a fixture Desktop restart. The
+`registration-integration` phase additionally starts with an unregistered
+folder and exercises the production packaged launch helper. Both save a
+sanitized `integration-report.json` and stop only their recorded fixture
+processes. This is not a full Mallard UI or screenshot acceptance test.
 
 Validation on the installed Windows Desktop (`26.1007.2314.0`): the production
-integration phase passed both runs, including the cold restart. The infrastructure
-library suite passed 851 tests, with 8 opt-in tests ignored in that suite; the
+registration integration phase passed both runs, including the cold restart.
+The infrastructure library suite passed 864 tests, with 8 opt-in tests ignored; the
 native placement test was run explicitly by the integration phase.
 The Tauri backend library suite also passed: 571 tests, 0 failures, 15 opt-in
-tests ignored. JavaScript syntax, Rust formatting for the placement modules,
+tests ignored, using a short temporary root outside the Git checkout.
+JavaScript syntax, Rust formatting for the placement modules,
 and the whitespace diff check passed.
 
 ## macOS production integration

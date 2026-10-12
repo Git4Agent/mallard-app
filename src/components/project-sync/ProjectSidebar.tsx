@@ -27,8 +27,10 @@ import { findStorageProvider, storageConnectionIssue } from "./StorageSettings";
    800x560 window floor — the tauri.conf.json minimum — the head alone asked
    for 314px of the 544 available and the three floors for 312 more, so the
    rail scrolled and Storages dropped off the bottom. The head is a fixed
-   148px now (42 drag strip, 56 wordmark, 46 tab strip, 4 border) and the list
-   takes the remaining 336. The roots were also being named twice over, once
+   98px now (48 brand bar, 46 tab strip, 4 border), plus a 30px strip for the
+   traffic lights on macOS, and the list takes the remaining 356 there. The
+   brand bar is the same on every platform; the sidebar toggle rides its far
+   end. The roots were also being named twice over, once
    in the nav and once as a section heading; the strip says each of them
    once. */
 
@@ -583,7 +585,7 @@ export default function ProjectSidebar({
           >
             <Icon name="activity" size={19} />
             {unreadLogs > 0 && !activityOpen && (
-              <span className="sidebar-nav-badge sync-activity-badge">{unreadLogs}</span>
+              <span className="sync-activity-badge">{unreadLogs}</span>
             )}
           </button>
         </nav>

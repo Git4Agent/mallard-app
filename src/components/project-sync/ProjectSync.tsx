@@ -50,6 +50,7 @@ import BundleConnectionDialog, { type BundleConnectionChoice } from "./BundleCon
 import { isManagedCloudStorage, managedCloudAccount } from "./RepositoryAddressPicker";
 import ActivityLogDrawer from "./ActivityLogDrawer";
 import SettingsPage from "./SettingsPage";
+import { isMacOS } from "../../platform";
 import { getPreference, setLanguageChoice } from "../../preferences";
 import { LANGUAGE_NAMES, OFFERED_LANGUAGES, Trans, uiLanguage, useTranslation } from "../../i18n";
 import { backendText } from "../../i18n/backend";
@@ -228,8 +229,7 @@ function storedSidebarVisibility(): boolean {
 }
 
 function sidebarShortcutLabel(): string {
-  if (typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform)) return "⌘B";
-  return "Ctrl+B";
+  return isMacOS ? "⌘B" : "Ctrl+B";
 }
 
 function storedActiveStorages(): Record<string, string> {
@@ -4125,7 +4125,7 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         aria-expanded={sidebarVisible}
         aria-keyshortcuts="Meta+B Control+B"
       >
-        <Icon name={sidebarVisible ? "sidebar-collapse" : "sidebar-expand"} size={15} />
+        <Icon name={sidebarVisible ? "sidebar-collapse" : "sidebar-expand"} size={18} />
         {/* The update pill lives in the sidebar; hidden, the toggle carries it. */}
         {!sidebarVisible && appUpdates.readyVersion && <span className="sync-update-dot" aria-hidden="true" />}
       </button>
@@ -4209,6 +4209,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
       </div>
 
       <div className={`sync-workspace${activityOpen ? " logs-open" : ""}${resizingLog ? " resizing-log" : ""}`}>
+        {/* With the sidebar hidden, the macOS traffic lights lose the strip
+            the sidebar head keeps for them, so the workspace opens with it.
+            It is 0px on every other platform. */}
+        {sidebarVisible ? null : <div className="sync-window-strip" data-tauri-drag-region />}
         {/* The project workspace merges the window chrome into its path bar, so
             there is one row at the top instead of a named strip above an empty
             one. Every other screen still gets a titlebar of its own. */}

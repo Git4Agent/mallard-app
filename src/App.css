@@ -77,14 +77,6 @@ summary:focus-visible {
 /* The file header occupies the titlebar strip; keep its real controls above
    the invisible drag layer while the breadcrumb/empty space remains draggable. */
 
-.sidebar-nav-badge {
-  height: 17px;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .sidebar-section-heading {
   display: flex;
   align-items: center;
@@ -851,13 +843,18 @@ svg[data-icon="lightbulb"] path:last-child {
   color: var(--text-0);
 }
 
+/* One button for both states, so keyboard focus survives the toggle. Open,
+   it rides the far end of the sidebar's brand bar, 9px in from the head's
+   inner edge; hidden, it leads the path bar. Both rows are 48px tall inside
+   the 8px frame gutter and the 2px tile edge, so one top centres it in
+   either, and --window-strip drops both below the macOS traffic lights. */
 .sync-sidebar-toggle {
   position: absolute;
   z-index: 12;
-  top: 20px;
-  left: 92px;
-  width: 28px;
-  height: 24px;
+  top: calc(var(--window-strip) + 19px);
+  left: calc(var(--sync-sidebar-width, 318px) - 33px);
+  width: 30px;
+  height: 30px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -882,8 +879,14 @@ svg[data-icon="lightbulb"] path:last-child {
   display: none;
 }
 
+/* Hidden, the toggle sits 8px into the path bar; a rule 11px past it parts
+   it from the trail, which starts 12px after that. */
+.sync-app.sidebar-hidden .sync-sidebar-toggle {
+  left: 18px;
+}
+
 .sync-app.sidebar-hidden .sync-titlebar {
-  padding-left: 146px;
+  padding-left: 62px;
 }
 
 .sync-app.sidebar-hidden .sync-titlebar::before {
@@ -891,7 +894,7 @@ svg[data-icon="lightbulb"] path:last-child {
   position: absolute;
   top: 13px;
   bottom: 13px;
-  left: 129px;
+  left: 49px;
   width: 1px;
   background: var(--border);
   pointer-events: none;
@@ -908,12 +911,7 @@ svg[data-icon="lightbulb"] path:last-child {
   border-right: 1px solid var(--border);
 }
 
-.sync-sidebar-drag {
-  flex: 0 0 38px;
-}
-
 .sync-sidebar-brand {
-  flex: 0 0 52px;
   display: flex;
   align-items: center;
 }
@@ -3274,7 +3272,7 @@ button.storage-found-group-head:hover { color: var(--text-1); background: var(--
    not scroll away with the page.
    -------------------------------------------------------------------------- */
 /* It carries .sync-titlebar too: same 52px window row, same drag region, and
-   the sidebar-hidden rule that insets it past the traffic lights still lands
+   the sidebar-hidden rule that insets it past the sidebar toggle still lands
    because that selector is more specific than this one. */
 /* The bar sizes against the sidebar, not the window, so what it can hold is a
    question about itself. Inline-size containment only — no paint containment,
@@ -10939,6 +10937,18 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
      act on, so they recede to ink and are told apart by glyph, clock vs bar. */
   --thread-status-pending: var(--text-2);
   --thread-status-unavailable: var(--text-2);
+
+  /* The macOS window draws its traffic lights over the page's top-left
+     corner (titleBarStyle Overlay), so the shell keeps a strip clear for
+     them there: inside the sidebar head, or above the path bar while the
+     sidebar is hidden. Other platforms draw their window controls in a
+     native title bar outside the page and keep none. main.tsx names the
+     platform on the root. */
+  --window-strip: 0px;
+}
+
+:root[data-platform="macos"] {
+  --window-strip: 30px;
 }
 
 /* Simplified Chinese. Latin keeps its faces; Han falls back to the
@@ -11667,32 +11677,34 @@ summary {
   margin-bottom: var(--retro-gutter);
 }
 
-/* 42 drag strip + 56 wordmark + 46 tab strip + 4 border. Fixed, because the
-   head has no handle and no stored height: the same three rows at every
-   window size, so nothing up here moves as the window is dragged. */
+/* Traffic-light strip (macOS only) + 48 brand bar + 46 tab strip + 4 border.
+   Every row has a fixed height and the head has no handle and no stored
+   height, so it is the same at every window size and nothing up here moves
+   as the window is dragged. */
 .sync-sidebar-head {
-  height: 148px;
   display: flex;
   overflow: hidden;
-  flex: 0 0 148px;
+  flex: 0 0 auto;
   flex-direction: column;
   background: var(--bg-1);
 }
 
-/* The strip exists only to clear the macOS traffic lights. Those end at 47px
-   (trafficLightPosition y: 35 plus the 12px buttons), and the strip starts
-   10px in — the frame gutter plus the head tile's own border — so 42px leaves
-   the wordmark a 5px margin and nothing above it is wasted. */
-.sync-sidebar-drag {
-  height: 42px;
-  flex-basis: 42px;
+/* Holds only the macOS traffic lights; trafficLightPosition in
+   tauri.conf.json centres them in it. 0px elsewhere. */
+.sync-sidebar-drag,
+.sync-window-strip {
+  height: var(--window-strip);
+  flex: 0 0 var(--window-strip);
 }
 
+/* The same bar on every platform, level with the path bar beside it. The
+   right inset keeps the wordmark 10px clear of the sidebar toggle, which
+   ProjectSync pins over the bar's far end. */
 .sync-sidebar-brand {
-  height: 56px;
-  flex-basis: 56px;
+  height: 48px;
+  flex: 0 0 48px;
   gap: 10px;
-  padding: 0 18px;
+  padding: 0 49px 0 18px;
 }
 
 /* 40, not 42: the mark is a 20-unit grid, so an even multiple puts every cell
@@ -11762,30 +11774,30 @@ summary {
   color: var(--text-0);
 }
 
-/* Nothing sits beside a glyph to push the badge along, so it rides the tab's
-   top corner instead of the end of a row — and drops the row badge's 28px
-   floor, which on a 52px tab reached across its neighbour. */
+/* The unread count rides the glyph's top-right corner, inside the tab: hung
+   off the tab's own corner it poked out above the strip. A ring of the
+   head's paper cuts it out of the glyph it overlaps, and the honey fill is
+   the update pill's, so it reads as news. It holds a count, not a label, so
+   it reads in the identifier face — and tabular figures keep it from
+   resizing as the number climbs. */
 .sidebar-root-tab > .sync-activity-badge {
   position: absolute;
-  top: -6px;
-  right: -5px;
-  min-width: 18px;
-  padding: 1px 4px;
-}
-
-/* The badge holds a count, not a label, so it reads in the identifier face —
-   and tabular figures keep it from resizing as the number climbs. */
-.sidebar-nav-badge,
-.sidebar-root-tab > .sync-activity-badge {
-  min-width: 28px;
-  padding: 2px 5px;
-  border: 1px solid var(--border-mid);
+  top: 1px;
+  left: calc(50% + 4px);
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border: 1px solid var(--ink-line);
   border-radius: var(--r-pill);
-  background: var(--surface-card);
-  color: var(--accent);
+  background: var(--button-primary-bg);
+  box-shadow: 0 0 0 2px var(--bg-1);
+  color: var(--button-primary-text);
   font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: var(--weight-semibold);
+  font-size: var(--type-2xs);
+  font-weight: var(--weight-bold);
   font-variant-numeric: tabular-nums;
   line-height: var(--leading-flat);
 }

@@ -166,14 +166,33 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(icons, /\| "sidebar-expand"/);
   assert.match(css, /\.sync-app\.sidebar-hidden \.sync-sidebar/);
   assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar/);
-  assert.match(css, /\.sync-sidebar-toggle \{[^}]*top: 20px;[^}]*left: 92px;/);
-  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar \{[^}]*padding-left: 146px;/);
-  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar::before \{[^}]*left: 129px;/);
+  // One button: open, at the far end of the brand bar; hidden, leading the
+  // path bar. Both rows share a top, below the macOS lights' strip.
+  assert.match(css, /\.sync-sidebar-toggle \{[^}]*top: calc\(var\(--window-strip\) \+ 19px\);[^}]*left: calc\(var\(--sync-sidebar-width, 318px\) - 33px\);/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-sidebar-toggle \{[^}]*left: 18px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar \{[^}]*padding-left: 62px;/);
+  assert.match(css, /\.sync-app\.sidebar-hidden \.sync-titlebar::before \{[^}]*left: 49px;/);
   assert.match(css, /\.sync-titlebar \{[^}]*flex: 0 0 auto;/);
   assert.match(css, /\.sync-titlebar \{[^}]*min-height: 3\.25rem;/);
-  assert.match(css, /\.sync-sidebar-drag\s*\{[^}]*height: 42px;/s);
-  assert.match(css, /\.sync-sidebar-brand\s*\{[^}]*height: 56px;/s);
+  assert.match(css, /\.sync-sidebar-brand\s*\{[^}]*height: 48px;/s);
   assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 26, y: 35 });
+});
+
+/* Only the macOS window draws controls over the page. Windows and Linux keep
+   theirs in a native title bar, so a strip cleared for traffic lights there
+   was an empty band with the toggle floating in it. */
+test("only macOS keeps a strip clear for the traffic lights", () => {
+  const css = readFileSync("src/App.css", "utf8");
+  const main = readFileSync("src/main.tsx", "utf8");
+  const workspace = readFileSync("src/components/project-sync/ProjectSync.tsx", "utf8");
+
+  assert.match(main, /applyPlatform\(\);[\s\S]*createRoot/);
+  assert.match(css, /:root \{[^}]*--window-strip: 0px;/);
+  assert.match(css, /:root\[data-platform="macos"\] \{\s*--window-strip: 30px;\s*\}/);
+  assert.match(css, /\.sync-sidebar-drag,\s*\.sync-window-strip \{[^}]*height: var\(--window-strip\);/);
+  // Hidden, the sidebar head no longer holds the lights' strip, so the
+  // workspace opens with it.
+  assert.match(workspace, /sidebarVisible \? null : <div className="sync-window-strip" data-tauri-drag-region \/>/);
 });
 
 // The sidebar's width is --sync-sidebar-width, owned by the drag handle, so
@@ -839,20 +858,25 @@ test("the sidebar fits the smallest window it can be opened at", () => {
     app: { windows: { minHeight: number }[] };
   };
 
-  // No handle and no stored height: the same three rows at every window size.
-  assert.match(css, /\.sync-sidebar-head \{[^}]*height: 148px;[^}]*flex: 0 0 148px;/);
+  // No handle and no stored height: the same fixed rows at every window size.
+  assert.match(css, /\.sync-sidebar-head \{[^}]*flex: 0 0 auto;/);
+  assert.match(css, /\.sync-sidebar-brand \{[^}]*height: 48px;[^}]*flex: 0 0 48px;/);
+  assert.match(css, /\.sidebar-root-tab \{[^}]*height: 40px;/);
+  assert.match(css, /\.sidebar-root-tabs \{[^}]*padding: 0 8px 6px;/);
   // The rail takes what is left and its own list scrolls, so the window's
   // height reaches the rows instead of a tray wrapped around them.
   assert.match(css, /\.sync-sidebar-rail \{[^}]*min-height: 0;[^}]*flex: 1;/);
   assert.match(css, /\.sidebar-rail-list \{[^}]*flex: 1;[^}]*overflow-y: auto;/);
 
   const GUTTER = 8;  // --retro-gutter: the frame, and the seam between tiles
-  const HEAD = 148;  // 42 drag strip + 56 wordmark + 46 tab strip + 4 border
+  // The taller head is macOS's: 30 lights strip + 48 brand bar + 46 tab
+  // strip + 4 border. Elsewhere the strip is 0 and the list gains 30px.
+  const HEAD = 128;
   const MARK = 44;   // .sync-sidebar-product-mark min-height
   const minHeight = config.app.windows[0].minHeight;
   assert.equal(minHeight, 560);
   const list = minHeight - (2 * GUTTER + HEAD + 2 * GUTTER + MARK);
-  assert.equal(list, 336, "the rail's height at the window floor");
+  assert.equal(list, 356, "the rail's height at the window floor");
 
   // Nothing is drag-sized or remembered between launches any more: the panes,
   // their floors, the handles between them, and the keys that stored the split.

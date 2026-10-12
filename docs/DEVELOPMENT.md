@@ -44,28 +44,38 @@ operations. It verifies the selected profile before either operation: Windows
 Restart Manager identifies the Core process holding a state database in the
 selected `CODEX_HOME`, that process must be a live child of the registered
 Desktop executable, and the native pipe must belong to that same Desktop.
-Only query APIs are used; Mallard never shuts down or restarts Desktop.
+Profile discovery uses only query APIs; Mallard never shuts down or restarts
+Desktop. If Core changes, Mallard re-verifies the same selected home and Desktop
+before continuing on the existing pipe. It never replays an unacknowledged move.
 
-Codex Desktop must be installed and running with the selected profile. Mallard
-opens the folder link once to register or select the destination project, then
-waits for one exact local project match. An ambiguous destination
-or a registration timeout returns an error. The native move is sent once, after
-registration is confirmed. Backend project IDs and Desktop project IDs are distinct.
+Mallard starts or focuses the installed Codex Desktop, then verifies that it
+uses the selected profile. If the destination is missing, Mallard sends its
+folder deep link once, then polls Desktop's project list within the 60-second
+placement deadline. Placement requires one exact local folder match; an
+ambiguous or unconfirmed destination returns an error. A readable existing chat
+can report `notLoaded`: Mallard waits for its
+stored history, checks its identity and the native move acknowledgement, and
+does not require an idle agent.
+Backend project IDs and Desktop project IDs are distinct.
 Backend `thread/metadata/update` is no longer used for Windows placement.
 
 The [native placement POC](POC_CODEX_DESKTOP_PROJECT_PLACEMENT.md) documents the
-connection contract and installed Desktop version. After creating and populating
-its disposable fixture, run its production integration phase:
+connection contract and installed Desktop version. Run the production test with
+the installation variables described there:
 
 ```powershell
-node scripts/poc-codex-native-placement.mjs --phase=integration --root=<temporary-poc-root>
+node scripts/poc-codex-native-placement.mjs --phase=registration-integration `
+  "--cli=$codexCli" "--executable=$desktopExe" `
+  "--connector=$appToolsServer" "--family=$packageFamily"
 ```
 
-This phase starts an isolated Desktop with its own backend and invokes the Rust
-production placement code. It reproduces the backend-only failure, checks native
-membership after repeated opens, rejects another home containing the same chat,
-and checks that history stays unchanged. It repeats after restarting only that
-fixture Desktop. Tests never use personal provider homes.
+This phase creates a disposable fixture with no registered project, starts an
+isolated Desktop with its own backend, and invokes the Rust production code. It
+checks automatic registration, placement of a restored `notLoaded` chat, native
+membership after repeated opens, rejection of another home containing the same
+chat, and unchanged history. It repeats after restarting only that fixture
+Desktop, checking that the same project ID persists. Tests never use personal
+provider homes.
 
 macOS uses the same native assignment flow. Desktop rejects direct callers
 outside its trusted process tree, so Mallard registers the

@@ -265,6 +265,7 @@ fn owned_by(pipe: &NamedPipeClient, pid: u32) -> bool {
 pub(super) struct Desktop {
     pipe: NamedPipeClient,
     profile: Profile,
+    home: PathBuf,
     id: u32,
     correlation: String,
 }
@@ -311,6 +312,7 @@ pub(super) async fn connect(
                     return Ok(Desktop {
                         pipe,
                         profile,
+                        home: home.to_path_buf(),
                         id: 0,
                         correlation: random.iter().map(|byte| format!("{byte:02x}")).collect(),
                     });
@@ -329,22 +331,50 @@ impl Desktop {
         arguments: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
-        if !self.profile.alive() || !owned_by(&self.pipe, self.profile.desktop.pid) {
+        let deadline = Instant::now() + timeout;
+        if !self.profile.desktop.alive() || !owned_by(&self.pipe, self.profile.desktop.pid) {
             return Err(PROFILE_UNAVAILABLE.into());
         }
+        // Desktop can replace Core when opening a folder. Re-prove the same
+        // home's owner while retaining this Desktop and its native connection.
+        // No tool request has been sent yet; sent requests are never replayed.
+        while !self.profile.core.alive() {
+            if Instant::now() >= deadline || !self.profile.desktop.alive() {
+                return Err(PROFILE_UNAVAILABLE.into());
+            }
+            if let Some(current) = profile(&self.profile.desktop.image, &self.home)? {
+                if current.desktop.pid != self.profile.desktop.pid {
+                    return Err(PROFILE_UNAVAILABLE.into());
+                }
+                self.profile = current;
+            } else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+        if !owned_by(&self.pipe, self.profile.desktop.pid) {
+            return Err(PROFILE_UNAVAILABLE.into());
+        }
+        let timeout = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(PROFILE_UNAVAILABLE)?;
         self.id += 1;
+        let call_id = format!("mallard-{}-{}", self.correlation, self.id);
+        // Match the native connector's local caller context. This connection
+        // has no executor host override; operation arguments still select local.
         let request = json!({"jsonrpc":"2.0", "id":self.id, "method":"tools/call", "params":{
             "namespace":"codex_app", "tool":tool, "arguments":arguments,
-            "callerSource":"codex", "hostId":"local", "threadId":thread_id,
+            "callerSource":"codex", "threadId":thread_id,
             "turnId":format!("mallard-{}", self.correlation),
-            "callId":format!("mallard-{}-{}", self.correlation, self.id),
+            "callId":call_id,
         }});
-        let result = tokio::time::timeout(timeout, exchange(&mut self.pipe, self.id, request))
+        tokio::time::timeout(timeout, exchange(&mut self.pipe, self.id, request))
             .await
             .map_err(|_| {
                 "Codex Desktop did not respond in time; the request was not repeated.".to_string()
-            })??;
-        tool_result(result)
+            })
+            .and_then(|result| result)
+            .and_then(tool_result)
+            .map_err(|error| format!("{tool}: {error} [request {call_id}]"))
     }
 }
 
@@ -353,6 +383,7 @@ fn supports_placement(catalog: &Value) -> bool {
         tools.len() <= 1024
             && [
                 "list_projects",
+                "read_thread",
                 "move_thread_to_project",
                 "navigate_to_codex_page",
             ]
@@ -367,8 +398,18 @@ fn supports_placement(catalog: &Value) -> bool {
 
 fn tool_result(result: Value) -> Result<Value, String> {
     if result["success"] != true {
-        // Do not log tool output, which can contain paths or conversations.
-        return Err("Codex Desktop refused the operation. Check that the chat and project are available in Desktop.".into());
+        let reason = result["contentItems"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(8)
+            .filter(|item| item["type"] == "inputText")
+            .filter_map(|item| item["text"].as_str())
+            .find_map(safe_refusal_reason)
+            .unwrap_or(
+                "Desktop's error detail was withheld because it was not recognized as safe.",
+            );
+        return Err(format!("Codex Desktop refused the operation: {reason}"));
     }
     let text = result["contentItems"]
         .as_array()
@@ -376,6 +417,31 @@ fn tool_result(result: Value) -> Result<Value, String> {
         .and_then(|item| item["text"].as_str())
         .ok_or("Invalid Codex Desktop tool response.")?;
     serde_json::from_str(text).map_err(|_| "Invalid Codex Desktop tool response.".into())
+}
+
+fn safe_refusal_reason(text: &str) -> Option<&'static str> {
+    // Match whole, fixed Desktop messages only. Free-form errors and structured
+    // fields can contain credentials, project paths, or conversation content.
+    if text.len() > 4096 {
+        return None;
+    }
+    let text = text.trim();
+    const REASONS: &[&str] = &[
+        "move_thread_to_project received invalid arguments.",
+        "The task belongs to a different host.",
+        "The task is not available in the sidebar.",
+        "The sidebar task belongs to a different host.",
+        "The task's source project could not be safely determined.",
+        "The destination project is unavailable. Use list_projects.",
+        "The project move was cancelled, unsupported, or failed.",
+        "The active account changed during the project move.",
+    ];
+    if let Some(reason) = REASONS.iter().find(|reason| **reason == text) {
+        return Some(*reason);
+    }
+    let detail: Value = serde_json::from_str(text).ok()?;
+    (detail["error"] == "confirmation_required")
+        .then_some("confirmation_required: move the chat in Codex Desktop's sidebar to confirm access to additional project folders.")
 }
 
 async fn exchange(
@@ -414,6 +480,11 @@ async fn exchange(
             continue;
         }
         if response.get("error").is_some() {
+            if let Some(code) = response["error"]["code"].as_i64() {
+                return Err(format!(
+                    "Codex Desktop could not handle the native request (code {code})."
+                ));
+            }
             return Err("Codex Desktop could not handle the native request.".into());
         }
         return response
@@ -427,6 +498,112 @@ async fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refusal_reports_fixed_desktop_reasons_without_response_data() {
+        let reason = "The task's source project could not be safely determined.";
+        let error = tool_result(json!({"success": false, "contentItems": [
+            {"type": "inputText", "text": reason},
+            {"type": "inputText", "text": "private conversation"}
+        ]}))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!("Codex Desktop refused the operation: {reason}")
+        );
+
+        let error = tool_result(json!({"success": false, "contentItems": [{
+            "type": "inputText", "text": json!({
+                "error": "confirmation_required", "projectId": "private project",
+                "missingProjectSources": ["C:\\private\\project"],
+                "token": "private credential"
+            }).to_string()
+        }]}))
+        .unwrap_err();
+        assert!(error.contains("confirmation_required"));
+        assert!(!error.contains("private"));
+    }
+
+    #[test]
+    fn refusal_withholds_unknown_malformed_and_oversized_details() {
+        for text in [
+            "private conversation".to_string(),
+            "The task is not available in the sidebar. C:\\private\\project".to_string(),
+            "Bearer private-credential".to_string(),
+            r#"{"error":"private-credential"}"#.to_string(),
+            "{".to_string(),
+            format!(
+                "{}The task is not available in the sidebar.",
+                " ".repeat(4096)
+            ),
+        ] {
+            let error = tool_result(json!({"success": false, "contentItems": [
+                {"type": "inputText", "text": text}
+            ]}))
+            .unwrap_err();
+            assert!(error.contains("error detail was withheld"));
+            assert!(!error.contains("private"));
+            assert!(error.len() < 200);
+        }
+        for result in [
+            json!({"success": false}),
+            json!({"success": false, "contentItems": [
+                {"type": "inputImage", "text": "The task is not available in the sidebar."},
+                {"type": "inputText", "text": {"error": "private"}}
+            ]}),
+        ] {
+            assert!(tool_result(result)
+                .unwrap_err()
+                .contains("error detail was withheld"));
+        }
+    }
+
+    #[test]
+    fn successful_tool_responses_keep_the_existing_contract() {
+        let expected = json!({"navigated": true});
+        assert_eq!(
+            tool_result(json!({"success": true, "contentItems": [
+                {"type": "inputText", "text": expected.to_string()}
+            ]}))
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            tool_result(json!({"success": true, "contentItems": [
+                {"type": "inputText", "text": "private malformed response"}
+            ]}))
+            .unwrap_err(),
+            "Invalid Codex Desktop tool response."
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_errors_expose_only_numeric_codes() {
+        for (code, expected) in [
+            (
+                json!(-32601),
+                "Codex Desktop could not handle the native request (code -32601).",
+            ),
+            (
+                json!("private credential"),
+                "Codex Desktop could not handle the native request.",
+            ),
+        ] {
+            let (mut client, mut server) = tokio::io::duplex(1024);
+            let reply = serde_json::to_vec(&json!({"id": 1, "error": {
+                "code": code, "message": "private conversation C:\\private\\project"
+            }}))
+            .unwrap();
+            server.write_u32_le(reply.len() as u32).await.unwrap();
+            server.write_all(&reply).await.unwrap();
+            assert_eq!(
+                exchange(&mut client, 1, json!({"id": 1}))
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+        }
+    }
 
     #[test]
     #[ignore = "installed Windows Desktop; only the isolated native-placement POC fixture"]
@@ -449,8 +626,11 @@ mod tests {
         assert_eq!(state["marker"], "mallard-native-placement-v1");
         let home = crate::local_paths::canonicalize(state["home"].as_str().unwrap()).unwrap();
         let project = crate::local_paths::canonicalize(state["project"].as_str().unwrap()).unwrap();
+        let user_data =
+            crate::local_paths::canonicalize(state["userData"].as_str().unwrap()).unwrap();
         assert_eq!(home, root.join("selected-home"));
         assert_eq!(project, root.join("Placement fixture"));
+        assert_eq!(user_data, root.join("desktop-data"));
         let app = crate::providers::windows_app::scheme_handler("codex").unwrap();
         assert!(crate::local_paths::same_canonical_path(
             &app.executable,
@@ -475,27 +655,150 @@ mod tests {
             desktop.profile.desktop.pid,
             state["desktopPid"].as_u64().unwrap() as u32
         );
-        let request = |method, params| {
-            super::super::super::app_server::request(
-                cli,
-                None,
-                &home,
-                method,
-                params,
-                Duration::from_secs(15),
-            )
-            .unwrap()
-        };
-        let before = request(
-            "thread/read",
-            json!({"threadId":thread, "includeTurns":true}),
-        );
-        assert!(!before["thread"]["turns"].as_array().unwrap().is_empty());
+        let source =
+            crate::local_paths::canonicalize(state["threadPath"].as_str().unwrap()).unwrap();
+        assert!(source.starts_with(home.join("sessions")));
+        let original_rollout = std::fs::read(&source).unwrap();
         let call = |desktop: &mut Desktop, tool, args| {
             runtime
                 .block_on(desktop.call(thread, tool, args, Duration::from_secs(20)))
                 .unwrap()
         };
+        let native_projects = |desktop: &mut Desktop| {
+            call(desktop, "list_projects", json!({}))["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| {
+                    item["projectKind"] == "local"
+                        && item["hostId"] == "local"
+                        && item["path"].as_str().is_some_and(|path| {
+                            crate::local_paths::same_canonical_path(Path::new(path), &project)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let initial_projects = native_projects(&mut desktop);
+        if state["fixtureProjectId"].is_null() {
+            assert!(
+                initial_projects.is_empty(),
+                "destination must start unregistered"
+            );
+        } else {
+            assert_eq!(initial_projects.len(), 1);
+            assert_eq!(initial_projects[0]["projectId"], state["fixtureProjectId"]);
+        }
+        let registrations = std::cell::Cell::new(0);
+        let mut register = || {
+            registrations.set(registrations.get() + 1);
+            println!("Launching the missing fixture project through the packaged handler");
+            // Explicit fixture paths prevent the packaged launcher from ever
+            // routing this test's folder into the user's Desktop instance.
+            crate::providers::windows_app::launch_app(
+                &app,
+                &[
+                    ("CODEX_HOME", &home),
+                    ("CODEX_ELECTRON_USER_DATA_PATH", &user_data),
+                    ("CODEX_CLI_PATH", cli),
+                ],
+                &[
+                    &format!("--user-data-dir={}", user_data.display()),
+                    &super::super::super::actions::codex_project_deep_link(&project),
+                ],
+            )
+        };
+        // Exercise registration with the existing completed chat first, as in
+        // the POC. Then test a newly restored chat in that registered project.
+        super::super::assign_and_open(executable, &home, thread, &project, &mut register).unwrap();
+        // Import a completed rollout after Desktop has populated its sidebar.
+        // Unlike an explicitly projectless chat, it has no saved assignment or
+        // loaded conversation in this Desktop process.
+        call(&mut desktop, "list_threads", json!({"limit":50}));
+        let mut suffix = [0u8; 6];
+        getrandom::fill(&mut suffix).unwrap();
+        // Imported IDs need not encode the rollout directory's date.
+        let restored = format!(
+            "019f7798-5437-7632-9dbc-{}",
+            suffix
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let restored_path = source.with_file_name(
+            source
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace(thread, &restored),
+        );
+        assert_ne!(source, restored_path);
+        std::fs::write(
+            &restored_path,
+            std::fs::read_to_string(&source)
+                .unwrap()
+                .replace(thread, &restored),
+        )
+        .unwrap();
+        let unread = call(
+            &mut desktop,
+            "read_thread",
+            json!({"threadId":restored, "hostId":"local", "turnLimit":1, "includeOutputs":false}),
+        );
+        assert_eq!(unread["thread"]["status"]["type"], "notLoaded");
+        println!("Confirmed the restored fixture chat is notLoaded before production placement");
+        super::super::assign_and_open(executable, &home, &restored, &project, &mut register)
+            .unwrap();
+        let registered = native_projects(&mut desktop);
+        assert_eq!(registered.len(), 1);
+        let project_id = &registered[0]["projectId"];
+        assert_eq!(
+            registrations.get(),
+            usize::from(initial_projects.is_empty())
+        );
+        if !initial_projects.is_empty() {
+            assert_eq!(*project_id, state["fixtureProjectId"]);
+        }
+        // Native navigation acknowledges dispatch; history can arrive later
+        // regardless of whether the agent runtime is idle or notLoaded.
+        let history_deadline = Instant::now() + Duration::from_secs(30);
+        let loaded = loop {
+            let detail = call(
+                &mut desktop,
+                "read_thread",
+                json!({"threadId":restored, "hostId":"local", "turnLimit":10, "includeOutputs":true,
+                    "maxOutputCharsPerItem":4000}),
+            );
+            if !detail["turns"].as_array().unwrap().is_empty() {
+                break detail;
+            }
+            assert!(
+                Instant::now() < history_deadline,
+                "restored history did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        assert_eq!(loaded["thread"]["id"], restored);
+        assert!(matches!(
+            loaded["thread"]["status"]["type"].as_str(),
+            Some("notLoaded" | "idle" | "active")
+        ));
+        assert!(!loaded["turns"].as_array().unwrap().is_empty());
+        let listing = call(&mut desktop, "list_threads", json!({"limit":50}));
+        let placed = listing["pinnedThreads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(listing["threads"].as_array().unwrap())
+            .find(|item| item["id"] == restored && item["hostId"] == "local")
+            .expect("restored chat in native sidebar");
+        assert_eq!(placed["projectId"], *project_id);
+        println!(
+            "PASS production registration and restored-chat placement (status {})",
+            loaded["thread"]["status"]["type"]
+        );
+
         let membership = |desktop: &mut Desktop| {
             let listing = call(desktop, "list_threads", json!({"limit":50}));
             listing["pinnedThreads"]
@@ -513,34 +816,17 @@ mod tests {
             json!({"source":"codex", "hostId":"local", "threadId":thread, "projectId":null}),
         );
         assert!(membership(&mut desktop).is_null());
-        let projects = request("project/list", json!({"limit":100}));
-        let backend_project = projects["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| {
-                item["roots"].as_array().unwrap().iter().any(|root| {
-                    crate::local_paths::same_canonical_path(
-                        Path::new(root["path"].as_str().unwrap()),
-                        &project,
-                    )
-                })
-            })
-            .unwrap();
-        let updated = request(
-            "thread/metadata/update",
-            json!({"threadId":thread, "projectId":backend_project["id"]}),
-        );
-        assert_eq!(updated["thread"]["projectId"], backend_project["id"]);
-        assert!(
-            membership(&mut desktop).is_null(),
-            "backend-only assignment must reproduce the bug"
-        );
 
         for _ in 0..2 {
-            super::super::assign_and_open(executable, &home, thread, &project, || Ok(())).unwrap();
-            assert_eq!(membership(&mut desktop), state["fixtureProjectId"]);
+            super::super::assign_and_open(executable, &home, thread, &project, &mut register)
+                .unwrap();
+            assert_eq!(membership(&mut desktop), *project_id);
         }
+        assert_eq!(
+            registrations.get(),
+            usize::from(initial_projects.is_empty())
+        );
+        assert_eq!(native_projects(&mut desktop).len(), 1);
         // A copied rollout has the same chat ID but does not prove which home
         // the running Desktop uses.
         let other = tempfile::tempdir_in(&root).unwrap();
@@ -557,14 +843,24 @@ mod tests {
                 Instant::now() + Duration::from_millis(300)
             ))
             .is_err());
-        assert_eq!(membership(&mut desktop), state["fixtureProjectId"]);
-        let after = request(
-            "thread/read",
-            json!({"threadId":thread, "includeTurns":true}),
+        assert_eq!(membership(&mut desktop), *project_id);
+        let after = call(
+            &mut desktop,
+            "read_thread",
+            json!({"threadId":thread, "hostId":"local", "turnLimit":10, "includeOutputs":true,
+                "maxOutputCharsPerItem":4000}),
         );
-        for key in ["id", "name", "preview", "turns"] {
-            assert_eq!(before["thread"][key], after["thread"][key], "{key} changed");
-        }
+        assert_eq!(after["thread"]["id"], thread);
+        assert_eq!(
+            after["thread"]["title"],
+            "Mallard existing-chat placement POC"
+        );
+        assert!(after["turns"]
+            .to_string()
+            .contains("Mallard POC fixture completed locally."));
+        assert!(std::fs::read(source)
+            .unwrap()
+            .starts_with(&original_rollout));
     }
 
     #[test]

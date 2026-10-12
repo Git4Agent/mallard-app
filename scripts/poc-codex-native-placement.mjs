@@ -1,5 +1,7 @@
 // Opt-in Windows POC. Every write and chat belongs to a fresh temporary profile.
 // --phase=integration exercises the Rust production placement code.
+// --phase=registration-owned proves automatic registration with Desktop's own backend.
+// --phase=registration-integration tests automatic registration through production Rust.
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile, open, realpath } from "node:fs/promises";
@@ -25,11 +27,18 @@ function cleanEnv() {
 }
 
 async function powershell(code) {
-  const result = await run(ps, ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-    Buffer.from(code, "utf16le").toString("base64")], {
-    env: cleanEnv(), windowsHide: true, timeout: 20_000, maxBuffer: 1024 * 1024,
-  });
-  return result.stdout.trim();
+  const wrapped = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue';
+    try { ${code} } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`;
+  try {
+    const result = await run(ps, ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+      Buffer.from(wrapped, "utf16le").toString("base64")], {
+      env: cleanEnv(), windowsHide: true, timeout: 20_000, maxBuffer: 1024 * 1024,
+    });
+    return result.stdout.trim();
+  } catch (error) {
+    throw new Error(error.killed ? "POC PowerShell command timed out" :
+      String(error.stderr || "POC PowerShell command failed").trim().slice(0, 4096));
+  }
 }
 
 async function save(state) {
@@ -123,13 +132,16 @@ async function launch(state, url) {
 }
 
 async function findPipe(state) {
+  const verifyBackend = state.desktopOwnsBackend
+    ? `& { ${await readFile(new URL("./poc-windows-profile-owner.ps1", import.meta.url), "utf8")} } -DesktopProcessId ${state.desktopPid} -SelectedHome ${psQuote(state.home)} | Out-Null`
+    : `$outgoing=@(Get-NetTCPConnection -OwningProcess ${state.desktopPid} -RemotePort ${new URL(state.wsUrl).port} -State Established -ErrorAction SilentlyContinue);
+       $incoming=@(Get-NetTCPConnection -OwningProcess ${state.backendPid} -LocalPort ${new URL(state.wsUrl).port} -State Established -ErrorAction SilentlyContinue);
+       if (!($outgoing | Where-Object { $incoming.RemotePort -contains $_.LocalPort })) { throw 'Desktop is not connected to the verified selected-home backend' }`;
   const result = await powershell(`
     $ErrorActionPreference='Stop';
     $desktop=Get-CimInstance Win32_Process -Filter "ProcessId=${state.desktopPid}";
     if (!$desktop -or !$desktop.CommandLine.Contains(${psQuote(state.userData)})) { throw 'Isolated Desktop process identity mismatch' }
-    $outgoing=@(Get-NetTCPConnection -OwningProcess ${state.desktopPid} -RemotePort ${new URL(state.wsUrl).port} -State Established -ErrorAction SilentlyContinue);
-    $incoming=@(Get-NetTCPConnection -OwningProcess ${state.backendPid} -LocalPort ${new URL(state.wsUrl).port} -State Established -ErrorAction SilentlyContinue);
-    if (!($outgoing | Where-Object { $incoming.RemotePort -contains $_.LocalPort })) { throw 'Desktop is not connected to the verified selected-home backend' }
+    ${verifyBackend}
     Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles; public class PocPipe { [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid); }';
     $matches=@();
     foreach($path in [IO.Directory]::GetFiles('\\\\.\\pipe\\','codex-browser-use*')) {
@@ -151,8 +163,10 @@ async function appTools(state, requestedHome = args["codex-home"] ?? state.home)
   if (selectedHome.toLowerCase() !== (await realpath(state.home)).toLowerCase()) {
     throw new Error("Selected CODEX_HOME does not match the isolated Desktop; no native request sent");
   }
-  const backend = await connect(state);
-  backend.close();
+  if (!state.desktopOwnsBackend) {
+    const backend = await connect(state);
+    backend.close();
+  }
   const pipe = await findPipe(state);
   const child = spawn(process.execPath, [state.connector], {
     env: { ...cleanEnv(), CODEX_HOME: state.home, CODEX_APP_TOOLS_PIPE_PATH: pipe },
@@ -183,6 +197,14 @@ async function appTools(state, requestedHome = args["codex-home"] ?? state.home)
   await request("initialize", { protocolVersion: "2025-11-25", capabilities: {},
     clientInfo: { name: "mallard-native-placement-poc", version: "0.1.0" } });
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  // As in Mallard's production connection, discovery initializes Desktop's
+  // dispatcher. An MCP initialize reply alone does not establish readiness.
+  try {
+    const catalog = await request("tools/list", {});
+    for (const name of ["list_projects", "list_threads", "read_thread", "move_thread_to_project", "navigate_to_codex_page"]) {
+      assert.ok(catalog.tools?.some((tool) => tool.name === name), `Required native tool missing: ${name}`);
+    }
+  } catch (error) { child.kill(); throw error; }
   return {
     call: (name, input) => request("tools/call", { name, arguments: input,
       _meta: { "openai/threadId": state.threadId } }),
@@ -190,7 +212,7 @@ async function appTools(state, requestedHome = args["codex-home"] ?? state.home)
   };
 }
 
-async function setup() {
+async function setup({ seedProject = true, launchDesktop = true } = {}) {
   for (const key of ["cli", "executable", "connector", "family"]) if (!args[key]) throw new Error(`Missing --${key}`);
   const root = await mkdtemp(join(tmpdir(), "mallard-native-placement-"));
   const state = { marker: "mallard-native-placement-v1", root, cli: resolve(args.cli),
@@ -198,13 +220,15 @@ async function setup() {
     home: join(root, "selected-home"), userData: join(root, "desktop-data"), project: join(root, "Placement fixture") };
   for (const dir of [state.home, state.userData, state.project]) await mkdir(dir);
   await writeFile(join(state.project, "README.md"), "# Mallard native placement fixture\n");
-  // Cold fixture data only: an existing Desktop project, with no chat assignment.
-  // The experiment never rewrites this file after Desktop starts.
-  state.fixtureProjectId = randomUUID();
-  await writeFile(join(state.home, ".codex-global-state.json"), JSON.stringify({
-    "local-projects": { [state.fixtureProjectId]: { id: state.fixtureProjectId,
-      name: "Placement fixture", rootPaths: [state.project], createdAt: Date.now(), updatedAt: Date.now() } },
-  }));
+  // The original placement probe seeds an existing project. Registration
+  // probes leave this file entirely to Desktop, including the initial project.
+  if (seedProject) {
+    state.fixtureProjectId = randomUUID();
+    await writeFile(join(state.home, ".codex-global-state.json"), JSON.stringify({
+      "local-projects": { [state.fixtureProjectId]: { id: state.fixtureProjectId,
+        name: "Placement fixture", rootPaths: [state.project], createdAt: Date.now(), updatedAt: Date.now() } },
+    }));
+  }
   await writeFile(join(state.home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "poc-local-only-not-a-credential" }));
   await writeFile(join(state.home, "config.toml"), `model = "gpt-5.4"\nmodel_provider = "placement_poc"\n[model_providers.placement_poc]\nname = "Local POC (no inference)"\nbase_url = "http://127.0.0.1:1/v1"\nwire_api = "responses"\nrequires_openai_auth = false\n[analytics]\nenabled = false\n`);
   const server = createServer(); await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -226,7 +250,7 @@ async function setup() {
     await rpc.request("thread/name/set", { threadId: state.threadId, name: "Mallard existing-chat placement POC" });
     await save(state);
   } finally { rpc.close(); }
-  state.desktopPid = await launch(state, `codex://threads/new?path=${encodeURIComponent(state.project)}`);
+  if (launchDesktop) state.desktopPid = await launch(state, seedProject ? `codex://threads/new?path=${encodeURIComponent(state.project)}` : undefined);
   await save(state);
   return state;
 }
@@ -266,10 +290,133 @@ function unwrap(result) {
 async function readyBridge(state) {
   let failure;
   for (let attempt = 0; attempt < 20; attempt++) {
-    try { return await appTools(state); } catch (error) { failure = error; }
+    let bridge;
+    try {
+      bridge = await appTools(state);
+      unwrap(await bridge.call("list_projects", {}));
+      return bridge;
+    } catch (error) { bridge?.close(); failure = error; }
     await sleep(500);
   }
   throw failure;
+}
+
+async function registerMissingProject(state) {
+  const bridge = await readyBridge(state);
+  const projects = async () => unwrap(await bridge.call("list_projects", {})).projects;
+  const matching = (items) => items.filter((item) => item.projectKind === "local" &&
+    item.hostId === "local" && typeof item.path === "string" &&
+    resolve(item.path).toLowerCase() === resolve(state.project).toLowerCase());
+  try {
+    assert.equal(matching(await projects()).length, 0, "Registration must start with no Desktop project");
+    console.log("PASS destination_project_initially_absent");
+    const started = Date.now();
+    await launch(state, `codex://threads/new?path=${encodeURIComponent(state.project)}`);
+    const deadline = started + 30_000;
+    let matches = [];
+    while (Date.now() < deadline) {
+      matches = matching(await projects());
+      if (matches.length) break;
+      await sleep(250);
+    }
+    assert.equal(matches.length, 1, "Folder deep link must register exactly one native project within 30 seconds");
+    state.fixtureProjectId = matches[0].projectId;
+    state.registrationMs = Date.now() - started;
+    state.projectRegisteredByDeepLink = true;
+    await save(state);
+    console.log(`PASS folder_deep_link_registers_native_project (${state.registrationMs} ms)`);
+  } finally { bridge.close(); }
+}
+
+async function verifyOwnedRegistration(state) {
+  const checks = [];
+  const observedThreadStatuses = [];
+  const pass = (name) => { checks.push(name); console.log(`PASS ${name}`); };
+  const original = await readFile(state.threadPath);
+  await cleanup(state);
+  state.desktopOwnsBackend = true;
+  state.desktopPid = await launch(state);
+  await save(state);
+  let bridge;
+  try {
+    bridge = await readyBridge(state);
+    pass("desktop_owned_backend_profile_and_pipe_verified");
+    const call = async (tool, input) => unwrap(await bridge.call(tool, input));
+    const read = () => call("read_thread", { threadId: state.threadId, hostId: "local",
+      turnLimit: 10, includeOutputs: true, maxOutputCharsPerItem: 4000 });
+    assert.equal((await read()).thread.status.type, "notLoaded");
+    pass("existing_chat_initially_not_loaded");
+    await registerMissingProject(state);
+    pass("absent_project_registered_without_seeding_or_manual_action");
+    const projects = async () => (await call("list_projects", {})).projects.filter((item) =>
+      item.projectKind === "local" && item.hostId === "local" && typeof item.path === "string" &&
+      resolve(item.path).toLowerCase() === resolve(state.project).toLowerCase());
+    const membership = async () => {
+      const listing = await call("list_threads", { limit: 50 });
+      const entries = [...listing.pinnedThreads, ...listing.threads];
+      assert.equal(entries.length, 1, "Opening the folder must not create an extra chat");
+      assert.equal(entries[0].id, state.threadId);
+      return entries[0].projectId;
+    };
+    const openAndPlace = async () => {
+      assert.equal((await call("navigate_to_codex_page", { threadId: state.threadId })).navigated, true);
+      const deadline = Date.now() + 30_000;
+      let detail;
+      while (Date.now() < deadline) {
+        detail = await read();
+        assert.equal(detail.thread.id, state.threadId);
+        assert.equal(detail.thread.hostId, "local");
+        assert.ok(["idle", "notLoaded"].includes(detail.thread.status.type));
+        // An idle backend is not required to view a stored chat. Desktop can
+        // report notLoaded while returning its full history and placing it.
+        if (detail.turns.length > 0) break;
+        await sleep(250);
+      }
+      assert.ok(detail?.turns.length > 0, "Desktop must return the existing chat's history");
+      assert.ok(JSON.stringify(detail.turns).includes("Mallard POC fixture completed locally."));
+      observedThreadStatuses.push(detail.thread.status.type);
+      // One native move, no retry after an uncertain mutation result.
+      const moved = await call("move_thread_to_project", { source: "codex", hostId: "local",
+        threadId: state.threadId, projectId: state.fixtureProjectId });
+      assert.equal(moved.projectId, state.fixtureProjectId);
+      assert.equal(moved.threadId, state.threadId);
+      assert.equal((await call("navigate_to_codex_page", { threadId: state.threadId })).navigated, true);
+      assert.equal(await membership(), state.fixtureProjectId);
+      return detail;
+    };
+    const before = await openAndPlace();
+    pass("same_existing_chat_read_placed_and_opened");
+    await launch(state, `codex://threads/new?path=${encodeURIComponent(state.project)}`);
+    await openAndPlace();
+    assert.equal((await projects()).length, 1);
+    pass("repeat_folder_and_chat_open_creates_no_duplicate_project_or_chat");
+    await assert.rejects(appTools(state, state.userData), /Selected CODEX_HOME does not match/);
+    assert.equal(await membership(), state.fixtureProjectId);
+    pass("wrong_home_rejected_before_native_request");
+    bridge.close(); bridge = null;
+    await restart(state);
+    bridge = await readyBridge(state);
+    const persisted = await projects();
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0].projectId, state.fixtureProjectId);
+    assert.equal(await membership(), state.fixtureProjectId);
+    pass("cold_restart_preserves_registered_project_and_membership");
+    const after = await openAndPlace();
+    assert.equal(after.thread.title, before.thread.title);
+    assert.equal(after.thread.preview, before.thread.preview);
+    assert.deepEqual(after.turns, before.turns);
+    const finalTranscript = await readFile(state.threadPath);
+    assert.ok(finalTranscript.subarray(0, original.length).equals(original));
+    pass("original_transcript_and_native_history_preserved");
+    const report = { scope: "windows_desktop_owned_automatic_project_registration", passed: true,
+      checks, seededProject: false, manualProjectRegistration: false, registrationMs: state.registrationMs,
+      observedThreadStatuses,
+      activeModelTurnRequired: false, productionCodeChanged: false,
+      nativeMembershipVerified: true, screenshotVerified: false,
+      topology: "Desktop-owned backend; selected database owner and native pipe owner verified" };
+    await writeFile(join(state.root, "registration-owned-report.json"), JSON.stringify(report, null, 2) + "\n");
+    return report;
+  } finally { bridge?.close(); }
 }
 
 async function verify(state) {
@@ -355,10 +502,11 @@ async function verify(state) {
 
 async function cleanup(state) {
   // Only PIDs recorded by this fixture; no process-name based termination.
-  return powershell(`Get-CimInstance Win32_Process -Filter "ProcessId=${state.desktopPid}" | Where-Object { $_.CommandLine.Contains(${psQuote(state.userData)}) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Get-CimInstance Win32_Process -Filter "ProcessId=${state.backendPid}" | Where-Object { $_.CommandLine.Contains(${psQuote(state.wsUrl)}) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; 'Isolated processes stopped'`);
+  return powershell(`${state.desktopPid ? `Get-CimInstance Win32_Process -Filter "ProcessId=${state.desktopPid}" | Where-Object { $_.CommandLine.Contains(${psQuote(state.userData)}) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force };` : ""} Get-CimInstance Win32_Process -Filter "ProcessId=${state.backendPid}" | Where-Object { $_.CommandLine.Contains(${psQuote(state.wsUrl)}) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; 'Isolated processes stopped'`);
 }
 
 async function integration(state) {
+  const startedUnregistered = state.fixtureProjectId == null;
   await cleanup(state);
   state.desktopOwnsBackend = true;
   try {
@@ -370,20 +518,37 @@ async function integration(state) {
     // another home. It accepts only this runner's temporary fixture tree.
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt) await restart(state);
-      await new Promise((accept, reject) => {
-        const child = spawn(args.cargo ?? "cargo", ["test", "-p", "mallard-infrastructure", "--lib",
-          "native_desktop_placement_uses_the_selected_home", "--", "--ignored", "--nocapture"], {
-          env: { ...process.env, MALLARD_NATIVE_PLACEMENT_ROOT: state.root },
-          windowsHide: true, stdio: "inherit",
+      const bridge = await readyBridge(state);
+      try {
+        const initial = unwrap(await bridge.call("read_thread", {
+          threadId: state.threadId, hostId: "local", turnLimit: 10,
+          includeOutputs: true, maxOutputCharsPerItem: 4000,
+        }));
+        assert.equal(initial.thread.id, state.threadId);
+        assert.ok(JSON.stringify(initial.turns).includes("Mallard POC fixture completed locally."));
+        await new Promise((accept, reject) => {
+          const child = spawn(args.cargo ?? "cargo", ["test", "-p", "mallard-infrastructure", "--lib",
+            "native_desktop_placement_uses_the_selected_home", "--", "--ignored", "--nocapture"], {
+            env: { ...cleanEnv(), MALLARD_NATIVE_PLACEMENT_ROOT: state.root },
+            windowsHide: true, stdio: "inherit",
+          });
+          child.once("error", reject);
+          child.once("exit", (code) => code === 0 ? accept() : reject(new Error("production_placement_failed")));
         });
-        child.once("error", reject);
-        child.once("exit", (code) => code === 0 ? accept() : reject(new Error("production_placement_failed")));
-      });
+        const projects = unwrap(await bridge.call("list_projects", {})).projects.filter((item) =>
+          item.projectKind === "local" && item.hostId === "local" && typeof item.path === "string" &&
+          resolve(item.path).toLowerCase() === resolve(state.project).toLowerCase());
+        assert.equal(projects.length, 1);
+        if (state.fixtureProjectId) assert.equal(projects[0].projectId, state.fixtureProjectId);
+        state.fixtureProjectId = projects[0].projectId;
+        await save(state);
+      } finally { bridge.close(); }
     }
     const report = { scope: "windows_production_placement", passed: true,
       nativeMembershipVerified: true, screenshotVerified: false,
       topology: "Desktop-owned backend; selected database owner, process lifetime and native pipe owner verified",
-      checks: ["backend_only_assignment_reproduces_failure", "production_move_and_open",
+      checks: [...(startedUnregistered ? ["production_registers_missing_folder_once"] : []),
+        "notLoaded_restored_chat_placed", "production_move_and_open",
         "repeat_open_keeps_membership", "wrong_home_rejected", "history_preserved",
         "production_path_repeated_after_fixture_restart"] };
     await writeFile(join(state.root, "integration-report.json"), JSON.stringify(report, null, 2) + "\n");
@@ -392,6 +557,40 @@ async function integration(state) {
 }
 
 async function main() {
+  if (args.phase === "registration-integration") {
+    const state = await setup({ seedProject: false, launchDesktop: false });
+    console.log(JSON.stringify({ root: state.root, seededProject: false }));
+    try {
+      await populate(state);
+      console.log(JSON.stringify(await integration(state), null, 2));
+    } finally { console.log(await cleanup(state)); }
+    return;
+  }
+  if (args.phase === "registration-setup") {
+    const state = await setup({ seedProject: false });
+    console.log(JSON.stringify({ root: state.root, seededProject: false }));
+    await populate(state);
+    return;
+  }
+  if (args.phase === "registration" || args.phase === "registration-owned") {
+    const state = await setup({ seedProject: false, launchDesktop: args.phase !== "registration-owned" });
+    console.log(JSON.stringify({ root: state.root, seededProject: false }));
+    try {
+      await populate(state);
+      if (args.phase === "registration-owned") {
+        console.log(JSON.stringify(await verifyOwnedRegistration(state), null, 2));
+        return;
+      }
+      await registerMissingProject(state);
+      const placement = await verify(state);
+      const report = { ...placement, scope: "windows_automatic_project_registration",
+        seededProject: false, manualProjectRegistration: false, registrationMs: state.registrationMs,
+        checks: ["destination_project_initially_absent", "folder_deep_link_registers_native_project", ...placement.checks] };
+      await writeFile(join(state.root, "registration-report.json"), JSON.stringify(report, null, 2) + "\n");
+      console.log(JSON.stringify(report, null, 2));
+    } finally { console.log(await cleanup(state)); }
+    return;
+  }
   if (args.phase === "setup" || args.phase === "run") {
     const state = await setup();
     console.log(JSON.stringify({ root: state.root, selectedHomeConfirmed: true }));
@@ -419,6 +618,8 @@ async function main() {
     console.log(JSON.stringify({ desktopPid: state.desktopPid }));
   } else if (args.phase === "open") {
     console.log(JSON.stringify({ launchPid: await launch(state, `codex://threads/${state.threadId}`) }));
+  } else if (args.phase === "open-project") {
+    console.log(JSON.stringify({ launchPid: await launch(state, `codex://threads/new?path=${encodeURIComponent(state.project)}`) }));
   } else if (args.phase === "native") {
     const bridge = await appTools(state);
     try {
@@ -428,7 +629,7 @@ async function main() {
     } finally { bridge.close(); }
   } else if (args.phase === "cleanup") {
     console.log(await cleanup(state));
-  } else throw new Error("Use --phase=run|setup|populate|verify|integration|read|rpc|open|native|restart|cleanup");
+  } else throw new Error("Use --phase=run|setup|populate|verify|integration|registration|registration-owned|registration-integration|registration-setup|read|rpc|open|open-project|native|restart|cleanup");
 }
 
 main().catch((error) => { console.error(error.message); process.exitCode = 1; })
