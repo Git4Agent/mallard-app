@@ -175,7 +175,12 @@ test("the desktop shell supports a persistent sidebar toggle and keyboard shortc
   assert.match(css, /\.sync-titlebar \{[^}]*flex: 0 0 auto;/);
   assert.match(css, /\.sync-titlebar \{[^}]*min-height: 3\.25rem;/);
   assert.match(css, /\.sync-sidebar-brand\s*\{[^}]*height: 48px;/s);
-  assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 26, y: 35 });
+  // The 14px lights' top lands at y - 9 (AppKit keeps them 9px off the
+  // bottom of a titlebar sized button + y), so y 26 puts them at 17-31: inside
+  // the 30px strip both ways — 10-40 in the sidebar head, 8-38 above the path
+  // bar while the sidebar is hidden. y 35 was the old 42px strip's, and left
+  // them 2px over the hidden-sidebar path bar.
+  assert.deepEqual(tauriConfig.app.windows[0].trafficLightPosition, { x: 26, y: 26 });
 });
 
 /* Only the macOS window draws controls over the page. Windows and Linux keep

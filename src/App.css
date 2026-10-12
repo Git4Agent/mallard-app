@@ -11689,8 +11689,10 @@ summary {
   background: var(--bg-1);
 }
 
-/* Holds only the macOS traffic lights; trafficLightPosition in
-   tauri.conf.json centres them in it. 0px elsewhere. */
+/* Holds only the macOS traffic lights. trafficLightPosition y 26 in
+   tauri.conf.json puts the 14px lights at 17-31 from the window top: inside
+   this strip at 10-40 in the sidebar head, and at 8-38 above the path bar
+   while the sidebar is hidden. Change one, change the other. 0px elsewhere. */
 .sync-sidebar-drag,
 .sync-window-strip {
   height: var(--window-strip);
