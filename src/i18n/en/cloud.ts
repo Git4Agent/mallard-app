@@ -177,6 +177,9 @@ export default {
     notPushedYet: "not pushed yet",
     public: "Public",
     publicRole: "Public · {{role}}",
+    refresh: "Refresh",
+    refreshing: "Refreshing…",
+    updated: "Updated",
   },
   /** The address a New row previews, refused. */
   name: {

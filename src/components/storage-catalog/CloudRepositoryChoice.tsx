@@ -88,7 +88,7 @@ type Lookup =
 
 type Listing =
   | { state: "loading" }
-  | { state: "ready"; rows: CatalogCloudRepository[] }
+  | { state: "ready"; rows: CatalogCloudRepository[]; refreshing: boolean }
   | { state: "error"; message: string };
 
 const capitalize = (value: string) => (value ? `${value[0].toUpperCase()}${value.slice(1)}` : value);
@@ -221,14 +221,19 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
 
   const readRef = useRef(read);
   readRef.current = read;
+  /** Bumped by Refresh: the rows are read again and stay on screen meanwhile. */
+  const [generation, setGeneration] = useState(0);
+  const lastListKey = useRef<string | null>(null);
   useEffect(() => {
     let current = true;
-    setListing({ state: "loading" });
+    const sameKey = lastListKey.current === listKey;
+    lastListKey.current = listKey;
+    setListing((held) => (sameKey && held.state === "ready" ? { ...held, refreshing: true } : { state: "loading" }));
     void readRef.current()
-      .then((rows) => { if (current) setListing({ state: "ready", rows }); })
+      .then((rows) => { if (current) setListing({ state: "ready", rows, refreshing: false }); })
       .catch((reason) => { if (current) setListing({ state: "error", message: errorMessage(reason) }); });
     return () => { current = false; };
-  }, [listKey]);
+  }, [listKey, generation]);
 
   /* Starred and Public are Add's: an item's own chooser lists only the
      repositories that hold it. */
@@ -572,7 +577,9 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
     }
     choices = (
       <>
-        <CloudScopeTabs tabs={tabs} active={tab} disabled={working} onChange={setTab} sort={listings.sort} onSort={listings.changeSort} />
+        <CloudScopeTabs tabs={tabs} active={tab} disabled={working} onChange={setTab} sort={listings.sort} onSort={listings.changeSort}
+          onRefresh={() => { setGeneration((held) => held + 1); listings.refresh(); }}
+          refreshing={(listing.state === "ready" && listing.refreshing) || listings.refreshing} />
         {panel}
       </>
     );

@@ -375,7 +375,7 @@ export default function ProjectSetupWorkspace({
   const repositoryFingerprint = inspection?.draft.repository_fingerprint
     ?? draft?.repository_fingerprint
     ?? null;
-  const managedListing = useManagedCloudRepositories(
+  const managed = useManagedCloudRepositories(
     managedStorage ? chosenStorageId : null,
     repositoryFingerprint,
     workflowIsActive,
@@ -561,7 +561,7 @@ export default function ProjectSetupWorkspace({
     && !profileNeedsSelection
     && !working
     && !bundlesLoading
-    && !(managedStorage && managedListing.state === "loading")
+    && !(managedStorage && managed.listing.state === "loading")
     && saveState !== "saving"
     && saveState !== "error"
     // Finish sets up the folder the draft holds, never one still being typed.
@@ -925,7 +925,8 @@ export default function ProjectSetupWorkspace({
                    repository name; it is a name, not copy. */
                 projectName={draft.display_name || "project"}
                 localFingerprint={repositoryFingerprint}
-                listing={managedListing}
+                listing={managed.listing}
+                onRefresh={managed.refresh}
                 selection={draft.repository.kind === "existing"
                   ? {
                     kind: "existing",

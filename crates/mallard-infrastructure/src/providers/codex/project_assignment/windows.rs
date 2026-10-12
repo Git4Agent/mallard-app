@@ -538,7 +538,7 @@ mod tests {
         );
 
         for _ in 0..2 {
-            super::super::assign_and_open(executable, &home, thread, &project).unwrap();
+            super::super::assign_and_open(executable, &home, thread, &project, || Ok(())).unwrap();
             assert_eq!(membership(&mut desktop), state["fixtureProjectId"]);
         }
         // A copied rollout has the same chat ID but does not prove which home

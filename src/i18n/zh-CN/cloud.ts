@@ -156,6 +156,9 @@ export default {
     notPushedYet: "尚未上传",
     public: "公开",
     publicRole: "公开 · {{role}}",
+    refresh: "刷新",
+    refreshing: "正在刷新…",
+    updated: "已更新",
   },
   name: {
     refusalProject: "名称需要包含字母或数字；请先重命名项目。",

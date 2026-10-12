@@ -121,6 +121,7 @@ const server = net.createServer((socket) => {
   let buffer = "";
   let busy = false;
   let count = 0;
+  let projectReads = 0;
   const correlation = randomUUID();
   socket.setTimeout(30_000, () => socket.destroy());
   socket.on("error", () => {});
@@ -149,7 +150,12 @@ const server = net.createServer((socket) => {
         if (socket.destroyed) return native.close();
         socket.write(JSON.stringify({ ready: true, home }) + "\n");
       } else {
-        if (!validateCall(input, threadId) || ++count > 4) throw new Error("Invalid placement operation.");
+        if (!validateCall(input, threadId)) throw new Error("Invalid placement operation.");
+        count += 1;
+        if (input.tool === "list_projects") projectReads += 1;
+        // Registration can take time. Permit bounded read polling within the
+        // caller's 30-second deadline, keeping the other operation limit.
+        if (projectReads > 300 || count - projectReads > 3) throw new Error("Invalid placement operation.");
         const result = await native.request("tools/call", {
           namespace: "codex_app", tool: input.tool, arguments: input.arguments,
           callerSource: "codex", hostId: "local", threadId,

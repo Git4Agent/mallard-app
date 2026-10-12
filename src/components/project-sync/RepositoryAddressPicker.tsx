@@ -96,36 +96,44 @@ export function managedCloudAccount(storage: Pick<StorageSummary, "settings" | "
 
 export type RepositoryListing =
   | { state: "loading" }
-  | { state: "ready"; repositories: ManagedCloudRepository[] }
+  | { state: "ready"; repositories: ManagedCloudRepository[]; refreshing: boolean }
   | { state: "error"; message: string };
 
 /** The account's project repositories on one Mallard Cloud storage, read
- *  once per storage and local fingerprint. */
+ *  once per storage and local fingerprint, and again on `refresh`, which
+ *  keeps the rows on screen until the answer lands. */
 export function useManagedCloudRepositories(
   storageId: string | null,
   localFingerprint: string | null,
   isActive: () => boolean = () => true,
-): RepositoryListing {
+): { listing: RepositoryListing; refresh: () => void } {
   const [listing, setListing] = useState<RepositoryListing>({ state: "loading" });
+  const [generation, setGeneration] = useState(0);
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
+  const lastSource = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const source = `${storageId ?? ""}\n${localFingerprint ?? ""}`;
+    const sameSource = lastSource.current === source;
+    lastSource.current = source;
     if (!storageId) {
-      setListing({ state: "ready", repositories: [] });
+      setListing({ state: "ready", repositories: [], refreshing: false });
       return () => { cancelled = true; };
     }
-    setListing({ state: "loading" });
+    // A refresh keeps the rows; a new storage or fingerprint starts over.
+    setListing((current) => (sameSource && current.state === "ready" ? { ...current, refreshing: true } : { state: "loading" }));
     void projectSyncApi.listManagedCloudRepositories(storageId, localFingerprint)
       .then((repositories) => {
-        if (!cancelled && isActiveRef.current()) setListing({ state: "ready", repositories });
+        if (!cancelled && isActiveRef.current()) setListing({ state: "ready", repositories, refreshing: false });
       })
       .catch((reason) => {
         if (!cancelled && isActiveRef.current()) setListing({ state: "error", message: errorMessage(reason) });
       });
     return () => { cancelled = true; };
-  }, [storageId, localFingerprint]);
-  return listing;
+  }, [storageId, localFingerprint, generation]);
+  const refresh = () => setGeneration((current) => current + 1);
+  return { listing, refresh };
 }
 
 export function selectionFor(repository: ManagedCloudRepository): RepositorySelection {
@@ -223,6 +231,8 @@ interface Props {
   projectName: string;
   localFingerprint: string | null;
   listing: RepositoryListing;
+  /** Reads the account's rows again; Starred and Public follow. */
+  onRefresh: () => void;
   selection: RepositorySelection | null;
   /** The rows' shape: the dialog's or the setup page's. */
   rows: "choice" | "match-option";
@@ -248,6 +258,7 @@ export default function RepositoryAddressPicker({
   projectName,
   localFingerprint,
   listing,
+  onRefresh,
   selection,
   rows,
   offerNew,
@@ -712,7 +723,9 @@ export default function RepositoryAddressPicker({
       {acknowledgement}
 
       <CloudScopeTabs tabs={tabs} active={tab} disabled={disabled} onChange={setTab}
-        sort={listings.sort} onSort={listings.changeSort} />
+        sort={listings.sort} onSort={listings.changeSort}
+        onRefresh={() => { onRefresh(); listings.refresh(); }}
+        refreshing={(listing.state === "ready" && listing.refreshing) || listings.refreshing} />
       {panel}
     </>
   );

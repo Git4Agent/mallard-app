@@ -16,7 +16,8 @@ const executable = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
 const cli = join(resources, "codex-cli/bin/codex");
 const state = { marker: "mallard-mac-placement-v1", root,
   home: join(root, "selected-home"), userData: join(root, "desktop-data"),
-  project: join(root, "Placement fixture"), projectId: randomUUID() };
+  project: join(root, "Placement fixture"),
+  existingProject: join(root, "Unrelated project"), existingProjectId: randomUUID() };
 const report = { scope: "macOS production native project placement", passed: false, checks: [] };
 const run = promisify(execFile);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -67,18 +68,26 @@ async function stopDesktop() {
   const all = await processes(), main = all.find((p) => p.pid === desktop.pid);
   if (main) {
     assert.ok(main.command.includes(executable) && main.command.includes(`--user-data-dir=${state.userData}`));
-    const ids = new Set([main.pid]);
+    const fixtureDesktops = all.filter((p) => p.command.includes(executable) &&
+      (p.pid === main.pid || p.command.includes(`--user-data-dir=${state.userData}/`)));
+    const ids = new Set(fixtureDesktops.map((p) => p.pid));
     for (let depth = 0; depth < 8; depth++) for (const p of all) if (ids.has(p.parent)) ids.add(p.pid);
     const recorded = all.filter((p) => ids.has(p.pid));
-    desktop.kill("SIGTERM"); await sleep(1500);
+    for (const p of fixtureDesktops) {
+      try { process.kill(p.pid, "SIGTERM"); } catch {}
+    }
+    await sleep(1500);
     for (const p of await processes()) {
       if (recorded.some((old) => old.pid === p.pid && old.identity === p.identity)) {
         try { process.kill(p.pid, "SIGTERM"); } catch {}
       }
     }
-    await sleep(500);
-    report.fixtureProcessesRemaining = (await processes()).filter((p) =>
-      recorded.some((old) => old.pid === p.pid && old.identity === p.identity)).map((p) => p.pid);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(250);
+      report.fixtureProcessesRemaining = (await processes()).filter((p) =>
+        recorded.some((old) => old.pid === p.pid && old.identity === p.identity)).map((p) => p.pid);
+      if (report.fixtureProcessesRemaining.length === 0) break;
+    }
     assert.deepEqual(report.fixtureProcessesRemaining, []);
   }
   desktop = undefined;
@@ -101,7 +110,7 @@ async function launchDesktop() {
 }
 
 try {
-  for (const directory of [state.home, state.userData, state.project]) await mkdir(directory);
+  for (const directory of [state.home, state.userData, state.project, state.existingProject]) await mkdir(directory);
   await writeFile(join(state.project, "README.md"), "Temporary native project placement fixture.\n");
   await writeFile(join(state.home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "fixture-local-only-not-a-credential" }));
   await writeFile(join(state.home, "config.toml"), `# Retain this fixture comment.
@@ -114,6 +123,8 @@ wire_api = "responses"
 requires_openai_auth = false
 [analytics]
 enabled = false
+[projects.${JSON.stringify(state.project)}]
+trust_level = "trusted"
 `);
   // Build before starting Desktop. No test uses the user's provider home.
   const build = await run("cargo", ["test", "-p", "mallard-infrastructure", "--lib", "--no-run", "--message-format=json"],
@@ -153,10 +164,11 @@ enabled = false
   core.kill(); core = undefined; await sleep(500); await mock.stop(); mock = undefined;
   const history = await readFile(state.threadPath);
   pass("completed_local_mock_chat_created");
-  // Cold fixture seed only. All later assignments use the native operation.
+  // Keep Desktop past first-project setup. The target folder is not registered.
   await writeFile(join(state.home, ".codex-global-state.json"), JSON.stringify({
-    "local-projects": { [state.projectId]: { id: state.projectId, name: "Placement fixture",
-      rootPaths: [state.project], createdAt: Date.now(), updatedAt: Date.now() } },
+    "local-projects": { [state.existingProjectId]: { id: state.existingProjectId,
+      name: "Unrelated project", rootPaths: [state.existingProject],
+      createdAt: Date.now(), updatedAt: Date.now() } },
     "projectless-thread-ids": [state.threadId],
   }));
   await writeFile(join(root, "state.json"), JSON.stringify(state, null, 2));
@@ -179,7 +191,7 @@ enabled = false
     });
     await writeFile(join(root, `native-test-${attempt}.log`), result.stdout + result.stderr);
     assert.match(result.stdout, /test result: ok\. 1 passed/);
-    pass(attempt ? "native_membership_and_repeat_open_after_restart" : "production_registration_move_navigation_and_membership");
+    pass(attempt ? "native_membership_and_repeat_open_after_restart" : "unregistered_folder_registered_before_session_assignment");
     await stopDesktop();
   }
   const after = await readFile(state.threadPath);

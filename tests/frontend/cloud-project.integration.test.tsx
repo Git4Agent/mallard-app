@@ -203,7 +203,7 @@ test("the picker in clone mode compares no remote, offers no new repository, and
       storage={personal}
       projectName=""
       localFingerprint={null}
-      listing={{ state: "ready", repositories: rows }}
+      listing={{ state: "ready", repositories: rows, refreshing: false }} onRefresh={() => {}}
       selection={null}
       rows="match-option"
       offerNew={false}

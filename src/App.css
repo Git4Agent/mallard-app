@@ -13629,6 +13629,7 @@ span.sync-update-pill {
    displacement; labelled buttons keep the press. */
 .sync-history-thread-actions .sync-history-launch-action:active:not(:disabled),
 .session-detail-launch:active:not(:disabled),
+.repo-scope-refresh:active:not(:disabled),
 .sync-history-debug-trigger:active:not(:disabled),
 .sync-history-commit-toggle:active:not(:disabled),
 .sync-history-spine-fold:active:not(:disabled),
@@ -14450,6 +14451,10 @@ span.sync-update-pill {
 .repo-scope-tabs > button > svg { flex: none; }
 .repo-scope-tabs > .repo-scope-sort { margin-left: auto; margin-bottom: 5px; }
 .repo-scope-sort button { height: 22px; padding: 0 8px; }
+/* Refresh: the strip's last control, a 28px icon square centred on the sort
+   pill's 30px; alone it takes the strip's end. */
+.repo-scope-tabs > .repo-scope-refresh { margin-left: auto; margin-bottom: 7px; width: 28px; min-height: 28px; padding: 0; }
+.repo-scope-tabs > .repo-scope-sort + .repo-scope-refresh { margin-left: 8px; }
 /* A row: the choice row with a tile, the address and its marks on one
    line, the description (else the role) under it, and a meta column that
    says role, stars and age. The pet tile is the Catalog card's preview at

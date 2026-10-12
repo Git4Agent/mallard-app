@@ -545,7 +545,7 @@ test("the address is looked up once by the pages' own lookups, which only select
       storage={cloudStorage("s-personal", "Rika321")}
       projectName=""
       localFingerprint={null}
-      listing={{ state: "ready", repositories: [] }}
+      listing={{ state: "ready", repositories: [], refreshing: false }} onRefresh={() => {}}
       selection={null}
       rows="match-option"
       offerNew={false}

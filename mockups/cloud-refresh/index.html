@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cloud picker refresh</title>
+    <style>
+      :root { --page: #f6eedb; --ink: #2b2118; --muted: #6f604c; --rule: #dccdab; --card: #fffaf0; --accent: #8a5a00; color-scheme: light; }
+      :root[data-theme="dark"] { --page: #1d1914; --ink: #f1e7d4; --muted: #b5a68e; --rule: #3d342a; --card: #26211b; --accent: #e3b45c; color-scheme: dark; }
+      html, body { height: auto !important; overflow: visible !important; }
+      body { margin: 0; padding: 20px 24px 60px; background: var(--page); color: var(--ink); font: 13px/1.45 system-ui, -apple-system, "PingFang SC", sans-serif; }
+      .spec-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; margin-bottom: 6px; }
+      .spec-head h1 { margin: 0; font-size: 18px; }
+      .toggles { display: flex; gap: 6px; }
+      .toggles a { font: inherit; padding: 3px 10px; border: 1.5px solid var(--ink); border-radius: 999px; background: var(--card); color: var(--ink); text-decoration: none; }
+      .toggles a[aria-current="true"] { background: var(--ink); color: var(--page); }
+      .rule { color: var(--muted); margin: 0; }
+      .row { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--rule); }
+      .row h3 { margin: 0; font-size: 14px; display: flex; gap: 8px; align-items: baseline; }
+      .row h3 .pick { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--accent); color: var(--page); }
+      .row p { margin: 2px 0 0; color: var(--muted); }
+      .row p a { color: inherit; }
+      .row p .against { color: var(--ink); }
+      .frames { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; align-items: flex-start; }
+      figure { margin: 0; }
+      figcaption { margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+      figcaption b { color: var(--ink); }
+      /* The dialog sits in flow here, not in the top layer. */
+      .frame dialog.sync-modal { position: static; margin: 0; width: 680px; max-height: none; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./specimen.tsx"></script>
+  </body>
+</html>

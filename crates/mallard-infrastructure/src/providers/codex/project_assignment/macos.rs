@@ -67,6 +67,68 @@ fn read_private(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+// This read is only a barrier between Desktop's two deep links. Project IDs
+// and membership still come from Desktop's native tools, never this file.
+pub(in crate::providers::codex) fn project_is_registered(
+    home: &Path,
+    project_root: &Path,
+) -> Result<bool, String> {
+    const ERROR: &str = "Could not read Codex Desktop's project registration.";
+    let path = home.join(".codex-global-state.json");
+    ensure_no_symlinks(home, &path).map_err(|_| ERROR)?;
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(ERROR.into()),
+    };
+    let metadata = file.metadata().map_err(|_| ERROR)?;
+    if !metadata.is_file() || metadata.len() > MAX_FRAME {
+        return Err(ERROR.into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FRAME + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ERROR)?;
+    if bytes.len() as u64 > MAX_FRAME {
+        return Err(ERROR.into());
+    }
+    let state: Value = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
+    let Some(projects) = state.get("local-projects").and_then(Value::as_object) else {
+        return Ok(false);
+    };
+    if projects.len() > 10_000 {
+        return Err(ERROR.into());
+    }
+    Ok(projects.values().any(|project| {
+        project["rootPaths"].as_array().is_some_and(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|root| crate::local_paths::same_canonical_path(Path::new(root), project_root))
+        })
+    }))
+}
+
+pub(in crate::providers::codex) fn wait_for_project_registration(
+    home: &Path,
+    project_root: &Path,
+    deadline: Instant,
+) -> Result<(), String> {
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(
+            "Codex Desktop did not register the project folder in time. Try Open in Codex again.",
+        )?;
+        if project_is_registered(home, project_root)? {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100).min(remaining));
+    }
+}
+
 pub(in crate::providers::codex) fn prepare(
     app: &InstalledMacApp,
     home: &Path,
@@ -281,10 +343,19 @@ impl Desktop {
     }
 }
 
-async fn connect(home: &Path, thread_id: &str, deadline: Instant) -> Result<Desktop, String> {
+async fn connect(
+    home: &Path,
+    thread_id: &str,
+    project_root: Option<&Path>,
+    existing_helpers: &[String],
+    deadline: Instant,
+) -> Result<Desktop, String> {
     let directory = profile_directory(home)?;
     while Instant::now() < deadline {
         for bridge in bridges(&directory)? {
+            if existing_helpers.contains(&bridge.token) {
+                continue;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let timeout = remaining.min(Duration::from_millis(500));
             let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, bridge.port);
@@ -305,6 +376,21 @@ async fn connect(home: &Path, thread_id: &str, deadline: Instant) -> Result<Desk
             {
                 if reply["ready"] == true && reply["home"] == bridge.home.to_string_lossy().as_ref()
                 {
+                    // Another window in the same home can retain the project
+                    // list from before registration. Use a helper that sees
+                    // the exact destination before sending any move.
+                    if let Some(root) = project_root {
+                        let timeout = deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_secs(2));
+                        let Ok(listing) = desktop.call("list_projects", json!({}), timeout).await
+                        else {
+                            continue;
+                        };
+                        if super::project_id_in_listing(listing, root)?.is_none() {
+                            continue;
+                        }
+                    }
                     return Ok(desktop);
                 }
             }
@@ -318,6 +404,7 @@ pub(in crate::providers::codex) fn assign_and_open(
     home: &Path,
     thread_id: &str,
     project_root: &Path,
+    existing_helpers: &[String],
 ) -> Result<(), String> {
     super::super::actions::validate_thread_uuid(thread_id)?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -325,36 +412,105 @@ pub(in crate::providers::codex) fn assign_and_open(
         .enable_all()
         .build()
         .map_err(|_| "Could not start the Codex Desktop connection.")?;
-    let mut desktop = runtime.block_on(connect(home, thread_id, deadline))?;
+    let mut desktop = runtime.block_on(connect(
+        home,
+        thread_id,
+        Some(project_root),
+        existing_helpers,
+        deadline,
+    ))?;
     super::assign_with_request(thread_id, project_root, deadline, |tool, args, timeout| {
         runtime.block_on(desktop.call(tool, args, timeout))
     })
     .map_err(|error| format!("Could not open the Codex chat in its project: {error}"))
 }
 
+pub(in crate::providers::codex) fn existing_helpers(home: &Path) -> Result<Vec<String>, String> {
+    Ok(bridges(&profile_directory(home)?)?
+        .into_iter()
+        .map(|bridge| bridge.token)
+        .collect())
+}
+
 #[cfg(test)]
-pub(in crate::providers::codex) fn fixture_thread(home: &Path, id: &str) -> Value {
+fn fixture_request(
+    home: &Path,
+    id: &str,
+    project: Option<&Path>,
+    tool: &str,
+    args: Value,
+) -> Value {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let mut desktop = connect(home, id, Instant::now() + Duration::from_secs(10))
+        let mut desktop = connect(
+            home,
+            id,
+            project,
+            &[],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        desktop
+            .call(tool, args, Duration::from_secs(10))
             .await
-            .unwrap();
-        let listing = desktop
-            .call("list_threads", json!({"limit":50}), Duration::from_secs(10))
-            .await
-            .unwrap();
-        listing["pinnedThreads"]
-            .as_array()
             .unwrap()
-            .iter()
-            .chain(listing["threads"].as_array().unwrap())
-            .find(|thread| thread["id"] == id)
-            .expect("fixture chat must be visible")
-            .clone()
     })
+}
+
+#[cfg(test)]
+pub(in crate::providers::codex) fn fixture_project(
+    home: &Path,
+    id: &str,
+    project_root: &Path,
+    registered: bool,
+) -> Option<String> {
+    let listing = fixture_request(
+        home,
+        id,
+        registered.then_some(project_root),
+        "list_projects",
+        json!({}),
+    );
+    let matches = listing["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|project| {
+            project["projectKind"] == "local"
+                && project["hostId"] == "local"
+                && project["path"] == project_root.to_string_lossy().as_ref()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches.len() <= 1,
+        "fixture folder must have at most one project"
+    );
+    matches.first().map(|project| {
+        let id = project["projectId"].as_str().unwrap();
+        assert!(!id.is_empty());
+        id.to_string()
+    })
+}
+
+#[cfg(test)]
+pub(in crate::providers::codex) fn fixture_thread(
+    home: &Path,
+    id: &str,
+    project: Option<&Path>,
+) -> Value {
+    let listing = fixture_request(home, id, project, "list_threads", json!({"limit":50}));
+    listing["pinnedThreads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(listing["threads"].as_array().unwrap())
+        .find(|thread| thread["id"] == id)
+        .expect("fixture chat must be visible")
+        .clone()
 }
 
 #[cfg(test)]
@@ -385,9 +541,41 @@ pub(in crate::providers::codex) fn verify_fixture_request_boundaries(home: &Path
                 .await
                 .is_err());
         }
-        let mut desktop = connect(home, id, Instant::now() + Duration::from_secs(10))
+        let mut desktop = connect(
+            home,
+            id,
+            None,
+            &[],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        // Registration polling can exceed the former four-call total limit.
+        for _ in 0..5 {
+            desktop
+                .call("list_projects", json!({}), Duration::from_secs(5))
+                .await
+                .unwrap();
+        }
+        for _ in 0..3 {
+            desktop
+                .call("list_threads", json!({"limit":1}), Duration::from_secs(5))
+                .await
+                .unwrap();
+        }
+        assert!(desktop
+            .call("list_threads", json!({"limit":1}), Duration::from_secs(5))
             .await
-            .unwrap();
+            .is_err());
+        let mut desktop = connect(
+            home,
+            id,
+            None,
+            &[],
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
         assert!(desktop
             .call(
                 "move_thread_to_project",
@@ -403,6 +591,72 @@ pub(in crate::providers::codex) fn verify_fixture_request_boundaries(home: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_waits_for_the_exact_folder_and_never_changes_desktop_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical_home = fs::canonicalize(temp.path()).unwrap();
+        let home = canonical_home.as_path();
+        let project = home.join("new-project");
+        fs::create_dir(&project).unwrap();
+        let state = home.join(".codex-global-state.json");
+        assert!(!project_is_registered(home, &project).unwrap());
+        fs::write(
+            &state,
+            br#"{"local-projects":{"other":{"rootPaths":["/unrelated"]}}}"#,
+        )
+        .unwrap();
+        let before = fs::read(&state).unwrap();
+        assert!(wait_for_project_registration(
+            home,
+            &project,
+            Instant::now() + Duration::from_millis(150)
+        )
+        .is_err());
+        assert_eq!(fs::read(&state).unwrap(), before);
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                write_bytes_atomic(
+                    home,
+                    &state,
+                    &serde_json::to_vec(&json!({"local-projects": {
+                        "new": {"rootPaths": [fs::canonicalize(&project).unwrap()]}
+                    }}))
+                    .unwrap(),
+                    MAX_FRAME,
+                )
+                .unwrap();
+            });
+            wait_for_project_registration(home, &project, Instant::now() + Duration::from_secs(5))
+                .unwrap();
+        });
+        let registered = fs::read(&state).unwrap();
+        wait_for_project_registration(home, &project, Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(fs::read(&state).unwrap(), registered);
+    }
+
+    #[test]
+    fn registration_rejects_symlinks_special_files_and_oversized_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state = home.join(".codex-global-state.json");
+        let outside = home.join("outside.json");
+        fs::write(&outside, b"{}").unwrap();
+        std::os::unix::fs::symlink(&outside, &state).unwrap();
+        assert!(project_is_registered(home, home).is_err());
+        fs::remove_file(&state).unwrap();
+        fs::create_dir(&state).unwrap();
+        assert!(project_is_registered(home, home).is_err());
+        fs::remove_dir(&state).unwrap();
+        fs::File::create(&state)
+            .unwrap()
+            .set_len(MAX_FRAME + 1)
+            .unwrap();
+        assert!(project_is_registered(home, home).is_err());
+    }
 
     #[test]
     fn helper_records_are_private_bounded_and_bound_to_the_selected_home() {

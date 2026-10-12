@@ -44,7 +44,7 @@ export function listingRoleWord(row: Pick<ManagedCloudListingRow, "role" | "visi
   return row.visibility === "public" ? translate("cloud:scopes.publicRole", { role }) : role;
 }
 
-export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort }: {
+export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort, onRefresh, refreshing }: {
   tabs: readonly ScopeTab[];
   active: ScopeId;
   disabled?: boolean;
@@ -52,8 +52,21 @@ export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort 
   /** Public's order, drawn at the strip's end while Public is open. */
   sort?: ManagedCloudPublicSort;
   onSort?: (sort: ManagedCloudPublicSort) => void;
+  /** Reads every scope again; the rows stay on screen meanwhile. */
+  onRefresh: () => void;
+  refreshing: boolean;
 }) {
   const { t } = useTranslation("cloud");
+  /* A reader hears the reload end: "Updated" once a refresh has finished,
+     nothing before the first one. */
+  const wasRefreshing = useRef(false);
+  const [updated, setUpdated] = useState(false);
+  useEffect(() => {
+    if (wasRefreshing.current && !refreshing) setUpdated(true);
+    if (refreshing) setUpdated(false);
+    wasRefreshing.current = refreshing;
+  }, [refreshing]);
+  const refreshWord = refreshing ? t("scopes.refreshing") : t("scopes.refresh");
   return (
     <div className="sync-project-tabs sync-sync-review-tabs repo-scope-tabs" role="tablist" aria-label={t("scopes.tabs")}>
       {tabs.map((tab) => {
@@ -84,6 +97,11 @@ export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort 
           <button type="button" role="radio" aria-checked={sort === "stars"} className={sort === "stars" ? "active" : undefined} disabled={disabled} onClick={() => onSort("stars")}>{t("scopes.mostStars")}</button>
         </div>
       )}
+      <button type="button" className="btn btn-ghost repo-scope-refresh" aria-label={refreshWord} title={refreshWord}
+        aria-busy={refreshing || undefined} disabled={disabled || refreshing} onClick={onRefresh}>
+        <Icon name="refresh" size={14} className={refreshing ? "icon-spin" : undefined} />
+      </button>
+      <span className="sync-visually-hidden" role="status">{refreshing ? t("scopes.refreshing") : updated ? t("scopes.updated") : ""}</span>
     </div>
   );
 }
@@ -91,14 +109,16 @@ export function CloudScopeTabs({ tabs, active, disabled, onChange, sort, onSort 
 export type Listing =
   | { state: "idle" }
   | { state: "loading" }
-  | { state: "ready"; rows: ManagedCloudListingRow[]; next: string | null; loadingMore: boolean }
+  | { state: "ready"; rows: ManagedCloudListingRow[]; next: string | null; loadingMore: boolean; refreshing: boolean }
   | { state: "error"; message: string };
 
 const NOT_LOADED: Listing = { state: "idle" };
 
 /** Starred is read when the picker opens; Public when its tab first opens,
- *  and again when its sort changes. Every answer carries the request it
- *  was sent under, so a late one for an earlier key is dropped. */
+ *  and again when its sort changes. A refresh reads Starred again, and
+ *  Public's first page when Public has rows; both keep their rows on screen
+ *  until the answer lands. Every answer carries the request it was sent
+ *  under, so a late one for an earlier key is dropped. */
 export function useCloudListings({ key, starred, publicPage, publicOpen }: {
   key: string;
   starred: () => Promise<ManagedCloudListingPage>;
@@ -108,21 +128,39 @@ export function useCloudListings({ key, starred, publicPage, publicOpen }: {
   const [starredListing, setStarred] = useState<Listing>(NOT_LOADED);
   const [publicListing, setPublic] = useState<Listing>(NOT_LOADED);
   const [sort, setSort] = useState<ManagedCloudPublicSort>("newest");
+  const [generation, setGeneration] = useState(0);
   const sequence = useRef(0);
   const starredRef = useRef(starred);
   starredRef.current = starred;
   const publicRef = useRef(publicPage);
   publicRef.current = publicPage;
+  const publicStateRef = useRef(publicListing);
+  publicStateRef.current = publicListing;
+  const sortRef = useRef(sort);
+  sortRef.current = sort;
+  const lastKey = useRef<string | null>(null);
 
   useEffect(() => {
     const request = ++sequence.current;
-    setStarred({ state: "loading" });
-    setPublic(NOT_LOADED);
+    const sameKey = lastKey.current === key;
+    lastKey.current = key;
+    const ready = (page: ManagedCloudListingPage): Listing => ({ state: "ready", rows: page.rows, next: page.next_cursor, loadingMore: false, refreshing: false });
+    // A refresh keeps the rows; a new key starts over.
+    setStarred((current) => (sameKey && current.state === "ready" ? { ...current, refreshing: true } : { state: "loading" }));
     void starredRef.current()
-      .then((page) => { if (request === sequence.current) setStarred({ state: "ready", rows: page.rows, next: page.next_cursor, loadingMore: false }); })
+      .then((page) => { if (request === sequence.current) setStarred(ready(page)); })
       .catch((reason) => { if (request === sequence.current) setStarred({ state: "error", message: errorMessage(reason) }); });
+    const held = publicStateRef.current;
+    if (sameKey && held.state === "ready") {
+      setPublic({ ...held, loadingMore: false, refreshing: true });
+      void publicRef.current(sortRef.current, null)
+        .then((page) => { if (request === sequence.current) setPublic(ready(page)); })
+        .catch((reason) => { if (request === sequence.current) setPublic({ state: "error", message: errorMessage(reason) }); });
+    } else {
+      setPublic(NOT_LOADED);
+    }
     return () => { sequence.current += 1; };
-  }, [key]);
+  }, [key, generation]);
 
   const publicWanted = publicOpen && publicListing.state === "idle";
   useEffect(() => {
@@ -130,7 +168,7 @@ export function useCloudListings({ key, starred, publicPage, publicOpen }: {
     const request = sequence.current;
     setPublic({ state: "loading" });
     void publicRef.current(sort, null)
-      .then((page) => { if (request === sequence.current) setPublic({ state: "ready", rows: page.rows, next: page.next_cursor, loadingMore: false }); })
+      .then((page) => { if (request === sequence.current) setPublic({ state: "ready", rows: page.rows, next: page.next_cursor, loadingMore: false, refreshing: false }); })
       .catch((reason) => { if (request === sequence.current) setPublic({ state: "error", message: errorMessage(reason) }); });
   }, [publicWanted, sort]);
 
@@ -141,7 +179,7 @@ export function useCloudListings({ key, starred, publicPage, publicOpen }: {
   };
 
   const loadMore = () => {
-    if (publicListing.state !== "ready" || !publicListing.next || publicListing.loadingMore) return;
+    if (publicListing.state !== "ready" || !publicListing.next || publicListing.loadingMore || publicListing.refreshing) return;
     const request = sequence.current;
     const cursor = publicListing.next;
     setPublic({ ...publicListing, loadingMore: true });
@@ -149,15 +187,18 @@ export function useCloudListings({ key, starred, publicPage, publicOpen }: {
       .then((page) => {
         if (request !== sequence.current) return;
         setPublic((current) => (current.state === "ready"
-          ? { state: "ready", rows: [...current.rows, ...page.rows], next: page.next_cursor, loadingMore: false }
+          ? { state: "ready", rows: [...current.rows, ...page.rows], next: page.next_cursor, loadingMore: false, refreshing: false }
           : current));
       })
       .catch((reason) => { if (request === sequence.current) setPublic({ state: "error", message: errorMessage(reason) }); });
   };
 
   const retryPublic = () => setPublic(NOT_LOADED);
+  const refresh = () => setGeneration((current) => current + 1);
+  const refreshing = (starredListing.state === "ready" && starredListing.refreshing)
+    || (publicListing.state === "ready" && publicListing.refreshing);
 
-  return { starred: starredListing, public: publicListing, sort, changeSort, loadMore, retryPublic };
+  return { starred: starredListing, public: publicListing, sort, changeSort, loadMore, retryPublic, refresh, refreshing };
 }
 
 /* ——— the row's parts: one anatomy for a full repository and a listed one ——— */

@@ -71,7 +71,7 @@ function ManagedCloudBody({
 }: Props) {
   const { t } = useTranslation(["reviews", "common"]);
   const localFingerprint = projectFingerprint ?? null;
-  const listing = useManagedCloudRepositories(storage.storage_id, localFingerprint);
+  const { listing, refresh } = useManagedCloudRepositories(storage.storage_id, localFingerprint);
   const [selection, setSelection] = useState<RepositorySelection | null>(null);
   const [chosen, setChosen] = useState<ManagedCloudRepository | null>(null);
   const account = managedCloudAccount(storage);
@@ -135,6 +135,7 @@ function ManagedCloudBody({
           projectName={projectName}
           localFingerprint={localFingerprint}
           listing={listing}
+          onRefresh={refresh}
           selection={selection}
           rows="choice"
           offerNew={offerNew}

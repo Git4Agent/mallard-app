@@ -155,7 +155,7 @@ test("the picker names repositories by address and never by bundle id", () => {
       storage={cloud}
       projectName="HorrorGame"
       localFingerprint={CHECKOUT}
-      listing={{ state: "ready", repositories: rows }}
+      listing={{ state: "ready", repositories: rows, refreshing: false }} onRefresh={() => {}}
       selection={{ kind: "new" }}
       rows="match-option"
       offerNew
@@ -192,7 +192,7 @@ test("the picker names repositories by address and never by bundle id", () => {
       storage={cloud}
       projectName="Horror Game"
       localFingerprint={null}
-      listing={{ state: "ready", repositories: [] }}
+      listing={{ state: "ready", repositories: [], refreshing: false }} onRefresh={() => {}}
       selection={{ kind: "new" }}
       rows="choice"
       offerNew
@@ -208,7 +208,7 @@ test("the picker names repositories by address and never by bundle id", () => {
       storage={cloud}
       projectName="HorrorGame"
       localFingerprint={CHECKOUT}
-      listing={{ state: "ready", repositories: rows }}
+      listing={{ state: "ready", repositories: rows, refreshing: false }} onRefresh={() => {}}
       selection={{ kind: "existing", bundle_id: rows[1].bundle_id!, display_name: rows[1].address, repository_fingerprint: rows[1].repository_fingerprint, mismatch_acknowledged: false }}
       rows="choice"
       offerNew={false}
@@ -225,7 +225,7 @@ test("the picker names repositories by address and never by bundle id", () => {
       storage={cloud}
       projectName=""
       localFingerprint={null}
-      listing={{ state: "ready", repositories: [] }}
+      listing={{ state: "ready", repositories: [], refreshing: false }} onRefresh={() => {}}
       selection={null}
       rows="match-option"
       offerNew={false}
@@ -357,7 +357,7 @@ test("rows carry the description and the stars, and the one field knows words fr
       storage={cloud}
       projectName="HorrorGame"
       localFingerprint={CHECKOUT}
-      listing={{ state: "ready", repositories: rows }}
+      listing={{ state: "ready", repositories: rows, refreshing: false }} onRefresh={() => {}}
       selection={null}
       rows="choice"
       offerNew={false}
@@ -459,7 +459,7 @@ test("in Chinese the Cloud chip, its panel and Publish version speak Chinese, an
     // The picker's field and tabs; the rows' addresses and roles as words.
     const picker = renderToStaticMarkup(
       <RepositoryAddressPicker storage={cloud} projectName="HorrorGame" localFingerprint={CHECKOUT}
-        listing={{ state: "ready", repositories: [repository({})] }} selection={{ kind: "new" }}
+        listing={{ state: "ready", repositories: [repository({})], refreshing: false }} onRefresh={() => {}} selection={{ kind: "new" }}
         rows="match-option" offerNew disabled={false} onSelect={() => undefined} />,
     );
     assert.match(picker, /placeholder="搜索，或粘贴链接、owner\/name 或邀请码"/);
@@ -472,4 +472,43 @@ test("in Chinese the Cloud chip, its panel and Publish version speak Chinese, an
   } finally {
     void i18n.changeLanguage("en");
   }
+});
+
+test("the scope strip ends in Refresh, and the rows stay while it runs", () => {
+  const rows = [repository({}), repository({ repository_id: "repo_2", name: "tidewatch", address: "Rika321/tidewatch", bundle_id: "a81b3c5d7e9f1a2b4c6d8e0f2a4b6c8d" })];
+  const picker = (refreshing: boolean) => renderToStaticMarkup(
+    <RepositoryAddressPicker storage={cloud} projectName="HorrorGame" localFingerprint={CHECKOUT}
+      listing={{ state: "ready", repositories: rows, refreshing }} onRefresh={() => {}}
+      selection={null} rows="choice" offerNew={false} disabled={false} onSelect={() => undefined} />,
+  );
+  const rest = picker(false);
+  assert.match(rest, /role="tablist"[\s\S]*?<button type="button" class="btn btn-ghost repo-scope-refresh" aria-label="Refresh" title="Refresh"><svg/, "an icon square at the strip's end, named by its tooltip");
+  assert.doesNotMatch(rest, /repo-scope-refresh"[^>]*aria-busy/);
+  assert.match(rest, /<span class="sync-visually-hidden" role="status"><\/span>/, "nothing is announced before a refresh");
+  const busy = picker(true);
+  assert.match(busy, /repo-scope-refresh" aria-label="Refreshing…" title="Refreshing…" aria-busy="true" disabled=""><svg[^>]*class="[^"]*icon-spin"/, "pending: disabled, spinning");
+  assert.match(busy, /Yours<small>2<\/small>/, "the count stays");
+  assert.equal(busy.match(/class="sync-bundle-choice repo-row/g)?.length, 2, "the rows stay on screen while the reload runs");
+  assert.doesNotMatch(busy, /status-loader/, "no loader replaces them");
+  assert.match(busy, /role="status">Refreshing…<\/span>/);
+
+  // One Refresh reads every scope again, keeping what is held: the hook
+  // tells a refresh from a new key, and every host wires both halves.
+  const scopes = readFileSync("src/components/managed-cloud/CloudScopes.tsx", "utf8");
+  assert.match(scopes, /sameKey && current\.state === "ready" \? \{ \.\.\.current, refreshing: true \} : \{ state: "loading" \}/);
+  assert.match(scopes, /sameKey && held\.state === "ready"/, "Public's first page is read again only when Public holds rows");
+  assert.match(scopes, /\}, \[key, generation\]\);/);
+  const pickerSource = readFileSync("src/components/project-sync/RepositoryAddressPicker.tsx", "utf8");
+  assert.match(pickerSource, /sameSource && current\.state === "ready" \? \{ \.\.\.current, refreshing: true \} : \{ state: "loading" \}/);
+  assert.match(pickerSource, /onRefresh=\{\(\) => \{ onRefresh\(\); listings\.refresh\(\); \}\}/);
+  for (const host of ["BundleConnectionDialog", "ProjectSetupWorkspace", "CloudProjectSource"]) {
+    const source = readFileSync(`src/components/project-sync/${host}.tsx`, "utf8");
+    assert.match(source, /onRefresh=\{(refresh|managed\.refresh)\}/, `${host} passes the account listing's refresh`);
+  }
+  const chooser = readFileSync("src/components/storage-catalog/CloudRepositoryChoice.tsx", "utf8");
+  assert.match(chooser, /onRefresh=\{\(\) => \{ setGeneration\(\(held\) => held \+ 1\); listings\.refresh\(\); \}\}/, "the Library's chooser refreshes the same way");
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.repo-scope-tabs > \.repo-scope-refresh \{ margin-left: auto; margin-bottom: 7px; width: 28px; min-height: 28px; padding: 0; \}/);
+  assert.match(css, /\.repo-scope-tabs > \.repo-scope-sort \+ \.repo-scope-refresh \{ margin-left: 8px; \}/);
+  assert.match(css, /\.repo-scope-refresh:active:not\(:disabled\),/, "icon-only: no press displacement");
 });

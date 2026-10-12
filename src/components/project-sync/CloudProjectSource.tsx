@@ -379,7 +379,7 @@ export default function CloudProjectSource({
   const storage = accounts.find((candidate) => candidate.storage_id === storageId) ?? null;
   const mountedRef = useRef(true);
   const isActive = () => mountedRef.current && isWorkflowCurrent(workflowEpoch);
-  const listing = useManagedCloudRepositories(storage?.storage_id ?? null, null, isActive);
+  const { listing, refresh } = useManagedCloudRepositories(storage?.storage_id ?? null, null, isActive);
   const [selection, setSelection] = useState<RepositorySelection | null>(null);
   const [repository, setRepository] = useState<ManagedCloudRepository | null>(null);
   const [mode, setMode] = useState<FolderMode>("new");
@@ -664,6 +664,7 @@ export default function CloudProjectSource({
               projectName=""
               localFingerprint={null}
               listing={listing}
+              onRefresh={refresh}
               selection={selection}
               rows="match-option"
               offerNew={false}

@@ -139,16 +139,18 @@ pub(crate) fn launch_codex_app(
         })?;
         open_session_in_mac_app(
             &app,
-            &deep_links[1],
+            &deep_links,
             codex_home,
+            project_root,
             before_launch,
             run_codex_app_deep_link,
             || super::project_assignment::macos::prepare(&app, codex_home),
-            || {
+            |existing_helpers| {
                 super::project_assignment::macos::assign_and_open(
                     codex_home,
                     thread_id,
                     project_root,
+                    existing_helpers,
                 )
             },
         )
@@ -157,7 +159,7 @@ pub(crate) fn launch_codex_app(
     {
         use crate::providers::windows_app::{display_launch, launch_app, scheme_handler};
         let _ = cli_path;
-        codex_app_deep_links(thread_id, project_root, codex_home)?;
+        let deep_links = codex_app_deep_links(thread_id, project_root, codex_home)?;
         let app = scheme_handler("codex")?;
         let env = [("CODEX_HOME", codex_home)];
 
@@ -171,6 +173,10 @@ pub(crate) fn launch_codex_app(
             codex_home,
             thread_id,
             project_root,
+            || {
+                before_launch(&display_launch(&app, &env, &[deep_links[0].as_str()]));
+                launch_app(&app, &env, &[deep_links[0].as_str()])
+            },
         )
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -182,28 +188,44 @@ pub(crate) fn launch_codex_app(
 
 /// The macOS half of Open in Codex once the app is found: refuse an app whose
 /// bundled CLI cannot resume the session, then register the native helper,
-/// load the chat, and confirm project membership through Desktop's native move.
+/// register the folder, and load the chat before Desktop's native move.
 #[cfg(target_os = "macos")]
 fn open_session_in_mac_app(
     app: &InstalledMacApp,
-    deep_link: &str,
+    deep_links: &[String; 2],
     codex_home: &Path,
+    project_root: &Path,
     before_launch: &mut dyn FnMut(&str),
     mut open: impl FnMut(&InstalledMacApp, &Path, &str, &str) -> Result<(), String>,
     prepare: impl FnOnce() -> Result<(), String>,
-    assign: impl FnOnce() -> Result<(), String>,
+    assign: impl FnOnce(&[String]) -> Result<(), String>,
 ) -> Result<(), String> {
+    use super::project_assignment::macos;
     require_session_resume(&app.bundled_cli(), None, ResumeCli::DesktopApp)?;
     prepare()?;
-    // macOS `open -n` starts Desktop after registration. Loading the chat
-    // starts its MCP helper; the native move confirms project membership.
-    before_launch(&codex_app_open_command(
-        &app.bundle_path,
-        codex_home,
-        deep_link,
-    ));
-    open(app, codex_home, deep_link, "thread")?;
-    assign()
+    // Desktop keeps only the latest pending route. Wait for folder registration
+    // before sending the chat route, which also loads its MCP helper.
+    let mut launch = |deep_link: &str, target: &str| {
+        before_launch(&codex_app_open_command(
+            &app.bundle_path,
+            codex_home,
+            deep_link,
+        ));
+        open(app, codex_home, deep_link, target)
+    };
+    if !macos::project_is_registered(codex_home, project_root)? {
+        launch(&deep_links[0], "project")?;
+        macos::wait_for_project_registration(
+            codex_home,
+            project_root,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )?;
+    }
+    // A helper from an earlier window can close as the chat is resumed. Bind
+    // placement to a helper started by this session launch.
+    let existing_helpers = macos::existing_helpers(codex_home)?;
+    launch(&deep_links[1], "thread")?;
+    assign(&existing_helpers)
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -683,6 +705,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn open_in_codex_checks_the_cli_bundled_in_the_app() {
         use crate::codex_app::{InstalledMacApp, OFFICIAL_MAC_APP};
+        use std::os::unix::fs::DirBuilderExt;
         let temp = tempfile::tempdir().unwrap();
         let app = InstalledMacApp {
             specification: OFFICIAL_MAC_APP,
@@ -696,7 +719,8 @@ mod tests {
         let home = temp.path().join("codex-home");
         std::fs::create_dir_all(&home).unwrap();
         let before = home_entries(&home);
-        let links = codex_app_deep_links(THREAD, Path::new("/Users/dev/project"), &home).unwrap();
+        let project = temp.path().join("project");
+        let links = codex_app_deep_links(THREAD, &project, &home).unwrap();
 
         // A newer CLI on PATH does not matter: the app runs its own copy.
         for (body, expected) in [
@@ -715,12 +739,13 @@ mod tests {
             let mut announced = Vec::new();
             let error = open_session_in_mac_app(
                 &app,
-                &links[1],
+                &links,
                 &home,
+                &project,
                 &mut |line: &str| announced.push(line.to_string()),
                 |_, _, _, _| panic!("a refused session reached `open`"),
                 || panic!("a refused session registered a helper"),
-                || panic!("a refused session changed project membership"),
+                |_| panic!("a refused session changed project membership"),
             )
             .unwrap_err();
             assert!(error.contains(expected), "{error}");
@@ -729,41 +754,100 @@ mod tests {
         }
 
         fake_cli(&bundled_cli, "echo 'codex-cli 0.155.0-alpha.2.6'");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(home.join(".mallard-project-placement"))
+            .unwrap();
+        let registry_path = home.join(".codex-global-state.json");
+        let registered = serde_json::to_vec(&serde_json::json!({
+            "local-projects": {"new": {"rootPaths": [&project]}}
+        }))
+        .unwrap();
         let mut announced = Vec::new();
         let mut opened = Vec::new();
         let phases = std::cell::RefCell::new(Vec::new());
         open_session_in_mac_app(
             &app,
-            &links[1],
+            &links,
             &home,
+            &project,
             &mut |line: &str| announced.push(line.to_string()),
             |_, _, deep_link, target| {
                 opened.push(deep_link.to_string());
                 phases.borrow_mut().push(target.to_string());
+                if target == "project" {
+                    std::fs::write(&registry_path, &registered).unwrap();
+                } else {
+                    assert!(
+                        super::super::project_assignment::macos::project_is_registered(
+                            &home, &project
+                        )
+                        .unwrap()
+                    );
+                }
                 Ok(())
             },
             || {
                 phases.borrow_mut().push("prepare".into());
                 Ok(())
             },
-            || {
+            |_| {
                 phases.borrow_mut().push("assign".into());
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(opened, [links[1].clone()]);
-        assert_eq!(announced.len(), 1);
-        assert_eq!(*phases.borrow(), ["prepare", "thread", "assign"]);
+        assert_eq!(opened, links);
+        assert_eq!(announced.len(), 2);
+        assert_eq!(*phases.borrow(), ["prepare", "project", "thread", "assign"]);
 
+        open_session_in_mac_app(
+            &app,
+            &links,
+            &home,
+            &project,
+            &mut |_| {},
+            |_, _, link, target| {
+                assert_eq!(
+                    target, "thread",
+                    "an existing project needs no folder launch"
+                );
+                assert_eq!(link, links[1]);
+                Ok(())
+            },
+            || Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        std::fs::remove_file(&registry_path).unwrap();
         let error = open_session_in_mac_app(
             &app,
-            &links[1],
+            &links,
             &home,
+            &project,
+            &mut |_| {},
+            |_, _, link, target| {
+                assert_eq!(target, "project");
+                assert_eq!(link, links[0]);
+                Err("Folder link failed".into())
+            },
+            || Ok(()),
+            |_| panic!("failed registration must not assign the chat"),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Folder link failed");
+
+        std::fs::write(&registry_path, &registered).unwrap();
+        let error = open_session_in_mac_app(
+            &app,
+            &links,
+            &home,
+            &project,
             &mut |_| {},
             |_, _, _, _| Ok(()),
             || Ok(()),
-            || Err("Native assignment failed".into()),
+            |_| Err("Native assignment failed".into()),
         )
         .unwrap_err();
         assert_eq!(error, "Native assignment failed");
@@ -778,7 +862,6 @@ mod tests {
     fn macos_native_project_placement_uses_the_selected_home() {
         use serde_json::Value;
         use std::process::Stdio;
-        use std::time::{Duration, Instant};
 
         let root = std::path::PathBuf::from(
             std::env::var_os("MALLARD_MAC_NATIVE_PLACEMENT_ROOT").expect("fixture root required"),
@@ -807,20 +890,42 @@ mod tests {
             super::super::project_assignment::macos::prepare(&app, &home).unwrap();
             return;
         }
-        let before = super::super::project_assignment::macos::fixture_thread(&home, thread_id);
+        let before =
+            super::super::project_assignment::macos::fixture_thread(&home, thread_id, None);
+        let project_before = super::super::project_assignment::macos::fixture_project(
+            &home, thread_id, &project, false,
+        );
+        let project_id_path = root.join("registered-project-id");
+        let mut project_id = std::fs::read_to_string(&project_id_path).ok();
         if std::env::var("MALLARD_MAC_NATIVE_PLACEMENT_EXPECT_PROJECTLESS").as_deref() == Ok("1") {
             assert!(
                 before["projectId"].is_null(),
                 "fixture must start projectless"
             );
-        } else {
             assert_eq!(
-                before["projectId"], state["projectId"],
+                project_before, None,
+                "fixture folder must not be registered"
+            );
+            assert_eq!(project_id, None);
+        } else {
+            assert!(project_id.is_some());
+            assert_eq!(project_before, project_id);
+            assert_eq!(
+                before["projectId"].as_str(),
+                project_id.as_deref(),
                 "membership must survive restart before another move"
             );
         }
         let links = codex_app_deep_links(thread_id, &project, &home).unwrap();
-        let mut launch = |app: &InstalledMacApp, home: &Path, link: &str, _: &str| {
+        let mut launch_number = 0;
+        let mut launch = |app: &InstalledMacApp, home: &Path, link: &str, target: &str| {
+            // An explicit Electron data path enables Desktop's single-instance
+            // mode. Give each launch its own data, matching production `open -n`.
+            // The runner closes these fixture instances and their children.
+            launch_number += 1;
+            let launch_data =
+                user_data.join(format!("{target}-{}-{launch_number}", std::process::id()));
+            std::fs::create_dir(&launch_data).unwrap();
             let mut command = Command::new(app.bundle_path.join("Contents/MacOS/ChatGPT"));
             for (key, _) in std::env::vars_os() {
                 let name = key.to_string_lossy();
@@ -838,56 +943,67 @@ mod tests {
                     command.env_remove(key);
                 }
             }
-            let mut child = command
-                .arg(format!("--user-data-dir={}", user_data.display()))
+            command
+                .arg(format!("--user-data-dir={}", launch_data.display()))
                 .arg(link)
                 .env("CODEX_HOME", home)
-                .env("CODEX_ELECTRON_USER_DATA_PATH", &user_data)
+                .env("CODEX_ELECTRON_USER_DATA_PATH", &launch_data)
                 .current_dir(&project)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
-            let started = Instant::now();
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert!(status.success());
-                    return Ok(());
-                }
-                if started.elapsed() > Duration::from_secs(10) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("isolated Desktop did not accept its route");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            Ok(())
         };
         for _ in 0..2 {
             open_session_in_mac_app(
                 &app,
-                &links[1],
+                &links,
                 &home,
+                &project,
                 &mut |_| {},
                 &mut launch,
                 || super::super::project_assignment::macos::prepare(&app, &home),
-                || {
+                |existing_helpers| {
                     super::super::project_assignment::macos::assign_and_open(
-                        &home, thread_id, &project,
+                        &home,
+                        thread_id,
+                        &project,
+                        existing_helpers,
                     )
                 },
             )
             .unwrap();
-            let thread = super::super::project_assignment::macos::fixture_thread(&home, thread_id);
-            assert_eq!(thread["projectId"], state["projectId"]);
+            let registered = super::super::project_assignment::macos::fixture_project(
+                &home, thread_id, &project, true,
+            )
+            .expect("Open in Codex must register the fixture folder");
+            if let Some(expected) = &project_id {
+                assert_eq!(&registered, expected, "repeat open must reuse the project");
+            } else {
+                std::fs::write(&project_id_path, &registered).unwrap();
+                project_id = Some(registered);
+            }
+            let thread = super::super::project_assignment::macos::fixture_thread(
+                &home,
+                thread_id,
+                Some(&project),
+            );
+            assert_eq!(thread["projectId"].as_str(), project_id.as_deref());
             assert_eq!(thread["hostId"], "local");
         }
         super::super::project_assignment::macos::verify_fixture_request_boundaries(
             &home, thread_id,
         );
         assert_eq!(
-            super::super::project_assignment::macos::fixture_thread(&home, thread_id)["projectId"],
-            state["projectId"]
+            super::super::project_assignment::macos::fixture_thread(
+                &home,
+                thread_id,
+                Some(&project)
+            )["projectId"]
+                .as_str(),
+            project_id.as_deref()
         );
         let configured = std::fs::read(home.join("config.toml")).unwrap();
         super::super::project_assignment::macos::prepare(&app, &home).unwrap();

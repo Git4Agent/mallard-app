@@ -46,10 +46,11 @@ selected `CODEX_HOME`, that process must be a live child of the registered
 Desktop executable, and the native pipe must belong to that same Desktop.
 Only query APIs are used; Mallard never shuts down or restarts Desktop.
 
-Codex Desktop must be installed and running with the selected profile. The
-destination folder must already exist in Desktop's project list. Mallard
-requires one exact local project match; a missing or ambiguous destination
-returns an error. Backend project IDs and Desktop project IDs are distinct.
+Codex Desktop must be installed and running with the selected profile. Mallard
+opens the folder link once to register or select the destination project, then
+waits for one exact local project match. An ambiguous destination
+or a registration timeout returns an error. The native move is sent once, after
+registration is confirmed. Backend project IDs and Desktop project IDs are distinct.
 Backend `thread/metadata/update` is no longer used for Windows placement.
 
 The [native placement POC](POC_CODEX_DESKTOP_PROJECT_PLACEMENT.md) documents the
@@ -74,10 +75,16 @@ Desktop starts the helper with its bundled Node. The helper exposes no tools to
 the model. Mallard checks the selected home and connection token before it sends
 the native move and navigation requests.
 
-Registration occurs before the existing macOS `open -n` launch. A loaded chat
-does not reliably reload a new MCP registration. Open in Codex now opens only
-the existing chat; the former new-chat project route did not assign membership.
-Both platforms require one exact destination in Desktop's local project list.
+Helper registration occurs before the existing macOS `open -n` launch. A loaded
+chat does not reliably reload a new MCP registration. For a missing project,
+Open in Codex opens the folder link before loading the existing chat. Opening
+the folder after connecting can close that helper. Desktop keeps only the latest
+pending route, so Mallard waits for the exact folder in the selected home's
+project registry before sending the chat link. This bounded check only reads
+Desktop state. Placement uses a helper started after the session launch whose
+native project list contains that folder. An older window can retain its previous
+list or close its helper during navigation. The native move still confirms
+membership. Codex retains its normal folder-consent prompt.
 
 Run the macOS native test with the installed official Desktop app:
 
@@ -85,9 +92,11 @@ Run the macOS native test with the installed official Desktop app:
 node scripts/poc-codex-macos-placement.mjs
 ```
 
-The runner uses a temporary Codex home, separate Electron data, and one local
-mock response to create the fixture. It tests production registration, native
-membership, repeated opens, restart persistence, rejected requests, configuration
+The runner uses a temporary Codex home, separate Electron data for each Desktop
+instance, and one local mock response to create the fixture. Its generated folder
+is trusted but initially absent from Desktop's project list. It tests folder
+registration, native membership, repeated opens,
+restart persistence, rejected requests, configuration
 preservation, and complete chat history preservation. It closes only its fixture
 processes. Native membership readback is distinct from a screenshot or complete
 Mallard UI acceptance test.
