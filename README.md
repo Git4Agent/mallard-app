@@ -144,6 +144,14 @@ Mallard needs only three things from a storage: List, Put and Get. No Git server
 
 [Read the storage layout →](https://mallard-ai.com/docs/storage-layout)
 
+## Community
+
+Join our [Discord](https://discord.gg/srnWNQUsB), or scan the QR code in WeChat to join the Mallard beta group.
+
+<a href="docs/readme/wechat-group.jpg"><img src="docs/readme/wechat-group.jpg" width="360" alt="WeChat QR code for the Mallard beta group"></a>
+
+The QR code is valid before October 19, as shown in the image. Click the image to view it at full size.
+
 ## FAQ
 
 <details>

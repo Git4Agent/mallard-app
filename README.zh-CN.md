@@ -139,6 +139,14 @@ Mallard 对存储只有三个要求：List、Put 和 Get，不需要 Git 服务�
 
 [阅读存储布局 →](https://mallard-ai.com/docs/storage-layout)
 
+## 社区
+
+加入 [Discord](https://discord.gg/srnWNQUsB)，或使用微信扫描下方二维码，加入 Mallard 内测群。
+
+<a href="docs/readme/wechat-group.jpg"><img src="docs/readme/wechat-group.jpg" width="360" alt="Mallard 内测微信群二维码"></a>
+
+二维码有效期为 10 月 19 日前，详见图片。点击图片可查看原图。
+
 ## 常见问题
 
 <details>
