@@ -127,11 +127,10 @@ Pick a folder where Codex or Claude worked.
 
 ## Your data stays yours
 
-- You pick and review every session before anything moves.
-- Nothing on your computer is replaced or deleted without your OK.
-- Storage passwords and folder paths stay on your computer.
-- Chats can hold keys you pasted. Turn on **Credential redaction** in Settings › Privacy to hide them.
-- Mallard Cloud pushes stay private to you and the people you invite.
+- Review and select sessions before transfer.
+- Storage credentials stay on your computer.
+- Enable **Credential redaction** in Settings › Privacy to hide detected keys in chats.
+- Mallard Cloud uploads are private to you and invited people.
 
 ## How it works
 
