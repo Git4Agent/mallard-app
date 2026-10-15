@@ -26,7 +26,7 @@ use serde::de::{Deserializer, IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
@@ -628,8 +628,14 @@ fn summarize_rollout_reader<R: BufRead + Seek>(
 }
 
 pub(crate) fn summarize_rollout_file(path: &Path) -> Result<SessionFileSummary, String> {
-    let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
-    summarize_rollout_reader(&mut BufReader::new(file), &format!("'{}'", path.display()))
+    let label = format!("'{}'", path.display());
+    if crate::jsonl_tail_io::is_compressed(path) {
+        // The summary seeks; a compressed rollout seeks in its decoded bytes.
+        let bytes = crate::jsonl_tail_io::read_bounded(path)?;
+        return summarize_rollout_reader(&mut std::io::Cursor::new(bytes), &label);
+    }
+    let file = crate::jsonl_tail_io::open_no_follow(path)?;
+    summarize_rollout_reader(&mut BufReader::new(file), &label)
 }
 
 pub(crate) fn summarize_rollout_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
@@ -2966,8 +2972,8 @@ pub(crate) struct CodexChildHead {
 }
 
 pub(crate) fn codex_child_head(path: &Path) -> Result<CodexChildHead, String> {
-    let file = crate::jsonl_tail_io::open_no_follow(path)?;
-    let mut reader = BufReader::new(file).take(CHILD_WINDOW_BYTES);
+    let (_, reader) = crate::jsonl_tail_io::open_head(path)?;
+    let mut reader = reader.take(CHILD_WINDOW_BYTES);
     let mut line = Vec::new();
     reader
         .read_until(b'\n', &mut line)
@@ -3377,6 +3383,96 @@ mod tests {
             assert!(build_timeline_index(&current, &context).is_err());
             assert!(read_event_detail(&current, &cached, &tool.event_id, &context).is_err());
         }
+    }
+
+    /// Codex compressed the retained base, or the current source as well:
+    /// the index is built, pages and details come from decoded offsets, and
+    /// the summaries decode.
+    #[test]
+    fn compressed_sources_serve_the_timeline_like_plain_ones() {
+        for compress_current in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (old, current) = historical_fixture(temp.path(), false);
+            let compress = |path: &Path| {
+                let bytes = fs::read(path).unwrap();
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let compressed = path.with_file_name(format!("{name}.zst"));
+                fs::write(
+                    &compressed,
+                    crate::jsonl_tail_io::compress_like_codex(bytes.as_slice()),
+                )
+                .unwrap();
+                fs::remove_file(path).unwrap();
+                compressed
+            };
+            compress(&old);
+            let current = if compress_current {
+                compress(&current)
+            } else {
+                current
+            };
+            let mut context = context(temp.path());
+            context.provider_home = temp.path();
+            let index = build_timeline_index(&current, &context).unwrap();
+            assert_eq!(index.sources.len(), 2);
+            assert_eq!(
+                index.sources[0].relative_path,
+                "sessions/rollout-2026-09-12T01-00-00-base.jsonl.zst"
+            );
+            let query = SessionTimelineQuery {
+                start_index: None,
+                limit: 10,
+                included_event_kinds: BTreeSet::from([
+                    SessionTimelineEventKind::Prompt,
+                    SessionTimelineEventKind::Response,
+                    SessionTimelineEventKind::ToolCall,
+                ]),
+                included_tool_categories: BTreeSet::from([SessionToolCategory::Shell]),
+                turn_id: None,
+            };
+            let page = read_timeline_page(&current, &index, &query, &context).unwrap();
+            assert_eq!(page.events.len(), 3, "compress_current={compress_current}");
+            assert_eq!(page.events[0].text.as_deref(), Some("Retained prompt"));
+            assert_eq!(page.events[2].text.as_deref(), Some("Replacement response"));
+            let tool = index
+                .events
+                .iter()
+                .find(|event| event.kind == SessionTimelineEventKind::ToolCall)
+                .unwrap();
+            let detail = read_event_detail(&current, &index, &tool.event_id, &context).unwrap();
+            assert!(detail.arguments.unwrap().contains("echo retained"));
+            assert_eq!(detail.result.as_deref(), Some("Retained result"));
+            let summary = summarize_timeline(&current, &index, &context).unwrap();
+            assert_eq!(summary.session_id, "session-1");
+            assert_eq!(summary.user_rounds, 1);
+            assert_eq!(
+                summarize_rollout_file(&current).unwrap().session_id,
+                "session-1"
+            );
+        }
+    }
+
+    #[test]
+    fn child_head_reads_a_compressed_rollout() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout-child.jsonl.zst");
+        let head = json!({
+            "type": "session_meta",
+            "payload": {
+                "id": "child",
+                "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}},
+                "agent_nickname": "worker"
+            }
+        });
+        fs::write(
+            &path,
+            crate::jsonl_tail_io::compress_like_codex(format!("{head}\n").as_bytes()),
+        )
+        .unwrap();
+        let head = codex_child_head(&path).unwrap();
+        assert_eq!(head.thread_id.as_deref(), Some("child"));
+        assert_eq!(head.parent_thread_id.as_deref(), Some("parent"));
+        assert_eq!(head.nickname.as_deref(), Some("worker"));
     }
 
     #[test]

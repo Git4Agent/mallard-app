@@ -2754,7 +2754,7 @@ test("Mallard Cloud declares a sign-in lane, no manual fields, and one managed s
 test("Mallard Cloud before start says what the lane does and who can read a push", () => {
   const html = renderManagedCloud({ phase: "idle" });
   assert.match(html, /storage-setup-agent-cta[^>]*>(?:<svg[^]*?<\/svg>)? Sign in with GitHub</);
-  assert.match(html, /Sign in with GitHub to share snapshots privately with invited collaborators, and request a release on the website to make them public\./);
+  assert.match(html, /Sign in with GitHub to share sessions privately with invited collaborators\. Request a public release on the website\./);
   assert.match(renderManagedCloud({ phase: "idle" }, "reconnect"), /Reconnect Mallard Cloud/);
 });
 test("Mallard Cloud sign-in offers the link to copy or open with Cancel on the line, never printed", () => {

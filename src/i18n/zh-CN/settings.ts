@@ -49,7 +49,7 @@ export default {
     redaction: "密钥隐藏",
     redactionHint: "在上传的会话中隐藏检测到的密钥、令牌和密码。更改后，下次上传时会重新上传已同步的会话；之前的副本仍保留在存储历史中。",
     updates: "自动更新",
-    updatesHint: "启动时及每隔 {{hours}}小时检查一次 GitHub。在后台下载更新，并在重启或退出时安装。不会发送任何个人或项目数据。",
+    updatesHint: "启动时及每隔 {{hours}}小时检查一次 GitHub。在后台下载更新，并在重启或退出时安装。",
   },
   version: {
     label: "软件更新",

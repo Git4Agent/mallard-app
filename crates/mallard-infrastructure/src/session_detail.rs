@@ -705,6 +705,24 @@ fn is_message_kind(kind: SessionTimelineEventKind) -> bool {
     )
 }
 
+/// The length of the bytes a timeline index addresses: the file's own for
+/// a plain transcript, the decoded length for one Codex compressed in
+/// place. `file_size` stays the file's own either way: it is the page's
+/// identity, and a compression changes it.
+fn addressed_len(session: &ResolvedLocalSession) -> SessionDetailResult<u64> {
+    if !crate::jsonl_tail_io::is_compressed(&session.transcript_path) {
+        return Ok(session.file_size);
+    }
+    crate::jsonl_tail_io::read_bounded(&session.transcript_path)
+        .map(|bytes| bytes.len() as u64)
+        .map_err(|_| {
+            SessionDetailError::new(
+                SessionDetailErrorCode::ProviderError,
+                "The local session could not be decoded.",
+            )
+        })
+}
+
 fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetailResult<()> {
     let file_size = if index.sources.is_empty() {
         file_size
@@ -1473,6 +1491,7 @@ fn load_or_build_whole_index(
         refresh_file_state(session)?;
         let expected_size = session.file_size;
         let expected_nanos = session.modified_nanos;
+        let addressed = addressed_len(session)?;
         let current_snapshot_id = snapshot_id(session, timeline_version);
         if let Some(entry) = cached_entry.as_ref().filter(|entry| {
             entry.resource_id == session.resource_id
@@ -1489,7 +1508,7 @@ fn load_or_build_whole_index(
                 && entry.summary.is_internal_subagent == session.child.is_some()
                 && entry.index.parser_version == timeline_version
         }) {
-            if validate_index(&entry.index, expected_size).is_ok() {
+            if validate_index(&entry.index, addressed).is_ok() {
                 let index = entry.index.clone();
                 let summary = entry.summary.clone();
                 refresh_file_state(session)?;
@@ -1517,7 +1536,7 @@ fn load_or_build_whole_index(
                 "The provider returned a timeline with an unexpected parser version.",
             ));
         }
-        validate_index(&index, expected_size)?;
+        validate_index(&index, addressed)?;
         let summary = summarize_session(registry, session, &index)?;
         refresh_file_state(session)?;
         if session.file_size != expected_size || session.modified_nanos != expected_nanos {
@@ -2610,7 +2629,7 @@ fn build_fresh_index(
             "The provider returned a timeline with an unexpected parser version.",
         ));
     }
-    validate_index(&index, session.file_size)?;
+    validate_index(&index, addressed_len(session)?)?;
     let summary = summarize_session(registry, session, &index)?;
     Ok((index, summary))
 }
@@ -3874,6 +3893,187 @@ mod tests {
         .unwrap();
         assert_ne!(after.snapshot_id, before_snapshot_id);
         assert_eq!(error.current_snapshot_id, Some(after.snapshot_id));
+    }
+
+    /// A Codex session page reads a rollout Codex compressed in place: the
+    /// index cached from the plain file gives way to one built from the
+    /// decoded bytes, the page serves its records, the snapshot changes
+    /// with the file, and the next request is served from the new cache.
+    #[test]
+    fn a_compressed_codex_rollout_opens_as_the_same_session_page() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let repository = LocalStateRepository::from_home_dir(sandbox.path()).unwrap();
+        let provider_home = sandbox.path().join("codex-home");
+        let sessions_root = provider_home.join("sessions/2026/09/12");
+        let project_root = sandbox.path().join("project");
+        fs::create_dir_all(&sessions_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let provider = ProviderKey::parse("codex").unwrap();
+        let profile_id = LocalProviderProfileId::parse("compressed-profile").unwrap();
+        let local_project_id = LocalProjectId::parse("compressed-project").unwrap();
+        let bundle_id = BundleId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let identity = repository.load_or_create_host_identity().unwrap();
+        let canonical_project_root = fs::canonicalize(&project_root).unwrap();
+        let canonical_provider_home = fs::canonicalize(&provider_home).unwrap();
+        let project_binding = ProjectBinding {
+            host_id: identity.host_id.clone(),
+            replica_id: ReplicaId::parse("compressed-replica").unwrap(),
+            local_project_id: local_project_id.clone(),
+            bundle_id: bundle_id.clone(),
+            project_root: project_root.to_string_lossy().into_owned(),
+            canonical_project_root: canonical_project_root.to_string_lossy().into_owned(),
+            profile_ids: BTreeMap::from([(provider.clone(), profile_id.clone())]),
+            state: BindingState::Active,
+            revision: 0,
+            updated_at: 1,
+        };
+        repository
+            .mutate_config(|config| {
+                config.projects.push(LocalProjectRegistration {
+                    local_project_id: local_project_id.clone(),
+                    bundle_id: bundle_id.clone(),
+                    display_name: "Compressed project".to_string(),
+                    local_alias: None,
+                    repository_fingerprint: None,
+                    recipe: BundleRecipe::default(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                Ok(())
+            })
+            .unwrap();
+        repository
+            .mutate_bindings(|_, machine| {
+                machine.profiles.push(ProviderProfile {
+                    profile_id: profile_id.clone(),
+                    provider: provider.clone(),
+                    display_name: "Codex".to_string(),
+                    path: provider_home.to_string_lossy().into_owned(),
+                    canonical_path: canonical_provider_home.to_string_lossy().into_owned(),
+                    provider_config: mallard_domain::AgentProviderConfig::version_1(),
+                    revision: 0,
+                    created_at: 1,
+                    updated_at: 1,
+                });
+                machine.bindings.push(project_binding);
+                Ok(())
+            })
+            .unwrap();
+
+        let provider_session_id = "0193b6c1-5352-7b12-9c6e-000000000021";
+        let name = format!("rollout-2026-09-12T01-03-07-{provider_session_id}");
+        let plain = sessions_root.join(format!("{name}.jsonl"));
+        let mut bytes = Vec::new();
+        for record in [
+            serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-09-12T01:03:07Z",
+                "payload": {"id": provider_session_id, "cwd": canonical_project_root}
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-09-12T01:03:08Z",
+                "payload": {"type": "user_message", "message": "Hello from the cold"}
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-09-12T01:03:09Z",
+                "payload": {"type": "agent_message", "phase": "final_answer", "message": "Still here"}
+            }),
+        ] {
+            serde_json::to_writer(&mut bytes, &record).unwrap();
+            bytes.push(b'\n');
+        }
+        fs::write(&plain, &bytes).unwrap();
+
+        let thread_id =
+            initial_conversation_thread_id(&bundle_id, &provider, provider_session_id).unwrap();
+        let resource_id = conversation_resource_id(&provider, &thread_id).unwrap();
+        let view = |path: &Path| {
+            let metadata = fs::metadata(path).unwrap();
+            LocalSessionView {
+                descriptor: crate::provider_capture::ResourceCandidate {
+                    resource_id: resource_id.to_string(),
+                    kind: mallard_domain::portable::contracts::conversation(),
+                    provider: Some(provider.clone()),
+                    provider_resource_type: Some("session".to_string()),
+                    display_name: "Cold session".to_string(),
+                    apply_policy: mallard_domain::portable::contracts::safe_file(),
+                    selected_by_default: true,
+                    blocked_reason: None,
+                    logical_paths: vec!["sessions/transcript.jsonl".to_string()],
+                    project_content: None,
+                },
+                provider: provider.clone(),
+                provider_thread_id: provider_session_id.to_string(),
+                transcript_logical_path: "sessions/transcript.jsonl".to_string(),
+                source_path: path.to_path_buf(),
+                source_mtime: modified_secs(&metadata),
+                source_size: metadata.len(),
+                capture_bytes: metadata.len(),
+            }
+        };
+        let registry = AgentProviderRegistry::with_test_provider();
+        let page_of = |views: &[LocalSessionView]| {
+            let detail = get_project_session_detail(
+                &repository,
+                &registry,
+                &local_project_id,
+                resource_id.as_str(),
+                views,
+            )
+            .unwrap();
+            let page = get_project_session_timeline_page(
+                &repository,
+                &registry,
+                &local_project_id,
+                resource_id.as_str(),
+                ProjectSessionTimelineRequest {
+                    snapshot_id: detail.snapshot_id.clone(),
+                    cursor: None,
+                    limit: Some(10),
+                    included_event_kinds: BTreeSet::from([
+                        SessionTimelineEventKind::Prompt,
+                        SessionTimelineEventKind::Response,
+                    ]),
+                    included_tool_categories: BTreeSet::new(),
+                    turn_id: None,
+                },
+                views,
+            )
+            .unwrap();
+            let texts = page
+                .events
+                .iter()
+                .filter_map(|event| event.text.clone())
+                .collect::<Vec<_>>();
+            (detail.snapshot_id, texts)
+        };
+        let (plain_snapshot, plain_texts) = page_of(&[view(&plain)]);
+        assert_eq!(plain_texts, ["Hello from the cold", "Still here"]);
+
+        // Codex compresses the rollout in place: the same bytes as one
+        // stream, the modification time kept, the plain file removed.
+        let modified = fs::metadata(&plain).unwrap().modified().unwrap();
+        let compressed = sessions_root.join(format!("{name}.jsonl.zst"));
+        fs::write(
+            &compressed,
+            crate::jsonl_tail_io::compress_like_codex(&bytes),
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&compressed)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        fs::remove_file(&plain).unwrap();
+        let (compressed_snapshot, compressed_texts) = page_of(&[view(&compressed)]);
+        assert_eq!(compressed_texts, plain_texts);
+        assert_ne!(compressed_snapshot, plain_snapshot);
+        assert_eq!(page_of(&[view(&compressed)]).0, compressed_snapshot);
     }
 
     #[test]

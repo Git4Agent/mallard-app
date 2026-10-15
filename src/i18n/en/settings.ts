@@ -53,7 +53,7 @@ export default {
     redaction: "Credential redaction",
     redactionHint: "Hide detected credentials in pushed sessions. Changing it re-uploads synced sessions on the next Push. Earlier copies stay in storage history.",
     updates: "Automatic updates",
-    updatesHint: "Checks GitHub at startup and every {{hours}} hours. Downloads new releases in the background and installs on restart or quit. Sends no personal or project data.",
+    updatesHint: "Checks GitHub at startup and every {{hours}} hours. Downloads new releases in the background and installs on restart or quit.",
   },
   /** The App version row: what is installed, and the updater's verbs. */
   version: {

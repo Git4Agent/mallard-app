@@ -47,6 +47,41 @@ pub(crate) fn open_no_follow(path: &Path) -> Result<fs::File, String> {
         .map_err(|error| format!("open session transcript '{}': {}", path.display(), error))
 }
 
+/// Whether the path names a transcript Codex compressed in place: the same
+/// JSONL as one zstd stream, under the plain name plus `.zst`. Every reader
+/// here decodes such a file and addresses its decoded bytes; the stamp
+/// stays the file's own.
+pub fn is_compressed(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.zst"))
+}
+
+/// The decoded length a compressed transcript's frame header declares, when
+/// it declares one. A hint for refusing an oversized file before it is
+/// read, never a bound: the decoder enforces the limit on its own.
+pub fn declared_decoded_len(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut header = [0_u8; 18];
+    let read = open_no_follow(path).ok()?.read(&mut header).ok()?;
+    zstd::zstd_safe::get_frame_content_size(&header[..read])
+        .ok()
+        .flatten()
+}
+
+/// Bytes as Codex's compressor writes them: one zstd stream at level 3 with
+/// the plain length pledged into its frame header. Test fixtures only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn compress_like_codex(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    encoder
+        .set_pledged_src_size(Some(bytes.len() as u64))
+        .unwrap();
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
 /// Machine-local identity of the exact captured file. Never portable.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceStamp {
@@ -57,6 +92,11 @@ pub struct SourceStamp {
 }
 
 impl SourceStamp {
+    /// The length of the file on disk: of the stream when it is compressed.
+    pub fn file_len(&self) -> u64 {
+        self.len
+    }
+
     pub fn mtime_secs(&self) -> u64 {
         self.modified
             .duration_since(std::time::UNIX_EPOCH)
@@ -85,6 +125,14 @@ impl SourceStamp {
             #[cfg(any(unix, windows))]
             identity: (0, 0, 0, 0),
         }
+    }
+
+    /// The state a checkpoint saves beside a cursor into `path`: none for
+    /// a compressed transcript, whose cursor addresses decoded bytes the
+    /// file's own size cannot cover. A cursor without a state is never
+    /// reused, so such a source is read in full on every observation.
+    pub fn saved_state(&self, path: &Path) -> Option<SourceFileState> {
+        (!is_compressed(path)).then(|| self.file_state())
     }
 
     /// The plain-data form a checkpoint saves beside its cursor.
@@ -293,6 +341,57 @@ pub fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 pub fn read_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
+    if is_compressed(path) {
+        decoded_snapshot(path)
+    } else {
+        plain_snapshot(path)
+    }
+}
+
+/// A compressed transcript, decoded. The file itself is read under the plain
+/// contract (stamped before and after, within the limit), then its stream is
+/// decoded through a reader bounded by the same limit. The frame header's
+/// declared size is never trusted to skip that bound.
+fn decoded_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
+    use std::io::Read;
+
+    let (compressed, stamp) = plain_snapshot(path)?;
+    let limit = conversation_file_limit_bytes();
+    let mut bytes = Vec::new();
+    zstd::stream::read::Decoder::with_buffer(std::io::Cursor::new(compressed.as_slice()))
+        .and_then(|decoder| {
+            decoder
+                .take(limit.saturating_add(1))
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| format!("decode session transcript '{}': {}", path.display(), error))?;
+    if bytes.len() as u64 > limit {
+        return Err(format!(
+            "session transcript '{}' exceeds the bounded transcript limit",
+            path.display()
+        ));
+    }
+    Ok((bytes, stamp))
+}
+
+/// A bounded head read: the transcript's first bytes as a buffered reader,
+/// decoded when the file is compressed, with the open handle's stamp.
+/// Callers bound what they read with `take`; zstd decodes block by block,
+/// so a short head of a compressed file costs about a short head.
+pub fn open_head(path: &Path) -> Result<(SourceStamp, Box<dyn std::io::BufRead>), String> {
+    let file = open_no_follow(path)?;
+    let stamp = handle_stamp(&file, path)?;
+    if is_compressed(path) {
+        let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+            format!("decode session transcript '{}': {}", path.display(), error)
+        })?;
+        Ok((stamp, Box::new(std::io::BufReader::new(decoder))))
+    } else {
+        Ok((stamp, Box::new(std::io::BufReader::new(file))))
+    }
+}
+
+fn plain_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
     use std::io::Read;
 
     let mut file = open_no_follow(path)?;
@@ -343,6 +442,22 @@ fn handle_stamp(file: &fs::File, path: &Path) -> Result<SourceStamp, String> {
 pub fn read_tail_window(path: &Path, mapping: &RootPhysicalMapping) -> Result<TailWindow, String> {
     use std::io::{Read, Seek, SeekFrom};
     let window_offset = mapping.consumed_byte_offset - mapping.probe_window_len;
+    if is_compressed(path) {
+        // Immutable while compressed: one decoded snapshot is the read.
+        let (mut bytes, stamp) = decoded_snapshot(path)?;
+        let file_len = bytes.len() as u64;
+        let bytes = if file_len < mapping.consumed_byte_offset {
+            Vec::new()
+        } else {
+            bytes.split_off(window_offset as usize)
+        };
+        return Ok(TailWindow {
+            file_len,
+            window_offset,
+            bytes,
+            stamp,
+        });
+    }
     let mut file = open_no_follow(path)?;
     let mut attempts = 0;
     loop {
@@ -399,6 +514,18 @@ pub fn read_tail_window(path: &Path, mapping: &RootPhysicalMapping) -> Result<Ta
 /// bytes are attributed as transcript bytes, not probe/append bytes.
 pub fn read_suffix_window(path: &Path, max_window_bytes: u64) -> Result<TailWindow, String> {
     use std::io::{Read, Seek, SeekFrom};
+    if is_compressed(path) {
+        let (mut bytes, stamp) = decoded_snapshot(path)?;
+        let file_len = bytes.len() as u64;
+        let window_offset = file_len.saturating_sub(max_window_bytes);
+        let bytes = bytes.split_off(window_offset as usize);
+        return Ok(TailWindow {
+            file_len,
+            window_offset,
+            bytes,
+            stamp,
+        });
+    }
     let mut file = open_no_follow(path)?;
     let mut attempts = 0;
     loop {
@@ -449,6 +576,16 @@ pub fn read_range(path: &Path, start: u64, end: u64) -> Result<(Vec<u8>, SourceS
             "session transcript '{}' range request is out of bounds",
             path.display()
         ));
+    }
+    if is_compressed(path) {
+        let (bytes, stamp) = decoded_snapshot(path)?;
+        if (bytes.len() as u64) < end {
+            return Err(format!(
+                "session transcript '{}' is shorter than the pinned range",
+                path.display()
+            ));
+        }
+        return Ok((bytes[start as usize..end as usize].to_vec(), stamp));
     }
     let mut file = open_no_follow(path)?;
     let before = handle_stamp(&file, path)?;
@@ -677,6 +814,106 @@ mod tests {
         );
         early.validate().unwrap();
         assert!(now().continues(&early));
+    }
+
+    /// A compressed transcript reads as its decoded bytes under the file's
+    /// own stamp, every window addresses decoded offsets, a head read decodes
+    /// only what it takes, and a damaged stream is refused.
+    #[test]
+    fn compressed_transcripts_read_as_their_decoded_bytes() {
+        use std::io::BufRead;
+        let temp = tempfile::tempdir().unwrap();
+        let plain = temp.path().join("transcript.jsonl");
+        let compressed = temp.path().join("transcript.jsonl.zst");
+        let content = b"aaaa\nbbbb\ncccc\n";
+        fs::write(&plain, content).unwrap();
+        let stream = crate::jsonl_tail_io::compress_like_codex(&content[..]);
+        fs::write(&compressed, &stream).unwrap();
+        assert!(is_compressed(&compressed) && !is_compressed(&plain));
+        assert_eq!(declared_decoded_len(&compressed), Some(15));
+        assert_eq!(declared_decoded_len(&plain), None);
+
+        let stamp = SourceStamp::stat(&compressed).unwrap();
+        assert_eq!(stamp.file_len(), stream.len() as u64);
+        let (bytes, read_stamp) = read_snapshot(&compressed).unwrap();
+        assert_eq!(bytes, content);
+        assert_eq!(read_stamp, stamp);
+        let mapping = RootPhysicalMapping {
+            provider_thread_id: "thread".to_string(),
+            root_path: compressed.to_string_lossy().into_owned(),
+            source_file_size: 15,
+            consumed_byte_offset: 10,
+            consumed_record_ordinal: 2,
+            probe_window_len: 5,
+            probe_window_sha256: String::new(),
+            last_canonical_message_id: None,
+            last_synthetic_turn_id: None,
+            next_synthetic_turn_ordinal: 0,
+        };
+        let window = read_tail_window(&compressed, &mapping).unwrap();
+        assert_eq!((window.file_len, window.window_offset), (15, 5));
+        assert_eq!(window.bytes, b"bbbb\ncccc\n");
+        assert_eq!(window.stamp, stamp);
+        let suffix = read_suffix_window(&compressed, 6).unwrap();
+        assert_eq!((suffix.file_len, suffix.window_offset), (15, 9));
+        assert_eq!(suffix.bytes, b"\ncccc\n");
+        let (range, range_stamp) = read_range(&compressed, 0, 5).unwrap();
+        assert_eq!(range, b"aaaa\n");
+        assert_eq!(range_stamp, stamp);
+        assert!(read_range(&compressed, 0, 16)
+            .unwrap_err()
+            .contains("shorter than the pinned range"));
+        let past_end = RootPhysicalMapping {
+            consumed_byte_offset: 40,
+            ..mapping
+        };
+        let truncated = read_tail_window(&compressed, &past_end).unwrap();
+        assert!(truncated.bytes.is_empty());
+        assert_eq!(truncated.file_len, 15);
+
+        let (head_stamp, mut head) = open_head(&compressed).unwrap();
+        assert_eq!(head_stamp, stamp);
+        let mut line = Vec::new();
+        head.read_until(b'\n', &mut line).unwrap();
+        assert_eq!(line, b"aaaa\n");
+        assert!(!head.fill_buf().unwrap().is_empty());
+
+        fs::write(&compressed, b"\x28\xb5\x2f\xfd not a frame").unwrap();
+        assert!(read_snapshot(&compressed)
+            .unwrap_err()
+            .contains("decode session transcript"));
+        fs::write(&compressed, &stream[..stream.len() - 3]).unwrap();
+        assert!(read_snapshot(&compressed).is_err());
+        assert!(read_suffix_window(&compressed, 6).is_err());
+    }
+
+    /// The bound is on decoded bytes: a few KiB that decode past the limit
+    /// are refused whatever the header declares, and every reader refuses
+    /// them the same way.
+    #[test]
+    fn decoded_output_is_bounded_by_the_transcript_limit() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bomb.jsonl.zst");
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+        let chunk = vec![b'\n'; 1024 * 1024];
+        for _ in 0..(conversation_file_limit_bytes() / chunk.len() as u64 + 1) {
+            encoder.write_all(&chunk).unwrap();
+        }
+        let stream = encoder.finish().unwrap();
+        assert!(stream.len() < 1024 * 1024);
+        fs::write(&path, stream).unwrap();
+        assert_eq!(declared_decoded_len(&path), None);
+        for error in [
+            read_snapshot(&path).unwrap_err(),
+            read_suffix_window(&path, 64).unwrap_err(),
+            read_range(&path, 0, 8).unwrap_err(),
+        ] {
+            assert!(
+                error.contains("exceeds the bounded transcript limit"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

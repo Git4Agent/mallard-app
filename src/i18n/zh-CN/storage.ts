@@ -365,7 +365,7 @@ export default {
     resetTitle: "丢弃此设置草稿及其全部进度，然后重新开始。Mallard Cloud 上的内容不会改变。",
     signInLink: "Mallard Cloud 登录链接",
     copySignInLink: "复制登录链接",
-    createIntro: "使用 GitHub 登录后，可将快照私下分享给受邀协作者；在网站上申请公开发布后即可公开。",
+    createIntro: "使用 GitHub 登录，与受邀协作者私下分享会话。如需公开，请在网站上申请发布。",
     reconnectIntro: "使用同一 GitHub 账户续期此存储的会话。登录会在你选择的浏览器中进行。",
     signInGitHub: "使用 GitHub 登录",
     reconnect: "重新连接 Mallard Cloud",

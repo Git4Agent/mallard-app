@@ -114,8 +114,8 @@ Both paid targets disabled automatic retries. Before another paid run:
 | Permission metadata update | Upstream improvement only | Codex 0.152 preserves permission snapshots during client metadata updates. It does not sanitize imported history. | Do not treat the upstream fix as a Mallard safety fix. |
 | Paid Claude revision sequence | Pass | Registration revision 1, content revisions 2-4, and post-reset revision 1 passed. | Keep the current matrix. |
 | Paid Codex first tool turn | Pass | The direct `exec_command` path and current `FileChange` evidence passed with Codex 0.152. | Keep the current clean-cutover path. |
-| Compressed rollout files | Open, opt-in | Codex can use `.jsonl.zst`. Mallard accepts only a final `.jsonl` extension. | Add bounded decompression or fail visibly when compressed rollouts exist. |
-| Shared-lineage compression | Open, opt-in | Codex 0.152 can compress referenced and forked lineages when both compression features are enabled. | Preserve logical JSONL offsets and complete lineage resolution if support is added. |
+| Compressed rollout files | Pass | A rollout Codex compressed in place (`.jsonl.zst`) is read as its decoded bytes under the plain name; a compressed file beside its plain sibling is hidden, as in Codex. See `PLAN_CODEX_COMPRESSED_ROLLOUTS.md`. | None. Mallard writes plain files only. |
+| Shared-lineage compression | Pass | A compressed base or leaf resolves by the cutoffs the leaf declares, which address the decoded bytes. | None. |
 | Legacy rollout migration | Open | `codex migrate-rollouts` exists. Mallard does not detect eligibility or migration state. | Add detection or a clear user-facing instruction if legacy mode blocks a Mallard action. |
 | Queued submissions | Scope decision required | Codex stores durable thread queues in `queue_1.sqlite`. Mallard does not capture them. | Decide whether pending submissions are portable session state. If yes, use per-thread queue APIs. |
 | Thread names | Partial | Mallard transfers selected `session_index.jsonl` rows for its own display. Codex 0.152 uses SQLite names for paginated native reads. | Add a native `thread/name/set` Push/Pull/read E2E test. Reapply the name after restore if required. |
@@ -187,13 +187,15 @@ Both paid targets disabled automatic retries. Before another paid run:
 
 ### P1: Prevent silent state loss
 
-- [ ] **C152-008 — Detect `.jsonl.zst` rollouts.**
+- [x] **C152-008 — Detect `.jsonl.zst` rollouts.**
+  - Done on 2026-10-14: see `PLAN_CODEX_COMPRESSED_ROLLOUTS.md`.
   - Scan active and archived roots without following links.
   - Enforce the current file-count, entry-count, and byte bounds.
   - Surface a typed blocker until decompression support exists.
   - Acceptance: a compressed session cannot disappear silently.
 
-- [ ] **C152-009 — Decide whether to support compressed rollouts.**
+- [x] **C152-009 — Decide whether to support compressed rollouts.**
+  - Yes, done on 2026-10-14: bounded decoding through `jsonl_tail_io`, decoded offsets, plain-only writes.
   - If no, keep a clear blocker that names the disabled capability.
   - If yes, use bounded streaming zstd reads.
   - Preserve logical JSONL offsets for paginated lineage references.

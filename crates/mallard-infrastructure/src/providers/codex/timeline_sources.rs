@@ -3,11 +3,11 @@
 
 use crate::codex_history_graph::resolve_captured_codex_root;
 use crate::codex_subagents::RolloutLookup;
-use crate::jsonl_tail_io::{open_no_follow, read_snapshot};
+use crate::jsonl_tail_io::{is_compressed, open_no_follow, read_bounded, read_snapshot};
 use crate::payload::PayloadBytes;
 use crate::providers::traits::{SessionSourceSpan, SessionTimelineIndex, SessionTimelineSource};
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 fn relative_path(home: &Path, path: &Path) -> Result<String, String> {
@@ -109,8 +109,13 @@ pub(super) fn capture(
     Ok((sources, contents))
 }
 
+/// A retained source addressed by decoded byte offset: the file itself when
+/// plain, its decoded bytes when Codex compressed it.
+pub(super) trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
 pub(super) struct TimelineSources {
-    pub files: Vec<(File, u64)>,
+    pub files: Vec<(Box<dyn ReadSeek>, u64)>,
 }
 
 impl TimelineSources {
@@ -139,16 +144,30 @@ impl TimelineSources {
             if !seen.insert(&source.relative_path) {
                 return Err("duplicate timeline source".into());
             }
-            let file = open_no_follow(&source_path(home, &source.relative_path)?)?;
-            let metadata = file
-                .metadata()
-                .map_err(|_| "cannot inspect timeline source")?;
-            if !metadata.is_file() || metadata.len() < source.length {
+            let path = source_path(home, &source.relative_path)?;
+            let (reader, length): (Box<dyn ReadSeek>, u64) = if is_compressed(&path) {
+                let bytes = read_bounded(&path)?;
+                let length = bytes.len() as u64;
+                (Box::new(Cursor::new(bytes)), length)
+            } else {
+                let file = open_no_follow(&path)?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| "cannot inspect timeline source")?;
+                if !metadata.is_file() {
+                    return Err(
+                        "timeline source is not a regular file or is shorter than its cutoff"
+                            .into(),
+                    );
+                }
+                (Box::new(file), metadata.len())
+            };
+            if length < source.length {
                 return Err(
                     "timeline source is not a regular file or is shorter than its cutoff".into(),
                 );
             }
-            files.push((file, source.length));
+            files.push((reader, source.length));
         }
         Ok(Self { files })
     }

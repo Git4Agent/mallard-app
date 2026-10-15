@@ -46,6 +46,8 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 which = "8"
 unicode-normalization = "0.1"
+# Decodes rollouts Codex compressed in place (`.jsonl.zst`); the crate Codex writes with.
+zstd = "0.14"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"

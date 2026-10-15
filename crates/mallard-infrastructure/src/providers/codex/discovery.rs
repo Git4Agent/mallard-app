@@ -83,7 +83,7 @@ pub(super) fn recent_session_homes(
                 break 'walk;
             }
             if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
+                || crate::codex_rollout_selection::plain_name(entry.path()).is_none()
             {
                 continue;
             }
@@ -92,6 +92,10 @@ pub(super) fn recent_session_homes(
             }
         }
     }
+    let hidden = crate::codex_rollout_selection::hidden_siblings(
+        rollouts.iter().map(|(_, path)| path.as_path()),
+    );
+    rollouts.retain(|(_, path)| !hidden.contains(path));
     rollouts.sort_by(|left, right| right.cmp(left));
     let mut homes: BTreeMap<PathBuf, u64> = BTreeMap::new();
     for (modified, path) in rollouts.into_iter().take(RECENT_SESSION_FILES) {
@@ -127,6 +131,7 @@ pub(super) fn discover(
     let mut canonical_homes = BTreeMap::new();
     let mut visited_entries = 0_usize;
     let mut visited_files = 0_usize;
+    let mut files = Vec::new();
     for directory in ["sessions", "archived_sessions"] {
         let state_root = canonical_home.join(directory);
         if !state_root.exists() {
@@ -144,7 +149,7 @@ pub(super) fn discover(
                 return Err("Codex profile session inventory exceeds its entry bound".to_string());
             }
             if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("jsonl")
+                || crate::codex_rollout_selection::plain_name(entry.path()).is_none()
             {
                 continue;
             }
@@ -155,23 +160,33 @@ pub(super) fn discover(
                     MAX_PROFILE_SESSION_FILES
                 ));
             }
-            let meta = match scan_metadata(entry.path()) {
-                Ok(meta) => meta,
-                Err(error) => {
-                    discovery.warnings.push(format!(
-                        "ignored Codex session '{}': {}",
-                        entry.path().display(),
-                        error
-                    ));
-                    continue;
-                }
-            };
-            candidates
-                .entry(meta.session_id.clone())
-                .or_default()
-                .push(entry.path().to_path_buf());
-            metadata.insert(entry.path().to_path_buf(), meta);
+            files.push(entry.into_path());
         }
+    }
+    // A compressed rollout beside its plain sibling is never opened.
+    let hidden = crate::codex_rollout_selection::hidden_siblings(
+        files.iter().map(std::path::PathBuf::as_path),
+    );
+    for path in files {
+        if hidden.contains(&path) {
+            continue;
+        }
+        let meta = match scan_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) => {
+                discovery.warnings.push(format!(
+                    "ignored Codex session '{}': {}",
+                    path.display(),
+                    error
+                ));
+                continue;
+            }
+        };
+        candidates
+            .entry(meta.session_id.clone())
+            .or_default()
+            .push(path.clone());
+        metadata.insert(path, meta);
     }
     let lookup = crate::codex_subagents::RolloutLookup::new(&canonical_home);
     for (session_id, mut paths) in candidates {
@@ -559,6 +574,113 @@ mod tests {
         assert!(discovered.sessions[0].blocked_reason.is_none());
         assert_eq!(adapter.recent_session_homes(&home).unwrap().len(), 1);
         drop(writer);
+    }
+
+    /// A rollout Codex compressed in place is the same session: listed
+    /// under its id with the `.zst` path, found on request, counted among
+    /// the recent homes, and empty when only its header decodes. Beside its
+    /// plain sibling it is never opened. A header declaring more than the
+    /// limit blocks it before any read.
+    #[test]
+    fn compressed_rollouts_are_the_same_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(home.join("sessions/2026/09/12")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let home = home.canonicalize().unwrap();
+        let project = project.canonicalize().unwrap();
+        let day = home.join("sessions/2026/09/12");
+        let cold = "0193b6c1-5352-7b12-9c6e-000000000011";
+        let warm = "0193b6c1-5352-7b12-9c6e-000000000012";
+        let empty = "0193b6c1-5352-7b12-9c6e-000000000013";
+        let rollout = |id: &str, body: bool| {
+            let header = serde_json::json!({
+                "type": "session_meta", "ordinal": 0,
+                "payload": {"id": id, "cwd": project, "history_mode": "paginated"}
+            });
+            let message = serde_json::json!({
+                "type": "event_msg", "ordinal": 1,
+                "payload": {"type": "user_message", "message": "Hello"}
+            });
+            if body {
+                format!("{header}\n{message}\n")
+            } else {
+                format!("{header}\n")
+            }
+        };
+        let compressed = |path: &Path, bytes: &str| {
+            std::fs::write(
+                path,
+                crate::jsonl_tail_io::compress_like_codex(bytes.as_bytes()),
+            )
+            .unwrap();
+        };
+        let cold_path = day.join(format!("rollout-2026-09-12T01-03-07-{cold}.jsonl.zst"));
+        compressed(&cold_path, &rollout(cold, true));
+        let warm_path = day.join(format!("rollout-2026-09-12T01-03-08-{warm}.jsonl"));
+        std::fs::write(&warm_path, rollout(warm, true)).unwrap();
+        // An interrupted compression left this twin; its bytes prove that a
+        // hidden sibling is never opened.
+        std::fs::write(
+            day.join(format!("rollout-2026-09-12T01-03-08-{warm}.jsonl.zst")),
+            b"not a zstd stream",
+        )
+        .unwrap();
+        compressed(
+            &day.join(format!("rollout-2026-09-12T01-03-09-{empty}.jsonl.zst")),
+            &rollout(empty, false),
+        );
+
+        let context = SessionDiscoveryContext {
+            provider_home: &home,
+            project_root: &project,
+        };
+        let adapter = CodexAdapter::new();
+        let discovered = adapter.discover(&context).unwrap();
+        assert!(discovered.warnings.is_empty(), "{:?}", discovered.warnings);
+        assert_eq!(
+            discovered
+                .sessions
+                .iter()
+                .map(|session| (session.session_id.as_str(), session.physical_path.clone()))
+                .collect::<Vec<_>>(),
+            [(cold, cold_path.clone()), (warm, warm_path.clone())]
+        );
+        assert!(discovered
+            .sessions
+            .iter()
+            .all(|session| session.blocked_reason.is_none()));
+        assert_eq!(
+            adapter
+                .discover_for_deletion(&context)
+                .unwrap()
+                .sessions
+                .len(),
+            3
+        );
+        let found = locate_session(
+            &context,
+            &mut |candidate, _| Ok(candidate == cold),
+            |path| adapter.scan_metadata(path),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.physical_path, cold_path);
+        assert!(found.blocked_reason.is_none());
+        let homes = adapter.recent_session_homes(&home).unwrap();
+        assert_eq!(homes.len(), 1);
+        assert_eq!(homes[0].home, project);
+
+        // The declared decoded size refuses an oversized file before a
+        // read; the physical size alone would have let it through.
+        let big = day.join("rollout-2026-09-12T01-03-10-big.jsonl.zst");
+        compressed(&big, &"a".repeat(10_000));
+        assert!(std::fs::metadata(&big).unwrap().len() < 100);
+        let error =
+            inspect_candidate_files_with_limit(&home, std::slice::from_ref(&big), 100).unwrap_err();
+        assert!(error.contains("exceeds 100 bytes"), "{error}");
+        inspect_candidate_files_with_limit(&home, std::slice::from_ref(&big), 20_000).unwrap();
     }
 
     #[test]

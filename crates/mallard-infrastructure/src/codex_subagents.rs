@@ -1,7 +1,7 @@
 //! Native Codex child ownership and history validation.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use mallard_domain::{
@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::codex_rollout::{authoritative_session_meta_with_record, MAX_CODEX_RECORDS};
 use crate::conversation_codec::parsed_records;
-use crate::jsonl_tail_io::{open_no_follow, safe_record_end};
+use crate::jsonl_tail_io::safe_record_end;
 use crate::owned_subagents::InstalledChildPayload;
 
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
@@ -168,11 +168,8 @@ fn verify_cutoff(path: &Path, cutoff: u64) -> Result<(), String> {
     if cutoff == 0 {
         return Err("invalid installed Codex cutoff".into());
     }
-    let mut file = open_no_follow(path)?;
-    file.seek(SeekFrom::Start(cutoff - 1))
-        .map_err(|error| error.to_string())?;
-    let mut byte = [0];
-    file.read_exact(&mut byte)
+    // The one byte before the cutoff, addressed in the decoded bytes.
+    let (byte, _) = crate::jsonl_tail_io::read_range(path, cutoff - 1, cutoff)
         .map_err(|_| "installed Codex cutoff exceeds the source")?;
     if byte != [b'\n'] {
         return Err("installed Codex cutoff is not a record boundary".into());
@@ -556,12 +553,16 @@ impl RolloutLookup {
                         if kind.is_dir() {
                             pending.push(entry.path());
                         } else if kind.is_file()
-                            && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+                            && crate::codex_rollout_selection::plain_name(&entry.path()).is_some()
                         {
                             paths.push(entry.path());
                         }
                     }
                 }
+                let hidden = crate::codex_rollout_selection::hidden_siblings(
+                    paths.iter().map(PathBuf::as_path),
+                );
+                paths.retain(|path| !hidden.contains(path));
                 paths.sort();
                 Ok(paths)
             })
@@ -590,8 +591,7 @@ impl RolloutLookup {
         let original = format!("-{id}.jsonl");
         let reverted = format!("_{id}.jsonl");
         let mut matches = self.paths()?.iter().filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
+            crate::codex_rollout_selection::plain_name(path)
                 .is_some_and(|name| name.ends_with(&original) || name.ends_with(&reverted))
         });
         let found = matches.next().cloned();
@@ -608,8 +608,7 @@ impl RolloutLookup {
             .paths()?
             .iter()
             .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
+                crate::codex_rollout_selection::plain_name(path)
                     .is_some_and(|name| name.ends_with(&original) || name.contains(&reverted))
             })
             .cloned()
@@ -1188,13 +1187,11 @@ impl ChildMetadata {
 
 /// Read only bounded authoritative metadata while checking a candidate's owner.
 pub fn read_child_metadata(path: &Path, expected_id: &str) -> Result<ChildMetadata, String> {
-    let file = open_no_follow(path)?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
-    if !metadata.is_file() || metadata.len() > crate::app_settings::conversation_file_limit_bytes()
-    {
+    let (stamp, reader) = crate::jsonl_tail_io::open_head(path)?;
+    if stamp.file_len() > crate::app_settings::conversation_file_limit_bytes() {
         return Err("Codex child file is not a bounded regular transcript".to_string());
     }
-    let mut reader = BufReader::new(file.take(MAX_METADATA_BYTES + 1));
+    let mut reader = reader.take(MAX_METADATA_BYTES + 1);
     let mut bytes = Vec::new();
     loop {
         let read = reader
@@ -1291,6 +1288,53 @@ mod tests {
         assert!(lookup
             .verify_current("T", &source.with_file_name("other.jsonl"))
             .is_err());
+    }
+
+    /// A rollout Codex compressed in place is found under its thread, read
+    /// for its metadata, and verified as current; beside its plain sibling
+    /// the plain file is the rollout; a capture that named the plain file
+    /// fails closed once Codex compressed it.
+    #[test]
+    fn lookup_reads_compressed_rollouts_and_prefers_a_plain_sibling() {
+        let home = tempfile::tempdir().unwrap();
+        let bytes = fixture(home.path(), "T", None, &[]);
+        let plain = home
+            .path()
+            .join("sessions/rollout-2026-09-12T01-03-07-T.jsonl");
+        std::fs::rename(home.path().join("sessions/rollout-T.jsonl"), &plain).unwrap();
+        let compressed = plain.with_file_name("rollout-2026-09-12T01-03-07-T.jsonl.zst");
+        std::fs::write(
+            &compressed,
+            crate::jsonl_tail_io::compress_like_codex(bytes.as_slice()),
+        )
+        .unwrap();
+
+        let lookup = RolloutLookup::new(home.path());
+        assert_eq!(lookup.find_current("T").unwrap(), Some(plain.clone()));
+        assert_eq!(lookup.find_rollout("T").unwrap(), Some(plain.clone()));
+        assert_eq!(
+            lookup.rollouts_by_thread().unwrap()["T"],
+            vec![plain.clone()]
+        );
+        lookup.verify_current("T", &plain).unwrap();
+
+        std::fs::remove_file(&plain).unwrap();
+        let lookup = RolloutLookup::new(home.path());
+        assert_eq!(lookup.find_current("T").unwrap(), Some(compressed.clone()));
+        assert_eq!(lookup.find_rollout("T").unwrap(), Some(compressed.clone()));
+        assert_eq!(
+            lookup.rollouts_by_thread().unwrap()["T"],
+            vec![compressed.clone()]
+        );
+        assert_eq!(
+            read_child_metadata(&compressed, "T").unwrap(),
+            ChildMetadata::from_bytes(&bytes, "T").unwrap()
+        );
+        assert_eq!(
+            lookup.verify_current("T", &plain).unwrap_err(),
+            PUSH_CHANGED
+        );
+        lookup.verify_current("T", &compressed).unwrap();
     }
 
     #[test]

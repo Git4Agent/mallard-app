@@ -13,6 +13,8 @@
 mod codex_home;
 #[path = "support/codex_output.rs"]
 mod codex_output;
+#[path = "support/codex_compressed_rollouts.rs"]
+mod compressed_rollouts;
 #[path = "support/codex_failure_isolation.rs"]
 mod failure_isolation;
 #[path = "support/codex_open_rollout.rs"]
@@ -6555,6 +6557,7 @@ fn live_codex_aimock_setup_push_pull_divergence() {
     // through one bounded app-server. No rollout is directly written here.
     eprintln!("live Codex phase: paginated graph revisions 7-11");
     let graph = write_native_paginated_graph(&provider, &myconf1, &machine1_home, &project1);
+    compressed_rollouts::run(root.path(), &project1, &graph);
     let p1_initial_bytes = read_bounded_file(
         &graph.nodes["p1"].path,
         MAX_CONVERSATION_FILE_BYTES,

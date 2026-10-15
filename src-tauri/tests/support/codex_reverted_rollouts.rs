@@ -369,12 +369,16 @@ pub(super) fn assert_detail_history(
             let marker = match event.kind {
                 SessionTimelineEventKind::Prompt => normalize_position_zero_marker(&text)
                     .ok()
-                    .filter(|marker| marker.starts_with("LIVE_USER_"))
+                    .filter(|marker| {
+                        marker.starts_with("LIVE_USER_") || marker.starts_with("GRAPH_USER_")
+                    })
                     .map(|marker| HistoryMarker {
                         role: HistoryRole::User,
                         marker,
                     }),
-                SessionTimelineEventKind::Response if text.starts_with("MALLARD_") => {
+                SessionTimelineEventKind::Response
+                    if text.starts_with("MALLARD_") || text.starts_with("GRAPH_") =>
+                {
                     Some(HistoryMarker {
                         role: HistoryRole::Assistant,
                         marker: validate_exact_marker(&text).unwrap(),

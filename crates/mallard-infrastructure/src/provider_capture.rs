@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, Read};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
@@ -1674,8 +1674,7 @@ pub(crate) fn scan_session_metadata_with(
     parse_record: fn(&[u8]) -> Option<ParsedSessionMetadata>,
 ) -> Result<crate::providers::SessionFileMetadata, ScanFailure> {
     crate::sync_metrics::record_file_head_read(path);
-    let file = fs::File::open(path).map_err(|e| ScanFailure::Unreadable(format!("open: {}", e)))?;
-    let mut reader = BufReader::new(file);
+    let (_, mut reader) = crate::jsonl_tail_io::open_head(path).map_err(ScanFailure::Unreadable)?;
     let mut total = 0_usize;
     for _ in 0..MAX_METADATA_LINES {
         let mut line = Vec::new();
@@ -1701,10 +1700,7 @@ pub(crate) fn scan_session_metadata_with(
             validated.is_empty = metadata.can_be_empty
                 && total == read
                 && line.ends_with(b"\n")
-                && reader
-                    .get_ref()
-                    .metadata()
-                    .is_ok_and(|file| file.len() == read as u64);
+                && reader.fill_buf().is_ok_and(|rest| rest.is_empty());
             return Ok(validated);
         }
     }
@@ -1873,6 +1869,18 @@ fn inspect_candidate_file_with_limit(
     // their structural credential and hard-link exclusions.
     if project_content {
         return Ok(meta);
+    }
+    // A compressed transcript is bounded by what it decodes to; its header's
+    // declared size refuses an oversized one here, the decoder's bound later.
+    if crate::jsonl_tail_io::is_compressed(file)
+        && crate::jsonl_tail_io::declared_decoded_len(file)
+            .is_some_and(|declared| declared > max_file_bytes)
+    {
+        return Err(format!(
+            "'{}' exceeds {} bytes",
+            file.display(),
+            max_file_bytes
+        ));
     }
     if crate::persistence::hard_link_count(&meta, file).is_some_and(|links| links > 1) {
         return Err(format!(

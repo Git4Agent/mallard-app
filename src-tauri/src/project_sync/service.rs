@@ -4061,9 +4061,19 @@ fn bounded_file_expectation(path: &Path) -> Result<TargetExpectation, String> {
             path.display()
         ));
     }
-    let content = fs::read(path)
-        .map_err(|error| format!("read provider target '{}': {error}", path.display()))?;
-    mallard_infrastructure::sync_metrics::record_transcript_bytes_read(path, content.len() as u64);
+    // A compressed Codex source is pinned by its decoded bytes, the bytes
+    // the review compared and the apply reads.
+    let content = if jsonl_tail_io::is_compressed(path) {
+        jsonl_tail_io::read_bounded(path)?
+    } else {
+        let content = fs::read(path)
+            .map_err(|error| format!("read provider target '{}': {error}", path.display()))?;
+        mallard_infrastructure::sync_metrics::record_transcript_bytes_read(
+            path,
+            content.len() as u64,
+        );
+        content
+    };
     mallard_infrastructure::sync_metrics::record_bytes_hashed(path, content.len() as u64);
     Ok(TargetExpectation::Sha256(hex_digest(
         Sha256::digest(&content).as_slice(),
@@ -5877,7 +5887,8 @@ fn provider_thread_review(
                         physical: PhysicalMappingState::Ready {
                             root_mapping: seeded.mapping.clone(),
                             raw_range_pin,
-                            source_state: Some(source_stamp.file_state()),
+                            source_state: source_stamp
+                                .saved_state(Path::new(&seeded.mapping.root_path)),
                         },
                         prefix_witness: seeded.prefix_witness.clone(),
                         binding_revision,
@@ -6383,7 +6394,9 @@ fn provider_thread_review(
                     physical: PhysicalMappingState::Ready {
                         root_mapping: seeded.root.mapping.clone(),
                         raw_range_pin: pin,
-                        source_state: Some(seeded.source.file_state()),
+                        source_state: seeded
+                            .source
+                            .saved_state(Path::new(&seeded.root.mapping.root_path)),
                     },
                     prefix_witness: seeded.root.prefix_witness.clone(),
                     binding_revision: local_binding.revision,
@@ -10412,7 +10425,7 @@ fn build_conversation_publication(
             source_state: transcript
                 .source_stamp
                 .as_ref()
-                .map(jsonl_tail_io::SourceStamp::file_state),
+                .and_then(|stamp| stamp.saved_state(Path::new(&seeded.mapping.root_path))),
         },
         prefix_witness: seeded.prefix_witness.clone(),
         binding_revision: action.pins.context.binding_revision.unwrap_or(0),
@@ -24610,6 +24623,130 @@ mod tests {
             row.pull_decision.action,
             ConversationReviewAction::MaterializeCloud
         );
+    }
+
+    /// Codex compressed a bound rollout in place (`.jsonl.zst`, the plain
+    /// file removed): the row still reads in sync with no blocker and a
+    /// Push is a noop; a Pull onto a compressed copy writes its plain
+    /// sibling, leaves the `.zst` as it was, and the next refresh reads the
+    /// plain file.
+    #[test]
+    fn a_rollout_codex_compressed_in_place_stays_the_same_session() {
+        let world = TwoComputers::new("compressed-rollout-store");
+        let (a, b) = (&world.a, &world.b);
+        let session = "019f7500-0000-7000-8000-0000000000c1";
+        write_codex_session(&a.codex, session, &a.root);
+        assert_eq!(world.push(a).revision, Some(2));
+        let cloud_id = world.stored_cloud_ids()[&Some(session.to_string())].clone();
+        world.pull_conversations(&world.plan_pull(b));
+        let b_plain = world.rollout_of(b, &cloud_id);
+        assert_eq!(
+            TwoComputers::row_for(&world.compare(b), &cloud_id).state,
+            ThreadSyncState::Synced
+        );
+
+        // Cold on A: Codex compresses it. The session is the same session.
+        let a_plain = codex_rollout_path(&a.codex, session);
+        let a_compressed = compress_rollout_in_place(&a_plain);
+        let comparison = world.compare(a);
+        let row = TwoComputers::row_for(&comparison, &cloud_id);
+        assert_eq!(
+            row.state,
+            ThreadSyncState::Synced,
+            "{:?}",
+            row.status_detail
+        );
+        assert_eq!(row.push_decision.blocker, None);
+        assert_eq!(row.pull_decision.blocker, None);
+        assert!(row.local_present);
+        let noop = world.push(a);
+        assert!(noop.success, "{}", noop.message);
+        assert_eq!(noop.revision, Some(2));
+
+        // Codex materialises A's rollout to append; the next Push publishes it.
+        assert_eq!(materialize_rollout_in_place(&a_compressed), a_plain);
+        append_codex_user_turn(&a_plain, "message-next", "continued on A");
+        assert_eq!(world.push(a).revision, Some(3));
+
+        // Cold on B too: the Pull lands in a new, complete rollout and
+        // leaves the compressed copy exactly as it was.
+        let b_compressed = compress_rollout_in_place(&b_plain);
+        let compressed_bytes = std::fs::read(&b_compressed).unwrap();
+        let comparison = world.compare(b);
+        let row = TwoComputers::row_for(&comparison, &cloud_id);
+        assert_eq!(
+            row.state,
+            ThreadSyncState::StorageAhead,
+            "{:?}",
+            row.status_detail
+        );
+        assert_eq!(row.pull_decision.blocker, None);
+        assert_eq!(
+            row.pull_decision.action,
+            ConversationReviewAction::MaterializeCloud
+        );
+        world.pull_conversations(&world.plan_pull(b));
+        let relocated = world.rollout_of(b, &cloud_id);
+        assert_ne!(relocated, b_plain, "{:?}", rollout_files(&b.codex));
+        assert!(!b_plain.exists());
+        assert_eq!(std::fs::read(&b_compressed).unwrap(), compressed_bytes);
+        let installed = std::fs::read_to_string(&relocated).unwrap();
+        assert!(installed.contains("continued on A"));
+        assert_eq!(
+            TwoComputers::row_for(&world.compare(b), &cloud_id).state,
+            ThreadSyncState::Synced
+        );
+    }
+
+    /// Every file under a Codex home's session roots, for a failure message.
+    fn rollout_files(home: &Path) -> Vec<PathBuf> {
+        fn walk(directory: &Path, found: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&home.join("sessions"), &mut found);
+        walk(&home.join("archived_sessions"), &mut found);
+        found.sort();
+        found
+    }
+
+    /// Codex's compression as it leaves the home: the same bytes as one zstd
+    /// stream under the plain name plus `.zst`, the modification time kept,
+    /// the plain file removed last.
+    fn compress_rollout_in_place(plain: &Path) -> PathBuf {
+        let bytes = std::fs::read(plain).unwrap();
+        let modified = std::fs::metadata(plain).unwrap().modified().unwrap();
+        let name = plain.file_name().unwrap().to_str().unwrap();
+        let compressed = plain.with_file_name(format!("{name}.zst"));
+        std::fs::write(&compressed, jsonl_tail_io::compress_like_codex(&bytes)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&compressed)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        std::fs::remove_file(plain).unwrap();
+        compressed
+    }
+
+    /// Codex's materialisation before an append: the plain file back, the
+    /// `.zst` removed.
+    fn materialize_rollout_in_place(compressed: &Path) -> PathBuf {
+        let bytes = jsonl_tail_io::read_bounded(compressed).unwrap();
+        let plain = compressed.with_extension("");
+        std::fs::write(&plain, bytes).unwrap();
+        std::fs::remove_file(compressed).unwrap();
+        plain
     }
 
     /// T3 and Q3: the pinned version lost its race before the Pull started,

@@ -18,7 +18,7 @@ use crate::codex_rollout::{
     CodexStructureAccumulator, MAX_CODEX_FORK_DEPTH,
 };
 use crate::conversation_codec::{CanonicalChainBuilder, ChainFeedOutcome};
-use crate::jsonl_tail_io::{open_no_follow, safe_record_end, TailWindow, PROBE_WINDOW_BYTES};
+use crate::jsonl_tail_io::{safe_record_end, TailWindow, PROBE_WINDOW_BYTES};
 use mallard_domain::{
     compute_portable_conversation_tail, conversation_chain_digests, conversation_prefix_witness,
     sha256_hex, CanonicalConversationMessage, ConversationCheckpoint, ConversationPrefixWitness,
@@ -110,8 +110,6 @@ pub fn retained_root_is_byte_identical(
     path: &Path,
     checkpoint: &ConversationCheckpoint,
 ) -> Result<bool, String> {
-    use std::io::Read;
-
     let PhysicalMappingState::Ready {
         root_mapping,
         raw_range_pin,
@@ -127,30 +125,11 @@ pub fn retained_root_is_byte_identical(
     {
         return Ok(false);
     }
-    let mut file = open_no_follow(path)?;
-    let before = file
-        .metadata()
-        .map_err(|error| format!("inspect retained Codex rollout: {error}"))?;
-    if !before.is_file()
-        || before.len() != root_mapping.source_file_size
-        || before.len() > conversation_file_limit_bytes()
-    {
+    let (bytes, _) = crate::jsonl_tail_io::read_snapshot(path)?;
+    if bytes.len() as u64 != root_mapping.source_file_size {
         return Ok(false);
     }
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    file.by_ref()
-        .take(root_mapping.source_file_size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("read retained Codex rollout: {error}"))?;
-    let after = file
-        .metadata()
-        .map_err(|error| format!("reinspect retained Codex rollout: {error}"))?;
-    if after.len() != before.len() || bytes.len() as u64 != before.len() {
-        return Ok(false);
-    }
-    crate::sync_metrics::record_transcript_bytes_read(path, bytes.len() as u64);
-    let digest = sha256_hex(&bytes);
-    Ok(digest == raw_range_pin.range_sha256)
+    Ok(sha256_hex(&bytes) == raw_range_pin.range_sha256)
 }
 
 struct SegmentSource<'a> {
@@ -831,6 +810,23 @@ mod tests {
         raw_range_pin.start_byte_offset = 1;
         assert!(!retained_root_is_byte_identical(&path, &partial).unwrap());
 
+        // Codex compressed the retained root in place: the witness decodes it.
+        let compressed = temp.path().join("retained.jsonl.zst");
+        fs::write(
+            &compressed,
+            crate::jsonl_tail_io::compress_like_codex(&bytes[..]),
+        )
+        .unwrap();
+        let compressed = fs::canonicalize(compressed).unwrap();
+        let compressed_checkpoint = retained_checkpoint(&compressed, bytes);
+        assert!(retained_root_is_byte_identical(&compressed, &compressed_checkpoint).unwrap());
+        fs::write(
+            &compressed,
+            crate::jsonl_tail_io::compress_like_codex(&b"{}\n{}\n"[..]),
+        )
+        .unwrap();
+        assert!(!retained_root_is_byte_identical(&compressed, &compressed_checkpoint).unwrap());
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
@@ -1044,6 +1040,70 @@ mod tests {
         sources[&current].1.verify(&current).unwrap();
         fs::write(&current, b"changed current").unwrap();
         assert!(sources[&current].1.verify(&current).is_err());
+    }
+
+    /// A chain whose bases Codex compressed resolves by the cutoffs the
+    /// leaf declares, which address the decoded bytes.
+    #[test]
+    fn compressed_bases_resolve_by_their_decoded_cutoffs() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let retained =
+            encode_paginated_lines(&[meta_line("thread", None), message_line("m1", "keep one")]);
+        let mut old_bytes = retained.clone();
+        append_paginated_line(&mut old_bytes, &message_line("discarded", "DISCARDED TURN"));
+        fs::write(
+            sessions.join("rollout-2026-09-12T01-03-07-thread.jsonl.zst"),
+            crate::jsonl_tail_io::compress_like_codex(old_bytes.as_slice()),
+        )
+        .unwrap();
+        let first_bytes = encode_paginated_lines(&[
+            meta_line("thread", Some(("thread", 2, retained.len() as u64))),
+            message_line("m2", "keep two"),
+        ]);
+        fs::write(
+            sessions.join("rollout-2026-09-13T00-19-15-thread_revert1.jsonl.zst"),
+            crate::jsonl_tail_io::compress_like_codex(first_bytes.as_slice()),
+        )
+        .unwrap();
+        let current = sessions.join("rollout-2026-09-13T00-19-16-thread_revert2.jsonl");
+        let current_bytes = encode_paginated_lines(&[
+            meta_line("thread", Some(("revert1", 4, first_bytes.len() as u64))),
+            message_line("m3", "keep three"),
+        ]);
+        fs::write(&current, &current_bytes).unwrap();
+        let lookup = crate::codex_subagents::RolloutLookup::new(home.path());
+        let (bytes, stamp) = crate::jsonl_tail_io::read_snapshot(&current).unwrap();
+        let (resolved, sources) =
+            resolve_captured_codex_root(&current, bytes.into(), stamp, &|id| {
+                lookup.find_rollout(id)
+            })
+            .unwrap();
+        assert_eq!(
+            resolved
+                .segments
+                .iter()
+                .map(|segment| (segment.rollout_id.as_str(), segment.consumed_byte_len))
+                .collect::<Vec<_>>(),
+            [
+                ("thread", retained.len() as u64),
+                ("revert1", first_bytes.len() as u64),
+                ("revert2", current_bytes.len() as u64),
+            ]
+        );
+        let text = resolved
+            .segments
+            .iter()
+            .map(|segment| {
+                let (bytes, _) = &sources[&segment.path];
+                String::from_utf8_lossy(&bytes[..segment.consumed_byte_len as usize]).into_owned()
+            })
+            .collect::<String>();
+        assert!(
+            text.contains("keep one") && text.contains("keep two") && text.contains("keep three")
+        );
+        assert!(!text.contains("DISCARDED TURN"));
     }
 
     #[test]

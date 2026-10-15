@@ -632,6 +632,36 @@ mod tests {
         assert_eq!(metadata.session_id, "current-session");
         assert_eq!(metadata.authorized_home, temp.path());
     }
+
+    /// A compressed rollout's head decodes, and whether it is empty is told
+    /// by what follows its header, not by the stream's size.
+    #[test]
+    fn metadata_scan_reads_compressed_rollouts_and_their_emptiness() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_string_lossy().into_owned();
+        let header = serde_json::json!({
+            "type": "session_meta", "ordinal": 0,
+            "payload": {"id": "cold", "cwd": cwd, "history_mode": "paginated"}
+        });
+        let message = serde_json::json!({
+            "type": "event_msg", "ordinal": 1,
+            "payload": {"type": "user_message", "message": "Hello"}
+        });
+        for (name, records, empty) in [
+            ("empty", vec![header.clone()], true),
+            ("full", vec![header, message], false),
+        ] {
+            let path = temp.path().join(format!("rollout-{name}.jsonl.zst"));
+            fs::write(
+                &path,
+                crate::jsonl_tail_io::compress_like_codex(jsonl(records).as_bytes()),
+            )
+            .unwrap();
+            let metadata = scan_session_metadata_with(&path, parse_codex_session_metadata).unwrap();
+            assert_eq!(metadata.session_id, "cold");
+            assert_eq!(metadata.is_empty, empty, "{name}");
+        }
+    }
 }
 
 pub(crate) fn filter_codex_session_index_by_ids(

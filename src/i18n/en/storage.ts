@@ -373,7 +373,7 @@ export default {
     resetTitle: "Discards this setup draft and all of its progress, then opens a fresh one. Nothing on Mallard Cloud changes.",
     signInLink: "Mallard Cloud sign-in link",
     copySignInLink: "Copy sign-in link",
-    createIntro: "Sign in with GitHub to share snapshots privately with invited collaborators, and request a release on the website to make them public.",
+    createIntro: "Sign in with GitHub to share sessions privately with invited collaborators. Request a public release on the website.",
     reconnectIntro: "Renews this storage’s session with the same GitHub account. Sign-in happens in a browser you choose.",
     signInGitHub: "Sign in with GitHub",
     reconnect: "Reconnect Mallard Cloud",

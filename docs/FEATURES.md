@@ -127,6 +127,9 @@ works.
 
 You will also need Git and a local Codex profile. The default profile is
 normally stored at `~/.codex`.
+A session Codex has compressed in place (`rollout-….jsonl.zst`, its
+experimental `local_thread_store_compression` feature) is read like a plain
+one; Mallard itself writes only plain `.jsonl` files.
 
 ## Claude widgets in session detail
 
