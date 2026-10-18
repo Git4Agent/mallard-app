@@ -6,7 +6,7 @@
 </p>
 <h1 align="center">Mallard</h1>
 <p align="center">
-  <b>Git for agent sessions.</b><br>
+  <b>Git for AI agents</b><br>
   Your code travels with Git. Your Codex and Claude sessions travel with Mallard.
 </p>
 <p align="center">
