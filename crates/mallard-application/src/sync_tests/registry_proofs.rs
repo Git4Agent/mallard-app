@@ -9,14 +9,14 @@ use crate::project_sync::service::{
     config_view, create_provider_profile_with_repository, list_project_bindings_with_repository,
     recover_startup_state_with_repository,
 };
-use crate::sync_tests::thread_variants::harness::{
-    codex_scope_key, harness_captured_with, publish_request, publish_with_head, ThreadSpec,
-    TranscriptBuilder, VariantWorld,
-};
-use mallard_application::storage_setup::{
+use crate::storage_setup::{
     commit_storage_setup_draft, create_storage_setup_draft, list_storage_setup_drafts,
     list_storages, storage_provider_descriptors, update_storage_setup_draft,
     UpdateStorageSetupDraftRequest,
+};
+use crate::sync_tests::thread_variants::harness::{
+    codex_scope_key, harness_captured_with, publish_request, publish_with_head, ThreadSpec,
+    TranscriptBuilder, VariantWorld,
 };
 use mallard_domain::{
     hex_lower, BoundedConfigObject, BoundedPortableObject, BundleRecipe, PortableContractResolver,

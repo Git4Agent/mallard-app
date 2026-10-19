@@ -8,7 +8,7 @@
 //! index, objects, logs, and lock files never wake the page. The event names
 //! the project only; no path leaves the backend.
 
-use super::service::repository;
+use mallard_application::project_sync::service::repository;
 use mallard_domain::LocalProjectId;
 use mallard_infrastructure::project_activity::{project_git_dirs, ProjectGitDirs};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};

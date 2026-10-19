@@ -3035,21 +3035,16 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 name = "mallard"
 version = "0.1.11"
 dependencies = [
- "aws-smithy-types",
  "bytes",
  "chrono",
- "dirs 5.0.1",
- "hmac 0.12.1",
  "http-body-util",
  "hyper 1.10.1",
  "hyper-util",
- "image",
  "libc",
  "mallard-application",
  "mallard-domain",
  "mallard-infrastructure",
  "notify",
- "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3062,10 +3057,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
- "toml 0.9.12+spec-1.1.0",
- "unicode-normalization",
  "walkdir",
- "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -3073,13 +3065,28 @@ dependencies = [
 name = "mallard-application"
 version = "0.1.11"
 dependencies = [
+ "aws-smithy-types",
+ "bytes",
+ "chrono",
+ "hmac 0.12.1",
+ "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
+ "image",
+ "libc",
  "mallard-domain",
  "mallard-infrastructure",
+ "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "unicode-normalization",
  "url",
+ "walkdir",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -3087,6 +3094,7 @@ dependencies = [
 name = "mallard-cli"
 version = "0.1.11"
 dependencies = [
+ "chrono",
  "clap",
  "httparse",
  "mallard-application",

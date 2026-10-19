@@ -167,13 +167,13 @@ fn canonical_home_of(home: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(home).ok()
 }
 
-pub(crate) struct ObservationCache {
+pub struct ObservationCache {
     /// Per state root: loaded from disk on first use, written through on
     /// every store.
     records: Mutex<BTreeMap<PathBuf, Records>>,
 }
 
-pub(crate) fn observation_cache() -> &'static ObservationCache {
+pub fn observation_cache() -> &'static ObservationCache {
     static CACHE: OnceLock<ObservationCache> = OnceLock::new();
     CACHE.get_or_init(|| ObservationCache {
         records: Mutex::new(BTreeMap::new()),
@@ -223,7 +223,7 @@ impl ObservationCache {
     /// Forget every record in memory. The whole-`~/.mallard` reset deletes
     /// the file and the registrations the records are keyed by, and the
     /// process stays alive across it.
-    pub(crate) fn reset(&self) {
+    pub fn reset(&self) {
         if let Ok(mut roots) = self.records.lock() {
             roots.clear();
         }
@@ -234,7 +234,7 @@ impl ObservationCache {
     /// touches no session file, so every stamp would still hold; the lock
     /// is held across the unlink so no concurrent observation can reload
     /// the pre-change file and later write those rows back out.
-    pub(crate) fn reset_and_purge_disk(&self, state_root: &Path) -> Result<(), String> {
+    pub fn reset_and_purge_disk(&self, state_root: &Path) -> Result<(), String> {
         let mut guard = self.records.lock();
         if let Ok(roots) = guard.as_mut() {
             roots.insert(state_root.to_path_buf(), Records::new());

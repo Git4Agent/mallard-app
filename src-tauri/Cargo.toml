@@ -27,26 +27,13 @@ tauri-plugin-updater = "2"
 tauri-plugin-deep-link = "~2.4.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Already used transitively; parse provider config without executing its CLI.
-toml = "0.9"
-dirs = "5"
-walkdir = "2"
 zeroize = "1"
 tokio = { version = "1", features = ["full"] }
-# Base64 for x-amz-checksum-sha256 values in S3 tests.
-aws-smithy-types = "1"
-bytes = "1"
-# Pet preview derivation: decode PNG/WebP atlases, encode the cached PNG
-# thumbnail. Pure-Rust codecs only; no default features.
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
-sha2 = "0.10"
-hmac = "0.12"
 libc = "0.2"
 tempfile = "3"
-chrono = "0.4"
 notify = "8.2"
-unicode-normalization = "0.1"
-regex = "1"
+# R2 setup compares a bucket's creation date from the scan.
+chrono = "0.4"
 
 # Windows and Linux start another process for a link; this hands its
 # arguments to the running app and ends it. macOS delivers a link to the
@@ -54,20 +41,16 @@ regex = "1"
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "~2.4.5", features = ["deep-link"] }
 
-# Use the same Windows filesystem API version as infrastructure. Removal
-# marks the verified open handle for deletion instead of resolving its path again.
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
-
 [dev-dependencies]
 # Test-only domain and infrastructure helpers (compiled out of production
 # builds).
 mallard-domain = { path = "../crates/mallard-domain", features = ["test-support"] }
 mallard-infrastructure = { path = "../crates/mallard-infrastructure", features = ["test-support"] }
-# `test` enables tauri::test::{mock_builder, MockRuntime} for the headless
-# integration tests in src/sync_tests/.
-tauri = { version = "2", features = ["test"] }
-# Stub S3 server.
+# The live end-to-end suites under tests/ walk fixture trees, digest them,
+# and run a stub S3 server.
+walkdir = "2"
+sha2 = "0.10"
+bytes = "1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

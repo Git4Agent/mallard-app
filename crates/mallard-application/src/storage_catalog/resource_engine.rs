@@ -904,7 +904,8 @@ mod tests {
 
     #[test]
     fn feishu_two_sign_ins_publish_read_and_reject_stale_library_writes() {
-        let server = mallard_infrastructure::storage_core::feishu_store::mock::MockFeishuServer::new();
+        let server =
+            mallard_infrastructure::storage_core::feishu_store::mock::MockFeishuServer::new();
         let second = mallard_infrastructure::storage_core::feishu_store::mock::ListedReadStore(
             server.second_store(),
         );

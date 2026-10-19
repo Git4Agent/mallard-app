@@ -1,6 +1,9 @@
 //! Private, gated service worker for scripts/run-mixed-aimock-e2e.mjs.
 //! Native data and independent expected results belong to the Node harness.
 //! All paths are rooted in a disposable fixture. No Tauri application starts.
+use mallard_application::project_sync::service::{
+    ProjectSessionTimelineRequest, ProjectSyncService, PushApproval, PushReviewContext,
+};
 use mallard_domain::{
     BundleId, DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection,
     LocalProjectRegistration, ProjectBinding, ProviderKey, ResourceId, RestoreActionKind,
@@ -14,9 +17,6 @@ use std::{
     io::{BufRead, Read, Write},
     path::{Path, PathBuf},
     time::Instant,
-};
-use tauri_app_lib::{
-    ProjectSessionTimelineRequest, ProjectSyncService, PushApproval, PushReviewContext,
 };
 
 #[derive(Deserialize)]

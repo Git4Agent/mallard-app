@@ -170,6 +170,23 @@ test("release packaging contains no legacy Codex fork executor", async () => {
   assert.equal(tauriConfig.bundle.externalBin, undefined);
 });
 
+test("the application and command-line crates never depend on Tauri", async () => {
+  const [applicationCargo, cliCargo, applicationLib] = await Promise.all([
+    read("crates/mallard-application/Cargo.toml"),
+    read("crates/mallard-cli/Cargo.toml"),
+    read("crates/mallard-application/src/lib.rs"),
+  ]);
+  // The command line can only be as capable as the desktop because every
+  // service the desktop runs lives in the application crate, which the
+  // Tauri crate wraps and the CLI calls directly.
+  assert.doesNotMatch(applicationCargo, /^tauri/m);
+  assert.doesNotMatch(cliCargo, /^tauri/m);
+  assert.match(cliCargo, /^mallard-application = \{ path = "\.\.\/mallard-application" \}$/m);
+  for (const module of ["project_sync", "storage_catalog", "events", "activity_log", "storage_setup"]) {
+    assert.match(applicationLib, new RegExp(`^pub mod ${module};$`, "m"));
+  }
+});
+
 test("Mallard CLI is built and staged as a target-specific external binary", async () => {
   const [tauriConfigSource, cliCargoSource, buildScript, verifyScript, packageSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),

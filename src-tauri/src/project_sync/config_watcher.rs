@@ -57,12 +57,13 @@ pub fn start_connection_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 pub fn start_ignored_name_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     let mut events =
         mallard_infrastructure::storage_core::publication::ignored_name_events().subscribe();
+    let sink = crate::event_sink::DesktopSink::new(app);
     thread::Builder::new()
         .name("mallard-ignored-storage-names".to_string())
         .spawn(move || loop {
             match events.blocking_recv() {
-                Ok(name) => crate::activity_log::emit_typed_log(
-                    &app,
+                Ok(name) => mallard_application::activity_log::emit_typed_log(
+                    &sink,
                     mallard_infrastructure::activity_log::ActivityLogType::Storage,
                     "warn",
                     &format!("Ignored '{name}' in the storage: it is not a Mallard object."),
@@ -232,6 +233,60 @@ mod tests {
 
     fn event(kind: EventKind, path: &str) -> Event {
         Event::new(kind).add_path(PathBuf::from(path))
+    }
+
+    /// The watcher sees a config that another process, such as the command
+    /// line, replaces atomically: the OS reports the rename under the
+    /// config's own path, as `LocalStateRepository` writes it. The home is
+    /// canonical, as a user's home is; FSEvents names real paths.
+    #[test]
+    fn a_config_replaced_atomically_is_reported_as_a_config_change() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let repository = LocalStateRepository::from_home_dir(&home).unwrap();
+        let config_path = repository.config_path();
+        let drafts_path = repository.root().join("storage_drafts");
+        let (sender, receiver) = mpsc::channel::<(Event, WatchChanges)>();
+        let watched_config = config_path.clone();
+        let watched_drafts = drafts_path.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| {
+                if let Ok(event) = result {
+                    let changes = event_changes(&event, &watched_config, &watched_drafts);
+                    let _ = sender.send((event, changes));
+                }
+            },
+            Config::default(),
+        )
+        .unwrap();
+        watcher
+            .watch(repository.root(), RecursiveMode::Recursive)
+            .unwrap();
+        // The OS delivers nothing for a moment after a watch starts.
+        thread::sleep(Duration::from_millis(500));
+
+        let config = repository.load_config().unwrap();
+        let saved = repository.save_config(config).unwrap();
+        assert!(saved.revision >= 1);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut delivered = Vec::new();
+        let mut matched = false;
+        while !matched && std::time::Instant::now() < deadline {
+            match receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok((event, changes)) => {
+                    matched = changes.config;
+                    delivered.push(format!("{:?} {:?}", event.kind, event.paths));
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(
+            matched,
+            "no event named {}; delivered: {delivered:#?}",
+            config_path.display()
+        );
     }
 
     #[test]

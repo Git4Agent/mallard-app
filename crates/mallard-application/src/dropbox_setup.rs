@@ -77,7 +77,7 @@ pub async fn prepare(
         )
     };
     /* What listings call the folder: the name just created, the pick's name,
-       or — on a reconnect — whatever the saved settings already say. */
+    or — on a reconnect — whatever the saved settings already say. */
     let saved_name = draft
         .storage
         .provider_config
@@ -167,7 +167,10 @@ mod tests {
                 .unwrap();
             assert_eq!(prepared.revision, draft.revision + u64::from(!rejected));
             if !rejected {
-                assert_eq!(prepared.settings.get_str("folder_name"), Some("My chosen folder"));
+                assert_eq!(
+                    prepared.settings.get_str("folder_name"),
+                    Some("My chosen folder")
+                );
             }
             assert_eq!(
                 prepared

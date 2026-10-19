@@ -2896,7 +2896,7 @@ fn prepare_push_with_repositories(
         .as_ref()
         .expect("a linked workspace always has its storage");
     let storage_identity = storage_identity_for_config(storage)?;
-    let storage_is_local = mallard_application::storage_setup::storage_local_root(
+    let storage_is_local = crate::storage_setup::storage_local_root(
         mallard_infrastructure::storage_providers::StorageProviderRegistry::production(),
         storage,
     )?
@@ -8181,7 +8181,7 @@ mod tests {
         /// ```sh
         /// MALLARD_LIVE_CLOUD_ORIGIN=http://localhost:8787 MALLARD_LIVE_CLOUD_TOKEN=… \
         /// MALLARD_LIVE_CLOUD_GITHUB_USER_ID=123 MALLARD_LIVE_CLOUD_LOGIN=octocat \
-        ///   cargo test --manifest-path src-tauri/Cargo.toml --lib managed_cloud_live_library -- --ignored --nocapture
+        ///   cargo test -p mallard-application --lib managed_cloud_live_library -- --ignored --nocapture
         /// ```
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         #[ignore = "needs a running Mallard Cloud Worker and a desktop token"]

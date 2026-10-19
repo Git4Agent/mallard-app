@@ -1140,7 +1140,7 @@ mod session_refresh_regressions {
     // What a Push costs when its session was imported. A release build
     // gives the figures that are worth comparing:
     //
-    // cargo test --release --manifest-path src-tauri/Cargo.toml --lib -- \
+    // cargo test --release -p mallard-application --lib -- \
     //     --ignored push_cost_sample --nocapture
     #[test]
     #[ignore = "manual cost sample of 10 MiB; debug timings are not production benchmarks"]
@@ -2304,7 +2304,7 @@ mod session_refresh_regressions {
     // Push after a desktop import, which looks them up. One row in ten is
     // such a row, and one in ten holds thinking alone.
     //
-    // cargo test --release --manifest-path src-tauri/Cargo.toml --lib -- \
+    // cargo test --release -p mallard-application --lib -- \
     //     --ignored cost_sample_of_rows_with_thinking --nocapture
     #[test]
     #[ignore = "manual cost sample of 10 MiB; debug timings are not production benchmarks"]
@@ -2572,7 +2572,7 @@ mod session_refresh_regressions {
     // came without its transcript. `MALLARD_COST_SAMPLE_IMPORT=1` adds a
     // desktop import.
     //
-    // cargo test --release --manifest-path src-tauri/Cargo.toml --lib -- \
+    // cargo test --release -p mallard-application --lib -- \
     //     --ignored cost_sample_of_a_pulled_session --nocapture
     #[test]
     #[ignore = "manual cost sample of 10 MiB; debug timings are not production benchmarks"]
@@ -3632,7 +3632,7 @@ mod session_refresh_regressions {
     // What a Pull costs that updates a session with children, in place. A
     // release build gives the figures that are worth comparing:
     //
-    // cargo test --release --manifest-path src-tauri/Cargo.toml --lib -- \
+    // cargo test --release -p mallard-application --lib -- \
     //     --ignored pull_cost_sample --nocapture
     #[test]
     #[ignore = "manual cost sample of 8 children of 1 MiB; debug timings are not production benchmarks"]

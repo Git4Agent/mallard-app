@@ -25,6 +25,12 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use mallard_application::project_sync::service::{
+    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
+    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
+    SessionTimelineEventKind, SessionToolCategory, StorageDataClearResult, ThreadSyncComparison,
+    ThreadSyncState,
+};
 use mallard_domain::{
     ActionId, BundleId, CloudThreadId, ConversationFileRole, ConversationReviewAction,
     DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding,
@@ -56,12 +62,6 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
-use tauri_app_lib::{
-    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
-    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
-    SessionTimelineEventKind, SessionToolCategory, StorageDataClearResult, ThreadSyncComparison,
-    ThreadSyncState,
-};
 use walkdir::WalkDir;
 
 use support::catalog_flow::{run_catalog_flow, storage_snapshot, CatalogFlowInputs};
@@ -4046,7 +4046,7 @@ fn assert_stale_push_rejected(
     service: &ProjectSyncService<'_>,
     project_id: &LocalProjectId,
     storage_id: &StorageId,
-    review: &tauri_app_lib::PushReviewContext,
+    review: &mallard_application::project_sync::service::PushReviewContext,
 ) {
     assert!(
         service

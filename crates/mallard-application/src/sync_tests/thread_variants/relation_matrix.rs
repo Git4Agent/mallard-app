@@ -346,9 +346,9 @@ fn action_pins(
     ConversationActionPins {
         subagent_selection: Default::default(),
         credential_redaction_enabled: true,
-export_settings_changed: false,
-local_metadata_changed: false,
-context: ConversationContextPins {
+        export_settings_changed: false,
+        local_metadata_changed: false,
+        context: ConversationContextPins {
             host_id: HostId::parse("11111111111111111111111111111111").unwrap(),
             replica_id: ReplicaId::parse("replica-a").unwrap(),
             local_project_id: LocalProjectId::parse("project-a").unwrap(),

@@ -1,15 +1,14 @@
 //! Tauri command adapters for project sync.
 
-use super::service::{
-    agent_provider_descriptors, claim_history_scan_log_at,
-    commit_storage_setup_draft_with_repository, connect_project_to_remote_bundle_with_repository,
-    create_provider_profile_with_repository, create_storage_edit_draft_with_repository,
-    create_storage_setup_draft_with_repository, current_binding_for_restore_plan,
-    delete_local_project_sessions_with_repository, discard_setup_draft_with_repository,
-    discard_storage_setup_draft_with_repository, execute_project_session_action_with_repository,
-    find_project_session_with_repository, format_fetch_started_message, format_mb,
-    get_bundle_inventory_with_repository, get_host_identity_status_with_repository,
-    get_project_activity_with_repository, get_project_session_detail_with_repository,
+use crate::event_sink::desktop_sink;
+use mallard_application::activity_log::{emit_typed_log, ActivityLogScope};
+use mallard_application::project_sync::operations;
+use mallard_application::project_sync::service::{
+    agent_provider_descriptors, create_provider_profile_with_repository,
+    create_storage_edit_draft_with_repository, create_storage_setup_draft_with_repository,
+    discard_setup_draft_with_repository, discard_storage_setup_draft_with_repository,
+    find_project_session_with_repository, get_bundle_inventory_with_repository,
+    get_host_identity_status_with_repository, get_project_session_detail_with_repository,
     get_project_session_event_detail_with_repository,
     get_project_session_timeline_page_with_repository, get_project_with_repository,
     get_push_destination_status_with_repository, get_restore_readiness_with_repository,
@@ -21,17 +20,14 @@ use super::service::{
     list_provider_profiles_with_repository, list_remote_bundle_snapshots_with_repository,
     list_setup_drafts_with_repository, list_storage_setup_drafts_with_repository,
     load_project_sync_config_with_repository, probe_project_folder_with_repository,
-    probe_provider_profile_with_repository, project_open_commands, project_storage_log_context,
-    pull_action_resource_label, pull_plan_action_counts, pull_review_resource_labels,
-    read_project_markdown_image_with_repository, read_project_markdown_media_with_repository,
-    recover_startup_state_with_repository, refresh_project_activity_with_progress,
+    probe_provider_profile_with_repository, read_project_markdown_image_with_repository,
+    read_project_markdown_media_with_repository, recover_startup_state_with_repository,
     remove_local_project_with_repository, remove_project_link_with_repository,
-    remove_storage_with_repository, rename_local_project_with_repository,
-    rename_storage_with_repository, repository, resolve_project_markdown_path_with_repository,
-    reveal_storage_secret_with_repository, save_project_binding_with_repository,
-    save_project_link_with_repository, session_detail_error, should_log_history_scan,
+    rename_local_project_with_repository, repository,
+    resolve_project_markdown_path_with_repository, reveal_storage_secret_with_repository,
+    save_project_binding_with_repository, save_project_link_with_repository, session_detail_error,
     sibling_bundle_status_with_repository, start_project_session_with_repository,
-    storage_log_label, storage_provider_descriptors, test_storage_setup_draft_with_repository,
+    storage_provider_descriptors, test_storage_setup_draft_with_repository,
     test_storage_with_repository, update_storage_setup_draft_with_repository, AgentFolderList,
     BundleReadiness, BundleSnapshotSummary, CommitStorageDraftResult, ConnectProjectBundleRequest,
     CreateSetupDraftResult, HostIdentityStatus, NewSessionSurface, ProjectActivity,
@@ -44,22 +40,16 @@ use super::service::{
     SessionToolCategory, SetupDraftInspection, SetupDraftList, SiblingBundleStatus,
     StorageDataClearResult, StorageProviderDescriptor, StorageSetupDraftList,
     StorageSetupDraftSummary, TestStorageDraftResult, UpdateStorageSetupDraftRequest,
-    VerifyStorageResult, HISTORY_SCAN_LOGGED_AT,
+    VerifyStorageResult,
 };
-use crate::activity_log::{emit_typed_log, ActivityLogScope};
 use mallard_domain::{
-    now_secs, ActionId, BundleId, BundleRecipe, LocalProjectId, LocalProjectRegistration,
-    ProjectBinding, ProjectSetupDraft, ProjectStorageLink, ProviderKey, ProviderProfile,
-    PullReview, PullScope, ResourceId, RestorePlan, SetupDraftId, StorageId, StorageProviderKey,
-    StorageSetupDraftId,
+    ActionId, BundleId, BundleRecipe, LocalProjectId, LocalProjectRegistration, ProjectBinding,
+    ProjectSetupDraft, ProjectStorageLink, ProviderKey, ProviderProfile, PullReview, PullScope,
+    ResourceId, SetupDraftId, StorageId, StorageProviderKey, StorageSetupDraftId,
 };
 use mallard_infrastructure::activity_log::ActivityLogType;
-use mallard_infrastructure::bundle_engine::FetchProgress;
-use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Instant;
-use tauri::Emitter as _;
 
 async fn run_blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -80,120 +70,6 @@ async fn run_session_detail_blocking<T: Send + 'static>(
                 "The session-detail worker stopped unexpectedly.",
             )
         })?
-}
-
-#[derive(Serialize, Clone)]
-struct FetchProgressEventPayload {
-    phase: &'static str,
-    storage_id: String,
-    bundle_id: String,
-    index: usize,
-    total_objects: usize,
-    fetched_bytes: u64,
-    total_bytes: u64,
-}
-
-struct FetchProgressEmitter {
-    app: tauri::AppHandle,
-    log: ActivityLogScope,
-    phase: &'static str,
-    storage_id: StorageId,
-    storage_name: String,
-    bundle_id: BundleId,
-    started: Option<Instant>,
-    last_event: Option<Instant>,
-}
-
-impl FetchProgressEmitter {
-    fn new(
-        app: tauri::AppHandle,
-        log: ActivityLogScope,
-        phase: &'static str,
-        storage_id: StorageId,
-        storage_name: String,
-        bundle_id: BundleId,
-    ) -> Self {
-        Self {
-            app,
-            log,
-            phase,
-            storage_id,
-            storage_name,
-            bundle_id,
-            started: None,
-            last_event: None,
-        }
-    }
-
-    fn observe(&mut self, progress: FetchProgress) {
-        let now = Instant::now();
-        let upload = self.phase == "push";
-        if self.started.is_none() {
-            self.started = Some(now);
-            self.log.emit(
-                &self.app,
-                "info",
-                if upload {
-                    "push.upload_started"
-                } else {
-                    "pull.fetch_started"
-                },
-                &format_fetch_started_message(
-                    upload,
-                    progress.total_objects,
-                    progress.total_bytes,
-                    &self.storage_name,
-                ),
-            );
-        }
-        let last = progress.index == progress.total_objects;
-        let due = self
-            .last_event
-            .is_none_or(|previous| now.duration_since(previous).as_millis() >= 150);
-        if last || due {
-            self.last_event = Some(now);
-            let _ = self.app.emit(
-                "project-sync-fetch-progress",
-                &FetchProgressEventPayload {
-                    phase: self.phase,
-                    storage_id: self.storage_id.to_string(),
-                    bundle_id: self.bundle_id.to_string(),
-                    index: progress.index,
-                    total_objects: progress.total_objects,
-                    fetched_bytes: progress.fetched_bytes,
-                    total_bytes: progress.total_bytes,
-                },
-            );
-        }
-        if last {
-            let elapsed = self
-                .started
-                .map(|start| now.duration_since(start).as_secs_f64())
-                .unwrap_or_default();
-            let rate = if elapsed > 0.0 {
-                progress.total_bytes as f64 / 1_000_000.0 / elapsed
-            } else {
-                0.0
-            };
-            self.log.emit(
-                &self.app,
-                "ok",
-                if upload {
-                    "push.upload_completed"
-                } else {
-                    "pull.fetch_completed"
-                },
-                &format!(
-                    "{}  {} {} in {:.1}s ({:.1} MB/s)",
-                    if upload { "↑" } else { "↓" },
-                    if upload { "Uploaded" } else { "Downloaded" },
-                    format_mb(progress.total_bytes),
-                    elapsed,
-                    rate
-                ),
-            );
-        }
-    }
 }
 
 #[tauri::command]
@@ -272,51 +148,17 @@ pub async fn commit_storage_setup_draft(
 ) -> Result<CommitStorageDraftResult, String> {
     let repository = repository()?;
     let runtime = tokio::runtime::Handle::current();
-    let label_repository = repository.clone();
-    let label_draft_id = draft_id.clone();
-    let storage_name = run_blocking(move || {
-        Ok(
-            get_storage_setup_draft_with_repository(&label_repository, &label_draft_id)?
-                .map(|draft| draft.name)
-                .unwrap_or_default(),
-        )
-    })
-    .await?;
-    let result = run_blocking(move || {
-        commit_storage_setup_draft_with_repository(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::commit_storage_setup_draft(
             &repository,
+            sink.as_ref(),
             runtime,
             &draft_id,
             expected_draft_revision,
         )
     })
-    .await;
-    match &result {
-        Ok(outcome) => {
-            let (event, message) = if outcome.replaced {
-                (
-                    "storage.settings_updated",
-                    format!("Storage settings updated — {storage_name}"),
-                )
-            } else {
-                ("storage.added", format!("Storage added — {storage_name}"))
-            };
-            ActivityLogScope::new(ActivityLogType::Storage)
-                .storage(&outcome.storage_id, Some(&storage_name))
-                .emit(&app, "ok", event, &message);
-        }
-        Err(_) => {
-            // Keep the activity record fixed and credential-free even if the
-            // worker itself failed rather than returning a typed setup error.
-            ActivityLogScope::new(ActivityLogType::Storage).emit(
-                &app,
-                "error",
-                "storage.settings_update_failed",
-                "Storage settings could not be saved.",
-            );
-        }
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -326,17 +168,15 @@ pub async fn reveal_storage_secret(
     secret_id: mallard_domain::SecretKey,
 ) -> Result<String, String> {
     let repository = repository()?;
-    let log_storage_id = storage_id.clone();
-    let log_repository = repository.clone();
-    let log_secret_id = secret_id.clone();
-    // The log names the storage and the secret's label, never its value.
-    let (storage_name, secret_label) = run_blocking(move || {
-        let config = load_project_sync_config_with_repository(&log_repository)?;
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        // The log names the storage and the secret's label, never its value.
+        let config = load_project_sync_config_with_repository(&repository)?;
         let storage = config
             .storages
             .iter()
-            .find(|storage| storage.storage_id == log_storage_id);
-        let label = storage
+            .find(|storage| storage.storage_id == storage_id);
+        let secret_label = storage
             .and_then(|storage| {
                 storage_provider_descriptors()
                     .into_iter()
@@ -349,34 +189,27 @@ pub async fn reveal_storage_secret(
                 descriptor
                     .secrets
                     .into_iter()
-                    .find(|secret| secret.secret_id == log_secret_id)
+                    .find(|secret| secret.secret_id == secret_id)
                     .map(|secret| secret.label)
             })
-            .unwrap_or_else(|| log_secret_id.as_str().to_string());
-        Ok((
-            storage
-                .map(|storage| storage.name.clone())
-                .unwrap_or_default(),
-            label,
-        ))
+            .unwrap_or_else(|| secret_id.as_str().to_string());
+        let storage_name = storage
+            .map(|storage| storage.name.clone())
+            .unwrap_or_default();
+        let result = reveal_storage_secret_with_repository(&repository, &storage_id, &secret_id);
+        if result.is_ok() {
+            ActivityLogScope::new(ActivityLogType::Storage)
+                .storage(&storage_id, Some(&storage_name))
+                .emit(
+                    sink.as_ref(),
+                    "ok",
+                    "storage.secret_revealed",
+                    &format!("Secret revealed — {storage_name} · {secret_label}"),
+                );
+        }
+        result
     })
-    .await?;
-    let log_storage_id = storage_id.clone();
-    let result = run_blocking(move || {
-        reveal_storage_secret_with_repository(&repository, &storage_id, &secret_id)
-    })
-    .await;
-    if result.is_ok() {
-        ActivityLogScope::new(ActivityLogType::Storage)
-            .storage(&log_storage_id, Some(&storage_name))
-            .emit(
-                &app,
-                "ok",
-                "storage.secret_revealed",
-                &format!("Secret revealed — {storage_name} · {secret_label}"),
-            );
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -394,29 +227,17 @@ pub async fn rename_storage(
     expected_config_revision: u64,
 ) -> Result<ProjectSyncConfigView, String> {
     let repository = repository()?;
-    let log_storage_id = storage_id.clone();
-    let log_name = name.clone();
-    let result = run_blocking(move || {
-        rename_storage_with_repository(&repository, &storage_id, &name, expected_config_revision)
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::rename_storage(
+            &repository,
+            sink.as_ref(),
+            &storage_id,
+            &name,
+            expected_config_revision,
+        )
     })
-    .await;
-    let log =
-        ActivityLogScope::new(ActivityLogType::Storage).storage(&log_storage_id, Some(&log_name));
-    match &result {
-        Ok(_) => log.emit(
-            &app,
-            "ok",
-            "storage.settings_updated",
-            &format!("Storage settings updated — {log_name}"),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "storage.settings_update_failed",
-            &format!("Storage settings could not be saved: {error}"),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -426,29 +247,16 @@ pub async fn remove_storage(
     expected_config_revision: u64,
 ) -> Result<ProjectSyncConfigView, String> {
     let repository = repository()?;
-    let storage_name = storage_log_label(&repository, &storage_id);
-    let log_storage_id = storage_id.clone();
-    let result = run_blocking(move || {
-        remove_storage_with_repository(&repository, &storage_id, expected_config_revision)
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::remove_storage(
+            &repository,
+            sink.as_ref(),
+            &storage_id,
+            expected_config_revision,
+        )
     })
-    .await;
-    let log = ActivityLogScope::new(ActivityLogType::Storage)
-        .storage(&log_storage_id, Some(&storage_name));
-    match &result {
-        Ok(_) => log.emit(
-            &app,
-            "ok",
-            "storage.removed",
-            &format!("Storage removed — {storage_name}"),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "storage.settings_update_failed",
-            &format!("Storage could not be removed: {error}"),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -567,12 +375,19 @@ pub async fn list_local_projects() -> Result<Vec<LocalProjectRegistration>, Stri
 #[tauri::command]
 pub async fn recover_startup_state(app: tauri::AppHandle) -> Result<(), String> {
     let repository = repository()?;
-    let warnings =
-        run_blocking(move || Ok(recover_startup_state_with_repository(&repository))).await?;
-    for warning in warnings {
-        emit_typed_log(&app, ActivityLogType::Configuration, "warning", &warning);
-    }
-    Ok(())
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        for warning in recover_startup_state_with_repository(&repository) {
+            emit_typed_log(
+                sink.as_ref(),
+                ActivityLogType::Configuration,
+                "warning",
+                &warning,
+            );
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -606,19 +421,11 @@ pub async fn get_project_activity(
     review: bool,
 ) -> Result<ProjectActivity, String> {
     let repository = repository()?;
-    let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
-    let log_routine_scan = should_log_history_scan(&local_project_id);
-    if log_routine_scan {
-        log.emit(
-            &app,
-            "info",
-            "history.scan_started",
-            &format!("Scanning agent session activity for project {local_project_id}…"),
-        );
-    }
-    let result = run_blocking(move || {
-        get_project_activity_with_repository(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::get_project_activity(
             &repository,
+            sink.as_ref(),
             &local_project_id,
             storage_id.as_ref(),
             branch.as_deref(),
@@ -627,33 +434,7 @@ pub async fn get_project_activity(
             review,
         )
     })
-    .await;
-    match &result {
-        Ok(activity) => {
-            for warning in &activity.warnings {
-                log.emit(&app, "warning", "history.scan_warning", warning);
-            }
-            if log_routine_scan {
-                log.emit(
-                    &app,
-                    "info",
-                    "history.scan_completed",
-                    &format!(
-                        "Session activity scan complete: {} sessions in this {}-day window",
-                        activity.sessions.len(),
-                        activity.window_end.saturating_sub(activity.window_start) / (24 * 60 * 60)
-                    ),
-                );
-            }
-        }
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "history.scan_failed",
-            &format!("Session activity scan failed: {error}"),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -667,70 +448,24 @@ pub async fn refresh_project_activity(
     on_progress: tauri::ipc::Channel<ProjectActivityRefreshEvent>,
 ) -> Result<(), String> {
     let repository = repository()?;
-    let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
-    let log_routine_compare = HISTORY_SCAN_LOGGED_AT
-        .lock()
-        .map(|mut logged_at| {
-            claim_history_scan_log_at(
-                &mut logged_at,
-                &format!("compare:{local_project_id}"),
-                now_secs(),
-            )
-        })
-        .unwrap_or(true);
-    let phase_app = app.clone();
-    let phase_log = log.clone();
-    let total_started = Instant::now();
-    let result = run_blocking(move || {
-        refresh_project_activity_with_progress(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::refresh_project_activity(
             &repository,
+            sink.as_ref(),
             &local_project_id,
             &storage_id,
             branch.as_deref(),
             window_days,
             review,
             &mut |event| {
-                match &event {
-                    ProjectActivityRefreshEvent::ActivityError { message, .. }
-                    | ProjectActivityRefreshEvent::ComparisonError { message, .. } => {
-                        phase_log.emit(&phase_app, "warning", "history.refresh_warning", message)
-                    }
-                    _ => {}
-                }
                 on_progress
                     .send(event)
                     .map_err(|error| format!("send activity refresh: {error}"))
             },
-            &mut |phase, elapsed| {
-                if log_routine_compare {
-                    phase_log.emit(
-                        &phase_app,
-                        "info",
-                        "history.compare_phase_timing",
-                        &format!(
-                            "Storage comparison phase — {phase}: {:.3}s",
-                            elapsed.as_secs_f64()
-                        ),
-                    );
-                }
-            },
         )
     })
-    .await;
-    if let Err(error) = &result {
-        log.emit(&app, "error", "history.refresh_failed", error);
-    } else if log_routine_compare {
-        log.emit(
-            &app,
-            "info",
-            "history.refresh_completed",
-            &format!(
-                "Activity refresh complete in {:.3}s",
-                total_started.elapsed().as_secs_f64()
-            ),
-        );
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -926,7 +661,7 @@ pub async fn delete_local_project_session(
 ) -> Result<mallard_infrastructure::project_activity::LocalSessionDeleteResult, String> {
     let repository = repository()?;
     run_blocking(move || {
-        super::service::delete_local_project_session_with_repository(
+        mallard_application::project_sync::service::delete_local_project_session_with_repository(
             &repository,
             &local_project_id,
             &resource_id,
@@ -943,23 +678,14 @@ pub async fn execute_project_session_action(
     action_id: String,
 ) -> Result<(), String> {
     let repository = repository()?;
-    let worker_app = app.clone();
-    let worker_log =
-        ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
+    let sink = desktop_sink(&app);
     run_blocking(move || {
-        execute_project_session_action_with_repository(
+        operations::execute_project_session_action(
             &repository,
+            sink.as_ref(),
             &local_project_id,
             &resource_id,
             &action_id,
-            &mut |command| {
-                worker_log.emit(
-                    &worker_app,
-                    "info",
-                    "history.session_action",
-                    &format!("$ {command}"),
-                )
-            },
         )
     })
     .await
@@ -975,9 +701,8 @@ pub async fn start_project_session(
     surface: NewSessionSurface,
 ) -> Result<(), String> {
     let repository = repository()?;
-    let worker_app = app.clone();
-    let worker_log =
-        ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
+    let sink = desktop_sink(&app);
+    let log = ActivityLogScope::new(ActivityLogType::History).project(&local_project_id, None);
     run_blocking(move || {
         start_project_session_with_repository(
             &repository,
@@ -985,8 +710,8 @@ pub async fn start_project_session(
             &provider,
             surface,
             &mut |command| {
-                worker_log.emit(
-                    &worker_app,
+                log.emit(
+                    sink.as_ref(),
                     "info",
                     "history.session_start",
                     &format!("$ {command}"),
@@ -1010,55 +735,16 @@ pub async fn delete_local_project_sessions(
     expected_project_revision: u64,
 ) -> Result<ProjectSessionsDeleteResult, String> {
     let repository = repository()?;
-    let project_for_work = local_project_id.clone();
-    let log = ActivityLogScope::new(ActivityLogType::Repair).project(&local_project_id, None);
-    log.emit(
-        &app,
-        "warning",
-        "repair.project_sessions_delete_started",
-        "Deleting this project's local sessions…",
-    );
-    let result = run_blocking(move || {
-        delete_local_project_sessions_with_repository(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::delete_local_project_sessions(
             &repository,
-            &project_for_work,
+            sink.as_ref(),
+            &local_project_id,
             expected_project_revision,
         )
     })
-    .await;
-    match &result {
-        Ok(summary) => {
-            let metadata = if summary.metadata_reset.is_some() {
-                "completed"
-            } else if summary.metadata_error.is_none() {
-                "skipped; existing metadata kept"
-            } else {
-                "failed"
-            };
-            log.emit(
-                &app,
-                if summary.provider_errors.is_empty() && summary.metadata_error.is_none() {
-                    "ok"
-                } else {
-                    "warning"
-                },
-                "repair.project_sessions_delete_completed",
-                &format!(
-                    "Session deletion: {} completed, {} failed; {} provider issues; metadata reset {metadata}",
-                    summary.sessions_deleted,
-                    summary.sessions_failed,
-                    summary.provider_errors.len(),
-                ),
-            )
-        }
-        Err(_) => log.emit(
-            &app,
-            "error",
-            "repair.project_sessions_delete_failed",
-            "Project session deletion could not start.",
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1068,50 +754,16 @@ pub async fn clear_storage_data(
     expected_config_revision: u64,
 ) -> Result<StorageDataClearResult, String> {
     let repository = repository()?;
-    let label_repository = repository.clone();
-    let label_storage_id = storage_id.clone();
-    let storage_name = run_blocking(move || {
-        label_repository
-            .load_config()?
-            .storages
-            .iter()
-            .find(|storage| storage.id == label_storage_id)
-            .map(|storage| storage.name.clone())
-            .ok_or_else(|| format!("unknown storage '{}'", label_storage_id))
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::clear_storage_data(
+            &repository,
+            sink.as_ref(),
+            &storage_id,
+            expected_config_revision,
+        )
     })
-    .await?;
-    let storage_for_work = storage_id.clone();
-    let log =
-        ActivityLogScope::new(ActivityLogType::Storage).storage(&storage_id, Some(&storage_name));
-    log.emit(
-        &app,
-        "warning",
-        "storage.data_clear_started",
-        "Clearing all Mallard-managed data from storage…",
-    );
-    let result = run_blocking(move || {
-        ProjectSyncService::new(&repository)
-            .clear_storage_data(&storage_for_work, expected_config_revision)
-    })
-    .await;
-    match &result {
-        Ok(summary) => log.emit(
-            &app,
-            "ok",
-            "storage.data_clear_completed",
-            &format!(
-                "Cleared {} repository objects and {} Library objects",
-                summary.repository_objects_deleted, summary.library_objects_deleted
-            ),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "storage.data_clear_failed",
-            &format!("Storage data could not be cleared: {error}"),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1146,44 +798,11 @@ pub async fn connect_project_to_remote_bundle(
     request: ConnectProjectBundleRequest,
 ) -> Result<ProjectDetail, String> {
     let repository = repository()?;
-    let label_repository = repository.clone();
-    let label_storage_id = request.storage_id.clone();
-    let storage =
-        run_blocking(move || Ok(storage_log_label(&label_repository, &label_storage_id))).await?;
-    let log = ActivityLogScope::new(ActivityLogType::Configuration)
-        .project(&request.local_project_id, None)
-        .storage(&request.storage_id, Some(&storage));
-    log.emit(
-        &app,
-        "info",
-        "configuration.remote_connected_started",
-        &format!(
-            "Connecting project to bundle {} in {}…",
-            request.bundle_id, storage
-        ),
-    );
-    let result = run_blocking(move || {
-        connect_project_to_remote_bundle_with_repository(&repository, request)
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::connect_project_to_remote_bundle(&repository, sink.as_ref(), request)
     })
-    .await;
-    match &result {
-        Ok(detail) => log.emit(
-            &app,
-            "ok",
-            "configuration.remote_connected",
-            &format!(
-                "Connected {} to remote bundle {}",
-                detail.project.display_name, detail.project.bundle_id
-            ),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "configuration.remote_connect_failed",
-            &format!("Failed to connect remote bundle: {}", error),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1236,43 +855,14 @@ pub async fn list_project_bindings() -> Result<Vec<ProjectBinding>, String> {
 #[tauri::command]
 pub async fn execute_provider_maintenance_action(
     app: tauri::AppHandle,
-    request: super::maintenance::MaintenanceActionRequest,
-) -> Result<super::maintenance::MaintenanceActionResult, String> {
+    request: mallard_application::project_sync::maintenance::MaintenanceActionRequest,
+) -> Result<mallard_application::project_sync::maintenance::MaintenanceActionResult, String> {
     let repository = repository()?;
-    let label = format!("{} {}", request.provider, request.action_id);
-    let read_only = super::maintenance::MaintenanceRegistry::production()
-        .descriptor(&request.provider, &request.action_id)
-        .is_some_and(|descriptor| descriptor.read_only);
-    let log = ActivityLogScope::new(ActivityLogType::Pull);
-    if !read_only {
-        log.emit(
-            &app,
-            "info",
-            "maintenance.action_started",
-            &format!("Running {label}…"),
-        );
-    }
-    let result = run_blocking(move || {
-        super::maintenance::MaintenanceRegistry::production().execute(&repository, &request)
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::execute_provider_maintenance_action(&repository, sink.as_ref(), request)
     })
-    .await;
-    if !read_only {
-        match &result {
-            Ok(report) => log.emit(
-                &app,
-                if report.ready { "ok" } else { "warning" },
-                "maintenance.action_completed",
-                &report.summary,
-            ),
-            Err(error) => log.emit(
-                &app,
-                "error",
-                "maintenance.action_failed",
-                &format!("{label} failed: {error}"),
-            ),
-        }
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1321,39 +911,16 @@ pub async fn finish_unfinished_push(
     storage_id: StorageId,
 ) -> Result<(), String> {
     let repository = repository()?;
-    let context_repository = repository.clone();
-    let context_project_id = local_project_id.clone();
-    let context_storage_id = storage_id.clone();
-    let (project, storage, _) = run_blocking(move || {
-        Ok(project_storage_log_context(
-            &context_repository,
-            &context_project_id,
-            &context_storage_id,
-        ))
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::finish_unfinished_push(
+            &repository,
+            sink.as_ref(),
+            &local_project_id,
+            &storage_id,
+        )
     })
-    .await?;
-    let log = ActivityLogScope::new(ActivityLogType::Push)
-        .project(&local_project_id, Some(&project))
-        .storage(&storage_id, Some(&storage));
-    let result = run_blocking(move || {
-        ProjectSyncService::new(&repository).finish_unfinished_push(&local_project_id, &storage_id)
-    })
-    .await;
-    match &result {
-        Ok(()) => log.emit(
-            &app,
-            "ok",
-            "push.finished",
-            &format!("↑  Finished a push to {storage} that did not finish"),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "push.finish_failed",
-            &format!("↑  Finish that push to {storage} failed — {error}"),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1373,51 +940,11 @@ pub async fn push_bundle(
     acknowledged_warning_digests: Option<Vec<String>>,
 ) -> Result<ProjectOperationResult, String> {
     let repository = repository()?;
-    let context_repository = repository.clone();
-    let context_project_id = local_project_id.clone();
-    let context_storage_id = storage_id.clone();
-    let (project, storage, bundle_id) = run_blocking(move || {
-        Ok(project_storage_log_context(
-            &context_repository,
-            &context_project_id,
-            &context_storage_id,
-        ))
-    })
-    .await?;
-    let log = ActivityLogScope::new(ActivityLogType::Push)
-        .project(&local_project_id, Some(&project))
-        .storage(&storage_id, Some(&storage));
-    log.emit(
-        &app,
-        "info",
-        "push.started",
-        &format!("↑  Push started — {} → {}", project, storage),
-    );
-    let worker_app = app.clone();
-    let worker_log = log.clone();
-    let selected_count = recipe.entries.len();
-    let mut upload_progress = bundle_id.map(|bundle_id| {
-        FetchProgressEmitter::new(
-            app.clone(),
-            log.clone(),
-            "push",
-            storage_id.clone(),
-            storage.clone(),
-            bundle_id,
-        )
-    });
-    let total_started = Instant::now();
-    let result = run_blocking(move || {
-        worker_log.emit(
-            &worker_app,
-            "info",
-            "push.scan_started",
-            &format!(
-                "   Scanning {} resources selected for this storage…",
-                selected_count
-            ),
-        );
-        ProjectSyncService::new(&repository).push_reviewed_with_progress(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::push_bundle(
+            &repository,
+            sink.as_ref(),
             &local_project_id,
             &storage_id,
             PushApproval {
@@ -1431,72 +958,9 @@ pub async fn push_bundle(
                 project_content_removal_ids: project_content_removal_ids.unwrap_or_default(),
                 acknowledged_warning_digests: acknowledged_warning_digests.unwrap_or_default(),
             },
-            &mut |update| {
-                if let Some(emitter) = upload_progress.as_mut() {
-                    emitter.observe(update);
-                }
-            },
-            &mut |phase, elapsed| {
-                worker_log.emit(
-                    &worker_app,
-                    "info",
-                    "push.phase_timing",
-                    &format!("   Push phase — {phase}: {:.3}s", elapsed.as_secs_f64()),
-                );
-            },
         )
     })
-    .await;
-    log.emit(
-        &app,
-        "info",
-        "push.timing",
-        &format!(
-            "   Push total: {:.3}s",
-            total_started.elapsed().as_secs_f64()
-        ),
-    );
-    match &result {
-        Ok(operation) => {
-            for resource in &operation.results {
-                let (level, event) = match resource.state.as_str() {
-                    "synced" => ("ok", "push.resource_synced"),
-                    "failed" => ("error", "push.resource_failed"),
-                    "held" => ("warning", "push.resource_held"),
-                    _ => ("info", "push.resource_checked"),
-                };
-                let detail = resource
-                    .message
-                    .as_deref()
-                    .map(|message| format!(" — {message}"))
-                    .unwrap_or_default();
-                log.emit(
-                    &app,
-                    level,
-                    event,
-                    &format!("↑  {} ({}){}", resource.resource_id, resource.state, detail),
-                );
-            }
-            let (level, glyph) = if operation.success {
-                ("ok", "✓")
-            } else {
-                ("warning", "⚠")
-            };
-            log.emit(
-                &app,
-                level,
-                "push.completed",
-                &format!("{glyph}  Push complete — {}", operation.message),
-            );
-        }
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "push.failed",
-            &format!("✗  Push failed: {}", error),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1508,111 +972,18 @@ pub async fn plan_bundle_restore(
     scope: PullScope,
 ) -> Result<PullReview, String> {
     let repository = repository()?;
-    let context_repository = repository.clone();
-    let context_project_id = binding.local_project_id.clone();
-    let context_storage_id = storage_id.clone();
-    let (project, storage, _) = run_blocking(move || {
-        Ok(project_storage_log_context(
-            &context_repository,
-            &context_project_id,
-            &context_storage_id,
-        ))
-    })
-    .await?;
-    let log = ActivityLogScope::new(ActivityLogType::Pull)
-        .project(&binding.local_project_id, Some(&project))
-        .storage(&storage_id, Some(&storage));
-    log.emit(
-        &app,
-        "info",
-        "pull.review_started",
-        &format!("↓  Preparing Pull review — {} ← {}", project, storage),
-    );
-    let mut progress = FetchProgressEmitter::new(
-        app.clone(),
-        log.clone(),
-        "plan",
-        storage_id.clone(),
-        storage.clone(),
-        bundle_id.clone(),
-    );
-    let phase_app = app.clone();
-    let phase_log = log.clone();
-    let total_started = Instant::now();
-    let result = run_blocking(move || {
-        ProjectSyncService::new(&repository).plan_bundle_restore_with_progress(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::plan_bundle_restore(
+            &repository,
+            sink.as_ref(),
             &storage_id,
             &bundle_id,
             &binding,
             &scope,
-            &mut |update| progress.observe(update),
-            &mut |phase, elapsed| {
-                phase_log.emit(
-                    &phase_app,
-                    "info",
-                    "pull.phase_timing",
-                    &format!(
-                        "   Pull review phase — {phase}: {:.3}s",
-                        elapsed.as_secs_f64()
-                    ),
-                );
-            },
         )
     })
-    .await;
-    log.emit(
-        &app,
-        "info",
-        "pull.review_timing",
-        &format!(
-            "   Pull review total: {:.3}s",
-            total_started.elapsed().as_secs_f64()
-        ),
-    );
-    match &result {
-        Ok(plan) => {
-            for resource in pull_review_resource_labels(plan) {
-                log.emit(
-                    &app,
-                    "info",
-                    "pull.resource_review",
-                    &format!("↓  Review {resource}"),
-                );
-            }
-            let (ordinary_actions, conversation_actions) = pull_plan_action_counts(plan);
-            let applicable_actions = ordinary_actions.saturating_add(conversation_actions);
-            log.emit(
-                &app,
-                "ok",
-                "pull.review_ready",
-                &format!(
-                    "✓  Pull review ready — version {}, {} applicable actions ({} resources, {} conversations)",
-                    plan.revision,
-                    applicable_actions,
-                    ordinary_actions,
-                    conversation_actions
-                ),
-            );
-            log.emit(
-                &app,
-                "info",
-                "pull.awaiting_approval",
-                "   Nothing has been applied yet — use the Apply button in the Pull review.",
-            );
-        }
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "pull.comparison_failed",
-            &format!("✗  Pull comparison failed: {}", error),
-        ),
-    }
-    result.and_then(|plan| {
-        PullReview::from_plan(
-            plan,
-            mallard_infrastructure::provider_capture::MAX_CAPTURE_BYTES,
-        )
-    })
+    .await
 }
 
 #[tauri::command]
@@ -1621,149 +992,12 @@ pub async fn apply_bundle_restore(
     review: PullReview,
     approved_action_ids: Vec<ActionId>,
 ) -> Result<RestoreResult, String> {
-    let review = RestorePlan::from(review);
     let repository = repository()?;
-    let storage_for_log = storage_log_label(&repository, &review.storage_id);
-    let review_for_log = review.clone();
-    let binding_repository = repository.clone();
-    let log = ActivityLogScope::new(ActivityLogType::Pull);
-    log.emit(
-        &app,
-        "info",
-        "pull.apply_started",
-        &format!(
-            "↓  Applying {} approved Pull actions…",
-            approved_action_ids.len()
-        ),
-    );
-    let mut fetch_progress = Some(FetchProgressEmitter::new(
-        app.clone(),
-        log.clone()
-            .storage(&review.storage_id, Some(&storage_for_log)),
-        "apply",
-        review.storage_id.clone(),
-        storage_for_log,
-        review.bundle_id.clone(),
-    ));
-    let phase_app = app.clone();
-    let phase_log = log.clone();
-    let total_started = Instant::now();
-    let result = run_blocking(move || {
-        ProjectSyncService::new(&repository).apply_bundle_restore_with_progress(
-            &review,
-            approved_action_ids,
-            &mut |update| {
-                if let Some(emitter) = fetch_progress.as_mut() {
-                    emitter.observe(update);
-                }
-            },
-            &mut |phase, elapsed| {
-                phase_log.emit(
-                    &phase_app,
-                    "info",
-                    "pull.phase_timing",
-                    &format!(
-                        "   Pull apply phase — {phase}: {:.3}s",
-                        elapsed.as_secs_f64()
-                    ),
-                );
-            },
-        )
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::apply_bundle_restore(&repository, sink.as_ref(), review, approved_action_ids)
     })
-    .await;
-    log.emit(
-        &app,
-        "info",
-        "pull.apply_timing",
-        &format!(
-            "   Pull apply total: {:.3}s",
-            total_started.elapsed().as_secs_f64()
-        ),
-    );
-    match &result {
-        Ok(operation) => {
-            for action_id in &operation.applied_action_ids {
-                let resource = pull_action_resource_label(&review_for_log, action_id)
-                    .unwrap_or_else(|| action_id.to_string());
-                log.emit(
-                    &app,
-                    "ok",
-                    "pull.resource_applied",
-                    &format!("↓  {}", resource),
-                );
-            }
-            for failure in &operation.failed_actions {
-                log.emit(
-                    &app,
-                    "error",
-                    "pull.resource_failed",
-                    &format!("✗  {}: {}", failure.action_id, failure.message),
-                );
-            }
-            log.emit(
-                &app,
-                if operation.success { "ok" } else { "error" },
-                if operation.success {
-                    "pull.completed"
-                } else {
-                    "pull.completed_with_errors"
-                },
-                &format!(
-                    "{}  Pull finished — {}",
-                    if operation.success { "✓" } else { "✗" },
-                    operation.message
-                ),
-            );
-            if operation.success {
-                let review_for_binding = review_for_log.clone();
-                let binding = run_blocking(move || {
-                    current_binding_for_restore_plan(&binding_repository, &review_for_binding).map(
-                        |binding| {
-                            // Guidance is informational: an unreadable settings
-                            // file hides a saved CLI path, never the lines.
-                            let settings = mallard_infrastructure::app_settings::load_app_settings(
-                                &binding_repository,
-                            )
-                            .unwrap_or_default();
-                            (binding, settings)
-                        },
-                    )
-                })
-                .await;
-                match binding {
-                    Ok((binding, settings)) => {
-                        log.emit(
-                            &app,
-                            "info",
-                            "pull.open_project_hint",
-                            "   Open this project after Pull:",
-                        );
-                        for (label, command) in project_open_commands(&binding, &settings) {
-                            log.emit(
-                                &app,
-                                "info",
-                                "pull.open_project_command",
-                                &format!("   {}: {}", label, command),
-                            );
-                        }
-                    }
-                    Err(error) => log.emit(
-                        &app,
-                        "info",
-                        "pull.open_project_unavailable",
-                        &format!("   Open command unavailable: {}", error),
-                    ),
-                }
-            }
-        }
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "pull.failed",
-            &format!("✗  Pull failed: {}", error),
-        ),
-    }
-    result
+    .await
 }
 
 /// Where the session a stored row names is in a project: the id its page is
@@ -1812,112 +1046,17 @@ pub async fn prepare_push_review(
     scope: PushScope,
 ) -> Result<PushReviewContext, String> {
     let repository = repository()?;
-    let context_repository = repository.clone();
-    let context_project_id = local_project_id.clone();
-    let context_storage_id = storage_id.clone();
-    let (project, storage, _) = run_blocking(move || {
-        Ok(project_storage_log_context(
-            &context_repository,
-            &context_project_id,
-            &context_storage_id,
-        ))
-    })
-    .await?;
-    let log = ActivityLogScope::new(ActivityLogType::Push)
-        .project(&local_project_id, Some(&project))
-        .storage(&storage_id, Some(&storage));
-    log.emit(
-        &app,
-        "info",
-        "push.review_started",
-        &format!("↑  Preparing Push review — {} → {}", project, storage),
-    );
-    let phase_app = app.clone();
-    let phase_log = log.clone();
-    let total_started = Instant::now();
-    let result = run_blocking(move || {
-        ProjectSyncService::new(&repository).prepare_push_review_with_phases(
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::prepare_push_review(
+            &repository,
+            sink.as_ref(),
             &local_project_id,
             &storage_id,
             scope,
-            &mut |phase, elapsed| {
-                phase_log.emit(
-                    &phase_app,
-                    "info",
-                    "push.phase_timing",
-                    &format!(
-                        "   Push review phase — {phase}: {:.3}s",
-                        elapsed.as_secs_f64()
-                    ),
-                );
-            },
         )
     })
-    .await;
-    log.emit(
-        &app,
-        "info",
-        "push.review_timing",
-        &format!(
-            "   Push review total: {:.3}s",
-            total_started.elapsed().as_secs_f64()
-        ),
-    );
-    match &result {
-        Ok(context) => {
-            let threads = context
-                .thread_comparison
-                .as_ref()
-                .map(|comparison| comparison.entries.len())
-                .unwrap_or(0);
-            let selectable = context
-                .thread_comparison
-                .as_ref()
-                .map(|comparison| {
-                    comparison
-                        .entries
-                        .iter()
-                        .filter(|entry| entry.push_decision.selectable)
-                        .count()
-                })
-                .unwrap_or(0);
-            log.emit(
-                &app,
-                "ok",
-                "push.review_ready",
-                &format!(
-                    "✓  Push review ready — {} threads compared, {} pushable conversations",
-                    threads, selectable
-                ),
-            );
-            // A review that opens without its comparison is a review with
-            // nothing selectable; the reason must reach the log, not only
-            // the context the frontend may or may not render.
-            if let Some(error) = &context.thread_comparison_error {
-                log.emit(
-                    &app,
-                    "warning",
-                    "push.comparison_failed",
-                    &format!("⚠  Conversation comparison failed: {}", error),
-                );
-            }
-            if let Some(error) = &context.project_files_error {
-                log.emit(
-                    &app,
-                    "warning",
-                    "push.project_files_failed",
-                    &format!("⚠  Project files inventory failed: {}", error),
-                );
-            }
-        }
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "push.review_failed",
-            &format!("✗  Push review failed: {}", error),
-        ),
-    }
-    result
+    .await
 }
 
 #[tauri::command]
@@ -1993,30 +1132,9 @@ pub async fn finalize_project_setup(
     expected_revision: u64,
 ) -> Result<ProjectDetail, String> {
     let repository = repository()?;
-    let log = ActivityLogScope::new(ActivityLogType::Configuration);
-    log.emit(
-        &app,
-        "info",
-        "configuration.project_setup_started",
-        "Finalizing project setup…",
-    );
-    let result = run_blocking(move || {
-        ProjectSyncService::new(&repository).finalize_project_setup(&draft_id, expected_revision)
+    let sink = desktop_sink(&app);
+    run_blocking(move || {
+        operations::finalize_project_setup(&repository, sink.as_ref(), &draft_id, expected_revision)
     })
-    .await;
-    match &result {
-        Ok(detail) => log.emit(
-            &app,
-            "ok",
-            "configuration.project_setup_completed",
-            &format!("Project {} is set up", detail.project.display_name),
-        ),
-        Err(error) => log.emit(
-            &app,
-            "error",
-            "configuration.project_setup_failed",
-            &format!("Project setup failed: {}", error),
-        ),
-    }
-    result
+    .await
 }
