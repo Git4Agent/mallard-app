@@ -84,6 +84,10 @@ Windows Terminal with its `wt.exe` app execution alias enabled.
 Install the Codex CLI separately from the Codex desktop app; select that CLI
 under Settings › Agent CLIs if automatic detection finds the app's internal binary.
 
+Prefer a terminal, or want your coding agent to do it? The packaged
+`mallard-cli` (inside the app bundle) does everything below from the command
+line with `--json` output: [docs/CLI.md](docs/CLI.md).
+
 ### 1. [Add a storage](https://mallard-ai.com/docs/add-a-storage)
 
 Where your sessions live: Mallard Cloud, a folder, Cloudflare R2 or Dropbox.

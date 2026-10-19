@@ -290,7 +290,10 @@ fn setup_rejects_a_stale_draft_revision_before_wrangler() {
 #[test]
 fn removed_dropbox_setup_is_rejected_without_remote_work() {
     let home = tempfile::tempdir().unwrap();
-    let output = command(home.path()).args(["storage", "dropbox", "setup", "--json"]).output().unwrap();
+    let output = command(home.path())
+        .args(["storage", "dropbox", "setup", "--json"])
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
 }
