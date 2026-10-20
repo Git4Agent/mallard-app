@@ -11,5 +11,6 @@ pub mod feishu_setup;
 pub mod git_watcher;
 pub mod managed_cloud_link;
 pub mod managed_cloud_setup;
+pub mod media_protocol;
 pub mod provider_cli;
 pub mod r2_setup;

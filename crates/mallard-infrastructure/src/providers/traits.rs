@@ -739,6 +739,11 @@ pub struct SessionTimelineIndexEntry {
     /// What generated a prompt or an assistant message; the empty record on
     /// every other kind. Required: a cache written without it is rebuilt.
     pub settings: SessionMessageSettings,
+    /// Project-relative message cwd. None means the recorded cwd is outside
+    /// the project or unavailable, so relative links must not be opened.
+    /// Required even when null: an index without this field must be rebuilt.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub working_directory: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -785,6 +790,53 @@ pub struct SessionTimelineContext<'a> {
     /// Set when the transcript being indexed is itself a child: the provider
     /// then reads the child's own chain as the main one.
     pub child: Option<&'a SessionChildIdentity>,
+}
+
+impl SessionTimelineContext<'_> {
+    /// Keep only a bounded, clean descendant spelling. No absolute provider
+    /// path crosses the timeline boundary, and an outside cwd never becomes
+    /// the project root. File access still performs canonical/no-follow checks.
+    pub(crate) fn working_directory(&self, cwd: Option<&str>) -> Option<String> {
+        let cwd = cwd?;
+        if cwd.len() > 4096 || cwd.chars().any(char::is_control) {
+            return None;
+        }
+        let path = Path::new(cwd);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        // A transcript can use another spelling of the same directory (for
+        // example macOS /var and /private/var). Resolve that spelling only
+        // when lexical aliases do not match, and still require containment.
+        let canonical;
+        let relative = match most_specific_project_relative_path(
+            path,
+            self.project_root,
+            self.project_root_aliases,
+        ) {
+            Some(relative) => relative,
+            None => {
+                canonical = crate::local_paths::canonicalize(path).ok()?;
+                crate::local_paths::strip_prefix(&canonical, self.project_root).ok()?
+            }
+        };
+        let parts = relative
+            .components()
+            .filter_map(|part| match part {
+                std::path::Component::Normal(part) => part.to_str(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        Some(if parts.is_empty() {
+            ".".to_string()
+        } else {
+            parts.join("/")
+        })
+    }
 }
 
 /// Strip the most specific validated spelling of a bound project root.
@@ -869,6 +921,9 @@ pub struct SessionTimelineEvent {
     pub parent_event_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The message's cwd relative to the bound project; `.` is its root.
+    /// None disables relative links, rather than guessing another directory.
+    pub working_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<SessionToolCallPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1322,6 +1377,7 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(position, (turn_id, kind))| SessionTimelineIndexEntry {
+            working_directory: None,
             event_id: format!("event-{position}"),
             ordinal: position as u64,
             timestamp: None,

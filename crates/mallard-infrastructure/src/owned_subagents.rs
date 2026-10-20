@@ -258,6 +258,7 @@ pub(crate) mod agent_card_fixtures {
         offset: u64,
     ) -> SessionTimelineIndexEntry {
         SessionTimelineIndexEntry {
+            working_directory: None,
             event_id: event_id.to_string(),
             ordinal: 0,
             timestamp: None,
@@ -304,6 +305,7 @@ pub(crate) mod agent_card_fixtures {
                 .enumerate()
                 .map(
                     |(ordinal, (event_id, agent, offset))| SessionTimelineIndexEntry {
+                        working_directory: None,
                         ordinal: ordinal as u64,
                         ..agent_call(event_id, *agent, *offset)
                     },

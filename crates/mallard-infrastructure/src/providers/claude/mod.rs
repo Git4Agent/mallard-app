@@ -21,7 +21,6 @@ use super::traits::{
     SessionTimelineContext, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery,
 };
-use crate::app_settings::conversation_file_limit_bytes;
 use crate::provider_capture::{validated_session_metadata, MAX_CAPTURE_BYTES};
 use mallard_domain::ProviderKey;
 use std::io::{BufRead, BufReader, Read};
@@ -80,7 +79,7 @@ fn scan_claude_session_metadata_with_window(
     // applies the sync limit and retains an Unavailable row. The suffix
     // reader enforces that limit too, so oversized files use the bounded
     // metadata stream instead, including inherited fork records.
-    let identity = if metadata.len() > conversation_file_limit_bytes() {
+    let identity = if metadata.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         scan_full_stream(file, path)?
     } else if metadata.len() > window_bytes {
         drop(file);
@@ -700,7 +699,7 @@ mod tests {
         fn oracle_scan(path: &Path) -> Result<SessionFileMetadata, String> {
             let file = crate::jsonl_tail_io::open_no_follow(path)?;
             let metadata = file.metadata().map_err(|error| error.to_string())?;
-            if !metadata.is_file() || metadata.len() > conversation_file_limit_bytes() {
+            if !metadata.is_file() || metadata.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
                 return Err("bounds".to_string());
             }
             let mut reader = BufReader::new(file);

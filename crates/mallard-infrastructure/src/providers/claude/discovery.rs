@@ -206,7 +206,7 @@ pub(super) fn locate_session(
             blocked_reason: inspect_candidate_files_with_limit(
                 &canonical_home,
                 &[entry.path().to_path_buf()],
-                crate::app_settings::conversation_file_limit_bytes(),
+                mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             )
             .err(),
         }));
@@ -282,7 +282,7 @@ pub(super) fn discover(
             blocked_reason: inspect_candidate_files_with_limit(
                 &canonical_home,
                 &[entry.path().to_path_buf()],
-                crate::app_settings::conversation_file_limit_bytes(),
+                mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             )
             .err(),
         });
@@ -330,7 +330,7 @@ pub(super) fn discover(
                 blocked_reason: inspect_candidate_files_with_limit(
                     &canonical_home,
                     &[entry.path().to_path_buf()],
-                    crate::app_settings::conversation_file_limit_bytes(),
+                    mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                 )
                 .err(),
             });

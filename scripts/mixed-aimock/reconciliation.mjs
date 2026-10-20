@@ -9,7 +9,6 @@ import { safeFailure } from "./report.mjs";
 const NEW_SESSION = "019fb020-0000-7000-8000-000000000001";
 const CHILD_SESSION = "019fb020-0000-7000-8000-000000000002";
 const NEXT_ROLLOUT = "019fb020-0000-7000-8000-000000000003";
-const FILE_LIMIT = 100 * 1024 * 1024;
 const incomplete = new Set(["unknown", "unavailable"]);
 
 function check(value, code) {
@@ -231,7 +230,12 @@ export async function sessionReconciliation({ binary, root, replicas, checkpoint
     await run(provider, "restart_with_stale_disk_cache", async (c) => {
       await c.stop(); await c.append(); await c.start(); await ahead(c);
     });
-    await run(provider, "file_size_limit", async (c) => { await truncate(c.path, FILE_LIMIT + 1); await blocked(c); });
+    await run(provider, "file_size_limit", async (c) => {
+      const limit = (await c.worker.call("conversation_file_limit")).value;
+      check(Number.isSafeInteger(limit) && limit >= c.bytes.length && Number.isSafeInteger(limit + 1), "invalid_conversation_file_limit");
+      await truncate(c.path, limit + 1);
+      await blocked(c);
+    });
     if (process.getuid?.() !== 0 && process.platform !== "win32") {
       await run(provider, "read_error", async (c) => {
         const mode = (await stat(c.path)).mode & 0o777; c.cleanup.push(() => chmod(c.path, mode));

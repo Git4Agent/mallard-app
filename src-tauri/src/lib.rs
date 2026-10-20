@@ -35,6 +35,14 @@ pub fn run() {
         project_sync::app_link::show_window(app);
     }));
     builder
+        .register_asynchronous_uri_scheme_protocol(
+            "project-media",
+            |_context, request, responder| {
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(project_sync::media_protocol::respond(request));
+                });
+            },
+        )
         .plugin(tauri_plugin_deep_link::init())
         .manage(project_sync::app_link::AppLinkInbox::default())
         .manage(project_sync::r2_setup::R2SetupControl::default())
@@ -169,7 +177,7 @@ pub fn run() {
             project_sync::commands::get_project_session_event_detail,
             project_sync::commands::open_project_markdown_path,
             project_sync::commands::read_project_markdown_image,
-            project_sync::commands::read_project_markdown_media,
+            project_sync::commands::prepare_project_markdown_media,
             project_sync::commands::execute_project_session_action,
             project_sync::commands::start_project_session,
             project_sync::commands::delete_local_project_session,

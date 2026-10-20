@@ -12,6 +12,9 @@ pub mod codex;
 pub mod launch;
 pub mod windows_app;
 pub mod registry;
+// Feasibility experiment only; never linked into the application.
+#[cfg(test)]
+mod pi_poc;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_provider;
 pub mod timeparse;

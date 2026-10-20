@@ -52,8 +52,10 @@ pub(crate) const MAX_ACTIONS: usize = 100_000;
 pub const MAX_CONVERSATION_BINDINGS: usize = 100_000;
 pub const MAX_ORIGIN_ALIASES: usize = 20_000;
 pub(crate) const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
+/// Fixed maximum transcript size for discovery, comparison, Push, and Pull.
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
-pub(crate) const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum ordinary project-file size, shared by capture and bundle validation.
+pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 100 * 1024 * 1024;
 pub(crate) const MAX_PROJECT_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const ABSENT_BUNDLE_COMMIT_ID: &str = "absent";
 

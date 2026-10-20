@@ -105,6 +105,7 @@ export default {
     tokensSplitLabel: "Total tokens: {{total}}. Total input: {{input}}. Total output: {{output}}",
     tokensLabel: "Total tokens: {{total}}",
     partial: "Some session metrics are unavailable",
+    unavailable: "Metrics unavailable",
     ranFor: "Ran for {{duration}}",
     subagentsTooltip: "Subagents · {{subagents}}\nPush size · {{size}}",
     subagentsLabel: "Subagents: {{subagents}}. Push size: {{size}}",

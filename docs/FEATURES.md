@@ -40,6 +40,7 @@ What Mallard does, in detail. The short introduction is the repository's
   Apply; they persist no executable plan or conversation recovery journal.
   Pulls create backups and retain result receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.
+  Each file can be up to 100 MiB; the total selected Push is limited to 512 MiB.
   Git-managed project content continues to travel through Git.
 - Starts a new session in a project: **New session** at the end of the
   Sessions search row (in the empty list's box when there is none yet) runs
@@ -142,6 +143,27 @@ normally stored at `~/.codex`.
 A session Codex has compressed in place (`rollout-….jsonl.zst`, its
 experimental `local_thread_store_compression` feature) is read like a plain
 one; Mallard itself writes only plain `.jsonl` files.
+
+Sessions above the fixed 100 MiB size limit remain in the
+project's session list with an **Unavailable for sync** badge and the blocking
+reason. These rows use discovery metadata and the file's modification time;
+Mallard does not read the oversized transcript to calculate activity metrics.
+Push and Pull continue to exclude them.
+
+## Files and media in session detail
+
+Relative file links and media use each message's recorded working directory.
+Codex turn context and Claude message records can change that directory within
+one session. Links stay inside the bound project; paths outside it and paths
+through symbolic links cannot be opened. An unavailable or outside working
+directory disables relative file links.
+
+Audio and video play through native byte-range requests, including seeking in
+large files. Videos may be up to 500 MiB (524,288,000 bytes). Each response reads
+at most 1 MiB; the complete video is never copied through command IPC. Container,
+video-size and project-path checks apply to every request. Images retain their
+8 MiB embedding limit. Media remains local project content; viewing a session
+does not transfer its linked files.
 
 ## Claude widgets in session detail
 

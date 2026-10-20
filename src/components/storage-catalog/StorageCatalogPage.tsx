@@ -36,7 +36,7 @@ import LoadingScaffold from "../LoadingScaffold";
 import { writeClipboardText } from "../sync-review/clipboard";
 import TopLayer from "../sync-review/TopLayer";
 import { useDebugPopoverPlacement } from "../sync-review/debugPopoverPlacement";
-import { focusMenuEdge, moveMenuFocus } from "../sync-review/menuKeyboard";
+import { moveMenuFocus } from "../sync-review/menuKeyboard";
 import ProviderMark from "../sync-review/ProviderMark";
 import SyncPathBar, { type PathBarCrumb, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import SyncReviewSelectionBar from "../sync-review/SyncReviewSelectionBar";
@@ -561,6 +561,108 @@ export function ForkDrawer({
   );
 }
 
+/** A Pull row's local action when the plan offers more than one: the pill,
+ * and the app's own popover, item markup and all — a checkable list with the
+ * current choice ticked, and the keyboard contract that `role="menu"`
+ * promises. The list is on body, placed against the window: the review's
+ * scroll and the storage card both clip, and a list drawn in the row ran off
+ * their bottom edge. */
+function RowActionChoice({ action, name, nouns }: { action: RowAction; name: string; nouns: CatalogNouns }) {
+  const { t } = useTranslation("library");
+  const shellRef = useRef<HTMLSpanElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const { expanded, onToggle } = action;
+  const placement = useDebugPopoverPlacement(shellRef, menuRef, expanded, onToggle, false);
+
+  /* Outside-click and Escape dismiss it, the same contract the path bar's
+     own menus keep. Outside is neither the pill nor the list, which is no
+     longer inside the row. */
+  useEffect(() => {
+    if (!expanded) return;
+    const closeOnOutside = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && (shellRef.current?.contains(target) || menuRef.current?.contains(target))) return;
+      onToggle();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      /* This layer consumed Escape; the Push/Pull review listens on window
+         and must not also close and discard the whole review. */
+      event.stopPropagation();
+      triggerRef.current?.focus();
+      onToggle();
+    };
+    document.addEventListener("mousedown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [expanded, onToggle]);
+
+  return (
+    <span ref={shellRef} className="catalog-row-action-shell">
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`catalog-row-action is-choice${action.destructive ? " destructive" : ""}`}
+        aria-expanded={expanded}
+        aria-haspopup="menu"
+        title={t("action.chooseOther", { action: action.chosen.label })}
+        onClick={onToggle}
+      >
+        {actionChipLabel(action.chosen.kind, nouns)}
+        <Icon name={expanded ? "chevron-up" : "chevron-down"} size={10} />
+      </button>
+      {expanded && (
+        <TopLayer>
+          <div
+            ref={menuRef}
+            className="sync-path-menu end"
+            role="menu"
+            aria-label={t("action.menu", { name })}
+            /* Measured on the first layout pass; kept out of the paint until
+               then so it never shows at the window origin. */
+            style={placement ? { position: "fixed", right: "auto", zIndex: 100, ...placement } : { visibility: "hidden" }}
+            onKeyDown={(event) => {
+              if (event.key === "Tab") {
+                /* Tab leaves from the pill, so focus moves on through the row
+                   rather than from the end of the document. */
+                triggerRef.current?.focus();
+                onToggle();
+                return;
+              }
+              if (moveMenuFocus(event.currentTarget, event.key)) event.preventDefault();
+            }}
+          >
+            <div className="sync-path-menu-group">
+              {action.options.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={action.chosen.id === option.id}
+                  className={`sync-path-menu-item${option.kind === "overwrite_with_storage" ? " danger" : ""}`}
+                  onClick={() => action.onChoose(option.id)}
+                >
+                  <span className="sync-path-menu-copy">
+                    <span>{actionVerb(option.kind)}</span>
+                    <small className="phrase">{option.label}</small>
+                  </span>
+                  {action.chosen.id === option.id && (
+                    <Icon name="check" size={13} className="sync-path-menu-check" />
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        </TopLayer>
+      )}
+    </span>
+  );
+}
+
 /** One card per resource, wearing the activity card's grammar. Line one: the
  * badge, the name, the provider and terminal launches, Fork, and Reveal in
  * Finder. Line two: files and size, the rule, the ⓘ, and the full stamp.
@@ -677,58 +779,7 @@ export function ResourceCard({
             <span className="sync-history-branch-state current" title={repository.detail}>{t("card.newRepository")}</span>
           )}
           {action && (action.options.length > 1 ? (
-            <span className="catalog-row-action-shell">
-              <button
-                type="button"
-                className={`catalog-row-action is-choice${action.destructive ? " destructive" : ""}`}
-                aria-expanded={action.expanded}
-                aria-haspopup="menu"
-                title={t("action.chooseOther", { action: action.chosen.label })}
-                onClick={action.onToggle}
-              >
-                {actionChipLabel(action.chosen.kind, nouns)}
-                <Icon name={action.expanded ? "chevron-up" : "chevron-down"} size={10} />
-              </button>
-              {action.expanded && (
-                /* The app's own popover, item markup and all: a checkable
-                   list with the current choice ticked — and the keyboard
-                   contract that `role="menu"` promises. */
-                <div
-                  className="sync-path-menu end"
-                  role="menu"
-                  aria-label={t("action.menu", { name: row.display_name })}
-                  ref={(node) => focusMenuEdge(node, "first")}
-                  onKeyDown={(event) => {
-                    if (event.key === "Tab") {
-                      action.onToggle();
-                      return;
-                    }
-                    if (moveMenuFocus(event.currentTarget, event.key)) event.preventDefault();
-                  }}
-                >
-                  <div className="sync-path-menu-group">
-                    {action.options.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        role="menuitemcheckbox"
-                        aria-checked={action.chosen.id === option.id}
-                        className={`sync-path-menu-item${option.kind === "overwrite_with_storage" ? " danger" : ""}`}
-                        onClick={() => action.onChoose(option.id)}
-                      >
-                        <span className="sync-path-menu-copy">
-                          <span>{actionVerb(option.kind)}</span>
-                          <small className="phrase">{option.label}</small>
-                        </span>
-                        {action.chosen.id === option.id && (
-                          <Icon name="check" size={13} className="sync-path-menu-check" />
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </span>
+            <RowActionChoice action={action} name={row.display_name} nouns={nouns} />
           ) : (
             <span className="sync-history-branch-state history-only" title={action.chosen.label}>
               {actionVerb(action.chosen.kind)}
@@ -963,7 +1014,6 @@ export default function StorageCatalogPage({
   const [pullChoice, setPullChoice] = useState<Record<string, string>>({});
   const [pullAcks, setPullAcks] = useState<Set<string>>(new Set());
   const [openChoices, setOpenChoices] = useState<string | null>(null);
-  const pullListRef = useRef<HTMLDivElement | null>(null);
 
   /* Previews for stored-only pet rows, keyed by row id. Each row asks once
    * per page (the ref) so an offline storage is not hammered on every render;
@@ -1164,30 +1214,6 @@ export default function StorageCatalogPage({
     })
     .filter((phrase): phrase is string => phrase !== null)
     .join(t("attention.separator")), [nouns, rows, t, i18n.language]);
-
-  /* Outside-click and Escape dismiss the action menu, the same contract the
-     path bar's own menus keep. */
-  useEffect(() => {
-    if (!openChoices) return;
-    const closeOnOutside = (event: MouseEvent) => {
-      const target = event.target;
-      if (target instanceof Node && pullListRef.current?.contains(target)) return;
-      setOpenChoices(null);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      /* This layer consumed Escape; the Push/Pull review listens on window
-         and must not also close and discard the whole review. */
-      event.stopPropagation();
-      setOpenChoices(null);
-    };
-    document.addEventListener("mousedown", closeOnOutside);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutside);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [openChoices]);
 
   /* Stored-only rows with artwork ask for their preview after the list is on screen:
      one storage round-trip per row, kept out of the list call on purpose —
@@ -2303,7 +2329,7 @@ export default function StorageCatalogPage({
                 />
               </div>
             )}
-            <div className="sync-history-thread-list" ref={pullListRef}>
+            <div className="sync-history-thread-list">
               {visibleItems.map((item) => {
                 const resourceId = item.item.resource_id;
                 const row = rowForItem(item.item);

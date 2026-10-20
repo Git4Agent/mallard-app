@@ -12,7 +12,6 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-use crate::app_settings::conversation_file_limit_bytes;
 use crate::codex_rollout::{
     authoritative_session_meta, structural_record_type, CodexSessionMetaRecord,
     CodexStructureAccumulator, MAX_CODEX_FORK_DEPTH,
@@ -284,7 +283,7 @@ pub fn declared_history_bytes(leaf: &[u8]) -> u64 {
 /// Resolve a verified standalone wire transcript without a filesystem round trip.
 /// A portable root cannot depend on provider-local history files.
 pub(crate) fn resolve_standalone_codex_bytes(bytes: &[u8]) -> Result<ResolvedCodexRoot, String> {
-    if bytes.len() as u64 > conversation_file_limit_bytes() {
+    if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err("cloud conversation transcript exceeds its read limit".to_string());
     }
     let leaf_safe_end = safe_record_end(bytes);

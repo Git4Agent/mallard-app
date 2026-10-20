@@ -1,8 +1,8 @@
-import { createContext, memo, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { Components } from "react-markdown";
 import type { Element } from "hast";
 import MarkdownText, { MarkdownImagePlaceholder } from "../../markdown/MarkdownText";
-import { isSafeExternalMarkdownUrl, safeMarkdownUrl, safeRelativeMarkdownPath } from "../../markdown/markdownUrl";
+import { isSafeExternalMarkdownUrl } from "../../markdown/markdownUrl";
 import type { SessionAgentPreview, SessionCount, SessionTimelineEvent } from "../../../types";
 import Icon from "../../Icons";
 import ProviderMark from "../../sync-review/ProviderMark";
@@ -29,6 +29,7 @@ import {
   sessionAgentStatusLabel,
   sessionDetailDateTime,
   sessionEventKindLabel,
+  sessionMarkdownUrl,
 } from "./sessionDetailModel";
 
 interface Props {
@@ -119,6 +120,12 @@ function ProjectMarkdownPlayer({
 
 const BLOCKS = new Set(["p", "ul", "ol", "li", "blockquote", "pre", "table", "div", "h1", "h2", "h3", "h4", "h5", "h6"]);
 
+// ReactMarkdown has already resolved and sanitized every URL. Do not decode
+// it again: a filename containing literal percent escapes must stay literal.
+function projectPathFromMarkdown(url: string): string | null {
+  return url && !url.startsWith("#") && !isSafeExternalMarkdownUrl(url) ? url : null;
+}
+
 /** The project tracks and clips a line links to, once each, that the line does
  * not already embed: Claude links what it made, and the player goes under the
  * line. Nested blocks keep their own links; a link around a picture is that
@@ -131,11 +138,11 @@ function linkedPlayers(node: Element | undefined): string[] {
     for (const child of parent.children) {
       if (child.type !== "element" || BLOCKS.has(child.tagName)) continue;
       if (child.tagName === "img" && typeof child.properties.src === "string") {
-        const path = safeRelativeMarkdownPath(child.properties.src);
+        const path = projectPathFromMarkdown(child.properties.src);
         if (path) embedded.add(path);
       } else if (child.tagName === "a" && typeof child.properties.href === "string") {
         const picture = child.children.some((inner) => inner.type === "element" && inner.tagName === "img");
-        const path = picture ? null : safeRelativeMarkdownPath(child.properties.href);
+        const path = picture ? null : projectPathFromMarkdown(child.properties.href);
         if (path && markdownPlayerKind(path)) linked.add(path);
         visit(child);
       } else visit(child);
@@ -155,14 +162,17 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
   projectMedia,
   onLoadProjectMedia,
   projectRoot = "",
+  workingDirectory = ".",
 }: {
   text: string;
   onOpenProjectPath?: (relativePath: string) => void;
   projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
   onLoadProjectMedia?: (relativePath: string) => void;
   projectRoot?: string;
+  workingDirectory?: string | null;
 }) {
   const { t, i18n } = useTranslation("session");
+  const resolveUrl = useCallback((url: string) => sessionMarkdownUrl(url, workingDirectory), [workingDirectory]);
   // The renderers carry translated words, so a language switch rebuilds them.
   const components = useMemo<Components>(() => {
     const players = (node: Element | undefined) => onLoadProjectMedia
@@ -198,10 +208,10 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
             );
           }
           // Everything else must be a clean relative descendant of the
-          // project root, served through the bounded validated command.
-          // Absolute paths, traversal, and foreign schemes arrive here as
+          // project root, served through the validated media boundary.
+          // Absolute paths, escaping traversal, and foreign schemes arrive as
           // "" from the shared urlTransform and fall to the plain chip.
-          const projectPath = url ? safeRelativeMarkdownPath(url) : null;
+          const projectPath = projectPathFromMarkdown(url);
           if (!projectPath || !onLoadProjectMedia) {
             return (
               <MarkdownImagePlaceholder
@@ -233,10 +243,10 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
           );
         },
         a: ({ href, children, ...props }) => {
-          const safeHref = href ? safeMarkdownUrl(href) : "";
+          const safeHref = href ?? "";
           if (!safeHref) return <span>{children}</span>;
           const external = isSafeExternalMarkdownUrl(safeHref);
-          const projectPath = safeRelativeMarkdownPath(safeHref);
+          const projectPath = projectPathFromMarkdown(safeHref);
           if (projectPath && !onOpenProjectPath) return <span>{children}</span>;
           const displayPath = projectPath
             ? projectMarkdownDisplayPath(projectRoot, projectPath)
@@ -278,7 +288,7 @@ export const SessionDetailMarkdown = memo(function SessionDetailMarkdown({
 
   return (
     <ProjectMediaContext.Provider value={projectMedia}>
-      <MarkdownText text={text} components={components} />
+      <MarkdownText text={text} components={components} resolveUrl={resolveUrl} />
     </ProjectMediaContext.Provider>
   );
 });
@@ -522,6 +532,7 @@ function PromptCard({
         {event.text ? (
           <SessionDetailMarkdown
             text={event.text}
+            workingDirectory={event.working_directory ?? null}
             onOpenProjectPath={onOpenProjectPath}
             projectMedia={projectMedia}
             onLoadProjectMedia={onLoadProjectMedia}
@@ -562,6 +573,7 @@ function ReplyCard({
         {event.text ? (
           <SessionDetailMarkdown
             text={event.text}
+            workingDirectory={event.working_directory ?? null}
             onOpenProjectPath={onOpenProjectPath}
             projectMedia={projectMedia}
             onLoadProjectMedia={onLoadProjectMedia}
@@ -708,6 +720,7 @@ export default function SessionDetailEvent({
             {event.text ? (
               <SessionDetailMarkdown
                 text={event.text}
+                workingDirectory={event.working_directory ?? null}
                 onOpenProjectPath={onOpenProjectPath}
                 projectMedia={projectMedia}
                 onLoadProjectMedia={onLoadProjectMedia}

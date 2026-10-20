@@ -948,9 +948,16 @@ test("Push and Pull are page verbs with one review each, and link on the way", (
   // A local action is a readout plus the app's own popover, never a select.
   assert.match(page, /className="sync-path-menu end"\s*\n\s*role="menu"/);
   assert.doesNotMatch(page, /<select/);
-  // And the popover keeps the keyboard contract that role implies.
+  // And the popover keeps the keyboard contract that role implies; the
+  // placement hook focuses its first option once placed.
   assert.match(page, /moveMenuFocus\(event\.currentTarget, event\.key\)/);
-  assert.match(page, /focusMenuEdge\(node, "first"\)/);
+  // The list is on body, placed against the window: the review's scroll and
+  // the storage card both clip, and a list drawn in the row ran off their
+  // bottom edge.
+  assert.match(page, /useDebugPopoverPlacement\(shellRef, menuRef, expanded, onToggle, false\)/);
+  assert.match(page, /<TopLayer>\s*<div\s+ref=\{menuRef\}\s+className="sync-path-menu end"/);
+  // Outside is neither the pill nor the list, which is no longer in the row.
+  assert.match(page, /shellRef\.current\?\.contains\(target\) \|\| menuRef\.current\?\.contains\(target\)/);
 });
 
 test("the active path-bar Push commits the reviewed selection without rebuilding it", () => {
@@ -1936,7 +1943,7 @@ test("the app's one Markdown renderer belongs to neither feature", () => {
   assert.match(renderer, /skipHtml/);
   // Every destination passes `safeMarkdownUrl`, except an href the page
   // itself resolves to one of its own files.
-  assert.match(renderer, /\(url: string\) => \(fileLink\?\.resolve\(url\) \? url : safeMarkdownUrl\(url\)\)/);
+  assert.match(renderer, /\(url: string\) => \(fileLink\?\.resolve\(url\) \? url : safeMarkdownUrl\(resolveUrl \? resolveUrl\(url\) : url\)\)/);
   assert.match(renderer, /urlTransform=\{urlTransform\}/);
   // An image is a chip, never fetched; without alt text it names its kind.
   assert.match(renderer, /img: \(\{ alt \}\) => <MarkdownImagePlaceholder label=\{alt\} \/>/);

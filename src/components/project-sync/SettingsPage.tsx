@@ -69,7 +69,6 @@ interface Props {
 
 const RETENTION_OPTIONS = [7, 30, 90, 180, 365];
 const SIZE_OPTIONS_MB = [25, 100, 250, 500, 1_000];
-const THREAD_CAP_OPTIONS_MB = [25, 50, 100, 200, 400];
 const PREVIEW_OPTIONS_KB = [256, 512, 1_024, 2_048];
 const WORKER_OPTIONS = [1, 2, 4, 6, 8];
 const TRANSFER_OPTIONS = [1, 2, 4, 6, 8, 12];
@@ -104,7 +103,6 @@ const TUNING_KEYS = [
   "push_claude_children",
   "codex_cli_path",
   "claude_cli_path",
-  "conversation_file_limit_bytes",
   "timeline_preview_limit_bytes",
   "comparison_workers",
   "cloud_transfer_concurrency",
@@ -129,7 +127,6 @@ const SETTING_LABELS: Record<SettingKey, () => string> = {
   claude_cli_path: () => t("settings:cli.label", { provider: "Claude" }),
   openLogsOnSync: () => t("settings:sync.openLogs"),
   refreshOnFocus: () => t("settings:sync.refreshOnFocus"),
-  conversation_file_limit_bytes: () => t("settings:performance.threadLimit"),
   timeline_preview_limit_bytes: () => t("settings:performance.previewLimit"),
   comparison_workers: () => t("settings:performance.workers"),
   cloud_transfer_concurrency: () => t("settings:performance.transfers"),
@@ -1187,32 +1184,6 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
               <SettingsSectionIcon name="performance" /> {t("sections.performance")}
             </h2>
             <div className="sync-settings-card">
-              <SettingsRow
-                label={t("performance.threadLimit")}
-                setting="conversation_file_limit_bytes"
-                receipt={receiptFor("conversation_file_limit_bytes")}
-                control={(
-                  <div className="sync-select-shell">
-                    <select
-                      value={shownTuning ? Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024)) : 100}
-                      disabled={tuningBusy || !tuning}
-                      onChange={(event) => void applyTuning({
-                        conversation_file_limit_bytes: Number(event.target.value) * 1024 * 1024,
-                      })}
-                      aria-label={t("performance.threadLimit")}
-                    >
-                      {shownTuning && !THREAD_CAP_OPTIONS_MB.includes(Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024))) && (
-                        <option value={Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024))}>
-                          {formatBytes(shownTuning.conversation_file_limit_bytes)}
-                        </option>
-                      )}
-                      {THREAD_CAP_OPTIONS_MB.map((size) => <option key={size} value={size}>{size} MB</option>)}
-                    </select>
-                  </div>
-                )}
-              >
-                {t("performance.threadLimitHint")}
-              </SettingsRow>
               <SettingsRow
                 label={t("performance.previewLimit")}
                 setting="timeline_preview_limit_bytes"

@@ -657,7 +657,7 @@ export default function CloudProjectSource({
         </section>
 
         {storage && (
-          <section className="sync-setup-section repo-connect cloud-project-repository">
+          <section className="sync-setup-section repo-connect">
             <div className="sync-card-heading"><div><strong>{t("sections.repository")}</strong></div></div>
             <RepositoryAddressPicker
               storage={storage}

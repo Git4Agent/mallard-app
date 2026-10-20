@@ -2382,6 +2382,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2149c4b4b83390c71fab669730347d578ec6bdf759f2160c581ad8b8819733b4"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3033,7 +3039,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "mallard"
-version = "0.1.11"
+version = "1.0.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -3063,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "mallard-application"
-version = "0.1.11"
+version = "1.0.2"
 dependencies = [
  "aws-smithy-types",
  "bytes",
@@ -3092,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "mallard-cli"
-version = "0.1.11"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "clap",
@@ -3112,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "mallard-domain"
-version = "0.1.11"
+version = "1.0.2"
 dependencies = [
  "getrandom 0.3.4",
  "hmac 0.12.1",
@@ -3124,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "mallard-infrastructure"
-version = "0.1.11"
+version = "1.0.2"
 dependencies = [
  "aho-corasick",
  "aws-sdk-s3",
@@ -3136,6 +3142,7 @@ dependencies = [
  "dunce",
  "getrandom 0.3.4",
  "http-body-util",
+ "http-range",
  "httparse",
  "hyper 1.10.1",
  "hyper-util",

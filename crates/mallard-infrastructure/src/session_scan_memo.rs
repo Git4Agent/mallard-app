@@ -11,7 +11,6 @@
 //! that names no session costs a whole read to find out. A file that could
 //! not be read has no verdict, and is read again on the next call.
 
-use crate::app_settings::conversation_file_limit_bytes;
 use crate::jsonl_tail_io::SourceStamp;
 use crate::providers::traits::{ScanFailure, SessionFileMetadata};
 use std::collections::HashMap;
@@ -48,7 +47,7 @@ pub(crate) fn scan_once(
     let Ok(stamp) = SourceStamp::stat(path) else {
         return scan(path).map_err(ScanFailure::into_message);
     };
-    let conversation_limit = conversation_file_limit_bytes();
+    let conversation_limit = mallard_domain::MAX_CONVERSATION_FILE_BYTES;
     let key = (provider, path.to_path_buf());
     if let Some(scanned) = memo()
         .lock()

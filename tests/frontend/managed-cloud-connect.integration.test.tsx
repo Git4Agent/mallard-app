@@ -144,6 +144,20 @@ test("the found row's words follow role and remote", () => {
   assert.ok(!inListing({ bundle_id: null }, [{ bundle_id: null }]), "a repository with no bundle is never a row's twin");
 });
 
+test("a lookup's answer sets its chips under the name in every host", () => {
+  // On one line the auto-sized chip column took its full width first: in
+  // project setup the name shrank to a letter and the verdict wrapped a word
+  // per line under the Visibility chip.
+  for (const file of ["src/components/project-sync/RepositoryAddressPicker.tsx", "src/components/storage-catalog/CloudRepositoryChoice.tsx"]) {
+    assert.match(readFileSync(file, "utf8"), /className=\{`storage-found-row with-verb repo-answer-row\$\{selected \? " selected" : ""\}`\}/, file);
+  }
+  const css = readFileSync("src/App.css", "utf8");
+  assert.match(css, /\.storage-found-row\.repo-answer-row \{ grid-template-columns: 26px minmax\(0, 1fr\) auto; row-gap: 6px; \}/);
+  assert.match(css, /\.repo-answer-row > \.storage-found-facts \{ grid-row: 2; grid-column: 2 \/ -1;/);
+  // The row's own layout, never one host's: setup was the host left out.
+  assert.doesNotMatch(css, /\.(?:sync-bundle-connection-dialog|cloud-project-repository) \.storage-found-row/);
+});
+
 test("the picker names repositories by address and never by bundle id", () => {
   const rows = [
     repository({}),

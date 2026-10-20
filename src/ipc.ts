@@ -1,4 +1,4 @@
-export { Channel } from "@tauri-apps/api/core";
+export { Channel, convertFileSrc } from "@tauri-apps/api/core";
 import { invoke as invokeCommand, isTauri, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { t } from "./i18n";
 

@@ -14426,18 +14426,17 @@ span.sync-update-pill {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-/* New project › From Mallard Cloud wraps the same way: its Git chip names
-   the address a clone comes from, too long to share the name's line. */
-.sync-bundle-connection-dialog .storage-found-row.with-verb,
-.cloud-project-repository .storage-found-row.with-verb { grid-template-columns: 26px minmax(0, 1fr) auto; row-gap: 6px; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .sync-storage-repository-icon,
-.cloud-project-repository .storage-found-row.with-verb > .sync-storage-repository-icon { grid-row: 1; grid-column: 1; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-text,
-.cloud-project-repository .storage-found-row.with-verb > .storage-found-text { grid-row: 1; grid-column: 2; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-facts,
-.cloud-project-repository .storage-found-row.with-verb > .storage-found-facts { grid-row: 2; grid-column: 2 / -1; justify-content: flex-start; }
-.sync-bundle-connection-dialog .storage-found-row.with-verb > .storage-found-verb,
-.cloud-project-repository .storage-found-row.with-verb > .storage-found-verb { grid-row: 1; grid-column: 3; }
+/* A repository lookup's answer — the project picker's and the Library's —
+   sets its chips under the name, wherever it is hosted: the Git chip names a
+   remote or the address a clone comes from, too long to share the name's
+   line. On one line the auto-sized chip column took its full width first and
+   starved the name to a letter, and the verdict wrapped a word per line under
+   the chips. */
+.storage-found-row.repo-answer-row { grid-template-columns: 26px minmax(0, 1fr) auto; row-gap: 6px; }
+.repo-answer-row > .sync-storage-repository-icon { grid-row: 1; grid-column: 1; }
+.repo-answer-row > .storage-found-text { grid-row: 1; grid-column: 2; }
+.repo-answer-row > .storage-found-facts { grid-row: 2; grid-column: 2 / -1; justify-content: flex-start; }
+.repo-answer-row > .storage-found-verb { grid-row: 1; grid-column: 3; }
 /* One field takes an address or an invitation code; its verb keeps one
    width as it turns from Look up to Join. Under the field, "Your
    repositories" heads the rows. With no rows there is no box, only a quiet

@@ -68,7 +68,7 @@ export default {
     notFoundAudio: "链接的音频已不存在。",
     notFoundVideo: "链接的视频已不存在。",
     tooLargeToShow: "文件太大，无法在此显示。",
-    tooLargeToPlay: "文件太大，无法在此播放。",
+    videoTooLarge: "可播放最大 500 MiB 的视频。",
     cantShow: "Mallard 无法显示 {{format}} 文件。",
     cantPlay: "Mallard 无法播放 {{format}} 文件。",
     cantShowFile: "Mallard 无法显示此文件。",

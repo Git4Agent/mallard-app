@@ -48,7 +48,6 @@ use mallard_domain::{
 use mallard_domain::{
     AcceptedSubagentState, SubagentContentState, SubagentKey, SubagentSelection, SubagentTailPins,
 };
-use mallard_infrastructure::app_settings::conversation_file_limit_bytes;
 use mallard_infrastructure::app_settings::AppSettings;
 use mallard_infrastructure::bundle_engine::{
     absent_scope_pin, unreached_apply_result, BundleBytes, BundleEngine, BundleObservation,
@@ -1201,7 +1200,7 @@ fn cached_transcript_is_internal_subagent(
     bytes: &mut dyn BundleBytes,
     logical_path: &mallard_domain::LogicalPath,
 ) -> Result<bool, String> {
-    if expected_size > conversation_file_limit_bytes() {
+    if expected_size > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err("cloud conversation transcript exceeds its read limit".to_string());
     }
     static FLAGS: OnceLock<TranscriptSubagentCache> = OnceLock::new();
@@ -1216,7 +1215,7 @@ fn cached_transcript_is_internal_subagent(
     }
     let transcript = bytes.read_bounded(
         logical_path,
-        conversation_file_limit_bytes(),
+        mallard_domain::MAX_CONVERSATION_FILE_BYTES,
         "cloud conversation transcript",
     )?;
     let is_internal_subagent = analyze_codex_transcript(&transcript).is_internal_subagent;
@@ -1698,12 +1697,37 @@ pub fn read_project_markdown_image_with_repository(
     session_detail::read_project_markdown_image(repository, local_project_id, relative_path)
 }
 
-pub fn read_project_markdown_media_with_repository(
+pub fn prepare_project_markdown_media_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     relative_path: &str,
-) -> Result<Vec<u8>, SessionDetailError> {
-    session_detail::read_project_markdown_media(repository, local_project_id, relative_path)
+) -> Result<mallard_infrastructure::project_media::ProjectMarkdownMedia, SessionDetailError> {
+    mallard_infrastructure::project_media::open_project_markdown_media(
+        repository,
+        local_project_id,
+        relative_path,
+    )
+    .map(|media| media.metadata)
+}
+
+pub fn read_project_media_range_with_repository(
+    repository: &LocalStateRepository,
+    request_path: &str,
+    range: Option<&str>,
+    head: bool,
+) -> Result<
+    (
+        mallard_infrastructure::project_media::ProjectMarkdownMedia,
+        mallard_infrastructure::project_media::ProjectMediaRange,
+    ),
+    SessionDetailError,
+> {
+    let mut media = mallard_infrastructure::project_media::open_project_media_request(
+        repository,
+        request_path,
+    )?;
+    let response = media.read_range(range, head)?;
+    Ok((media.metadata, response))
 }
 
 pub fn delete_local_project_session_with_repository(
@@ -1954,7 +1978,7 @@ fn read_stored_session(
     let wire_bytes = objects
         .read_bounded(
             &transcript.logical_path,
-            conversation_file_limit_bytes(),
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             "stored conversation transcript",
         )
         .map_err(|error| {
@@ -3905,7 +3929,7 @@ fn thread_capture_unavailable_detail(blocked_reason: Option<&str>) -> (&'static 
         Some(reason)
             if reason.contains(&format!(
                 "exceeds {} bytes",
-                conversation_file_limit_bytes()
+                mallard_domain::MAX_CONVERSATION_FILE_BYTES
             )) =>
         {
             ("capture_size_limit", "size limit exceeded.")
@@ -4429,7 +4453,7 @@ impl LocalTailObservation {
             && proof.layout.as_ref() == layout
             && proof.seeded.mapping.provider_thread_id == provider_thread_id
             && Path::new(&proof.seeded.mapping.root_path) == source
-            && proof.conversation_limit == conversation_file_limit_bytes()
+            && proof.conversation_limit == mallard_domain::MAX_CONVERSATION_FILE_BYTES
             && proof.sources.get(source) == Some(stamp)
             && proof
                 .sources
@@ -5048,7 +5072,7 @@ fn observe_codex_local(
                     .iter()
                     .map(|(path, (_, stamp))| (path.clone(), stamp.clone()))
                     .collect(),
-                conversation_limit: conversation_file_limit_bytes(),
+                conversation_limit: mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             }),
             subagents: None,
             discovery: Some(codex_subagents::DiscoveryObservation {
@@ -5518,7 +5542,7 @@ fn observe_claude_local(
                     },
                     layout: layout.cloned(),
                     sources: BTreeMap::from([(source.clone(), stamp.clone())]),
-                    conversation_limit: conversation_file_limit_bytes(),
+                    conversation_limit: mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                 }),
                 subagents: None,
                 discovery: None,
@@ -6062,7 +6086,7 @@ fn provider_thread_review(
         }
         let prefetch_paths = offerable_cloud_transcripts
             .values()
-            .filter(|(_, _, size)| *size <= conversation_file_limit_bytes())
+            .filter(|(_, _, size)| *size <= mallard_domain::MAX_CONVERSATION_FILE_BYTES)
             .map(|(logical_path, _, _)| logical_path.clone())
             .collect::<Vec<_>>();
         let _ = bytes.prefetch(&prefetch_paths);
@@ -12764,7 +12788,7 @@ fn prepare_pull_conversation_actions(
             snapshot
                 .manifest
                 .find_file(path)
-                .is_some_and(|(_, entry)| entry.size <= conversation_file_limit_bytes())
+                .is_some_and(|(_, entry)| entry.size <= mallard_domain::MAX_CONVERSATION_FILE_BYTES)
         })
         .collect::<Vec<_>>();
     bytes.prefetch(&payload_paths)?;
@@ -12818,7 +12842,7 @@ fn prepare_pull_conversation_actions(
             .sha256
             .clone();
         let cloud_transcript = bytes.body(&transcript_ref.logical_path)?;
-        if cloud_transcript.size() > conversation_file_limit_bytes() {
+        if cloud_transcript.size() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             return Err("cloud conversation transcript exceeds its read limit".to_string());
         }
         // Wire content is verified once in the bounded preparation worker.
@@ -12962,7 +12986,7 @@ fn prepare_pull_conversation_actions(
                 &relative_path,
             )?;
             let body = bytes.body(&logical_path)?;
-            if body.size() > conversation_file_limit_bytes() {
+            if body.size() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
                 return Err(format!(
                     "cloud conversation sidecar '{}' exceeds its read limit",
                     relative_path
@@ -12986,7 +13010,7 @@ fn prepare_pull_conversation_actions(
                 total_bytes = total_bytes
                     .checked_add(body.size())
                     .ok_or("cloud tree size overflow")?;
-                if body.size() > conversation_file_limit_bytes()
+                if body.size() > mallard_domain::MAX_CONVERSATION_FILE_BYTES
                     || total_bytes > provider_capture::MAX_CAPTURE_BYTES
                 {
                     return Err("cloud tree exceeds capture limits".into());
@@ -13708,7 +13732,7 @@ fn apply_prepared_pull_conversation(
                     "provider planned more sidecars than the cloud row carries".to_string()
                 })?;
                 let bytes = sidecar.body.read_bounded(
-                    conversation_file_limit_bytes(),
+                    mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                     "cloud conversation sidecar",
                 )?;
                 targets.push(ConversationTargetPayload {
@@ -14722,7 +14746,7 @@ pub fn apply_bundle_restore_with_progress(
         |(prepared, destination)| {
             let (destination, identities) = destination?;
             let cloud_bytes = prepared.cloud_transcript.read_bounded(
-                conversation_file_limit_bytes(),
+                mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                 "cloud conversation transcript",
             )?;
             let action = &prepared.action;
@@ -14762,7 +14786,7 @@ pub fn apply_bundle_restore_with_progress(
                         key.clone(),
                         (
                             body.read_bounded(
-                                conversation_file_limit_bytes(),
+                                mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                                 "cloud child rollout",
                             )?,
                             normalized.clone(),
@@ -19154,7 +19178,7 @@ mod tests {
     fn unavailable_thread_state_reports_the_capture_size_error() {
         let reason = format!(
             "'/tmp/session.jsonl' exceeds {} bytes",
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         );
         assert_eq!(
             thread_capture_unavailable_detail(Some(&reason)),
@@ -20699,7 +20723,9 @@ mod tests {
         std::fs::create_dir_all(source_root.join("docs/specs")).unwrap();
         std::fs::create_dir_all(source_root.join("docs/empty")).unwrap();
         std::fs::write(source_root.join("docs/specs/a.md"), b"portable spec\n").unwrap();
-        std::fs::write(source_root.join("docs/file_b.md"), b"original b\n").unwrap();
+        // Exercise the complete Push/Pull path above the former 16 MiB cap.
+        let file_b = vec![b'b'; 17 * 1024 * 1024];
+        std::fs::write(source_root.join("docs/file_b.md"), &file_b).unwrap();
         std::fs::write(source_root.join("excluded.txt"), b"do not publish\n").unwrap();
         bind_and_link_test_replica(
             &repo,
@@ -20915,7 +20941,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(target_root.join("docs/file_b.md")).unwrap(),
-            b"original b\n"
+            file_b
         );
         assert!(target_root.join("docs/empty").is_dir());
 
@@ -26878,11 +26904,23 @@ mod tests {
             &storage_id,
         )
         .unwrap();
+        let activity_before = get_project_activity_with_repository(
+            &repo,
+            &project.local_project_id,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(activity_before.sessions.len(), 1);
+        assert!(activity_before.sessions[0].sync_blocked_reason.is_none());
         std::fs::OpenOptions::new()
             .write(true)
             .open(&session_path)
             .unwrap()
-            .set_len(conversation_file_limit_bytes() + 1)
+            .set_len(mallard_domain::MAX_CONVERSATION_FILE_BYTES + 1)
             .unwrap();
         let warm = get_project_thread_sync_comparison_with_repository(
             &repo,
@@ -26920,6 +26958,36 @@ mod tests {
         );
         assert_eq!(row.status_detail_code, Some("capture_size_limit"));
         assert_eq!(row.push_decision.reason_code, Some("capture_size_limit"));
+        assert!(!row.push_decision.selectable);
+        assert!(!row.pull_decision.selectable);
+
+        let metrics = mallard_infrastructure::sync_metrics::register_root(
+            &std::fs::canonicalize(&codex_home).unwrap(),
+        );
+        for storage in [None, Some(&storage_id)] {
+            let activity = get_project_activity_with_repository(
+                &repo,
+                &project.local_project_id,
+                storage,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(activity.sessions.len(), 1);
+            let session = &activity.sessions[0];
+            assert_eq!(session.provider_session_id.as_deref(), Some(provider_id));
+            assert_eq!(session.resource_id, row.conversation_resource_id.as_str());
+            assert!(session
+                .sync_blocked_reason
+                .as_deref()
+                .unwrap()
+                .contains("exceeds"));
+            assert!(!session.metrics_complete);
+            assert_eq!(session.total_tokens, None);
+        }
+        assert_eq!(metrics.snapshot().transcript_bytes_read, 0);
     }
 
     #[test]
@@ -26955,7 +27023,7 @@ mod tests {
         // record-count limit or putting the fork transition in the tail window.
         let mut padding = vec![b' '; 64 * 1024];
         *padding.last_mut().unwrap() = b'\n';
-        while file.metadata().unwrap().len() <= conversation_file_limit_bytes() {
+        while file.metadata().unwrap().len() <= mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             file.write_all(&padding).unwrap();
         }
         // Later execution in a subdirectory must not change project ownership.
@@ -26983,6 +27051,27 @@ mod tests {
             assert_eq!(row.status_detail.as_deref(), Some("size limit exceeded."));
             assert!(!row.push_decision.selectable);
             assert!(!row.pull_decision.selectable);
+
+            let activity = get_project_activity_with_repository(
+                &repo,
+                &project.local_project_id,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(activity.sessions.len(), 1);
+            let session = &activity.sessions[0];
+            assert_eq!(session.provider_session_id.as_deref(), Some(session_id));
+            assert_eq!(session.resource_id, row.conversation_resource_id.as_str());
+            assert!(session
+                .sync_blocked_reason
+                .as_deref()
+                .unwrap()
+                .contains("exceeds"));
+            assert!(!session.metrics_complete);
         }
     }
 
@@ -29226,7 +29315,7 @@ mod tests {
                     std::fs::remove_dir(&path).unwrap();
                     std::fs::File::create(&path)
                         .unwrap()
-                        .set_len(conversation_file_limit_bytes() + 1)
+                        .set_len(mallard_domain::MAX_CONVERSATION_FILE_BYTES + 1)
                         .unwrap();
                 }
                 _ => unreachable!(),
@@ -32345,7 +32434,7 @@ mod tests {
             .files
             .get_mut(&oversized_path)
             .unwrap()
-            .size = conversation_file_limit_bytes() + 1;
+            .size = mallard_domain::MAX_CONVERSATION_FILE_BYTES + 1;
         let mut inner = engine.byte_source(&oversized_snapshot, None);
         let mut bytes = CountingBytes {
             inner: &mut inner,

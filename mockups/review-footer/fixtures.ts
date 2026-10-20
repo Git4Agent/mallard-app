@@ -331,7 +331,6 @@ export const appSettings = {
   credential_redaction_enabled: false,
   update_check_enabled: false,
   schema: 1,
-  conversation_file_limit_bytes: 256 * MB,
   timeline_preview_limit_bytes: 2 * MB,
   comparison_workers: 4,
   cloud_transfer_concurrency: 4,

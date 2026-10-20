@@ -20,8 +20,8 @@ use mallard_application::project_sync::service::{
     list_provider_profiles_with_repository, list_remote_bundle_snapshots_with_repository,
     list_setup_drafts_with_repository, list_storage_setup_drafts_with_repository,
     load_project_sync_config_with_repository, probe_project_folder_with_repository,
-    probe_provider_profile_with_repository, read_project_markdown_image_with_repository,
-    read_project_markdown_media_with_repository, recover_startup_state_with_repository,
+    prepare_project_markdown_media_with_repository, probe_provider_profile_with_repository,
+    read_project_markdown_image_with_repository, recover_startup_state_with_repository,
     remove_local_project_with_repository, remove_project_link_with_repository,
     rename_local_project_with_repository, repository,
     resolve_project_markdown_path_with_repository, reveal_storage_secret_with_repository,
@@ -634,24 +634,27 @@ pub async fn read_project_markdown_image(
     .await
 }
 
-/// A project track or clip for an inline player, as raw bytes: the webview
-/// wraps them in a `blob:` URL rather than a base64 `data:` string.
+/// Validate the file and inspect its header. Playback uses the project-media
+/// protocol's bounded ranges; video bytes never cross command IPC.
 #[tauri::command]
-pub async fn read_project_markdown_media(
+pub async fn prepare_project_markdown_media(
     local_project_id: LocalProjectId,
     relative_path: String,
-) -> Result<tauri::ipc::Response, SessionDetailError> {
+) -> Result<mallard_infrastructure::project_media::ProjectMarkdownMedia, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
             SessionDetailErrorCode::ProviderError,
             "Mallard could not open its local state repository.",
         )
     })?;
-    let bytes = run_session_detail_blocking(move || {
-        read_project_markdown_media_with_repository(&repository, &local_project_id, &relative_path)
+    run_session_detail_blocking(move || {
+        prepare_project_markdown_media_with_repository(
+            &repository,
+            &local_project_id,
+            &relative_path,
+        )
     })
-    .await?;
-    Ok(tauri::ipc::Response::new(bytes))
+    .await
 }
 
 #[tauri::command]

@@ -72,7 +72,6 @@ import { PathBarBelow, PathBarMenu, type PathBarMenuGroup } from "../sync-review
 import { focusMenuEdge } from "../sync-review/menuKeyboard";
 import PushResourceWorkspace, {
   includeRequiredProjectContentDirectories,
-  projectFileSelectOffer,
   pullRequiredCopy,
   pushProjectFileWork,
   pushReviewDisabledReason,
@@ -2247,13 +2246,11 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
             .filter((digest): digest is string => Boolean(digest)));
           return new Set([...currentAcknowledgements].filter((digest) => currentWarningDigests.has(digest)));
         });
-        const nextDefaults = new Set([...current.projectDefaults, ...projectFileSelectOffer(inspected)]);
         return {
           ...current,
           projectContentInventory: inspected,
           projectContentScanned: true,
           showProjectFiles: true,
-          projectDefaults: includeRequiredProjectContentDirectories(inspected, nextDefaults),
         };
       });
     } catch (reason) {

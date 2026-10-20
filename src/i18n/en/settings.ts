@@ -107,8 +107,6 @@ export default {
     detectionHint: "Looks in Mallard's PATH, then the PATH your shell sets, then the usual install folders. On Windows a changed PATH needs a Mallard restart.",
   },
   performance: {
-    threadLimit: "Thread size limit",
-    threadLimitHint: "Skip transcripts above this limit in compare, Push, and Pull.",
     previewLimit: "Preview size limit",
     previewLimitHint: "Limit message and tool call previews. Full transcripts stay unchanged.",
     workers: "Comparison workers",

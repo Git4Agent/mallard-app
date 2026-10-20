@@ -343,6 +343,7 @@ pub struct LocalSessionRecord {
     pub physical_path: PathBuf,
     pub display_name: String,
     pub summary: SessionFileSummary,
+    pub sync_blocked_reason: Option<String>,
 }
 
 fn modified_nanos(metadata: &fs::Metadata) -> u64 {
@@ -408,58 +409,66 @@ pub fn scan_local_session_views(
         };
         let mut by_session: BTreeMap<String, LocalSessionRecord> = BTreeMap::new();
         for view in views.iter().filter(|view| &view.provider == provider) {
-            if let Some(reason) = &view.descriptor.blocked_reason {
-                warnings.push(format!(
-                    "Skipped '{}': {}",
-                    view.source_path.display(),
-                    reason
-                ));
-                continue;
-            }
-            let metadata = match fs::metadata(&view.source_path) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    warnings.push(format!(
-                        "Cannot read '{}': {error}",
-                        view.source_path.display()
-                    ));
-                    continue;
+            let summary = if view.descriptor.blocked_reason.is_some() {
+                // Discovery already proved identity and ownership. Keep its
+                // row even when the transcript cannot be safely summarized;
+                // the no-follow file timestamp places it in Activity without
+                // reading transcript bytes or caching incomplete metrics.
+                SessionFileSummary {
+                    session_id: view.provider_thread_id.clone(),
+                    started_at: Some(view.source_mtime),
+                    ended_at: Some(view.source_mtime),
+                    ..SessionFileSummary::default()
                 }
-            };
-            let cache_key = format!(
-                "{}\u{0}{}\u{0}{}\u{0}{}",
-                resolved.project_id,
-                provider,
-                home.home.display(),
-                view.source_path.display()
-            );
-            seen_cache_keys.insert(cache_key.clone());
-            let file_nanos = modified_nanos(&metadata);
-            let cached = cache
-                .entries
-                .get(&cache_key)
-                .filter(|entry| entry.size == metadata.len() && entry.modified_nanos == file_nanos)
-                .map(|entry| entry.summary.clone());
-            let summary = match cached {
-                Some(summary) => summary,
-                None => match adapter.summarize_file(&view.source_path) {
-                    Ok(summary) => {
-                        cache.entries.insert(
-                            cache_key,
-                            ActivityCacheEntry {
-                                size: metadata.len(),
-                                modified_nanos: file_nanos,
-                                summary: summary.clone(),
-                            },
-                        );
-                        cache_changed = true;
-                        summary
-                    }
+            } else {
+                let metadata = match fs::metadata(&view.source_path) {
+                    Ok(metadata) => metadata,
                     Err(error) => {
-                        warnings.push(format!("Skipped '{}': {error}", view.source_path.display()));
+                        warnings.push(format!(
+                            "Cannot read '{}': {error}",
+                            view.source_path.display()
+                        ));
                         continue;
                     }
-                },
+                };
+                let cache_key = format!(
+                    "{}\u{0}{}\u{0}{}\u{0}{}",
+                    resolved.project_id,
+                    provider,
+                    home.home.display(),
+                    view.source_path.display()
+                );
+                seen_cache_keys.insert(cache_key.clone());
+                let file_nanos = modified_nanos(&metadata);
+                let cached = cache
+                    .entries
+                    .get(&cache_key)
+                    .filter(|entry| {
+                        entry.size == metadata.len() && entry.modified_nanos == file_nanos
+                    })
+                    .map(|entry| entry.summary.clone());
+                match cached {
+                    Some(summary) => summary,
+                    None => match adapter.summarize_file(&view.source_path) {
+                        Ok(summary) => {
+                            cache.entries.insert(
+                                cache_key,
+                                ActivityCacheEntry {
+                                    size: metadata.len(),
+                                    modified_nanos: file_nanos,
+                                    summary: summary.clone(),
+                                },
+                            );
+                            cache_changed = true;
+                            summary
+                        }
+                        Err(error) => {
+                            warnings
+                                .push(format!("Skipped '{}': {error}", view.source_path.display()));
+                            continue;
+                        }
+                    },
+                }
             };
             if summary.is_internal_subagent || summary.session_id != view.provider_thread_id {
                 warnings.push(format!(
@@ -474,6 +483,7 @@ pub fn scan_local_session_views(
                 physical_path: view.source_path.clone(),
                 display_name: view.descriptor.display_name.clone(),
                 summary,
+                sync_blocked_reason: view.descriptor.blocked_reason.clone(),
             };
             let replace = by_session
                 .get(&record.session_id)
@@ -521,9 +531,15 @@ fn key_belongs_to_project(key: &str, resolved: &ResolvedActivityProject) -> bool
 
 fn record_is_preferred(candidate: &LocalSessionRecord, current: &LocalSessionRecord) -> bool {
     candidate
-        .summary
-        .metrics_complete
-        .cmp(&current.summary.metrics_complete)
+        .sync_blocked_reason
+        .is_none()
+        .cmp(&current.sync_blocked_reason.is_none())
+        .then_with(|| {
+            candidate
+                .summary
+                .metrics_complete
+                .cmp(&current.summary.metrics_complete)
+        })
         .then_with(|| {
             candidate
                 .summary
@@ -1075,7 +1091,7 @@ fn merge_activity_sessions_with_state(
                 last_prompt_at: record.summary.last_prompt_at,
                 transcript_path: Some(record.physical_path.to_string_lossy().into_owned()),
                 working_directory: Some(resolved.project_root.to_string_lossy().into_owned()),
-                sync_blocked_reason: None,
+                sync_blocked_reason: record.sync_blocked_reason,
                 recorded_sha: record.summary.recorded_sha.clone(),
                 is_active: false,
                 user_round_count: record.summary.user_rounds,
@@ -3952,5 +3968,49 @@ mod activity_only_tests {
             load_activity_cache(repository.root(), &cache_path, &mut warnings);
         assert!(!cache_changed);
         assert!(cache.entries.is_empty());
+
+        // A size-blocked session remains visible without calling the adapter
+        // or storing a metadata-only placeholder as a complete summary.
+        let mut blocked_views = views.clone();
+        blocked_views[0].descriptor.blocked_reason = Some("Session exceeds the size limit.".into());
+        blocked_views[0].source_mtime = 1_900_000_000;
+        let blocked_rows = scan_local_session_views(
+            &repository,
+            &registry,
+            &resolved,
+            &blocked_views,
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(blocked_rows.len(), 1);
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(blocked_rows[0].summary.ended_at, Some(1_900_000_000));
+        assert!(!blocked_rows[0].summary.metrics_complete);
+        assert_eq!(blocked_rows[0].summary.total_tokens, None);
+        let blocked_sessions = merge_activity_sessions(
+            &registry,
+            &repository,
+            &resolved,
+            blocked_rows,
+            Vec::new(),
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(blocked_sessions.len(), 1);
+        assert_eq!(blocked_sessions[0].title, "Session one (3)");
+        assert_eq!(
+            blocked_sessions[0].sync_blocked_reason.as_deref(),
+            Some("Session exceeds the size limit.")
+        );
+        let (cache, _) = load_activity_cache(repository.root(), &cache_path, &mut warnings);
+        assert!(cache.entries.is_empty());
+
+        let readable_again =
+            scan_local_session_views(&repository, &registry, &resolved, &views, &mut warnings)
+                .unwrap();
+        assert_eq!(summary_calls.load(Ordering::SeqCst), 4);
+        assert!(readable_again[0].summary.metrics_complete);
+        assert!(readable_again[0].sync_blocked_reason.is_none());
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

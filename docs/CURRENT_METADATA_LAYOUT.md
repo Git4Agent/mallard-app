@@ -1144,7 +1144,7 @@ payload is safe. Shared storage should be treated as private user data.
 - files, directories, and tombstones: at most 100,000 each.
 - one conversation source file: at most 100 MiB.
 - one ordinary captured provider file: at most 16 MiB.
-- one project-content file: at most 16 MiB.
+- one project-content file: at most 100 MiB.
 - aggregate selected capture/project content: at most 512 MiB.
 - conversation bindings: at most 100,000.
 - active conversation journal operations: at most 10,000.

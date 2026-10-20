@@ -580,7 +580,7 @@ pub fn capture_children(
             return Err(error);
         }
         origins.verify_source_length(&id, ordinal, false)?;
-        if output.len() as u64 > crate::app_settings::conversation_file_limit_bytes() {
+        if output.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             return Err("encoded Claude child exceeds size limit".into());
         }
         let wire: crate::payload::PayloadBytes = output.into_bytes().into();
@@ -693,7 +693,7 @@ pub fn prepare_child_payloads(
         if let Some(error) = failure {
             return Err(error);
         }
-        if output.len() as u64 > crate::app_settings::conversation_file_limit_bytes() {
+        if output.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             return Err("restored Claude child exceeds size limit".into());
         }
         let output: crate::payload::PayloadBytes = output.into_bytes().into();

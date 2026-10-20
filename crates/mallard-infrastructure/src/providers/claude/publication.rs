@@ -2,7 +2,6 @@
 
 use super::codec::{analyze_claude_record_values, ClaudeRecordContext};
 use super::subagents::{record_link, ChildLinks};
-use crate::app_settings::conversation_file_limit_bytes;
 use crate::claude_history_tail::ClaudeWatermark;
 use crate::conversation_codec::CodecLineage;
 use crate::credential_redaction::{RedactedWireBytes, RedactionRun};
@@ -100,7 +99,7 @@ pub fn encode_main_transcript(
     if lookup == OriginLookup::ByPosition {
         origins.verify_source_length(source_id, source_ordinal, false)?;
     }
-    if encoded_length > conversation_file_limit_bytes() {
+    if encoded_length > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err("path-encoded Claude transcript exceeds its size limit".into());
     }
     if let CodecLineage::Unknown { reason } = &analysis.lineage {

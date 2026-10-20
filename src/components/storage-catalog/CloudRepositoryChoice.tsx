@@ -423,7 +423,7 @@ export function useCloudRepositoryChoice({ storageId, scopeId, accountLogin, tar
     found = (
       <div className="r2-step-list">
         <div className="storage-found-list" aria-label={t("lookup.atAddress")}>
-          <div className={`storage-found-row with-verb${selected ? " selected" : ""}`}>
+          <div className={`storage-found-row with-verb repo-answer-row${selected ? " selected" : ""}`}>
             <span className="sync-storage-repository-icon"><Icon name={markFor(repository)} size={14} /></span>
             <span className="storage-found-text">
               <span className="storage-found-name">{repository.address}</span>

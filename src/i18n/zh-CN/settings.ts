@@ -99,8 +99,6 @@ export default {
     detectionHint: "依次查找 Mallard 的 PATH、Shell 设置的 PATH 和常用安装目录。在 Windows 上，PATH 变更后需要重启 Mallard。",
   },
   performance: {
-    threadLimit: "会话大小上限",
-    threadLimitHint: "比较、上传和下载时，跳过超过此上限的对话记录。",
     previewLimit: "预览大小上限",
     previewLimitHint: "限制消息和工具调用的预览长度，完整对话记录不受影响。",
     workers: "比较线程数",

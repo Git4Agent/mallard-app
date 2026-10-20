@@ -5,8 +5,7 @@
 
 use super::timeline_sources::{capture, TimelineSources};
 use crate::app_settings::{
-    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
-    timeline_tool_preview_bytes,
+    timeline_message_preview_bytes, timeline_page_content_bytes, timeline_tool_preview_bytes,
 };
 use crate::codex_subagents::{RolloutLookup, SubagentActivity, SubagentActivityKind};
 use crate::providers::timeparse::parse_timestamp_value;
@@ -34,7 +33,7 @@ use std::path::{Component, Path, PathBuf};
 /// Match the transcript bound so every record admitted by the transcript
 /// safety policy can also be indexed and opened by session detail.
 pub(crate) fn max_line_bytes() -> usize {
-    conversation_file_limit_bytes() as usize
+    mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize
 }
 const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
@@ -787,10 +786,12 @@ struct TurnContext {
     offset: u64,
     model: Option<String>,
     effort: Option<String>,
+    working_directory: Option<String>,
 }
 
 #[derive(Default)]
 struct TimelineBuilder {
+    current_working_directory: Option<String>,
     events: Vec<PendingTimelineEvent>,
     tool_positions: BTreeMap<String, usize>,
     /// `turn_context` records by the turn they describe, in file order; and
@@ -864,14 +865,24 @@ impl TimelineBuilder {
     }
 
     /// A turn's recorded settings, bounded as the events are.
-    fn observe_turn_context(&mut self, payload: &Value, source: SessionSourceSpan) {
+    fn observe_turn_context(
+        &mut self,
+        payload: &Value,
+        source: SessionSourceSpan,
+        timeline: &SessionTimelineContext<'_>,
+    ) {
         if self.contexts_in_order.len() >= MAX_TIMELINE_EVENTS {
             return;
+        }
+        if payload.get("cwd").is_some() {
+            self.current_working_directory =
+                timeline.working_directory(payload.get("cwd").and_then(Value::as_str));
         }
         let context = TurnContext {
             offset: source.offset,
             model: setting_token(string_alias(payload, &["model"])),
             effort: setting_token(string_alias(payload, &["effort"])),
+            working_directory: self.current_working_directory.clone(),
         };
         if let Some(turn_id) =
             string_alias(payload, &["turn_id", "turnId"]).filter(|turn_id| !turn_id.is_empty())
@@ -926,6 +937,7 @@ impl TimelineBuilder {
         }
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
+                working_directory: self.current_working_directory.clone(),
                 event_id,
                 ordinal: 0,
                 timestamp,
@@ -1023,6 +1035,7 @@ impl TimelineBuilder {
         };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
+                working_directory: None,
                 event_id: format!("codex:tool:{call_id}"),
                 ordinal: 0,
                 timestamp,
@@ -1090,6 +1103,7 @@ impl TimelineBuilder {
                         let parent = self.latest_assistant_event_id(&turn_id);
                         self.events.push(PendingTimelineEvent {
                             entry: SessionTimelineIndexEntry {
+                                working_directory: None,
                                 event_id: format!("codex:agent:{}", activity.event_id),
                                 ordinal: 0,
                                 timestamp,
@@ -1334,12 +1348,19 @@ impl TimelineBuilder {
                     | SessionTimelineEventKind::Response
                     | SessionTimelineEventKind::IntermediateStep
             ) {
-                pending.entry.settings = message_settings(
+                if let Some(context) = message_context(
                     &pending.entry,
                     &turn_contexts,
                     &contexts_in_order,
                     self.saw_family,
-                );
+                ) {
+                    pending.entry.settings = SessionMessageSettings::recorded(
+                        context.model.clone(),
+                        context.effort.clone(),
+                        SessionMessageSettingsSource::Turn,
+                    );
+                    pending.entry.working_directory = context.working_directory.clone();
+                }
             }
         }
 
@@ -1386,14 +1407,14 @@ impl TimelineBuilder {
 /// first. Never another turn's; a turn without a context reads as nothing
 /// recorded. The legacy stream names no turn on its items, so there a message
 /// takes the latest context before it, which is its own turn's.
-fn message_settings(
+fn message_context<'a>(
     entry: &SessionTimelineIndexEntry,
-    turn_contexts: &BTreeMap<String, Vec<TurnContext>>,
-    contexts_in_order: &[TurnContext],
+    turn_contexts: &'a BTreeMap<String, Vec<TurnContext>>,
+    contexts_in_order: &'a [TurnContext],
     canonical: bool,
-) -> SessionMessageSettings {
+) -> Option<&'a TurnContext> {
     let offset = entry.source.offset;
-    let context = match entry
+    match entry
         .turn_id
         .as_ref()
         .and_then(|turn_id| turn_contexts.get(turn_id))
@@ -1412,14 +1433,6 @@ fn message_settings(
             .iter()
             .rev()
             .find(|context| context.offset <= offset),
-    };
-    match context {
-        Some(context) => SessionMessageSettings::recorded(
-            context.model.clone(),
-            context.effort.clone(),
-            SessionMessageSettingsSource::Turn,
-        ),
-        None => SessionMessageSettings::none(),
     }
 }
 
@@ -2441,6 +2454,14 @@ pub(crate) fn build_timeline_index(
                 continue;
             }
             match outer_type.as_str() {
+                "sessionmeta" => {
+                    let directory = context.working_directory(string_alias(
+                        payload,
+                        &["cwd", "working_directory", "project_path"],
+                    ));
+                    canonical.current_working_directory = directory.clone();
+                    legacy.current_working_directory = directory;
+                }
                 "eventmsg" => {
                     let payload_type = normalized_type(payload.get("type").and_then(Value::as_str));
                     match payload_type.as_str() {
@@ -2467,8 +2488,8 @@ pub(crate) fn build_timeline_index(
                     consume_legacy_response_item(&mut legacy, payload, source, timestamp, context)
                 }
                 "turncontext" => {
-                    canonical.observe_turn_context(payload, source);
-                    legacy.observe_turn_context(payload, source);
+                    canonical.observe_turn_context(payload, source, context);
+                    legacy.observe_turn_context(payload, source, context);
                 }
                 _ => {}
             }
@@ -2886,6 +2907,7 @@ pub(crate) fn read_timeline_page(
             }
         }
         events.push(SessionTimelineEvent {
+            working_directory: entry.working_directory.clone(),
             event_id: entry.event_id.clone(),
             ordinal: entry.ordinal,
             timestamp: entry.timestamp,
@@ -4104,6 +4126,74 @@ mod tests {
             .clone()
     }
 
+    #[test]
+    fn message_working_directories_follow_turns_without_changing_parser_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir_all(root.join("output")).unwrap();
+        let transcript = temp.path().join("rollout.jsonl");
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"session_meta","payload":{"id":"session-1","cwd":root}}),
+                turn_item(
+                    "2026-08-07T00:00:00Z",
+                    "turn-1",
+                    user_item("u-1", "Make a clip"),
+                ),
+                json!({"type":"turn_context","payload":{"turn_id":"turn-1","cwd":root.join("output")}}),
+                turn_item(
+                    "2026-08-07T00:00:01Z",
+                    "turn-1",
+                    final_item("a-1", "[clip](clip.mp4)"),
+                ),
+                json!({"type":"turn_context","payload":{"turn_id":"turn-2","cwd":root}}),
+                turn_item(
+                    "2026-08-07T00:00:02Z",
+                    "turn-2",
+                    final_item("a-2", "[clip](output/clip.mp4)"),
+                ),
+                json!({"type":"turn_context","payload":{"turn_id":"turn-3","cwd":temp.path().join("outside")}}),
+                turn_item(
+                    "2026-08-07T00:00:03Z",
+                    "turn-3",
+                    final_item("a-3", "[clip](clip.mp4)"),
+                ),
+            ],
+        );
+        let context = context(&root);
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        assert_eq!(index.parser_version, 1);
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([
+                SessionTimelineEventKind::Prompt,
+                SessionTimelineEventKind::Response,
+            ]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query, &context).unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.working_directory.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("output"), Some("output"), Some("."), None]
+        );
+        let mut old = serde_json::to_value(&index).unwrap();
+        old["events"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("working_directory");
+        assert!(serde_json::from_value::<SessionTimelineIndex>(old).is_err());
+        assert!(serde_json::from_value::<SessionTimelineIndex>(
+            serde_json::to_value(&index).unwrap()
+        )
+        .is_ok());
+    }
+
     fn turn_settings(model: Option<&str>, effort: Option<&str>) -> SessionMessageSettings {
         SessionMessageSettings::recorded(
             model.map(ToOwned::to_owned),
@@ -4436,6 +4526,7 @@ mod tests {
         let pending = |event_id: String, turn_id: Option<&str>, order, kind, assistant_phase| {
             PendingTimelineEvent {
                 entry: SessionTimelineIndexEntry {
+                    working_directory: None,
                     event_id: event_id.clone(),
                     ordinal: 0,
                     timestamp: None,
@@ -4720,7 +4811,9 @@ mod tests {
         let selected_root = temp.path().join("selected/project1_copy");
         let aliases = vec![canonical_root.clone(), selected_root.clone()];
         let inside = selected_root.join("generated/session-paths/inside-alpha.txt");
-        let outside = temp.path().join("selected/project1_copy_external/outside-alpha.txt");
+        let outside = temp
+            .path()
+            .join("selected/project1_copy_external/outside-alpha.txt");
         write_jsonl(
             &transcript,
             vec![
@@ -4800,7 +4893,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
+        assert_eq!(
+            max_line_bytes() as u64,
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
+        );
         assert!(fs::metadata(&transcript).unwrap().len() > 4 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert!(!index.truncated);

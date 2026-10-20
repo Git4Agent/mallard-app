@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::app_settings::conversation_file_limit_bytes;
 use mallard_domain::{RootPhysicalMapping, SourceFileIdentity, SourceFileState};
 
 pub const PROBE_WINDOW_BYTES: u64 = 4_096;
@@ -356,7 +355,7 @@ fn decoded_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
     use std::io::Read;
 
     let (compressed, stamp) = plain_snapshot(path)?;
-    let limit = conversation_file_limit_bytes();
+    let limit = mallard_domain::MAX_CONVERSATION_FILE_BYTES;
     let mut bytes = Vec::new();
     zstd::stream::read::Decoder::with_buffer(std::io::Cursor::new(compressed.as_slice()))
         .and_then(|decoder| {
@@ -396,7 +395,7 @@ fn plain_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
 
     let mut file = open_no_follow(path)?;
     let stamp = handle_stamp(&file, path)?;
-    if stamp.len > conversation_file_limit_bytes() {
+    if stamp.len > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "session transcript '{}' exceeds the bounded transcript limit",
             path.display()
@@ -404,11 +403,11 @@ fn plain_snapshot(path: &Path) -> Result<(Vec<u8>, SourceStamp), String> {
     }
     let mut bytes = Vec::with_capacity(stamp.len as usize);
     file.by_ref()
-        .take(conversation_file_limit_bytes().saturating_add(1))
+        .take(mallard_domain::MAX_CONVERSATION_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read session transcript '{}': {}", path.display(), error))?;
     let after = handle_stamp(&file, path)?;
-    if bytes.len() as u64 > conversation_file_limit_bytes() {
+    if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "session transcript '{}' exceeds the bounded transcript limit",
             path.display()
@@ -462,7 +461,7 @@ pub fn read_tail_window(path: &Path, mapping: &RootPhysicalMapping) -> Result<Ta
     let mut attempts = 0;
     loop {
         let before = handle_stamp(&file, path)?;
-        if before.len > conversation_file_limit_bytes() {
+        if before.len > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             return Err(format!(
                 "session transcript '{}' exceeds the bounded transcript limit",
                 path.display()
@@ -530,7 +529,7 @@ pub fn read_suffix_window(path: &Path, max_window_bytes: u64) -> Result<TailWind
     let mut attempts = 0;
     loop {
         let before = handle_stamp(&file, path)?;
-        if before.len > conversation_file_limit_bytes() {
+        if before.len > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             return Err(format!(
                 "session transcript '{}' exceeds the bounded transcript limit",
                 path.display()
@@ -571,7 +570,7 @@ pub fn read_suffix_window(path: &Path, max_window_bytes: u64) -> Result<TailWind
 /// the read: a file that changes afterwards no longer carries it.
 pub fn read_range(path: &Path, start: u64, end: u64) -> Result<(Vec<u8>, SourceStamp), String> {
     use std::io::{Read, Seek, SeekFrom};
-    if end < start || end > conversation_file_limit_bytes() {
+    if end < start || end > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "session transcript '{}' range request is out of bounds",
             path.display()
@@ -897,7 +896,7 @@ mod tests {
         let path = temp.path().join("bomb.jsonl.zst");
         let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
         let chunk = vec![b'\n'; 1024 * 1024];
-        for _ in 0..(conversation_file_limit_bytes() / chunk.len() as u64 + 1) {
+        for _ in 0..(mallard_domain::MAX_CONVERSATION_FILE_BYTES / chunk.len() as u64 + 1) {
             encoder.write_all(&chunk).unwrap();
         }
         let stream = encoder.finish().unwrap();

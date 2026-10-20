@@ -95,6 +95,7 @@ export default {
     tokensSplitLabel: "Token 总数：{{total}}。输入 Token 总数：{{input}}。输出 Token 总数：{{output}}",
     tokensLabel: "Token 总数：{{total}}",
     partial: "部分会话指标不可用",
+    unavailable: "统计信息不可用",
     ranFor: "运行了 {{duration}}",
     subagentsTooltip: "子代理 · {{subagents}}\n上传大小 · {{size}}",
     subagentsLabel: "子代理：{{subagents}}。上传大小：{{size}}",

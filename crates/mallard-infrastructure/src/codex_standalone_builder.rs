@@ -20,7 +20,6 @@ use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
-use crate::app_settings::conversation_file_limit_bytes;
 use crate::codex_history_graph::{ResolvedCodexRoot, ResolvedSegment};
 use crate::codex_paginated_projection::project_with_sources;
 use crate::codex_paginated_projection::verify_projection_fixpoint;
@@ -486,7 +485,7 @@ fn reconstruct_codex_root(
             .or_default()
             .insert(0, head_origins);
     }
-    if output.len() as u64 > conversation_file_limit_bytes() {
+    if output.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err("standalone Codex output exceeds the bounded transcript limit".into());
     }
     let output_verification_started = Instant::now();

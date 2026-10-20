@@ -12,9 +12,8 @@ const MARKDOWN_URL_SCHEME = /^[a-z][a-z\d+.-]*:/i;
 
 /**
  * A clean relative descendant path, decoded, or null: absolute paths, URL
- * schemes, and parent traversal stay plain text. A session's text crosses
- * the backend boundary with the project root rewritten to `.`, so its
- * project paths arrive in this form.
+ * schemes, and parent traversal stay plain text. A page may resolve its
+ * own directory context before this shared check.
  */
 export function safeRelativeMarkdownPath(url: string): string | null {
   if (!url || url.startsWith("#") || url.startsWith("/") || url.startsWith("\\")

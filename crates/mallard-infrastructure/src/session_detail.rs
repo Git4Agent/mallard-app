@@ -6,8 +6,7 @@
 //! response bounds, and DTOs that may cross the Tauri boundary.
 
 use crate::app_settings::{
-    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
-    timeline_tool_preview_bytes,
+    timeline_message_preview_bytes, timeline_page_content_bytes, timeline_tool_preview_bytes,
 };
 use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{
@@ -54,11 +53,6 @@ const MAX_PROJECT_MARKDOWN_PATH_BYTES: usize = 4 * 1024;
 /// Raw-byte cap for inline Markdown image embedding. Base64 inflates the IPC
 /// payload by 4/3, so the transported response stays under ~11 MiB.
 const MAX_PROJECT_MARKDOWN_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
-/// Raw-byte cap for an inline Markdown track or clip. The bytes cross the
-/// boundary unencoded and play from a `blob:` URL, so the cap is what the page
-/// holds in memory, the website's limit for the same files.
-const MAX_PROJECT_MARKDOWN_MEDIA_BYTES: u64 = 16 * 1024 * 1024;
-
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionDetailErrorCode {
@@ -80,7 +74,7 @@ pub struct SessionDetailError {
 }
 
 impl SessionDetailError {
-    fn new(code: SessionDetailErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: SessionDetailErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -387,7 +381,7 @@ fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String 
         session,
         timeline_version,
         timeline_message_preview_bytes() as u64,
-        conversation_file_limit_bytes(),
+        mallard_domain::MAX_CONVERSATION_FILE_BYTES,
     )
 }
 
@@ -472,7 +466,22 @@ fn safe_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn canonical_project_markdown_path(
+fn validate_working_directory(directory: Option<&str>) -> SessionDetailResult<()> {
+    if let Some(directory) = directory {
+        if directory.len() > MAX_PROJECT_MARKDOWN_PATH_BYTES
+            || directory.chars().any(char::is_control)
+            || directory.contains('\\')
+            || (directory != "." && !safe_relative_path(directory))
+        {
+            return Err(invalid_request(
+                "The message working directory is not a project-relative path.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn canonical_project_markdown_path(
     project_root: &Path,
     relative_path: &str,
 ) -> SessionDetailResult<PathBuf> {
@@ -596,33 +605,6 @@ fn bounded_project_markdown_image(path: &Path) -> SessionDetailResult<ProjectMar
     })
 }
 
-/// Read one Markdown-referenced project track or clip for an inline player:
-/// the same canonical/no-follow validation, regular-file check and size cap
-/// read before the bytes as images, then a magic-byte whitelist of audio and
-/// video containers. The raw bytes go to the webview, which plays them from a
-/// `blob:` URL with the type its extension names.
-pub fn read_project_markdown_media(
-    repository: &LocalStateRepository,
-    local_project_id: &LocalProjectId,
-    relative_path: &str,
-) -> SessionDetailResult<Vec<u8>> {
-    let path = resolve_project_markdown_path(repository, local_project_id, relative_path)?;
-    bounded_project_markdown_media(&path)
-}
-
-/// The bounded read half of [`read_project_markdown_media`], over an
-/// already-validated canonical project path.
-fn bounded_project_markdown_media(path: &Path) -> SessionDetailResult<Vec<u8>> {
-    let bytes =
-        bounded_project_markdown_bytes(path, MAX_PROJECT_MARKDOWN_MEDIA_BYTES, "media file")?;
-    if !is_markdown_media(&bytes) {
-        return Err(invalid_request(
-            "Only WAV, MP3, AAC, FLAC, Ogg, MP4, QuickTime, and WebM project media can play.",
-        ));
-    }
-    Ok(bytes)
-}
-
 /// One regular project file, read whole under `cap`: the size is checked from
 /// the metadata before the read and again on the bytes, so a file growing
 /// between the two never reaches the webview past the cap.
@@ -657,25 +639,6 @@ fn bounded_project_markdown_bytes(
         return Err(too_large());
     }
     Ok(bytes)
-}
-
-/// The audio and video containers an inline player takes, by magic bytes.
-/// Whether the webview can decode a given codec is the page's question; this
-/// only keeps anything that is not a media container out of a player.
-fn is_markdown_media(bytes: &[u8]) -> bool {
-    let riff_wave = bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE";
-    // ISO base media (MP4, M4A, MOV): a `ftyp` box first.
-    let iso_media = bytes.len() >= 8 && &bytes[4..8] == b"ftyp";
-    // MPEG audio frames and ADTS AAC share the 11-bit sync; either is audio.
-    let mpeg_sync = bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0;
-    riff_wave
-        || iso_media
-        || mpeg_sync
-        || bytes.starts_with(b"ID3")
-        || bytes.starts_with(b"fLaC")
-        || bytes.starts_with(b"OggS")
-        // EBML: WebM and Matroska.
-        || bytes.starts_with(b"\x1A\x45\xDF\xA3")
 }
 
 /// The supported embeddable formats by magic bytes. SVG is deliberately
@@ -770,6 +733,7 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
     let mut previous_ordinal = None;
     for event in &index.events {
         ensure_identifier("event id", &event.event_id)?;
+        validate_working_directory(event.working_directory.as_deref())?;
         if event.kind == SessionTimelineEventKind::Checkpoint {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
@@ -1000,6 +964,7 @@ fn validate_page_slice(
     let mut page_content_bytes = 0usize;
     for event in &slice.events {
         ensure_identifier("event id", &event.event_id)?;
+        validate_working_directory(event.working_directory.as_deref())?;
         if event.kind == SessionTimelineEventKind::Checkpoint || event.checkpoint.is_some() {
             return Err(SessionDetailError::new(
                 SessionDetailErrorCode::ProviderError,
@@ -1502,7 +1467,7 @@ fn load_or_build_whole_index(
                 && entry_matches_limits(
                     entry,
                     timeline_message_preview_bytes() as u64,
-                    conversation_file_limit_bytes(),
+                    mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                 )
                 && entry.summary.session_id == session.provider_session_id
                 && entry.summary.is_internal_subagent == session.child.is_some()
@@ -1556,7 +1521,7 @@ fn load_or_build_whole_index(
             modified_nanos: expected_nanos,
             timeline_version,
             preview_budget_bytes: timeline_message_preview_bytes() as u64,
-            conversation_limit_bytes: conversation_file_limit_bytes(),
+            conversation_limit_bytes: mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             summary: summary.clone(),
             index: index.clone(),
         };
@@ -1591,6 +1556,7 @@ fn checkpoint_event(
     checkpoint: SessionCheckpoint,
 ) -> SessionTimelineEvent {
     SessionTimelineEvent {
+        working_directory: None,
         event_id: checkpoint_event_id(&checkpoint),
         ordinal: index
             .events
@@ -1856,6 +1822,14 @@ fn summarize_session(
 }
 
 fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String {
+    sanitize_boundary_text_from_directory(value, session, ".")
+}
+
+fn sanitize_boundary_text_from_directory(
+    value: &str,
+    session: &ResolvedLocalSession,
+    root: &str,
+) -> String {
     let transcript = session.transcript_path.to_string_lossy();
     let provider_home = session.provider_home.to_string_lossy();
     let mut redacted = value
@@ -1863,13 +1837,13 @@ fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String
         .replace(provider_home.as_ref(), "<provider-home>");
     for project_root in &session.project_root_aliases {
         let project_root = project_root.to_string_lossy();
-        redacted = replace_sensitive_path_occurrences(&redacted, &project_root, ".");
+        redacted = replace_sensitive_path_occurrences(&redacted, &project_root, root);
         // Markdown also uses forward slashes for Windows project paths.
         if root_family(&project_root) == Some(RootFamily::Windows) {
             redacted = replace_sensitive_path_occurrences(
                 &redacted,
                 &project_root.replace('\\', "/"),
-                ".",
+                root,
             );
         }
     }
@@ -1879,7 +1853,17 @@ fn sanitize_boundary_text(value: &str, session: &ResolvedLocalSession) -> String
 fn sanitize_timeline_events(events: &mut [SessionTimelineEvent], session: &ResolvedLocalSession) {
     for event in events {
         if let Some(text) = event.text.as_mut() {
-            *text = sanitize_boundary_text(text, session);
+            // Absolute in-project destinations must still name the same file
+            // when the message was written below the root. Express the root
+            // relative to that message's cwd; the frontend normalizes the
+            // resulting path before the canonical/no-follow file boundary.
+            let root = event
+                .working_directory
+                .as_deref()
+                .filter(|directory| *directory != ".")
+                .map(|directory| vec![".."; directory.split('/').count()].join("/"))
+                .unwrap_or_else(|| ".".to_string());
+            *text = sanitize_boundary_text_from_directory(text, session, &root);
         }
         if let Some(tool) = event.tool.as_mut() {
             tool.native_name = sanitize_boundary_text(&tool.native_name, session);
@@ -2595,7 +2579,7 @@ fn stored_snapshot_id(stored: &StoredSessionTranscript, timeline_version: u32) -
             stored.wire_sha256(),
             timeline_version,
             timeline_message_preview_bytes() as u64,
-            conversation_file_limit_bytes(),
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             stored.project_root().display()
         )
         .as_bytes(),
@@ -2751,6 +2735,7 @@ mod tests {
             sources: Vec::new(),
             parser_version: 1,
             events: vec![SessionTimelineIndexEntry {
+                working_directory: None,
                 event_id: "event-1".to_string(),
                 ordinal: 0,
                 timestamp: Some(1),
@@ -3101,7 +3086,7 @@ mod tests {
             .timeline_version();
         entry.index.parser_version = entry.timeline_version;
         entry.preview_budget_bytes = timeline_message_preview_bytes() as u64;
-        entry.conversation_limit_bytes = conversation_file_limit_bytes();
+        entry.conversation_limit_bytes = mallard_domain::MAX_CONVERSATION_FILE_BYTES;
         entry.summary.title = Some("Cached summary".to_string());
         let key = cache_key(&session);
         let directory = repository.root().join("session_timeline_cache");
@@ -3276,6 +3261,24 @@ mod tests {
     }
 
     #[test]
+    fn message_absolute_links_keep_their_target_after_cwd_redaction() {
+        let session = sanitization_session();
+        let mut event: SessionTimelineEvent = serde_json::from_value(serde_json::json!({
+            "event_id":"reply", "ordinal":0, "kind":"response", "quality":"exact",
+            "working_directory":"output/scenes",
+            "text":"[local](clip.mp4) [root](/tmp/run/project1/readme.md) ![poster](/tmp/run/project1/output/poster.png)"
+        })).unwrap();
+        sanitize_timeline_events(std::slice::from_mut(&mut event), &session);
+        assert_eq!(
+            event.text.as_deref(),
+            Some("[local](clip.mp4) [root](../../readme.md) ![poster](../../output/poster.png)")
+        );
+        for directory in ["../outside", "/outside", "bad\0path", "output\\..\\outside"] {
+            assert!(validate_working_directory(Some(directory)).is_err());
+        }
+    }
+
+    #[test]
     fn session_text_sanitizes_windows_forward_slash_media_and_download_links() {
         let mut session = sanitization_session();
         session.project_root = PathBuf::from(r"D:\fixture\project1");
@@ -3394,6 +3397,7 @@ mod tests {
     fn timeline_page_accepts_one_mib_fields_and_enforces_the_aggregate_cap() {
         let index = index_with_path("src/main.rs");
         let tool_event = SessionTimelineEvent {
+            working_directory: None,
             event_id: "event-1".to_string(),
             ordinal: 0,
             timestamp: Some(1),
@@ -3444,6 +3448,7 @@ mod tests {
         assert_eq!(error.code, SessionDetailErrorCode::ProviderError);
 
         let message = |event_id: &str, text: String| SessionTimelineEvent {
+            working_directory: None,
             event_id: event_id.to_string(),
             ordinal: 0,
             timestamp: None,
@@ -3585,72 +3590,6 @@ mod tests {
         drop(file);
         assert_eq!(
             bounded_project_markdown_image(&oversized).unwrap_err().code,
-            SessionDetailErrorCode::ResponseTooLarge,
-        );
-    }
-
-    #[test]
-    fn project_markdown_media_are_sniffed_bounded_regular_files() {
-        let sandbox = tempfile::tempdir().unwrap();
-        let project = sandbox.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-
-        // Each supported container is recognized by its magic bytes and
-        // returned whole, unencoded.
-        let samples: [(&str, &[u8]); 8] = [
-            ("peaceful_music.wav", b"RIFF\x24\x00\x00\x00WAVEfmt "),
-            ("song.mp3", b"ID3\x04\x00\x00\x00\x00\x00\x00"),
-            ("frames.mp3", b"\xFF\xFB\x90\x64\x00"),
-            ("voice.aac", b"\xFF\xF1\x50\x80\x00"),
-            ("take.flac", b"fLaC\x00\x00\x00\x22"),
-            ("loop.ogg", b"OggS\x00\x02\x00\x00"),
-            ("clip.mp4", b"\x00\x00\x00\x18ftypmp42"),
-            ("clip.webm", b"\x1A\x45\xDF\xA3\x9F\x42\x86\x81"),
-        ];
-        for (name, bytes) in samples {
-            let path = project.join(name);
-            fs::write(&path, bytes).unwrap();
-            assert_eq!(
-                bounded_project_markdown_media(&path).unwrap(),
-                bytes,
-                "{name}"
-            );
-        }
-
-        // The declared extension is never trusted: a script called .wav and a
-        // picture called .mp4 are not media.
-        let fake = project.join("fake.wav");
-        fs::write(&fake, b"#!/bin/sh\necho pwned\n").unwrap();
-        assert_eq!(
-            bounded_project_markdown_media(&fake).unwrap_err().code,
-            SessionDetailErrorCode::InvalidRequest,
-        );
-        let picture = project.join("picture.mp4");
-        fs::write(&picture, b"\x89PNG\r\n\x1a\n0000").unwrap();
-        assert_eq!(
-            bounded_project_markdown_media(&picture).unwrap_err().code,
-            SessionDetailErrorCode::InvalidRequest,
-        );
-
-        // Directories and missing files are typed, not played.
-        assert_eq!(
-            bounded_project_markdown_media(&project).unwrap_err().code,
-            SessionDetailErrorCode::InvalidRequest,
-        );
-        assert_eq!(
-            bounded_project_markdown_media(&project.join("missing.wav"))
-                .unwrap_err()
-                .code,
-            SessionDetailErrorCode::NotFound,
-        );
-
-        // The size cap rejects before reading the bytes.
-        let oversized = project.join("long.mp4");
-        let file = fs::File::create(&oversized).unwrap();
-        file.set_len(MAX_PROJECT_MARKDOWN_MEDIA_BYTES + 1).unwrap();
-        drop(file);
-        assert_eq!(
-            bounded_project_markdown_media(&oversized).unwrap_err().code,
             SessionDetailErrorCode::ResponseTooLarge,
         );
     }

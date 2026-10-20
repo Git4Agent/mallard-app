@@ -2,8 +2,7 @@
 
 use super::codec::ClaudeSessionIdentityTracker;
 use crate::app_settings::{
-    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
-    timeline_tool_preview_bytes,
+    timeline_message_preview_bytes, timeline_page_content_bytes, timeline_tool_preview_bytes,
 };
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
@@ -28,7 +27,7 @@ const TITLE_CHARS: usize = 120;
 /// One record's read bound tracks the transcript bound: every admitted file
 /// can be indexed line by line.
 fn max_line_bytes() -> usize {
-    conversation_file_limit_bytes() as usize
+    mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize
 }
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
@@ -47,11 +46,11 @@ fn is_agent_tool(name: &str) -> bool {
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
-    if meta.len() > conversation_file_limit_bytes() {
+    if meta.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Claude session '{}' exceeds {} bytes",
             path.display(),
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ));
     }
     fs::read(path).map_err(|e| format!("read '{}': {}", path.display(), e))
@@ -166,10 +165,10 @@ pub(crate) fn summarize_child_file(
 }
 
 pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
-    if bytes.len() as u64 > conversation_file_limit_bytes() {
+    if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Claude session exceeds {} bytes",
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ));
     }
     let mut summary = SummaryAccumulator::new();
@@ -190,10 +189,10 @@ pub(crate) fn analyze_and_summarize(
         crate::conversation_codec::parsed_records(bytes).inspect(|record| summary.observe(record));
     let analysis = super::codec::analyze_claude_records(bytes, &mut records);
     records.for_each(drop);
-    let summary = if bytes.len() as u64 > conversation_file_limit_bytes() {
+    let summary = if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         Err(format!(
             "Claude session exceeds {} bytes",
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ))
     } else {
         summary.finish()
@@ -595,6 +594,7 @@ impl ClaudeTimelineBuilder {
         };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
+                working_directory: None,
                 event_id,
                 ordinal: 0,
                 timestamp,
@@ -729,6 +729,7 @@ impl ClaudeTimelineBuilder {
         };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
+                working_directory: None,
                 event_id: format!("claude:tool:{call_id}"),
                 ordinal: 0,
                 timestamp,
@@ -876,6 +877,7 @@ impl ClaudeTimelineBuilder {
             }
             self.events.push(PendingTimelineEvent {
                 entry: SessionTimelineIndexEntry {
+                    working_directory: None,
                     event_id: group.event_id,
                     ordinal: 0,
                     timestamp: group.timestamp,
@@ -1560,11 +1562,11 @@ pub(crate) fn build_timeline_index(
 ) -> Result<SessionTimelineIndex, String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("inspect '{}': {error}", path.display()))?;
-    if metadata.len() > conversation_file_limit_bytes() {
+    if metadata.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Claude session '{}' exceeds {} bytes",
             path.display(),
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ));
     }
     let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
@@ -1906,11 +1908,14 @@ pub(crate) fn read_timeline_page(
             position += 1;
             continue;
         }
-        let text = if is_call_kind(entry.kind) {
-            None
+        let (text, working_directory) = if is_call_kind(entry.kind) {
+            (None, None)
         } else {
             let value = read_source_value(&mut file, entry.source)?;
-            bounded_text(record_text(&value), timeline_message_preview_bytes()).0
+            (
+                bounded_text(record_text(&value), timeline_message_preview_bytes()).0,
+                context.working_directory(value.get("cwd").and_then(Value::as_str)),
+            )
         };
         let is_agent = entry.kind == SessionTimelineEventKind::AgentCall;
         let tool = if let Some(tool_index) = &entry.tool {
@@ -1976,6 +1981,7 @@ pub(crate) fn read_timeline_page(
             }
         }
         events.push(SessionTimelineEvent {
+            working_directory,
             event_id: entry.event_id.clone(),
             ordinal: entry.ordinal,
             timestamp: entry.timestamp,
@@ -2316,6 +2322,66 @@ mod tests {
 
     fn count_value(count: &SessionCount) -> u64 {
         count.value.expect("supported count")
+    }
+
+    #[test]
+    fn messages_keep_their_own_project_relative_working_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir_all(root.join("output")).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let reply = |id: &str, cwd: Value| {
+            json!({
+                "type":"assistant", "uuid":id, "sessionId":"session-1", "cwd":cwd,
+                "message":{"id":id,"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"[clip](clip.mp4)"}]}
+            })
+        };
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u1","sessionId":"session-1","cwd":root,"message":{"role":"user","content":"Show the clip"}}),
+                reply("a1", json!(root.join("output"))),
+                reply("a2", json!(root)),
+                reply("a3", json!(temp.path().join("outside"))),
+                reply("a4", Value::Null),
+            ],
+        );
+        let context = context(&root);
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        assert_eq!(index.parser_version, 1);
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::Response]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query, &context).unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.working_directory.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("output"), Some("."), None, None]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn message_cwd_accepts_a_canonical_project_alias_but_not_an_outside_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap().join("project");
+        fs::create_dir_all(root.join("output")).unwrap();
+        let alias = temp.path().join("selected");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let context = context(&root);
+        assert_eq!(
+            context
+                .working_directory(alias.join("output").to_str())
+                .as_deref(),
+            Some("output")
+        );
+        assert_eq!(context.working_directory(temp.path().to_str()), None);
     }
 
     #[test]
@@ -3210,7 +3276,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
+        assert_eq!(
+            max_line_bytes() as u64,
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
+        );
         assert!(fs::metadata(&transcript).unwrap().len() > 2 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert_eq!(index.parser_version, TIMELINE_PARSER_VERSION);
@@ -3343,7 +3412,9 @@ mod tests {
         let selected_root = canonical_root.join("alias");
         let aliases = vec![canonical_root.clone(), selected_root.clone()];
         let inside = selected_root.join("src/lib.rs");
-        let outside = temp.path().join("project_external/alias_external/outside.rs");
+        let outside = temp
+            .path()
+            .join("project_external/alias_external/outside.rs");
         write_jsonl(
             &transcript,
             vec![

@@ -21,7 +21,7 @@ use crate::providers::traits::ScanFailure;
 use mallard_domain::portable::contracts;
 use mallard_domain::{
     self as domain, hex_lower, sha256_hex, ApplyPolicyCoordinate, ResourceKindCoordinate,
-    ResourceKindPrimitive,
+    ResourceKindPrimitive, MAX_PROJECT_CONTENT_FILE_BYTES,
 };
 
 const MAX_DISCOVERED_FILES: usize = 20_000;
@@ -45,10 +45,10 @@ pub fn kind_primitive(kind: &ResourceKindCoordinate) -> Option<ResourceKindPrimi
 }
 
 fn capture_file_limit(kind: &ResourceKindCoordinate) -> u64 {
-    if kind_primitive(kind) == Some(ResourceKindPrimitive::Conversation) {
-        crate::app_settings::conversation_file_limit_bytes()
-    } else {
-        MAX_FILE_BYTES
+    match kind_primitive(kind) {
+        Some(ResourceKindPrimitive::Conversation) => mallard_domain::MAX_CONVERSATION_FILE_BYTES,
+        Some(ResourceKindPrimitive::ProjectContentFile) => MAX_PROJECT_CONTENT_FILE_BYTES,
+        _ => MAX_FILE_BYTES,
     }
 }
 
@@ -1292,13 +1292,13 @@ fn discover_generic_project_content(
             )?;
             continue;
         }
-        if meta.len() > MAX_FILE_BYTES {
+        if meta.len() > MAX_PROJECT_CONTENT_FILE_BYTES {
             add_blocked_project_content_candidate(
                 discovery,
                 &relative,
                 &format!(
                     "File exceeds the {} byte project-content limit",
-                    MAX_FILE_BYTES
+                    MAX_PROJECT_CONTENT_FILE_BYTES
                 ),
             )?;
             continue;
@@ -1370,7 +1370,7 @@ fn add_project_content_file(
         .map_err(|error| format!("reinspect '{}': {}", path.display(), error))?;
     if after.file_type().is_symlink()
         || !after.is_file()
-        || bytes.len() as u64 > MAX_FILE_BYTES
+        || bytes.len() as u64 > MAX_PROJECT_CONTENT_FILE_BYTES
         || bytes.len() as u64 != before.len()
         || before.len() != after.len()
         || modified_secs(before) != modified_secs(&after)
@@ -1468,8 +1468,8 @@ fn read_project_content_bytes(path: &Path, expected_len: u64) -> Result<Vec<u8>,
     let file = options
         .open(path)
         .map_err(|error| format!("read '{}': {}", path.display(), error))?;
-    let mut bytes = Vec::with_capacity(expected_len.min(MAX_FILE_BYTES) as usize);
-    file.take(MAX_FILE_BYTES.saturating_add(1))
+    let mut bytes = Vec::with_capacity(expected_len.min(MAX_PROJECT_CONTENT_FILE_BYTES) as usize);
+    file.take(MAX_PROJECT_CONTENT_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read '{}': {}", path.display(), error))?;
     Ok(bytes)
@@ -3356,8 +3356,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
+        let at_limit = fs::File::create(project.join("at-limit.bin")).unwrap();
+        at_limit.set_len(100 * 1024 * 1024).unwrap();
         let oversized = fs::File::create(project.join("oversized.bin")).unwrap();
-        oversized.set_len(MAX_FILE_BYTES + 1).unwrap();
+        oversized.set_len(100 * 1024 * 1024 + 1).unwrap();
         let mut deep = project.clone();
         for index in 0..=MAX_TREE_DEPTH {
             deep.push(format!("d{index}"));
@@ -3366,7 +3368,15 @@ mod tests {
 
         let mut request = CaptureRequest::for_project(&project);
         request.include_project_content = true;
-        let inventory = discover_project(registry(), &request).unwrap();
+        let discovery = discover_full(registry(), &request).unwrap();
+        let inventory = discovery.project_inventory();
+        let at_limit = inventory
+            .resources
+            .iter()
+            .find(|resource| resource.display_name == "at-limit.bin")
+            .unwrap();
+        assert!(at_limit.blocked_reason.is_none());
+        assert!(at_limit.selected_by_default);
         let oversized = inventory
             .resources
             .iter()
@@ -3375,7 +3385,21 @@ mod tests {
         assert!(oversized
             .blocked_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("exceeds")));
+            .is_some_and(|reason| reason.contains("104857600 byte project-content limit")));
+        assert!(!oversized.selected_by_default);
+        let selected =
+            BTreeSet::from([at_limit.resource_id.clone(), oversized.resource_id.clone()]);
+        let captured =
+            capture_from_discovery(registry(), &request, &discovery, &selected, true).unwrap();
+        assert_eq!(
+            captured.files["project/at-limit.bin"].bytes.len(),
+            100 * 1024 * 1024
+        );
+        assert_eq!(
+            captured.unavailable_resource_ids,
+            vec![oversized.resource_id.clone()]
+        );
+        assert!(!captured.files.contains_key("project/oversized.bin"));
         assert!(inventory.blocked_count >= 2);
         assert!(inventory
             .warnings
@@ -3402,7 +3426,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap()
-            .set_len(MAX_FILE_BYTES * 4 + 1)
+            .set_len(MAX_PROJECT_CONTENT_FILE_BYTES * 4 + 1)
             .unwrap();
 
         let mut discovery = Discovery::default();
