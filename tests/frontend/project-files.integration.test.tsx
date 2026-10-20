@@ -17,7 +17,6 @@ import ProjectFilesReviewPage, {
 import PushResourceWorkspace, {
   PushApplyButton,
   includeRequiredProjectContentDirectories,
-  projectFileSelectOffer,
   pushBlockerRevealTarget,
   pushBudgetTotal,
   pushProjectFileWork,
@@ -246,35 +245,79 @@ test("the scan ticks no new file: it opens unticked and New, and the Sessions st
   assert.doesNotMatch(render("project_files", new Set(), leftOut), />New</);
 });
 
-test("Select offers the new files without a finding, and no folder for a file it leaves out", () => {
+test("Files Select includes previously excluded and warned files without acknowledging warnings", () => {
   const flagged = entry("file-run", "file", "scripts/run.sh");
   flagged.warning_code = "executable";
   flagged.warning_digest = "w".repeat(64);
-  const stored = entry("file-s", "file", "notes/plan.md", false);
-  stored.selected_in_recipe = true;
-  stored.storage_present = true;
   const leftOut = entry("file-l", "file", "notes/draft.md", false);
   const scanned: ProjectContentInventory = {
     ...inventory,
+    excluded_resource_ids: [leftOut.descriptor.resource_id],
     entries: [
       ...inventory.entries,
       entry("dir-scripts", "directory", "scripts"),
       flagged,
       entry("dir-empty", "directory", "assets"),
       entry("dir-notes", "directory", "notes", false),
-      stored,
       leftOut,
     ],
   };
-  const offer = projectFileSelectOffer(scanned);
-  // The new file, the recipe's file, and the folder nothing else speaks for.
-  assert.deepEqual([...offer].sort(), ["dir-empty", "file-a", "file-s"]);
-  // Ticking the offer brings the folders of its files, and only those: the
-  // flagged script stays, and its folder does not travel empty.
-  assert.deepEqual(
-    [...includeRequiredProjectContentDirectories(scanned, offer)].sort(),
-    ["dir-docs", "dir-empty", "dir-notes", "dir-specs", "file-a", "file-s"],
+  const defaults = includeRequiredProjectContentDirectories(scanned, new Set(["file-a"]));
+  const render = (selected: Set<string>, acknowledgedWarningDigests = new Set<string>()) => renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true}
+      resources={scanned.entries.map((candidate) => projectContentReviewRow(candidate))}
+      selected={selected} projectDefaults={defaults} busy={false}
+      projectContentInventory={scanned} projectContentScanned showProjectFiles
+      activeStep="project_files" acknowledgedWarningDigests={acknowledgedWarningDigests}
+      onToggleProjectContentWarning={() => undefined}
+      onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined}
+    />,
   );
+  const initial = render(defaults);
+  assert.match(initial, /title="Select all eligible project files \(8\)"/);
+  assert.match(initial, /Select <span class="sync-path-count">8<\/span>/);
+  assert.doesNotMatch(initial, /Unselect <span/);
+  assert.doesNotMatch(initial, /aria-label="Include notes\/draft\.md"[^>]*checked/);
+
+  const all = new Set(scanned.entries.map((candidate) => candidate.descriptor.resource_id));
+  const selected = render(all);
+  assert.match(selected, /Unselect <span class="sync-path-count">8<\/span>/);
+  assert.match(selected, /aria-label="Include notes\/draft\.md"[^>]*checked/);
+  assert.match(selected, /aria-label="Include scripts\/run\.sh"[^>]*checked/);
+  assert.match(selected, /1 needs review/);
+  assert.deepEqual(pushReviewBlockers(all, null, scanned).map((blocker) => blocker.state), ["warning_unacknowledged"]);
+  assert.notEqual(pushReviewDisabledReason({ selected: all, projectContentInventory: scanned, deletionApproved: true }), null);
+
+  const acknowledged = new Set([flagged.warning_digest]);
+  assert.equal(pushReviewDisabledReason({
+    selected: all, projectContentInventory: scanned, acknowledgedWarningDigests: acknowledged, deletionApproved: true,
+  }), null);
+  assert.doesNotMatch(render(all, acknowledged), /1 needs review/);
+});
+
+test("Files Select skips blocked, unselectable, held and removed files", () => {
+  const blocked = { ...entry("blocked", "file", "blocked.md"), blocked_reason: "Cannot read file" };
+  const held: ProjectContentEntry = { ...entry("held", "file", "held.md"), state: "storage_ahead", storage_present: true };
+  const removed = entry("removed", "file", "removed.md");
+  const unavailable = entry("unavailable", "file", "unavailable.md");
+  const included = entry("included", "file", "included.md", false);
+  const scanned = { ...inventory, entries: [blocked, held, removed, unavailable, included] };
+  const resources = scanned.entries.map((candidate) => ({
+    ...projectContentReviewRow(candidate),
+    selectable: candidate !== unavailable,
+  }));
+  const render = (selected: Set<string>) => renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true} resources={resources}
+      selected={selected} projectDefaults={new Set(resources.map((resource) => resource.resource_id))} busy={false}
+      projectContentInventory={scanned} projectContentScanned showProjectFiles
+      projectContentRemovals={new Set(["removed"])} activeStep="project_files"
+      onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined}
+    />,
+  );
+  assert.match(render(new Set()), /title="Select all eligible project files \(1\)"/);
+  assert.match(render(new Set(["included"])), /Unselect <span class="sync-path-count">1<\/span>/);
 });
 
 test("a push sends the scan's review token only when it has file work", () => {

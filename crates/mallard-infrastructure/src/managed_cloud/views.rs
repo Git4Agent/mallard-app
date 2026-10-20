@@ -319,7 +319,7 @@ fn codex_display_transcript(transcript: &[u8]) -> Result<Vec<u8>, String> {
         serde_json::to_writer(&mut bytes, &record)
             .map_err(|error| format!("encode Codex view transcript: {error}"))?;
         bytes.push(b'\n');
-        if bytes.len() as u64 > crate::app_settings::conversation_file_limit_bytes() {
+        if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
             return Err("Codex view transcript exceeds the bounded transcript limit".to_string());
         }
     }

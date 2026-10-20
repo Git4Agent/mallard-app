@@ -215,7 +215,7 @@ fn perform(context: &mut Context, request: &Request) -> Result<Value, String> {
     let storage = &context.storage_id;
     match request.operation.as_str() {
         "conversation_file_limit" => Ok(json!(
-            mallard_infrastructure::app_settings::conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         )),
         "compare" => serde_json::to_value(service.compare_threads(id, storage)?)
             .map_err(|_| "comparison serialization".into()),

@@ -33,10 +33,6 @@ fn default_schema() -> u32 {
     APP_SETTINGS_SCHEMA
 }
 
-fn default_conversation_file_limit_bytes() -> u64 {
-    mallard_domain::MAX_CONVERSATION_FILE_BYTES
-}
-
 fn default_timeline_preview_limit_bytes() -> u64 {
     DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES
 }
@@ -71,8 +67,6 @@ pub struct AppSettings {
     pub update_check_enabled: bool,
     #[serde(default = "default_schema")]
     pub schema: u32,
-    #[serde(default = "default_conversation_file_limit_bytes")]
-    pub conversation_file_limit_bytes: u64,
     #[serde(default = "default_timeline_preview_limit_bytes")]
     pub timeline_preview_limit_bytes: u64,
     #[serde(default = "default_comparison_workers")]
@@ -91,7 +85,6 @@ impl Default for AppSettings {
             push_claude_children: false,
             credential_redaction_enabled: false,
             update_check_enabled: true,
-            conversation_file_limit_bytes: default_conversation_file_limit_bytes(),
             timeline_preview_limit_bytes: DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES,
             comparison_workers: DEFAULT_COMPARISON_WORKERS,
             cloud_transfer_concurrency: DEFAULT_CLOUD_TRANSFER_CONCURRENCY,
@@ -128,8 +121,7 @@ impl AppSettings {
 
     /// Tuning values only: a CLI path or an export setting never purges a cache.
     pub fn tuning_differs(&self, other: &Self) -> bool {
-        self.conversation_file_limit_bytes != other.conversation_file_limit_bytes
-            || self.timeline_preview_limit_bytes != other.timeline_preview_limit_bytes
+        self.timeline_preview_limit_bytes != other.timeline_preview_limit_bytes
             || self.comparison_workers != other.comparison_workers
             || self.cloud_transfer_concurrency != other.cloud_transfer_concurrency
     }
@@ -141,9 +133,6 @@ impl AppSettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != APP_SETTINGS_SCHEMA {
             return Err(format!("unsupported settings schema {}", self.schema));
-        }
-        if !(1024 * 1024..=512 * 1024 * 1024).contains(&self.conversation_file_limit_bytes) {
-            return Err("thread size limit must be between 1 MB and 512 MB".to_string());
         }
         if !(64 * 1024..=2 * 1024 * 1024).contains(&self.timeline_preview_limit_bytes) {
             return Err("preview size limit must be between 64 KB and 2 MB".to_string());
@@ -231,27 +220,19 @@ pub fn save_app_settings(
     write_json_atomic(repository.root(), &path, settings, MAX_SETTINGS_BYTES)
 }
 
-static CONVERSATION_FILE_LIMIT_BYTES: AtomicU64 =
-    AtomicU64::new(mallard_domain::MAX_CONVERSATION_FILE_BYTES);
 static TIMELINE_PREVIEW_LIMIT_BYTES: AtomicU64 =
     AtomicU64::new(DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES);
 static COMPARISON_WORKERS: AtomicU32 = AtomicU32::new(DEFAULT_COMPARISON_WORKERS);
 static CLOUD_TRANSFER_CONCURRENCY: AtomicU32 = AtomicU32::new(DEFAULT_CLOUD_TRANSFER_CONCURRENCY);
 
 /// Make `settings` the values every accessor below returns, process-wide.
-/// The four cells are independent; a reader racing an install may briefly mix
+/// The three cells are independent; a reader racing an install may briefly mix
 /// two settings generations. Every consumer tolerates the mix because each
 /// gate is correct under either value.
 pub fn install_app_settings(settings: &AppSettings) {
-    CONVERSATION_FILE_LIMIT_BYTES.store(settings.conversation_file_limit_bytes, Ordering::Relaxed);
     TIMELINE_PREVIEW_LIMIT_BYTES.store(settings.timeline_preview_limit_bytes, Ordering::Relaxed);
     COMPARISON_WORKERS.store(settings.comparison_workers, Ordering::Relaxed);
     CLOUD_TRANSFER_CONCURRENCY.store(settings.cloud_transfer_concurrency, Ordering::Relaxed);
-}
-
-/// Largest session transcript any path may read, compare, push, or pull.
-pub fn conversation_file_limit_bytes() -> u64 {
-    CONVERSATION_FILE_LIMIT_BYTES.load(Ordering::Relaxed)
 }
 
 /// Maximum UTF-8 bytes returned for one visible timeline message.
@@ -305,7 +286,6 @@ mod tests {
         assert!(!settings.push_codex_children);
         assert!(!settings.push_claude_children);
         assert!(!settings.credential_redaction_enabled);
-        assert_eq!(settings.conversation_file_limit_bytes, 200 * 1024 * 1024);
         assert_eq!(settings.timeline_preview_limit_bytes, 1024 * 1024);
         assert_eq!(settings.comparison_workers, 4);
         assert_eq!(settings.cloud_transfer_concurrency, 6);
@@ -320,20 +300,6 @@ mod tests {
                 "schema",
                 AppSettings {
                     schema: 2,
-                    ..ok.clone()
-                },
-            ),
-            (
-                "thread floor",
-                AppSettings {
-                    conversation_file_limit_bytes: 1024 * 1024 - 1,
-                    ..ok.clone()
-                },
-            ),
-            (
-                "thread ceiling",
-                AppSettings {
-                    conversation_file_limit_bytes: 512 * 1024 * 1024 + 1,
                     ..ok.clone()
                 },
             ),
@@ -383,7 +349,6 @@ mod tests {
             assert!(bad.validate().is_err(), "{label} must be rejected");
         }
         AppSettings {
-            conversation_file_limit_bytes: 512 * 1024 * 1024,
             timeline_preview_limit_bytes: 2 * 1024 * 1024,
             comparison_workers: 16,
             cloud_transfer_concurrency: 16,
@@ -392,7 +357,6 @@ mod tests {
         .validate()
         .unwrap();
         AppSettings {
-            conversation_file_limit_bytes: 1024 * 1024,
             timeline_preview_limit_bytes: 64 * 1024,
             comparison_workers: 1,
             cloud_transfer_concurrency: 1,
@@ -412,13 +376,31 @@ mod tests {
     }
 
     #[test]
+    fn settings_cannot_override_the_fixed_conversation_limit() {
+        let (_temp, repository) = repository();
+        assert_eq!(mallard_domain::MAX_CONVERSATION_FILE_BYTES, 100 * 1024 * 1024);
+        for requested_limit in [1024 * 1024, 512 * 1024 * 1024] {
+            let document = serde_json::json!({
+                "schema": 1,
+                "conversation_file_limit_bytes": requested_limit,
+            });
+            fs::write(settings_path(&repository), document.to_string()).unwrap();
+            let settings = load_app_settings(&repository).unwrap();
+            assert_eq!(settings, AppSettings::default());
+            save_app_settings(&repository, &settings).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(settings_path(&repository)).unwrap()).unwrap();
+            assert!(saved.get("conversation_file_limit_bytes").is_none());
+        }
+    }
+
+    #[test]
     fn save_then_load_round_trips_and_rejects_invalid() {
         let (_temp, repository) = repository();
         let settings = AppSettings {
             push_codex_children: true,
             push_claude_children: true,
             credential_redaction_enabled: true,
-            conversation_file_limit_bytes: 100 * 1024 * 1024,
             timeline_preview_limit_bytes: 512 * 1024,
             comparison_workers: 8,
             cloud_transfer_concurrency: 2,
@@ -498,10 +480,6 @@ mod tests {
     #[test]
     fn accessors_serve_the_installed_snapshot() {
         install_app_settings(&AppSettings::default());
-        assert_eq!(
-            conversation_file_limit_bytes(),
-            mallard_domain::MAX_CONVERSATION_FILE_BYTES
-        );
         assert_eq!(timeline_message_preview_bytes(), 1024 * 1024);
         assert_eq!(timeline_tool_preview_bytes(), 1024 * 1024);
         assert_eq!(timeline_tool_detail_bytes(), 1024 * 1024);

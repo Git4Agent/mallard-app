@@ -136,10 +136,10 @@ test("a scan's Pull and Push tallies follow the verbs its rows name", () => {
     entry("unknown", "unknown.md", "unknown"),
     entry("blocked", "poster.psd", "blocked", {
       entry_type: "blocked",
-      blocked_reason: "File exceeds the 16 MiB project-content limit",
+      blocked_reason: "File exceeds the 100 MiB project-content limit",
       storage_present: false,
     }),
-    entry("blocked-new", "render.mov", "local_only", { blocked_reason: "File exceeds the 16 MiB project-content limit" }),
+    entry("blocked-new", "render.mov", "local_only", { blocked_reason: "File exceeds the 100 MiB project-content limit" }),
     // Directory rows are never drawn, so they are never counted.
     {
       ...entry("dir-assets", "assets", "storage_only", { local_present: false, storage_present: true }),
@@ -382,13 +382,13 @@ test("blocked and storage-only rows say why they cannot act", () => {
   const markup = renderView(inventoryWith([
     entry("file-blocked", "poster.psd", "blocked", {
       entry_type: "blocked",
-      blocked_reason: "File exceeds the 16 MiB project-content limit",
+      blocked_reason: "File exceeds the 100 MiB project-content limit",
       storage_present: false,
     }),
     entry("file-cloud", "press-kit.pdf", "storage_only", { local_present: false, storage_present: true }),
   ]));
   assert.ok(markup.includes("Blocked"), "a blocked row carries its chip");
-  assert.ok(markup.includes("File exceeds the 16 MiB project-content limit"), "the reason travels with the row");
+  assert.ok(markup.includes("File exceeds the 100 MiB project-content limit"), "the reason travels with the row");
   assert.ok(markup.includes("Not on this Mac"), "a cloud-only row's reveal is disabled with the reason");
   assert.ok(markup.includes("Only in Attic R2. Pull to download it here."), "the cloud row states its status against the storage by name");
 });
@@ -456,7 +456,7 @@ function scopedInventory(): ProjectContentInventory {
     entry("both-sides", "notes/both.md", "diverged"),
     entry("blocked", "poster.psd", "blocked", {
       entry_type: "blocked",
-      blocked_reason: "File exceeds the 16 MiB project-content limit",
+      blocked_reason: "File exceeds the 100 MiB project-content limit",
       storage_present: false,
     }),
     entry("same", "same.md", "synced"),

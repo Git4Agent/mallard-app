@@ -509,26 +509,6 @@ export function pushProjectFileCommitImpact(
   return counts;
 }
 
-/** What Select applies on the Files step: what the recipe holds, and every
- *  new entry the scan found nothing against. A new folder is offered by
- *  itself only when it is empty; one that holds entries rides the
- *  required-ancestor rule of whatever is ticked inside it, so a folder whose
- *  only file is flagged does not travel empty. */
-export function projectFileSelectOffer(inventory: ProjectContentInventory): Set<string> {
-  const holdsEntries = new Set<string>();
-  for (const entry of inventory.entries) {
-    const parts = entry.relative_path.split("/");
-    for (let end = 1; end < parts.length; end += 1) holdsEntries.add(parts.slice(0, end).join("/"));
-  }
-  return new Set(inventory.entries
-    .filter((entry) => entry.selected_in_recipe || (
-      entry.undecided
-      && !entry.warning_code
-      && (entry.entry_type !== "directory" || !holdsEntries.has(entry.relative_path))
-    ))
-    .map((entry) => entry.descriptor.resource_id));
-}
-
 /** What a Push has to do with the project folder.
  *
  *  `send`: it changes what storage or the recipe holds — a removal, a tick
@@ -594,6 +574,43 @@ export function pushBudgetTotal(
     : 0;
   const total = sessions + budget.reserved_bytes + projectFiles;
   return { sessions, reserved: budget.reserved_bytes, projectFiles, total, limit: budget.limit_bytes };
+}
+
+/** Fill the file selection in path order without exceeding the whole Push
+ *  budget. Even unchanged selected files are captured when a new file is
+ *  added, so reserve their bytes before choosing any additions. */
+export function selectPushProjectFilesWithinBudget(
+  selected: ReadonlySet<string>,
+  candidates: ReadonlySet<string>,
+  threadComparison?: ThreadSyncComparison | null,
+  inventory?: ProjectContentInventory | null,
+): Set<string> {
+  const next = new Set([...selected].filter((resourceId) => !candidates.has(resourceId)));
+  const budget = pushBudgetTotal(next, threadComparison, inventory);
+  const fixedFileBytes = (inventory?.entries ?? [])
+    .filter((entry) => entry.local_present && next.has(entry.descriptor.resource_id))
+    .reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  let remaining = budget ? budget.limit - budget.sessions - budget.reserved - fixedFileBytes : Infinity;
+  const entries = (inventory?.entries ?? [])
+    .filter((entry) => candidates.has(entry.descriptor.resource_id))
+    .sort((a, b) => (
+      // Keep existing choices first when they still fit.
+      Number(selected.has(b.descriptor.resource_id)) - Number(selected.has(a.descriptor.resource_id))
+      || a.relative_path.localeCompare(b.relative_path)
+    ));
+  const occupiedDirectories = new Set<string>();
+  for (const entry of inventory?.entries ?? []) {
+    const parts = entry.relative_path.split("/");
+    for (let end = 1; end < parts.length; end += 1) occupiedDirectories.add(parts.slice(0, end).join("/"));
+  }
+  for (const entry of entries) {
+    if (entry.entry_type === "directory" && occupiedDirectories.has(entry.relative_path)) continue;
+    const bytes = entry.size ?? 0;
+    if (bytes > remaining) continue;
+    next.add(entry.descriptor.resource_id);
+    remaining -= bytes;
+  }
+  return includeRequiredProjectContentDirectories(inventory, next);
 }
 
 /** Why Push must refuse, or null when it may proceed.
@@ -1058,12 +1075,12 @@ export default function PushResourceWorkspace({
     else next.add(resourceId);
     commitSelection(next);
   };
-  const useRecommendedForStep = () => {
+  const selectStepResources = () => {
     const group = searchGroup;
     const next = new Set(effectiveSelected);
     group.forEach((resource) => next.delete(resource.resource_id));
     group.forEach((resource) => {
-      if (safeProjectDefaults.has(resource.resource_id)) next.add(resource.resource_id);
+      if (stepSelectionIds.has(resource.resource_id)) next.add(resource.resource_id);
     });
     commitSelection(next);
   };
@@ -1117,11 +1134,27 @@ export default function PushResourceWorkspace({
   const searchGroup = searchActive
     ? currentGroup.filter((resource) => resource.category === "conversations" && matchingIds.has(resource.resource_id))
     : currentGroup;
-  const currentDefaults = searchGroup.filter((resource) => safeProjectDefaults.has(resource.resource_id));
-  const currentMatchesDefaults = searchGroup.every((resource) => (
-    effectiveSelected.has(resource.resource_id) === safeProjectDefaults.has(resource.resource_id)
+  // Files use all eligible rows, including earlier exclusions and warnings.
+  // Selecting a warning never acknowledges it; Push still waits for review.
+  const stepCandidateIds = new Set(searchGroup
+    .filter((resource) => activeStep === "project_files"
+      ? selectableIds.has(resource.resource_id) && !projectContentRemovals.has(resource.resource_id)
+      : safeProjectDefaults.has(resource.resource_id))
+    .map((resource) => resource.resource_id));
+  const budgetedFileSelection = activeStep === "project_files"
+    ? selectPushProjectFilesWithinBudget(effectiveSelected, stepCandidateIds, threadComparison, projectContentInventory)
+    : null;
+  const stepSelectionIds = budgetedFileSelection
+    ? new Set([...stepCandidateIds].filter((resourceId) => budgetedFileSelection.has(resourceId)))
+    : stepCandidateIds;
+  const currentMatchesSelection = searchGroup.every((resource) => (
+    effectiveSelected.has(resource.resource_id) === stepSelectionIds.has(resource.resource_id)
   ));
-  const recommendedCount = currentDefaults.length;
+  const selectionCount = stepSelectionIds.size;
+  const filesOverBudget = activeStep === "project_files" && (projectContentInventory?.entries ?? []).some((entry) => (
+    entry.entry_type === "file" && stepCandidateIds.has(entry.descriptor.resource_id)
+    && !stepSelectionIds.has(entry.descriptor.resource_id)
+  ));
 
   return (
     <section className="sync-inline-action-review sync-inline-push-review sync-sync-review-workspace" aria-labelledby="sync-push-resource-title">
@@ -1145,13 +1178,15 @@ export default function PushResourceWorkspace({
           busy={busy}
           listPending={listPending}
           recommendedTitle={searchActive
-            ? t("push.recommendMatching", { count: recommendedCount })
+            ? t("push.recommendMatching", { count: selectionCount })
             : activeStep === "history"
-              ? t("push.recommendSessions", { count: recommendedCount })
-              : t("push.recommendFiles", { count: recommendedCount })}
-          recommendedCount={recommendedCount}
-          recommendedDisabled={currentDefaults.length === 0 || currentMatchesDefaults}
-          onRecommended={useRecommendedForStep}
+              ? t("push.recommendSessions", { count: selectionCount })
+              : filesOverBudget && budgetTotal
+                ? t("push.selectFilesWithinBudget", { count: selectionCount, limit: formatBytes(budgetTotal.limit) })
+                : t("push.selectFiles", { count: selectionCount })}
+          recommendedCount={selectionCount}
+          recommendedDisabled={selectionCount === 0 || currentMatchesSelection}
+          onRecommended={selectStepResources}
           searchActive={searchActive}
           clearDisabled={countSelected(searchGroup, effectiveSelected) === 0}
           onClear={clearStep}
@@ -1273,10 +1308,18 @@ export default function PushResourceWorkspace({
               onScan={onScanProjectFiles}
               onToggle={toggleResource}
               onBulkToggle={(resourceIds, shouldSelect) => {
+                if (shouldSelect) {
+                  const candidates = new Set(resourceIds.filter((resourceId) => (
+                    selectableIds.has(resourceId) && !projectContentRemovals.has(resourceId)
+                  )));
+                  commitSelection(selectPushProjectFilesWithinBudget(
+                    effectiveSelected, candidates, threadComparison, projectContentInventory,
+                  ));
+                  return;
+                }
                 const next = new Set(effectiveSelected);
                 resourceIds.forEach((resourceId) => {
-                  if (shouldSelect) next.add(resourceId);
-                  else if (!requiredProjectDirectories.has(resourceId)) next.delete(resourceId);
+                  if (!requiredProjectDirectories.has(resourceId)) next.delete(resourceId);
                 });
                 commitSelection(next);
               }}

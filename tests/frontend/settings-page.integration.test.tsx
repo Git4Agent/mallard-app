@@ -101,7 +101,7 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // the app's select shell, the folder verb, and both cleanup verbs.
   assert.match(html, /aria-label="Keep log events for"/);
   assert.match(html, /aria-label="Log size cap"/);
-  assert.equal((html.match(/class="sync-select-shell"/g) ?? []).length, 6);
+  assert.equal((html.match(/class="sync-select-shell"/g) ?? []).length, 5);
   assert.match(html, /> Open folder</);
   assert.match(html, /> Clean up now</);
   assert.match(html, />Delete all</);
@@ -120,10 +120,8 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, /On Windows a changed PATH needs a Mallard restart\./);
   assert.doesNotMatch(html, /Detecting…/);
 
-  // The Performance group: four tuning selects on the same shell. The thread
-  // cap defaults to 200 MiB, while the log size cap above stays at 100 MiB.
-  assert.match(html, /aria-label="Thread size limit"[\s\S]{0,600}<option value="200" selected="">200 MB<\/option>/);
-  assert.match(html, /<option value="400">400 MB<\/option>/);
+  // Session size is fixed in the backend; only preview and concurrency are tunable.
+  assert.doesNotMatch(html, /Thread size limit|settings-row-conversation_file_limit_bytes/);
   assert.match(html, /aria-label="Preview size limit"/);
   assert.match(html, /<option value="1024" selected="">1 MB<\/option>/);
   assert.match(html, /<option value="4" selected="">4 workers<\/option>/);
@@ -269,7 +267,7 @@ test("Performance settings persist through the backend tuning document", () => {
   // limits in — a settings change touches no session file, so their stamps
   // would all still hold.
   assert.match(document, /pub const APP_SETTINGS_SCHEMA: u32 = 1;/);
-  assert.match(document, /#\[serde\(default = "default_conversation_file_limit_bytes"\)\]/);
+  assert.doesNotMatch(document, /pub conversation_file_limit_bytes|CONVERSATION_FILE_LIMIT_BYTES: Atomic/);
   assert.match(document, /#\[serde\(default = "default_timeline_preview_limit_bytes"\)\]/);
   assert.match(commands, /update_app_settings_core\(&repository, &settings, \|\| \{/);
   assert.match(commands, /save_app_settings\(repository, settings\)\?;\s*install_app_settings\(settings\);/);

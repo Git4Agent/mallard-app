@@ -2,8 +2,7 @@
 
 use super::codec::ClaudeSessionIdentityTracker;
 use crate::app_settings::{
-    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
-    timeline_tool_preview_bytes,
+    timeline_message_preview_bytes, timeline_page_content_bytes, timeline_tool_preview_bytes,
 };
 use crate::providers::timeparse::parse_timestamp_value;
 use crate::providers::traits::{
@@ -28,7 +27,7 @@ const TITLE_CHARS: usize = 120;
 /// One record's read bound tracks the transcript bound: every admitted file
 /// can be indexed line by line.
 fn max_line_bytes() -> usize {
-    conversation_file_limit_bytes() as usize
+    mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize
 }
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
@@ -47,11 +46,11 @@ fn is_agent_tool(name: &str) -> bool {
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     let meta = fs::metadata(path).map_err(|e| format!("inspect '{}': {}", path.display(), e))?;
-    if meta.len() > conversation_file_limit_bytes() {
+    if meta.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Claude session '{}' exceeds {} bytes",
             path.display(),
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ));
     }
     fs::read(path).map_err(|e| format!("read '{}': {}", path.display(), e))
@@ -166,10 +165,10 @@ pub(crate) fn summarize_child_file(
 }
 
 pub(crate) fn summarize_bytes(bytes: &[u8]) -> Result<SessionFileSummary, String> {
-    if bytes.len() as u64 > conversation_file_limit_bytes() {
+    if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Claude session exceeds {} bytes",
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ));
     }
     let mut summary = SummaryAccumulator::new();
@@ -190,10 +189,10 @@ pub(crate) fn analyze_and_summarize(
         crate::conversation_codec::parsed_records(bytes).inspect(|record| summary.observe(record));
     let analysis = super::codec::analyze_claude_records(bytes, &mut records);
     records.for_each(drop);
-    let summary = if bytes.len() as u64 > conversation_file_limit_bytes() {
+    let summary = if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         Err(format!(
             "Claude session exceeds {} bytes",
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ))
     } else {
         summary.finish()
@@ -1563,11 +1562,11 @@ pub(crate) fn build_timeline_index(
 ) -> Result<SessionTimelineIndex, String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("inspect '{}': {error}", path.display()))?;
-    if metadata.len() > conversation_file_limit_bytes() {
+    if metadata.len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err(format!(
             "Claude session '{}' exceeds {} bytes",
             path.display(),
-            conversation_file_limit_bytes()
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
         ));
     }
     let file = File::open(path).map_err(|error| format!("open '{}': {error}", path.display()))?;
@@ -3277,7 +3276,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
+        assert_eq!(
+            max_line_bytes() as u64,
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
+        );
         assert!(fs::metadata(&transcript).unwrap().len() > 2 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert_eq!(index.parser_version, TIMELINE_PARSER_VERSION);

@@ -3213,7 +3213,7 @@ mod session_refresh_regressions {
             .write(true)
             .open(&fixture.path)
             .unwrap();
-        writer.set_len(conversation_file_limit_bytes() + 1).unwrap();
+        writer.set_len(mallard_domain::MAX_CONVERSATION_FILE_BYTES + 1).unwrap();
         fixture.assert_incomplete(&fixture.refresh());
         drop(writer);
     }

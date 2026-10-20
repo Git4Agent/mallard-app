@@ -2503,7 +2503,7 @@ test("unavailable sessions explain why they cannot be synced", () => {
 });
 
 test("oversized sessions stay visible and marked unavailable before a storage comparison", () => {
-  const reason = "Session exceeds the 200 MiB size limit.";
+  const reason = "Session exceeds the 100 MiB size limit.";
   const oversized = { ...codexSession, sync_blocked_reason: reason, metrics_complete: false };
   for (const git of [null, activity.git]) {
     for (const comparison of [null, emptyComparison()]) {
@@ -2517,8 +2517,8 @@ test("oversized sessions stay visible and marked unavailable before a storage co
       );
 
       assert.match(html, /Add Git history mapping/);
-      assert.match(html, /aria-label="Unavailable for sync\. Session exceeds the 200 MiB size limit\."/);
-      assert.match(html, /class="sync-history-branch-state history-only" title="Session exceeds the 200 MiB size limit\.">Unavailable for sync<\/span>/);
+      assert.match(html, /aria-label="Unavailable for sync\. Session exceeds the 100 MiB size limit\."/);
+      assert.match(html, /class="sync-history-branch-state history-only" title="Session exceeds the 100 MiB size limit\.">Unavailable for sync<\/span>/);
       assert.match(html, /Metrics unavailable/);
       assert.doesNotMatch(html, /aria-label="Messages:/);
       assert.doesNotMatch(html, /sync-sync-row-choice/);

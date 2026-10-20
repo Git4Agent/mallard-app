@@ -212,7 +212,7 @@ pub(super) fn discover(
             inspect_candidate_files_with_limit(
                 &canonical_home,
                 std::slice::from_ref(&physical_path),
-                crate::app_settings::conversation_file_limit_bytes(),
+                mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             )
             .err()
         });
@@ -284,7 +284,7 @@ pub(super) fn locate_session(
             inspect_candidate_files_with_limit(
                 &canonical_home,
                 std::slice::from_ref(&physical_path),
-                crate::app_settings::conversation_file_limit_bytes(),
+                mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             )
             .err()
         });

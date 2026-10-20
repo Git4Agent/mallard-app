@@ -11,6 +11,7 @@ import PushResourceWorkspace, {
   pushProjectFileWork,
   pushReviewDisabledReason,
   recommendedPushSelection,
+  selectPushProjectFilesWithinBudget,
   sanitizePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import { i18n } from "../../src/i18n";
@@ -541,6 +542,65 @@ const projectFiles: ProjectContentInventory = {
   warnings: [],
   scanned_at: NOW,
 };
+
+test("Files Select respects the 512 MB total including sessions and reserved content", () => {
+  const session = entry("selected", { capture_bytes: 100 * MB });
+  const reviewed = comparison({ entries: [session], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 20 * MB } });
+  const file = (path: string, size: number) => ({ ...flaggedFile(path, "", "").inventoryEntry, size, undecided: false });
+  const first = file("a.md", 200 * MB);
+  const tooLarge = file("b.mov", 400 * MB);
+  const exactFit = { ...file("c.sh", 192 * MB), warning_code: "executable", warning_digest: "w".repeat(64) };
+  const oneByteOver = file("d.md", 1);
+  const scanned = { ...projectFiles, entries: [oneByteOver, tooLarge, exactFit, first] };
+  const candidates = new Set(scanned.entries.map((row) => row.descriptor.resource_id));
+  const selected = selectPushProjectFilesWithinBudget(new Set([session.resource_id]), candidates, reviewed, scanned);
+
+  assert.deepEqual([...selected], [session.resource_id, first.descriptor.resource_id, exactFit.descriptor.resource_id]);
+  assert.equal(pushBudgetTotal(selected, reviewed, scanned)?.total, LIMIT);
+  assert.equal(selected.has(tooLarge.descriptor.resource_id), false);
+  assert.equal(selected.has(oneByteOver.descriptor.resource_id), false);
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: scanned, deletionApproved: true }), "c.sh is executable — mark it reviewed or exclude it.");
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: scanned, deletionApproved: true, acknowledgedWarningDigests: new Set([exactFit.warning_digest]) }), null);
+  assert.deepEqual(selectPushProjectFilesWithinBudget(selected, candidates, reviewed, scanned), selected);
+
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled
+      resources={[conversationResource(session), ...scanned.entries.map((row) => ({ ...projectFile, ...row.descriptor }))]}
+      selected={new Set([session.resource_id])} projectDefaults={new Set()} busy={false}
+      threadComparison={reviewed} projectContentInventory={scanned} projectContentScanned showProjectFiles
+      activeStep="project_files" onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+  );
+  assert.match(html, /title="Select the 2 project files that fit within the 512 MB total push limit"/);
+});
+
+test("Files Select reserves unchanged files that will be recaptured and keeps existing choices first", () => {
+  const session = entry("selected", { capture_bytes: 100 * MB });
+  const reviewed = comparison({ entries: [session], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 20 * MB } });
+  const stored = { ...flaggedFile("stored.md", "", "").inventoryEntry, size: 300 * MB, state: "synced" as const, storage_present: true, selected_in_recipe: true };
+  const large = { ...flaggedFile("a.mov", "", "").inventoryEntry, size: 100 * MB };
+  const chosen = { ...flaggedFile("z.md", "", "").inventoryEntry, size: 92 * MB };
+  const scanned = { ...projectFiles, entries: [stored, large, chosen] };
+  const candidates = new Set([large.descriptor.resource_id, chosen.descriptor.resource_id]);
+  const initial = new Set([session.resource_id, stored.descriptor.resource_id]);
+  assert.equal(pushBudgetTotal(initial, reviewed, scanned)?.total, 120 * MB);
+  const selected = selectPushProjectFilesWithinBudget(initial, candidates, reviewed, scanned);
+  assert.equal(selected.has(large.descriptor.resource_id), false);
+  assert.equal(selected.has(chosen.descriptor.resource_id), true);
+  assert.equal(pushBudgetTotal(selected, reviewed, scanned)?.total, LIMIT);
+
+  const smaller = { ...large, size: 50 * MB };
+  const withChoice = { ...scanned, entries: [stored, smaller, chosen] };
+  assert.deepEqual(selectPushProjectFilesWithinBudget(selected, candidates, reviewed, withChoice), selected);
+});
+
+test("Files Select adds nothing when sessions and requirements use the whole budget", () => {
+  const session = entry("full", { capture_bytes: 500 * MB });
+  const reviewed = comparison({ entries: [session], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 12 * MB } });
+  const initial = new Set([session.resource_id]);
+  const selected = selectPushProjectFilesWithinBudget(initial, new Set([projectFile.resource_id]), reviewed, projectFiles);
+  assert.deepEqual(selected, initial);
+  assert.equal(pushBudgetTotal(selected, reviewed, projectFiles)?.total, LIMIT);
+});
 
 test("automatic selection takes the newest sessions that fit, even when every session was saved", () => {
   const entries = Array.from({ length: 394 }, (_, index) => entry(`session-${index}`, {

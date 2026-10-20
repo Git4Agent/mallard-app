@@ -1188,7 +1188,7 @@ impl ChildMetadata {
 /// Read only bounded authoritative metadata while checking a candidate's owner.
 pub fn read_child_metadata(path: &Path, expected_id: &str) -> Result<ChildMetadata, String> {
     let (stamp, reader) = crate::jsonl_tail_io::open_head(path)?;
-    if stamp.file_len() > crate::app_settings::conversation_file_limit_bytes() {
+    if stamp.file_len() > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
         return Err("Codex child file is not a bounded regular transcript".to_string());
     }
     let mut reader = reader.take(MAX_METADATA_BYTES + 1);

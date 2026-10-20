@@ -6,8 +6,7 @@
 //! response bounds, and DTOs that may cross the Tauri boundary.
 
 use crate::app_settings::{
-    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
-    timeline_tool_preview_bytes,
+    timeline_message_preview_bytes, timeline_page_content_bytes, timeline_tool_preview_bytes,
 };
 use crate::path_text_boundary::replace_sensitive_path_occurrences;
 use crate::persistence::{
@@ -382,7 +381,7 @@ fn snapshot_id(session: &ResolvedLocalSession, timeline_version: u32) -> String 
         session,
         timeline_version,
         timeline_message_preview_bytes() as u64,
-        conversation_file_limit_bytes(),
+        mallard_domain::MAX_CONVERSATION_FILE_BYTES,
     )
 }
 
@@ -1468,7 +1467,7 @@ fn load_or_build_whole_index(
                 && entry_matches_limits(
                     entry,
                     timeline_message_preview_bytes() as u64,
-                    conversation_file_limit_bytes(),
+                    mallard_domain::MAX_CONVERSATION_FILE_BYTES,
                 )
                 && entry.summary.session_id == session.provider_session_id
                 && entry.summary.is_internal_subagent == session.child.is_some()
@@ -1522,7 +1521,7 @@ fn load_or_build_whole_index(
             modified_nanos: expected_nanos,
             timeline_version,
             preview_budget_bytes: timeline_message_preview_bytes() as u64,
-            conversation_limit_bytes: conversation_file_limit_bytes(),
+            conversation_limit_bytes: mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             summary: summary.clone(),
             index: index.clone(),
         };
@@ -2580,7 +2579,7 @@ fn stored_snapshot_id(stored: &StoredSessionTranscript, timeline_version: u32) -
             stored.wire_sha256(),
             timeline_version,
             timeline_message_preview_bytes() as u64,
-            conversation_file_limit_bytes(),
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES,
             stored.project_root().display()
         )
         .as_bytes(),
@@ -3087,7 +3086,7 @@ mod tests {
             .timeline_version();
         entry.index.parser_version = entry.timeline_version;
         entry.preview_budget_bytes = timeline_message_preview_bytes() as u64;
-        entry.conversation_limit_bytes = conversation_file_limit_bytes();
+        entry.conversation_limit_bytes = mallard_domain::MAX_CONVERSATION_FILE_BYTES;
         entry.summary.title = Some("Cached summary".to_string());
         let key = cache_key(&session);
         let directory = repository.root().join("session_timeline_cache");

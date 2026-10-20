@@ -86,7 +86,6 @@ export interface AppSettings {
    * background; a manual check ignores this. */
   update_check_enabled: boolean;
   schema: number;
-  conversation_file_limit_bytes: number;
   timeline_preview_limit_bytes: number;
   comparison_workers: number;
   cloud_transfer_concurrency: number;

@@ -134,7 +134,7 @@ impl TimelineSources {
         let mut files = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for source in &index.sources {
-            if source.length > crate::app_settings::conversation_file_limit_bytes() {
+            if source.length > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
                 return Err("timeline source exceeds the transcript limit".into());
             }
             total = total

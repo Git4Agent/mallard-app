@@ -1686,6 +1686,30 @@ fn project_content_manifest_validates_exact_tree_identity() {
 }
 
 #[test]
+fn project_content_manifest_accepts_100_mib_and_rejects_one_byte_more() {
+    let limit = 100 * 1024 * 1024;
+    for size in [limit, limit + 1] {
+        let mut scope = sealed_project_scope();
+        scope
+            .files
+            .get_mut(&LogicalPath::parse("project/docs/specs/a.md").unwrap())
+            .unwrap()
+            .size = size;
+        scope.content_sha256 = scope
+            .compute_content_sha256(&SyncScopeKey::Project)
+            .unwrap();
+        let manifest = scoped_manifest(BTreeMap::from([(SyncScopeKey::Project, scope)]));
+        manifest.validate().unwrap();
+        let resolved = manifest.resolve_all(&portable::test_resolver::Version1Resolver);
+        if size == limit {
+            resolved.unwrap();
+        } else {
+            assert!(resolved.unwrap_err().contains("exceeds 104857600 bytes"));
+        }
+    }
+}
+
+#[test]
 fn project_content_tombstones_are_typed_and_path_bound() {
     let mut manifest = scoped_manifest(BTreeMap::from([(
         SyncScopeKey::Project,

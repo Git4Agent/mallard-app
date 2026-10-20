@@ -5,8 +5,7 @@
 
 use super::timeline_sources::{capture, TimelineSources};
 use crate::app_settings::{
-    conversation_file_limit_bytes, timeline_message_preview_bytes, timeline_page_content_bytes,
-    timeline_tool_preview_bytes,
+    timeline_message_preview_bytes, timeline_page_content_bytes, timeline_tool_preview_bytes,
 };
 use crate::codex_subagents::{RolloutLookup, SubagentActivity, SubagentActivityKind};
 use crate::providers::timeparse::parse_timestamp_value;
@@ -34,7 +33,7 @@ use std::path::{Component, Path, PathBuf};
 /// Match the transcript bound so every record admitted by the transcript
 /// safety policy can also be indexed and opened by session detail.
 pub(crate) fn max_line_bytes() -> usize {
-    conversation_file_limit_bytes() as usize
+    mallard_domain::MAX_CONVERSATION_FILE_BYTES as usize
 }
 const MAX_SUMMARY_CHARS: usize = 180;
 const MAX_TIMELINE_EVENTS: usize = 50_000;
@@ -4894,7 +4893,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(max_line_bytes() as u64, conversation_file_limit_bytes());
+        assert_eq!(
+            max_line_bytes() as u64,
+            mallard_domain::MAX_CONVERSATION_FILE_BYTES
+        );
         assert!(fs::metadata(&transcript).unwrap().len() > 4 * 1024 * 1024);
         let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
         assert!(!index.truncated);
