@@ -85,6 +85,8 @@ pub enum CliDiscoveryError {
 
 /// Find `program` by the selection policy. `program` is one plain name, the
 /// way it is typed in a terminal; platform extensions are the search's job.
+/// Provider installation directories follow the common installation directories.
+/// Relative directories are ignored.
 ///
 /// The shell probe is spent only where it can change the answer: not for a
 /// saved selection, not when the inherited `PATH` already names the
@@ -94,20 +96,36 @@ pub fn discover_launcher(
     program: &str,
     explicit: Option<&Path>,
     shell: ShellDiscovery,
+    installation_dirs: &[PathBuf],
 ) -> Result<DiscoveredLauncher, CliDiscoveryError> {
-    discover_launcher_with(program, explicit, inherited_path_dirs(), || match shell {
-        ShellDiscovery::Use if !launched_from_terminal() => shell_path().unwrap_or_default(),
-        _ => Vec::new(),
-    })
+    let standard = standard_dirs()
+        .into_iter()
+        .chain(
+            installation_dirs
+                .iter()
+                .filter(|dir| dir.is_absolute())
+                .cloned(),
+        )
+        .collect();
+    discover_launcher_with(
+        program,
+        explicit,
+        inherited_path_dirs(),
+        standard,
+        || match shell {
+            ShellDiscovery::Use if !launched_from_terminal() => shell_path().unwrap_or_default(),
+            _ => Vec::new(),
+        },
+    )
 }
 
 fn discover_launcher_with(
     program: &str,
     explicit: Option<&Path>,
     inherited: Vec<PathBuf>,
+    standard: Vec<PathBuf>,
     probe: impl FnOnce() -> Vec<PathBuf>,
 ) -> Result<DiscoveredLauncher, CliDiscoveryError> {
-    let standard = standard_dirs();
     let found =
         |launcher: PathBuf, source: CliSelectionSource, recovered: &[PathBuf]| DiscoveredLauncher {
             launcher,
@@ -166,7 +184,7 @@ fn shell_level_names_a_shell(level: Option<&OsStr>) -> bool {
 /// Find a general tool such as `git` the same way, without a provider's
 /// launcher handling: the executable is the launcher.
 pub fn find_tool(program: &str, shell: ShellDiscovery) -> Result<PathBuf, CliDiscoveryError> {
-    let found = discover_launcher(program, None, shell)?;
+    let found = discover_launcher(program, None, shell, &[])?;
     validate_executable(&found.launcher).map_err(|_| CliDiscoveryError::NotFound)
 }
 
@@ -620,20 +638,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let chosen = temp.path().join("chosen");
         executable(&chosen, "true");
-        let found = discover_launcher("tool", Some(&chosen), ShellDiscovery::Skip).unwrap();
+        let found = discover_launcher("tool", Some(&chosen), ShellDiscovery::Skip, &[]).unwrap();
         assert_eq!(found.launcher, chosen);
         assert_eq!(found.source, CliSelectionSource::Selected);
         assert_eq!(
             discover_launcher(
                 "tool",
                 Some(&temp.path().join("gone")),
-                ShellDiscovery::Skip
+                ShellDiscovery::Skip,
+                &[],
             )
             .unwrap_err(),
             CliDiscoveryError::SelectedUnavailable
         );
         assert_eq!(
-            discover_launcher("mallard-no-such-tool-xyz", None, ShellDiscovery::Skip).unwrap_err(),
+            discover_launcher("mallard-no-such-tool-xyz", None, ShellDiscovery::Skip, &[]).unwrap_err(),
             CliDiscoveryError::NotFound
         );
     }
@@ -662,8 +681,14 @@ mod tests {
         // and standard directories only.
         let chosen = temp.path().join("chosen");
         executable(&chosen, "true");
-        let found = discover_launcher_with(tool, Some(&chosen), vec![inherited_dir.clone()], probe)
-            .unwrap();
+        let found = discover_launcher_with(
+            tool,
+            Some(&chosen),
+            vec![inherited_dir.clone()],
+            Vec::new(),
+            probe,
+        )
+        .unwrap();
         assert_eq!(found.source, CliSelectionSource::Selected);
         assert_eq!(probed.get(), 0);
         assert_eq!(dirs_of(&found)[0], inherited_dir);
@@ -671,7 +696,14 @@ mod tests {
 
         // The inherited PATH names the launcher: no probe.
         executable(&inherited_dir.join(tool), "true");
-        let found = discover_launcher_with(tool, None, vec![inherited_dir.clone()], probe).unwrap();
+        let found = discover_launcher_with(
+            tool,
+            None,
+            vec![inherited_dir.clone()],
+            Vec::new(),
+            probe,
+        )
+        .unwrap();
         assert_eq!(found.launcher, inherited_dir.join(tool));
         assert_eq!(found.source, CliSelectionSource::InheritedPath);
         assert_eq!(probed.get(), 0);
@@ -679,7 +711,14 @@ mod tests {
         // Otherwise the probe runs once, and its directories follow the
         // inherited ones in the child PATH.
         fs::remove_file(inherited_dir.join(tool)).unwrap();
-        let found = discover_launcher_with(tool, None, vec![inherited_dir.clone()], probe).unwrap();
+        let found = discover_launcher_with(
+            tool,
+            None,
+            vec![inherited_dir.clone()],
+            Vec::new(),
+            probe,
+        )
+        .unwrap();
         assert_eq!(found.launcher, shell_dir.join(tool));
         assert_eq!(found.source, CliSelectionSource::ShellPath);
         assert_eq!(probed.get(), 1);
@@ -690,11 +729,88 @@ mod tests {
 
         // Nothing anywhere: the probe was spent, and that is the answer.
         assert_eq!(
-            discover_launcher_with("mallard-no-such-tool-xyz", None, vec![inherited_dir], probe)
-                .unwrap_err(),
+            discover_launcher_with(
+                "mallard-no-such-tool-xyz",
+                None,
+                vec![inherited_dir],
+                Vec::new(),
+                probe,
+            )
+            .unwrap_err(),
             CliDiscoveryError::NotFound
         );
         assert_eq!(probed.get(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn installation_directories_preserve_selection_and_path_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let inherited = temp.path().join("inherited");
+        let shell = temp.path().join("shell");
+        let standard = temp.path().join("standard");
+        let bundled = temp.path().join("Desktop.app/bin");
+        let tool = "codex";
+        for dir in [&inherited, &shell, &standard, &bundled] {
+            executable(&dir.join(tool), "true");
+        }
+        let discover = |explicit: Option<&Path>| {
+            discover_launcher_with(
+                tool,
+                explicit,
+                vec![inherited.clone()],
+                vec![standard.clone(), bundled.clone()],
+                || vec![shell.clone()],
+            )
+        };
+        let chosen = temp.path().join("chosen");
+        executable(&chosen, "true");
+        assert_eq!(discover(Some(&chosen)).unwrap().launcher, chosen);
+        assert_eq!(
+            discover(Some(&temp.path().join("gone"))).unwrap_err(),
+            CliDiscoveryError::SelectedUnavailable
+        );
+        for (dir, source) in [
+            (&inherited, CliSelectionSource::InheritedPath),
+            (&shell, CliSelectionSource::ShellPath),
+            (&standard, CliSelectionSource::StandardLocation),
+            (&bundled, CliSelectionSource::StandardLocation),
+        ] {
+            let found = discover(None).unwrap();
+            assert_eq!(found.launcher, dir.join(tool));
+            assert_eq!(found.source, source);
+            if dir == &bundled {
+                assert_eq!(
+                    std::env::split_paths(&found.search_path).collect::<Vec<_>>(),
+                    vec![
+                        inherited.clone(),
+                        shell.clone(),
+                        standard.clone(),
+                        bundled.clone()
+                    ]
+                );
+            }
+            fs::remove_file(dir.join(tool)).unwrap();
+        }
+        assert_eq!(discover(None).unwrap_err(), CliDiscoveryError::NotFound);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provider_installation_directories_are_searched_only_when_absolute() {
+        let temp = tempfile::tempdir().unwrap();
+        let tool = "mallard-bundled-cli-test";
+        executable(&temp.path().join(tool), "true");
+        let found = discover_launcher(
+            tool,
+            None,
+            ShellDiscovery::Skip,
+            &[PathBuf::from("."), temp.path().to_path_buf()],
+        )
+        .unwrap();
+        assert_eq!(found.launcher, temp.path().join(tool));
+        assert_eq!(found.source, CliSelectionSource::StandardLocation);
+        assert!(std::env::split_paths(&found.search_path).all(|dir| dir.is_absolute()));
     }
 
     #[test]

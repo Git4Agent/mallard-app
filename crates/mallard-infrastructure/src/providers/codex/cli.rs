@@ -44,18 +44,23 @@ pub(super) fn version_from_banner(banner: &str) -> Option<String> {
 }
 
 /// The Codex CLI for one operation: the saved selection when there is one,
-/// otherwise the discovery policy.
+/// otherwise the discovery policy, including the official desktop app's
+/// bundled CLI on macOS after standalone installations.
 pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
-    let found = cli_discovery::discover_launcher("codex", explicit, ShellDiscovery::Use).map_err(
-        |error| match error {
-            CliDiscoveryError::SelectedUnavailable => {
-                "Selected Codex executable is unavailable. Choose it again in Settings."
-            }
-            CliDiscoveryError::NotFound => {
-                "Codex CLI not found. Install Codex, or choose its executable in Settings."
-            }
-        },
-    )?;
+    let found = cli_discovery::discover_launcher(
+        "codex",
+        explicit,
+        ShellDiscovery::Use,
+        &bundled_cli_dirs(),
+    )
+    .map_err(|error| match error {
+        CliDiscoveryError::SelectedUnavailable => {
+            "Selected Codex executable is unavailable. Choose it again in Settings."
+        }
+        CliDiscoveryError::NotFound => {
+            "Codex CLI not found. Install Codex, or choose its executable in Settings."
+        }
+    })?;
     let executable = native_target(&found.launcher)?;
     Ok(ResolvedCli {
         launcher: found.launcher,
@@ -63,6 +68,35 @@ pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
         source: found.source,
         search_path: found.search_path,
     })
+}
+
+fn bundled_cli_dirs() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        bundled_cli_dirs_in(
+            Path::new("/Applications"),
+            crate::persistence::user_home_dir().as_deref(),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+#[cfg(target_os = "macos")]
+fn bundled_cli_dirs_in(applications: &Path, user_home: Option<&Path>) -> Vec<PathBuf> {
+    crate::codex_app::mac_app_candidate_paths(applications, user_home)
+        .into_iter()
+        .filter_map(|path| crate::codex_app::validate_mac_app_bundle(&path))
+        .filter_map(|app| {
+            let cli = app.bundled_cli();
+            let executable = validate_executable(&cli).ok()?;
+            // An installation must not redirect discovery outside its bundle.
+            if !executable.starts_with(&app.bundle_path) {
+                return None;
+            }
+            cli.parent().map(Path::to_path_buf)
+        })
+        .collect()
 }
 
 /// The binary `launcher` runs: the platform package's native Codex for the
@@ -327,6 +361,88 @@ mod tests {
             error.starts_with("Selected Codex executable is unavailable"),
             "{error}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn desktop_bundle(applications: &Path, bundle_id: &str) -> PathBuf {
+        let bundle = applications.join("ChatGPT.app");
+        executable(&bundle.join("Contents/MacOS/ChatGPT"));
+        plist::Value::Dictionary(plist::Dictionary::from_iter([
+            (
+                "CFBundleIdentifier".to_string(),
+                plist::Value::String(bundle_id.to_string()),
+            ),
+            (
+                "CFBundleExecutable".to_string(),
+                plist::Value::String("ChatGPT".to_string()),
+            ),
+        ]))
+        .to_file_xml(bundle.join("Contents/Info.plist"))
+        .unwrap();
+        let cli = bundle.join("Contents/Resources/codex-cli/bin/codex");
+        executable(&cli);
+        cli
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn bundled_cli_discovery_checks_system_and_user_applications() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let applications = root.join("Applications");
+        let user_home = root.join("user");
+        assert!(bundled_cli_dirs_in(&applications, Some(&user_home)).is_empty());
+
+        let user_cli = desktop_bundle(&user_home.join("Applications"), "com.openai.codex");
+        assert_eq!(
+            bundled_cli_dirs_in(&applications, Some(&user_home)),
+            vec![user_cli.parent().unwrap()]
+        );
+        let system_cli = desktop_bundle(&applications, "com.openai.codex");
+        assert_eq!(
+            bundled_cli_dirs_in(&applications, Some(&user_home)),
+            vec![system_cli.parent().unwrap(), user_cli.parent().unwrap()]
+        );
+        assert_eq!(
+            bundled_cli_dirs_in(&applications, None),
+            vec![system_cli.parent().unwrap()]
+        );
+
+        // An incomplete system installation does not hide a working user one.
+        fs::remove_file(&system_cli).unwrap();
+        assert_eq!(
+            bundled_cli_dirs_in(&applications, Some(&user_home)),
+            vec![user_cli.parent().unwrap()]
+        );
+        fs::set_permissions(&user_cli, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(bundled_cli_dirs_in(&applications, Some(&user_home)).is_empty());
+
+        // The old ChatGPT identity does not establish a Codex installation.
+        desktop_bundle(&applications, "com.openai.chat");
+        assert!(bundled_cli_dirs_in(&applications, Some(&user_home)).is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn bundled_cli_discovery_rejects_redirected_bundles_and_external_executables() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let applications = root.join("Applications");
+        let cli = desktop_bundle(&applications, "com.openai.codex");
+        let bundle = applications.join("ChatGPT.app");
+        let outside = root.join("other.app");
+        fs::rename(&bundle, &outside).unwrap();
+        symlink(&outside, &bundle).unwrap();
+        assert!(bundled_cli_dirs_in(&applications, None).is_empty());
+        fs::remove_file(&bundle).unwrap();
+        fs::rename(&outside, &bundle).unwrap();
+
+        let outside_cli = root.join("codex");
+        fs::rename(&cli, &outside_cli).unwrap();
+        symlink(&outside_cli, &cli).unwrap();
+        assert!(bundled_cli_dirs_in(&applications, None).is_empty());
     }
 
     /// Resolves the Codex installed on this machine and probes its version.

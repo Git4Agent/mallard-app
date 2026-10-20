@@ -57,7 +57,7 @@ fn version_from_banner(banner: &str) -> Option<String> {
 /// The Claude CLI for one operation: the saved selection when there is one,
 /// otherwise the discovery policy.
 pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
-    let found = cli_discovery::discover_launcher("claude", explicit, ShellDiscovery::Use).map_err(
+    let found = cli_discovery::discover_launcher("claude", explicit, ShellDiscovery::Use, &[]).map_err(
         |error| match error {
             CliDiscoveryError::SelectedUnavailable => {
                 "Selected Claude executable is unavailable. Choose it again in Settings."

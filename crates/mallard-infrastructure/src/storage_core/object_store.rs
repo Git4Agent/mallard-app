@@ -7,11 +7,13 @@
 use bytes::Bytes;
 use mallard_domain::{hex_lower, sha256_hex};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use tempfile::NamedTempFile;
+use std::sync::Arc;
+use tempfile::{NamedTempFile, TempPath};
 
+use super::local_store::open_read_only_no_follow;
 use super::{ObjectKey, ObjectPrefix};
 use mallard_domain as domain;
 
@@ -35,35 +37,37 @@ pub struct ExpectedObject {
     pub sha256: String,
 }
 
+/// The staged file, closed. Only the path is retained between reads: a Pull
+/// stages every object of its selection before it writes any, and a process
+/// that kept each staged file open would run out of descriptors long before
+/// it ran out of staging space. The file is deleted when the last clone of
+/// its body drops.
 struct VerifiedBodyInner {
-    file: Mutex<NamedTempFile>,
+    path: TempPath,
+    /// The device and inode the bytes were verified under; a reopen that
+    /// finds anything else at the path is refused.
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
 }
 
+/// One open read of a staged object. It owns its descriptor and closes it
+/// when dropped, so the descriptors in use are exactly the readers alive.
 pub struct VerifiedBodyReader {
-    inner: Arc<VerifiedBodyInner>,
-    position: u64,
+    file: File,
 }
 
 impl Read for VerifiedBodyReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let mut staged = self
-            .inner
-            .file
-            .lock()
-            .map_err(|_| std::io::Error::other("verified object lock is poisoned"))?;
-        staged.as_file_mut().seek(SeekFrom::Start(self.position))?;
-        let count = staged.as_file_mut().read(buffer)?;
-        self.position = self
-            .position
-            .checked_add(count as u64)
-            .ok_or_else(|| std::io::Error::other("verified object reader position overflow"))?;
-        Ok(count)
+        self.file.read(buffer)
     }
 }
 
 /// A fully received and integrity-verified object backed by a private
 /// machine-local temporary file. Clones share ownership of the staged bytes;
 /// each [`Self::open`] call returns an independent reader at byte zero.
+/// No descriptor is held between reads.
 #[derive(Clone)]
 pub struct VerifiedBody {
     inner: Arc<VerifiedBodyInner>,
@@ -84,27 +88,34 @@ impl std::fmt::Debug for VerifiedBody {
 }
 
 impl VerifiedBody {
+    /// Take ownership of a staged file whose bytes the caller has verified.
+    /// The handle is closed here; the path alone is kept.
     pub(crate) fn from_temp_file(
-        mut file: NamedTempFile,
+        file: NamedTempFile,
         size: u64,
         sha256: String,
         etag: String,
     ) -> Result<Self, String> {
         domain::validate_sha256("verified object", &sha256)?;
-        let actual_size = file
+        let metadata = file
             .as_file()
             .metadata()
-            .map_err(|error| format!("inspect verified object: {}", error))?
-            .len();
-        if actual_size != size {
+            .map_err(|error| format!("inspect verified object: {}", error))?;
+        if metadata.len() != size {
             return Err("verified object size differs from its staged file".to_string());
         }
-        file.as_file_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(|error| format!("rewind verified object: {}", error))?;
+        #[cfg(unix)]
+        let (device, inode) = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        };
         Ok(Self {
             inner: Arc::new(VerifiedBodyInner {
-                file: Mutex::new(file),
+                path: file.into_temp_path(),
+                #[cfg(unix)]
+                device,
+                #[cfg(unix)]
+                inode,
             }),
             size,
             sha256,
@@ -112,11 +123,31 @@ impl VerifiedBody {
         })
     }
 
+    /// Reopen the staged file for one read. The reader is refused unless the
+    /// path still holds the regular file the bytes were verified in, at its
+    /// verified size.
     pub fn open(&self) -> Result<VerifiedBodyReader, String> {
-        Ok(VerifiedBodyReader {
-            inner: self.inner.clone(),
-            position: 0,
-        })
+        let file = open_read_only_no_follow(&self.inner.path, "verified object")?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("inspect verified object: {}", error))?;
+        if !metadata.is_file() || metadata.len() != self.size {
+            return Err("verified object changed after verification".to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.dev() != self.inner.device || metadata.ino() != self.inner.inode {
+                return Err("verified object was replaced after verification".to_string());
+            }
+        }
+        Ok(VerifiedBodyReader { file })
+    }
+
+    /// Where the staged bytes live, for tests of their lifetime.
+    #[cfg(test)]
+    fn staged_path(&self) -> &Path {
+        &self.inner.path
     }
 
     pub fn read_bounded(&self, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
@@ -531,6 +562,119 @@ pub(crate) fn sha256_reader(reader: &mut impl Read, label: &str) -> Result<Strin
 mod tests {
     use super::super::LocalObjectStore;
     use super::*;
+    use std::sync::Mutex;
+
+    fn repository_object_key(bytes: &[u8]) -> ObjectKey {
+        ObjectKey::parse(format!(
+            ".mallard/v1/repositories/{:032x}/_objects/{}",
+            1,
+            sha256_hex(bytes)
+        ))
+        .unwrap()
+    }
+
+    fn stage(store: &LocalObjectStore, bytes: &[u8]) -> VerifiedBody {
+        let outcome = store
+            .stage_verified(
+                &repository_object_key(bytes),
+                &ExpectedObject {
+                    size: bytes.len() as u64,
+                    sha256: sha256_hex(bytes),
+                },
+            )
+            .unwrap();
+        let StageOutcome::Verified(body) = outcome else {
+            panic!("object was not staged")
+        };
+        body
+    }
+
+    /// The descriptors this process holds open right now.
+    #[cfg(unix)]
+    fn open_descriptor_count() -> usize {
+        std::fs::read_dir("/dev/fd").unwrap().count()
+    }
+
+    /// A Pull stages its whole selection before it writes anything, so the
+    /// bodies it holds must cost no descriptors: the launcher's soft limit
+    /// on macOS is 256, and a selection of small files reaches it long
+    /// before the staging-space bound does. The selection here is larger
+    /// than that limit.
+    #[cfg(unix)]
+    #[test]
+    fn held_bodies_cost_no_descriptors() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..300)
+            .map(|index| format!("object {index}").into_bytes())
+            .collect();
+        for bytes in &payloads {
+            store
+                .put_immutable(&repository_object_key(bytes), bytes)
+                .unwrap();
+        }
+
+        let before = open_descriptor_count();
+        let bodies: Vec<VerifiedBody> = payloads.iter().map(|bytes| stage(&store, bytes)).collect();
+        let held = open_descriptor_count().saturating_sub(before);
+        // Other tests in this process may open a few files meanwhile; the
+        // old behavior held one descriptor per body.
+        assert!(
+            held < bodies.len() / 4,
+            "{held} descriptors held for {} staged bodies",
+            bodies.len()
+        );
+
+        // A reader costs one descriptor while it is alive and reads the
+        // verified bytes; the body outlives it.
+        let mut reader = bodies[7].open().unwrap();
+        let mut read = Vec::new();
+        reader.read_to_end(&mut read).unwrap();
+        drop(reader);
+        assert_eq!(read, payloads[7]);
+        assert_eq!(bodies[7].read_bounded(64, "object").unwrap(), payloads[7]);
+    }
+
+    #[test]
+    fn the_staged_file_lives_with_the_last_clone_of_its_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        store
+            .put_immutable(&repository_object_key(b"abcdef"), b"abcdef")
+            .unwrap();
+        let body = stage(&store, b"abcdef");
+        let path = body.staged_path().to_path_buf();
+        let clone = body.clone();
+        drop(body);
+        assert!(path.is_file(), "a live clone keeps the staged file");
+
+        // A reader taken before the last clone drops still reads the bytes.
+        let mut reader = clone.open().unwrap();
+        drop(clone);
+        let mut read = Vec::new();
+        reader.read_to_end(&mut read).unwrap();
+        assert_eq!(read, b"abcdef");
+        assert!(!path.exists(), "the last clone deletes the staged file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_staged_file_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        store
+            .put_immutable(&repository_object_key(b"abcdef"), b"abcdef")
+            .unwrap();
+        let body = stage(&store, b"abcdef");
+        let path = body.staged_path().to_path_buf();
+        // Same size, other bytes, another inode: the body's verification no
+        // longer covers what the path holds.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"uvwxyz").unwrap();
+
+        let error = body.open().err().expect("reopen is refused");
+        assert!(error.contains("replaced"), "{error}");
+    }
 
     #[test]
     fn verified_body_readers_have_independent_positions() {
