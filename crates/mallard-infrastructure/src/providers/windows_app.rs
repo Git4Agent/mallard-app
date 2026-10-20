@@ -20,6 +20,38 @@ struct PackageApp {
     app_id: String,
 }
 
+#[cfg(windows)]
+impl WindowsApp {
+    pub(crate) fn is_packaged(&self) -> bool {
+        self.package.is_some()
+    }
+
+    /// Packaged desktop apps keep their roaming data inside the package's
+    /// LocalCache; ordinary desktop installs use the user's roaming directory.
+    pub(crate) fn roaming_data_dir(&self, local: &Path, roaming: &Path) -> Option<PathBuf> {
+        if !local.is_absolute() || !roaming.is_absolute() {
+            return None;
+        }
+        match &self.package {
+            None => Some(roaming.to_path_buf()),
+            Some(package) => {
+                let mut parts = Path::new(&package.family).components();
+                if !matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                    || parts.next().is_some()
+                {
+                    return None;
+                }
+                Some(
+                    local
+                        .join("Packages")
+                        .join(&package.family)
+                        .join("LocalCache/Roaming"),
+                )
+            }
+        }
+    }
+}
+
 #[cfg(any(windows, test))]
 fn handler_executable_path(executable: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(executable);
@@ -393,6 +425,36 @@ pub fn display_launch(app: &WindowsApp, env: &[(&str, &Path)], args: &[&str]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn roaming_data_uses_the_registered_package_family_without_changing_profile_homes() {
+        let mut app = WindowsApp {
+            executable: PathBuf::from(r"C:\Apps\Claude.exe"),
+            package: None,
+        };
+        let local = Path::new(r"C:\Users\dev\AppData\Local");
+        let roaming = Path::new(r"C:\Users\dev\AppData\Roaming");
+        assert!(!app.is_packaged());
+        assert_eq!(
+            app.roaming_data_dir(local, roaming),
+            Some(roaming.to_path_buf())
+        );
+        app.package = Some(PackageApp {
+            family: "Claude_testpublisher".into(),
+            app_id: "App".into(),
+        });
+        assert!(app.is_packaged());
+        assert_eq!(
+            app.roaming_data_dir(local, roaming),
+            Some(local.join("Packages/Claude_testpublisher/LocalCache/Roaming"))
+        );
+        for family in ["", "..", r"..\outside", r"C:\outside", r"family\child"] {
+            app.package.as_mut().unwrap().family = family.into();
+            assert_eq!(app.roaming_data_dir(local, roaming), None);
+        }
+        assert_eq!(app.roaming_data_dir(Path::new("."), roaming), None);
+    }
 
     #[test]
     fn handler_paths_must_be_absolute_executables() {

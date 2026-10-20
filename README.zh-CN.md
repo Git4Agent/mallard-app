@@ -79,6 +79,10 @@ Mallard Cloud 上的公开仓库：在网页上打开，或下载到 Mallard。
 
 [下载 Mallard](https://github.com/Git4Agent/mallard-app/releases/latest)（macOS 或 Windows），然后：
 
+Mallard 优先查找独立安装的 Codex 和 Claude CLI，再查找桌面应用已准备好的 CLI。
+如果 Claude Desktop 尚未下载 CLI，请先打开它的 Code 标签页。
+也可以在设置 › Agent CLIs 中选择指定的可执行文件。
+
 ### 1. [添加存储](https://mallard-ai.com/docs/add-a-storage)
 
 会话存放的地方：Mallard Cloud、本地文件夹、Cloudflare R2 或 Dropbox。

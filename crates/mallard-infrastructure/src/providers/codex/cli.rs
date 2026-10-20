@@ -45,22 +45,18 @@ pub(super) fn version_from_banner(banner: &str) -> Option<String> {
 
 /// The Codex CLI for one operation: the saved selection when there is one,
 /// otherwise the discovery policy, including the official desktop app's
-/// bundled CLI on macOS after standalone installations.
+/// managed CLI after standalone installations.
 pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
-    let found = cli_discovery::discover_launcher(
-        "codex",
-        explicit,
-        ShellDiscovery::Use,
-        &bundled_cli_dirs(),
-    )
-    .map_err(|error| match error {
-        CliDiscoveryError::SelectedUnavailable => {
-            "Selected Codex executable is unavailable. Choose it again in Settings."
-        }
-        CliDiscoveryError::NotFound => {
-            "Codex CLI not found. Install Codex, or choose its executable in Settings."
-        }
-    })?;
+    let found =
+        cli_discovery::discover_launcher("codex", explicit, ShellDiscovery::Use, bundled_cli_dirs)
+            .map_err(|error| match error {
+                CliDiscoveryError::SelectedUnavailable => {
+                    "Selected Codex executable is unavailable. Choose it again in Settings."
+                }
+                CliDiscoveryError::NotFound => {
+                    "Codex CLI not found. Install Codex, or choose its executable in Settings."
+                }
+            })?;
     let executable = native_target(&found.launcher)?;
     Ok(ResolvedCli {
         launcher: found.launcher,
@@ -78,7 +74,13 @@ fn bundled_cli_dirs() -> Vec<PathBuf> {
             crate::persistence::user_home_dir().as_deref(),
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        super::desktop_cli_windows::installation_dir()
+            .into_iter()
+            .collect()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     Vec::new()
 }
 

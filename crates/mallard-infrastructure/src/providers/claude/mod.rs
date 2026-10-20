@@ -6,7 +6,7 @@ pub mod actions;
 pub mod cli;
 pub mod codec;
 mod deletion;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod desktop_cli;
 pub mod discovery;
 pub mod history;

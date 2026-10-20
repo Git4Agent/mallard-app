@@ -1,18 +1,23 @@
 //! Claude Desktop downloads its host CLI separately from the desktop app,
-//! under `Library/Application Support/Claude/claude-code` in the user home.
-//! Each install is `<version>/<checksum prefix>/claude.app`; `.verified`
+//! under its application data directory. Each install is
+//! `<version>/<checksum prefix>/claude.app` on macOS or `claude.exe` on Windows; `.verified`
 //! is written last. Inspect only that layout, never the sibling VM installs.
 
 use crate::cli_discovery::validate_executable;
 use semver::Version;
 use std::fs;
-use std::io::{Cursor, Read};
+#[cfg(target_os = "macos")]
+use std::io::Cursor;
+use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+#[cfg(target_os = "macos")]
 const INSTALL_ROOT: &str = "Library/Application Support/Claude/claude-code";
 const MAX_INSTALL_ENTRIES: usize = 256;
+#[cfg(target_os = "macos")]
 const MAX_PLIST_BYTES: u64 = 64 * 1024;
 const CHECKSUM_BYTES: usize = 64;
 const PREFIX_BYTES: usize = 12;
@@ -20,14 +25,33 @@ const PREFIX_BYTES: usize = 12;
 /// The newest complete, valid Desktop installation. Resolve afresh for each
 /// operation so Desktop updates do not leave an automatically selected path
 /// pinned to an old version. The home is injected for fixture-only tests.
+#[cfg(target_os = "macos")]
 pub(super) fn installation_dir_in(home: &Path) -> Option<PathBuf> {
     if !home.is_absolute() {
         return None;
     }
     let root = fs::canonicalize(home).ok()?.join(INSTALL_ROOT);
-    if !fs::symlink_metadata(&root).ok()?.is_dir() || fs::canonicalize(&root).ok()? != root {
+    installation_dir_at(&root)
+}
+
+#[cfg(windows)]
+pub(super) fn windows_installation_dir() -> Option<PathBuf> {
+    let app = crate::providers::windows_app::scheme_handler("claude").ok()?;
+    let root = app
+        .roaming_data_dir(&dirs::data_local_dir()?, &dirs::config_dir()?)?
+        .join("Claude/claude-code");
+    installation_dir_at(&root)
+}
+
+fn installation_dir_at(root: &Path) -> Option<PathBuf> {
+    if !root.is_absolute() || !fs::symlink_metadata(root).ok()?.is_dir() {
         return None;
     }
+    let canonical = fs::canonicalize(root).ok()?;
+    if dunce::simplified(&canonical) != dunce::simplified(root) {
+        return None;
+    }
+    let root = canonical;
 
     let mut candidates = Vec::new();
     for (count, entry) in WalkDir::new(&root)
@@ -92,6 +116,23 @@ fn validate_installation(path: &Path, version: &Version) -> Option<PathBuf> {
         return None;
     }
 
+    #[cfg(target_os = "macos")]
+    let launcher = mac_launcher(path, version)?;
+    #[cfg(windows)]
+    let launcher = {
+        let _ = version;
+        path.join("claude.exe")
+    };
+    if !fs::symlink_metadata(&launcher).ok()?.is_file()
+        || validate_executable(&launcher).ok()? != launcher
+    {
+        return None;
+    }
+    launcher.parent().map(Path::to_path_buf)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_launcher(path: &Path, version: &Version) -> Option<PathBuf> {
     let contents = path.join("claude.app/Contents");
     let bytes = read_metadata_file(&contents.join("Info.plist"), MAX_PLIST_BYTES)?;
     let dictionary = plist::Value::from_reader(Cursor::new(bytes))
@@ -105,13 +146,7 @@ fn validate_installation(path: &Path, version: &Version) -> Option<PathBuf> {
         return None;
     }
 
-    let launcher = contents.join("MacOS/claude");
-    if !fs::symlink_metadata(&launcher).ok()?.is_file()
-        || validate_executable(&launcher).ok()? != launcher
-    {
-        return None;
-    }
-    launcher.parent().map(Path::to_path_buf)
+    Some(contents.join("MacOS/claude"))
 }
 
 /// Bound metadata reads and reject symlinks in both the leaf and its parents.
@@ -120,12 +155,18 @@ fn read_metadata_file(path: &Path, limit: u64) -> Option<Vec<u8>> {
     if !metadata.is_file() || metadata.len() > limit || fs::canonicalize(path).ok()? != path {
         return None;
     }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
-    if !file.metadata().ok()?.is_file() {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
         return None;
     }
     let mut bytes = Vec::new();
@@ -133,7 +174,135 @@ fn read_metadata_file(path: &Path, limit: u64) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= limit).then_some(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    const BUILD: &str = "012345abcdef";
+
+    fn installation(root: &Path, version: &str, build: &str) -> PathBuf {
+        let path = root.join(version).join(build);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("claude.exe"), b"fixture").unwrap();
+        fs::write(path.join(".verified"), format!("{build}{}", "0".repeat(52))).unwrap();
+        path
+    }
+
+    #[test]
+    fn windows_downloads_use_numeric_versions_and_observe_completed_updates() {
+        let root = tempfile::tempdir().unwrap();
+        installation(root.path(), "2.1.9", BUILD);
+        installation(root.path(), "2.1.10-beta.1", BUILD);
+        installation(root.path(), "2.1.10", "ffffffffffff");
+        let current = installation(root.path(), "2.1.10", BUILD);
+        assert_eq!(
+            installation_dir_at(root.path()),
+            Some(fs::canonicalize(&current).unwrap())
+        );
+        let update = installation(root.path(), "2.1.11", BUILD);
+        fs::remove_file(update.join(".verified")).unwrap();
+        assert_eq!(
+            installation_dir_at(root.path()),
+            Some(fs::canonicalize(&current).unwrap())
+        );
+        fs::write(
+            update.join(".verified"),
+            format!("{BUILD}{}", "0".repeat(52)),
+        )
+        .unwrap();
+        assert_eq!(
+            installation_dir_at(root.path()),
+            Some(fs::canonicalize(&update).unwrap())
+        );
+    }
+
+    #[test]
+    fn windows_downloads_reject_incomplete_or_malformed_installations() {
+        for invalid in [
+            "missing marker",
+            "wrong marker",
+            "oversized marker",
+            "missing executable",
+            "executable directory",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let valid = installation(root.path(), "2.1.9", BUILD);
+            let bad = installation(root.path(), "2.1.10", BUILD);
+            match invalid {
+                "missing marker" => fs::remove_file(bad.join(".verified")).unwrap(),
+                "wrong marker" => fs::write(bad.join(".verified"), "f".repeat(64)).unwrap(),
+                "oversized marker" => fs::write(bad.join(".verified"), "0".repeat(65)).unwrap(),
+                "missing executable" => fs::remove_file(bad.join("claude.exe")).unwrap(),
+                "executable directory" => {
+                    fs::remove_file(bad.join("claude.exe")).unwrap();
+                    fs::create_dir(bad.join("claude.exe")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                installation_dir_at(root.path()),
+                Some(fs::canonicalize(&valid).unwrap()),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_download_scan_is_bounded_and_uses_only_the_host_layout() {
+        let root = tempfile::tempdir().unwrap();
+        installation(root.path(), "latest", BUILD);
+        installation(root.path(), "2.1.10", "not-a-build");
+        installation(root.path(), "2.1.11", "ABCDEF012345");
+        installation(&root.path().join("vm"), "2.1.12", BUILD);
+        assert_eq!(installation_dir_at(root.path()), None);
+        assert_eq!(installation_dir_at(Path::new(".")), None);
+        installation(root.path(), "2.1.10", BUILD);
+        for index in 0..MAX_INSTALL_ENTRIES {
+            fs::write(root.path().join(format!("extra-{index}")), b"").unwrap();
+        }
+        assert_eq!(installation_dir_at(root.path()), None);
+    }
+
+    #[test]
+    fn windows_downloads_reject_directory_junctions() {
+        use std::os::windows::process::CommandExt;
+        for relative in ["", "2.1.10", "2.1.10/012345abcdef"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("claude-code");
+            installation(&root, "2.1.10", BUILD);
+            let redirected = root.join(relative);
+            let outside = temp.path().join("outside");
+            fs::rename(&redirected, &outside).unwrap();
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/c", "mklink", "/J"])
+                .arg(redirected.to_string_lossy().replace('/', "\\"))
+                .arg(outside.to_string_lossy().replace('/', "\\"))
+                .creation_flags(0x0800_0000)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+            assert_eq!(installation_dir_at(&root), None, "{relative}");
+            fs::remove_dir(redirected).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires installed Claude Desktop runtime and PATH without standalone CLIs; uses a temporary home"]
+    fn installed_desktop_cli_resolves_and_reports_its_version() {
+        use crate::providers::traits::ProviderCli;
+        let dir = windows_installation_dir().expect("Desktop must have downloaded its CLI");
+        let cli = super::super::cli::resolve(None).unwrap();
+        assert_eq!(cli.executable, dir.join("claude.exe"));
+        assert_eq!(
+            cli.source,
+            crate::cli_discovery::CliSelectionSource::StandardLocation
+        );
+        let version = super::super::cli::ClaudeCli.probe_version(&cli).unwrap();
+        println!("Desktop Claude {version}: discovery and isolated version probe passed");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -178,7 +347,11 @@ mod tests {
         let updating = installation(home.path(), "2.1.11", BUILD);
         fs::remove_file(updating.join(".verified")).unwrap();
         assert_eq!(installation_dir_in(home.path()), Some(expected_dir(&newer)));
-        fs::write(updating.join(".verified"), format!("{BUILD}{}", "0".repeat(52))).unwrap();
+        fs::write(
+            updating.join(".verified"),
+            format!("{BUILD}{}", "0".repeat(52)),
+        )
+        .unwrap();
         assert_eq!(
             installation_dir_in(home.path()),
             Some(expected_dir(&updating))
@@ -295,7 +468,8 @@ mod tests {
         let host = installation(home.path(), "2.1.12", BUILD);
         fs::rename(
             host,
-            home.path().join("Library/Application Support/Claude/claude-code-vm"),
+            home.path()
+                .join("Library/Application Support/Claude/claude-code-vm"),
         )
         .unwrap();
         assert_eq!(installation_dir_in(home.path()), None);

@@ -244,6 +244,15 @@ fn resolve_codex_cli(_cli_path: Option<&Path>) -> Result<ResolvedCli, String> {
     Err("Open in Terminal is supported only on macOS and Windows".to_string())
 }
 
+pub(super) fn terminal_command(codex_cli: &str, codex_home: &Path) -> TerminalCommand {
+    let command = TerminalCommand::new(codex_cli).env("CODEX_HOME", codex_home);
+    #[cfg(windows)]
+    if super::desktop_cli_windows::requires_no_daemon(Path::new(codex_cli)) {
+        return command.arg("--no-daemon");
+    }
+    command
+}
+
 fn terminal_resume_command(
     codex_cli: &Path,
     thread_id: &str,
@@ -254,8 +263,7 @@ fn terminal_resume_command(
     if !codex_cli.is_absolute() || !project_root.is_absolute() || !codex_home.is_absolute() {
         return Err("Codex CLI, project root, and Codex home must be absolute".to_string());
     }
-    Ok(TerminalCommand::new(codex_cli.to_string_lossy())
-        .env("CODEX_HOME", codex_home)
+    Ok(terminal_command(&codex_cli.to_string_lossy(), codex_home)
         .arg("resume")
         .arg(thread_id)
         .arg("-C")
@@ -354,8 +362,7 @@ pub(super) fn new_session_terminal_command(
     codex_home: &Path,
     project_root: &Path,
 ) -> TerminalCommand {
-    TerminalCommand::new(codex_cli)
-        .env("CODEX_HOME", codex_home)
+    terminal_command(codex_cli, codex_home)
         .arg("-C")
         .arg(project_root.to_string_lossy())
 }
@@ -396,7 +403,7 @@ fn codex_home_terminal_command(
     if !codex_cli.is_absolute() || !codex_home.is_absolute() {
         return Err("Codex CLI and Codex home must be absolute".to_string());
     }
-    Ok(TerminalCommand::new(codex_cli.to_string_lossy()).env("CODEX_HOME", codex_home))
+    Ok(terminal_command(&codex_cli.to_string_lossy(), codex_home))
 }
 
 /// Open a terminal running the Codex CLI against one profile home.
@@ -575,6 +582,49 @@ mod tests {
         assert!(command.args.is_empty());
         assert!(codex_home_terminal_command(Path::new("codex"), Path::new(home)).is_err());
         assert!(launch_codex_home_app(Path::new("relative"), Path::new("/Users/dev")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_terminal_commands_preserve_the_cli_home_project_and_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("selected profile");
+        let project = temp.path().join("selected project");
+        // Only build command values; never execute against the installed app.
+        let cli = dirs::data_local_dir()
+            .unwrap()
+            .join("OpenAI/Codex/bin/0123456789abcdef/codex.exe");
+        let thread = "0193b6c1-5352-7b12-9c6e-000000000001";
+        let commands = [
+            codex_home_terminal_command(&cli, &home).unwrap(),
+            new_session_terminal_command(&cli.to_string_lossy(), &home, &project),
+            terminal_resume_command(&cli, thread, &project, &home).unwrap(),
+        ];
+        for command in &commands {
+            assert_eq!(command.program, cli.to_string_lossy());
+            assert_eq!(
+                command.env,
+                vec![(
+                    "CODEX_HOME".to_string(),
+                    home.to_string_lossy().into_owned()
+                )]
+            );
+            assert_eq!(command.args[0], "--no-daemon");
+        }
+        assert_eq!(
+            commands[1].args,
+            ["--no-daemon", "-C", &project.to_string_lossy()]
+        );
+        assert_eq!(
+            commands[2].args,
+            [
+                "--no-daemon",
+                "resume",
+                thread,
+                "-C",
+                &project.to_string_lossy()
+            ]
+        );
     }
 
     #[test]

@@ -55,21 +55,12 @@ fn version_from_banner(banner: &str) -> Option<String> {
 }
 
 /// The Claude CLI for one operation: the saved selection when there is one,
-/// otherwise the discovery policy, including Desktop's managed CLI on
-/// macOS after standalone installations.
+/// otherwise the discovery policy, including Desktop's managed CLI after
+/// standalone installations.
 pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
-    let installation_dirs = if explicit.is_none() {
-        desktop_cli_dirs()
-    } else {
-        Vec::new()
-    };
-    let found = cli_discovery::discover_launcher(
-        "claude",
-        explicit,
-        ShellDiscovery::Use,
-        &installation_dirs,
-    )
-    .map_err(|error| match error {
+    let discovered =
+        cli_discovery::discover_launcher("claude", explicit, ShellDiscovery::Use, desktop_cli_dirs);
+    let found = discovered.map_err(|error| match error {
         CliDiscoveryError::SelectedUnavailable => {
             "Selected Claude executable is unavailable. Choose it again in Settings."
         }
@@ -95,7 +86,13 @@ fn desktop_cli_dirs() -> Vec<PathBuf> {
             .into_iter()
             .collect()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        super::desktop_cli::windows_installation_dir()
+            .into_iter()
+            .collect()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     Vec::new()
 }
 

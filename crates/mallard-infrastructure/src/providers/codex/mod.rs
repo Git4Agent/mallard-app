@@ -7,6 +7,8 @@ mod app_server;
 pub mod cli;
 mod cli_version;
 mod deletion;
+#[cfg(windows)]
+mod desktop_cli_windows;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
@@ -195,12 +197,11 @@ impl SessionAdapter for CodexAdapter {
         project_root: &str,
         cli_path: Option<&Path>,
     ) -> Vec<ProjectOpenCommand> {
-        use crate::providers::launch::TerminalCommand;
         let program = cli_path.map_or_else(
             || "codex".to_string(),
             |path| path.to_string_lossy().into_owned(),
         );
-        let cli = || TerminalCommand::new(program.clone()).env("CODEX_HOME", home);
+        let cli = || actions::terminal_command(&program, home);
         let mut commands = vec![
             ProjectOpenCommand {
                 label: "Codex — new".to_string(),

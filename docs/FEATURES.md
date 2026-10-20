@@ -125,7 +125,15 @@ official ChatGPT desktop app in `/Applications` and `~/Applications` after
 standalone CLI installations. Claude discovery also checks the host CLI that
 Claude Desktop downloads under `~/Library/Application Support/Claude/claude-code`,
 selecting the newest complete, valid installation after standalone CLIs.
-If Desktop has not downloaded its CLI yet, open its Code tab to set it up.
+On Windows, Mallard resolves the registered desktop apps. Codex discovery uses
+the matching complete runtime that its packaged app extracts under
+`%LOCALAPPDATA%\OpenAI\Codex\bin` (or the bundled runtime for an unpackaged app).
+Claude discovery checks `Claude\claude-code` in its app-data directory, including
+the registered MSIX package's `LocalCache\Roaming` directory.
+These locations supply executables only: every action keeps its selected
+`CODEX_HOME` or `CLAUDE_CONFIG_DIR`. Windows Codex Terminal actions use
+`--no-daemon` for the desktop runtime, which has no standalone daemon package.
+If Claude Desktop has not downloaded its CLI yet, open its Code tab to set it up.
 If a machine keeps a CLI somewhere else, type
 or browse to the executable under Settings › Agent CLIs (an empty field means automatic),
 where **Test** runs its `--version`. Mallard
