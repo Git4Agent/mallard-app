@@ -7,7 +7,7 @@ import test from "node:test";
 const projectUrl = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, projectUrl), "utf8");
 
-test("release version is 1.0.1 in every source", async () => {
+test("release version is 1.0.2 in every source", async () => {
   const [tauriConfigSource, workspaceCargoSource, cargoSource, packageSource, packageLockSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
     read("Cargo.toml"),
@@ -19,12 +19,12 @@ test("release version is 1.0.1 in every source", async () => {
   const packageConfig = JSON.parse(packageSource);
   const packageLock = JSON.parse(packageLockSource);
 
-  assert.equal(tauriConfig.version, "1.0.1");
-  assert.match(workspaceCargoSource, /^version = "1\.0\.1"$/m);
+  assert.equal(tauriConfig.version, "1.0.2");
+  assert.match(workspaceCargoSource, /^version = "1\.0\.2"$/m);
   assert.match(cargoSource, /^version\.workspace = true$/m);
-  assert.equal(packageConfig.version, "1.0.1");
-  assert.equal(packageLock.version, "1.0.1");
-  assert.equal(packageLock.packages[""].version, "1.0.1");
+  assert.equal(packageConfig.version, "1.0.2");
+  assert.equal(packageLock.version, "1.0.2");
+  assert.equal(packageLock.packages[""].version, "1.0.2");
 });
 
 // The signed updater was removed in af20e1a because no Apple signing existed
