@@ -149,7 +149,7 @@ Join our [Discord](https://discord.gg/srnWNQUsB), or scan the QR code in WeChat 
 
 <a href="docs/readme/wechat-group.jpg"><img src="docs/readme/wechat-group.jpg" width="360" alt="WeChat QR code for the Mallard beta group"></a>
 
-The QR code is valid before October 19, as shown in the image. Click the image to view it at full size.
+The QR code is valid before October 26, as shown in the image. Click the image to view it at full size.
 
 ## FAQ
 

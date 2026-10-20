@@ -55,18 +55,28 @@ fn version_from_banner(banner: &str) -> Option<String> {
 }
 
 /// The Claude CLI for one operation: the saved selection when there is one,
-/// otherwise the discovery policy.
+/// otherwise the discovery policy, including Desktop's managed CLI on
+/// macOS after standalone installations.
 pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
-    let found = cli_discovery::discover_launcher("claude", explicit, ShellDiscovery::Use, &[]).map_err(
-        |error| match error {
-            CliDiscoveryError::SelectedUnavailable => {
-                "Selected Claude executable is unavailable. Choose it again in Settings."
-            }
-            CliDiscoveryError::NotFound => {
-                "Claude CLI not found. Install Claude Code, or choose its executable in Settings."
-            }
-        },
-    )?;
+    let installation_dirs = if explicit.is_none() {
+        desktop_cli_dirs()
+    } else {
+        Vec::new()
+    };
+    let found = cli_discovery::discover_launcher(
+        "claude",
+        explicit,
+        ShellDiscovery::Use,
+        &installation_dirs,
+    )
+    .map_err(|error| match error {
+        CliDiscoveryError::SelectedUnavailable => {
+            "Selected Claude executable is unavailable. Choose it again in Settings."
+        }
+        CliDiscoveryError::NotFound => {
+            "Claude CLI not found. Install Claude Code, or choose its executable in Settings."
+        }
+    })?;
     let executable = native_target(&found.launcher)?;
     Ok(ResolvedCli {
         launcher: found.launcher,
@@ -74,6 +84,19 @@ pub fn resolve(explicit: Option<&Path>) -> Result<ResolvedCli, String> {
         source: found.source,
         search_path: found.search_path,
     })
+}
+
+fn desktop_cli_dirs() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::persistence::user_home_dir()
+            .as_deref()
+            .and_then(super::desktop_cli::installation_dir_in)
+            .into_iter()
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
 }
 
 fn native_target(launcher: &Path) -> Result<PathBuf, String> {

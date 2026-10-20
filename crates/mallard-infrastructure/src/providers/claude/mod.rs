@@ -6,6 +6,8 @@ pub mod actions;
 pub mod cli;
 pub mod codec;
 mod deletion;
+#[cfg(target_os = "macos")]
+mod desktop_cli;
 pub mod discovery;
 pub mod history;
 pub mod materialization;

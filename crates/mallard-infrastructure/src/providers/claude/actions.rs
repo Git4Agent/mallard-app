@@ -1,14 +1,14 @@
 //! Safe Claude session actions surfaced through the generic action contract.
 
-use crate::providers::launch::{
-    launch_terminal, percent_encode_uri_component, shell_quote, TerminalCommand,
-};
+#[cfg(target_os = "macos")]
+use crate::providers::launch::shell_quote;
+use crate::providers::launch::{launch_terminal, percent_encode_uri_component, TerminalCommand};
 use crate::providers::traits::{
     NewSessionRequest, NewSessionSurface, SessionActionContext, SessionActionDescriptor,
     SessionActionKind, SessionActionOutcome, SessionActionRequest,
 };
 use std::path::Path;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::process::Command;
 
 pub(super) const OPEN_IN_APP: &str = "claude.open-in-app";
@@ -43,15 +43,18 @@ fn claude_app_deep_link(session_id: &str) -> Result<String, String> {
     Ok(format!("claude://resume?session={session_id}"))
 }
 
-fn claude_app_open_command(claude_home: &Path, deep_link: &str) -> String {
-    format!(
-        "'/usr/bin/open' -n -a '/Applications/Claude.app' --env {} {}",
-        shell_quote(&format!(
-            "CLAUDE_CONFIG_DIR={}",
-            claude_home.to_string_lossy()
-        )),
-        shell_quote(deep_link)
-    )
+/// Let Launch Services reuse Claude's running instance. `--env` selects the
+/// home only on a cold start; an existing instance keeps its own environment.
+#[cfg(any(target_os = "macos", test))]
+fn claude_app_open_command(claude_home: &Path, deep_link: Option<&str>) -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    command
+        .args(["-a", "/Applications/Claude.app", "--env"])
+        .arg(format!("CLAUDE_CONFIG_DIR={}", claude_home.to_string_lossy()));
+    if let Some(deep_link) = deep_link {
+        command.arg(deep_link);
+    }
+    command
 }
 
 fn launch_claude_app(
@@ -72,7 +75,8 @@ fn claude_code_new_deep_link(project_root: &Path) -> String {
     )
 }
 
-/// Hand one `claude://` link to the desktop app reading `claude_home`.
+/// Hand one `claude://` link to the desktop app, reusing it on macOS.
+/// `claude_home` selects the profile when starting the app.
 /// `target` names what the link opens, for the error.
 fn open_app_link(
     claude_home: &Path,
@@ -85,17 +89,14 @@ fn open_app_link(
     }
     #[cfg(target_os = "macos")]
     {
-        let environment = format!("CLAUDE_CONFIG_DIR={}", claude_home.to_string_lossy());
-        before_launch(&claude_app_open_command(claude_home, deep_link));
-        let output = Command::new("/usr/bin/open")
-            .args([
-                "-n",
-                "-a",
-                "/Applications/Claude.app",
-                "--env",
-                &environment,
-                deep_link,
-            ])
+        let mut command = claude_app_open_command(claude_home, Some(deep_link));
+        let display = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(|arg| shell_quote(&arg.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        before_launch(&display);
+        let output = command
             .output()
             .map_err(|error| format!("open the Claude desktop app {target}: {error}"))?;
         if !output.status.success() {
@@ -122,24 +123,15 @@ fn open_app_link(
     }
 }
 
-/// Open the Claude desktop app reading one profile home, with no session —
-/// the Library's launch. Claude's only deep link resumes a session, so a
-/// home-scoped open is a plain app launch with the config environment.
+/// Open Claude without a session for the Library. On macOS this focuses the
+/// running app, or starts it with the selected profile home if it is closed.
 pub fn launch_claude_home_app(claude_home: &Path) -> Result<(), String> {
     if !claude_home.is_absolute() {
         return Err("Claude home must be absolute".to_string());
     }
     #[cfg(target_os = "macos")]
     {
-        let environment = format!("CLAUDE_CONFIG_DIR={}", claude_home.to_string_lossy());
-        let output = Command::new("/usr/bin/open")
-            .args([
-                "-n",
-                "-a",
-                "/Applications/Claude.app",
-                "--env",
-                &environment,
-            ])
+        let output = claude_app_open_command(claude_home, None)
             .output()
             .map_err(|error| format!("open the Claude desktop app: {error}"))?;
         if !output.status.success() {
@@ -305,15 +297,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_deep_links_and_commands_are_argument_safe() {
+    fn app_deep_links_are_argument_safe() {
         let session_id = "0193b6c1-5352-7b12-9c6e-000000000001";
         let deep_link = claude_app_deep_link(session_id).unwrap();
         assert_eq!(deep_link, format!("claude://resume?session={session_id}"));
         assert!(claude_app_deep_link("../../etc/passwd").is_err());
+    }
 
-        let command = claude_app_open_command(Path::new("/Users/dev/my claude"), &deep_link);
-        assert!(command.contains("'CLAUDE_CONFIG_DIR=/Users/dev/my claude'"));
-        assert!(command.contains("'/Applications/Claude.app'"));
+    #[test]
+    fn macos_app_launches_reuse_claude_for_resumes_new_sessions_and_library() {
+        let resume = claude_app_deep_link("0193b6c1-5352-7b12-9c6e-000000000001").unwrap();
+        let new_session = claude_code_new_deep_link(Path::new("/Users/dev/my project"));
+        let home = Path::new("/Users/dev/my claude's home");
+
+        for deep_link in [Some(resume.as_str()), Some(new_session.as_str()), None] {
+            let command = claude_app_open_command(home, deep_link);
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            let args: Vec<_> = command.get_args().collect();
+            assert!(
+                !args.iter().any(|arg| *arg == "-n" || *arg == "--new"),
+                "opening Claude must reuse its running instance"
+            );
+            // The selected home still reaches a cold launch as one literal
+            // argument, including spaces and quotes, without a shell.
+            assert_eq!(args[0], "-a");
+            assert_eq!(args[1], "/Applications/Claude.app");
+            assert_eq!(args[2], "--env");
+            assert_eq!(args[3], "CLAUDE_CONFIG_DIR=/Users/dev/my claude's home");
+            if let Some(deep_link) = deep_link {
+                assert_eq!(args.len(), 5);
+                assert_eq!(args[4], deep_link);
+            } else {
+                assert_eq!(args.len(), 4);
+            }
+        }
     }
 
     #[test]

@@ -47,6 +47,9 @@ What Mallard does, in detail. The short introduction is the repository's
   a bound agent's CLI in Terminal in the project's folder, on the project's
   own agent home, or opens the agent's desktop app on that folder. The new
   session is listed once the agent writes it and the list is refreshed.
+  On macOS, Claude desktop actions reuse the running app for session resumes,
+  new sessions, and Library launches. A running Claude keeps its current
+  profile; Mallard's selected Claude home applies when starting a closed app.
 - Manages user-global Agent Skills, provider-native plugin install intent, and
   Codex pets as independent Library resources. The Catalog menu starts empty
   and grows one row per **(provider home × resource kind)** the user adds. A
@@ -119,7 +122,11 @@ login shell once per launch, in the background, with
 `MALLARD_RESOLVING_ENVIRONMENT=1` set so a startup file can skip slow work
 when it sees it. On macOS, automatic Codex CLI discovery also checks the
 official ChatGPT desktop app in `/Applications` and `~/Applications` after
-standalone CLI installations. If a machine keeps a CLI somewhere else, type
+standalone CLI installations. Claude discovery also checks the host CLI that
+Claude Desktop downloads under `~/Library/Application Support/Claude/claude-code`,
+selecting the newest complete, valid installation after standalone CLIs.
+If Desktop has not downloaded its CLI yet, open its Code tab to set it up.
+If a machine keeps a CLI somewhere else, type
 or browse to the executable under Settings › Agent CLIs (an empty field means automatic),
 where **Test** runs its `--version`. Mallard
 downloads newer releases in the
