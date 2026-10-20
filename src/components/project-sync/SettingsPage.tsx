@@ -1194,7 +1194,7 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                 control={(
                   <div className="sync-select-shell">
                     <select
-                      value={shownTuning ? Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024)) : 100}
+                      value={shownTuning ? Math.round(shownTuning.conversation_file_limit_bytes / (1024 * 1024)) : 200}
                       disabled={tuningBusy || !tuning}
                       onChange={(event) => void applyTuning({
                         conversation_file_limit_bytes: Number(event.target.value) * 1024 * 1024,

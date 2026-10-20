@@ -595,6 +595,7 @@ impl ClaudeTimelineBuilder {
         };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
+                working_directory: None,
                 event_id,
                 ordinal: 0,
                 timestamp,
@@ -729,6 +730,7 @@ impl ClaudeTimelineBuilder {
         };
         self.events.push(PendingTimelineEvent {
             entry: SessionTimelineIndexEntry {
+                working_directory: None,
                 event_id: format!("claude:tool:{call_id}"),
                 ordinal: 0,
                 timestamp,
@@ -876,6 +878,7 @@ impl ClaudeTimelineBuilder {
             }
             self.events.push(PendingTimelineEvent {
                 entry: SessionTimelineIndexEntry {
+                    working_directory: None,
                     event_id: group.event_id,
                     ordinal: 0,
                     timestamp: group.timestamp,
@@ -1906,11 +1909,14 @@ pub(crate) fn read_timeline_page(
             position += 1;
             continue;
         }
-        let text = if is_call_kind(entry.kind) {
-            None
+        let (text, working_directory) = if is_call_kind(entry.kind) {
+            (None, None)
         } else {
             let value = read_source_value(&mut file, entry.source)?;
-            bounded_text(record_text(&value), timeline_message_preview_bytes()).0
+            (
+                bounded_text(record_text(&value), timeline_message_preview_bytes()).0,
+                context.working_directory(value.get("cwd").and_then(Value::as_str)),
+            )
         };
         let is_agent = entry.kind == SessionTimelineEventKind::AgentCall;
         let tool = if let Some(tool_index) = &entry.tool {
@@ -1976,6 +1982,7 @@ pub(crate) fn read_timeline_page(
             }
         }
         events.push(SessionTimelineEvent {
+            working_directory,
             event_id: entry.event_id.clone(),
             ordinal: entry.ordinal,
             timestamp: entry.timestamp,
@@ -2316,6 +2323,66 @@ mod tests {
 
     fn count_value(count: &SessionCount) -> u64 {
         count.value.expect("supported count")
+    }
+
+    #[test]
+    fn messages_keep_their_own_project_relative_working_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir_all(root.join("output")).unwrap();
+        let transcript = temp.path().join("session.jsonl");
+        let reply = |id: &str, cwd: Value| {
+            json!({
+                "type":"assistant", "uuid":id, "sessionId":"session-1", "cwd":cwd,
+                "message":{"id":id,"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"[clip](clip.mp4)"}]}
+            })
+        };
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u1","sessionId":"session-1","cwd":root,"message":{"role":"user","content":"Show the clip"}}),
+                reply("a1", json!(root.join("output"))),
+                reply("a2", json!(root)),
+                reply("a3", json!(temp.path().join("outside"))),
+                reply("a4", Value::Null),
+            ],
+        );
+        let context = context(&root);
+        let index = build_timeline_index(&transcript, &context).unwrap();
+        assert_eq!(index.parser_version, 1);
+        let query = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::Response]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page = read_timeline_page(&transcript, &index, &query, &context).unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.working_directory.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("output"), Some("."), None, None]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn message_cwd_accepts_a_canonical_project_alias_but_not_an_outside_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap().join("project");
+        fs::create_dir_all(root.join("output")).unwrap();
+        let alias = temp.path().join("selected");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let context = context(&root);
+        assert_eq!(
+            context
+                .working_directory(alias.join("output").to_str())
+                .as_deref(),
+            Some("output")
+        );
+        assert_eq!(context.working_directory(temp.path().to_str()), None);
     }
 
     #[test]
@@ -3343,7 +3410,9 @@ mod tests {
         let selected_root = canonical_root.join("alias");
         let aliases = vec![canonical_root.clone(), selected_root.clone()];
         let inside = selected_root.join("src/lib.rs");
-        let outside = temp.path().join("project_external/alias_external/outside.rs");
+        let outside = temp
+            .path()
+            .join("project_external/alias_external/outside.rs");
         write_jsonl(
             &transcript,
             vec![

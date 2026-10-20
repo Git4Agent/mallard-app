@@ -15,6 +15,7 @@ import { formatCompactNumber, formatNumber } from "../../../format";
 import { t, uiLocale } from "../../../i18n";
 import { syncDecisionReason, syncStatusDetail } from "../syncDetailText";
 import type { PushSessionFacts } from "../ProjectActivityPage";
+import { isSafeExternalMarkdownUrl, safeMarkdownUrl } from "../../markdown/markdownUrl";
 import {
   clockOptions,
   formatDateTime,
@@ -684,9 +685,35 @@ export function projectMarkdownDisplayPath(projectRoot: string, relativePath: st
   return root ? `${root}${separator}${path}` : `${separator}${path}`;
 }
 
+/** Resolve a transcript destination from its message's cwd. Only parent
+ * steps that stay inside the project are allowed. Encode once for the shared
+ * Markdown URL sanitizer, which returns the decoded project-relative path. */
+export function sessionMarkdownUrl(url: string, workingDirectory: string | null): string {
+  if (url.startsWith("#") || isSafeExternalMarkdownUrl(url)) return safeMarkdownUrl(url);
+  if (workingDirectory === null) return "";
+  let path: string;
+  try {
+    path = decodeURIComponent(url).replace(/\\/g, "/");
+  } catch {
+    return "";
+  }
+  const unsafe = (value: string) => value.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(value) || /[\u0000-\u001f\u007f]/.test(value);
+  if (!path || unsafe(path) || unsafe(workingDirectory) || workingDirectory.includes("\\")) return "";
+  const parts = workingDirectory.split("/").filter((part) => part && part !== ".");
+  if (parts.includes("..")) return "";
+  for (const part of path.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (parts.length === 0) return "";
+      parts.pop();
+    } else parts.push(part);
+  }
+  return parts.map(encodeURIComponent).join("/");
+}
+
 /**
  * One project picture's, track's or clip's settled outcome in the page-level
- * cache: a ready `data:` URI (a picture) or `blob:` URL (a track or a clip),
+ * cache: a ready `data:` URI (a picture) or native media URL (a track or clip),
  * or a terminal failure in words for the chip (rejected format, size cap,
  * missing file). An absent entry means the load has not settled yet.
  */
@@ -694,14 +721,8 @@ export type ProjectMarkdownMediaState =
   | { status: "loaded"; src: string }
   | { status: "failed"; message: string };
 
-const MARKDOWN_AUDIO_TYPES: Readonly<Record<string, string>> = {
-  wav: "audio/wav", mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac",
-  ogg: "audio/ogg", oga: "audio/ogg", opus: "audio/ogg", flac: "audio/flac",
-};
-const MARKDOWN_VIDEO_TYPES: Readonly<Record<string, string>> = {
-  mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
-  webm: "video/webm", mkv: "video/x-matroska", ogv: "video/ogg",
-};
+const MARKDOWN_AUDIO_EXTENSIONS = new Set(["wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "flac"]);
+const MARKDOWN_VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv", "ogv"]);
 
 export type MarkdownMediaKind = "image" | "audio" | "video";
 
@@ -714,13 +735,7 @@ function markdownExtension(path: string): string {
 /** A project path a session plays in place: a track or a clip, by extension. */
 export function markdownPlayerKind(path: string): "audio" | "video" | null {
   const extension = markdownExtension(path);
-  return MARKDOWN_AUDIO_TYPES[extension] ? "audio" : MARKDOWN_VIDEO_TYPES[extension] ? "video" : null;
-}
-
-/** The type a track's or a clip's `Blob` carries, so the webview's player takes it. */
-export function markdownPlayerType(path: string): string | null {
-  const extension = markdownExtension(path);
-  return MARKDOWN_AUDIO_TYPES[extension] ?? MARKDOWN_VIDEO_TYPES[extension] ?? null;
+  return MARKDOWN_AUDIO_EXTENSIONS.has(extension) ? "audio" : MARKDOWN_VIDEO_EXTENSIONS.has(extension) ? "video" : null;
 }
 
 /** Why a picture does not show or a track or a clip does not play, in the file's own words. */
@@ -731,7 +746,10 @@ export function markdownMediaFailureMessage(kind: MarkdownMediaKind, path: strin
       return kind === "image"
         ? t("session:media.notFoundImage")
         : kind === "audio" ? t("session:media.notFoundAudio") : t("session:media.notFoundVideo");
-    case "response_too_large": return kind === "image" ? t("session:media.tooLargeToShow") : t("session:media.tooLargeToPlay");
+    case "response_too_large":
+      return kind === "image"
+        ? t("session:media.tooLargeToShow")
+        : kind === "video" ? t("session:media.videoTooLarge") : failure.message;
     case "invalid_request":
       if (kind === "image") return format ? t("session:media.cantShow", { format }) : t("session:media.cantShowFile");
       return format ? t("session:media.cantPlay", { format }) : t("session:media.cantPlayFile");

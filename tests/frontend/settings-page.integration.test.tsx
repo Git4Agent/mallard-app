@@ -120,11 +120,9 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.match(html, /On Windows a changed PATH needs a Mallard restart\./);
   assert.doesNotMatch(html, /Detecting…/);
 
-  // The Performance group: four tuning selects on the same shell, each
-  // defaulting to what was hardcoded before the knobs existed. The thread
-  // cap shares its "100 MB" face with the log size cap, so its default is
-  // pinned through its own select; the other three are unambiguous.
-  assert.match(html, /aria-label="Thread size limit"[\s\S]{0,600}<option value="100" selected="">100 MB<\/option>/);
+  // The Performance group: four tuning selects on the same shell. The thread
+  // cap defaults to 200 MiB, while the log size cap above stays at 100 MiB.
+  assert.match(html, /aria-label="Thread size limit"[\s\S]{0,600}<option value="200" selected="">200 MB<\/option>/);
   assert.match(html, /<option value="400">400 MB<\/option>/);
   assert.match(html, /aria-label="Preview size limit"/);
   assert.match(html, /<option value="1024" selected="">1 MB<\/option>/);
@@ -214,7 +212,7 @@ test("clock options use a padded 24-hour cycle", () => {
   });
 });
 
-test("Reset Mallard wipes ~/.mallard behind a warning confirm and restarts", () => {
+test("Reset Mallard wipes ~/.mallard behind a warning confirm and reloads the webview", () => {
   const page = readFileSync("src/components/project-sync/SettingsPage.tsx", "utf8");
   const api = readFileSync("src/components/project-sync/api.ts", "utf8");
   const reset = readFileSync("src-tauri/src/app_reset.rs", "utf8");
@@ -235,12 +233,12 @@ test("Reset Mallard wipes ~/.mallard behind a warning confirm and restarts", () 
   assert.match(api, /invoke<LocalStateWipeResult>\("reset_local_state"\)/);
   assert.doesNotMatch(api, /restart_app/);
 
-  // Rust side: the wipe holds the catalog-state guard, re-arms the only two
-  // long-lived holders of pre-wipe state (the process survives the reset),
-  // never relaunches the process, and logs no persisted success entry (that
-  // would recreate ~/.mallard/logs the reset just deleted).
-  assert.match(reset, /acquire_state_guard\(\)/);
-  assert.match(reset, /wipe_local_state\(\)/);
+  // The local core guards the wipe. The Tauri command delegates to
+  // it, re-arms live state, and logs no persisted success entry that would
+  // recreate ~/.mallard/logs. The process survives the reset.
+  assert.match(reset, /reset_local_state_with_repositories\(&repository, &catalog\)/);
+  assert.match(reset, /acquire_state_guard\(\)\?;[\s\S]*?repository\.wipe_local_state\(\)\?/);
+  assert.match(reset, /plan_store::discard_all\(catalog\.root\(\)\)/);
   assert.match(reset, /observation_cache\(\)\.reset\(\);/);
   assert.match(reset, /ConfigWatcher::start\(app\.clone\(\)\)/);
   assert.doesNotMatch(reset, /request_restart|restart_app/);
@@ -273,6 +271,7 @@ test("Performance settings persist through the backend tuning document", () => {
   assert.match(document, /pub const APP_SETTINGS_SCHEMA: u32 = 1;/);
   assert.match(document, /#\[serde\(default = "default_conversation_file_limit_bytes"\)\]/);
   assert.match(document, /#\[serde\(default = "default_timeline_preview_limit_bytes"\)\]/);
+  assert.match(commands, /update_app_settings_core\(&repository, &settings, \|\| \{/);
   assert.match(commands, /save_app_settings\(repository, settings\)\?;\s*install_app_settings\(settings\);/);
   assert.match(commands, /observation_cache\(\)\.reset_and_purge_disk\(repository\.root\(\)\)/);
   assert.match(lib, /app_settings::get_app_settings,\s*app_settings::update_app_settings,/);
@@ -384,7 +383,7 @@ test("each agent CLI row is a path field: typed or browsed, saved on Enter as ap
   assert.match(document, /metadata\.len\(\) > MAX_SETTINGS_BYTES/);
   assert.match(document, /fn validate_cli_path\(label: &str, path: &str\)/);
   assert.match(document, /Tuning values only: a CLI path or an export setting never purges a cache\./);
-  assert.match(commands, /cli\.probe_version\(&resolved\)/);
+  assert.match(commands, /cli\.resolve\(settings\.cli_path\(provider\)\)\?;\s*cli\.probe_version\(&resolved\)/);
   assert.match(discovery, /\.arg\("--version"\)\s*\.env_clear\(\)/);
   assert.match(discovery, /\.args\(\["-i", "-l", "-c", &script\]\)/);
   assert.match(discovery, /SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs\(10\)/);

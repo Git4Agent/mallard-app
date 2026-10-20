@@ -23,7 +23,7 @@ use super::service::{
     load_project_sync_config_with_repository, probe_project_folder_with_repository,
     probe_provider_profile_with_repository, project_open_commands, project_storage_log_context,
     pull_action_resource_label, pull_plan_action_counts, pull_review_resource_labels,
-    read_project_markdown_image_with_repository, read_project_markdown_media_with_repository,
+    prepare_project_markdown_media_with_repository, read_project_markdown_image_with_repository,
     recover_startup_state_with_repository, refresh_project_activity_with_progress,
     remove_local_project_with_repository, remove_project_link_with_repository,
     remove_storage_with_repository, rename_local_project_with_repository,
@@ -899,24 +899,27 @@ pub async fn read_project_markdown_image(
     .await
 }
 
-/// A project track or clip for an inline player, as raw bytes: the webview
-/// wraps them in a `blob:` URL rather than a base64 `data:` string.
+/// Validate the file and inspect its header. Playback uses the project-media
+/// protocol's bounded ranges; video bytes never cross command IPC.
 #[tauri::command]
-pub async fn read_project_markdown_media(
+pub async fn prepare_project_markdown_media(
     local_project_id: LocalProjectId,
     relative_path: String,
-) -> Result<tauri::ipc::Response, SessionDetailError> {
+) -> Result<mallard_infrastructure::project_media::ProjectMarkdownMedia, SessionDetailError> {
     let repository = repository().map_err(|_| {
         session_detail_error(
             SessionDetailErrorCode::ProviderError,
             "Mallard could not open its local state repository.",
         )
     })?;
-    let bytes = run_session_detail_blocking(move || {
-        read_project_markdown_media_with_repository(&repository, &local_project_id, &relative_path)
+    run_session_detail_blocking(move || {
+        prepare_project_markdown_media_with_repository(
+            &repository,
+            &local_project_id,
+            &relative_path,
+        )
     })
-    .await?;
-    Ok(tauri::ipc::Response::new(bytes))
+    .await
 }
 
 #[tauri::command]

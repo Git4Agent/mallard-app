@@ -2502,6 +2502,30 @@ test("unavailable sessions explain why they cannot be synced", () => {
   assert.doesNotMatch(html, /can.t tell which copy is newer/);
 });
 
+test("oversized sessions stay visible and marked unavailable before a storage comparison", () => {
+  const reason = "Session exceeds the 200 MiB size limit.";
+  const oversized = { ...codexSession, sync_blocked_reason: reason, metrics_complete: false };
+  for (const git of [null, activity.git]) {
+    for (const comparison of [null, emptyComparison()]) {
+      const html = renderToStaticMarkup(
+        <ProjectChatHistoryContent
+          {...contentDefaults}
+          activity={{ ...activity, git, sessions: [oversized] }}
+          comparison={comparison}
+          activeStorageName={comparison ? "Local storage 1" : null}
+        />,
+      );
+
+      assert.match(html, /Add Git history mapping/);
+      assert.match(html, /aria-label="Unavailable for sync\. Session exceeds the 200 MiB size limit\."/);
+      assert.match(html, /class="sync-history-branch-state history-only" title="Session exceeds the 200 MiB size limit\.">Unavailable for sync<\/span>/);
+      assert.match(html, /Metrics unavailable/);
+      assert.doesNotMatch(html, /aria-label="Messages:/);
+      assert.doesNotMatch(html, /sync-sync-row-choice/);
+    }
+  }
+});
+
 test("Push review hides sessions blocked by provider discovery", () => {
   const reason = "The provider could not verify this session for sync.";
   const html = renderToStaticMarkup(

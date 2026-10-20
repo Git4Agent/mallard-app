@@ -37,6 +37,8 @@ percent-encoding = "2"
 semver = "1"
 socket2 = "0.6"
 httparse = "1.10"
+# The same Range parser used by Tauri's asset protocol.
+http-range = "0.1.5"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "multipart"] }
 
 # Inspect typed HTTP error causes; reqwest already uses this dependency.

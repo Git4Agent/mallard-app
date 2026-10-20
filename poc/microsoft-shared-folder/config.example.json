@@ -1,0 +1,5 @@
+{
+  "clientId": "YOUR_PUBLIC_APPLICATION_CLIENT_ID",
+  "tenant": "RESOURCE_TENANT_UUID",
+  "sharingUrl": "https://YOUR_TENANT.sharepoint.com/:f:/s/YOUR_SITE/YOUR_SHARED_FOLDER_LINK"
+}

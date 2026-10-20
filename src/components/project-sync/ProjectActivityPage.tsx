@@ -1535,6 +1535,11 @@ function SessionCard({
           ) : (
             <strong title={visibleTitle === fullTitle ? undefined : fullTitle}>{visibleTitle}</strong>
           )}
+          {session.sync_blocked_reason && (
+            <span className="sync-history-branch-state history-only" title={session.sync_blocked_reason}>
+              {t("reviewState.unavailable")}
+            </span>
+          )}
           {selectionMode === "push" && syncEntry?.subagent_selection?.omitted && <ChildOmissionIcon />}
           {session.preserved && (
             <span
@@ -1618,11 +1623,15 @@ function SessionCard({
           stamp still closes the line so it forms one column down the list. */}
       <div className="sync-history-session-details">
         <div className="sync-history-session-summary">
-          <SessionMetrics
-            session={session}
-            showTimestamp={false}
-            sizeReadout={reviewSizeReadout(selectionMode, syncEntry)}
-          />
+          {session.sync_blocked_reason ? (
+            <span className="sync-history-thread-metric sync-history-partial">{t("metrics.unavailable")}</span>
+          ) : (
+            <SessionMetrics
+              session={session}
+              showTimestamp={false}
+              sizeReadout={reviewSizeReadout(selectionMode, syncEntry)}
+            />
+          )}
           <span className="sync-history-actions-divider" aria-hidden="true" />
           <div className="sync-history-row-clickables">
             {!selectionMode && session.source !== "remote_only" && session.access === "bound_ready"

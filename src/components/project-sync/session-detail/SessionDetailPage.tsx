@@ -25,7 +25,6 @@ import {
   includedSessionEventKinds,
   markdownMediaFailureMessage,
   markdownPlayerKind,
-  markdownPlayerType,
   mergeSessionTimelinePages,
   normalizeSessionDetailFailure,
   type ProjectMarkdownMediaState,
@@ -377,9 +376,8 @@ export default function SessionDetailPage({
     }
   }, [localProjectId]);
 
-  // Markdown-referenced project pictures, embedded as bounded data: URIs, and
-  // tracks and clips, played from blob: URLs this page owns until the project
-  // changes or the page closes. The cache is settled outcomes only; the ref
+  // Pictures use bounded data: URIs; tracks and clips use the native protocol
+  // to stream bounded ranges. The cache is settled outcomes only; the ref
   // dedupes in-flight loads so one path is read at most once per page,
   // whatever re-renders happen.
   const [projectMedia, setProjectMedia] = useState<
@@ -387,43 +385,33 @@ export default function SessionDetailPage({
   >({});
   const requestedProjectMedia = useRef(new Set<string>());
   const mediaProject = useRef(localProjectId);
-  const mediaUrls = useRef<string[]>([]);
   useEffect(() => {
     mediaProject.current = localProjectId;
     requestedProjectMedia.current = new Set();
     setProjectMedia({});
-    return () => {
-      for (const url of mediaUrls.current.splice(0)) URL.revokeObjectURL(url);
-    };
   }, [localProjectId]);
   const loadProjectMedia = useCallback(async (relativePath: string) => {
     if (requestedProjectMedia.current.has(relativePath)) return;
     requestedProjectMedia.current.add(relativePath);
     const player = markdownPlayerKind(relativePath);
-    const type = markdownPlayerType(relativePath);
     let state: ProjectMarkdownMediaState;
     try {
-      if (!player || !type) {
+      if (!player) {
         const image = await projectSyncApi.readProjectMarkdownImage(localProjectId, relativePath);
         state = {
           status: "loaded",
           src: `data:${image.mime_type};base64,${image.base64_data}`,
         };
-      } else if (!document.createElement(player).canPlayType(type)) {
-        // A format the webview cannot decode is never read at all.
-        state = {
-          status: "failed",
-          message: markdownMediaFailureMessage(player, relativePath, { code: "invalid_request", message: "" }),
-        };
       } else {
-        const bytes = await projectSyncApi.readProjectMarkdownMedia(localProjectId, relativePath);
-        const url = URL.createObjectURL(new Blob([bytes], { type }));
-        if (mediaProject.current !== localProjectId) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        mediaUrls.current.push(url);
-        state = { status: "loaded", src: url };
+        const media = await projectSyncApi.prepareProjectMarkdownMedia(localProjectId, relativePath);
+        // The backend inspects only the header; unsupported containers never
+        // become a player or start range requests.
+        state = document.createElement(player).canPlayType(media.mime_type)
+          ? { status: "loaded", src: media.src }
+          : {
+            status: "failed",
+            message: markdownMediaFailureMessage(player, relativePath, { code: "invalid_request", message: "" }),
+          };
       }
     } catch (reason) {
       state = {

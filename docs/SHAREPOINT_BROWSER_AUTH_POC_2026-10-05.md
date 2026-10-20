@@ -4,6 +4,12 @@
 > on 2026-10-09. Paths and commands below that use those files are historical
 > and no longer work in this checkout. Git history retains the tracked files.
 
+**15 October follow-up:** A new isolated
+[Microsoft 365 shared-folder POC](../poc/microsoft-shared-folder/README.md)
+prepares two-user browser sign-in, shared-root inspection, and opt-in
+synthetic upload checks. Live Microsoft validation remains pending. The
+October 5 experiment below remains historical.
+
 Research date: 5 October 2026.
 
 Yes. Mallard can offer **Connect SharePoint → Microsoft sign-in → choose a

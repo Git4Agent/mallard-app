@@ -67,7 +67,7 @@ export default {
     notFoundAudio: "The linked audio no longer exists.",
     notFoundVideo: "The linked video no longer exists.",
     tooLargeToShow: "Too large to show here.",
-    tooLargeToPlay: "Too large to play here.",
+    videoTooLarge: "Videos up to 500 MiB can play here.",
     cantShow: "{{format}} can't show in Mallard.",
     cantPlay: "{{format}} can't play in Mallard.",
     cantShowFile: "This file can't show in Mallard.",

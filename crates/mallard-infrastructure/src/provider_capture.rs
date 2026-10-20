@@ -2747,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_files_allow_100_mib_and_block_larger_files() {
+    fn conversation_files_allow_200_mib_and_block_larger_files() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         let codex = temp.path().join("codex");
@@ -2803,7 +2803,7 @@ mod tests {
         assert!(over_limit
             .blocked_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("exceeds 104857600 bytes")));
+            .is_some_and(|reason| reason.contains("exceeds 209715200 bytes")));
     }
 
     #[test]

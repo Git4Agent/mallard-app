@@ -1,6 +1,6 @@
 import type { ManagedCloudDiscardedDraft, ManagedCloudListingPage, ManagedCloudPublicSort, ManagedCloudPublishedVersion } from "../managed-cloud/types";
 import { listen } from "@tauri-apps/api/event";
-import { Channel, invoke } from "../../ipc";
+import { Channel, convertFileSrc, invoke } from "../../ipc";
 import type {
   DropboxSetupMode,
   DropboxSetupLogin,
@@ -53,6 +53,7 @@ import type {
   ProjectContentInventory,
   ProjectOperationResult,
   ProjectMarkdownImage,
+  ProjectMarkdownMedia,
   ProjectSessionDetail,
   ProjectSessionTimelinePage,
   ProjectSessionTimelineQuery,
@@ -660,9 +661,11 @@ export const projectSyncApi = {
   readProjectMarkdownImage: (localProjectId: string, relativePath: string) =>
     invoke<ProjectMarkdownImage>("read_project_markdown_image", { localProjectId, relativePath }),
 
-  /** A project track or clip for an inline player, as raw bytes. */
-  readProjectMarkdownMedia: (localProjectId: string, relativePath: string) =>
-    invoke<ArrayBuffer>("read_project_markdown_media", { localProjectId, relativePath }),
+  /** Header validation plus a project-scoped URL for bounded native playback. */
+  prepareProjectMarkdownMedia: async (localProjectId: string, relativePath: string) => {
+    const metadata = await invoke<ProjectMarkdownMedia>("prepare_project_markdown_media", { localProjectId, relativePath });
+    return { ...metadata, src: convertFileSrc(`${localProjectId}/${relativePath}`, "project-media") };
+  },
 
   deleteLocalProjectSession: (localProjectId: string, resourceId: string) =>
     invoke<LocalSessionDeleteResult>("delete_local_project_session", { localProjectId, resourceId }),

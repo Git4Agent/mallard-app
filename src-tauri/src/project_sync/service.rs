@@ -1703,12 +1703,37 @@ pub(super) fn read_project_markdown_image_with_repository(
     session_detail::read_project_markdown_image(repository, local_project_id, relative_path)
 }
 
-pub(super) fn read_project_markdown_media_with_repository(
+pub(super) fn prepare_project_markdown_media_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     relative_path: &str,
-) -> Result<Vec<u8>, SessionDetailError> {
-    session_detail::read_project_markdown_media(repository, local_project_id, relative_path)
+) -> Result<mallard_infrastructure::project_media::ProjectMarkdownMedia, SessionDetailError> {
+    mallard_infrastructure::project_media::open_project_markdown_media(
+        repository,
+        local_project_id,
+        relative_path,
+    )
+    .map(|media| media.metadata)
+}
+
+pub(super) fn read_project_media_range_with_repository(
+    repository: &LocalStateRepository,
+    request_path: &str,
+    range: Option<&str>,
+    head: bool,
+) -> Result<
+    (
+        mallard_infrastructure::project_media::ProjectMarkdownMedia,
+        mallard_infrastructure::project_media::ProjectMediaRange,
+    ),
+    SessionDetailError,
+> {
+    let mut media = mallard_infrastructure::project_media::open_project_media_request(
+        repository,
+        request_path,
+    )?;
+    let response = media.read_range(range, head)?;
+    Ok((media.metadata, response))
 }
 
 pub(super) fn delete_local_project_session_with_repository(
@@ -26886,6 +26911,18 @@ mod tests {
             &storage_id,
         )
         .unwrap();
+        let activity_before = get_project_activity_with_repository(
+            &repo,
+            &project.local_project_id,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(activity_before.sessions.len(), 1);
+        assert!(activity_before.sessions[0].sync_blocked_reason.is_none());
         std::fs::OpenOptions::new()
             .write(true)
             .open(&session_path)
@@ -26928,6 +26965,36 @@ mod tests {
         );
         assert_eq!(row.status_detail_code, Some("capture_size_limit"));
         assert_eq!(row.push_decision.reason_code, Some("capture_size_limit"));
+        assert!(!row.push_decision.selectable);
+        assert!(!row.pull_decision.selectable);
+
+        let metrics = mallard_infrastructure::sync_metrics::register_root(
+            &std::fs::canonicalize(&codex_home).unwrap(),
+        );
+        for storage in [None, Some(&storage_id)] {
+            let activity = get_project_activity_with_repository(
+                &repo,
+                &project.local_project_id,
+                storage,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(activity.sessions.len(), 1);
+            let session = &activity.sessions[0];
+            assert_eq!(session.provider_session_id.as_deref(), Some(provider_id));
+            assert_eq!(session.resource_id, row.conversation_resource_id.as_str());
+            assert!(session
+                .sync_blocked_reason
+                .as_deref()
+                .unwrap()
+                .contains("exceeds"));
+            assert!(!session.metrics_complete);
+            assert_eq!(session.total_tokens, None);
+        }
+        assert_eq!(metrics.snapshot().transcript_bytes_read, 0);
     }
 
     #[test]
@@ -26991,6 +27058,27 @@ mod tests {
             assert_eq!(row.status_detail.as_deref(), Some("size limit exceeded."));
             assert!(!row.push_decision.selectable);
             assert!(!row.pull_decision.selectable);
+
+            let activity = get_project_activity_with_repository(
+                &repo,
+                &project.local_project_id,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(activity.sessions.len(), 1);
+            let session = &activity.sessions[0];
+            assert_eq!(session.provider_session_id.as_deref(), Some(session_id));
+            assert_eq!(session.resource_id, row.conversation_resource_id.as_str());
+            assert!(session
+                .sync_blocked_reason
+                .as_deref()
+                .unwrap()
+                .contains("exceeds"));
+            assert!(!session.metrics_complete);
         }
     }
 

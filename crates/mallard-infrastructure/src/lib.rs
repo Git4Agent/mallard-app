@@ -37,6 +37,7 @@ pub mod payload;
 pub mod persistence;
 pub mod portable_resources;
 pub mod project_activity;
+pub mod project_media;
 pub mod provider_capture;
 pub mod providers;
 pub mod pull_transcript;

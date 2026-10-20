@@ -299,16 +299,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_equal_the_constants_the_knobs_replaced() {
+    fn defaults_use_the_documented_limits() {
         let settings = AppSettings::default();
         assert_eq!(settings.schema, 1);
         assert!(!settings.push_codex_children);
         assert!(!settings.push_claude_children);
         assert!(!settings.credential_redaction_enabled);
-        assert_eq!(
-            settings.conversation_file_limit_bytes,
-            mallard_domain::MAX_CONVERSATION_FILE_BYTES
-        );
+        assert_eq!(settings.conversation_file_limit_bytes, 200 * 1024 * 1024);
         assert_eq!(settings.timeline_preview_limit_bytes, 1024 * 1024);
         assert_eq!(settings.comparison_workers, 4);
         assert_eq!(settings.cloud_transfer_concurrency, 6);
@@ -421,7 +418,7 @@ mod tests {
             push_codex_children: true,
             push_claude_children: true,
             credential_redaction_enabled: true,
-            conversation_file_limit_bytes: 200 * 1024 * 1024,
+            conversation_file_limit_bytes: 100 * 1024 * 1024,
             timeline_preview_limit_bytes: 512 * 1024,
             comparison_workers: 8,
             cloud_transfer_concurrency: 2,

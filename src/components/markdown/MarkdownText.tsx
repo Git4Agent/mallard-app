@@ -92,6 +92,7 @@ const MarkdownText = memo(function MarkdownText({
   components,
   onOpenExternal,
   fileLink,
+  resolveUrl,
 }: {
   text: string;
   /** Replaces the default renderers by tag, e.g. a page's own `img` or `a`. */
@@ -100,12 +101,14 @@ const MarkdownText = memo(function MarkdownText({
   onOpenExternal?: (url: string) => void;
   /** Opens a relative link to one of the page's own files; without it such a link is text. */
   fileLink?: MarkdownFileLink;
+  /** Resolves a page's own link context before the shared URL safety check. */
+  resolveUrl?: (url: string) => string;
 }) {
   /* `safeMarkdownUrl` keeps no `..`, so an href the page resolves to its own
      file is kept as written and only ever reaches `fileLink.open`. */
   const urlTransform = useCallback(
-    (url: string) => (fileLink?.resolve(url) ? url : safeMarkdownUrl(url)),
-    [fileLink],
+    (url: string) => (fileLink?.resolve(url) ? url : safeMarkdownUrl(resolveUrl ? resolveUrl(url) : url)),
+    [fileLink, resolveUrl],
   );
   const merged = useMemo<Components>(() => ({
     pre: makeMermaidPre(writeClipboardText),

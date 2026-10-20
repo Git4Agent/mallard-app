@@ -179,7 +179,7 @@ function CloudRepositoryBands({ account, scopes, profiles, capabilities, working
   const glyph = catalogPresentation(capability).icon;
   return (
     <>
-      <section className="sync-setup-section repo-connect cloud-project-repository">
+      <section className="sync-setup-section repo-connect">
         <div className="sync-card-heading"><div><strong>{t("add.repository")}</strong></div></div>
         {choice.field}
         {choice.found}

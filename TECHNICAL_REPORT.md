@@ -649,7 +649,7 @@ every computer selects the same one, and the Push that wrote the other fails.
 | --- | ---: |
 | Discovered resources | 20,000 |
 | Generic project-content depth | 32 components |
-| Conversation file size | 100 MiB |
+| Conversation file size | 200 MiB default |
 | Other captured file size | 16 MiB |
 | Aggregate selected capture | 512 MiB |
 | Manifest resources | 20,000 |

@@ -4,6 +4,12 @@
 > on 2026-10-09. Paths and commands below that use those files are historical
 > and no longer work in this checkout. Git history retains the tracked files.
 
+**15 October follow-up:** The isolated
+[Microsoft 365 shared-folder POC](../poc/microsoft-shared-folder/README.md)
+is now runnable for two-user inspection and opt-in synthetic upload tests.
+Its local fixtures validate the harness; live Microsoft behavior and the
+wider qualification matrix below remain untested.
+
 Research date: 5 October 2026. Status: documentation and source review.
 Live access, uploads, and permission changes were not tested.
 

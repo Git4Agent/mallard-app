@@ -1684,6 +1684,8 @@ export interface SessionTimelineEvent {
   turn_tool_summary?: SessionTurnToolSummary | null;
   parent_event_id?: string | null;
   text?: string | null;
+  /** Message cwd relative to the project. Null disables relative file links. */
+  working_directory?: string | null;
   tool?: SessionToolCallPreview | null;
   checkpoint?: SessionCheckpoint | null;
   agent?: SessionAgentPreview | null;
@@ -1712,6 +1714,12 @@ export interface SessionEventDetail {
 export interface ProjectMarkdownImage {
   mime_type: string;
   base64_data: string;
+}
+
+/** Header-only inspection; playback reads bounded native byte ranges. */
+export interface ProjectMarkdownMedia {
+  mime_type: string;
+  size_bytes: number;
 }
 
 export interface ProjectSessionTimelineQuery {
