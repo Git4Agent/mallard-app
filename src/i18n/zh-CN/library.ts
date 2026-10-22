@@ -109,7 +109,6 @@ export default {
     unidentified: "无法安全识别此资源。",
   },
   warning: {
-    executable: "可执行内容",
     secretShaped: "疑似凭据的内容",
   },
   fork: {

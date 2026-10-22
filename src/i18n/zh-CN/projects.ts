@@ -372,7 +372,6 @@ export default {
     markReviewed: "标为已检查",
     reviewed: "已检查",
     reviewAllLead_other: "已选中的 {{count}} 个文件带有警告",
-    reviewAllExecutable_other: "{{count}} 个可执行",
     reviewAllSecret_other: "{{count}} 个疑似密钥",
     reviewAllScan_other: "{{count}} 个扫描警告",
     reviewAllLabel: "已检查：{{lead}} — {{breakdown}}",
@@ -384,7 +383,6 @@ export default {
     scanningShort: "正在扫描…",
     notScanned: "项目文件尚未扫描。",
     noChanges: "没有更改",
-    warningExecutable: "可执行内容",
     warningSecret: "疑似密钥内容",
     warningScan: "扫描警告",
     op: {

@@ -71,7 +71,7 @@ import StorageProviderPicker from "./StorageProviderPicker";
 import { PathBarBelow, PathBarMenu, type PathBarMenuGroup } from "../sync-review/SyncPathBar";
 import { focusMenuEdge } from "../sync-review/menuKeyboard";
 import PushResourceWorkspace, {
-  includeRequiredProjectContentDirectories,
+  projectFileSelectionAfterScan,
   pullRequiredCopy,
   pushProjectFileWork,
   pushReviewDisabledReason,
@@ -2201,10 +2201,10 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
     }
   };
 
-  /* The folder walk behind the Files step. It ticks what the recipe already
-     holds — a stored file that changed here travels — and nothing else: a new
-     file waits for its own tick. Only the latest walk clears the wait, so one
-     left over from a closed review cannot end a newer one's early. */
+  /* The first folder walk ticks what the recipe already holds; a rescan
+     preserves this review's choices. New files wait for their own tick.
+     Only the latest walk clears the wait, so one left over from a closed
+     review cannot end a newer one's early. */
   const projectScanRun = useRef(0);
   const scanProjectFiles = async (
     projectId: string,
@@ -2223,23 +2223,9 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         if (!current || current.projectId !== projectId || current.storageId !== storageId) {
           return current;
         }
-        const previousGenericIds = new Set((current.projectContentInventory?.entries ?? [])
-          .map((entry) => entry.descriptor.resource_id));
-        const inspectedIds = new Set(inspected.entries.map((entry) => entry.descriptor.resource_id));
-        setPushSelected((currentSelection) => {
-          const next = new Set(currentSelection);
-          for (const resourceId of previousGenericIds) {
-            if (!inspectedIds.has(resourceId)) next.delete(resourceId);
-          }
-          for (const entry of inspected.entries) {
-            const resourceId = entry.descriptor.resource_id;
-            const wasSelected = currentSelection.has(resourceId);
-            const shouldSelect = !removals.has(resourceId) && (wasSelected || entry.selected_in_recipe);
-            if (shouldSelect) next.add(resourceId);
-            else next.delete(resourceId);
-          }
-          return includeRequiredProjectContentDirectories(inspected, next);
-        });
+        setPushSelected((currentSelection) => projectFileSelectionAfterScan(
+          current.projectContentInventory, inspected, currentSelection, removals,
+        ));
         setPushWarningAcknowledgements((currentAcknowledgements) => {
           const currentWarningDigests = new Set(inspected.entries
             .map((entry) => entry.warning_digest)

@@ -55,13 +55,13 @@ test("every message closes through one Dismiss control, after its action", () =>
 
 test("an acknowledgement is the one message that never closes", () => {
   const html = renderToStaticMarkup(
-    <Acknowledgement checked={false} onChange={() => undefined} title="Executable content" verbs={["Mark reviewed", "Reviewed"]}>
+    <Acknowledgement checked={false} onChange={() => undefined} title="Credential-shaped content" verbs={["Mark reviewed", "Reviewed"]}>
       — scripts/install.sh
     </Acknowledgement>,
   );
   assert.match(html, /^<label class="notice warning notice-ack">/);
   assert.match(html, /type="checkbox"/);
-  assert.match(html, /Warning ·<\/strong> <strong class="notice-lead">Executable content<\/strong> — scripts\/install\.sh/);
+  assert.match(html, /Warning ·<\/strong> <strong class="notice-lead">Credential-shaped content<\/strong> — scripts\/install\.sh/);
   assert.match(html, />Mark reviewed<\/small>/);
   assert.doesNotMatch(html, /sync-notice-dismiss/);
 });

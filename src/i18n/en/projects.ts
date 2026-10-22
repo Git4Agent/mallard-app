@@ -412,8 +412,6 @@ export default {
     /** The step's own acknowledgement, over every listed selected flagged file. */
     reviewAllLead_one: "{{count}} selected file flagged",
     reviewAllLead_other: "{{count}} selected files flagged",
-    reviewAllExecutable_one: "{{count}} executable",
-    reviewAllExecutable_other: "{{count}} executable",
     reviewAllSecret_one: "{{count}} credential-shaped",
     reviewAllSecret_other: "{{count}} credential-shaped",
     reviewAllScan_one: "{{count}} scan warning",
@@ -427,7 +425,6 @@ export default {
     scanningShort: "Scanning…",
     notScanned: "Project files were not scanned.",
     noChanges: "No changes",
-    warningExecutable: "Executable content",
     warningSecret: "Credential-shaped content",
     warningScan: "Scan warning",
     /** A Pull row's operation chip. */

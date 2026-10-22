@@ -346,7 +346,7 @@ test("the activity list is read-only and directories band instead of nesting", (
       descriptor: { ...descriptor("dir-notes", "notes"), kind: { key: "project_content_directory", version: 1 } },
     },
     entry("file-notes-a", "notes/outline.md", "synced"),
-    entry("file-notes-b", "notes/render.sh", "local_only", { warning_code: "executable", warning_digest: "b".repeat(64) }),
+    entry("file-notes-b", "notes/render.sh", "local_only", { warning_code: "possible_secret", warning_digest: "b".repeat(64) }),
     entry("file-deep", "notes/drafts/chapter1.md", "local_only"),
   ]));
   assert.ok(!markup.includes("checkbox"), "no selection controls on the activity face");
@@ -356,7 +356,7 @@ test("the activity list is read-only and directories band instead of nesting", (
   assert.ok(markup.includes("<span>notes/</span></strong>"), "a folder that holds files heads its own tile");
   assert.ok(markup.includes("<span>notes/drafts/</span></strong>"), "a nested folder tiles with its full path");
   assert.ok(markup.includes("2 files"), "the tile head counts the files directly inside it");
-  assert.ok(markup.includes("Executable"), "warning files keep their chip");
+  assert.ok(markup.includes("Possible secret"), "warning files keep their chip");
   // The directory entry itself draws no card: only its tile head names it.
   assert.equal(markup.split("sync-history-thread-card").length - 1, 4, "one two-row card per file, none per directory");
   assert.match(markup, /Kind · Markdown|>Markdown</, "the readout line carries the kind chip");

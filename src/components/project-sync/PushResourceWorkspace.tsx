@@ -264,9 +264,6 @@ export function pushReviewBlockers(
 /** The sentence about one flagged file, by the scanner's finding: by its
  *  file name, or as "a selected file" when the scan no longer lists it. */
 function projectFileWarningSentence(code: string | null | undefined, name: string | null): string {
-  if (code === "executable") {
-    return name === null ? t("reviews:blockers.executableUnnamed") : t("reviews:blockers.executable", { name });
-  }
   if (code === "possible_secret") {
     return name === null ? t("reviews:blockers.secretUnnamed") : t("reviews:blockers.secret", { name });
   }
@@ -462,7 +459,7 @@ export function requiredProjectContentDirectoryIds(
     .map((entry) => [entry.relative_path, entry.descriptor.resource_id]));
   const required = new Set<string>();
   for (const entry of inventory?.entries ?? []) {
-    if (!selected.has(entry.descriptor.resource_id) || entry.entry_type !== "file") continue;
+    if (!selected.has(entry.descriptor.resource_id) || entry.entry_type === "blocked") continue;
     const parts = entry.relative_path.split("/");
     for (let end = 1; end < parts.length; end += 1) {
       const resourceId = directoriesByPath.get(parts.slice(0, end).join("/"));
@@ -479,6 +476,40 @@ export function includeRequiredProjectContentDirectories(
   const next = new Set(selected);
   requiredProjectContentDirectoryIds(inventory, next).forEach((resourceId) => next.add(resourceId));
   return next;
+}
+
+/** Ancestors follow their selected descendants; an empty directory is its
+ *  own choice. Rebuild the ancestors after changing any part of a selection. */
+export function updatePushSelection(
+  inventory: ProjectContentInventory | null | undefined,
+  previous: ReadonlySet<string>,
+  selected: ReadonlySet<string>,
+): Set<string> {
+  const next = new Set(selected);
+  requiredProjectContentDirectoryIds(inventory, previous).forEach((id) => next.delete(id));
+  return includeRequiredProjectContentDirectories(inventory, next);
+}
+
+/** A rescan refreshes facts without undoing choices made in this review. */
+export function projectFileSelectionAfterScan(
+  previous: ProjectContentInventory | null | undefined,
+  inventory: ProjectContentInventory,
+  selected: ReadonlySet<string>,
+  removals: ReadonlySet<string>,
+): Set<string> {
+  const previousIds = new Set((previous?.entries ?? []).map((entry) => entry.descriptor.resource_id));
+  const inspectedIds = new Set(inventory.entries.map((entry) => entry.descriptor.resource_id));
+  const next = new Set(selected);
+  requiredProjectContentDirectoryIds(previous, selected).forEach((id) => next.delete(id));
+  previousIds.forEach((id) => {
+    if (!inspectedIds.has(id)) next.delete(id);
+  });
+  for (const entry of inventory.entries) {
+    const id = entry.descriptor.resource_id;
+    if (removals.has(id)) next.delete(id);
+    else if (!previousIds.has(id) && entry.selected_in_recipe) next.add(id);
+  }
+  return includeRequiredProjectContentDirectories(inventory, next);
 }
 
 export function pushProjectFileCommitImpact(
@@ -532,8 +563,8 @@ export function pushProjectFileWork(
   let remembers = false;
   for (const entry of inventory.entries) {
     const picked = selected.has(entry.descriptor.resource_id);
-    // The backend re-adds a recipe file storage still holds, so leaving one
-    // unticked changes nothing; every other difference changes the recipe.
+    // An unticked stored file keeps its published copy; every other
+    // selection difference changes what the destination recipe holds.
     if (picked !== entry.selected_in_recipe && !(entry.selected_in_recipe && entry.storage_present)) return "send";
     if (picked && entry.local_present && entry.state !== "synced") return "send";
     if (filesShown && entry.undecided && !picked) remembers = true;
@@ -546,6 +577,22 @@ export interface PushFileReview {
   removals?: ReadonlySet<string>;
   /** The Files step was on screen with its scanned rows. */
   filesShown?: boolean;
+}
+
+/** Only selected local files are captured. Retaining a stored copy spends
+ *  none of this Push's capture budget. */
+function pushProjectFileCaptureBytes(
+  selected: ReadonlySet<string>,
+  inventory: ProjectContentInventory | null | undefined,
+  removals: ReadonlySet<string>,
+): number {
+  let captured = 0;
+  for (const entry of inventory?.entries ?? []) {
+    const id = entry.descriptor.resource_id;
+    if (!entry.local_present || removals.has(id) || !selected.has(id)) continue;
+    captured += entry.size ?? 0;
+  }
+  return captured;
 }
 
 /** What the current selection would put into one push: the selected sessions
@@ -568,31 +615,27 @@ export function pushBudgetTotal(
   const capturesFiles = !!projectContentInventory
     && pushProjectFileWork(projectContentInventory, selected, removals, filesShown) !== null;
   const projectFiles = capturesFiles
-    ? projectContentInventory.entries
-      .filter((entry) => entry.local_present && selected.has(entry.descriptor.resource_id))
-      .reduce((sum, entry) => sum + (entry.size ?? 0), 0)
+    ? pushProjectFileCaptureBytes(selected, projectContentInventory, removals)
     : 0;
   const total = sessions + budget.reserved_bytes + projectFiles;
   return { sessions, reserved: budget.reserved_bytes, projectFiles, total, limit: budget.limit_bytes };
 }
 
-/** Fill the file selection in path order without exceeding the whole Push
- *  budget. Even unchanged selected files are captured when a new file is
- *  added, so reserve their bytes before choosing any additions. */
+/** Fill the selection within this Push's capture limit. Reserve local files
+ *  that will be recaptured; storage-only files do not consume the budget. */
 export function selectPushProjectFilesWithinBudget(
   selected: ReadonlySet<string>,
   candidates: ReadonlySet<string>,
   threadComparison?: ThreadSyncComparison | null,
   inventory?: ProjectContentInventory | null,
+  removals: ReadonlySet<string> = new Set(),
 ): Set<string> {
-  const next = new Set([...selected].filter((resourceId) => !candidates.has(resourceId)));
-  const budget = pushBudgetTotal(next, threadComparison, inventory);
-  const fixedFileBytes = (inventory?.entries ?? [])
-    .filter((entry) => entry.local_present && next.has(entry.descriptor.resource_id))
-    .reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+  const next = new Set([...selected].filter((resourceId) => !candidates.has(resourceId) && !removals.has(resourceId)));
+  const budget = pushBudgetTotal(next, threadComparison, inventory, { removals });
+  const fixedFileBytes = pushProjectFileCaptureBytes(next, inventory, removals);
   let remaining = budget ? budget.limit - budget.sessions - budget.reserved - fixedFileBytes : Infinity;
   const entries = (inventory?.entries ?? [])
-    .filter((entry) => candidates.has(entry.descriptor.resource_id))
+    .filter((entry) => candidates.has(entry.descriptor.resource_id) && !removals.has(entry.descriptor.resource_id))
     .sort((a, b) => (
       // Keep existing choices first when they still fit.
       Number(selected.has(b.descriptor.resource_id)) - Number(selected.has(a.descriptor.resource_id))
@@ -605,10 +648,10 @@ export function selectPushProjectFilesWithinBudget(
   }
   for (const entry of entries) {
     if (entry.entry_type === "directory" && occupiedDirectories.has(entry.relative_path)) continue;
-    const bytes = entry.size ?? 0;
-    if (bytes > remaining) continue;
+    const capturedBytes = entry.local_present ? entry.size ?? 0 : 0;
+    if (capturedBytes > remaining) continue;
     next.add(entry.descriptor.resource_id);
-    remaining -= bytes;
+    remaining -= capturedBytes;
   }
   return includeRequiredProjectContentDirectories(inventory, next);
 }
@@ -1053,8 +1096,9 @@ export default function PushResourceWorkspace({
   );
 
   const commitSelection = (next: Set<string>) => {
-    const safeNext = includeRequiredProjectContentDirectories(
+    const safeNext = updatePushSelection(
       projectContentInventory,
+      effectiveSelected,
       new Set([...next].filter((resourceId) => selectableIds.has(resourceId))),
     );
     if (onSelectionChange) {
@@ -1085,16 +1129,11 @@ export default function PushResourceWorkspace({
     commitSelection(next);
   };
   const clearStep = () => {
-    const group = searchGroup;
+    // Clear the whole Files selection, including stored files and implicit
+    // directories that do not have a visible card in this review.
+    const group = activeStep === "project_files" ? projectFiles : searchGroup;
     const next = new Set(effectiveSelected);
-    group.forEach((resource) => {
-      const projectEntry = projectContentInventory?.entries.find((entry) => (
-        entry.descriptor.resource_id === resource.resource_id
-      ));
-      if (activeStep !== "project_files" || !projectEntry?.storage_present) {
-        next.delete(resource.resource_id);
-      }
-    });
+    group.forEach((resource) => next.delete(resource.resource_id));
     commitSelection(next);
   };
   const selectableConversationIds = new Set(visibleConversations
@@ -1142,7 +1181,7 @@ export default function PushResourceWorkspace({
       : safeProjectDefaults.has(resource.resource_id))
     .map((resource) => resource.resource_id));
   const budgetedFileSelection = activeStep === "project_files"
-    ? selectPushProjectFilesWithinBudget(effectiveSelected, stepCandidateIds, threadComparison, projectContentInventory)
+    ? selectPushProjectFilesWithinBudget(effectiveSelected, stepCandidateIds, threadComparison, projectContentInventory, projectContentRemovals)
     : null;
   const stepSelectionIds = budgetedFileSelection
     ? new Set([...stepCandidateIds].filter((resourceId) => budgetedFileSelection.has(resourceId)))
@@ -1177,18 +1216,18 @@ export default function PushResourceWorkspace({
           total={currentGroup.length}
           busy={busy}
           listPending={listPending}
-          recommendedTitle={searchActive
-            ? t("push.recommendMatching", { count: selectionCount })
-            : activeStep === "history"
-              ? t("push.recommendSessions", { count: selectionCount })
-              : filesOverBudget && budgetTotal
-                ? t("push.selectFilesWithinBudget", { count: selectionCount, limit: formatBytes(budgetTotal.limit) })
-                : t("push.selectFiles", { count: selectionCount })}
+          recommendedTitle={activeStep === "project_files"
+            ? filesOverBudget && budgetTotal
+              ? t("push.selectFilesWithinBudget", { count: selectionCount, limit: formatBytes(budgetTotal.limit) })
+              : t("push.selectFiles", { count: selectionCount })
+            : searchActive
+              ? t("push.recommendMatching", { count: selectionCount })
+              : t("push.recommendSessions", { count: selectionCount })}
           recommendedCount={selectionCount}
           recommendedDisabled={selectionCount === 0 || currentMatchesSelection}
           onRecommended={selectStepResources}
           searchActive={searchActive}
-          clearDisabled={countSelected(searchGroup, effectiveSelected) === 0}
+          clearDisabled={countSelected(activeStep === "project_files" ? projectFiles : searchGroup, effectiveSelected) === 0}
           onClear={clearStep}
           close={{ ariaLabel: t("push.close"), onClose }}
         />
@@ -1313,14 +1352,12 @@ export default function PushResourceWorkspace({
                     selectableIds.has(resourceId) && !projectContentRemovals.has(resourceId)
                   )));
                   commitSelection(selectPushProjectFilesWithinBudget(
-                    effectiveSelected, candidates, threadComparison, projectContentInventory,
+                    effectiveSelected, candidates, threadComparison, projectContentInventory, projectContentRemovals,
                   ));
                   return;
                 }
                 const next = new Set(effectiveSelected);
-                resourceIds.forEach((resourceId) => {
-                  if (!requiredProjectDirectories.has(resourceId)) next.delete(resourceId);
-                });
+                resourceIds.forEach((resourceId) => next.delete(resourceId));
                 commitSelection(next);
               }}
               onReviewWarnings={onReviewProjectContentWarnings}

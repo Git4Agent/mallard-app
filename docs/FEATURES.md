@@ -41,6 +41,13 @@ What Mallard does, in detail. The short introduction is the repository's
   Pulls create backups and retain result receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.
   Each file can be up to 100 MiB; the total selected Push is limited to 512 MiB.
+  Files retained in storage without a local capture do not use that Push budget;
+  the stored project can grow across pushes.
+  Unselect leaves stored copies unchanged and excludes local edits from the Push;
+  Rescan preserves the selections made in the open review.
+  Scripts and executables sync as ordinary files without an executable-content
+  warning. Credential-shaped content still requires explicit review, including
+  in Library imports.
   Git-managed project content continues to travel through Git.
 - Starts a new session in a project: **New session** at the end of the
   Sessions search row (in the empty list's box when there is none yet) runs

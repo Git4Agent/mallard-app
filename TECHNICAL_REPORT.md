@@ -312,7 +312,8 @@ The scanner:
   credential filenames;
 - blocks symlinks, Unix hard links, special files, private-key material,
   unsafe paths, oversized files, and excessive depth; and
-- flags executable or credential-shaped opaque content for explicit review.
+- flags credential-shaped opaque content for explicit review; executable
+  files retain their modes without a separate warning or acknowledgement.
 
 Secret detection is deliberately best-effort. A clean scan is not a guarantee
 that content contains no secret.
@@ -666,6 +667,9 @@ the render window. Backend validation remains authoritative for the full set.
 There is no generic object read/write ceiling: manifest sizes are exact
 integrity coordinates, while conversation/provider/project-content and
 aggregate capture limits remain product policy.
+The 512 MiB capture limit applies to one Push, not to the accumulated project
+snapshot. Retaining existing stored files without capturing local payloads does
+not consume this budget. Manifest counts and per-file bounds still apply.
 
 ## 13. Current automated coverage
 
@@ -756,8 +760,9 @@ checked-out branch unless another branch was picked in the branch menu. See
 - VCS data, build output, Codex and Mallard metadata, symlinks, and special
   files are excluded or blocked. Size and path limits still apply.
 - Non-Git project files can include credential files, private keys, and
-  hard-linked regular files. Credential filenames, detected secrets, and
-  executable content require an explicit warning acknowledgement.
+  hard-linked regular files. Credential filenames and detected secrets
+  require an explicit warning acknowledgement. Executable content alone
+  does not require acknowledgement in project files or Library imports.
 - Provider-home capture keeps its credential-file and hard-link exclusions.
 - Pull deletions begin unselected. Approved file deletion verifies the local
   digest and creates a backup; approved directory deletion removes only an

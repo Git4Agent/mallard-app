@@ -106,14 +106,12 @@ pub enum ProjectContentCandidate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectContentWarning {
     PossibleSecret,
-    Executable,
 }
 
 impl ProjectContentWarning {
     pub fn code(self) -> &'static str {
         match self {
             Self::PossibleSecret => "possible_secret",
-            Self::Executable => "executable",
         }
     }
 }
@@ -1388,8 +1386,7 @@ fn add_project_content_file(
     let source_mtime = modified_secs(&after);
     let content_sha256 = sha256_hex(&bytes);
     let warning = (detected_secret.is_some() || relative.split('/').any(denied_file_name))
-        .then_some(ProjectContentWarning::PossibleSecret)
-        .or_else(|| is_executable_path(path).then_some(ProjectContentWarning::Executable));
+        .then_some(ProjectContentWarning::PossibleSecret);
     let review_digest = project_content_review_digest("file", relative, &content_sha256, mode);
     insert_resource(
         discovery,
@@ -2335,23 +2332,6 @@ fn safe_mode(_meta: &fs::Metadata) -> u32 {
     0o600
 }
 
-fn is_executable_path(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0) {
-            return true;
-        }
-    }
-    matches!(
-        path.extension()
-            .and_then(|value| value.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("sh" | "bash" | "zsh" | "fish" | "py" | "rb" | "pl" | "ps1" | "bat" | "cmd" | "exe")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3214,6 +3194,50 @@ mod tests {
         assert!(captured.directories.contains_key("project/docs"));
         assert!(captured.directories.contains_key("project/docs/specs"));
         assert!(captured.directories.contains_key("project/docs/empty"));
+    }
+
+    #[test]
+    fn executable_project_files_keep_bytes_and_modes_without_warnings() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        for path in ["make_neural_audio.py", "run.sh", "tool.exe", "run"] {
+            write(&project.join(path), b"#!/bin/sh\necho fixture\n");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(project.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        write(&project.join("secret.py"), b"# ghp_test_value_fixture\n");
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let mut selected = BTreeSet::new();
+        for resource in &inventory.resources {
+            let Some(ProjectContentCandidate::File {
+                relative_path,
+                warning,
+                ..
+            }) = &resource.project_content else {
+                continue;
+            };
+            assert_eq!(
+                *warning,
+                (relative_path == "secret.py").then_some(ProjectContentWarning::PossibleSecret),
+                "{relative_path}"
+            );
+            selected.insert(resource.resource_id.clone());
+        }
+        assert_eq!(selected.len(), 5);
+        let captured = capture_selected(registry(), &request, &selected).unwrap();
+        for path in ["make_neural_audio.py", "run.sh", "tool.exe", "run", "secret.py"] {
+            assert_eq!(
+                captured.files[&format!("project/{path}")].bytes.as_bytes(),
+                fs::read(project.join(path)).unwrap()
+            );
+        }
+        #[cfg(unix)]
+        assert_eq!(captured.files["project/run"].mode, 0o755);
     }
 
     #[test]

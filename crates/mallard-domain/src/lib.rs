@@ -56,7 +56,6 @@ pub(crate) const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
 /// Maximum ordinary project-file size, shared by capture and bundle validation.
 pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 100 * 1024 * 1024;
-pub(crate) const MAX_PROJECT_CONTENT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const ABSENT_BUNDLE_COMMIT_ID: &str = "absent";
 
 const WINDOWS_RESERVED_NAMES: &[&str] = &[
@@ -4526,7 +4525,6 @@ impl BundleScope {
         }
         let mut file_owners = BTreeMap::<ResourceId, usize>::new();
         let mut directory_owners = BTreeMap::<ResourceId, usize>::new();
-        let mut project_content_bytes = 0_u64;
         for (path, entry) in &self.directories {
             let descriptor = &self.resources[&entry.resource_id];
             if resolved.kind(&entry.resource_id)
@@ -4574,15 +4572,6 @@ impl BundleScope {
                     return Err(format!(
                         "project-content file '{}' exceeds {} bytes",
                         path, MAX_PROJECT_CONTENT_FILE_BYTES
-                    ));
-                }
-                project_content_bytes = project_content_bytes
-                    .checked_add(entry.size)
-                    .ok_or_else(|| "project-content byte total overflow".to_string())?;
-                if project_content_bytes > MAX_PROJECT_CONTENT_TOTAL_BYTES {
-                    return Err(format!(
-                        "project content exceeds {} bytes",
-                        MAX_PROJECT_CONTENT_TOTAL_BYTES
                     ));
                 }
                 let components = path.as_str().split('/').collect::<Vec<_>>();

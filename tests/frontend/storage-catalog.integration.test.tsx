@@ -2329,7 +2329,7 @@ test("in Chinese a Pull review row's chooser keeps names and the backend's words
     const options = actions.map((candidate) => ({ id: candidate.action_id, label: actionLabel(candidate), kind: candidate.kind.kind }));
     return renderToStaticMarkup(
       <ResourceCard
-        row={itemRow({ state: "storage_changed", blocker: "Folder is a symlink", warnings: [{ code: "executable_content", digest: "d1", message: "contains executable content: scripts/run.sh" }] })}
+        row={itemRow({ state: "storage_changed", blocker: "Folder is a symlink", warnings: [{ code: "secret_shaped", digest: "d1", message: "contains credential-shaped content: scripts/run.sh" }] })}
         storageName="Vault"
         storageRevision={null}
         provider="codex"
@@ -2359,7 +2359,7 @@ test("in Chinese a Pull review row's chooser keeps names and the backend's words
   assert.match(skill, /data-tooltip="Vault 中较新。下载以更新本机。"/);
   // The backend's refusal and warning stay in its words.
   assert.match(skill, /title="Folder is a symlink"/);
-  assert.match(skill, /data-tooltip="contains executable content: scripts\/run\.sh"/);
+  assert.match(skill, /data-tooltip="contains credential-shaped content: scripts\/run\.sh"/);
   assert.doesNotMatch(skill, /技能|推送|拉取/);
   // A Han noun sets against the Han beside it.
   assert.match(inChinese(() => card(CODEX_PLUGINS, 2)), />安装插件<svg/);

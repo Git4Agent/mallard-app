@@ -16,7 +16,6 @@ export default {
     shared: "Shared",
     explicitReview: "Explicit review",
     possibleSecret: "Possible secret",
-    executable: "Executable",
   },
   /** The inventory's resource groups. */
   groups: {
@@ -123,7 +122,6 @@ export default {
   },
   /** Why the selected items stop a push: the footer's sentence and pill. */
   blockers: {
-    executable: "{{name}} is executable — mark it reviewed or exclude it.",
     secret: "{{name}} may hold a secret — mark it reviewed or exclude it.",
     warning: "{{name}} has a scan warning — mark it reviewed or exclude it.",
     flaggedMany: "{{count}} files need review — mark them reviewed or exclude them.",
@@ -131,7 +129,6 @@ export default {
     unreadableSession: "“{{name}}” can’t be captured — exclude it to push.",
     unreadableMany: "{{count}} selected items can’t be captured — exclude them to push.",
     /* The same sentences for an item the review cannot name. */
-    executableUnnamed: "A selected file is executable — mark it reviewed or exclude it.",
     secretUnnamed: "A selected file may hold a secret — mark it reviewed or exclude it.",
     warningUnnamed: "A selected file has a scan warning — mark it reviewed or exclude it.",
     unreadableUnnamedFile: "A selected file can’t be captured — exclude it to push.",

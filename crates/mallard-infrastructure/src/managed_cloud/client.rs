@@ -891,9 +891,9 @@ impl ManagedCloudClient {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(60))
-            .timeout(Duration::from_secs(600))
+            .connect_timeout(Duration::from_secs(150))
+            .read_timeout(Duration::from_secs(600))
+            .timeout(Duration::from_secs(6000))
             .build()
             .map_err(|_| "Mallard could not start the Mallard Cloud connection.".to_string())?;
         Ok(Self {

@@ -162,7 +162,6 @@ function rowPresentation(
 /** The acknowledgement chip's lead, the Catalog's vocabulary for the same
  * scanner findings. An unknown code keeps a plain generic lead. */
 const WARNING_LEADS: Record<string, ParseKeys<"projects">> = {
-  executable: "files.warningExecutable",
   possible_secret: "files.warningSecret",
 };
 
@@ -239,14 +238,12 @@ export function reviewAllWarningRows(
   return matchingCards.filter((row) => !!row.warningDigest && !!row.warningCode && isSelected(row));
 }
 
-/** "174 executable · 2 credential-shaped": the findings behind the step's
+/** "2 credential-shaped": the findings behind the step's
  *  box, each kind only when present, in the scanner's own order. */
 function warningBreakdown(rows: ProjectFileReviewRow[]): string {
-  const executable = rows.filter((row) => row.warningCode === "executable").length;
   const secret = rows.filter((row) => row.warningCode === "possible_secret").length;
-  const other = rows.length - executable - secret;
+  const other = rows.length - secret;
   const parts: string[] = [];
-  if (executable > 0) parts.push(t("projects:files.reviewAllExecutable", { count: executable }));
   if (secret > 0) parts.push(t("projects:files.reviewAllSecret", { count: secret }));
   if (other > 0) parts.push(t("projects:files.reviewAllScan", { count: other }));
   return parts.join(" · ");

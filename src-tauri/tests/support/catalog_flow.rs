@@ -633,15 +633,9 @@ fn push_resource(
         acknowledged_warning_digests: Vec::new(),
     };
     if row.row.coordinate == skills_coordinate() {
-        let executable = row
-            .row
-            .warnings
-            .iter()
-            .find(|warning| warning.code == "executable_content")
-            .expect("executable skill fixture did not produce its reviewed warning");
         assert!(
-            executable.message.contains("scripts/check.sh"),
-            "executable warning did not identify the reviewed fixture path"
+            row.row.warnings.is_empty(),
+            "the executable skill fixture needs no warning acknowledgement"
         );
     }
     if !row.row.warnings.is_empty() {

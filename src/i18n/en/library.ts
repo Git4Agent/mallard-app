@@ -137,7 +137,6 @@ export default {
   },
   /** The bold lead a known capture warning wears. */
   warning: {
-    executable: "Executable content",
     secretShaped: "Credential-shaped content",
   },
   /** Fork, on a card and in its drawer. */

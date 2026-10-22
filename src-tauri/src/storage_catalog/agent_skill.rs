@@ -311,7 +311,10 @@ mod tests {
         let identity: AgentSkillIdentity = captured.identity.decode().unwrap();
         assert_eq!(identity.root, "provider-home");
         assert_eq!(identity.install_directory, "review-dir");
-        assert_eq!(captured.warnings[0].code, "executable_content");
+        assert!(
+            captured.warnings.is_empty(),
+            "scripts do not require warning acknowledgement"
+        );
         assert_eq!(
             AgentSkillCodec.collision_key(&captured).as_deref(),
             Some("review")

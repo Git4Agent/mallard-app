@@ -549,7 +549,7 @@ test("Files Select respects the 512 MB total including sessions and reserved con
   const file = (path: string, size: number) => ({ ...flaggedFile(path, "", "").inventoryEntry, size, undecided: false });
   const first = file("a.md", 200 * MB);
   const tooLarge = file("b.mov", 400 * MB);
-  const exactFit = { ...file("c.sh", 192 * MB), warning_code: "executable", warning_digest: "w".repeat(64) };
+  const exactFit = { ...file("c.sh", 192 * MB), warning_code: "possible_secret", warning_digest: "w".repeat(64) };
   const oneByteOver = file("d.md", 1);
   const scanned = { ...projectFiles, entries: [oneByteOver, tooLarge, exactFit, first] };
   const candidates = new Set(scanned.entries.map((row) => row.descriptor.resource_id));
@@ -559,7 +559,7 @@ test("Files Select respects the 512 MB total including sessions and reserved con
   assert.equal(pushBudgetTotal(selected, reviewed, scanned)?.total, LIMIT);
   assert.equal(selected.has(tooLarge.descriptor.resource_id), false);
   assert.equal(selected.has(oneByteOver.descriptor.resource_id), false);
-  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: scanned, deletionApproved: true }), "c.sh is executable — mark it reviewed or exclude it.");
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: scanned, deletionApproved: true }), "c.sh may hold a secret — mark it reviewed or exclude it.");
   assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: scanned, deletionApproved: true, acknowledgedWarningDigests: new Set([exactFit.warning_digest]) }), null);
   assert.deepEqual(selectPushProjectFilesWithinBudget(selected, candidates, reviewed, scanned), selected);
 
@@ -600,6 +600,96 @@ test("Files Select adds nothing when sessions and requirements use the whole bud
   const selected = selectPushProjectFilesWithinBudget(initial, new Set([projectFile.resource_id]), reviewed, projectFiles);
   assert.deepEqual(selected, initial);
   assert.equal(pushBudgetTotal(selected, reviewed, projectFiles)?.total, LIMIT);
+});
+
+function retainedProjectFiles() {
+  const stored = Array.from({ length: 5 }, (_, index) => ({
+    ...flaggedFile(`stored-${index}.bin`, "", "").inventoryEntry,
+    size: 96 * MB,
+    state: "missing" as const,
+    local_present: false,
+    storage_present: true,
+    base_present: true,
+    selected_in_recipe: true,
+    undecided: false,
+  }));
+  const added = { ...flaggedFile("new.bin", "", "").inventoryEntry, size: 40 * MB };
+  return { stored, added, scanned: { ...projectFiles, entries: [...stored, added] } };
+}
+
+test("Push can add 40 MB while retaining 480 MB already in storage", () => {
+  const { added, scanned } = retainedProjectFiles();
+  const selected = new Set([added.descriptor.resource_id]);
+  const reviewed = comparison({ entries: [], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  assert.equal(pushBudgetTotal(selected, reviewed, scanned)?.total, 40 * MB);
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: scanned, deletionApproved: true }), null);
+
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined} credentialRedactionEnabled
+      resources={scanned.entries.map((row) => ({ ...projectFile, ...row.descriptor }))}
+      selected={selected} projectDefaults={new Set()} busy={false}
+      threadComparison={reviewed} projectContentInventory={scanned} projectContentScanned showProjectFiles
+      activeStep="project_files" onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+  );
+  assert.match(html, /<b>40 MB<\/b> \/ 512 MB/);
+  assert.doesNotMatch(html, /sync-push-project-budget|kept in storage|Stored project files would total/);
+  const push = html.match(/<button[^>]*class="[^"]*sync-pull-apply-button[^"]*"[^>]*>/)?.[0] ?? "";
+  assert.ok(push.length > 0);
+  assert.doesNotMatch(push, /disabled/);
+});
+
+test("Files Select can use the full 512 MB push budget while retaining 336 MB in storage", () => {
+  const { stored, scanned } = retainedProjectFiles();
+  const retained = stored.slice(0, 4).map((row) => ({ ...row, size: 84 * MB }));
+  const local = [88, 88, 88, 88, 88, 72].map((size, index) => ({
+    ...flaggedFile(`new-${index}.bin`, "", "").inventoryEntry,
+    size: size * MB,
+  }));
+  const overflow = { ...flaggedFile("new-6.bin", "", "").inventoryEntry, size: 1 };
+  const inventory = { ...scanned, entries: [...retained, ...local, overflow] };
+  const reviewed = comparison({ entries: [], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  const candidates = new Set([...local, overflow].map((row) => row.descriptor.resource_id));
+  const initial = new Set(retained.map((row) => row.descriptor.resource_id));
+  const selected = selectPushProjectFilesWithinBudget(initial, candidates, reviewed, inventory);
+  assert.deepEqual([...selected], [...initial, ...local.map((row) => row.descriptor.resource_id)]);
+  assert.equal(pushBudgetTotal(selected, reviewed, inventory)?.total, LIMIT);
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: inventory, deletionApproved: true }), null);
+  assert.deepEqual(selectPushProjectFilesWithinBudget(selected, candidates, reviewed, inventory), selected);
+
+  // Retained data does not use the budget, but one extra captured byte still does.
+  selected.add(overflow.descriptor.resource_id);
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: inventory, deletionApproved: true }),
+    "1 B over the 512 MB push limit — exclude sessions or files to push.");
+});
+
+test("Files Select does not restore explicit removals and Push still requires deletion approval", () => {
+  const { stored, added, scanned } = retainedProjectFiles();
+  const selected = new Set([added.descriptor.resource_id]);
+  const removals = new Set([stored[0].descriptor.resource_id]);
+  const reviewed = comparison({ entries: [], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  const fitted = selectPushProjectFilesWithinBudget(new Set(), new Set([...selected, ...removals]), reviewed, scanned, removals);
+  assert.deepEqual(fitted, selected, "Select must not restore a file marked for removal");
+  const approval = { selected, threadComparison: reviewed, projectContentInventory: scanned, projectContentRemovals: removals };
+  assert.equal(pushReviewDisabledReason({ ...approval, deletionApproved: false }), "Approve the selected project file deletions");
+  assert.equal(pushReviewDisabledReason({ ...approval, deletionApproved: true }), null);
+});
+
+test("Push captures only selected local replacements and does not charge retained files to a session capture", () => {
+  const { stored, added, scanned } = retainedProjectFiles();
+  const replaced = { ...stored[0], local_present: true, size: 40 * MB, state: "local_ahead" as const };
+  const inventory = { ...scanned, entries: [replaced, ...stored.slice(1), added] };
+  const selected = new Set([added.descriptor.resource_id]);
+  const reviewed = comparison({ entries: [], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  assert.equal(pushBudgetTotal(selected, reviewed, inventory)?.total, 40 * MB, "an unticked stored file is retained without capture");
+  selected.add(replaced.descriptor.resource_id);
+  assert.equal(pushBudgetTotal(selected, reviewed, inventory)?.total, 80 * MB, "selecting the local replacement counts its bytes once");
+  assert.deepEqual(selectPushProjectFilesWithinBudget(new Set(), selected, reviewed, inventory), selected);
+
+  const session = entry("new-session", { capture_bytes: 100 * MB });
+  const sessionSelection = new Set([session.resource_id]);
+  const sessionReview = comparison({ entries: [session], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  assert.equal(pushBudgetTotal(sessionSelection, sessionReview, scanned)?.total, 100 * MB);
+  assert.equal(pushReviewDisabledReason({ selected: sessionSelection, threadComparison: sessionReview, projectContentInventory: scanned, deletionApproved: true }), null);
 });
 
 test("automatic selection takes the newest sessions that fit, even when every session was saved", () => {
@@ -977,7 +1067,7 @@ function flaggedFile(path: string, warningCode: string, digest: string) {
 }
 
 test("the blocker sentence words each cause by its fix, naming one item and counting several", () => {
-  const run = flaggedFile("scripts/run.sh", "executable", "e".repeat(64));
+  const run = flaggedFile("scripts/run.sh", "possible_secret", "e".repeat(64));
   const env = flaggedFile(".env.local", "possible_secret", "s".repeat(64));
   const unknown = flaggedFile("notes/plan.md", "", "");
   const inventory: ProjectContentInventory = {
@@ -990,7 +1080,7 @@ test("the blocker sentence words each cause by its fix, naming one item and coun
 
   assert.equal(
     pushBlockerSentence([flagged(run.descriptor.resource_id)], sessions, inventory),
-    "run.sh is executable — mark it reviewed or exclude it.",
+    "run.sh may hold a secret — mark it reviewed or exclude it.",
   );
   assert.equal(
     pushBlockerSentence([flagged(env.descriptor.resource_id)], sessions, inventory),
@@ -1006,7 +1096,7 @@ test("the blocker sentence words each cause by its fix, naming one item and coun
   assert.equal(pushBlockerSentence([unreadableSession], sessions, inventory), "“Fix login redirect” can’t be captured — exclude it to push.");
   assert.equal(
     pushBlockerSentence([unreadableSession, flagged(run.descriptor.resource_id)], sessions, inventory),
-    "run.sh is executable — mark it reviewed or exclude it. “Fix login redirect” can’t be captured — exclude it to push.",
+    "run.sh may hold a secret — mark it reviewed or exclude it. “Fix login redirect” can’t be captured — exclude it to push.",
   );
   // Storage holds are the banner's, not the footer's.
   const held = { kind: "storage" as const, step: "history" as const, resourceId: lost.resource_id, state: "storage_ahead" };
@@ -1021,10 +1111,10 @@ test("the blocker sentence words each cause by its fix, naming one item and coun
 });
 
 test("a flagged file stops Push with a pill at the button, and both Push buttons read its sentence", () => {
-  const run = flaggedFile("scripts/run.sh", "executable", "e".repeat(64));
+  const run = flaggedFile("scripts/run.sh", "possible_secret", "e".repeat(64));
   const inventory: ProjectContentInventory = { ...projectFiles, entries: [run.inventoryEntry] };
   const selected = new Set([fits.resource_id, run.descriptor.resource_id]);
-  const sentence = "run.sh is executable — mark it reviewed or exclude it.";
+  const sentence = "run.sh may hold a secret — mark it reviewed or exclude it.";
   // The path bar's Push reads the same rule as the footer's.
   assert.equal(
     pushReviewDisabledReason({ selected, threadComparison: comparison(), projectContentInventory: inventory, deletionApproved: true }),
@@ -1076,7 +1166,7 @@ test("a flagged file stops Push with a pill at the button, and both Push buttons
 });
 
 test("unchanged warned files do not block a session push without file capture", () => {
-  const files = [flaggedFile("run.sh", "executable", "e".repeat(64)), flaggedFile(".env.local", "possible_secret", "s".repeat(64))];
+  const files = [flaggedFile("run.sh", "possible_secret", "e".repeat(64)), flaggedFile(".env.local", "possible_secret", "s".repeat(64))];
   const inventory: ProjectContentInventory = {
     ...projectFiles,
     entries: files.map(({ inventoryEntry }) => ({
@@ -1110,7 +1200,7 @@ test("unchanged warned files do not block a session push without file capture", 
 
 for (const work of ["send", "remember"] as const) {
   test(`${work} file work exposes unchanged warned files until and after approval`, () => {
-    const run = flaggedFile("run.sh", "executable", "e".repeat(64));
+    const run = flaggedFile("run.sh", "possible_secret", "e".repeat(64));
     const env = flaggedFile(".env.local", "possible_secret", "s".repeat(64));
     const fresh = flaggedFile("notes.md", "", "");
     const inventory: ProjectContentInventory = {
@@ -1146,10 +1236,10 @@ for (const work of ["send", "remember"] as const) {
       );
       assert.match(html, /data-resource-id="project:file:run\.sh"/);
       assert.match(html, /data-resource-id="project:file:\.env\.local"/);
-      assert.equal((html.match(/aria-label="Reviewed: (Executable|Credential-shaped) content/g) ?? []).length, 2);
+      assert.equal((html.match(/aria-label="Reviewed: Credential-shaped content/g) ?? []).length, 2);
       // The step's own box follows the rows: unticked, mixed, then done.
       const strip = html.match(/<label class="notice warning notice-ack sync-project-files-review-all[^"]*">[\s\S]*?<\/label>/)?.[0] ?? "";
-      assert.match(strip, /2 selected files flagged<\/strong> — 1 executable · 1 credential-shaped/);
+      assert.match(strip, /2 selected files flagged<\/strong> — 2 credential-shaped/);
       assert.equal(/aria-checked="mixed"/.test(strip), approvedCount === 1);
       assert.equal(/review-all done"/.test(strip), approvedCount === 2);
       if (approvedCount < 2) {
@@ -1180,7 +1270,7 @@ test("the blocker pill opens its card: the step switches and the files page scro
 /* The Push review in Chinese: the review's own words translate, and what the
    user named — sessions, files, storages — stays exactly as given. */
 test("the Push review header and footer speak Chinese around the user's names", () => {
-  const run = flaggedFile("scripts/run.sh", "executable", "e".repeat(64));
+  const run = flaggedFile("scripts/run.sh", "possible_secret", "e".repeat(64));
   const inventory: ProjectContentInventory = { ...projectFiles, entries: [run.inventoryEntry] };
   void i18n.changeLanguage("zh-CN");
   try {
@@ -1207,7 +1297,7 @@ test("the Push review header and footer speak Chinese around the user's names", 
     );
     assert.equal(
       pushReviewDisabledReason({ selected: new Set([fits.resource_id, run.descriptor.resource_id]), threadComparison: comparison(), projectContentInventory: inventory, deletionApproved: true }),
-      "run.sh 是可执行文件——请标为已检查或将其排除。",
+      "run.sh 可能含有密钥——请标为已检查或将其排除。",
     );
     assert.equal(pushBlockerPillLabel([{ kind: "local", step: "project_files", resourceId: run.descriptor.resource_id, state: "warning_unacknowledged" }]), "1 个需检查");
     // A session is quoted inside its sentence; one the review cannot name

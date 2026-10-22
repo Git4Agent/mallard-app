@@ -81,9 +81,6 @@ Public on Mallard Cloud. Open one, or pull it into Mallard.
 
 On Windows, CLI actions open Windows Terminal with Windows PowerShell. Install
 Windows Terminal with its `wt.exe` app execution alias enabled.
-Mallard checks standalone Codex and Claude CLIs first, then the CLIs already
-prepared by their desktop apps. Open Claude Desktop's Code tab once to download
-its CLI if needed. Settings › Agent CLIs can select a specific executable.
 
 ### 1. [Add a storage](https://mallard-ai.com/docs/add-a-storage)
 

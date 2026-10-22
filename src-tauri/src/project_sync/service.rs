@@ -11702,6 +11702,15 @@ pub(super) fn push_bundle_reviewed_with_progress(
         &mut push_recipe,
         discovery.excluded_subagent_resource_ids(),
     );
+    // Selection controls capture. The published recipe also retains stored
+    // files that were unticked, without reading or replacing their local copy.
+    let mut capture_recipe = push_recipe.clone();
+    let selected_project_content_ids = capture_recipe
+        .entries
+        .keys()
+        .filter(|resource_id| mallard_domain::is_project_content_resource_id(resource_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let saved_project_content_entries = stored_destination_recipe
         .as_ref()
         .filter(|_| *push_scope == PushScope::Project)
@@ -11741,13 +11750,13 @@ pub(super) fn push_bundle_reviewed_with_progress(
         }
     }
 
-    let requested_project_content_ids = push_recipe
+    let published_project_content_ids = push_recipe
         .entries
         .keys()
         .filter(|resource_id| mallard_domain::is_project_content_resource_id(resource_id))
         .cloned()
         .collect::<BTreeSet<_>>();
-    let project_content_selection_changed = requested_project_content_ids
+    let project_content_selection_changed = published_project_content_ids
         != saved_project_content_entries
             .keys()
             .cloned()
@@ -11782,8 +11791,8 @@ pub(super) fn push_bundle_reviewed_with_progress(
             .iter()
             .map(|entry| (entry.descriptor.resource_id.clone(), entry))
             .collect::<BTreeMap<_, _>>();
-        for resource_id in requested_project_content_ids.clone() {
-            let entry = entries_by_id.get(&resource_id).ok_or_else(|| {
+        for resource_id in &selected_project_content_ids {
+            let entry = entries_by_id.get(resource_id).ok_or_else(|| {
                 format!(
                     "selected project-content resource '{}' was not in the reviewed scan",
                     resource_id
@@ -11795,7 +11804,7 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     resource_id
                 ));
             }
-            if !entry.local_present && !saved_project_content_entries.contains_key(&resource_id) {
+            if !entry.local_present && !saved_project_content_entries.contains_key(resource_id) {
                 return Err(format!(
                     "new project-content resource '{}' disappeared after review",
                     resource_id
@@ -11813,7 +11822,12 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     ));
                 }
             }
-            if entry.entry_type == ProjectContentEntryType::File && entry.local_present {
+            if entry.local_present
+                && matches!(
+                    entry.entry_type,
+                    ProjectContentEntryType::File | ProjectContentEntryType::Directory
+                )
+            {
                 for ancestor in project_content_ancestor_paths(&entry.relative_path) {
                     let required = inventory.entries.iter().find(|candidate| {
                         candidate.entry_type == ProjectContentEntryType::Directory
@@ -11821,19 +11835,22 @@ pub(super) fn push_bundle_reviewed_with_progress(
                     });
                     let required = required.ok_or_else(|| {
                         format!(
-                            "selected file '{}' lacks reviewed directory '{}'",
+                            "selected entry '{}' lacks reviewed directory '{}'",
                             entry.relative_path, ancestor
                         )
                     })?;
                     let required_id = required.descriptor.resource_id.clone();
-                    push_recipe
+                    let required_entry = push_recipe
                         .entries
                         .entry(required_id.clone())
                         .or_insert(RecipeEntry {
-                            resource_id: required_id,
+                            resource_id: required_id.clone(),
                             apply_policy: contracts::explicit_review(),
                             required: true,
                         });
+                    capture_recipe
+                        .entries
+                        .insert(required_id, required_entry.clone());
                 }
             }
         }
@@ -11872,11 +11889,12 @@ pub(super) fn push_bundle_reviewed_with_progress(
         Some(current) => current.revision.saturating_add(1),
         None => 1,
     };
+    capture_recipe.revision = push_recipe.revision;
     let capture = provider_capture::capture_recipe_from_discovery(
         provider_registry(),
         &capture_request,
         &discovery,
-        &push_recipe,
+        &capture_recipe,
         credential_redaction_enabled,
     )?;
     on_phase("capture selected payloads", phase_started.elapsed());
@@ -20640,6 +20658,125 @@ mod tests {
         assert!(!entry(&scan(), "notes/ideas.md").undecided);
     }
 
+    #[test]
+    fn unselected_stored_files_keep_published_bytes_during_reviewed_push() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("unselected-files-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/build.py"), b"# ghp_test_value_stored\n").unwrap();
+        bind_and_link_test_replica(
+            &repo,
+            &project,
+            &storage_id,
+            &root,
+            &temp.path().join("codex-home"),
+        );
+        let scan = || {
+            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap()
+        };
+        let push = |recipe, inventory: &ProjectContentInventory, acknowledgements| {
+            push_bundle_reviewed_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+                recipe,
+                ProjectContentPushReview {
+                    review_token: inventory.review_token.clone(),
+                    files_shown: true,
+                    acknowledged_warning_digests: acknowledgements,
+                    ..empty_project_content_review()
+                },
+                &mut |_| {},
+            )
+        };
+        let first = scan();
+        let first_warnings = first
+            .entries
+            .iter()
+            .filter_map(|entry| entry.warning_digest.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!first_warnings.is_empty());
+        assert!(push(reviewed_project_content_recipe(&first), &first, first_warnings)
+            .unwrap()
+            .success);
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let first_snapshot = engine.inspect(&project.bundle_id).unwrap();
+        let stored_path = LogicalPath::parse("project/scripts/build.py").unwrap();
+        let stored = first_snapshot
+            .manifest
+            .scope(&SyncScopeKey::Project)
+            .unwrap()
+            .files[&stored_path].clone();
+
+        std::fs::write(root.join("scripts/build.py"), b"# ghp_test_value_unchecked\n").unwrap();
+        std::fs::write(root.join("notes.md"), b"selected new file\n").unwrap();
+        let second = scan();
+        let mut selected = reviewed_project_content_recipe(&second);
+        selected.entries.retain(|id, _| {
+            second.entries.iter().any(|entry| {
+                &entry.descriptor.resource_id == id && entry.relative_path == "notes.md"
+            })
+        });
+        assert!(push(selected, &second, BTreeSet::new()).unwrap().success);
+        let second_snapshot = engine.inspect(&project.bundle_id).unwrap();
+        let scope = second_snapshot.manifest.scope(&SyncScopeKey::Project).unwrap();
+        assert_eq!(scope.files[&stored_path], stored);
+        assert!(scope
+            .files
+            .contains_key(&LogicalPath::parse("project/notes.md").unwrap()));
+        assert!(scope.tombstones.is_empty(), "unselect must not delete stored files");
+        assert_eq!(
+            std::fs::read(root.join("scripts/build.py")).unwrap(),
+            b"# ghp_test_value_unchecked\n"
+        );
+
+        let third = scan();
+        let edited = third
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == "scripts/build.py")
+            .unwrap();
+        assert_eq!(
+            edited.state, "local_ahead",
+            "the unchecked local edit is still pending"
+        );
+        assert!(push(BundleRecipe::default(), &third, BTreeSet::new()).unwrap().success);
+        let after_clear = engine.inspect(&project.bundle_id).unwrap();
+        assert_eq!(
+            after_clear.manifest.scope(&SyncScopeKey::Project).unwrap().files,
+            scope.files
+        );
+
+        let fourth = scan();
+        let mut selected = BundleRecipe::default();
+        selected.entries.insert(
+            stored.resource_id.clone(),
+            RecipeEntry {
+                resource_id: stored.resource_id.clone(),
+                apply_policy: contracts::explicit_review(),
+                required: false,
+            },
+        );
+        let error = push(selected.clone(), &fourth, BTreeSet::new()).unwrap_err();
+        assert!(error.contains("requires explicit acknowledgement"), "{error}");
+        let warnings = fourth
+            .entries
+            .iter()
+            .filter_map(|entry| entry.warning_digest.clone())
+            .collect();
+        assert!(push(selected, &fourth, warnings).unwrap().success);
+        let updated = engine.inspect(&project.bundle_id).unwrap();
+        assert_ne!(
+            updated.manifest.scope(&SyncScopeKey::Project).unwrap().files[&stored_path].sha256,
+            stored.sha256
+        );
+    }
+
     /// A file deleted here while storage kept it counts as a file to pull on
     /// the Files face and the path bar, so a Pull must offer it back: one
     /// write with no local digest to check, which the review reads as Add
@@ -20717,6 +20854,96 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(writes.len(), 1, "{:?}", plan.actions);
         assert_eq!(writes[0].expected_target_sha256, None);
+    }
+
+    #[test]
+    fn project_content_push_of_nested_empty_directory_includes_reviewed_ancestors() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("empty-directory-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let project = register(&repo);
+        let root = temp.path().join("project");
+        let selected_path = "素材/previews/backgrounds";
+        std::fs::create_dir_all(root.join(selected_path)).unwrap();
+        std::fs::create_dir_all(root.join("素材/previews/unselected")).unwrap();
+        std::fs::write(root.join("素材/notes.md"), b"keep local\n").unwrap();
+        bind_and_link_test_replica(
+            &repo,
+            &project,
+            &storage_id,
+            &root,
+            &temp.path().join("codex-home"),
+        );
+        let scanned =
+            inspect_project_files_with_repository(&repo, &project.local_project_id, &storage_id)
+                .unwrap();
+        let selected_id = scanned
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == selected_path)
+            .unwrap()
+            .descriptor
+            .resource_id
+            .clone();
+        let mut recipe = BundleRecipe::default();
+        recipe.entries.insert(
+            selected_id.clone(),
+            RecipeEntry {
+                resource_id: selected_id,
+                apply_policy: contracts::explicit_review(),
+                required: false,
+            },
+        );
+        let pushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &project.local_project_id,
+            &storage_id,
+            recipe,
+            ProjectContentPushReview {
+                review_token: scanned.review_token,
+                files_shown: true,
+                ..empty_project_content_review()
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(pushed.success, "{}", pushed.message);
+
+        let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+        let snapshot = engine.inspect(&project.bundle_id).unwrap();
+        let scope = snapshot.manifest.scope(&SyncScopeKey::Project).unwrap();
+        assert_eq!(
+            scope
+                .directories
+                .keys()
+                .map(|path| path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "project/素材",
+                "project/素材/previews",
+                "project/素材/previews/backgrounds",
+            ]
+        );
+        assert!(scope.files.is_empty(), "unselected files must stay local");
+        for (path, directory) in &scope.directories {
+            assert_eq!(
+                scope.recipe.entries[&directory.resource_id].required,
+                path.as_str() != "project/素材/previews/backgrounds"
+            );
+        }
+        let config = repo.load_config().unwrap();
+        let saved_recipe = config
+            .links
+            .iter()
+            .find(|link| {
+                link.local_project_id == project.local_project_id && link.storage_id == storage_id
+            })
+            .unwrap()
+            .recipe
+            .as_ref()
+            .unwrap();
+        assert_eq!(saved_recipe.entries, scope.recipe.entries);
     }
 
     #[test]
@@ -21152,6 +21379,75 @@ mod tests {
     }
 
     #[test]
+    fn project_content_scripts_push_and_pull_without_warning_acknowledgements() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("script-files-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let source = register(&repo);
+        let source_root = temp.path().join("source/project");
+        let relative = "姜维一计害三贤_180秒/新版配音/制作/make_neural_audio.py";
+        let script = b"print('audio fixture')\n";
+        std::fs::create_dir_all(source_root.join(relative).parent().unwrap()).unwrap();
+        std::fs::write(source_root.join(relative), script).unwrap();
+        bind_and_link_test_replica(
+            &repo,
+            &source,
+            &storage_id,
+            &source_root,
+            &temp.path().join("source/codex"),
+        );
+        let scanned =
+            inspect_project_files_with_repository(&repo, &source.local_project_id, &storage_id)
+                .unwrap();
+        assert!(scanned.entries.iter().all(|entry| {
+            entry.warning_code.is_none() && entry.warning_digest.is_none()
+        }));
+        let pushed = push_bundle_reviewed_with_repository(
+            &repo,
+            &source.local_project_id,
+            &storage_id,
+            reviewed_project_content_recipe(&scanned),
+            ProjectContentPushReview {
+                review_token: scanned.review_token,
+                files_shown: true,
+                ..empty_project_content_review()
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(pushed.success, "{}", pushed.message);
+
+        let target = register(&repo);
+        let target_root = temp.path().join("target/project");
+        let binding = bind_and_link_test_replica(
+            &repo,
+            &target,
+            &storage_id,
+            &target_root,
+            &temp.path().join("target/codex"),
+        );
+        let service = ProjectSyncService::new(&repo);
+        let plan = service
+            .plan_bundle_restore(&storage_id, &target.bundle_id, &binding)
+            .unwrap();
+        let applied = service
+            .apply_bundle_restore(
+                &plan,
+                plan.actions.iter().map(|action| action.action_id.clone()).collect(),
+            )
+            .unwrap();
+        assert!(applied.success, "{}", applied.message);
+        assert_eq!(std::fs::read(target_root.join(relative)).unwrap(), script);
+        let pulled =
+            inspect_project_files_with_repository(&repo, &target.local_project_id, &storage_id)
+                .unwrap();
+        assert!(pulled.entries.iter().all(|entry| {
+            entry.warning_code.is_none() && entry.warning_digest.is_none()
+        }));
+    }
+
+    #[test]
     fn project_content_warning_and_review_tokens_are_bound_to_exact_bytes() {
         for (path, first_bytes, next_bytes) in [
             (
@@ -21341,6 +21637,12 @@ mod tests {
 
         // Machine A moves the storage side past the base.
         std::fs::write(source_root.join("draft.md"), b"storage v2\n").unwrap();
+        let config = repo.load_config().unwrap();
+        let selected = project_link(&config, &source.local_project_id, &storage_id)
+            .unwrap()
+            .recipe
+            .clone()
+            .unwrap();
         let rescanned =
             inspect_project_files_with_repository(&repo, &source.local_project_id, &storage_id)
                 .unwrap();
@@ -21348,7 +21650,7 @@ mod tests {
             &repo,
             &source.local_project_id,
             &storage_id,
-            reviewed_project_content_recipe(&rescanned),
+            selected,
             ProjectContentPushReview {
                 scope: PushScope::Project,
                 git_history_review_token: None,

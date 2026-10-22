@@ -428,25 +428,15 @@ pub fn read_directory_tree(
     Ok(files)
 }
 
-/// Executable and credential-shaped content warnings over a captured tree.
+/// Credential-shaped content warnings over a captured tree. Executable modes
+/// are preserved as file metadata and do not require acknowledgement.
 pub fn content_warnings(files: &BTreeMap<String, CapturedFile>) -> Vec<CaptureWarning> {
-    let executable: Vec<&str> = files
-        .iter()
-        .filter(|(_, file)| file.mode == 0o755)
-        .map(|(path, _)| path.as_str())
-        .collect();
     let secret_shaped: Vec<&str> = files
         .iter()
         .filter(|(_, file)| looks_secret_shaped(&file.bytes))
         .map(|(path, _)| path.as_str())
         .collect();
     let mut warnings = Vec::new();
-    if !executable.is_empty() {
-        warnings.push(CaptureWarning {
-            code: "executable_content".to_string(),
-            message: format!("contains executable content: {}", executable.join(", ")),
-        });
-    }
     if !secret_shaped.is_empty() {
         warnings.push(CaptureWarning {
             code: "secret_shaped".to_string(),
@@ -530,10 +520,18 @@ mod tests {
         assert_eq!(files["scripts/run.sh"].mode, 0o755);
         assert_eq!(files["SKILL.md"].mode, 0o644);
         let warnings = content_warnings(&files);
-        assert_eq!(warnings[0].code, "executable_content");
-        assert!(warnings[0].message.contains("scripts/run.sh"));
-        assert_eq!(warnings[1].code, "secret_shaped");
-        assert!(warnings[1].message.contains("notes.txt"));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "secret_shaped");
+        assert!(warnings[0].message.contains("notes.txt"));
+        assert!(!warnings[0].message.contains("scripts/run.sh"));
+
+        let mut scripts = BTreeMap::from([(
+            "scripts/run.sh".to_string(),
+            files["scripts/run.sh"].clone(),
+        )]);
+        assert!(content_warnings(&scripts).is_empty());
+        scripts.get_mut("scripts/run.sh").unwrap().bytes = files["notes.txt"].bytes.clone();
+        assert_eq!(content_warnings(&scripts)[0].code, "secret_shaped");
     }
 
     #[test]

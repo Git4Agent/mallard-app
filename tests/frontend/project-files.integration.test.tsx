@@ -17,6 +17,7 @@ import ProjectFilesReviewPage, {
 import PushResourceWorkspace, {
   PushApplyButton,
   includeRequiredProjectContentDirectories,
+  projectFileSelectionAfterScan,
   pushBlockerRevealTarget,
   pushBudgetTotal,
   pushProjectFileWork,
@@ -24,6 +25,8 @@ import PushResourceWorkspace, {
   pushReviewBlockers,
   pushReviewDisabledReason,
   requiredProjectContentDirectoryIds,
+  selectPushProjectFilesWithinBudget,
+  updatePushSelection,
 } from "../../src/components/project-sync/PushResourceWorkspace";
 import RestorePlanView, { pullProjectFileCommitImpact } from "../../src/components/project-sync/RestorePlanView";
 import { projectContentReviewRow } from "../../src/components/project-sync/model";
@@ -110,6 +113,83 @@ const inventory: ProjectContentInventory = {
 
 const emptyCounts = { history: 0, project_files: 0 };
 
+const emptyDirectoryInventory: ProjectContentInventory = {
+  ...inventory,
+  entries: [
+    entry("dir-assets", "directory", "素材"),
+    entry("dir-previews", "directory", "素材/previews"),
+    entry("dir-backgrounds", "directory", "素材/previews/backgrounds"),
+    entry("file-notes", "file", "素材/notes.md"),
+  ],
+};
+
+test("Python scripts have no executable warning or acknowledgement in Push and Pull", () => {
+  const path = "姜维一计害三贤_180秒/新版配音/制作/make_neural_audio.py";
+  const script = { ...entry("script", "file", path), mode: 0o755 };
+  const scanned = { ...inventory, entries: [script] };
+  const selected = new Set(["script"]);
+  assert.equal(pushReviewDisabledReason({ selected, projectContentInventory: scanned, deletionApproved: true }), null);
+  for (const mode of ["push", "pull"] as const) {
+    const html = renderToStaticMarkup(
+      <ProjectFilesReviewPage
+        mode={mode} eligibility={scanned.eligibility}
+        rows={[{ resourceId: "script", relativePath: path, entryType: "file", state: "local_only", mode: 0o755,
+          localPresent: true, storagePresent: false,
+          warningCode: script.warning_code, warningDigest: script.warning_digest }]}
+        selectedIds={selected} onToggle={() => undefined} onReviewWarnings={() => undefined}
+      />,
+    );
+    assert.match(html, /make_neural_audio\.py/);
+    assert.match(html, /Python/);
+    assert.doesNotMatch(html, /Executable|notice-chip warning|notice-ack|Mark reviewed/);
+  }
+});
+
+test("clearing files removes stored choices and required ancestors while preserving other resources", () => {
+  const scanned = {
+    ...inventory,
+    entries: inventory.entries.map((row) => ({ ...row, storage_present: true, selected_in_recipe: true, undecided: false })),
+  };
+  const selected = includeRequiredProjectContentDirectories(scanned, new Set(["file-a", "session", "tool"]));
+  const next = new Set([...selected].filter((id) => !scanned.entries.some((row) => row.descriptor.resource_id === id)));
+  assert.deepEqual(updatePushSelection(scanned, selected, next), new Set(["session", "tool"]));
+  assert.equal(pushProjectFileWork(scanned, next, new Set(), true), null, "unselect is not storage deletion");
+});
+
+test("unselecting a file or folder removes unused ancestors but keeps other selected branches and empty directories", () => {
+  const scanned = {
+    ...inventory,
+    entries: [
+      ...inventory.entries,
+      entry("dir-images", "directory", "docs/images"),
+      entry("file-image", "file", "docs/images/cover.png"),
+      entry("dir-empty", "directory", "empty"),
+    ],
+  };
+  const selected = includeRequiredProjectContentDirectories(scanned, new Set(["file-a", "file-image", "dir-empty"]));
+  const next = new Set(selected);
+  next.delete("file-a");
+  const withoutFile = updatePushSelection(scanned, selected, next);
+  assert.deepEqual(withoutFile, new Set(["file-image", "dir-images", "dir-docs", "dir-empty"]));
+
+  const withoutFolder = new Set(withoutFile);
+  ["file-image", "dir-images"].forEach((id) => withoutFolder.delete(id));
+  assert.deepEqual(updatePushSelection(scanned, withoutFile, withoutFolder), new Set(["dir-empty"]));
+});
+
+test("rescanning preserves unselected stored files and cleans ancestors of disappeared selections", () => {
+  const scanned = {
+    ...inventory,
+    entries: inventory.entries.map((row) => ({ ...row, storage_present: true, selected_in_recipe: true })),
+  };
+  const defaults = projectFileSelectionAfterScan(null, scanned, new Set(["session"]), new Set());
+  assert.deepEqual(defaults, new Set(["session", "dir-docs", "dir-specs", "file-a"]));
+  assert.deepEqual(projectFileSelectionAfterScan(scanned, scanned, new Set(["session"]), new Set()), new Set(["session"]));
+  const disappeared = { ...scanned, entries: scanned.entries.filter((row) => row.entry_type === "directory") };
+  assert.deepEqual(projectFileSelectionAfterScan(scanned, disappeared, defaults, new Set()), new Set(["session"]));
+  assert.deepEqual(projectFileSelectionAfterScan(null, scanned, new Set(), new Set(["file-a"])), new Set(["dir-docs", "dir-specs"]));
+});
+
 test("eligible reviews put Project files directly after Git & sessions with no Review step", () => {
   assert.deepEqual(syncReviewSteps(false), ["history"]);
   assert.deepEqual(syncReviewSteps(true), ["history", "project_files"]);
@@ -190,6 +270,32 @@ test("a ticked new file locks both directory ancestors and still reads New", () 
   assert.doesNotMatch(html, /Exact entries selected|Scanning cannot prove/);
 });
 
+test("selecting a nested empty directory includes and locks its ancestors without selecting sibling files", () => {
+  const selected = includeRequiredProjectContentDirectories(
+    emptyDirectoryInventory,
+    new Set(["dir-backgrounds"]),
+  );
+  assert.deepEqual([...selected].sort(), ["dir-assets", "dir-backgrounds", "dir-previews"]);
+  assert.deepEqual(
+    [...requiredProjectContentDirectoryIds(emptyDirectoryInventory, selected)].sort(),
+    ["dir-assets", "dir-previews"],
+    "the empty directory itself stays optional",
+  );
+});
+
+test("Files Select includes every ancestor of an empty directory alongside sibling files", () => {
+  const selected = selectPushProjectFilesWithinBudget(
+    new Set(),
+    new Set(emptyDirectoryInventory.entries.map((candidate) => candidate.descriptor.resource_id)),
+    null,
+    emptyDirectoryInventory,
+  );
+  assert.deepEqual(
+    [...selected].sort(),
+    ["dir-assets", "dir-backgrounds", "dir-previews", "file-notes"],
+  );
+});
+
 test("the scan ticks no new file: it opens unticked and New, and the Sessions step counts it", () => {
   // What Select applies is not what opens ticked: the scan offers the new
   // file, and leaves the tick to the user.
@@ -247,7 +353,7 @@ test("the scan ticks no new file: it opens unticked and New, and the Sessions st
 
 test("Files Select includes previously excluded and warned files without acknowledging warnings", () => {
   const flagged = entry("file-run", "file", "scripts/run.sh");
-  flagged.warning_code = "executable";
+  flagged.warning_code = "possible_secret";
   flagged.warning_digest = "w".repeat(64);
   const leftOut = entry("file-l", "file", "notes/draft.md", false);
   const scanned: ProjectContentInventory = {
@@ -320,6 +426,26 @@ test("Files Select skips blocked, unselectable, held and removed files", () => {
   assert.match(render(new Set(["included"])), /Unselect <span class="sync-path-count">1<\/span>/);
 });
 
+test("Files clear stays available when only unchanged hidden files are selected", () => {
+  const stored: ProjectContentEntry = {
+    ...entry("stored", "file", "unchanged.md", false),
+    selected_in_recipe: true, storage_present: true, state: "synced",
+  };
+  const scanned = { ...inventory, entries: [stored, entry("new", "file", "new.md")] };
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true} resources={scanned.entries.map((row) => projectContentReviewRow(row))}
+      selected={new Set(["stored"])} projectDefaults={new Set()} busy={false}
+      projectContentInventory={scanned} projectContentScanned projectFilesShown showProjectFiles activeStep="project_files"
+      onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined}
+    />,
+  );
+  assert.doesNotMatch(html, /aria-label="Include unchanged\.md"/);
+  const clear = html.match(/<button[^>]*aria-label="Clear current selection"[^>]*>/)?.[0];
+  assert.ok(clear);
+  assert.doesNotMatch(clear, /disabled/);
+});
+
 test("a push sends the scan's review token only when it has file work", () => {
   const stored = entry("file-s", "file", "notes/plan.md", false);
   stored.selected_in_recipe = true;
@@ -332,7 +458,7 @@ test("a push sends the scan's review token only when it has file work", () => {
   // Sessions only: the stored file is as storage holds it, the new one waits
   // on a list nobody opened.
   assert.equal(pushProjectFileWork(scanned(stored, fresh), new Set(["file-s"]), none, false), null);
-  // The backend re-adds a recipe file storage holds, so unticking it is no change.
+  // Unticking a stored file retains its published copy without capture.
   assert.equal(pushProjectFileWork(scanned(stored), none, none, false), null);
   // On a list the user saw, the new file left unticked is remembered; with
   // nothing new to remember, seeing the list is no work at all.
@@ -377,6 +503,8 @@ test("the meter and the refusal count only the files a push would capture", () =
   // With file work the backend captures every selected file, changed or not.
   assert.equal(files(["file-s", "file-n"]), 5_000);
   assert.equal(files(["file-s"], true), 4_000);
+  assert.equal(files(["file-n"]), 1_000);
+  assert.equal(files([], true), 0);
 
   // A selection of files storage already holds sends nothing.
   const refusal = (selected: string[], projectFilesShown = false) => pushReviewDisabledReason({
@@ -548,10 +676,10 @@ test("the Files step's own acknowledgement reviews every listed selected flagged
     return candidate;
   };
   const rows = [
-    flagged("file-a", "art.py", "executable"),
-    flagged("file-b", "film/make_audio.py", "executable"),
+    flagged("file-a", "art.py", "possible_secret"),
+    flagged("file-b", "film/make_audio.py", "possible_secret"),
     flagged("file-c", "film/voices.toml", "possible_secret"),
-    flagged("file-d", "film/unticked.sh", "executable"),
+    flagged("file-d", "film/unticked.sh", "possible_secret"),
     entry("file-e", "file", "notes/plain.md"),
   ].map((candidate) => ({
     resourceId: candidate.descriptor.resource_id,
@@ -582,8 +710,8 @@ test("the Files step's own acknowledgement reviews every listed selected flagged
   // flagged file left unticked is not among them, and the rows keep their
   // own boxes under it.
   const none = render([]);
-  assert.match(strip(none), /3 selected files flagged<\/strong> — 2 executable · 1 credential-shaped/);
-  assert.match(strip(none), /aria-label="Reviewed: 3 selected files flagged — 2 executable · 1 credential-shaped"/);
+  assert.match(strip(none), /3 selected files flagged<\/strong> — 3 credential-shaped/);
+  assert.match(strip(none), /aria-label="Reviewed: 3 selected files flagged — 3 credential-shaped"/);
   assert.match(strip(none), />Mark all reviewed</);
   assert.doesNotMatch(strip(none), /aria-checked|checked=""/);
   assert.equal((none.match(/<label class="notice warning notice-ack/g) ?? []).length, 5);

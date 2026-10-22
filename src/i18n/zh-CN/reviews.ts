@@ -13,7 +13,6 @@ export default {
     shared: "共享",
     explicitReview: "需明确检查",
     possibleSecret: "可能含密钥",
-    executable: "可执行",
   },
   groups: {
     conversations: "会话",
@@ -108,14 +107,12 @@ export default {
     bindingChangedUnnamed: "项目文件夹或 Codex 配置已不同。请先检查此存储。",
   },
   blockers: {
-    executable: "{{name}} 是可执行文件——请标为已检查或将其排除。",
     secret: "{{name}} 可能含有密钥——请标为已检查或将其排除。",
     warning: "{{name}} 有扫描警告——请标为已检查或将其排除。",
     flaggedMany: "{{count}} 个文件需要检查——请标为已检查或将其排除。",
     unreadable: "{{name}} 无法读取——请将其排除后再上传。",
     unreadableSession: "“{{name}}”无法读取——请将其排除后再上传。",
     unreadableMany: "{{count}} 个所选项目无法读取——请将其排除后再上传。",
-    executableUnnamed: "所选文件是可执行文件——请标为已检查或将其排除。",
     secretUnnamed: "所选文件可能含有密钥——请标为已检查或将其排除。",
     warningUnnamed: "所选文件有扫描警告——请标为已检查或将其排除。",
     unreadableUnnamedFile: "所选文件无法读取——请将其排除后再上传。",

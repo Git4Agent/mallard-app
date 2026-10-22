@@ -144,7 +144,6 @@ export function fileKindLabel(name: string): string {
    Files activity and the Push file review: the chip names the finding. */
 const PROJECT_FILE_WARNING_LABELS: Record<string, () => string> = {
   possible_secret: () => t("reviews:model.possibleSecret"),
-  executable: () => t("reviews:model.executable"),
 };
 
 /** An unknown code prints as the backend wrote it, underscores spaced. */

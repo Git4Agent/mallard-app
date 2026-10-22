@@ -1710,6 +1710,58 @@ fn project_content_manifest_accepts_100_mib_and_rejects_one_byte_more() {
 }
 
 #[test]
+fn project_content_snapshot_can_accumulate_beyond_one_push_limit() {
+    for added_bytes in [32 * 1024 * 1024, 32 * 1024 * 1024 + 1, 40 * 1024 * 1024] {
+        let mut scope = sealed_project_scope();
+        scope.files.clear();
+        scope.resources.clear();
+        scope.directories.clear();
+        scope.recipe.entries.clear();
+        for index in 0..6 {
+            let path = format!("file-{index}.bin");
+            let digest = sha256_hex(path.as_bytes());
+            let descriptor = project_content_descriptor("file", &path);
+            let resource_id = descriptor.resource_id.clone();
+            scope.recipe.entries.insert(
+                resource_id.clone(),
+                RecipeEntry {
+                    resource_id: resource_id.clone(),
+                    apply_policy: portable::contracts::explicit_review(),
+                    required: false,
+                },
+            );
+            scope.resources.insert(resource_id.clone(), descriptor);
+            scope.files.insert(
+                LogicalPath::parse(format!("project/{path}")).unwrap(),
+                BundleFileEntry {
+                    resource_id,
+                    sha256: digest.clone(),
+                    size: if index == 5 {
+                        added_bytes
+                    } else {
+                        96 * 1024 * 1024
+                    },
+                    source_mtime: 1,
+                    object_key: format!("_objects/{digest}"),
+                    mode: Some(0o644),
+                },
+            );
+        }
+        scope.content_sha256 = scope
+            .compute_content_sha256(&SyncScopeKey::Project)
+            .unwrap();
+        let manifest = scoped_manifest(BTreeMap::from([(SyncScopeKey::Project, scope)]));
+        manifest.validate().unwrap();
+        // Five existing 96 MiB files plus another push may exceed 512 MiB.
+        // Scope validation still checks each file and the bounded manifest;
+        // the aggregate byte limit belongs to the selected capture instead.
+        manifest
+            .resolve_all(&portable::test_resolver::Version1Resolver)
+            .unwrap();
+    }
+}
+
+#[test]
 fn project_content_tombstones_are_typed_and_path_bound() {
     let mut manifest = scoped_manifest(BTreeMap::from([(
         SyncScopeKey::Project,

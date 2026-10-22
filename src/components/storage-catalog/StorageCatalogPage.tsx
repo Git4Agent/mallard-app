@@ -142,14 +142,12 @@ function forkSeed(row: CatalogScopeRow): string {
 }
 
 /** The acknowledgement's lead, keyed by the warning's code — the backend
- * mints `executable_content` and `secret_shaped` today (inventory.rs) — with
+ * mints `secret_shaped` today (inventory.rs) — with
  * the prefix its message is known to carry. An unknown code, or a message
  * that stopped matching its prefix, keeps the whole backend sentence: the
  * backend stays the authority on what a warning says, and its words stay as
  * it wrote them; only the lead is the interface's. */
 const WARNING_LEADS: Record<string, { lead: () => string; prefix: string }> = {
-  // i18n-ignore: backend text
-  executable_content: { lead: () => translate("library:warning.executable"), prefix: "contains executable content: " },
   // i18n-ignore: backend text
   secret_shaped: { lead: () => translate("library:warning.secretShaped"), prefix: "contains credential-shaped content: " },
 };
