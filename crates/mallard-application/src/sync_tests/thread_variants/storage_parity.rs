@@ -948,7 +948,7 @@ async fn managed_cloud_noop_fast_forward_views_and_stale_writer_match_local_prot
 ///
 /// ```sh
 /// MALLARD_LIVE_CLOUD_ORIGIN=http://localhost:8787 MALLARD_LIVE_CLOUD_TOKEN=… \
-///   cargo test --manifest-path src-tauri/Cargo.toml --lib managed_cloud_live_gateway -- --ignored --nocapture
+///   cargo test -p mallard-application --lib managed_cloud_live_gateway -- --ignored --nocapture
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a running Mallard Cloud Worker and a desktop token"]

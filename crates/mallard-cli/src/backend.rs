@@ -1,8 +1,7 @@
 use mallard_application::storage_setup::{
-    begin_storage_draft_operation, list_storages, prepare_storage_draft_in_operation,
-    verify_storage, PreparedProviderConfig,
+    begin_storage_draft_operation, prepare_storage_draft_in_operation, PreparedProviderConfig,
 };
-use mallard_domain::{BoundedConfigObject, SecretMap, StorageId, StorageSetupDraftId};
+use mallard_domain::{BoundedConfigObject, SecretMap, StorageSetupDraftId};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use mallard_infrastructure::r2_setup::{prepare_bucket, propose_bucket_name, R2SetupClient};
 use mallard_infrastructure::storage_providers::r2::{
@@ -10,32 +9,17 @@ use mallard_infrastructure::storage_providers::r2::{
     R2SettingsV1,
 };
 use mallard_infrastructure::storage_providers::StorageProviderRegistry;
-use serde::Serialize;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 
 use crate::error::CliError;
 use crate::r2_browser_setup::{
     authorize_bucket, publish_bucket_ready, publish_wrangler_ready, WranglerAccount, WranglerClient,
 };
 
-#[derive(Serialize)]
-pub(crate) struct StorageSummary {
-    pub storage_id: String,
-    pub name: String,
-    pub provider: String,
-    pub provider_label: String,
-}
-
 pub(crate) struct SetupInput {
     pub name: String,
     pub draft_id: String,
     pub expected_revision: u64,
-}
-
-pub(crate) struct VerifyOutcome {
-    pub storage_id: String,
-    pub config_revision: u64,
-    pub verified: bool,
 }
 
 /// What a setup command prepared: a draft for a new storage, or a regained
@@ -58,7 +42,6 @@ pub(crate) enum R2Target {
 }
 
 pub(crate) trait StorageBackend {
-    fn list(&self) -> Result<Vec<StorageSummary>, CliError>;
     fn r2_accounts(&self, login: bool) -> Result<Vec<WranglerAccount>, CliError>;
     fn setup(
         &self,
@@ -72,7 +55,6 @@ pub(crate) trait StorageBackend {
         &self,
         account_id: &str,
     ) -> Result<mallard_infrastructure::r2_setup::discovery::BucketScan, CliError>;
-    fn verify(&self, storage_id: &str) -> Result<VerifyOutcome, CliError>;
 }
 
 pub(crate) struct ProductionBackend {
@@ -95,10 +77,6 @@ impl ProductionBackend {
             repository,
             runtime,
         })
-    }
-
-    fn runtime_handle(&self) -> Handle {
-        self.runtime.handle().clone()
     }
 
     fn registry(&self) -> &'static StorageProviderRegistry {
@@ -132,19 +110,6 @@ impl StorageBackend for ProductionBackend {
         self.runtime
             .block_on(client.discover(&account_id))
             .map_err(r2_setup_error)
-    }
-
-    fn list(&self) -> Result<Vec<StorageSummary>, CliError> {
-        Ok(list_storages(&self.repository, self.registry())
-            .map_err(CliError::from_setup)?
-            .into_iter()
-            .map(|storage| StorageSummary {
-                storage_id: storage.storage_id.to_string(),
-                name: storage.name,
-                provider: storage.provider.to_string(),
-                provider_label: storage.provider_label,
-            })
-            .collect())
     }
 
     /// The R2 setup operation: pin the exact draft, drive Cloudflare's
@@ -308,23 +273,6 @@ impl StorageBackend for ProductionBackend {
         )
         .map_err(CliError::from_setup)?;
         Ok(SetupOutcome { reconnected })
-    }
-
-    fn verify(&self, storage_id: &str) -> Result<VerifyOutcome, CliError> {
-        let storage_id = StorageId::parse(storage_id)
-            .map_err(|_| CliError::invalid("The Mallard storage ID is invalid."))?;
-        let result = verify_storage(
-            &self.repository,
-            self.registry(),
-            &self.runtime_handle(),
-            &storage_id,
-        )
-        .map_err(CliError::from_setup)?;
-        Ok(VerifyOutcome {
-            storage_id: result.storage_id.to_string(),
-            config_revision: result.config_revision,
-            verified: result.verified,
-        })
     }
 }
 

@@ -6,15 +6,17 @@ use std::collections::BTreeMap;
 
 use mallard_domain::StorageId;
 
-use super::codec::{CatalogResourceDetail, CatalogResourceFile};
-use super::domain::{
+use mallard_application::storage_catalog::codec::{CatalogResourceDetail, CatalogResourceFile};
+use mallard_application::storage_catalog::domain::{
     CatalogActionResult, CatalogFormatKey, CatalogLinkId, CatalogPlanActionId, CatalogPlanId,
     CatalogResourceForkPlan, CatalogResourceId, CatalogResourceKindKey, CatalogScopeId,
     CatalogScopePullPlan, CatalogScopePushPlan, LocalCatalogProfileId, ProviderKey,
 };
-use super::registry::CatalogCapabilityDescriptor;
-use super::service::cloud::{CatalogCloudPlace, CatalogCloudRepository, CatalogCloudResolution};
-use super::service::{
+use mallard_application::storage_catalog::registry::CatalogCapabilityDescriptor;
+use mallard_application::storage_catalog::service::cloud::{
+    CatalogCloudPlace, CatalogCloudRepository, CatalogCloudResolution,
+};
+use mallard_application::storage_catalog::service::{
     CatalogProfileDto, CatalogProfileInspectionDto, CatalogProfileProbeDto, CatalogPullApproval,
     CatalogPushApproval, CatalogScopeDto, CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto,
     CatalogScopePushOutcomeDto, CatalogScopeResourcesDto, CatalogStorageRepositoryDto,
@@ -246,7 +248,9 @@ pub async fn apply_catalog_scope_push(
     plan_id: CatalogPlanId,
     selected_resource_ids: Vec<CatalogResourceId>,
     acknowledged_warning_digests: Vec<String>,
-    on_progress: tauri::ipc::Channel<super::service::CatalogSyncProgress>,
+    on_progress: tauri::ipc::Channel<
+        mallard_application::storage_catalog::service::CatalogSyncProgress,
+    >,
 ) -> Result<CatalogScopePushOutcomeDto, String> {
     run_blocking(move || {
         StorageCatalogService::from_user_home()?
@@ -296,7 +300,9 @@ pub async fn apply_catalog_scope_pull(
     plan_id: CatalogPlanId,
     choices: BTreeMap<CatalogResourceId, CatalogPlanActionId>,
     destructive_acknowledged: Vec<CatalogResourceId>,
-    on_progress: tauri::ipc::Channel<super::service::CatalogSyncProgress>,
+    on_progress: tauri::ipc::Channel<
+        mallard_application::storage_catalog::service::CatalogSyncProgress,
+    >,
 ) -> Result<CatalogScopePullOutcomeDto, String> {
     run_blocking(move || {
         StorageCatalogService::from_user_home()?
@@ -470,7 +476,7 @@ pub async fn discard_catalog_cloud_draft(
 pub async fn prepare_catalog_resource_removal(
     scope_id: CatalogScopeId,
     resource_id: CatalogResourceId,
-) -> Result<super::domain::CatalogResourceRemovalPlan, String> {
+) -> Result<mallard_application::storage_catalog::domain::CatalogResourceRemovalPlan, String> {
     run_blocking(move || {
         StorageCatalogService::from_user_home()?.prepare_removal(&scope_id, &resource_id)
     })
@@ -480,6 +486,6 @@ pub async fn prepare_catalog_resource_removal(
 #[tauri::command]
 pub async fn apply_catalog_resource_removal(
     plan_id: CatalogPlanId,
-) -> Result<super::service::CatalogRemovalResult, String> {
+) -> Result<mallard_application::storage_catalog::service::CatalogRemovalResult, String> {
     run_blocking(move || StorageCatalogService::from_user_home()?.apply_removal(&plan_id)).await
 }

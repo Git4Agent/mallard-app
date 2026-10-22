@@ -1,149 +1,17 @@
-//! Tauri-facing activity-log emission and commands.
+//! Activity-log commands: the drawer's reads, its retention policy, and the
+//! folder. Emission is `mallard_application::activity_log` through the
+//! desktop's `event_sink`.
 
-use mallard_domain::generated_named_id;
 use mallard_infrastructure::activity_log::{
-    normalized_level_name, ActivityLogCleanupRequest, ActivityLogCleanupResult, ActivityLogContext,
-    ActivityLogEntry, ActivityLogPage, ActivityLogPolicy, ActivityLogQuery, ActivityLogStats,
-    ActivityLogStore, ActivityLogType,
+    ActivityLogCleanupRequest, ActivityLogCleanupResult, ActivityLogPage, ActivityLogPolicy,
+    ActivityLogQuery, ActivityLogStats, ActivityLogStore,
 };
 use mallard_infrastructure::persistence::LocalStateRepository;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::Emitter;
-
-#[cfg(not(test))]
-use mallard_infrastructure::activity_log::day_for_timestamp;
-
-static PERSISTENCE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
-
-/// Keep Cloud upload evidence in the activity log, separate from the short
-/// command error used by the notice. Subscribe before commands can run.
-pub fn start_cloud_diagnostic_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    let mut events = mallard_infrastructure::managed_cloud::diagnostics::upload_diagnostics();
-    std::thread::Builder::new()
-        .name("mallard-cloud-diagnostics".to_string())
-        .spawn(move || loop {
-            let message = match events.blocking_recv() {
-                Ok(message) => message,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    format!("Cloud upload diagnostics omitted {count} entries because the log queue was full.")
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            };
-            emit_activity_log(
-                &app,
-                ActivityLogType::Storage,
-                "warning",
-                "storage.cloud_upload_diagnostic",
-                &message,
-                None,
-                ActivityLogContext::default(),
-            );
-        })
-        .ok();
-}
 
 /// Resolve the activity log store below the machine-global metadata directory.
 fn activity_log_store() -> Result<ActivityLogStore, String> {
     let repository = LocalStateRepository::from_user_home()?;
     ActivityLogStore::from_repository(&repository)
-}
-
-#[derive(Clone, Debug)]
-pub struct ActivityLogScope {
-    log_type: ActivityLogType,
-    run_id: Option<String>,
-    context: ActivityLogContext,
-}
-
-impl ActivityLogScope {
-    pub fn new(log_type: ActivityLogType) -> Self {
-        Self {
-            log_type,
-            run_id: generated_named_id(log_type.as_str()).ok(),
-            context: ActivityLogContext::default(),
-        }
-    }
-
-    pub fn project(mut self, project_id: impl ToString, project_name: Option<&str>) -> Self {
-        self.context.project_id = Some(project_id.to_string());
-        self.context.project_name = project_name.map(ToOwned::to_owned);
-        self
-    }
-
-    pub fn storage(mut self, storage_id: impl ToString, storage_name: Option<&str>) -> Self {
-        self.context.storage_id = Some(storage_id.to_string());
-        self.context.storage_name = storage_name.map(ToOwned::to_owned);
-        self
-    }
-
-    pub fn emit<R: tauri::Runtime>(
-        &self,
-        app: &tauri::AppHandle<R>,
-        level: &str,
-        event: &str,
-        message: &str,
-    ) {
-        emit_activity_log(
-            app,
-            self.log_type,
-            level,
-            event,
-            message,
-            self.run_id.clone(),
-            self.context.clone(),
-        );
-    }
-}
-
-pub fn emit_typed_log<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    log_type: ActivityLogType,
-    level: &str,
-    message: &str,
-) {
-    let event = format!("{}.{}", log_type.as_str(), normalized_level_name(level));
-    emit_activity_log(
-        app,
-        log_type,
-        level,
-        &event,
-        message,
-        None,
-        ActivityLogContext::default(),
-    );
-}
-
-fn emit_activity_log<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    log_type: ActivityLogType,
-    level: &str,
-    event: &str,
-    message: &str,
-    run_id: Option<String>,
-    context: ActivityLogContext,
-) {
-    let entry = ActivityLogEntry::new(log_type, level, event, message, run_id, context);
-    #[cfg(not(test))]
-    let persisted = activity_log_store().and_then(|store| {
-        store.append(&entry)?;
-        let day = day_for_timestamp(entry.ts)?;
-        store.maybe_cleanup(&day);
-        Ok(())
-    });
-    #[cfg(test)]
-    let persisted: Result<(), String> = Ok(());
-    let _ = app.emit("sync-log", &entry);
-    if persisted.is_err() && !PERSISTENCE_WARNING_EMITTED.swap(true, Ordering::SeqCst) {
-        let warning = ActivityLogEntry::new(
-            ActivityLogType::System,
-            "warning",
-            "system.log_persistence_unavailable",
-            "Activity log persistence is unavailable; current entries remain visible until Mallard closes.",
-            None,
-            ActivityLogContext::default(),
-        );
-        let _ = app.emit("sync-log", warning);
-    }
 }
 
 #[tauri::command]

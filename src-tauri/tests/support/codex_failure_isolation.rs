@@ -229,7 +229,7 @@ impl Replica {
 }
 
 fn selected_resources(
-    review: &tauri_app_lib::PushReviewContext,
+    review: &mallard_application::project_sync::service::PushReviewContext,
     aliases: &[String],
 ) -> BTreeSet<ResourceId> {
     let selected = review

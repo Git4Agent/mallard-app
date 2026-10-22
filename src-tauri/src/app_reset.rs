@@ -1,18 +1,18 @@
 //! App-scoped local-data reset: measure and delete the whole `~/.mallard`
-//! metadata root. The deletion itself lives on
-//! `LocalStateRepository::wipe_local_state`; this module adds the
-//! catalog-state guard the infrastructure crate cannot see, re-arms the two
-//! long-lived backend holders of pre-wipe state, and exposes the Tauri
-//! surface. The process deliberately stays alive — relaunching the raw
+//! metadata root. The deletion is `mallard_application::app_reset`; this
+//! module re-arms the two long-lived backend holders of pre-wipe state and
+//! exposes the Tauri surface. The process deliberately stays alive — relaunching the raw
 //! binary under `tauri dev` orphans the frontend from its dev server (the
 //! CLI kills Vite when the original process exits, and the relaunched app
 //! then loads `devUrl` from a dead port: a white window). The frontend
 //! reloads the live process state with `window.location.reload()`.
 
-use crate::activity_log::ActivityLogScope;
+use crate::event_sink::DesktopSink;
 use crate::project_sync::config_watcher::ConfigWatcher;
-use crate::project_sync::observation_cache::observation_cache;
-use crate::storage_catalog::persistence::CatalogStateRepository;
+use mallard_application::activity_log::ActivityLogScope;
+use mallard_application::app_reset::reset_local_state as reset_local_state_with_repositories;
+use mallard_application::project_sync::observation_cache::observation_cache;
+use mallard_application::storage_catalog::persistence::CatalogStateRepository;
 use mallard_infrastructure::activity_log::ActivityLogType;
 use mallard_infrastructure::persistence::{
     LocalStateRepository, LocalStateSummary, LocalStateWipeResult,
@@ -25,21 +25,6 @@ async fn run_reset_io<T: Send + 'static>(
     tauri::async_runtime::spawn_blocking(operation)
         .await
         .map_err(|error| format!("local-data reset worker failed: {error}"))?
-}
-
-/// Non-Tauri core, unit-testable. Lock order is catalog-state → host
-/// operation → persistence — the order `clear_storage_data` already
-/// establishes; inverting it risks a flock deadlock between two commands.
-fn reset_local_state_with_repositories(
-    repository: &LocalStateRepository,
-    catalog: &CatalogStateRepository,
-) -> Result<LocalStateWipeResult, String> {
-    let _catalog_guard = catalog.acquire_state_guard()?;
-    let result = repository.wipe_local_state()?;
-    // Pending Library reviews are process-wide in-memory state; the process
-    // survives the wipe, so forget them with the root they described.
-    crate::storage_catalog::plan_store::discard_all(catalog.root());
-    Ok(result)
 }
 
 #[tauri::command]
@@ -56,8 +41,9 @@ pub async fn reset_local_state(app: tauri::AppHandle) -> Result<LocalStateWipeRe
     // would recreate `~/.mallard/logs` before the restart, and the restarted
     // app already logs `system.app_started`.
     let scope = ActivityLogScope::new(ActivityLogType::System);
+    let sink = DesktopSink::new(app.clone());
     scope.emit(
-        &app,
+        &sink,
         "warning",
         "system.local_state_reset_started",
         "Deleting all Mallard local data…",
@@ -70,7 +56,7 @@ pub async fn reset_local_state(app: tauri::AppHandle) -> Result<LocalStateWipeRe
     .await;
     if let Err(error) = &outcome {
         scope.emit(
-            &app,
+            &sink,
             "error",
             "system.local_state_reset_failed",
             &format!("Local data reset failed: {error}"),
@@ -105,57 +91,4 @@ pub async fn reset_local_state(app: tauri::AppHandle) -> Result<LocalStateWipeRe
         }
     }
     outcome
-}
-
-#[cfg(test)]
-mod tests {
-    use super::reset_local_state_with_repositories;
-    use crate::storage_catalog::domain::{
-        CatalogCoordinate, CatalogLinkId, CatalogPlanId, CatalogResourcePlanDocument,
-        CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePushPlan,
-    };
-    use crate::storage_catalog::persistence::CatalogStateRepository;
-    use crate::storage_catalog::plan_store;
-    use mallard_infrastructure::persistence::LocalStateRepository;
-
-    #[test]
-    fn reset_with_repositories_clears_catalog_state_too() {
-        let temp = tempfile::tempdir().unwrap();
-        let repository = LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        let catalog = CatalogStateRepository::from_home_dir(temp.path()).unwrap();
-        std::fs::write(catalog.root().join("catalog_scopes.json"), b"{}").unwrap();
-        let plan = CatalogResourcePlanDocument::Push(CatalogScopePushPlan {
-            plan_id: CatalogPlanId::generate().unwrap(),
-            scope_id: CatalogScopeId::generate().unwrap(),
-            link_id: CatalogLinkId::generate().unwrap(),
-            link_revision: 1,
-            storage_id: mallard_domain::StorageId::parse("storage-a").unwrap(),
-            repository_id: CatalogResourceRepositoryId::for_coordinate(
-                &CatalogCoordinate::new("codex", "agent_skill", "agentskills.io.skill", 1).unwrap(),
-            ),
-            storage_identity_sha256: "a".repeat(64),
-            profile_pins: Vec::new(),
-            target_pins: Vec::new(),
-            observed_head: None,
-            observed_items: std::collections::BTreeMap::new(),
-            destinations: std::collections::BTreeMap::new(),
-            rows: Vec::new(),
-            warning_digests: Vec::new(),
-            created_at: 1,
-            expires_at: 2,
-        });
-        let plan_id = plan.plan_id().clone();
-        plan_store::save(catalog.root(), plan, 1).unwrap();
-
-        let result = reset_local_state_with_repositories(&repository, &catalog).unwrap();
-        assert!(result.existed);
-        assert!(result.files_removed > 0);
-        assert!(!temp.path().join(".mallard").exists());
-        // The process survives the reset, so its pending reviews must not.
-        assert!(plan_store::load(catalog.root(), &plan_id).is_err());
-
-        // Both repositories reconstruct cleanly over the fresh root.
-        LocalStateRepository::from_home_dir(temp.path()).unwrap();
-        CatalogStateRepository::from_home_dir(temp.path()).unwrap();
-    }
 }

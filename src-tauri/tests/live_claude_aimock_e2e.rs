@@ -20,6 +20,12 @@ mod session_reconciliation;
 #[path = "support/claude_desktop_import.rs"]
 mod claude_desktop_import;
 
+use mallard_application::project_sync::service::{
+    ProjectActivity, ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest,
+    ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
+    RestoreResult, SessionDetailErrorCode, StorageDataClearResult, ThreadSyncComparison,
+    ThreadSyncState,
+};
 use mallard_domain::{
     ActionId, BundleId, CloudThreadId, ConversationMaterializationState, ConversationReviewAction,
     DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding,
@@ -46,12 +52,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri_app_lib::{
-    ProjectActivity, ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest,
-    ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
-    RestoreResult, SessionDetailErrorCode, StorageDataClearResult, ThreadSyncComparison,
-    ThreadSyncState,
-};
 use walkdir::WalkDir;
 
 const LIVE_TEST_GATE: &str = "MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E";

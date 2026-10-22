@@ -1,7 +1,7 @@
 //! The native media transport; all path validation and bounded reads belong
 //! to the application/infrastructure layers, shared with fixture tests.
 
-use super::service::{
+use mallard_application::project_sync::service::{
     read_project_media_range_with_repository, repository,
 };
 use mallard_infrastructure::session_detail::SessionDetailErrorCode;

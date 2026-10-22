@@ -4,12 +4,12 @@
 //! persistence. Every storage uses the same immutable bundle publication:
 //! a record written last, and a head selected from the stream's records.
 
-use chrono::{TimeZone, Utc};
-use mallard_application::storage_setup::{self as storage_setup, storage_local_root};
-pub use mallard_application::storage_setup::{
+use crate::storage_setup::{self as storage_setup, storage_local_root};
+pub use crate::storage_setup::{
     CommitStorageDraftResult, StorageSetupDraftSummary, StorageSummary, TestStorageDraftResult,
     VerifyStorageResult,
 };
+use chrono::{TimeZone, Utc};
 use mallard_domain::portable::contracts;
 use mallard_domain::ConversationWireChildren;
 use mallard_domain::PortableContractResolver;
@@ -128,7 +128,7 @@ use unicode_normalization::UnicodeNormalization;
 
 const MAX_CONVERSATION_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 const HISTORY_SCAN_LOG_THROTTLE_SECS: u64 = 5 * 60;
-pub(super) static HISTORY_SCAN_LOGGED_AT: std::sync::Mutex<BTreeMap<String, u64>> =
+pub static HISTORY_SCAN_LOGGED_AT: std::sync::Mutex<BTreeMap<String, u64>> =
     std::sync::Mutex::new(BTreeMap::new());
 const AGENT_HOME_LOCKED_MESSAGE: &str =
     "agent home is fixed after project setup; remove and set up the project again to use a different agent home";
@@ -540,7 +540,7 @@ impl<'a> ProjectSyncService<'a> {
     }
 }
 
-pub(super) fn provider_registry() -> &'static AgentProviderRegistry {
+pub fn provider_registry() -> &'static AgentProviderRegistry {
     AgentProviderRegistry::production()
 }
 
@@ -553,7 +553,7 @@ fn provider_supports_tail_cursor(provider: &ProviderKey) -> bool {
         .is_some_and(|adapter| adapter.supports_tail_cursor())
 }
 
-pub(super) fn claim_history_scan_log_at(
+pub fn claim_history_scan_log_at(
     logged_at: &mut BTreeMap<String, u64>,
     local_project_id: &str,
     now: u64,
@@ -567,7 +567,7 @@ pub(super) fn claim_history_scan_log_at(
     allowed
 }
 
-pub(super) fn should_log_history_scan(local_project_id: &LocalProjectId) -> bool {
+pub fn should_log_history_scan(local_project_id: &LocalProjectId) -> bool {
     HISTORY_SCAN_LOGGED_AT
         .lock()
         .map(|mut logged_at| {
@@ -744,18 +744,18 @@ pub struct ProjectContentInventory {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ProjectContentPushReview {
-    pub(super) scope: PushScope,
-    pub(super) credential_redaction_enabled: bool,
-    pub(super) subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
-    pub(super) review_token: Option<String>,
+pub struct ProjectContentPushReview {
+    pub scope: PushScope,
+    pub credential_redaction_enabled: bool,
+    pub subagent_selections: BTreeMap<ResourceId, SubagentSelection>,
+    pub review_token: Option<String>,
     /// The Files step was on screen with its scanned rows. A local file left
     /// unticked there is a choice, and is remembered as left out; without it
     /// an unticked file is one nobody saw, and stays undecided.
-    pub(super) files_shown: bool,
-    pub(super) git_history_review_token: Option<String>,
-    pub(super) removal_ids: BTreeSet<ResourceId>,
-    pub(super) acknowledged_warning_digests: BTreeSet<String>,
+    pub files_shown: bool,
+    pub git_history_review_token: Option<String>,
+    pub removal_ids: BTreeSet<ResourceId>,
+    pub acknowledged_warning_digests: BTreeSet<String>,
 }
 
 impl Default for ProjectContentPushReview {
@@ -1062,7 +1062,7 @@ pub struct BundleReadiness {
     pub generated_at: u64,
 }
 
-pub(super) fn repository() -> Result<LocalStateRepository, String> {
+pub fn repository() -> Result<LocalStateRepository, String> {
     LocalStateRepository::from_user_home()
 }
 
@@ -1078,7 +1078,7 @@ pub struct ProjectSyncConfigView {
     pub links: Vec<ProjectStorageLink>,
 }
 
-pub(crate) fn config_view(config: SyncConfig) -> Result<ProjectSyncConfigView, String> {
+pub fn config_view(config: SyncConfig) -> Result<ProjectSyncConfigView, String> {
     let registry = StorageProviderRegistry::production();
     let storages = config
         .storages
@@ -1095,25 +1095,25 @@ pub(crate) fn config_view(config: SyncConfig) -> Result<ProjectSyncConfigView, S
     })
 }
 
-pub(super) fn load_project_sync_config_with_repository(
+pub fn load_project_sync_config_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<ProjectSyncConfigView, String> {
     config_view(repository.load_config()?)
 }
 
-pub(super) fn list_local_projects_with_repository(
+pub fn list_local_projects_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<Vec<LocalProjectRegistration>, String> {
     Ok(repository.load_config()?.projects)
 }
 
-pub(crate) fn list_project_bindings_with_repository(
+pub fn list_project_bindings_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<Vec<ProjectBinding>, String> {
     Ok(repository.load_bindings()?.bindings)
 }
 
-pub(super) fn delete_local_project_sessions_with_repository(
+pub fn delete_local_project_sessions_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     expected_project_revision: u64,
@@ -1126,14 +1126,14 @@ pub(super) fn delete_local_project_sessions_with_repository(
     )
 }
 
-pub(super) fn get_setup_draft_with_repository(
+pub fn get_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &SetupDraftId,
 ) -> Result<Option<ProjectSetupDraft>, String> {
     repository.load_setup_draft(draft_id)
 }
 
-pub(super) fn get_host_identity_status_with_repository(
+pub fn get_host_identity_status_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<HostIdentityStatus, String> {
     repository
@@ -1141,7 +1141,7 @@ pub(super) fn get_host_identity_status_with_repository(
         .map(host_identity_status)
 }
 
-pub(super) fn project_storage_log_context(
+pub fn project_storage_log_context(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -1170,10 +1170,7 @@ pub(super) fn project_storage_log_context(
     (project, storage, bundle_id)
 }
 
-pub(super) fn storage_log_label(
-    repository: &LocalStateRepository,
-    storage_id: &StorageId,
-) -> String {
+pub fn storage_log_label(repository: &LocalStateRepository, storage_id: &StorageId) -> String {
     repository
         .load_config()
         .ok()
@@ -1232,7 +1229,7 @@ fn cached_transcript_is_internal_subagent(
 }
 
 /// Every compiled storage provider's safe descriptor, in display order.
-pub(super) fn storage_provider_descriptors() -> Vec<StorageProviderDescriptor> {
+pub fn storage_provider_descriptors() -> Vec<StorageProviderDescriptor> {
     storage_setup::storage_provider_descriptors(StorageProviderRegistry::production())
 }
 
@@ -1240,7 +1237,7 @@ fn setup_error(error: storage_setup::StorageSetupError) -> String {
     error.to_string()
 }
 
-pub(super) fn create_storage_setup_draft_with_repository(
+pub fn create_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     provider: &StorageProviderKey,
 ) -> Result<StorageSetupDraftSummary, String> {
@@ -1252,7 +1249,7 @@ pub(super) fn create_storage_setup_draft_with_repository(
     .map_err(setup_error)
 }
 
-pub(super) fn create_storage_edit_draft_with_repository(
+pub fn create_storage_edit_draft_with_repository(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<StorageSetupDraftSummary, String> {
@@ -1277,7 +1274,7 @@ pub struct UpdateStorageSetupDraftRequest {
     pub secrets: BTreeMap<SecretKey, SecretOperation>,
 }
 
-pub(super) fn update_storage_setup_draft_with_repository(
+pub fn update_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     request: UpdateStorageSetupDraftRequest,
 ) -> Result<StorageSetupDraftSummary, String> {
@@ -1303,7 +1300,7 @@ pub struct StorageSetupDraftList {
     pub warnings: Vec<String>,
 }
 
-pub(super) fn list_storage_setup_drafts_with_repository(
+pub fn list_storage_setup_drafts_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<StorageSetupDraftList, String> {
     let (drafts, warnings) =
@@ -1312,7 +1309,7 @@ pub(super) fn list_storage_setup_drafts_with_repository(
     Ok(StorageSetupDraftList { drafts, warnings })
 }
 
-pub(super) fn get_storage_setup_draft_with_repository(
+pub fn get_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &StorageSetupDraftId,
 ) -> Result<Option<StorageSetupDraftSummary>, String> {
@@ -1324,14 +1321,14 @@ pub(super) fn get_storage_setup_draft_with_repository(
     .map_err(setup_error)
 }
 
-pub(super) fn discard_storage_setup_draft_with_repository(
+pub fn discard_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &StorageSetupDraftId,
 ) -> Result<bool, String> {
     repository.delete_storage_setup_draft(draft_id)
 }
 
-pub(super) fn test_storage_setup_draft_with_repository(
+pub fn test_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     runtime: tokio::runtime::Handle,
     draft_id: &StorageSetupDraftId,
@@ -1351,7 +1348,7 @@ pub(super) fn test_storage_setup_draft_with_repository(
 /// isolation check the domain cannot express (local storage roots against
 /// application data, project roots, and provider homes) runs inside the same
 /// transaction on the prospective document.
-pub(super) fn commit_storage_setup_draft_with_repository(
+pub fn commit_storage_setup_draft_with_repository(
     repository: &LocalStateRepository,
     runtime: tokio::runtime::Handle,
     draft_id: &StorageSetupDraftId,
@@ -1378,7 +1375,7 @@ pub(super) fn commit_storage_setup_draft_with_repository(
 
 /// One saved secret for the storage page's Show or Copy. The command logs
 /// the reveal; the value itself goes only to the caller.
-pub(super) fn reveal_storage_secret_with_repository(
+pub fn reveal_storage_secret_with_repository(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     secret_id: &mallard_domain::SecretKey,
@@ -1393,7 +1390,7 @@ pub(super) fn reveal_storage_secret_with_repository(
 }
 
 /// Probe one saved storage as it is configured, without a draft.
-pub(super) fn test_storage_with_repository(
+pub fn test_storage_with_repository(
     repository: &LocalStateRepository,
     runtime: tokio::runtime::Handle,
     storage_id: &StorageId,
@@ -1407,7 +1404,7 @@ pub(super) fn test_storage_with_repository(
     .map_err(setup_error)
 }
 
-pub(super) fn rename_storage_with_repository(
+pub fn rename_storage_with_repository(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     name: &str,
@@ -1421,7 +1418,7 @@ pub(super) fn rename_storage_with_repository(
 /// Remove one storage record. Library references are checked before the
 /// transaction: the catalog state lock must never be taken inside the
 /// project-sync persistence lock.
-pub(super) fn remove_storage_with_repository(
+pub fn remove_storage_with_repository(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     expected_config_revision: u64,
@@ -1434,7 +1431,7 @@ pub(super) fn remove_storage_with_repository(
 }
 
 /// Resolve the CLI beside the running desktop executable.
-pub(super) fn packaged_cli_path(current_executable: &Path) -> Result<PathBuf, String> {
+pub fn packaged_cli_path(current_executable: &Path) -> Result<PathBuf, String> {
     let directory = current_executable
         .parent()
         .ok_or_else(|| "Mallard cannot resolve its packaged CLI location.".to_string())?;
@@ -1474,19 +1471,17 @@ fn host_identity_status(identity: mallard_domain::HostIdentity) -> HostIdentityS
 
 /// Heal interrupted project setup finalizations. Sync applies are one-shot
 /// and have no restart recovery path.
-pub(crate) fn recover_startup_state_with_repository(
-    repository: &LocalStateRepository,
-) -> Vec<String> {
+pub fn recover_startup_state_with_repository(repository: &LocalStateRepository) -> Vec<String> {
     recover_setup_state(repository)
 }
 
-pub(super) fn list_project_repository_kinds_with_repository(
+pub fn list_project_repository_kinds_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<BTreeMap<String, bool>, String> {
     project_activity::list_project_repository_kinds(repository)
 }
 
-pub(super) fn agent_provider_descriptors() -> Vec<ProviderDescriptor> {
+pub fn agent_provider_descriptors() -> Vec<ProviderDescriptor> {
     provider_registry().descriptors()
 }
 
@@ -1527,7 +1522,7 @@ fn build_activity_from_local_read(
     )
 }
 
-pub(super) fn get_project_activity_with_repository(
+pub fn get_project_activity_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: Option<&StorageId>,
@@ -1592,7 +1587,7 @@ pub enum ProjectActivityRefreshEvent {
     },
 }
 
-pub(super) fn refresh_project_activity_with_progress(
+pub fn refresh_project_activity_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -1675,7 +1670,7 @@ pub(super) fn refresh_project_activity_with_progress(
     Ok(())
 }
 
-pub(super) fn session_detail_error(
+pub fn session_detail_error(
     code: SessionDetailErrorCode,
     message: impl Into<String>,
 ) -> SessionDetailError {
@@ -1686,7 +1681,7 @@ pub(super) fn session_detail_error(
     }
 }
 
-pub(super) fn resolve_project_markdown_path_with_repository(
+pub fn resolve_project_markdown_path_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     relative_path: &str,
@@ -1694,7 +1689,7 @@ pub(super) fn resolve_project_markdown_path_with_repository(
     session_detail::resolve_project_markdown_path(repository, local_project_id, relative_path)
 }
 
-pub(super) fn read_project_markdown_image_with_repository(
+pub fn read_project_markdown_image_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     relative_path: &str,
@@ -1702,7 +1697,7 @@ pub(super) fn read_project_markdown_image_with_repository(
     session_detail::read_project_markdown_image(repository, local_project_id, relative_path)
 }
 
-pub(super) fn prepare_project_markdown_media_with_repository(
+pub fn prepare_project_markdown_media_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     relative_path: &str,
@@ -1715,7 +1710,7 @@ pub(super) fn prepare_project_markdown_media_with_repository(
     .map(|media| media.metadata)
 }
 
-pub(super) fn read_project_media_range_with_repository(
+pub fn read_project_media_range_with_repository(
     repository: &LocalStateRepository,
     request_path: &str,
     range: Option<&str>,
@@ -1735,7 +1730,7 @@ pub(super) fn read_project_media_range_with_repository(
     Ok((media.metadata, response))
 }
 
-pub(super) fn delete_local_project_session_with_repository(
+pub fn delete_local_project_session_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     resource_id: &str,
@@ -1748,7 +1743,7 @@ pub(super) fn delete_local_project_session_with_repository(
     )
 }
 
-pub(super) fn execute_project_session_action_with_repository(
+pub fn execute_project_session_action_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     resource_id: &str,
@@ -1765,7 +1760,7 @@ pub(super) fn execute_project_session_action_with_repository(
     )
 }
 
-pub(super) fn start_project_session_with_repository(
+pub fn start_project_session_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     provider: &ProviderKey,
@@ -2007,7 +2002,7 @@ fn read_stored_session(
     })
 }
 
-pub(super) fn get_stored_session_detail_with_repository(
+pub fn get_stored_session_detail_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -2017,7 +2012,7 @@ pub(super) fn get_stored_session_detail_with_repository(
     session_detail::get_stored_session_detail(provider_registry(), &stored)
 }
 
-pub(super) fn get_stored_session_timeline_page_with_repository(
+pub fn get_stored_session_timeline_page_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -2028,7 +2023,7 @@ pub(super) fn get_stored_session_timeline_page_with_repository(
     session_detail::get_stored_session_timeline_page(provider_registry(), &stored, request)
 }
 
-pub(super) fn get_stored_session_event_detail_with_repository(
+pub fn get_stored_session_event_detail_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -2045,7 +2040,7 @@ pub(super) fn get_stored_session_event_detail_with_repository(
     )
 }
 
-pub(super) fn get_project_session_detail_with_repository(
+pub fn get_project_session_detail_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     resource_id: &str,
@@ -2060,7 +2055,7 @@ pub(super) fn get_project_session_detail_with_repository(
     )
 }
 
-pub(super) fn get_project_session_timeline_page_with_repository(
+pub fn get_project_session_timeline_page_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     resource_id: &str,
@@ -2077,7 +2072,7 @@ pub(super) fn get_project_session_timeline_page_with_repository(
     )
 }
 
-pub(super) fn get_project_session_event_detail_with_repository(
+pub fn get_project_session_event_detail_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     resource_id: &str,
@@ -2097,7 +2092,7 @@ pub(super) fn get_project_session_event_detail_with_repository(
 }
 
 /// Delete Mallard-managed objects and derived local sync state only.
-pub(super) fn clear_storage_data_with_repositories(
+pub fn clear_storage_data_with_repositories(
     repository: &LocalStateRepository,
     catalog_repository: &crate::storage_catalog::persistence::CatalogStateRepository,
     storage_id: &StorageId,
@@ -2135,7 +2130,7 @@ fn storage_data_clear_result(
     }
 }
 
-pub(super) fn remove_project_link_with_repository(
+pub fn remove_project_link_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -2167,11 +2162,11 @@ pub(super) fn remove_project_link_with_repository(
     Ok(removed)
 }
 
-pub(super) fn format_mb(bytes: u64) -> String {
+pub fn format_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
-pub(super) fn format_fetch_started_message(
+pub fn format_fetch_started_message(
     upload: bool,
     total_objects: usize,
     total_bytes: u64,
@@ -2256,7 +2251,7 @@ fn pull_limit_sentence(total: u64, limit: u64) -> String {
     )
 }
 
-pub(super) fn pull_plan_action_counts(plan: &RestorePlan) -> (usize, usize) {
+pub fn pull_plan_action_counts(plan: &RestorePlan) -> (usize, usize) {
     let ordinary = plan
         .actions
         .iter()
@@ -2286,10 +2281,7 @@ fn conversation_action_row_key(action: &ConversationPlanAction) -> Option<Resour
     })
 }
 
-pub(super) fn pull_action_resource_label(
-    plan: &RestorePlan,
-    action_id: &ActionId,
-) -> Option<String> {
+pub fn pull_action_resource_label(plan: &RestorePlan, action_id: &ActionId) -> Option<String> {
     if let Some(action) = plan
         .actions
         .iter()
@@ -2304,7 +2296,7 @@ pub(super) fn pull_action_resource_label(
         .map(|resource_id| resource_id.to_string())
 }
 
-pub(super) fn pull_review_resource_labels(plan: &RestorePlan) -> Vec<String> {
+pub fn pull_review_resource_labels(plan: &RestorePlan) -> Vec<String> {
     let ordinary = plan
         .actions
         .iter()
@@ -2325,7 +2317,7 @@ pub(super) fn pull_review_resource_labels(plan: &RestorePlan) -> Vec<String> {
 
 /// Provider facts come from the registered adapter descriptor; setup code
 /// never hard-codes a provider list or name.
-pub(super) fn provider_descriptor(provider: &ProviderKey) -> Result<ProviderDescriptor, String> {
+pub fn provider_descriptor(provider: &ProviderKey) -> Result<ProviderDescriptor, String> {
     provider_registry()
         .get(provider)
         .map(|adapter| adapter.descriptor())
@@ -2368,7 +2360,7 @@ fn suggested_profile_name(provider: &ProviderKey, path: &Path) -> String {
         .unwrap_or_else(|| format!("{} profile", provider_name(provider)))
 }
 
-pub(super) fn probe_provider_profile_with_repository(
+pub fn probe_provider_profile_with_repository(
     repository: &LocalStateRepository,
     provider: &ProviderKey,
     requested_path: &str,
@@ -2461,7 +2453,7 @@ pub(super) fn probe_provider_profile_with_repository(
     })
 }
 
-pub(crate) fn create_provider_profile_with_repository(
+pub fn create_provider_profile_with_repository(
     repository: &LocalStateRepository,
     provider: &ProviderKey,
     display_name: &str,
@@ -2565,7 +2557,7 @@ fn inspect_provider_profile(profile: &ProviderProfile) -> (bool, bool, bool, Opt
     }
 }
 
-pub(super) fn list_provider_profiles_with_repository(
+pub fn list_provider_profiles_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<Vec<ProviderProfileSummary>, String> {
     ensure_default_provider_profiles(repository)?;
@@ -2720,7 +2712,7 @@ struct ProjectContentVersion {
 /// when that snapshot moved before it returned (`refuse_if_state_moved`).
 /// The review token it mints is honoured only by a Push that walks the
 /// project again under the host lock and mints the same token.
-pub(super) fn inspect_project_files_with_repository(
+pub fn inspect_project_files_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -2730,7 +2722,7 @@ pub(super) fn inspect_project_files_with_repository(
 
 /// `on_phase` reports the finished scan once, before the snapshot is read
 /// again. It runs outside every persistence lock.
-pub(super) fn inspect_project_files_with_progress(
+pub fn inspect_project_files_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -3434,7 +3426,7 @@ fn project_file_sync_eligibility(binding: &ProjectBinding) -> ProjectFileSyncEli
     }
 }
 
-pub(super) fn get_bundle_inventory_with_repository(
+pub fn get_bundle_inventory_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
 ) -> Result<ResourceInventory, String> {
@@ -3660,7 +3652,7 @@ fn find_remote_bundle_matches_with_repository(
     )
 }
 
-pub(super) fn list_remote_bundle_snapshots_with_repository(
+pub fn list_remote_bundle_snapshots_with_repository(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<Vec<BundleSnapshotSummary>, String> {
@@ -3815,7 +3807,7 @@ pub enum SiblingBundleStatus {
     },
 }
 
-pub(super) fn sibling_bundle_status_with_repository(
+pub fn sibling_bundle_status_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -4038,26 +4030,26 @@ impl BundleBytes for EmptyBundleBytes {
 }
 
 #[derive(Clone)]
-pub(crate) struct LocalThreadReview {
-    pub(crate) binding: Option<LocalConversationBinding>,
-    pub(crate) binding_resolution: BindingResolution,
-    pub(crate) resource_id: ResourceId,
-    pub(crate) descriptor: Option<ResourceDescriptor>,
-    pub(crate) provider_thread_id: String,
-    pub(crate) source_path: PathBuf,
-    pub(crate) source_mtime: u64,
+pub struct LocalThreadReview {
+    pub binding: Option<LocalConversationBinding>,
+    pub binding_resolution: BindingResolution,
+    pub resource_id: ResourceId,
+    pub descriptor: Option<ResourceDescriptor>,
+    pub provider_thread_id: String,
+    pub source_path: PathBuf,
+    pub source_mtime: u64,
     /// Transcript plus sidecars, what a push capture of this thread weighs.
-    pub(crate) capture_bytes: u64,
-    pub(crate) captured: Option<CapturedThread>,
+    pub capture_bytes: u64,
+    pub captured: Option<CapturedThread>,
 }
 
 /// Captured transcript bytes attached to a reviewed local thread when a
 /// capture selected it: always for providers without a cursor codec, and
 /// only for byte-pinning work on providers with one.
 #[derive(Clone)]
-pub(crate) struct CapturedThread {
-    pub(crate) conversation: provider_capture::CapturedConversation,
-    pub(crate) transcript: provider_capture::CapturedFile,
+pub struct CapturedThread {
+    pub conversation: provider_capture::CapturedConversation,
+    pub transcript: provider_capture::CapturedFile,
 }
 
 fn bounded_file_expectation(path: &Path) -> Result<TargetExpectation, String> {
@@ -4230,7 +4222,7 @@ fn provider_scope_pin(snapshot: Option<&BundleSnapshot>, provider: &ProviderKey)
 /// Locate one Codex rollout by thread id under the profile's canonical
 /// session roots. Codex embeds the thread UUID in the rollout file name, so
 /// the walk matches on the suffix without opening unrelated files.
-pub(super) fn codex_rollout_lookup(
+pub fn codex_rollout_lookup(
     provider_home: &Path,
 ) -> impl Fn(&str) -> Result<Option<PathBuf>, String> + '_ {
     let lookup = RolloutLookup::new(provider_home);
@@ -4341,7 +4333,7 @@ struct SeededCursor {
 }
 
 /// A worker's complete observation outcome.
-pub(crate) struct ProviderLocalObservation {
+pub struct ProviderLocalObservation {
     observation: LocalTailObservation,
     seeded: Option<SeededCursor>,
     /// Physical files the derivation read, each under its read-time stamp;
@@ -4368,12 +4360,12 @@ fn take_observation_outcome(
 /// observation cache persists it between processes; the value is a pure
 /// function of the session bytes it was derived from.
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct LocalTailObservation {
+pub struct LocalTailObservation {
     /// Read-time evidence for same-process Push reuse. Disk observations do
     /// not carry executable evidence and must be derived again.
     #[serde(skip)]
     push_reuse: Option<PushObservationEvidence>,
-    pub(crate) subagents: Option<owned_subagents::TreeObservation>,
+    pub subagents: Option<owned_subagents::TreeObservation>,
     discovery: Option<codex_subagents::DiscoveryObservation>,
     evidence: TailSideEvidence,
     /// The checkpoint-format raw range pin for a publishing plan.
@@ -4402,7 +4394,7 @@ struct PushObservationEvidence {
 }
 
 impl LocalTailObservation {
-    pub(crate) fn matches_codex_selection(&self, lookup: &RolloutLookup) -> bool {
+    pub fn matches_codex_selection(&self, lookup: &RolloutLookup) -> bool {
         let Some(owned_subagents::TreeObservation::Codex(tree)) = &self.subagents else {
             return true;
         };
@@ -4426,7 +4418,7 @@ impl LocalTailObservation {
                 .all(|child| matches(&child.discovery.mapping))
     }
 
-    pub(crate) fn matches_push_capture(
+    pub fn matches_push_capture(
         &self,
         source: &Path,
         stamp: &jsonl_tail_io::SourceStamp,
@@ -4503,7 +4495,7 @@ fn load_source_path_origins<'a>(
 /// The §6.4 encode-compare adoption outcome: dual pins for this review only;
 /// the durable pins are written by the Push or Pull the adoption enables.
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct VerifiedAdoption {
+pub struct VerifiedAdoption {
     wire_tail: PortableConversationTail,
     local_tail: PortableConversationTail,
 }
@@ -7854,7 +7846,7 @@ fn conversation_sidecar_refs(
 #[cfg(test)]
 impl LocalTailObservation {
     /// Bare observation for the observation cache's own suite.
-    pub(crate) fn for_observation_cache_tests(evidence: TailSideEvidence) -> Self {
+    pub fn for_observation_cache_tests(evidence: TailSideEvidence) -> Self {
         Self {
             push_reuse: None,
             subagents: None,
@@ -7868,7 +7860,7 @@ impl LocalTailObservation {
 }
 
 #[cfg(test)]
-pub(crate) fn thread_entries(
+pub fn thread_entries(
     repository: &LocalStateRepository,
     snapshot: &BundleSnapshot,
     mainline: &Mainline,
@@ -8121,7 +8113,7 @@ fn build_comparison_from_reads(
     )
 }
 
-pub(super) fn get_project_thread_sync_comparison_with_progress(
+pub fn get_project_thread_sync_comparison_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -8818,7 +8810,7 @@ fn prepare_push_review_with_repository(
     )
 }
 
-pub(super) fn prepare_push_review_with_progress(
+pub fn prepare_push_review_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -9049,7 +9041,7 @@ pub(super) fn prepare_push_review_with_progress(
 }
 
 /// A readout: no host lock, one snapshot, refused if the snapshot moved.
-pub(super) fn get_push_destination_status_with_repository(
+pub fn get_push_destination_status_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -9095,7 +9087,7 @@ fn push_bundle_with_repository(
     service.push_reviewed(local_project_id, storage_id, approval)
 }
 
-pub(super) fn recommended_review_recipe(
+pub fn recommended_review_recipe(
     review: &PushReviewContext,
     storage_id: &StorageId,
 ) -> BundleRecipe {
@@ -11564,7 +11556,7 @@ fn conversation_push_results(
 /// finish (CAS-free plan, section 13): write the record its claim holds,
 /// once, and report with the sentences of the Push review. Nothing runs it
 /// by itself, and nothing local moves: the user compares again afterwards.
-pub(super) fn finish_unfinished_push(
+pub fn finish_unfinished_push(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -11584,7 +11576,7 @@ pub(super) fn finish_unfinished_push(
         .map_err(|error| unfinished_push_sentence(&storage.name, error))
 }
 
-pub(super) fn push_bundle_reviewed_with_progress(
+pub fn push_bundle_reviewed_with_progress(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -12274,7 +12266,7 @@ fn session_binding(
 /// Where the session of a stored row is in this project: the id its page is
 /// opened by, or none when the project does not hold the session. Reads the
 /// bindings and nothing else.
-pub(super) fn find_project_session_with_repository(
+pub fn find_project_session_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     resource_id: &ResourceId,
@@ -12313,7 +12305,7 @@ fn session_pull_resources(
     Ok(selected)
 }
 
-pub(super) fn plan_bundle_restore_with_progress(
+pub fn plan_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
     bundle_id: &BundleId,
@@ -14455,7 +14447,7 @@ mod pull_test_support {
         RENAME.with(|slot| *slot.borrow_mut() = rename);
     }
 
-    pub(super) fn rename(home: &Path, id: &str, title: &str) -> Result<(), String> {
+    pub fn rename(home: &Path, id: &str, title: &str) -> Result<(), String> {
         RENAME.with(|slot| match slot.borrow_mut().as_mut() {
             Some(rename) => rename(home, id, title),
             None => Ok(()), // Unit tests never launch the installed provider.
@@ -14479,20 +14471,20 @@ mod pull_test_support {
         AFTER_DOWNLOAD.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
     }
 
-    pub(super) fn run_before_download() {
+    pub fn run_before_download() {
         if let Some(action) = BEFORE_DOWNLOAD.with(|slot| slot.borrow_mut().take()) {
             action();
         }
     }
 
-    pub(super) fn run_after_download() {
+    pub fn run_after_download() {
         if let Some(action) = AFTER_DOWNLOAD.with(|slot| slot.borrow_mut().take()) {
             action();
         }
     }
 }
 
-pub(super) fn apply_bundle_restore_with_progress(
+pub fn apply_bundle_restore_with_progress(
     repository: &LocalStateRepository,
     review: &RestorePlan,
     approved_action_ids: Vec<ActionId>,
@@ -15392,7 +15384,7 @@ fn adopt_cloud_metadata_actions(
         .collect()
 }
 
-pub(super) fn committed_conversation_receipt(
+pub fn committed_conversation_receipt(
     repository: &LocalStateRepository,
     operation_id: &ConversationOperationId,
 ) -> Result<mallard_domain::ConversationApplyReceipt, String> {
@@ -15464,7 +15456,7 @@ fn reviewed_files_complete(
 }
 
 /// Read current setup state. This query does not authorize an Apply.
-pub(super) fn get_restore_readiness_with_repository(
+pub fn get_restore_readiness_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     storage_id: &StorageId,
@@ -15673,7 +15665,7 @@ fn add_partial_materialization_issues(
 /// state persists profile IDs; commands resolve homes per operation through
 /// the profile catalog and never store them on the binding.
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedBinding {
+pub struct ResolvedBinding {
     pub binding: ProjectBinding,
     pub homes: BTreeMap<ProviderKey, String>,
 }
@@ -15761,7 +15753,7 @@ fn require_current_binding_from_state(
     resolve_project_binding_from_state(bindings, current)
 }
 
-pub(super) fn resolve_project_binding(
+pub fn resolve_project_binding(
     repository: &LocalStateRepository,
     binding: &ProjectBinding,
 ) -> Result<ResolvedBinding, String> {
@@ -15782,7 +15774,7 @@ fn resolve_project_binding_from_state(
     Ok(resolved)
 }
 
-pub(super) fn current_binding_for_restore_plan(
+pub fn current_binding_for_restore_plan(
     repository: &LocalStateRepository,
     plan: &RestorePlan,
 ) -> Result<ResolvedBinding, String> {
@@ -15811,7 +15803,7 @@ pub(super) fn current_binding_for_restore_plan(
 /// Every bound provider's declared ways to open the pulled project, in
 /// provider display order. `settings` supplies a saved CLI selection; the
 /// lines run no discovery.
-pub(super) fn project_open_commands(
+pub fn project_open_commands(
     resolved: &ResolvedBinding,
     settings: &mallard_infrastructure::app_settings::AppSettings,
 ) -> Vec<(String, String)> {
@@ -15995,13 +15987,13 @@ fn capture_request_for_resolved_binding_from_state(
     Ok(request)
 }
 
-pub(super) fn repository_fingerprint(project_root: &Path) -> Option<String> {
+pub fn repository_fingerprint(project_root: &Path) -> Option<String> {
     origin_url(project_root).map(|url| repository_fingerprint_from_remote_url(&url))
 }
 
 /// The `origin` remote's URL as `.git/config` spells it, read without
 /// running Git; none when the folder has no readable config of its own.
-pub(super) fn origin_url(project_root: &Path) -> Option<String> {
+pub fn origin_url(project_root: &Path) -> Option<String> {
     let config_path = project_root.join(".git/config");
     let metadata = fs::symlink_metadata(&config_path).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024 {
@@ -16027,7 +16019,7 @@ pub(super) fn origin_url(project_root: &Path) -> Option<String> {
     None
 }
 
-pub(super) fn repository_fingerprint_from_remote_url(value: &str) -> String {
+pub fn repository_fingerprint_from_remote_url(value: &str) -> String {
     let sanitized = strip_url_userinfo(value.trim());
     let canonical_github = project_activity::normalize_github_repository_url(value);
     let canonical = canonical_github.as_deref().unwrap_or(&sanitized);
@@ -16072,7 +16064,7 @@ fn require_project_link<'a>(
         })
 }
 
-pub(super) fn storage_engine(
+pub fn storage_engine(
     repository: &LocalStateRepository,
     storage_id: &StorageId,
 ) -> Result<(StorageConfig, StorageEngine), String> {
@@ -16232,7 +16224,7 @@ fn prospective_canonical(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-pub(super) fn get_project_with_repository(
+pub fn get_project_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
 ) -> Result<Option<ProjectDetail>, String> {
@@ -16369,7 +16361,7 @@ fn cloud_status_for(
     store.managed_cloud()?.status(&link.bundle_id)
 }
 
-pub(super) fn save_project_link_with_repository(
+pub fn save_project_link_with_repository(
     repository: &LocalStateRepository,
     request: SaveProjectLinkRequest,
 ) -> Result<ProjectStorageLink, String> {
@@ -16455,7 +16447,7 @@ pub(super) fn save_project_link_with_repository(
     })
 }
 
-pub(super) fn connect_project_to_remote_bundle_with_repository(
+pub fn connect_project_to_remote_bundle_with_repository(
     repository: &LocalStateRepository,
     request: ConnectProjectBundleRequest,
 ) -> Result<ProjectDetail, String> {
@@ -16621,7 +16613,7 @@ fn connect_project_to_remote_bundle_guarded(
         .ok_or_else(|| "project disappeared after connecting remote storage".to_string())
 }
 
-pub(super) fn save_project_binding_with_repository(
+pub fn save_project_binding_with_repository(
     repository: &LocalStateRepository,
     request: SaveProjectBindingRequest,
 ) -> Result<ProjectBinding, String> {
@@ -16917,7 +16909,7 @@ fn detach_project_binding_guarded(
 /// Sets or clears the machine-local alias.  The synced `display_name` stays
 /// untouched so a rename here never propagates to the remote bundle or other
 /// replicas.
-pub(super) fn rename_local_project_with_repository(
+pub fn rename_local_project_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
     local_alias: Option<String>,
@@ -16946,7 +16938,7 @@ pub(super) fn rename_local_project_with_repository(
     })
 }
 
-pub(super) fn remove_local_project_with_repository(
+pub fn remove_local_project_with_repository(
     repository: &LocalStateRepository,
     local_project_id: &LocalProjectId,
 ) -> Result<bool, String> {
@@ -17197,7 +17189,7 @@ impl ProjectFolderIndex {
     }
 }
 
-pub(super) fn probe_project_folder_with_repository(
+pub fn probe_project_folder_with_repository(
     repository: &LocalStateRepository,
     project_root: &str,
 ) -> Result<ProjectFolderProbe, String> {
@@ -17214,7 +17206,7 @@ pub(super) fn probe_project_folder_with_repository(
 /// the folder or above, as the recent-folder list reads it. For a probe that
 /// runs per keystroke where Git may not be installed — on macOS, running the
 /// `/usr/bin/git` stub offers to install the developer tools.
-pub(super) fn probe_project_folder_without_git(
+pub fn probe_project_folder_without_git(
     repository: &LocalStateRepository,
     project_root: &str,
 ) -> Result<ProjectFolderProbe, String> {
@@ -17231,7 +17223,7 @@ pub(super) fn probe_project_folder_without_git(
 /// with the verdict choosing it would get. Each provider bounds its own read
 /// (`SessionAdapter::recent_session_homes`); a profile that cannot be read
 /// adds nothing.
-pub(super) fn list_agent_folders_with_repository(
+pub fn list_agent_folders_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<AgentFolderList, String> {
     let machine = repository.load_bindings()?;
@@ -17311,7 +17303,7 @@ pub struct SetupDraftInspection {
     pub can_finalize: bool,
 }
 
-pub(super) fn list_setup_drafts_with_repository(
+pub fn list_setup_drafts_with_repository(
     repository: &LocalStateRepository,
 ) -> Result<SetupDraftList, String> {
     let (drafts, warnings) = repository.list_setup_drafts()?;
@@ -17392,7 +17384,7 @@ fn preferred_setup_profile<'a>(
         })
 }
 
-pub(super) fn create_setup_draft_with_repository(
+pub fn create_setup_draft_with_repository(
     repository: &LocalStateRepository,
     project_root: &str,
 ) -> Result<CreateSetupDraftResult, String> {
@@ -17508,7 +17500,7 @@ pub(super) fn create_setup_draft_with_repository(
     })
 }
 
-pub(super) fn update_setup_draft_with_repository(
+pub fn update_setup_draft_with_repository(
     repository: &LocalStateRepository,
     submitted: ProjectSetupDraft,
 ) -> Result<ProjectSetupDraft, String> {
@@ -17555,7 +17547,7 @@ pub(super) fn update_setup_draft_with_repository(
     repository.save_setup_draft(draft)
 }
 
-pub(super) fn discard_setup_draft_with_repository(
+pub fn discard_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &SetupDraftId,
 ) -> Result<bool, String> {
@@ -17690,7 +17682,7 @@ fn repository_fingerprints_require_acknowledgement(
     remote != local
 }
 
-pub(super) fn inspect_setup_draft_with_repository(
+pub fn inspect_setup_draft_with_repository(
     repository: &LocalStateRepository,
     draft_id: &SetupDraftId,
 ) -> Result<SetupDraftInspection, String> {
@@ -18190,7 +18182,7 @@ fn setup_transaction_partially_applied(
 /// Complete or clean up interrupted finalizations.  Runs before the shell's
 /// first project listing and before every finalize, so a crash between the
 /// config and binding writes heals on the next app start.
-pub(crate) fn recover_setup_state(repository: &LocalStateRepository) -> Vec<String> {
+pub fn recover_setup_state(repository: &LocalStateRepository) -> Vec<String> {
     let (transactions, mut warnings) = match repository.list_setup_transactions() {
         Ok(listed) => listed,
         Err(error) => return vec![format!("setup recovery unavailable: {}", error)],
@@ -18280,7 +18272,7 @@ fn record_draft_error(repository: &LocalStateRepository, draft_id: &SetupDraftId
     let _ = repository.save_setup_draft(draft);
 }
 
-pub(super) fn finalize_project_setup_with_repository(
+pub fn finalize_project_setup_with_repository(
     repository: &LocalStateRepository,
     draft_id: &SetupDraftId,
     expected_revision: u64,
@@ -18380,7 +18372,7 @@ fn fs_profile_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
     Ok(metadata)
 }
 
-pub(super) fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
+pub fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
     local_paths::canonicalize(path)
         .map_err(|error| format!("resolve '{}': {}", path.display(), error))
 }
@@ -30735,9 +30727,9 @@ mod tests {
         assert!(a_after.contains(&json_text(&format!(
             "editing {a_root_text}/readme per your ask"
         ))));
-        assert!(a_after.contains(
-            json_text(&format!("update {a_root_text}/readme2")).trim_matches('"')
-        ));
+        assert!(
+            a_after.contains(json_text(&format!("update {a_root_text}/readme2")).trim_matches('"'))
+        );
         let comparison = get_project_thread_sync_comparison_with_repository(
             &repo,
             &machine_a.local_project_id,

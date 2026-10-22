@@ -85,6 +85,10 @@ Mallard checks standalone Codex and Claude CLIs first, then the CLIs already
 prepared by their desktop apps. Open Claude Desktop's Code tab once to download
 its CLI if needed. Settings › Agent CLIs can select a specific executable.
 
+Prefer a terminal, or want your coding agent to do it? The packaged
+`mallard-cli` (inside the app bundle) does everything below from the command
+line with `--json` output: [docs/CLI.md](docs/CLI.md).
+
 ### 1. [Add a storage](https://mallard-ai.com/docs/add-a-storage)
 
 Where your sessions live: Mallard Cloud, a folder, Cloudflare R2 or Dropbox.

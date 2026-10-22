@@ -1,30 +1,79 @@
 use serde::Serialize;
 use std::io::Write;
 
-use crate::backend::{SetupOutcome, StorageSummary, VerifyOutcome};
+use crate::backend::SetupOutcome;
 use crate::error::CliError;
+
+/// One verb's result: the JSON document under `--json`, the text otherwise.
+/// The document is `{ "schema": 1, "status": <status>, <key>: <payload> }`,
+/// where the payload is the same serialized shape the desktop receives.
+pub(crate) struct CommandOutput {
+    status: &'static str,
+    key: &'static str,
+    value: serde_json::Value,
+    text: String,
+}
+
+impl CommandOutput {
+    pub fn new<T: Serialize>(
+        status: &'static str,
+        key: &'static str,
+        payload: &T,
+        text: String,
+    ) -> Result<Self, CliError> {
+        let value = serde_json::to_value(payload)
+            .map_err(|_| CliError::persistence("Mallard CLI could not encode the result."))?;
+        Ok(Self {
+            status,
+            key,
+            value,
+            text,
+        })
+    }
+
+    /// A result whose payload object's fields sit beside the envelope's own,
+    /// for a verb that composes several nouns. `schema` and `status` stay the
+    /// envelope's.
+    pub fn merged(
+        status: &'static str,
+        payload: &impl Serialize,
+        text: String,
+    ) -> Result<Self, CliError> {
+        Self::new(status, "", payload, text)
+    }
+
+    pub fn write(self, writer: &mut dyn Write, json: bool) -> std::io::Result<()> {
+        if json {
+            let mut document = serde_json::Map::new();
+            document.insert("schema".to_string(), serde_json::Value::from(1));
+            document.insert("status".to_string(), serde_json::Value::from(self.status));
+            if self.key.is_empty() {
+                if let serde_json::Value::Object(fields) = self.value {
+                    for (key, value) in fields {
+                        if key != "schema" && key != "status" {
+                            document.insert(key, value);
+                        }
+                    }
+                }
+            } else {
+                document.insert(self.key.to_string(), self.value);
+            }
+            write_json(writer, &serde_json::Value::Object(document))
+        } else if self.text.is_empty() {
+            Ok(())
+        } else if self.text.ends_with('\n') {
+            writer.write_all(self.text.as_bytes())
+        } else {
+            writeln!(writer, "{}", self.text)
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct JsonSetup {
     schema: u32,
     status: &'static str,
     reconnected: bool,
-}
-
-#[derive(Serialize)]
-struct JsonList<'a> {
-    schema: u32,
-    status: &'static str,
-    storages: &'a [StorageSummary],
-}
-
-#[derive(Serialize)]
-struct JsonVerify<'a> {
-    schema: u32,
-    status: &'static str,
-    storage_id: &'a str,
-    config_revision: u64,
-    verified: bool,
 }
 
 #[derive(Serialize)]
@@ -60,61 +109,6 @@ pub(crate) fn setup(
             writer,
             "Storage settings are ready for review in Mallard. Review the connection, optionally test it, then select Finish setup."
         )
-    }
-}
-
-pub(crate) fn list(
-    writer: &mut dyn Write,
-    json: bool,
-    storages: &[StorageSummary],
-) -> std::io::Result<()> {
-    if json {
-        return write_json(
-            writer,
-            &JsonList {
-                schema: 1,
-                status: "ok",
-                storages,
-            },
-        );
-    }
-    if storages.is_empty() {
-        return writeln!(writer, "No Mallard storages configured.");
-    }
-    for storage in storages {
-        writeln!(
-            writer,
-            "{} [{}] — {}",
-            storage.name, storage.storage_id, storage.provider_label
-        )?;
-    }
-    Ok(())
-}
-
-pub(crate) fn verify(
-    writer: &mut dyn Write,
-    json: bool,
-    outcome: &VerifyOutcome,
-) -> std::io::Result<()> {
-    if json {
-        write_json(
-            writer,
-            &JsonVerify {
-                schema: 1,
-                status: "verified",
-                storage_id: &outcome.storage_id,
-                config_revision: outcome.config_revision,
-                verified: outcome.verified,
-            },
-        )
-    } else {
-        writeln!(writer, "Verified storage {}.", outcome.storage_id)?;
-        writeln!(
-            writer,
-            "Mallard config version: {}",
-            outcome.config_revision
-        )?;
-        writeln!(writer, "Remote capability probe: passed")
     }
 }
 
@@ -178,4 +172,27 @@ pub(crate) fn discovery(
         }
         Ok(())
     }
+}
+
+/// `"1,234"`-free, plain integer formatting with a unit for text output.
+pub(crate) fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Seconds since the epoch as a UTC timestamp, for text output.
+pub(crate) fn human_time(secs: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| secs.to_string())
 }

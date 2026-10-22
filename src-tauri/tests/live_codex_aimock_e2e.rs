@@ -25,6 +25,12 @@ mod reverted_rollouts;
 mod session_reconciliation;
 mod support;
 
+use mallard_application::project_sync::service::{
+    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
+    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
+    SessionTimelineEventKind, SessionToolCategory, StorageDataClearResult, ThreadSyncComparison,
+    ThreadSyncState,
+};
 use mallard_domain::{
     ActionId, BundleId, CloudThreadId, ConversationFileRole, ConversationReviewAction,
     DraftProfileSelection, DraftRepositoryChoice, DraftStorageSelection, LocalConversationBinding,
@@ -55,12 +61,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri_app_lib::{
-    ProjectDetail, ProjectOperationResult, ProjectSessionTimelineRequest, ProjectSyncService,
-    PushApproval, PushDestinationPullReason, PushDestinationStatus, RestoreResult,
-    SessionTimelineEventKind, SessionToolCategory, StorageDataClearResult, ThreadSyncComparison,
-    ThreadSyncState,
-};
 use walkdir::WalkDir;
 
 use support::catalog_flow::{run_catalog_flow, storage_snapshot, CatalogFlowInputs};
@@ -4871,7 +4871,7 @@ fn assert_stale_push_rejected(
     service: &ProjectSyncService<'_>,
     project_id: &LocalProjectId,
     storage_id: &StorageId,
-    review: &tauri_app_lib::PushReviewContext,
+    review: &mallard_application::project_sync::service::PushReviewContext,
 ) {
     assert!(
         service

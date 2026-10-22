@@ -17,8 +17,7 @@ use mallard_infrastructure::persistence::{
 use mallard_infrastructure::storage_core::{ConfiguredObjectStore, ConnectionHealth};
 use mallard_infrastructure::storage_providers::{
     StorageAdapterError, StorageAdapterErrorKind, StorageProviderAdapter,
-    StorageProviderDescriptor, StorageProviderRegistry,
-    StorageSummaryField,
+    StorageProviderDescriptor, StorageProviderRegistry, StorageSummaryField,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -588,9 +587,7 @@ pub fn update_storage_setup_draft(
         )
         .map_err(|_| storage_unavailable())?;
     let descriptor = adapter.descriptor();
-    let managed_id = descriptor
-        .managed_secret_id
-        .as_ref();
+    let managed_id = descriptor.managed_secret_id.as_ref();
     let managed = managed_id.is_some_and(|key| draft.storage.provider_config.secrets.contains(key));
     let declared = descriptor
         .secrets
@@ -971,7 +968,6 @@ pub fn storage_provider_descriptors(
 /// Render the declared setup assistant's instruction for one exact draft.
 /// A provider that declares no assistant is refused.
 
-
 /// Exclusive host-operation token for preparing one existing setup draft
 /// from direct setup. The caller keeps this value alive across its
 /// provider-specific work. The draft revision is pinned before that work so
@@ -1342,9 +1338,7 @@ fn storage_unavailable() -> StorageSetupError {
 mod tests {
     use super::*;
     use mallard_domain::LocalProjectId;
-    use mallard_infrastructure::storage_providers::local::{
-        local_storage_config,
-    };
+    use mallard_infrastructure::storage_providers::local::local_storage_config;
     use mallard_infrastructure::storage_providers::test_provider::{
         provider_key as test_key, test_storage_config,
     };
@@ -2465,7 +2459,12 @@ mod dropbox_tests {
         assert_eq!(stored.storage.provider_config, prepared_config);
         assert_eq!(stored.storage.provider_config.version, 1);
         assert!(repository.load_config().unwrap().storages.is_empty());
-        assert!(DropboxAdapter.descriptor().local_setup == Some(mallard_infrastructure::storage_providers::traits::StorageLocalSetup::Dropbox));
+        assert!(
+            DropboxAdapter.descriptor().local_setup
+                == Some(
+                    mallard_infrastructure::storage_providers::traits::StorageLocalSetup::Dropbox
+                )
+        );
     }
 
     fn storage(id: &str, namespace: &str, token: &str) -> StorageConfig {

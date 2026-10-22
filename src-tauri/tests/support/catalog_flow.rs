@@ -6,6 +6,17 @@
 //! storage once, every push and pull is one review over rows, and all
 //! resources of one coordinate converge into one repository.
 
+use mallard_application::project_sync::service::ProjectSyncService;
+use mallard_application::storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
+use mallard_application::storage_catalog::domain::{
+    CatalogActionOutcome, CatalogCoordinate, CatalogLinkState, CatalogPullActionKind,
+    CatalogPullDisposition, CatalogResourceId, CatalogResourceRelation,
+    CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan, CatalogScopePushPlan,
+    ProviderKey, CATALOG_SCHEMA,
+};
+use mallard_application::storage_catalog::service::{
+    CatalogPullApproval, CatalogPushApproval, StorageCatalogService,
+};
 use mallard_domain::{StorageConfig, StorageId};
 use mallard_infrastructure::persistence::LocalStateRepository;
 use sha2::{Digest as _, Sha256};
@@ -15,13 +26,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tauri_app_lib::{
-    CatalogActionOutcome, CatalogCoordinate, CatalogLinkState, CatalogPullActionKind,
-    CatalogPullApproval, CatalogPullDisposition, CatalogPushApproval, CatalogResourceId,
-    CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
-    CatalogScopePushPlan, CmdOutput, PluginProcessRunner, ProjectSyncService, ProviderKey,
-    StorageCatalogService, CATALOG_SCHEMA,
-};
 use walkdir::WalkDir;
 
 const ALPHA: &str = "mallard-alpha";

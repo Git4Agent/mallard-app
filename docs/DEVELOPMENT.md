@@ -28,10 +28,17 @@ filesystem and storage backend used by these test flows.
 ```sh
 npm run build
 npm run test:frontend-integration # strict test type-check plus frontend tests
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo check --workspace --all-targets
+cargo test -p mallard-application # the sync and Library services and their suites
+npm run test:cli                  # the command line, against temporary homes
 npm run test:backend-integration  # all Rust targets plus loopback aimock tests
 npm run test:integration          # all committed standard suites
 ```
+
+The command-line suites (`crates/mallard-cli/tests/`) run the built binary
+against temporary homes and local-folder storages: two homes push and pull a
+project's files and a Library skill between them. They never touch a real
+`~/.mallard`. The command line itself is documented in [CLI.md](CLI.md).
 
 The backend suite includes Rust and aimock server tests that bind localhost.
 Restricted environments may require permission for these test servers. The

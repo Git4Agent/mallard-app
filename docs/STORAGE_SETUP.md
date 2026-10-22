@@ -190,9 +190,15 @@ project bundle.
 
 ## Direct setup and packaged CLI
 
-Builds package `mallard-cli` for R2 setup. The installer does not modify PATH.
-Dropbox setup runs directly in the desktop backend. There is no Dropbox CLI
-setup command or storage agent launch path.
+Builds package `mallard-cli`. The installer does not modify PATH. The desktop
+spawns it for R2 setup (`storage r2 setup|accounts|discover`, below), and it
+sets up every provider on its own: `storage add local --path <dir>` saves a
+folder storage, `storage add r2|dropbox|feishu|cloud` sign in through the
+browser (the link is printed, never opened), prepare the draft, probe the
+destination and save it in one run, and `storage reconnect <storage>` renews a
+lost credential. Open drafts are `storage draft list|show|test|commit|discard`.
+See [CLI.md](CLI.md). The desktop's own Dropbox, Feishu and Mallard Cloud setup
+pages run in the desktop backend, as before.
 
 Mallard includes its public Dropbox app key and uses PKCE with a registered
 loopback callback. Creation adds `sharing.write` to the four storage scopes.

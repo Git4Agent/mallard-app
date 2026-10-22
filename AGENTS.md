@@ -63,24 +63,49 @@ The integration tests intentionally enforce this cutover.
   Catalog item's page; it imports neither feature.
 - `src/components/app-link/` answers the website's `mallard://` link: the
   pure routing model, the hook that holds the newest link, and its sheet. A
-  link only reads; the shell navigates when the sheet's verb is pressed. The
-  backend half is `src-tauri/src/project_sync/app_link.rs`, and the link is
-  parsed in `managed_cloud/app_link.rs`.
+  link only reads; the shell navigates when the sheet's verb is pressed.
 - `src/components/project-sync/api.ts` is the typed Tauri `invoke` boundary.
+- `src-tauri/src/project_sync/app_link.rs` keeps the `mallard://` inbox for
+  the window; reading and answering a link is
+  `mallard-application/src/project_sync/app_link.rs`, and the link is parsed
+  in `managed_cloud/app_link.rs`.
 - `src/components/project-sync/model.ts`, `pullReviewModel.ts`, and
   `pullReviewFlow.ts` contain reusable frontend behavior.
 - `src/types.ts` mirrors serialized Rust DTOs. Keep it synchronized with Rust
   response and request shapes.
 - `src/App.css` contains the shared desktop-shell and project-sync styling.
 - `src-tauri/src/lib.rs` registers the production Tauri command surface.
-- `src-tauri/src/project_sync/domain.rs` owns IDs, schemas, validation,
-  manifests, plans, actions, and receipts. Keep it free of Tauri and filesystem
-  concerns.
+  `src-tauri/src/project_sync/commands.rs` and
+  `storage_catalog/resource_commands.rs` are thin wrappers: each extracts
+  arguments, runs one application function on a blocking thread, and
+  forwards narration through `event_sink.rs` (`DesktopSink`). The browser
+  setup adapters, watchers, deep-link inbox, menu and updater stay there.
+- `crates/mallard-application/` is the application boundary shared by the
+  desktop and the command line; it never depends on Tauri.
+  `project_sync/service.rs` (`ProjectSyncService`, the `*_with_repository`
+  functions) composes capture, the bundle engine and persistence;
+  `project_sync/operations.rs` holds the reviewed operations with their
+  activity-log narration; `events.rs` is the `SyncEventSink` an adapter
+  implements to show that narration; `activity_log.rs` the scope and append;
+  `storage_catalog/` the Library (Tauri-free domain, plans, persistence,
+  engine, reconciliation, journaled apply, `StorageCatalogService`);
+  `storage_setup.rs` and the `*_setup.rs` modules the storage drafts; and
+  `project_sync/{managed_cloud_link, cloud_project, app_link, provider_cli}.rs`
+  the Mallard Cloud bridge, the clone, the website link, and provider CLIs.
+  Its `sync_tests/` and `*_tests.rs` are the service-level suites.
+- `crates/mallard-cli/` is the command line (`mallard-cli`), designed for
+  coding agents: `args.rs` is the clap tree, `context.rs` resolves the
+  project from the current folder and runs services on a blocking thread,
+  `events.rs` prints narration to stderr, `output.rs` writes the one JSON
+  document, and `commands/` holds one module per noun. Payloads are the
+  desktop's DTOs. `backend.rs` and `r2_browser_setup.rs` are the R2 helper
+  the desktop spawns. `docs/CLI.md` is the guide.
+- `mallard-domain` owns IDs, schemas, validation, manifests, plans, actions,
+  and receipts. Keep it free of Tauri and filesystem concerns.
 - `provider_capture.rs` owns provider discovery, filters, stable resource
   identity, and capture. Keep it free of Tauri and cloud transport concerns.
 - `bundle_engine.rs` owns immutable publication, integrity checks, restore
   planning, backups, and apply behavior.
-- `commands.rs` orchestrates Tauri commands and cross-document transactions.
 - `persistence.rs` owns bounded, atomic machine-local JSON persistence.
 - `storage_core/` (in `crates/mallard-infrastructure`) is the neutral
   transport shared by both storage protocols: the closed `.mallard/` object
@@ -89,16 +114,18 @@ The integration tests intentionally enforce this cutover.
   storage marker. `feishu_connections.rs` and `feishu_auth.rs` beside it
   keep a Feishu sign-in's refresh chain under `~/.mallard/feishu_connections/`
   and renew it; no Mallard service takes part.
-- `src-tauri/src/storage_catalog/` owns the storage-scoped catalog:
-  Tauri-free domain and plans, machine-local persistence, profile and skill
-  root resolution, provider adapters, inventory, the remote catalog engine,
-  reconciliation/planning, journaled apply, and its command surface. It never
+- `crates/mallard-application/src/storage_catalog/` owns the storage-scoped
+  catalog: Tauri-free domain and plans, machine-local persistence, profile
+  and skill root resolution, provider adapters, inventory, the remote catalog
+  engine, reconciliation/planning, and journaled apply; its Tauri command
+  surface is `src-tauri/src/storage_catalog/resource_commands.rs`. It never
   imports `project_sync` modules or project/thread domain types.
 - `chat_history.rs` parses Codex history and maps sessions to Git history.
 - `activity_log.rs` owns sanitized JSONL activity history and retention.
 - `tests/frontend/` contains Node test-runner integration tests bundled with
   esbuild. Rust unit and integration tests live beside their modules and under
-  `src-tauri/src/sync_tests/`.
+  `crates/mallard-application/src/sync_tests/`; the live end-to-end suites are
+  `src-tauri/tests/`, and the command-line suites `crates/mallard-cli/tests/`.
 
 `README.md` (with `README.zh-CN.md`) is the short public introduction; its
 images live in `docs/readme/`. Current behavior is described by the active
@@ -119,9 +146,11 @@ the current schemas and command surface in code before editing.
 - `npm run test:frontend-integration` runs the frontend integration suite.
 - `npm run test:release-config` checks packaged release configuration.
 - `npm run test:backend-integration` runs the Rust library test suite.
+- `npm run test:cli` runs the command-line suites against temporary homes.
 - `npm run test:integration` runs all committed integration suites.
-- `cargo check --manifest-path src-tauri/Cargo.toml` checks the backend.
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib` runs Rust tests.
+- `cargo check --workspace --all-targets` checks every crate and test target.
+- `cargo test -p mallard-application` runs the service suites;
+  `cargo test --workspace --all-targets` runs every Rust test.
 - `npm run check:release-version` verifies version agreement between
   `package.json`, `Cargo.toml`, and `tauri.conf.json`.
 - `npm run tauri build` creates packaged artifacts through the repository's
@@ -210,7 +239,10 @@ handoff set:
 - frontend or shared DTO changes: `npm run build` and
   `npm run test:frontend-integration`;
 - Rust domain, persistence, capture, storage, or restore changes:
-  `cargo test --manifest-path src-tauri/Cargo.toml --lib`;
+  `cargo test -p mallard-application` (and `-p mallard-infrastructure` or
+  `-p mallard-domain` for those crates);
+- command-line changes: `npm run test:cli`; a new noun or verb is documented
+  in `docs/CLI.md` and covered by a test under `crates/mallard-cli/tests/`;
 - Tauri contract changes: run both frontend and Rust checks;
 - version or release changes: `npm run check:release-version` and
   `npm run test:release-config`.
@@ -218,8 +250,8 @@ handoff set:
 Add frontend integration coverage to an existing
 `tests/frontend/*.integration.test.tsx` file when practical, and register a
 new file in `scripts/run-frontend-integration-tests.mjs`. Put Rust unit tests
-beside the protected helper; use `src-tauri/src/sync_tests/` for flows that
-cross module boundaries.
+beside the protected helper; use `crates/mallard-application/src/sync_tests/`
+for flows that cross module boundaries.
 
 For UI changes, verify the complete Tauri application when native behavior is
 involved and include a screenshot or recording in the pull request.

@@ -15,36 +15,11 @@ mod app_settings;
 #[cfg_attr(test, allow(dead_code))]
 mod app_update;
 #[cfg_attr(test, allow(dead_code))]
+mod event_sink;
+#[cfg_attr(test, allow(dead_code))]
 mod project_sync;
 #[cfg_attr(test, allow(dead_code))]
 mod storage_catalog;
-
-#[cfg(test)]
-mod sync_tests;
-
-pub use project_sync::service::{
-    CreateSetupDraftResult, ProjectActivity, ProjectDetail, ProjectOperationResult,
-    ProjectSessionDetail, ProjectSessionTimelinePage, ProjectSessionTimelineRequest,
-    ProjectSyncService, PushApproval, PushDestinationPullReason, PushDestinationStatus,
-    PushReviewContext, RestoreResult, SessionDetailError, SessionDetailErrorCode,
-    SessionEventDetail, SessionTimelineEventKind, SessionToolCategory, SetupDraftInspection,
-    StorageDataClearResult, ThreadSyncComparison, ThreadSyncState,
-};
-pub use storage_catalog::adapters::{CmdOutput, PluginProcessRunner};
-pub use storage_catalog::domain::{
-    CatalogActionOutcome, CatalogCoordinate, CatalogLinkId, CatalogLinkState, CatalogPlanActionId,
-    CatalogPlanId, CatalogPullActionKind, CatalogPullDisposition, CatalogResourceId,
-    CatalogResourceRelation, CatalogResourceRepositoryId, CatalogScopeId, CatalogScopePullPlan,
-    CatalogScopePushPlan, LibraryHeadCoordinate, LibraryResourceTag, LocalCatalogProfileId,
-    ProviderKey, CATALOG_SCHEMA,
-};
-pub use storage_catalog::registry::CatalogCapabilityDescriptor;
-pub use storage_catalog::service::{
-    CatalogProfileDto, CatalogPullApproval, CatalogPushApproval, CatalogScopeDto,
-    CatalogScopeLinkOutcomeDto, CatalogScopePullOutcomeDto, CatalogScopePushOutcomeDto,
-    CatalogScopeResourcesDto, CatalogScopeRowDto, CatalogStorageRepositoryDto,
-    StorageCatalogService,
-};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[cfg(not(test))]
@@ -105,11 +80,11 @@ pub fn run() {
             // A visible process boundary in the activity log: operations that
             // died with the previous process (no terminal event) become
             // explainable instead of mysterious.
-            activity_log::ActivityLogScope::new(
+            mallard_application::activity_log::ActivityLogScope::new(
                 mallard_infrastructure::activity_log::ActivityLogType::System,
             )
             .emit(
-                app.handle(),
+                &event_sink::DesktopSink::new(app.handle().clone()),
                 "info",
                 "system.app_started",
                 "Mallard started",
@@ -122,7 +97,9 @@ pub fn run() {
             ));
             project_sync::config_watcher::start_connection_forwarder(app.handle().clone());
             project_sync::config_watcher::start_ignored_name_forwarder(app.handle().clone());
-            activity_log::start_cloud_diagnostic_forwarder(app.handle().clone());
+            mallard_application::activity_log::start_cloud_diagnostic_forwarder(
+                event_sink::desktop_sink(app.handle()),
+            );
             // The Feishu sign-ins this computer keeps live beside the
             // config; a launch that cannot find the state root keeps no
             // store, and every Feishu storage then reads as reconnect.
@@ -182,7 +159,6 @@ pub fn run() {
             project_sync::cloud_project::probe_cloud_project_folder,
             project_sync::cloud_project::get_cloud_project_folder,
             project_sync::cloud_project::cancel_cloud_project_folder,
-
             project_sync::commands::cancel_r2_storage_setup,
             project_sync::commands::discover_r2_storage,
             project_sync::commands::prepare_existing_r2_storage,

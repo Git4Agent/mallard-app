@@ -676,9 +676,10 @@ async fn execute(
             ]),
         }
         let current = std::env::current_exe().map_err(|_| R2SetupFailure::failed())?;
-        let program = super::service::packaged_cli_path(&current).map_err(|_| R2SetupFailure {
-            code: R2SetupErrorCode::HelperUnavailable,
-        })?;
+        let program = mallard_application::project_sync::service::packaged_cli_path(&current)
+            .map_err(|_| R2SetupFailure {
+                code: R2SetupErrorCode::HelperUnavailable,
+            })?;
         Ok::<_, R2SetupFailure>((program, args))
     })
     .await

@@ -109,6 +109,18 @@ again. Interrupted removal is reported and is never replayed automatically.
 Library resources use a clean cutover: there is no backward compatibility,
 migration, legacy execution path, or parallel storage-wide catalog.
 
+## Command line
+
+The packaged `mallard-cli` does what the app does from a terminal, for people
+and for coding agents: projects, links, Push and Pull reviews, sessions and
+their timelines, every storage provider's setup and reconnection, the Library
+(skills, plugins, pets), Mallard Cloud repositories and clones, provider CLIs,
+settings, and the activity log. It runs the same services and writes the same
+local state and activity log, so a running app shows the command line's work
+live. `--json` gives one document per verb with the desktop's own payload
+shapes and NDJSON events on stderr; reviews print first and apply only with
+what the caller approves. [CLI.md](CLI.md) is the guide.
+
 ## Install and updates
 
 The fastest path is the packaged macOS DMG (Apple Silicon or Intel) or the
