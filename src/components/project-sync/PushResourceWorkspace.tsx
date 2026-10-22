@@ -91,7 +91,7 @@ interface Props {
   onToggle: (resourceId: string) => void;
   onSelectionChange?: (selected: Set<string>) => void;
   onScanProjectFiles?: () => void;
-  onToggleProjectContentWarning?: (warningDigest: string) => void;
+  onReviewProjectContentWarnings?: (warningDigests: readonly string[], reviewed: boolean) => void;
   onClose: () => void;
   onPush: () => void;
   onPull?: () => void;
@@ -785,7 +785,7 @@ export default function PushResourceWorkspace({
   onToggle,
   onSelectionChange,
   onScanProjectFiles,
-  onToggleProjectContentWarning,
+  onReviewProjectContentWarnings,
   onClose,
   onPush,
   onPull,
@@ -1323,7 +1323,7 @@ export default function PushResourceWorkspace({
                 });
                 commitSelection(next);
               }}
-              onToggleWarning={onToggleProjectContentWarning}
+              onReviewWarnings={onReviewProjectContentWarnings}
               onReviewPull={onPull}
               reveal={projectFileReveal}
             />

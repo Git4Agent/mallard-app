@@ -3738,10 +3738,12 @@ export default function ProjectSync({ theme, onThemeChange }: Props) {
         })}
         onSelectionChange={setPushSelected}
         onScanProjectFiles={scanPendingProjectFiles}
-        onToggleProjectContentWarning={(warningDigest) => setPushWarningAcknowledgements((current) => {
+        onReviewProjectContentWarnings={(warningDigests, reviewed) => setPushWarningAcknowledgements((current) => {
           const next = new Set(current);
-          if (next.has(warningDigest)) next.delete(warningDigest);
-          else next.add(warningDigest);
+          for (const warningDigest of warningDigests) {
+            if (reviewed) next.add(warningDigest);
+            else next.delete(warningDigest);
+          }
           return next;
         })}
         onClose={closePushReview}

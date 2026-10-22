@@ -270,7 +270,7 @@ test("Files Select includes previously excluded and warned files without acknowl
       selected={selected} projectDefaults={defaults} busy={false}
       projectContentInventory={scanned} projectContentScanned showProjectFiles
       activeStep="project_files" acknowledgedWarningDigests={acknowledgedWarningDigests}
-      onToggleProjectContentWarning={() => undefined}
+      onReviewProjectContentWarnings={() => undefined}
       onToggle={() => undefined} onClose={() => undefined} onPush={() => undefined}
     />,
   );
@@ -508,7 +508,7 @@ test("warnings acknowledge through the catalog chip, and removal is the card's t
       removalIds={new Set()}
       onToggle={() => undefined}
       onToggleRemoval={() => undefined}
-      onToggleWarning={() => undefined}
+      onReviewWarnings={() => undefined}
     />,
   );
   // The warning is an acknowledgement: the push waits on its tick, so it is
@@ -532,12 +532,77 @@ test("warnings acknowledge through the catalog chip, and removal is the card's t
       removalIds={new Set(["file-s"])}
       onToggle={() => undefined}
       onToggleRemoval={() => undefined}
-      onToggleWarning={() => undefined}
+      onReviewWarnings={() => undefined}
     />,
   );
   assert.match(removing, /catalog-card removal/);
   assert.match(removing, />Removes from storage</);
   assert.match(removing, /aria-label="Keep notes\/old_draft\.md in storage"/);
+});
+
+test("the Files step's own acknowledgement reviews every listed selected flagged file at once", () => {
+  const flagged = (id: string, path: string, code: string) => {
+    const candidate = entry(id, "file", path);
+    candidate.warning_code = code;
+    candidate.warning_digest = id.padEnd(64, "0");
+    return candidate;
+  };
+  const rows = [
+    flagged("file-a", "art.py", "executable"),
+    flagged("file-b", "film/make_audio.py", "executable"),
+    flagged("file-c", "film/voices.toml", "possible_secret"),
+    flagged("file-d", "film/unticked.sh", "executable"),
+    entry("file-e", "file", "notes/plain.md"),
+  ].map((candidate) => ({
+    resourceId: candidate.descriptor.resource_id,
+    relativePath: candidate.relative_path,
+    entryType: candidate.entry_type as "file",
+    state: candidate.state,
+    localPresent: candidate.local_present,
+    storagePresent: candidate.storage_present,
+    warningCode: candidate.warning_code,
+    warningDigest: candidate.warning_digest,
+  }));
+  const render = (acknowledged: string[], selected = ["file-a", "file-b", "file-c", "file-e"]) => renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="push"
+      eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+      rows={rows}
+      selectedIds={new Set(selected)}
+      acknowledgedWarningDigests={new Set(acknowledged)}
+      onToggle={() => undefined}
+      onReviewWarnings={() => undefined}
+    />,
+  );
+  const strip = (html: string) => html.match(
+    /<label class="notice warning notice-ack sync-project-files-review-all[^"]*">[\s\S]*?<\/label>/,
+  )?.[0] ?? "";
+
+  // Unticked: the count and the findings say what the one tick reviews. The
+  // flagged file left unticked is not among them, and the rows keep their
+  // own boxes under it.
+  const none = render([]);
+  assert.match(strip(none), /3 selected files flagged<\/strong> — 2 executable · 1 credential-shaped/);
+  assert.match(strip(none), /aria-label="Reviewed: 3 selected files flagged — 2 executable · 1 credential-shaped"/);
+  assert.match(strip(none), />Mark all reviewed</);
+  assert.doesNotMatch(strip(none), /aria-checked|checked=""/);
+  assert.equal((none.match(/<label class="notice warning notice-ack/g) ?? []).length, 5);
+  assert.ok(none.indexOf("sync-project-files-review-all") < none.indexOf("sync-list-tile"), "heads the list");
+
+  // Some ticked: the box is mixed and still offers the rest.
+  const some = strip(render(["file-a".padEnd(64, "0")]));
+  assert.match(some, /aria-checked="mixed"/);
+  assert.doesNotMatch(some, /checked=""/);
+  assert.match(some, />Mark all reviewed</);
+
+  // All ticked: done, in the success tint.
+  const all = strip(render(["file-a", "file-b", "file-c"].map((id) => id.padEnd(64, "0"))));
+  assert.match(all, /^<label class="notice warning notice-ack sync-project-files-review-all done">/);
+  assert.match(all, /checked=""/);
+  assert.match(all, />All reviewed</);
+
+  // Nothing flagged is selected: no box to tick.
+  assert.equal(strip(render([], ["file-e"])), "");
 });
 
 test("Push review lists local-outstanding and unresolved local project files", () => {

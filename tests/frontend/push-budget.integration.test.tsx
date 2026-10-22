@@ -1100,7 +1100,7 @@ test("unchanged warned files do not block a session push without file capture", 
         selected={selected} projectDefaults={selected} busy={false} threadComparison={comparison()}
         projectContentInventory={inventory} projectContentScanned projectFilesShown={projectFilesShown}
         showProjectFiles activeStep="project_files" onToggle={() => undefined}
-        onToggleProjectContentWarning={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
+        onReviewProjectContentWarnings={() => undefined} onClose={() => undefined} onPush={() => undefined} />,
     );
     assert.match(html, /aria-label="Project files, 0 selected"/);
     assert.doesNotMatch(html, /sync-review-blocker-pill|Mark reviewed/);
@@ -1141,12 +1141,17 @@ for (const work of ["send", "remember"] as const) {
           selected={selected} projectDefaults={selected} busy={false} threadComparison={comparison()}
           projectContentInventory={inventory} projectContentScanned projectFilesShown
           acknowledgedWarningDigests={acknowledged} showProjectFiles activeStep="project_files"
-          onToggle={() => undefined} onToggleProjectContentWarning={() => undefined}
+          onToggle={() => undefined} onReviewProjectContentWarnings={() => undefined}
           onClose={() => undefined} onPush={() => undefined} />,
       );
       assert.match(html, /data-resource-id="project:file:run\.sh"/);
       assert.match(html, /data-resource-id="project:file:\.env\.local"/);
-      assert.equal((html.match(/aria-label="Reviewed:/g) ?? []).length, 2);
+      assert.equal((html.match(/aria-label="Reviewed: (Executable|Credential-shaped) content/g) ?? []).length, 2);
+      // The step's own box follows the rows: unticked, mixed, then done.
+      const strip = html.match(/<label class="notice warning notice-ack sync-project-files-review-all[^"]*">[\s\S]*?<\/label>/)?.[0] ?? "";
+      assert.match(strip, /2 selected files flagged<\/strong> — 1 executable · 1 credential-shaped/);
+      assert.equal(/aria-checked="mixed"/.test(strip), approvedCount === 1);
+      assert.equal(/review-all done"/.test(strip), approvedCount === 2);
       if (approvedCount < 2) {
         assert.match(html, /Mark reviewed/);
         assert.match(html, /sync-review-blocker-pill/);

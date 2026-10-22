@@ -70,7 +70,9 @@ interface Props {
   onToggle: (resourceId: string) => void;
   onBulkToggle?: (resourceIds: string[], selected: boolean) => void;
   onToggleRemoval?: (resourceId: string) => void;
-  onToggleWarning?: (warningDigest: string) => void;
+  /** Mark the findings behind these digests reviewed, or not: a row's own
+   *  box sends its one, the step's box every listed selected flagged file. */
+  onReviewWarnings?: (warningDigests: readonly string[], reviewed: boolean) => void;
   onReviewPull?: () => void;
   /** The Push footer's blocker pill: scroll this card into view and hand it
    *  focus. */
@@ -225,6 +227,31 @@ export function searchProjectFileReviewCards(
   return { matchingCards, hiddenSelected: selectedIn(cardRows) - selectedIn(matchingCards) };
 }
 
+/** The flagged files the step's own acknowledgement speaks for: every listed
+ *  selected card with a finding. The search narrows it — a file the query
+ *  hides is not reviewed unseen — but the render limit does not: the box
+ *  names its count and its findings, and that sentence is what is reviewed,
+ *  so one tick reaches a flagged file past the drawn cards too. */
+export function reviewAllWarningRows(
+  matchingCards: ProjectFileReviewRow[],
+  isSelected: (row: ProjectFileReviewRow) => boolean,
+): ProjectFileReviewRow[] {
+  return matchingCards.filter((row) => !!row.warningDigest && !!row.warningCode && isSelected(row));
+}
+
+/** "174 executable · 2 credential-shaped": the findings behind the step's
+ *  box, each kind only when present, in the scanner's own order. */
+function warningBreakdown(rows: ProjectFileReviewRow[]): string {
+  const executable = rows.filter((row) => row.warningCode === "executable").length;
+  const secret = rows.filter((row) => row.warningCode === "possible_secret").length;
+  const other = rows.length - executable - secret;
+  const parts: string[] = [];
+  if (executable > 0) parts.push(t("projects:files.reviewAllExecutable", { count: executable }));
+  if (secret > 0) parts.push(t("projects:files.reviewAllSecret", { count: secret }));
+  if (other > 0) parts.push(t("projects:files.reviewAllScan", { count: other }));
+  return parts.join(" · ");
+}
+
 /** Which rows draw a card. Files always do. A directory does only when
  *  nothing else speaks for it — no descendant rows at all (an empty folder
  *  still has to be pushable) — or when its own deletion is the decision on
@@ -272,7 +299,7 @@ export default function ProjectFilesReviewPage({
   onToggle,
   onBulkToggle,
   onToggleRemoval,
-  onToggleWarning,
+  onReviewWarnings,
   onReviewPull,
   reveal = null,
 }: Props) {
@@ -296,6 +323,17 @@ export default function ProjectFilesReviewPage({
     () => matchingCards.slice(0, PROJECT_FILE_CARD_RENDER_LIMIT),
     [matchingCards],
   );
+  // The step's own acknowledgement: what it covers, and how much of that is
+  // already ticked.
+  const flaggedSelected = useMemo(
+    () => reviewAllWarningRows(
+      matchingCards,
+      (row) => selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId),
+    ),
+    [matchingCards, selectedIds, removalIds],
+  );
+  const flaggedReviewed = flaggedSelected.filter((row) => acknowledgedWarningDigests.has(row.warningDigest!)).length;
+  const allFlaggedReviewed = flaggedReviewed === flaggedSelected.length;
 
   const groups = useMemo<ReviewFileGroup[]>(() => {
     const byDirectory = new Map<string, ProjectFileReviewRow[]>();
@@ -524,14 +562,14 @@ export default function ProjectFilesReviewPage({
             )}
           </div>
         </div>
-        {row.warningDigest && row.warningCode && onToggleWarning && (
+        {row.warningDigest && row.warningCode && onReviewWarnings && (
           <Acknowledgement
             title={warningLead(row.warningCode)}
             checked={warningAcknowledged}
             disabled={disabled || !selected}
             ariaLabel={t("files.reviewedLabel", { lead: warningLead(row.warningCode), path: row.relativePath })}
             verbs={[t("files.markReviewed"), t("files.reviewed")]}
-            onChange={() => onToggleWarning(row.warningDigest!)}
+            onChange={(checked) => onReviewWarnings([row.warningDigest!], checked)}
           >
             {`— ${row.relativePath}`}
           </Acknowledgement>
@@ -647,6 +685,28 @@ export default function ProjectFilesReviewPage({
         <div className="sync-history-state">{t("files.noMatches")}</div>
       ) : (
         <>
+          {/* One box for every listed selected file with a finding — the
+              row's own box scaled to the step, heading the list it clears.
+              Mixed while only some rows are ticked; ticking it reviews them
+              all, unticking takes every acknowledgement back. The rows keep
+              their own boxes, so one file can still be un-reviewed after. */}
+          {flaggedSelected.length > 0 && onReviewWarnings && (
+            <Acknowledgement
+              className={`sync-project-files-review-all${allFlaggedReviewed ? " done" : ""}`}
+              title={t("files.reviewAllLead", { count: flaggedSelected.length })}
+              checked={allFlaggedReviewed}
+              indeterminate={flaggedReviewed > 0 && !allFlaggedReviewed}
+              disabled={disabled}
+              ariaLabel={t("files.reviewAllLabel", {
+                lead: t("files.reviewAllLead", { count: flaggedSelected.length }),
+                breakdown: warningBreakdown(flaggedSelected),
+              })}
+              verbs={[t("files.reviewAllMark"), t("files.reviewAllDone")]}
+              onChange={(checked) => onReviewWarnings(flaggedSelected.map((row) => row.warningDigest!), checked)}
+            >
+              {`— ${warningBreakdown(flaggedSelected)}`}
+            </Acknowledgement>
+          )}
           {groups.map(renderTile)}
           {matchingCards.length > shownCards.length && (
             <div className="sync-project-file-limit">{t("files.limitShown", { limit: PROJECT_FILE_CARD_RENDER_LIMIT })}</div>

@@ -8121,6 +8121,26 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-page > .sync-name-search,
 .sync-project-files-page > .sync-list-head { margin-bottom: 0; }
 
+/* The step's own acknowledgement heads the list: one box for every listed
+   selected file with a finding, the row box scaled to the step. It holds the
+   top of the review's scroll while the rows pass under it, so the one tick
+   that clears them all is never out of reach; the backing is opaque because
+   the tint alone is a wash the rows would show through. Done, it wears the
+   success tint whole — the step is reviewed, not one row's verb. */
+.sync-project-files-page > .sync-project-files-review-all {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0;
+  background: linear-gradient(var(--warning-soft), var(--warning-soft)), var(--bg-0);
+  box-shadow: 0 6px 14px -10px rgba(0, 0, 0, 0.6);
+}
+.sync-project-files-page > .sync-project-files-review-all.done {
+  color: var(--success-text);
+  background: linear-gradient(var(--success-soft), var(--success-soft)), var(--bg-0);
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+}
+
 .sync-project-files-page > .sync-pull-empty {
   min-height: 0;
   align-items: center;

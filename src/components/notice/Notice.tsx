@@ -328,9 +328,12 @@ export function NoticeZone({ items: allItems, subject, className, ...timing }: N
 
 /** A warning the flow waits on: the box is the checkbox's label, and it never
  * closes — ticking it is the only way past it. `verbs` is the trailing word,
- * unticked then ticked ("Mark reviewed" → "Reviewed"). */
-export function Acknowledgement({ checked, onChange, disabled, title, children, verbs, ariaLabel, className }: {
+ * unticked then ticked ("Mark reviewed" → "Reviewed"). One box can speak for
+ * several acknowledgements; `indeterminate` is its mixed state while only
+ * some of them are ticked. */
+export function Acknowledgement({ checked, indeterminate = false, onChange, disabled, title, children, verbs, ariaLabel, className }: {
   checked: boolean;
+  indeterminate?: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
   title?: ReactNode;
@@ -346,6 +349,8 @@ export function Acknowledgement({ checked, onChange, disabled, title, children, 
         <input
           type="checkbox"
           checked={checked}
+          ref={(node) => { if (node) node.indeterminate = indeterminate; }}
+          aria-checked={indeterminate ? "mixed" : undefined}
           disabled={disabled}
           aria-label={ariaLabel}
           onChange={(event) => onChange(event.target.checked)}
