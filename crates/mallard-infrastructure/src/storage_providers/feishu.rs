@@ -114,7 +114,7 @@ impl StorageProviderAdapter for FeishuAdapter {
             key: provider_key(),
             config_version: 1,
             display_name: "Feishu".into(),
-            description: "A Feishu Drive folder. Up to 100 MiB per object.".into(),
+            description: "A Feishu Drive folder. Objects up to 100 MiB; larger files are stored in chunks.".into(),
             default_name: "Feishu storage".into(),
             name_suggestion: Some(StorageNameSuggestion::whole_setting(
                 "folder_name",

@@ -88,6 +88,7 @@ test("Settings saves as you go and says so: a status line and Done in the bar, n
     "push_claude_children",
     "openLogsOnSync",
     "refreshOnFocus",
+    "project_file_limit_bytes",
     "timeline_preview_limit_bytes",
     "comparison_workers",
     "cloud_transfer_concurrency",

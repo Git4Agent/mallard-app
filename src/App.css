@@ -8324,6 +8324,67 @@ button.sync-history-branch-trigger:hover:not(:disabled),
 .sync-project-files-scan-summary summary { cursor: pointer; }
 .sync-project-files-scan-summary p { margin: 5px 0 0 16px; font-size: var(--type-2xs); }
 
+/* The Push review's files that will not upload: a list tile whose head strip
+   is a disclosure button. The dashed frame and flat shadow say nothing in it
+   travels; folded, the strip is the whole tile, so it drops its rule. */
+.sync-list-tile.sync-project-files-blocked {
+  border-style: dashed;
+  box-shadow: none;
+}
+.sync-project-files-blocked > .sync-list-tile-head {
+  width: 100%;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sync-project-files-blocked:not(.open) > .sync-list-tile-head { border-bottom: 0; }
+.sync-project-files-blocked > .sync-list-tile-head:hover {
+  background: color-mix(in srgb, var(--text-0) 4%, var(--surface-subtle));
+}
+.sync-project-files-blocked > [hidden] { display: none; }
+.sync-project-files-blocked-breakdown {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--type-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-project-files-blocked-reason > header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 12px 5px;
+  border-top: 1px solid var(--border-mid);
+  font-size: var(--type-2xs);
+}
+.sync-project-files-blocked-reason:first-child > header { border-top: 0; }
+.sync-project-files-blocked-reason > header strong { color: var(--text-1); }
+.sync-project-files-blocked-reason > header small { color: var(--text-3); }
+.sync-project-files-blocked-reason > header + .sync-history-thread-card { border-top: 1px solid var(--border-mid); }
+.sync-project-files-blocked-more {
+  width: 100%;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-top: 1px solid var(--border-mid);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--type-2xs);
+  cursor: pointer;
+}
+.sync-project-files-blocked-more:hover { color: var(--text-0); }
+.sync-history-thread-metric.over-limit b { color: var(--danger-text); }
+
 /* The shared list tile (`ListTile`): every group a project list sorts its
    rows into — a folder, "Project root" included, on the Files face and in
    both Files reviews; the session list on the Sessions face — is a framed

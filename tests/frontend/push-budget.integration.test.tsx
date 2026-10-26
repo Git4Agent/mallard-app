@@ -539,6 +539,7 @@ const projectFiles: ProjectContentInventory = {
   }],
   ignored_count: 0,
   blocked_count: 0,
+  file_limit_bytes: 512 * 1024 * 1024,
   warnings: [],
   scanned_at: NOW,
 };

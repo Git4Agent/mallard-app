@@ -21,6 +21,12 @@ pub const APP_SETTINGS_SCHEMA: u32 = 1;
 pub const DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_COMPARISON_WORKERS: u32 = 4;
 pub const DEFAULT_CLOUD_TRANSFER_CONCURRENCY: u32 = 6;
+/// The largest ordinary project file a Push captures. A larger value also
+/// raises the Push and Pull budget to it, so a file the setting allows
+/// always fits one push; the ceiling is the domain's
+/// `MAX_PROJECT_CONTENT_FILE_BYTES`.
+pub const DEFAULT_PROJECT_FILE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+const MIN_PROJECT_FILE_LIMIT_BYTES: u64 = 1024 * 1024;
 const SETTINGS_FILE: &str = "settings.json";
 /// Two saved CLI paths of up to 4096 bytes each, JSON-escaped, still fit.
 const MAX_SETTINGS_BYTES: u64 = 16 * 1024;
@@ -43,6 +49,10 @@ fn default_comparison_workers() -> u32 {
 
 fn default_cloud_transfer_concurrency() -> u32 {
     DEFAULT_CLOUD_TRANSFER_CONCURRENCY
+}
+
+fn default_project_file_limit_bytes() -> u64 {
+    DEFAULT_PROJECT_FILE_LIMIT_BYTES
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -73,6 +83,10 @@ pub struct AppSettings {
     pub comparison_workers: u32,
     #[serde(default = "default_cloud_transfer_concurrency")]
     pub cloud_transfer_concurrency: u32,
+    /// The largest ordinary project file a Push captures, in bytes; see
+    /// `DEFAULT_PROJECT_FILE_LIMIT_BYTES`.
+    #[serde(default = "default_project_file_limit_bytes")]
+    pub project_file_limit_bytes: u64,
 }
 
 impl Default for AppSettings {
@@ -88,6 +102,7 @@ impl Default for AppSettings {
             timeline_preview_limit_bytes: DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES,
             comparison_workers: DEFAULT_COMPARISON_WORKERS,
             cloud_transfer_concurrency: DEFAULT_CLOUD_TRANSFER_CONCURRENCY,
+            project_file_limit_bytes: DEFAULT_PROJECT_FILE_LIMIT_BYTES,
         }
     }
 }
@@ -124,6 +139,7 @@ impl AppSettings {
         self.timeline_preview_limit_bytes != other.timeline_preview_limit_bytes
             || self.comparison_workers != other.comparison_workers
             || self.cloud_transfer_concurrency != other.cloud_transfer_concurrency
+            || self.project_file_limit_bytes != other.project_file_limit_bytes
     }
 
     /// The preview ceiling is load-bearing, not taste: page content budgets
@@ -142,6 +158,11 @@ impl AppSettings {
         }
         if !(1..=16).contains(&self.cloud_transfer_concurrency) {
             return Err("cloud transfer concurrency must be between 1 and 16".to_string());
+        }
+        if !(MIN_PROJECT_FILE_LIMIT_BYTES..=mallard_domain::MAX_PROJECT_CONTENT_FILE_BYTES)
+            .contains(&self.project_file_limit_bytes)
+        {
+            return Err("project file limit must be between 1 MB and 2 GB".to_string());
         }
         for (label, path) in [
             ("Codex", &self.codex_cli_path),
@@ -224,6 +245,7 @@ static TIMELINE_PREVIEW_LIMIT_BYTES: AtomicU64 =
     AtomicU64::new(DEFAULT_TIMELINE_PREVIEW_LIMIT_BYTES);
 static COMPARISON_WORKERS: AtomicU32 = AtomicU32::new(DEFAULT_COMPARISON_WORKERS);
 static CLOUD_TRANSFER_CONCURRENCY: AtomicU32 = AtomicU32::new(DEFAULT_CLOUD_TRANSFER_CONCURRENCY);
+static PROJECT_FILE_LIMIT_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_PROJECT_FILE_LIMIT_BYTES);
 
 /// Make `settings` the values every accessor below returns, process-wide.
 /// The three cells are independent; a reader racing an install may briefly mix
@@ -233,6 +255,7 @@ pub fn install_app_settings(settings: &AppSettings) {
     TIMELINE_PREVIEW_LIMIT_BYTES.store(settings.timeline_preview_limit_bytes, Ordering::Relaxed);
     COMPARISON_WORKERS.store(settings.comparison_workers, Ordering::Relaxed);
     CLOUD_TRANSFER_CONCURRENCY.store(settings.cloud_transfer_concurrency, Ordering::Relaxed);
+    PROJECT_FILE_LIMIT_BYTES.store(settings.project_file_limit_bytes, Ordering::Relaxed);
 }
 
 /// Maximum UTF-8 bytes returned for one visible timeline message.
@@ -269,6 +292,13 @@ pub fn cloud_transfer_concurrency() -> usize {
     CLOUD_TRANSFER_CONCURRENCY.load(Ordering::Relaxed) as usize
 }
 
+/// The largest ordinary project file a Push captures; discovery blocks a
+/// larger one. Manifests from other computers may carry files up to the
+/// domain ceiling regardless.
+pub fn project_file_limit_bytes() -> u64 {
+    PROJECT_FILE_LIMIT_BYTES.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +319,7 @@ mod tests {
         assert_eq!(settings.timeline_preview_limit_bytes, 1024 * 1024);
         assert_eq!(settings.comparison_workers, 4);
         assert_eq!(settings.cloud_transfer_concurrency, 6);
+        assert_eq!(settings.project_file_limit_bytes, 512 * 1024 * 1024);
         settings.validate().unwrap();
     }
 
@@ -335,6 +366,20 @@ mod tests {
                 "transfers floor",
                 AppSettings {
                     cloud_transfer_concurrency: 0,
+                    ..ok.clone()
+                },
+            ),
+            (
+                "project file floor",
+                AppSettings {
+                    project_file_limit_bytes: 1024 * 1024 - 1,
+                    ..ok.clone()
+                },
+            ),
+            (
+                "project file ceiling",
+                AppSettings {
+                    project_file_limit_bytes: 2 * 1024 * 1024 * 1024 + 1,
                     ..ok.clone()
                 },
             ),

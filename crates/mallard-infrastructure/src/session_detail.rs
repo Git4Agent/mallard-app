@@ -706,7 +706,7 @@ fn validate_index(index: &SessionTimelineIndex, file_size: u64) -> SessionDetail
             }
             total = total
                 .checked_add(source.length)
-                .filter(|total| *total <= crate::provider_capture::MAX_CAPTURE_BYTES)
+                .filter(|total| *total <= crate::provider_capture::capture_budget_bytes())
                 .ok_or_else(|| {
                     invalid_request("Timeline source bytes exceed the history limit.")
                 })?;

@@ -74,6 +74,9 @@ export default {
     openLogsHint: "开始上传或下载时打开日志。",
     refreshOnFocus: "切回窗口时刷新",
     refreshOnFocusHint: "回到 Mallard 时刷新项目和存储。",
+    projectFileLimit: "项目文件大小上限",
+    projectFileLimitLabel: "可同步的最大项目文件",
+    projectFileLimitHint: "超过此大小的项目文件不参与上传和下载。单次上传或下载最多携带此大小（不低于 512 MB），传输期间每个选中的文件会保留在内存中。",
   },
   cli: {
     label: "{{provider}} CLI",

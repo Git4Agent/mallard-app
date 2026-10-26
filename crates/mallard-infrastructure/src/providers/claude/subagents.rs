@@ -450,7 +450,7 @@ pub fn observe_tree(
         total = total
             .checked_add(child.mapping.source_file_size)
             .ok_or("Claude child byte overflow")?;
-        if total > crate::provider_capture::MAX_CAPTURE_BYTES {
+        if total > crate::provider_capture::capture_budget_bytes() {
             return Err("Claude parent exceeds capture limit".into());
         }
         tree.dependencies.record(&child_path, &child.stamp);
@@ -521,7 +521,7 @@ pub fn capture_children(
         total = total
             .checked_add(bytes.len() as u64)
             .ok_or("Claude child byte overflow")?;
-        if total > crate::provider_capture::MAX_CAPTURE_BYTES {
+        if total > crate::provider_capture::capture_budget_bytes() {
             return Err("Claude parent exceeds capture limit".into());
         }
         if jsonl_tail_io::safe_record_end(&bytes) != bytes.len() as u64 {

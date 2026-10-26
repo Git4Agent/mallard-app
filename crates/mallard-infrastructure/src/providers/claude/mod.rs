@@ -23,7 +23,7 @@ use super::traits::{
     SessionTimelineContext, SessionTimelineIndex, SessionTimelineIndexEntry,
     SessionTimelinePageSlice, SessionTimelineQuery,
 };
-use crate::provider_capture::{validated_session_metadata, MAX_CAPTURE_BYTES};
+use crate::provider_capture::{capture_budget_bytes, validated_session_metadata};
 use mallard_domain::ProviderKey;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -70,10 +70,10 @@ fn scan_claude_session_metadata_with_window(
     if !metadata.is_file() {
         return Err(rejected("Claude session transcript is not a regular file"));
     }
-    if metadata.len() > MAX_CAPTURE_BYTES {
+    if metadata.len() > capture_budget_bytes() {
         return Err(ScanFailure::Rejected(format!(
             "Claude session exceeds {} metadata scan bytes",
-            MAX_CAPTURE_BYTES
+            capture_budget_bytes()
         )));
     }
 
@@ -195,7 +195,7 @@ fn scan_full_stream(
     file: std::fs::File,
     path: &Path,
 ) -> Result<codec::ClaudeSessionIdentityTracker, ScanFailure> {
-    let mut reader = BufReader::new(file.take(MAX_CAPTURE_BYTES.saturating_add(1)));
+    let mut reader = BufReader::new(file.take(capture_budget_bytes().saturating_add(1)));
     let mut identity = codec::ClaudeSessionIdentityTracker::default();
     let mut bytes_read = 0_u64;
     let mut record_count = 0_usize;
@@ -208,10 +208,10 @@ fn scan_full_stream(
             break;
         }
         bytes_read = bytes_read.saturating_add(read as u64);
-        if bytes_read > MAX_CAPTURE_BYTES {
+        if bytes_read > capture_budget_bytes() {
             return Err(ScanFailure::Rejected(format!(
                 "Claude session exceeds {} metadata scan bytes",
-                MAX_CAPTURE_BYTES
+                capture_budget_bytes()
             )));
         }
         // The provider is allowed to be appending. A non-newline-terminated
@@ -527,7 +527,7 @@ mod tests {
         let path = temp.path().join("oversize.jsonl");
         fs::File::create(&path)
             .unwrap()
-            .set_len(MAX_CAPTURE_BYTES + 1)
+            .set_len(capture_budget_bytes() + 1)
             .unwrap();
         let error = scan_claude_session_metadata(&path)
             .unwrap_err()

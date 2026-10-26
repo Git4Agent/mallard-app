@@ -72,6 +72,10 @@ const SIZE_OPTIONS_MB = [25, 100, 250, 500, 1_000];
 const PREVIEW_OPTIONS_KB = [256, 512, 1_024, 2_048];
 const WORKER_OPTIONS = [1, 2, 4, 6, 8];
 const TRANSFER_OPTIONS = [1, 2, 4, 6, 8, 12];
+/** Largest project file, in MiB: the offered choices stop at 1.5 GiB while
+ *  the backend accepts up to 2 GiB. */
+const FILE_LIMIT_OPTIONS_MB = [256, 512, 1_024, 1_536];
+const MIB = 1024 * 1024;
 
 const THEME_CHOICES: Array<{ value: ThemeChoice; label: ParseKeys<"settings"> }> = [
   { value: "system", label: "appearance.system" },
@@ -106,6 +110,7 @@ const TUNING_KEYS = [
   "timeline_preview_limit_bytes",
   "comparison_workers",
   "cloud_transfer_concurrency",
+  "project_file_limit_bytes",
 ] as const;
 const POLICY_KEYS = ["retention_days", "max_total_bytes"] as const;
 
@@ -130,6 +135,7 @@ const SETTING_LABELS: Record<SettingKey, () => string> = {
   timeline_preview_limit_bytes: () => t("settings:performance.previewLimit"),
   comparison_workers: () => t("settings:performance.workers"),
   cloud_transfer_concurrency: () => t("settings:performance.transfers"),
+  project_file_limit_bytes: () => t("settings:sync.projectFileLimit"),
   retention_days: () => t("settings:logs.retention"),
   max_total_bytes: () => t("settings:logs.sizeCap"),
   clock24: () => t("settings:display.clock24"),
@@ -1126,6 +1132,34 @@ export default function SettingsPage({ appActions, appUpdates, onLogsChanged, on
                 )}
               >
                 {t("sync.refreshOnFocusHint")}
+              </SettingsRow>
+              <SettingsRow
+                label={t("sync.projectFileLimit")}
+                setting="project_file_limit_bytes"
+                receipt={receiptFor("project_file_limit_bytes")}
+                control={(
+                  <div className="sync-select-shell">
+                    <select
+                      value={shownTuning ? Math.round(shownTuning.project_file_limit_bytes / MIB) : 512}
+                      disabled={tuningBusy || !tuning}
+                      onChange={(event) => void applyTuning({ project_file_limit_bytes: Number(event.target.value) * MIB })}
+                      aria-label={t("sync.projectFileLimitLabel")}
+                    >
+                      {shownTuning && !FILE_LIMIT_OPTIONS_MB.includes(Math.round(shownTuning.project_file_limit_bytes / MIB)) && (
+                        <option value={Math.round(shownTuning.project_file_limit_bytes / MIB)}>
+                          {formatBytes(shownTuning.project_file_limit_bytes)}
+                        </option>
+                      )}
+                      {FILE_LIMIT_OPTIONS_MB.map((size) => (
+                        <option key={size} value={size}>
+                          {size >= 1_024 ? `${size / 1_024} GB` : `${size} MB`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              >
+                {t("sync.projectFileLimitHint")}
               </SettingsRow>
             </div>
             {tuningSection === "sync" && <NoticeZone items={tuningNotices} subject={t("tuning.subject")} {...tuningTiming} />}

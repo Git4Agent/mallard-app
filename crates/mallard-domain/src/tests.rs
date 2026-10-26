@@ -812,7 +812,8 @@ fn project_scope_content() -> ProjectScopeContent {
             sha256: "a".repeat(64),
             size: 1,
             source_mtime: 1,
-            object_key: "_uploads/upload-1/files/project/docs/specs/a.md".to_string(),
+            object_key: Some("_uploads/upload-1/files/project/docs/specs/a.md".to_string()),
+            chunks: Vec::new(),
             mode: Some(0o644),
         },
     );
@@ -973,7 +974,8 @@ fn sealed_provider_scope(provider_key: &str, thread_suffix: &str) -> ProviderSco
                 sha256: "c".repeat(64),
                 size: 10,
                 source_mtime: 1,
-                object_key: "_objects/".to_string() + &"c".repeat(64),
+                object_key: Some("_objects/".to_string() + &"c".repeat(64)),
+                chunks: Vec::new(),
                 mode: Some(0o600),
             },
         )]),
@@ -1066,7 +1068,8 @@ fn a_pull_of_a_thread_weighs_every_file_the_manifest_lists_for_it() {
             sha256: "d".repeat(64),
             size: 5,
             source_mtime: 1,
-            object_key: "_objects/".to_string() + &"d".repeat(64),
+            object_key: Some("_objects/".to_string() + &"d".repeat(64)),
+            chunks: Vec::new(),
             mode: Some(0o600),
         },
     );
@@ -1190,7 +1193,8 @@ fn scopes_reject_cross_scope_and_misplaced_content() {
             sha256: "e".repeat(64),
             size: 1,
             source_mtime: 1,
-            object_key: "_objects/".to_string() + &"e".repeat(64),
+            object_key: Some("_objects/".to_string() + &"e".repeat(64)),
+            chunks: Vec::new(),
             mode: Some(0o600),
         },
     );
@@ -1293,7 +1297,8 @@ fn duplicate_threads_across_scopes_are_rejected() {
                 sha256: "f".repeat(64),
                 size: 5,
                 source_mtime: 1,
-                object_key: "_objects/".to_string() + &"f".repeat(64),
+                object_key: Some("_objects/".to_string() + &"f".repeat(64)),
+                chunks: Vec::new(),
                 mode: Some(0o600),
             },
         )]),
@@ -1686,8 +1691,9 @@ fn project_content_manifest_validates_exact_tree_identity() {
 }
 
 #[test]
-fn project_content_manifest_accepts_100_mib_and_rejects_one_byte_more() {
-    let limit = 100 * 1024 * 1024;
+fn project_content_manifest_accepts_2_gib_and_rejects_one_byte_more() {
+    let limit = crate::MAX_PROJECT_CONTENT_FILE_BYTES;
+    assert_eq!(limit, 2 * 1024 * 1024 * 1024);
     for size in [limit, limit + 1] {
         let mut scope = sealed_project_scope();
         scope
@@ -1704,7 +1710,7 @@ fn project_content_manifest_accepts_100_mib_and_rejects_one_byte_more() {
         if size == limit {
             resolved.unwrap();
         } else {
-            assert!(resolved.unwrap_err().contains("exceeds 104857600 bytes"));
+            assert!(resolved.unwrap_err().contains("exceeds 2147483648 bytes"));
         }
     }
 }
@@ -1742,7 +1748,8 @@ fn project_content_snapshot_can_accumulate_beyond_one_push_limit() {
                         96 * 1024 * 1024
                     },
                     source_mtime: 1,
-                    object_key: format!("_objects/{digest}"),
+                    object_key: Some(format!("_objects/{digest}")),
+                    chunks: Vec::new(),
                     mode: Some(0o644),
                 },
             );
@@ -1983,7 +1990,8 @@ fn conversation_sidecars_stay_inside_their_thread_namespace() {
             sha256: "d".repeat(64),
             size: 2,
             source_mtime: 1,
-            object_key: "_objects/".to_string() + &"d".repeat(64),
+            object_key: Some("_objects/".to_string() + &"d".repeat(64)),
+            chunks: Vec::new(),
             mode: Some(0o600),
         },
     );
@@ -4201,4 +4209,220 @@ fn cloud_repository_id_is_optional_and_omitted_when_absent() {
         serde_json::from_value::<ProjectStorageLink>(encoded).unwrap(),
         link
     );
+}
+
+/// A split entry over `size` bytes with one distinct, valid digest per chunk.
+fn split_entry(size: u64) -> BundleFileEntry {
+    let chunks = crate::payload_chunk_ranges(size)
+        .into_iter()
+        .enumerate()
+        .map(|(index, range)| crate::BundleChunk {
+            sha256: char::from_digit(index as u32 % 16, 16)
+                .unwrap()
+                .to_string()
+                .repeat(64),
+            size: range.end - range.start,
+        })
+        .collect();
+    BundleFileEntry {
+        resource_id: resource_id("project:content-file:big"),
+        sha256: "f".repeat(64),
+        size,
+        source_mtime: 1,
+        object_key: None,
+        chunks,
+        mode: Some(0o644),
+    }
+}
+
+#[test]
+fn payload_chunk_ranges_split_only_above_the_chunk_size() {
+    use crate::{payload_chunk_ranges, MAX_PAYLOAD_CHUNKS, PAYLOAD_CHUNK_BYTES};
+    assert!(payload_chunk_ranges(0).is_empty());
+    assert!(payload_chunk_ranges(PAYLOAD_CHUNK_BYTES).is_empty());
+    assert_eq!(
+        payload_chunk_ranges(PAYLOAD_CHUNK_BYTES + 1),
+        vec![
+            0..PAYLOAD_CHUNK_BYTES,
+            PAYLOAD_CHUNK_BYTES..PAYLOAD_CHUNK_BYTES + 1
+        ]
+    );
+    let three = payload_chunk_ranges(3 * PAYLOAD_CHUNK_BYTES);
+    assert_eq!(three.len(), 3);
+    assert!(three
+        .iter()
+        .all(|range| range.end - range.start == PAYLOAD_CHUNK_BYTES));
+    assert_eq!(MAX_PAYLOAD_CHUNKS, 64);
+    assert_eq!(
+        payload_chunk_ranges(crate::MAX_PROJECT_CONTENT_FILE_BYTES).len(),
+        MAX_PAYLOAD_CHUNKS
+    );
+}
+
+#[test]
+fn file_entry_is_one_object_or_a_chunk_list() {
+    use crate::{PayloadObject, MAX_PAYLOAD_CHUNKS, PAYLOAD_CHUNK_BYTES};
+    let split = split_entry(PAYLOAD_CHUNK_BYTES + 1);
+    split.validate().unwrap();
+    assert!(split.is_split());
+    let objects = split.payload_objects();
+    assert_eq!(objects.len(), 2);
+    assert_eq!(objects[0].relative_key, format!("_objects/{}", "0".repeat(64)));
+    assert_eq!(objects[0].sha256, "0".repeat(64));
+    assert_eq!(objects[0].size, PAYLOAD_CHUNK_BYTES);
+    assert_eq!(objects[1].relative_key, format!("_objects/{}", "1".repeat(64)));
+    assert_eq!(objects[1].size, 1);
+    assert_eq!(
+        split.payload_identity(),
+        (
+            None,
+            split.chunks.as_slice(),
+            split.sha256.as_str(),
+            PAYLOAD_CHUNK_BYTES + 1
+        )
+    );
+
+    let single = BundleFileEntry {
+        resource_id: resource_id("project:content-file:small"),
+        sha256: "a".repeat(64),
+        size: 10,
+        source_mtime: 1,
+        object_key: Some(format!("_objects/{}", "a".repeat(64))),
+        chunks: Vec::new(),
+        mode: None,
+    };
+    single.validate().unwrap();
+    assert!(!single.is_split());
+    assert_eq!(
+        single.payload_objects(),
+        vec![PayloadObject {
+            relative_key: format!("_objects/{}", "a".repeat(64)),
+            size: 10,
+            sha256: "a".repeat(64),
+        }]
+    );
+    assert_eq!(
+        single.payload_identity(),
+        (
+            Some(single.object_key.as_deref().unwrap()),
+            &[][..],
+            single.sha256.as_str(),
+            10
+        )
+    );
+    // A single object above the chunk size is what every earlier writer
+    // published; it stays valid.
+    let mut large_single = single.clone();
+    large_single.size = 96 * 1024 * 1024;
+    large_single.validate().unwrap();
+
+    let mut both = split.clone();
+    both.object_key = Some(format!("_objects/{}", both.sha256));
+    assert!(both.validate().unwrap_err().contains("both"));
+    let mut neither = single.clone();
+    neither.object_key = None;
+    assert!(neither.validate().unwrap_err().contains("neither"));
+    let mut small = split.clone();
+    small.size = PAYLOAD_CHUNK_BYTES;
+    small.chunks.truncate(1);
+    assert!(small.validate().unwrap_err().contains("at or below"));
+    let mut short = split.clone();
+    short.chunks[0].size -= 1;
+    assert!(short.validate().unwrap_err().contains("holds"));
+    let mut few = split.clone();
+    few.chunks.pop();
+    assert!(few
+        .validate()
+        .unwrap_err()
+        .contains("lists 1 chunks, not 2"));
+    let mut many = split.clone();
+    many.chunks = vec![many.chunks[0].clone(); MAX_PAYLOAD_CHUNKS + 1];
+    assert!(many.validate().unwrap_err().contains("more than"));
+    let mut huge = split_entry(crate::MAX_PROJECT_CONTENT_FILE_BYTES);
+    huge.validate().unwrap();
+    huge.size += 1;
+    assert!(huge.validate().unwrap_err().contains("exceeds"));
+    let mut bad_digest = split.clone();
+    bad_digest.chunks[1].sha256 = "zz".repeat(32);
+    assert!(bad_digest.validate().is_err());
+}
+
+#[test]
+fn file_entry_serialization_names_only_the_payload_location_in_use() {
+    let single = BundleFileEntry {
+        resource_id: resource_id("project:content-file:small"),
+        sha256: "a".repeat(64),
+        size: 10,
+        source_mtime: 1,
+        object_key: Some(format!("_objects/{}", "a".repeat(64))),
+        chunks: Vec::new(),
+        mode: Some(0o600),
+    };
+    // Byte for byte what every manifest already in a storage holds.
+    assert_eq!(
+        serde_json::to_string(&single).unwrap(),
+        format!(
+            r#"{{"resource_id":"project:content-file:small","sha256":"{a}","size":10,"source_mtime":1,"object_key":"_objects/{a}","mode":384}}"#,
+            a = "a".repeat(64)
+        )
+    );
+    let split = split_entry(crate::PAYLOAD_CHUNK_BYTES + 1);
+    let value = serde_json::to_value(&split).unwrap();
+    assert!(value.get("object_key").is_none());
+    assert_eq!(value["chunks"].as_array().unwrap().len(), 2);
+    assert_eq!(value["chunks"][1]["size"], 1);
+    let parsed: BundleFileEntry = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed, split);
+    let legacy: BundleFileEntry = serde_json::from_str(&serde_json::to_string(&single).unwrap()).unwrap();
+    assert_eq!(legacy, single);
+}
+
+#[test]
+fn only_a_project_file_may_be_split() {
+    let codex = sealed_provider_scope("codex", "0123456789abcdef0123456789abcdef");
+    let mut scope = codex.scope;
+    let sidecar = LogicalPath::parse(format!(
+        "state/conversations/codex/{}/sidecars/todo/todo.json",
+        codex.thread_id
+    ))
+    .unwrap();
+    let thread = scope.conversations.get_mut(&codex.thread_id).unwrap();
+    thread.files.push(ConversationFileRef {
+        logical_path: sidecar.clone(),
+        role: ConversationFileRole::Sidecar {
+            sidecar_kind: "todo".to_string(),
+        },
+    });
+    let mut entry = split_entry(crate::PAYLOAD_CHUNK_BYTES + 1);
+    entry.resource_id = thread.resource_id.clone();
+    scope.files.insert(sidecar, entry);
+    let key = SyncScopeKey::Provider(provider("codex"));
+    scope.content_sha256 = scope.compute_content_sha256(&key).unwrap();
+    let manifest = scoped_manifest(BTreeMap::from([
+        (SyncScopeKey::Project, sealed_project_scope()),
+        (key, scope),
+    ]));
+    let error = manifest
+        .resolve_all(&portable::test_resolver::Version1Resolver)
+        .unwrap_err();
+    assert!(error.contains("only a project file may be"), "{error}");
+
+    let mut project = sealed_project_scope();
+    let (path, existing) = project
+        .files
+        .iter()
+        .map(|(path, entry)| (path.clone(), entry.clone()))
+        .next()
+        .unwrap();
+    let mut split = split_entry(crate::PAYLOAD_CHUNK_BYTES + 1);
+    split.resource_id = existing.resource_id;
+    project.files.insert(path, split);
+    project.content_sha256 = project
+        .compute_content_sha256(&SyncScopeKey::Project)
+        .unwrap();
+    let manifest = scoped_manifest(BTreeMap::from([(SyncScopeKey::Project, project)]));
+    manifest.validate().unwrap();
+    manifest
+        .resolve_all(&portable::test_resolver::Version1Resolver)
+        .unwrap();
 }

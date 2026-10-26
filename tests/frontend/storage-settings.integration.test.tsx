@@ -3755,7 +3755,7 @@ const FEISHU_DESCRIPTOR: StorageProviderDescriptor = {
   key: "feishu",
   config_version: 1,
   display_name: "Feishu",
-  description: "A Feishu Drive folder. Up to 100 MiB per object.",
+  description: "A Feishu Drive folder. Objects up to 100 MiB; larger files are stored in chunks.",
   default_name: "Feishu storage",
   display_rank: 25,
   icon: "cloud",

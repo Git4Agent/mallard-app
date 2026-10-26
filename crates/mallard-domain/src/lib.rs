@@ -54,8 +54,16 @@ pub const MAX_ORIGIN_ALIASES: usize = 20_000;
 pub(crate) const MAX_LOGICAL_PATH_BYTES: usize = 1_024;
 /// Fixed maximum transcript size for discovery, comparison, Push, and Pull.
 pub const MAX_CONVERSATION_FILE_BYTES: u64 = 100 * 1024 * 1024;
-/// Maximum ordinary project-file size, shared by capture and bundle validation.
-pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 100 * 1024 * 1024;
+/// The largest ordinary project file any manifest may carry. A computer
+/// captures up to its project-file limit setting, which is at most this.
+pub const MAX_PROJECT_CONTENT_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// A project file above this size is published as chunk objects of exactly
+/// this size, the last one shorter. The split is a function of the bytes
+/// alone, so two computers publish the same objects for the same file.
+pub const PAYLOAD_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
+/// The most chunks one file entry lists: the largest project file, split.
+pub const MAX_PAYLOAD_CHUNKS: usize =
+    MAX_PROJECT_CONTENT_FILE_BYTES.div_ceil(PAYLOAD_CHUNK_BYTES) as usize;
 const ABSENT_BUNDLE_COMMIT_ID: &str = "absent";
 
 const WINDOWS_RESERVED_NAMES: &[&str] = &[
@@ -3978,13 +3986,53 @@ pub fn provider_state_path_prefix(provider: &ProviderKey) -> String {
     format!("state/providers/{}/", provider.as_str())
 }
 
+/// One chunk of a split payload: the immutable object `_objects/<sha256>`
+/// holding exactly `size` bytes of the file, in order.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BundleChunk {
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// One stored object of a file entry's payload: its bundle-relative key and
+/// the exact size and digest a read verifies before anything opens it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayloadObject {
+    pub relative_key: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// The byte ranges a payload of `size` bytes is split into: none when it
+/// travels as one object, else `PAYLOAD_CHUNK_BYTES` each with the
+/// remainder last. Callers bound `size` first; this never does.
+pub fn payload_chunk_ranges(size: u64) -> Vec<std::ops::Range<u64>> {
+    if size <= PAYLOAD_CHUNK_BYTES {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < size {
+        let end = start.saturating_add(PAYLOAD_CHUNK_BYTES).min(size);
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+/// A file's payload is one object at `object_key` or, for a project file
+/// above `PAYLOAD_CHUNK_BYTES`, the ordered `chunks`: never both, never
+/// neither. `sha256` and `size` are the whole file's either way.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BundleFileEntry {
     pub resource_id: ResourceId,
     pub sha256: String,
     pub size: u64,
     pub source_mtime: u64,
-    pub object_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chunks: Vec<BundleChunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
 }
@@ -4009,22 +4057,115 @@ impl BundleDirectoryEntry {
 impl BundleFileEntry {
     pub fn validate(&self) -> Result<(), String> {
         validate_sha256("bundle file", &self.sha256)?;
-        if self.object_key.is_empty()
-            || self.object_key.len() > 2_048
-            || self.object_key.starts_with('/')
-            || self.object_key.contains('\\')
-            || self
-                .object_key
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-        {
-            return Err(format!("unsafe bundle object key '{}'", self.object_key));
+        match (&self.object_key, self.chunks.is_empty()) {
+            (Some(object_key), true) => validate_entry_object_key(object_key)?,
+            (None, false) => self.validate_chunks()?,
+            (Some(_), false) => {
+                return Err("bundle file names both an object key and chunks".to_string())
+            }
+            (None, true) => {
+                return Err("bundle file names neither an object key nor chunks".to_string())
+            }
         }
         if self.mode.is_some_and(|mode| mode & !0o777 != 0) {
             return Err("bundle file mode contains unsafe bits".to_string());
         }
         Ok(())
     }
+
+    /// The chunk list is exactly what `payload_chunk_ranges` makes of the
+    /// file's size: the count and every size are checked before any digest.
+    fn validate_chunks(&self) -> Result<(), String> {
+        if self.chunks.len() > MAX_PAYLOAD_CHUNKS {
+            return Err(format!(
+                "bundle file lists {} chunks, more than {}",
+                self.chunks.len(),
+                MAX_PAYLOAD_CHUNKS
+            ));
+        }
+        if self.size > MAX_PROJECT_CONTENT_FILE_BYTES {
+            return Err(format!(
+                "split bundle file of {} bytes exceeds {} bytes",
+                self.size, MAX_PROJECT_CONTENT_FILE_BYTES
+            ));
+        }
+        let ranges = payload_chunk_ranges(self.size);
+        if ranges.is_empty() {
+            return Err(format!(
+                "bundle file of {} bytes is split at or below the {}-byte chunk size",
+                self.size, PAYLOAD_CHUNK_BYTES
+            ));
+        }
+        if self.chunks.len() != ranges.len() {
+            return Err(format!(
+                "bundle file of {} bytes lists {} chunks, not {}",
+                self.size,
+                self.chunks.len(),
+                ranges.len()
+            ));
+        }
+        for (index, (chunk, range)) in self.chunks.iter().zip(&ranges).enumerate() {
+            validate_sha256(&format!("bundle file chunk {}", index), &chunk.sha256)?;
+            if chunk.size != range.end - range.start {
+                return Err(format!(
+                    "bundle file chunk {} holds {} bytes, not {}",
+                    index,
+                    chunk.size,
+                    range.end - range.start
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_split(&self) -> bool {
+        !self.chunks.is_empty()
+    }
+
+    /// The objects that hold this file's bytes, in order: one for a
+    /// single-object entry, one per chunk for a split one.
+    pub fn payload_objects(&self) -> Vec<PayloadObject> {
+        if self.chunks.is_empty() {
+            return vec![PayloadObject {
+                relative_key: self.object_key.clone().unwrap_or_default(),
+                size: self.size,
+                sha256: self.sha256.clone(),
+            }];
+        }
+        self.chunks
+            .iter()
+            .map(|chunk| PayloadObject {
+                relative_key: format!("_objects/{}", chunk.sha256),
+                size: chunk.size,
+                sha256: chunk.sha256.clone(),
+            })
+            .collect()
+    }
+
+    /// Where the payload lives, with the whole file's digest and size: what
+    /// a retained entry must repeat from the reviewed manifest.
+    pub fn payload_identity(&self) -> (Option<&str>, &[BundleChunk], &str, u64) {
+        (
+            self.object_key.as_deref(),
+            &self.chunks,
+            &self.sha256,
+            self.size,
+        )
+    }
+}
+
+fn validate_entry_object_key(object_key: &str) -> Result<(), String> {
+    if object_key.is_empty()
+        || object_key.len() > 2_048
+        || object_key.starts_with('/')
+        || object_key.contains('\\')
+        || object_key
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(format!("unsafe bundle object key '{}'", object_key));
+    }
+    Ok(())
 }
 
 /// One deletion record. Its target is an open versioned envelope; the map
@@ -4584,6 +4725,11 @@ impl BundleScope {
                         ));
                     }
                 }
+            } else if entry.is_split() {
+                return Err(format!(
+                    "file '{}' is split, which only a project file may be",
+                    path
+                ));
             }
         }
         for (resource_id, kind) in &resolved.kinds {
@@ -4717,6 +4863,14 @@ impl BundleScope {
         provider: &ProviderKey,
         resolved: &ResolvedScope,
     ) -> Result<(), String> {
+        for (path, entry) in &self.files {
+            if entry.is_split() {
+                return Err(format!(
+                    "file '{}' is split, which only a project file may be",
+                    path
+                ));
+            }
+        }
         let conversation_prefix = format!("state/conversations/{}/", provider);
         let state_prefix = provider_state_path_prefix(provider);
         for (id, kind) in &resolved.kinds {

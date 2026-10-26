@@ -143,7 +143,9 @@ children; the logical layout is unchanged. See the
 
 Dropbox uses the same `.mallard/` layout. Each uploaded object must be at most
 **150 MiB (157,286,400 bytes)**. This Dropbox upload limit does not change
-Local, R2, capture, or download limits. Dropbox transfers objects concurrently
+Local, R2, capture, or download limits, and no provider's per-object limit
+bounds a project file: a file above 32 MiB is stored as 32 MiB chunk objects
+on every provider ([chunked payload objects](PLAN_CHUNKED_PAYLOAD_OBJECTS.md). Dropbox transfers objects concurrently
 through upload sessions and commits each bounded batch. See the
 [Dropbox storage design](DESIGN_DROPBOX_SHARED_TEAM_NAMESPACE_STORAGE.md)
 for setup and recovery details. The authorization and folder-creation POC

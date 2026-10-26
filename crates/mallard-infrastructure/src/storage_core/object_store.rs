@@ -8,7 +8,7 @@ use bytes::Bytes;
 use mallard_domain::{hex_lower, sha256_hex};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{NamedTempFile, TempPath};
@@ -121,6 +121,48 @@ impl VerifiedBody {
             sha256,
             etag,
         })
+    }
+
+    /// One body from the verified chunks of a split payload, in order. The
+    /// chunks are copied into a new private file while hashing, each read
+    /// through `open` so a chunk that changed since its verification is
+    /// refused, and the result is refused unless it is exactly `size` bytes
+    /// with digest `sha256`.
+    pub fn assemble(parts: &[VerifiedBody], size: u64, sha256: &str) -> Result<Self, String> {
+        domain::validate_sha256("assembled object", sha256)?;
+        let mut file = NamedTempFile::new()
+            .map_err(|error| format!("stage assembled object: {}", error))?;
+        let mut hasher = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        for part in parts {
+            let mut reader = part.open()?;
+            loop {
+                let count = reader
+                    .read(&mut buffer)
+                    .map_err(|error| format!("read staged chunk: {}", error))?;
+                if count == 0 {
+                    break;
+                }
+                copied = copied
+                    .checked_add(count as u64)
+                    .ok_or_else(|| "assembled object size overflow".to_string())?;
+                if copied > size {
+                    return Err("assembled object exceeds its expected size".to_string());
+                }
+                hasher.update(&buffer[..count]);
+                file.as_file_mut()
+                    .write_all(&buffer[..count])
+                    .map_err(|error| format!("write assembled object: {}", error))?;
+            }
+        }
+        if copied != size || hex_lower(&hasher.finalize()) != sha256 {
+            return Err("assembled object failed size/hash verification".to_string());
+        }
+        file.as_file_mut()
+            .flush()
+            .map_err(|error| format!("flush assembled object: {}", error))?;
+        Self::from_temp_file(file, size, sha256.to_string(), sha256.to_string())
     }
 
     /// Reopen the staged file for one read. The reader is refused unless the
@@ -674,6 +716,50 @@ mod tests {
 
         let error = body.open().err().expect("reopen is refused");
         assert!(error.contains("replaced"), "{error}");
+    }
+
+    /// A split payload comes back as one body: the chunks are copied in
+    /// order while hashing, and the result is refused unless it is exactly
+    /// the whole file. A chunk replaced after its verification is refused
+    /// through the same reopen check every body makes.
+    #[test]
+    fn chunks_assemble_into_one_verified_body_or_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = LocalObjectStore::open(temp.path().join("store")).unwrap();
+        let whole = (0..200_000u32)
+            .map(|index| (index.wrapping_mul(31) ^ (index >> 7)) as u8)
+            .collect::<Vec<u8>>();
+        let (first, second) = whole.split_at(131_072);
+        for chunk in [first, second] {
+            store
+                .put_immutable(&repository_object_key(chunk), chunk)
+                .unwrap();
+        }
+        let parts = [stage(&store, first), stage(&store, second)];
+        let body = VerifiedBody::assemble(&parts, whole.len() as u64, &sha256_hex(&whole)).unwrap();
+        assert_eq!(body.size(), whole.len() as u64);
+        assert_eq!(body.sha256(), sha256_hex(&whole));
+        let mut assembled = Vec::new();
+        body.open().unwrap().read_to_end(&mut assembled).unwrap();
+        assert_eq!(assembled, whole);
+        drop(parts);
+        // The assembled file outlives the chunks it was built from.
+        assert_eq!(body.read_bounded(whole.len() as u64, "assembled").unwrap(), whole);
+
+        let parts = [stage(&store, first), stage(&store, second)];
+        let short = VerifiedBody::assemble(&parts, whole.len() as u64 - 1, &sha256_hex(&whole)).unwrap_err();
+        assert!(short.contains("exceeds its expected size"), "{short}");
+        let long = VerifiedBody::assemble(&parts, whole.len() as u64 + 1, &sha256_hex(&whole)).unwrap_err();
+        assert!(long.contains("failed size/hash verification"), "{long}");
+        let reordered = [stage(&store, second), stage(&store, first)];
+        let wrong_order =
+            VerifiedBody::assemble(&reordered, whole.len() as u64, &sha256_hex(&whole)).unwrap_err();
+        assert!(wrong_order.contains("failed size/hash verification"), "{wrong_order}");
+        let path = parts[1].staged_path().to_path_buf();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, second).unwrap();
+        let replaced = VerifiedBody::assemble(&parts, whole.len() as u64, &sha256_hex(&whole)).unwrap_err();
+        assert!(replaced.contains("replaced"), "{replaced}");
     }
 
     #[test]

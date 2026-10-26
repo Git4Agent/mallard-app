@@ -82,6 +82,7 @@ function inventoryWith(entries: ProjectContentEntry[], overrides: Partial<Projec
     entries,
     ignored_count: 1,
     blocked_count: 1,
+    file_limit_bytes: 512 * 1024 * 1024,
     warnings: ["Ignore file '.mallardignore' exceeds the metadata limit"],
     scanned_at: 1,
     ...overrides,

@@ -384,6 +384,32 @@ export default {
     limitShown: "First {{limit}} shown. Search to narrow the list.",
     scanSummary_one: "{{ignored}} ignored · {{blocked}} blocked · {{count}} scan warning",
     scanSummary_other: "{{ignored}} ignored · {{blocked}} blocked · {{count}} scan warnings",
+    /** The Push review's line: its blocked files are listed in their group. */
+    reviewScanSummary_one: "{{ignored}} ignored · {{count}} scan warning",
+    reviewScanSummary_other: "{{ignored}} ignored · {{count}} scan warnings",
+    noUploadMatches: "No matching files to upload.",
+    /** The Push review's folded group of files the folder walk refused. */
+    blockedGroup: "Won't upload",
+    blockedShowMore_one: "Show {{count}} more",
+    blockedShowMore_other: "Show {{count}} more",
+    blockedTitle: {
+      too_large: "Over the {{limit}} file limit",
+      symlink: "Symlinks",
+      special_file: "Special files",
+    },
+    blockedCount: {
+      too_large_one: "{{count}} over the limit",
+      too_large_other: "{{count}} over the limit",
+      symlink_one: "{{count}} symlink",
+      symlink_other: "{{count}} symlinks",
+      special_file_one: "{{count}} special file",
+      special_file_other: "{{count}} special files",
+    },
+    blockedSentence: {
+      too_large: "Larger than the {{limit}} limit for one file.",
+      symlink: "A symlink would point somewhere else on another computer.",
+      special_file: "Sockets, devices, and other special files cannot be copied.",
+    },
     blocked: "Blocked",
     open: "Open {{path}}",
     reveal: "Show {{path}} in Finder",

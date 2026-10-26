@@ -214,7 +214,7 @@ pub fn resolve_captured_codex_root(
             .map(|(bytes, _)| bytes.len() as u64)
             .sum::<u64>()
             + bytes.len() as u64
-            > crate::provider_capture::MAX_CAPTURE_BYTES
+            > crate::provider_capture::capture_budget_bytes()
         {
             return Err("Codex graph exceeds the aggregate capture limit".into());
         }

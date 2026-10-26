@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   BundleFetchProgress,
   GitHistoryOutgoing,
@@ -35,6 +36,7 @@ import { isPushReviewDecision } from "../sync-review/pullReviewStatus";
 import { ReviewBudgetGauge, ReviewBudgetGlance, reviewBudgetSentence, type ReviewBudget } from "../sync-review/ReviewBudgetMeter";
 import { formatBytes } from "../../format";
 import { t, useTranslation } from "../../i18n";
+import { errorMessage } from "../../storageError";
 
 export interface PushReviewBlocker {
   kind: "storage" | "local";
@@ -48,8 +50,8 @@ const WARNING_UNACKNOWLEDGED = "warning_unacknowledged";
 
 interface Props {
   credentialRedactionEnabled: boolean;
-  /** A failed session action in the review's session list, or null to clear it;
-      the shell draws it under the path bar. */
+  /** A failed action in the review's lists — a session's, or Show in Finder
+      on a file — or null to clear it; the shell draws it under the path bar. */
   onSessionActionError: (message: string | null) => void;
 
   gitHistory?: GitHistorySnapshot | null;
@@ -117,6 +119,31 @@ function isPushReviewProjectContent(entry: ProjectContentEntry): boolean {
   if (!entry.local_present) return false;
   if (entry.state === "unknown") return !entry.storage_present;
   return entry.state === "local_only" || entry.state === "local_ahead";
+}
+
+/** The local entries the folder walk refused. They never travel; the review
+ *  lists them folded, so a missing file is never a silent one. */
+function isPushReviewBlockedContent(entry: ProjectContentEntry): boolean {
+  return entry.entry_type === "blocked" && entry.local_present;
+}
+
+function projectFileReviewRow(entry: ProjectContentEntry): ProjectFileReviewRow {
+  return {
+    resourceId: entry.descriptor.resource_id,
+    relativePath: entry.relative_path,
+    entryType: entry.entry_type,
+    state: entry.state,
+    size: entry.size,
+    mode: entry.mode,
+    sourceMtime: entry.source_mtime,
+    localPresent: entry.local_present,
+    storagePresent: entry.storage_present,
+    undecided: entry.undecided,
+    blockedReason: entry.blocked_reason,
+    blockedCode: entry.blocked_code,
+    warningCode: entry.warning_code,
+    warningDigest: entry.warning_digest,
+  };
 }
 
 function pushBlockerKind(
@@ -1143,21 +1170,14 @@ export default function PushResourceWorkspace({
     projectContentInventory,
     effectiveSelected,
   );
-  const projectFileRows: ProjectFileReviewRow[] = visibleProjectContentEntries.map((entry) => ({
-    resourceId: entry.descriptor.resource_id,
-    relativePath: entry.relative_path,
-    entryType: entry.entry_type,
-    state: entry.state,
-    size: entry.size,
-    mode: entry.mode,
-    sourceMtime: entry.source_mtime,
-    localPresent: entry.local_present,
-    storagePresent: entry.storage_present,
-    undecided: entry.undecided,
-    blockedReason: entry.blocked_reason,
-    warningCode: entry.warning_code,
-    warningDigest: entry.warning_digest,
-  }));
+  const projectFileRows = visibleProjectContentEntries.map(projectFileReviewRow);
+  const blockedProjectFileRows = (projectContentInventory?.entries ?? [])
+    .filter(isPushReviewBlockedContent)
+    .map(projectFileReviewRow);
+  const revealProjectPath = (path: string) => {
+    onSessionActionError(null);
+    void revealItemInDir(path).catch((reason) => onSessionActionError(errorMessage(reason)));
+  };
   /* The files that wait: new to this storage, never left out, and not
      ticked. A Push leaves them here, so the Sessions step counts them on the
      button that opens their list. */
@@ -1341,7 +1361,11 @@ export default function PushResourceWorkspace({
               scanned={projectContentScanned}
               loading={projectContentLoading}
               ignoredCount={projectContentInventory?.ignored_count}
-              blockedCount={projectContentInventory?.blocked_count}
+              blocked={projectContentInventory ? {
+                rows: blockedProjectFileRows,
+                fileLimitBytes: projectContentInventory.file_limit_bytes,
+              } : undefined}
+              onRevealPath={revealProjectPath}
               warnings={projectContentInventory?.warnings}
               disabled={busy}
               onScan={onScanProjectFiles}

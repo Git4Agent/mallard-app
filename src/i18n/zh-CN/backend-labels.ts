@@ -88,7 +88,7 @@ export const zhBackendLabels = {
     },
     feishu: {
       displayName: "飞书",
-      description: "飞书 Drive 文件夹。单个对象最大 100 MiB。",
+      description: "飞书 Drive 文件夹。单个对象最大 100 MiB，更大的文件分块存储。",
       field: {
         folder_token: {
           label: "文件夹令牌",

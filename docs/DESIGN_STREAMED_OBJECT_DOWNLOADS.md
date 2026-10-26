@@ -102,6 +102,8 @@ chunk, so an actively progressing transfer may run longer than 120 seconds.
   token.
 - Add resumable or multipart upload. S3 write-side 512 MiB guards are removed,
   but upload transport improvements remain separate from this GET hardening.
+  Large project files are split into chunk objects instead
+  ([PLAN_CHUNKED_PAYLOAD_OBJECTS.md](PLAN_CHUNKED_PAYLOAD_OBJECTS.md)).
 - Preserve storage or machine-local documents that predate the required
   `manifest_size` metadata.
 - Add an S3 `HEAD` fallback for missing size metadata.

@@ -101,7 +101,7 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   // the app's select shell, the folder verb, and both cleanup verbs.
   assert.match(html, /aria-label="Keep log events for"/);
   assert.match(html, /aria-label="Log size cap"/);
-  assert.equal((html.match(/class="sync-select-shell"/g) ?? []).length, 5);
+  assert.equal((html.match(/class="sync-select-shell"/g) ?? []).length, 6);
   assert.match(html, /> Open folder</);
   assert.match(html, /> Clean up now</);
   assert.match(html, />Delete all</);
@@ -124,6 +124,10 @@ test("the Settings page is a path-bar screen of grouped preference rows", () => 
   assert.doesNotMatch(html, /Thread size limit|settings-row-conversation_file_limit_bytes/);
   assert.match(html, /aria-label="Preview size limit"/);
   assert.match(html, /<option value="1024" selected="">1 MB<\/option>/);
+  // The largest project file defaults to 512 MB and offers up to 1.5 GB.
+  assert.match(html, /<option value="512" selected="">512 MB<\/option>/);
+  assert.match(html, /<option value="1536">1.5 GB<\/option>/);
+  assert.doesNotMatch(html, />2 GB<\/option>/);
   assert.match(html, /<option value="4" selected="">4 workers<\/option>/);
   assert.match(html, /aria-label="Parallel cloud transfers"/);
   assert.match(html, /<option value="6" selected="">6 transfers<\/option>/);
@@ -409,7 +413,7 @@ function latinLeft(html: string, kept: readonly string[]): string[] {
 
 /* Product and system names, units, paths, the done target the test hands in,
    and English as the Language row names it — in its own language. */
-const KEPT_LATIN = ["~/.mallard/logs", "~/.mallard", "--version", "mallard-app", "Mallard", "GitHub", "Codex", "Claude", "CLI", "PATH", "Shell", "macOS", "Windows", "CPU", "Version", "MB", "KB", "English"];
+const KEPT_LATIN = ["~/.mallard/logs", "~/.mallard", "--version", "mallard-app", "Mallard", "GitHub", "Codex", "Claude", "CLI", "PATH", "Shell", "macOS", "Windows", "CPU", "Version", "MB", "KB", "GB", "English"];
 
 test("the Settings page in Chinese: every row, the path bar and the switches, nothing left in English", () => {
   const html = inChinese(() => renderPage([{

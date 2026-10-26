@@ -23,7 +23,8 @@ use crate::providers::AgentProviderRegistry;
 use mallard_domain::portable::contracts;
 use mallard_domain::{
     self as domain, hex_lower, now_secs, sha256_hex, ActionId, ActionStatus, ApplyPolicyPrimitive,
-    ApplyReceipt, BindingState, BundleDirectoryEntry, BundleFileEntry, BundleHead, BundleId,
+    payload_chunk_ranges, ApplyReceipt, BindingState, BundleDirectoryEntry, BundleFileEntry,
+    BundleHead, BundleId,
     BundleIdentity, BundleKind, BundleManifest, BundleRecipe, BundleScope, BundleSnapshot,
     CapturedWith, CloudThreadId, ConversationThread, LogicalPath, Mainline, PlanId,
     PortableContractResolver, PortableOrigin, ProjectBinding, ProjectFilePreservationPin,
@@ -39,7 +40,7 @@ use crate::storage_core::publication::{
 };
 use crate::storage_core::{
     open_read_only_no_follow, parse_json_bytes, parse_json_reader, repository_object_key,
-    sha256_reader, validate_bundle_relative_object_key, ExpectedObject, ObjectStore, StageOutcome,
+    sha256_reader, validate_bundle_relative_object_key, ExpectedObject, ObjectKey, ObjectStore, StageOutcome,
     VerifiedBody,
 };
 
@@ -329,29 +330,67 @@ impl<'a, S: ObjectStore> EngineByteSource<'a, S> {
             self.loaded.insert(logical_path.clone(), hit);
             return Ok(());
         }
-        let key = repository_object_key(bundle_id, &entry.object_key)?;
-        let outcome = self.engine.store.stage_verified(
-            &key,
-            &ExpectedObject {
-                size: entry.size,
-                sha256: entry.sha256.clone(),
-            },
-        )?;
-        let body = match outcome {
-            StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
-            StageOutcome::Mismatch => {
-                return Err(format!(
-                    "bundle object '{}' does not match manifest size/hash",
-                    key
-                ))
-            }
-            StageOutcome::Verified(body) => body,
+        let requests = Self::requests_for(bundle_id, entry)?;
+        let outcomes = match requests.as_slice() {
+            [(key, expected)] => vec![self.engine.store.stage_verified(key, expected)?],
+            _ => self.engine.store.stage_many_verified(&requests)?,
         };
+        let body = Self::body_from_outcomes(entry, &requests, outcomes)?;
         if let Some(cache) = &self.cache {
             cache.insert(cache_key, body.clone());
         }
         self.loaded.insert(logical_path.clone(), body);
         Ok(())
+    }
+
+    /// The store requests one file entry resolves to, in order: one for a
+    /// single-object entry, one per chunk for a split one.
+    fn requests_for(
+        bundle_id: &BundleId,
+        entry: &BundleFileEntry,
+    ) -> Result<Vec<(ObjectKey, ExpectedObject)>, String> {
+        entry
+            .payload_objects()
+            .into_iter()
+            .map(|object| {
+                Ok((
+                    repository_object_key(bundle_id, &object.relative_key)?,
+                    ExpectedObject {
+                        size: object.size,
+                        sha256: object.sha256,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// One file's verified body from its staged objects: the object itself,
+    /// or the chunks assembled and verified as the whole file. A missing
+    /// object is the version missing a part; a mismatch names its key.
+    fn body_from_outcomes(
+        entry: &BundleFileEntry,
+        requests: &[(ObjectKey, ExpectedObject)],
+        outcomes: Vec<StageOutcome>,
+    ) -> Result<VerifiedBody, String> {
+        let mut parts = Vec::with_capacity(outcomes.len());
+        for ((key, _), outcome) in requests.iter().zip(outcomes) {
+            match outcome {
+                StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
+                StageOutcome::Mismatch => {
+                    return Err(format!(
+                        "bundle object '{}' does not match manifest size/hash",
+                        key
+                    ))
+                }
+                StageOutcome::Verified(body) => parts.push(body),
+            }
+        }
+        if !entry.is_split() {
+            return parts
+                .pop()
+                .ok_or_else(|| "bundle file entry names no object".to_string());
+        }
+        VerifiedBody::assemble(&parts, entry.size, &entry.sha256)
     }
 }
 
@@ -412,28 +451,21 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
             }
             pending.push((path.clone(), entry.clone()));
         }
-        let total_objects = pending.len();
         let total_bytes = pending
             .iter()
             .fold(0_u64, |sum, (_, entry)| sum.saturating_add(entry.size));
-        let requests = pending
+        let per_entry = pending
             .iter()
-            .map(|(_, entry)| {
-                Ok((
-                    repository_object_key(&self.snapshot.head.bundle_id, &entry.object_key)?,
-                    ExpectedObject {
-                        size: entry.size,
-                        sha256: entry.sha256.clone(),
-                    },
-                ))
-            })
+            .map(|(_, entry)| Self::requests_for(&self.snapshot.head.bundle_id, entry))
             .collect::<Result<Vec<_>, String>>()?;
+        let requests = per_entry.concat();
+        let total_objects = requests.len();
         // One operation over every pending object: the store owns its
         // transfer windows and reports each object as it is settled.
         let mut fetched_bytes = 0_u64;
         let mut index = 0_usize;
         let on_progress = &mut self.on_progress;
-        let outcomes = self
+        let mut outcomes = self
             .engine
             .store
             .stage_many_with_progress(&requests, &mut |size| {
@@ -447,18 +479,14 @@ impl<S: ObjectStore> BundleBytes for EngineByteSource<'_, S> {
                         total_bytes,
                     });
                 }
-            })?;
-        for (((path, entry), (key, _)), outcome) in pending.iter().zip(&requests).zip(outcomes) {
-            let body = match outcome {
-                StageOutcome::Missing => return Err(VERSION_INCOMPLETE.to_string()),
-                StageOutcome::Mismatch => {
-                    return Err(format!(
-                        "bundle object '{}' does not match manifest size/hash",
-                        key
-                    ))
-                }
-                StageOutcome::Verified(body) => body,
-            };
+            })?
+            .into_iter();
+        for ((path, entry), requests) in pending.iter().zip(&per_entry) {
+            let entry_outcomes = outcomes.by_ref().take(requests.len()).collect::<Vec<_>>();
+            if entry_outcomes.len() != requests.len() {
+                return Err("the store settled fewer objects than were requested".to_string());
+            }
+            let body = Self::body_from_outcomes(entry, requests, entry_outcomes)?;
             if let Some(cache) = &self.cache {
                 cache.insert(
                     ObjectCacheKey {
@@ -1083,21 +1111,68 @@ impl<S: ObjectStore> BundleEngine<S> {
                         path, captured.resource_id
                     ));
                 }
+                let descriptor = &input.resources[&captured.resource_id];
+                let kind = self
+                    .contracts
+                    .resolve_resource_kind(&descriptor.kind, &descriptor.attributes)
+                    .map_err(|error| {
+                        format!("resource '{}' attributes: {}", captured.resource_id, error)
+                    })?;
                 let digest = captured.bytes.sha256().to_string();
-                prepared.insert(
-                    path,
+                let size = captured.bytes.len() as u64;
+                let bytes = captured.bytes.into_bytes();
+                // A project file above the chunk size travels as chunks; every
+                // other payload stays one object, since its limits already fit
+                // every provider and Cloud keys session views by the transcript
+                // object. Slices share the capture allocation.
+                let ranges = if *scope_key == SyncScopeKey::Project
+                    && kind == Some(ResourceKindPrimitive::ProjectContentFile)
+                {
+                    payload_chunk_ranges(size)
+                } else {
+                    Vec::new()
+                };
+                let (entry, objects) = if ranges.is_empty() {
                     (
                         BundleFileEntry {
                             resource_id: captured.resource_id.clone(),
                             sha256: digest.clone(),
-                            size: captured.bytes.len() as u64,
+                            size,
                             source_mtime: captured.source_mtime,
-                            object_key: format!("_objects/{}", digest),
+                            object_key: Some(format!("_objects/{}", digest)),
+                            chunks: Vec::new(),
                             mode: captured.mode,
                         },
-                        captured.bytes.into_bytes(),
-                    ),
-                );
+                        vec![(digest, bytes)],
+                    )
+                } else {
+                    let objects = ranges
+                        .into_iter()
+                        .map(|range| {
+                            let slice = bytes.slice(range.start as usize..range.end as usize);
+                            (sha256_hex(&slice), slice)
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        BundleFileEntry {
+                            resource_id: captured.resource_id.clone(),
+                            sha256: digest,
+                            size,
+                            source_mtime: captured.source_mtime,
+                            object_key: None,
+                            chunks: objects
+                                .iter()
+                                .map(|(sha256, slice)| mallard_domain::BundleChunk {
+                                    sha256: sha256.clone(),
+                                    size: slice.len() as u64,
+                                })
+                                .collect(),
+                            mode: captured.mode,
+                        },
+                        objects,
+                    )
+                };
+                prepared.insert(path, (entry, objects));
             }
             prepared_captures.insert(scope_key.clone(), prepared);
         }
@@ -1127,28 +1202,18 @@ impl<S: ObjectStore> BundleEngine<S> {
                 let previous_scope = previous_manifest
                     .as_ref()
                     .and_then(|manifest| manifest.scopes.get(scope_key));
-                let published_file_identities: BTreeSet<(&str, &str, u64)> = previous_scope
+                let published_file_identities: BTreeSet<_> = previous_scope
                     .map(|scope| {
                         scope
                             .files
                             .values()
-                            .map(|candidate| {
-                                (
-                                    candidate.object_key.as_str(),
-                                    candidate.sha256.as_str(),
-                                    candidate.size,
-                                )
-                            })
+                            .map(|candidate| candidate.payload_identity())
                             .collect()
                     })
                     .unwrap_or_default();
                 for (path, entry) in &input.retained_files {
                     entry.validate()?;
-                    if !published_file_identities.contains(&(
-                        entry.object_key.as_str(),
-                        entry.sha256.as_str(),
-                        entry.size,
-                    )) {
+                    if !published_file_identities.contains(&entry.payload_identity()) {
                         return Err(format!(
                             "retained file '{}' was not in the reviewed manifest",
                             path
@@ -1194,10 +1259,12 @@ impl<S: ObjectStore> BundleEngine<S> {
                     // nothing for that scope.
                     continue;
                 }
-                for (_, (entry, bytes)) in prepared.into_iter().flatten() {
-                    pending_uploads
-                        .entry(entry.sha256.clone())
-                        .or_insert_with(|| bytes.clone());
+                for (_, (_, objects)) in prepared.into_iter().flatten() {
+                    for (digest, bytes) in objects {
+                        pending_uploads
+                            .entry(digest.clone())
+                            .or_insert_with(|| bytes.clone());
+                    }
                 }
                 let revision = previous_scope
                     .map(|scope| scope.revision.saturating_add(1))
@@ -2068,7 +2135,7 @@ mod tests {
         StoreKeyPage, StoreListPage, StoredMetadata, REPOSITORY_COMMITS_PREFIX, REPOSITORY_PREFIX,
         STORAGE_MARKER_KEY,
     };
-    use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId};
+    use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId, PAYLOAD_CHUNK_BYTES};
 
     fn bundle_id(number: u64) -> BundleId {
         BundleId::parse(format!("{:032x}", number)).unwrap()
@@ -3699,7 +3766,10 @@ mod tests {
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         assert_eq!(store.payload_puts().len(), 2);
         for entry in project_scope(&first.manifest).files.values() {
-            assert_eq!(entry.object_key, format!("_objects/{}", entry.sha256));
+            assert_eq!(
+                entry.object_key.as_deref(),
+                Some(format!("_objects/{}", entry.sha256).as_str())
+            );
         }
 
         write(&source.join("changing.md"), b"second draft");
@@ -3978,8 +4048,377 @@ mod tests {
             .collect();
         assert_eq!(file_entries.len(), 2);
         for entry in file_entries {
-            assert_eq!(entry.object_key, shared_key);
+            assert_eq!(entry.object_key.as_deref(), Some(shared_key.as_str()));
         }
+    }
+
+    /// Deterministic bytes that differ from chunk to chunk.
+    fn large_payload(len: u64) -> Vec<u8> {
+        (0..len)
+            .map(|index| (index.wrapping_mul(31) ^ (index >> 7)) as u8)
+            .collect()
+    }
+
+    fn big_path() -> LogicalPath {
+        LogicalPath::parse("project/big.bin").unwrap()
+    }
+
+    /// A project file above the chunk size is published as chunk objects
+    /// listed in order on its entry, deduplicated with an identical file in
+    /// the same push, and pulled back as one verified file.
+    #[test]
+    fn a_large_project_file_travels_as_chunks_and_pulls_back_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let payload = large_payload(PAYLOAD_CHUNK_BYTES + 3);
+        write(&source.join("big.bin"), &payload);
+        write(&source.join("big-copy.bin"), &payload);
+        write(&source.join("note.md"), b"small beside it");
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(97);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let published = publish_captured(
+            &engine,
+            identity(id.clone(), "Chunks"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        // Two chunks, shared by the identical copy, and the small file.
+        let puts = store.payload_puts();
+        assert_eq!(puts.len(), 3, "{puts:?}");
+        let manifest = &published.snapshot().manifest;
+        let entry = &project_scope(manifest).files[&big_path()];
+        assert!(entry.is_split());
+        assert_eq!(entry.object_key, None);
+        assert_eq!(entry.sha256, sha256_hex(&payload));
+        assert_eq!(entry.size, payload.len() as u64);
+        assert_eq!(entry.chunks.len(), 2);
+        assert_eq!(entry.chunks[0].size, PAYLOAD_CHUNK_BYTES);
+        assert_eq!(
+            entry.chunks[0].sha256,
+            sha256_hex(&payload[..PAYLOAD_CHUNK_BYTES as usize])
+        );
+        assert_eq!(entry.chunks[1].size, 3);
+        assert_eq!(
+            entry.chunks[1].sha256,
+            sha256_hex(&payload[PAYLOAD_CHUNK_BYTES as usize..])
+        );
+        for chunk in &entry.chunks {
+            assert!(puts
+                .iter()
+                .any(|key| key.ends_with(&format!("/_objects/{}", chunk.sha256))));
+        }
+        assert!(!puts
+            .iter()
+            .any(|key| key.ends_with(&format!("/_objects/{}", entry.sha256))));
+        let copy = &project_scope(manifest).files[&LogicalPath::parse("project/big-copy.bin").unwrap()];
+        assert_eq!(copy.chunks, entry.chunks);
+        assert!(!project_scope(manifest).files[&LogicalPath::parse("project/note.md").unwrap()].is_split());
+
+        // Pull: every chunk is staged and reported, then assembled into one
+        // body with the whole file's coordinates.
+        let snapshot = engine.inspect(&id).unwrap();
+        let mut progress = Vec::new();
+        {
+            let mut on_progress = |report: FetchProgress| {
+                progress.push((
+                    report.index,
+                    report.total_objects,
+                    report.fetched_bytes,
+                    report.total_bytes,
+                ));
+            };
+            let mut bytes = engine.byte_source(&snapshot, Some(&mut on_progress));
+            bytes.prefetch(&[big_path()]).unwrap();
+            let body = bytes.body(&big_path()).unwrap();
+            assert_eq!(body.size(), payload.len() as u64);
+            assert_eq!(body.sha256(), sha256_hex(&payload));
+            let mut assembled = Vec::new();
+            std::io::Read::read_to_end(&mut body.open().unwrap(), &mut assembled).unwrap();
+            assert_eq!(assembled, payload);
+        }
+        assert_eq!(
+            progress.last(),
+            Some(&(2, 2, payload.len() as u64, payload.len() as u64))
+        );
+
+        // And a restore writes the file whole.
+        let binding = active_binding(id.clone(), &target);
+        let homes = BTreeMap::new();
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &homes,
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
+        let mut bytes = engine.byte_source(&snapshot, None);
+        engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &homes,
+                &plan,
+                &approved,
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        assert_eq!(fs::read(target.join("big.bin")).unwrap(), payload);
+        assert_eq!(fs::read(target.join("big-copy.bin")).unwrap(), payload);
+        assert_eq!(fs::read(target.join("note.md")).unwrap(), b"small beside it");
+    }
+
+    /// A chunk with other bytes is a mismatch naming that chunk; a chunk
+    /// the storage lost makes the version incomplete, as any object does.
+    #[test]
+    fn a_damaged_or_missing_chunk_fails_the_pull_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        let payload = large_payload(PAYLOAD_CHUNK_BYTES + 3);
+        write(&source.join("big.bin"), &payload);
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let id = bundle_id(98);
+        let store_root = temp.path().join("store");
+        let engine = BundleEngine::open(
+            LocalObjectStore::open(&store_root).unwrap(),
+            storage_id(),
+        )
+        .unwrap()
+        .with_object_cache(Arc::new(ObjectCache::default()));
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Chunks"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
+        let entry = project_scope(&snapshot.manifest).files[&big_path()].clone();
+        let objects = store_root.join(format!("{}/{}/_objects", REPOSITORY_PREFIX, id));
+
+        let last = objects.join(&entry.chunks[1].sha256);
+        fs::write(&last, b"xyz").unwrap();
+        let mut bytes = engine.byte_source(&snapshot, None);
+        let error = bytes.body(&big_path()).unwrap_err();
+        assert!(error.contains("does not match manifest size/hash"), "{error}");
+        assert!(error.contains(&entry.chunks[1].sha256), "{error}");
+        drop(bytes);
+
+        fs::remove_file(objects.join(&entry.chunks[0].sha256)).unwrap();
+        let mut bytes = engine.byte_source(&snapshot, None);
+        assert_eq!(bytes.body(&big_path()).unwrap_err(), VERSION_INCOMPLETE);
+        assert_eq!(bytes.prefetch(&[big_path()]).unwrap_err(), VERSION_INCOMPLETE);
+    }
+
+    /// An unchanged split file is retained from the reviewed manifest with
+    /// its chunk list; the next push uploads only what is new.
+    #[test]
+    fn an_unchanged_split_file_is_retained_and_uploads_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source-project");
+        fs::create_dir_all(&source).unwrap();
+        let payload = large_payload(PAYLOAD_CHUNK_BYTES + 1);
+        write(&source.join("big.bin"), &payload);
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let id = bundle_id(99);
+        let store = CountingStore::open(&temp.path().join("store"));
+        let engine = BundleEngine::open(store.clone(), storage_id()).unwrap();
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let first = publish_captured(
+            &engine,
+            identity(id.clone(), "Chunks"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        assert_eq!(store.payload_puts().len(), 2);
+        let first_entry = project_scope(&first.snapshot().manifest).files[&big_path()].clone();
+        assert!(first_entry.is_split());
+
+        write(&source.join("note.md"), b"new beside the big file");
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        store.reset();
+        let second = publish_captured(
+            &engine,
+            identity(id.clone(), "Chunks"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            engine.read_head(&id).unwrap(),
+            20,
+        )
+        .unwrap();
+        assert_eq!(store.payload_puts().len(), 1);
+        assert_eq!(
+            project_scope(&second.snapshot().manifest).files[&big_path()],
+            first_entry
+        );
+    }
+
+    /// Dropbox: every chunk is one upload session under its 150 MiB limit.
+    #[test]
+    fn dropbox_round_trips_a_split_project_file() {
+        let server = crate::storage_core::dropbox_store::mock::MockDropboxServer::new();
+        let second = server.second_user();
+        let first = BundleEngine::open(server.store, storage_id()).unwrap();
+        let second = BundleEngine::open(second, storage_id()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let payload = large_payload(PAYLOAD_CHUNK_BYTES + 1);
+        let target = round_trip_split_file(&first, &second, temp.path(), &payload, bundle_id(100));
+        assert_eq!(fs::read(target.join("big.bin")).unwrap(), payload);
+    }
+
+    /// Feishu: a 32 MiB chunk takes the prepare/part/finish path that
+    /// exists for objects above 20 MiB.
+    #[test]
+    fn feishu_round_trips_a_split_project_file() {
+        let server = crate::storage_core::feishu_store::mock::MockFeishuServer::new();
+        let second =
+            crate::storage_core::feishu_store::mock::ListedReadStore(server.second_store());
+        let first = BundleEngine::open(server.store.clone(), storage_id()).unwrap();
+        let second = BundleEngine::open(second, storage_id()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let payload = large_payload(PAYLOAD_CHUNK_BYTES + 1);
+        let target = round_trip_split_file(&first, &second, temp.path(), &payload, bundle_id(101));
+        assert_eq!(fs::read(target.join("big.bin")).unwrap(), payload);
+    }
+
+    /// Mallard Cloud: every chunk lands as an ordinary object the service
+    /// indexes and counts, and a second engine pulls the file whole.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn managed_cloud_round_trips_a_split_project_file() {
+        use crate::managed_cloud::client::ManagedCloudClient;
+        use crate::managed_cloud::stub::StubManagedCloud;
+        use crate::managed_cloud::ManagedObjectStore;
+        let stub = StubManagedCloud::start().await;
+        let (_, token) = stub.state.lock().unwrap().add_user("octocat");
+        let client = ManagedCloudClient::new(
+            &stub.endpoint,
+            Some(mallard_domain::SecretValue::parse(&token).unwrap()),
+        )
+        .unwrap();
+        let store = ManagedObjectStore::new(client, tokio::runtime::Handle::current());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let payload = large_payload(PAYLOAD_CHUNK_BYTES + 1);
+        let id = bundle_id(102);
+        let (target, chunks) = tokio::task::spawn_blocking({
+            let payload = payload.clone();
+            let id = id.clone();
+            move || {
+                let first = BundleEngine::open(store.clone(), storage_id()).unwrap();
+                let second = BundleEngine::open(store, storage_id())
+                    .unwrap()
+                    .with_object_cache(Arc::new(ObjectCache::default()));
+                let target = round_trip_split_file(&first, &second, &root, &payload, id.clone());
+                let chunks = project_scope(&second.inspect(&id).unwrap().manifest).files[&big_path()]
+                    .chunks
+                    .clone();
+                (target, chunks)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fs::read(target.join("big.bin")).unwrap(), payload);
+        assert_eq!(chunks.len(), 2);
+        let state = stub.state.lock().unwrap();
+        let repository = state
+            .repositories
+            .values()
+            .find(|repository| repository.bundle_id.as_deref() == Some(id.as_str()))
+            .expect("the project's repository");
+        for chunk in &chunks {
+            let key = format!("{REPOSITORY_PREFIX}/{id}/_objects/{}", chunk.sha256);
+            assert!(repository.objects.contains_key(&key), "{key}");
+        }
+        assert!(repository.committed_bytes >= payload.len() as u64);
+    }
+
+    /// Push `payload` as `big.bin` through `first`, pull it through
+    /// `second` into a target folder, and return that folder.
+    fn round_trip_split_file<A: ObjectStore, B: ObjectStore>(
+        first: &BundleEngine<A>,
+        second: &BundleEngine<B>,
+        root: &Path,
+        payload: &[u8],
+        id: BundleId,
+    ) -> PathBuf {
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        write(&source.join("big.bin"), payload);
+        let mut request = CaptureRequest::for_project(&source);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let recipe = recipe_for(inventory.resources.iter().map(|r| r.resource_id.clone()));
+        let published = publish_captured(
+            first,
+            identity(id.clone(), "Split"),
+            &recipe,
+            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        let entry = &project_scope(&published.snapshot().manifest).files[&big_path()];
+        assert_eq!(entry.chunks.len(), 2, "{entry:?}");
+        let snapshot = second.inspect(&id).unwrap();
+        let binding = active_binding(id, &target);
+        let homes = BTreeMap::new();
+        let plan = second
+            .build_restore_plan_from_snapshot(
+                registry(),
+                &snapshot,
+                &binding,
+                &homes,
+                &BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
+        let mut bytes = second.byte_source(&snapshot, None);
+        second
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &homes,
+                &plan,
+                &approved,
+                &root.join("backups"),
+                101,
+            )
+            .unwrap();
+        target
     }
 
     #[test]
@@ -4834,7 +5273,10 @@ mod tests {
         let expected_keys = paths
             .iter()
             .map(|path| {
-                repository_object_key(&snapshot.head.bundle_id, &files[path].object_key)
+                repository_object_key(
+                    &snapshot.head.bundle_id,
+                    files[path].object_key.as_deref().unwrap(),
+                )
                     .unwrap()
                     .as_str()
                     .to_string()

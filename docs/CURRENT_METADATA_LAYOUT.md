@@ -743,12 +743,19 @@ A file entry contains:
 
 ```text
 resource_id
-sha256
+sha256                        # the whole file
 size
 source_mtime
-object_key                    # normally _objects/<sha256>
+object_key                    # _objects/<sha256>, for a file stored as one object
+chunks                        # ordered {sha256, size}, for a project file above
+                              # 32 MiB; each chunk is the object _objects/<sha256>
 optional mode                 # safe permission bits only
 ```
+
+An entry carries exactly one of `object_key` and `chunks`. A split entry's
+chunks are exactly 32 MiB each with the remainder last, so the list is a
+function of the file's bytes; only a project file may be split, and a file
+stored as one object may be any size its kind allows.
 
 A directory entry contains its resource ID, optional safe mode, and source
 mtime, but no object key. Tombstones are typed as resource, resource file,
@@ -930,7 +937,11 @@ used as resource identity or object keys.
   in different repositories still has separate object keys.
 
 The manifest, not the object path alone, supplies ownership, size, logical
-path, source mtime, and safe mode.
+path, source mtime, and safe mode. A project file above 32 MiB is stored as
+several such objects, one per chunk, each named by its own digest and listed
+on the file's entry; a Pull stages every chunk through the same verified read
+and assembles them into one verified body, checked against the whole file's
+size and digest, before anything opens it.
 
 Payload reads use the manifest entry's exact `size` and `sha256`. Both storage
 adapters copy each object into a private temporary file while hashing it and
@@ -1144,8 +1155,12 @@ payload is safe. Shared storage should be treated as private user data.
 - files, directories, and tombstones: at most 100,000 each.
 - one conversation source file: at most 100 MiB.
 - one ordinary captured provider file: at most 16 MiB.
-- one project-content file: at most 100 MiB.
-- aggregate selected capture/project content: at most 512 MiB.
+- one project-content file: at most the *Largest project file* setting of
+  the capturing computer (512 MiB by default, choices up to 1.5 GiB, the
+  document accepting up to 2 GiB, which is the ceiling any manifest may
+  carry); above 32 MiB, stored as 32 MiB chunk objects, at most 64.
+- aggregate selected capture/project content: at most 512 MiB, or the
+  *Largest project file* setting when larger.
 - conversation bindings: at most 100,000.
 - active conversation journal operations: at most 10,000.
 - Library resources: at most 512 per kind-repository manifest; scope links:

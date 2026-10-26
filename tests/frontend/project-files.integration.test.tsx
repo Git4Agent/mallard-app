@@ -4,6 +4,7 @@ import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type {
   ProjectBinding,
+  ProjectContentBlockedCode,
   ProjectContentEntry,
   ProjectContentInventory,
   ProjectResourceDescriptor,
@@ -11,6 +12,7 @@ import type {
   ThreadSyncComparison,
 } from "../../src/types";
 import ProjectFilesReviewPage, {
+  blockedReviewSections,
   searchProjectFileReviewCards,
   type ProjectFileReviewRow,
 } from "../../src/components/project-sync/ProjectFilesReviewPage";
@@ -107,6 +109,7 @@ const inventory: ProjectContentInventory = {
   ],
   ignored_count: 2,
   blocked_count: 1,
+  file_limit_bytes: 512 * 1024 * 1024,
   warnings: [],
   scanned_at: 1,
 };
@@ -265,7 +268,7 @@ test("a ticked new file locks both directory ancestors and still reads New", () 
   assert.equal(html.match(/catalog-card/g)?.length, 1, "only the file draws a card");
   assert.match(html, /aria-label="Include docs\/specs\/a\.md"[^>]*checked/);
   assert.match(html, /class="sync-name-search-count">1 file</);
-  assert.match(html, /2 ignored · 1 blocked/);
+  assert.match(html, /2 ignored · 0 scan warnings/);
   assert.doesNotMatch(html, /sync-project-file-selection-placeholder/);
   assert.doesNotMatch(html, /Exact entries selected|Scanning cannot prove/);
 });
@@ -788,6 +791,94 @@ test("Push review lists local-outstanding and unresolved local project files", (
   // The unresolved local file stops the push, and its own tick is the way out.
   assert.match(list, /<input type="checkbox" aria-label="Include doc\/unknown\.md" checked=""\/>/);
   assert.match(html, />4 project files require Pull</);
+});
+
+const FILE_LIMIT = 512 * 1024 * 1024;
+
+function blockedEntry(
+  resourceId: string,
+  path: string,
+  code: ProjectContentBlockedCode,
+  size: number | null = null,
+): ProjectContentEntry {
+  return {
+    ...entry(resourceId, "file", path, false),
+    entry_type: "blocked",
+    state: "blocked",
+    size,
+    mode: null,
+    source_mtime: null,
+    local_digest: null,
+    review_digest: null,
+    newly_discovered: false,
+    blocked_reason: "The scanner's own sentence",
+    blocked_code: code,
+  };
+}
+
+test("files the walk refused wait folded after the folders, counted by reason and never ticked", () => {
+  const scanned: ProjectContentInventory = {
+    ...inventory,
+    entries: [
+      ...inventory.entries,
+      blockedEntry("take-1", "raw/take-1.mov", "too_large", FILE_LIMIT + 10),
+      blockedEntry("take-2", "raw/take-2.mov", "too_large", FILE_LIMIT + 20),
+      blockedEntry("link", "latest.mov", "symlink"),
+    ],
+    blocked_count: 3,
+  };
+  const html = renderToStaticMarkup(
+    <PushResourceWorkspace onSessionActionError={() => undefined}
+      credentialRedactionEnabled={true}
+      resources={scanned.entries.map((candidate) => projectContentReviewRow(candidate))}
+      selected={new Set()}
+      projectDefaults={new Set()}
+      busy={false}
+      projectContentInventory={scanned}
+      projectContentScanned
+      showProjectFiles
+      activeStep="project_files"
+      onToggle={() => undefined}
+      onClose={() => undefined}
+      onPush={() => undefined}
+    />,
+  );
+  // Folded: the head says how many, how large and why; no card is drawn.
+  assert.match(html, /<button type="button" class="sync-list-tile-head" aria-expanded="false" aria-controls="[^"]+">/);
+  assert.match(html, /Won&#x27;t upload<\/strong><small>3 files · 1\.0 GB<\/small>/);
+  assert.match(html, />2 over the limit · 1 symlink</);
+  assert.doesNotMatch(html, /take-1\.mov|latest\.mov/);
+  // The folder that holds the uploadable file still counts only it.
+  assert.match(html, /aria-label="0 of 1 selected in docs\/specs"/);
+  // The line under the list no longer counts what the group lists.
+  assert.match(html, />2 ignored · 0 scan warnings</);
+  assert.doesNotMatch(html, / blocked · /);
+});
+
+test("the blocked group sorts by reason, speaks the interface language and follows the search", () => {
+  const row = (resourceId: string, relativePath: string, blockedCode: ProjectContentBlockedCode, size?: number) => ({
+    resourceId, relativePath, blockedCode, size,
+    entryType: "blocked" as const, state: "blocked", localPresent: true, storagePresent: false,
+    blockedReason: "The scanner's own sentence",
+  });
+  const rows = [
+    row("sock", ".render.sock", "special_file"),
+    row("link", "latest.mov", "symlink"),
+    row("take-1", "raw/take-1.mov", "too_large", FILE_LIMIT + 1),
+    row("take-2", "raw/take-2.mov", "too_large", FILE_LIMIT + 2),
+  ];
+  const sections = blockedReviewSections(rows, "", FILE_LIMIT);
+  assert.deepEqual(
+    sections.map((section) => [section.code, section.rows.map((candidate) => candidate.resourceId)]),
+    [["too_large", ["take-1", "take-2"]], ["symlink", ["link"]], ["special_file", ["sock"]]],
+  );
+  assert.equal(sections[0].title, "Over the 512 MB file limit");
+  assert.equal(sections[0].rows[0].blockedReason, "Larger than the 512 MB limit for one file.");
+  assert.deepEqual(
+    blockedReviewSections(rows, "take-2", FILE_LIMIT).map((section) => section.rows.map((candidate) => candidate.relativePath)),
+    [["raw/take-2.mov"]],
+  );
+  assert.deepEqual(blockedReviewSections(rows, "nothing-like-it", FILE_LIMIT), []);
 });
 
 test("Excluding an unresolved local file and its folder clears the Push refusal", () => {

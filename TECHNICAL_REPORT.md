@@ -353,6 +353,14 @@ Entries are classified as `synced`, `local_only`, `local_ahead`,
 `unknown`. An unavailable historical base forces relevant entries to
 `unknown` instead of guessing.
 
+A `blocked` local entry carries its reason code — `too_large`, `symlink`, or
+`special_file` — and, when too large, its size; the inventory carries the
+one-file limit. The Push review lists blocked entries in one group after the
+folders, folded until opened or until a search matches one, by reason. They
+are never selectable and never captured. An entry refused before it had a
+listable path (too deep, or not a portable name) is reported as a scan
+warning instead.
+
 After Scan, a newly discovered eligible entry is selected in the pending
 review unless its stable ID is in the link's exclusion set. Existing recipe
 entries remain selected. Selected descendants force their ancestor directory
@@ -651,9 +659,9 @@ every computer selects the same one, and the Push that wrote the other fails.
 | Discovered resources | 20,000 |
 | Generic project-content depth | 32 components |
 | Conversation file size | 100 MiB fixed; not user-configurable |
-| Project-content file size | 100 MiB |
+| Project-content file size | the *Largest project file* setting: 512 MiB by default, choices up to 1.5 GiB, the document accepting up to 2 GiB; above 32 MiB, stored as 32 MiB chunk objects |
 | Other captured file size | 16 MiB |
-| Aggregate selected capture | 512 MiB |
+| Aggregate selected capture | 512 MiB, or the *Largest project file* setting when larger |
 | Manifest resources | 20,000 |
 | Manifest files/directories/tombstones | 100,000 each |
 | Restore actions | 100,000 |
@@ -670,6 +678,9 @@ aggregate capture limits remain product policy.
 The 512 MiB capture limit applies to one Push, not to the accumulated project
 snapshot. Retaining existing stored files without capturing local payloads does
 not consume this budget. Manifest counts and per-file bounds still apply.
+A project file above 32 MiB travels as chunk objects of exactly 32 MiB, the
+last one shorter, listed in order on its manifest entry; a Pull verifies every
+chunk and then the whole file (`docs/PLAN_CHUNKED_PAYLOAD_OBJECTS.md`).
 
 ## 13. Current automated coverage
 

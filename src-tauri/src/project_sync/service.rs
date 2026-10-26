@@ -715,6 +715,10 @@ pub struct ProjectContentEntry {
     pub undecided: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Why a local entry was blocked: `too_large`, `symlink`, or
+    /// `special_file`. The review groups and words the refusal by it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -738,6 +742,8 @@ pub struct ProjectContentInventory {
     pub entries: Vec<ProjectContentEntry>,
     pub ignored_count: usize,
     pub blocked_count: usize,
+    /// One file's capture limit, which a `too_large` entry exceeds.
+    pub file_limit_bytes: u64,
     #[serde(default)]
     pub warnings: Vec<String>,
     pub scanned_at: u64,
@@ -2875,6 +2881,7 @@ fn build_project_files_inventory(
     let mut local_versions = BTreeMap::<ResourceId, ProjectContentVersion>::new();
     let mut local_blocked_versions = BTreeMap::<ResourceId, ProjectContentVersion>::new();
     let mut local_blockers = BTreeMap::<ResourceId, String>::new();
+    let mut local_block_codes = BTreeMap::<ResourceId, String>::new();
     let mut local_warnings = BTreeMap::<ResourceId, String>::new();
     let mut ignored_count = 0;
     let mut blocked_count = 0;
@@ -2897,7 +2904,10 @@ fn build_project_files_inventory(
                 )
             })?;
             match facts {
-                provider_capture::ProjectContentCandidate::Blocked { relative_path } => {
+                provider_capture::ProjectContentCandidate::Blocked {
+                    relative_path,
+                    block,
+                } => {
                     let reason = candidate.blocked_reason.ok_or_else(|| {
                         format!(
                             "blocked project-content resource '{}' lacks a reason",
@@ -2905,13 +2915,14 @@ fn build_project_files_inventory(
                         )
                     })?;
                     local_blockers.insert(resource_id.clone(), reason);
+                    local_block_codes.insert(resource_id.clone(), block.code().to_string());
                     local_blocked_versions.insert(
                         resource_id,
                         ProjectContentVersion {
                             logical_path: format!("project/{}", relative_path),
                             relative_path,
                             entry_type: ProjectContentEntryType::Blocked,
-                            size: None,
+                            size: block.size(),
                             mode: None,
                             source_mtime: None,
                             descriptor,
@@ -3047,6 +3058,7 @@ fn build_project_files_inventory(
             newly_discovered,
             undecided,
             blocked_reason,
+            blocked_code: local_block_codes.get(&resource_id).cloned(),
             warning_code,
             warning_digest,
         });
@@ -3081,6 +3093,7 @@ fn build_project_files_inventory(
         entries,
         ignored_count,
         blocked_count,
+        file_limit_bytes: provider_capture::project_file_limit_bytes(),
         warnings,
         scanned_at: now_secs(),
     })
@@ -5112,7 +5125,7 @@ fn observe_codex_local(
             .map(|(bytes, _)| bytes.len() as u64)
             .sum();
         let size: u64 = sources.values().map(|(bytes, _)| bytes.len() as u64).sum();
-        if retained.saturating_add(size) > provider_capture::MAX_CAPTURE_BYTES {
+        if retained.saturating_add(size) > provider_capture::capture_budget_bytes() {
             return Err("Codex review exceeds the aggregate capture limit".into());
         }
         roots.insert(source, (resolved, sources));
@@ -7779,7 +7792,7 @@ fn provider_thread_review(
                         .flat_map(|child| child.sources.values())
                         .map(|(bytes, _)| bytes.len() as u64)
                         .sum::<u64>();
-                if retained_bytes.saturating_add(size) > provider_capture::MAX_CAPTURE_BYTES {
+                if retained_bytes.saturating_add(size) > provider_capture::capture_budget_bytes() {
                     return Err("Codex review exceeds the aggregate capture limit".into());
                 }
                 retained_bytes += size;
@@ -8519,7 +8532,7 @@ fn build_thread_sync_comparison(
         provider_errors: review.provider_errors,
         warnings,
         capture_budget: Some(CaptureBudget {
-            limit_bytes: provider_capture::MAX_CAPTURE_BYTES,
+            limit_bytes: provider_capture::capture_budget_bytes(),
             reserved_bytes,
         }),
         remote_continuity,
@@ -10508,7 +10521,7 @@ fn build_conversation_publication(
         .values()
         .map(|(bytes, _)| bytes.len() as u64)
         .sum();
-    if total > provider_capture::MAX_CAPTURE_BYTES {
+    if total > provider_capture::capture_budget_bytes() {
         return Err("Codex tree exceeds capture limit".into());
     }
     if let Some(tree) = &captured_tree {
@@ -13037,7 +13050,7 @@ fn prepare_pull_conversation_actions(
                     .checked_add(body.size())
                     .ok_or("cloud tree size overflow")?;
                 if body.size() > mallard_domain::MAX_CONVERSATION_FILE_BYTES
-                    || total_bytes > provider_capture::MAX_CAPTURE_BYTES
+                    || total_bytes > provider_capture::capture_budget_bytes()
                 {
                     return Err("cloud tree exceeds capture limits".into());
                 }
@@ -14580,10 +14593,10 @@ pub(super) fn apply_bundle_restore_with_progress(
             )
         }),
     )?;
-    if pull_bytes > provider_capture::MAX_CAPTURE_BYTES {
+    if pull_bytes > provider_capture::capture_budget_bytes() {
         return Err(pull_limit_sentence(
             pull_bytes,
-            provider_capture::MAX_CAPTURE_BYTES,
+            provider_capture::capture_budget_bytes(),
         ));
     }
     let applied_at = now_secs();
@@ -20413,10 +20426,11 @@ mod tests {
         let stored_files = first_snapshot
             .manifest
             .all_files()
-            .map(|(_, file)| {
+            .flat_map(|(_, file)| file.payload_objects())
+            .map(|object| {
                 (
-                    repository_object_key(&project.bundle_id, &file.object_key).unwrap(),
-                    file.size,
+                    repository_object_key(&project.bundle_id, &object.relative_key).unwrap(),
+                    object.size,
                 )
             })
             .collect::<Vec<_>>();
@@ -23546,6 +23560,48 @@ mod tests {
         }
     }
 
+    /// A blocked row says why, so the Push review can group and word it: a
+    /// symlink by its code alone, an oversized file with its size against
+    /// the limit the inventory carries.
+    #[cfg(unix)]
+    #[test]
+    fn blocked_project_files_carry_their_code_and_oversized_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let world = FilesWorld::new(&temp, "blocked-files-store");
+        std::os::unix::fs::symlink(
+            world.project_root.join("draft.md"),
+            world.project_root.join("latest.md"),
+        )
+        .unwrap();
+        let oversized = provider_capture::project_file_limit_bytes() + 1;
+        std::fs::File::create(world.project_root.join("take.mov"))
+            .unwrap()
+            .set_len(oversized)
+            .unwrap();
+
+        let files = world.files();
+        assert_eq!(files.file_limit_bytes, provider_capture::project_file_limit_bytes());
+        let row = |path: &str| {
+            files
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == path)
+                .unwrap()
+        };
+        let link = row("latest.md");
+        assert_eq!(link.entry_type, ProjectContentEntryType::Blocked);
+        assert_eq!(link.blocked_code.as_deref(), Some("symlink"));
+        assert_eq!(link.size, None);
+        let take = row("take.mov");
+        assert_eq!(take.entry_type, ProjectContentEntryType::Blocked);
+        assert_eq!(take.blocked_code.as_deref(), Some("too_large"));
+        assert_eq!(take.size, Some(oversized));
+        assert!(take.local_present);
+        let draft = row("draft.md");
+        assert_eq!(draft.blocked_code, None);
+        assert_eq!(files.blocked_count, 2);
+    }
+
     /// Story 1 with project files, rows F1 and A3: another computer cleared
     /// the storage and nobody pushed since. The base of the project's files
     /// names a manifest the storage no longer has. It is read as absent, so
@@ -24882,7 +24938,7 @@ mod tests {
             self.storage_root
                 .join(".mallard/v1/repositories")
                 .join(self.bundle_id.as_str())
-                .join(&entry.object_key)
+                .join(entry.object_key.as_deref().expect("a small file is one object"))
         }
 
         fn row_for<'a>(
@@ -25401,6 +25457,65 @@ mod tests {
         );
         assert_eq!(world.push(b).revision, Some(1));
         assert!(world.stored_cloud_ids().values().any(|id| id == &cloud_id));
+    }
+
+    /// A project file above the chunk size is pushed as chunk objects and
+    /// pulled back whole on the other computer. A chunk that has not
+    /// arrived in a replicated folder stops the Pull like any missing
+    /// object, and the Pull finishes once it has.
+    #[test]
+    fn a_large_project_file_pushes_as_chunks_and_pulls_back_whole() {
+        let world = TwoComputers::with_project_files("chunked-store");
+        let (a, b) = (&world.a, &world.b);
+        let payload = (0..mallard_domain::PAYLOAD_CHUNK_BYTES + 5)
+            .map(|index| (index.wrapping_mul(31) ^ (index >> 7)) as u8)
+            .collect::<Vec<u8>>();
+        std::fs::write(a.root.join("big.bin"), &payload).unwrap();
+        let pushed = world.push_with_files(a);
+        assert!(pushed.success, "{}", pushed.message);
+        let entry = {
+            let (_, engine) = storage_engine(&world.repo, &world.storage_id).unwrap();
+            let snapshot = engine.inspect(&world.bundle_id).unwrap();
+            snapshot
+                .manifest
+                .find_file(&LogicalPath::parse("project/big.bin").unwrap())
+                .expect("the file is stored")
+                .1
+                .clone()
+        };
+        assert_eq!(entry.chunks.len(), 2, "{entry:?}");
+        assert_eq!(entry.object_key, None);
+        assert_eq!(entry.sha256, mallard_domain::sha256_hex(&payload));
+        let objects = world
+            .storage_root
+            .join(".mallard/v1/repositories")
+            .join(world.bundle_id.as_str())
+            .join("_objects");
+        for chunk in &entry.chunks {
+            assert_eq!(
+                std::fs::metadata(objects.join(&chunk.sha256)).unwrap().len(),
+                chunk.size
+            );
+        }
+        assert!(!objects.join(&entry.sha256).exists());
+
+        let last = objects.join(&entry.chunks[1].sha256);
+        let aside = last.with_extension("not-arrived");
+        std::fs::rename(&last, &aside).unwrap();
+        let plan = world.plan_pull(b);
+        let result = world.pull_everything(&plan);
+        assert!(!result.success);
+        assert_eq!(
+            result.stopped.as_deref(),
+            Some("Part of this version is missing from Project content store. Compare again.")
+        );
+        assert!(!b.root.join("big.bin").exists());
+
+        std::fs::rename(&aside, &last).unwrap();
+        let plan = world.plan_pull(b);
+        let result = world.pull_everything(&plan);
+        assert!(result.success, "{:?}", result.stopped);
+        assert_eq!(std::fs::read(b.root.join("big.bin")).unwrap(), payload);
     }
 
     /// N7: a folder that a sync product replicates has not received one
@@ -27061,7 +27176,7 @@ mod tests {
             .capture_budget
             .as_ref()
             .unwrap();
-        assert_eq!(budget.limit_bytes, provider_capture::MAX_CAPTURE_BYTES);
+        assert_eq!(budget.limit_bytes, provider_capture::capture_budget_bytes());
         assert_eq!(
             strip_volatile(reviewed_threads),
             strip_volatile(serde_json::to_value(Some(standalone_threads)).unwrap()),
@@ -33352,12 +33467,12 @@ mod tests {
         // weighs its files, a metadata adoption nothing.
         let review = mallard_domain::PullReview::from_plan(
             restore.clone(),
-            provider_capture::MAX_CAPTURE_BYTES,
+            provider_capture::capture_budget_bytes(),
         )
         .unwrap();
         assert_eq!(
             review.apply_limit_bytes,
-            provider_capture::MAX_CAPTURE_BYTES
+            provider_capture::capture_budget_bytes()
         );
         let priced = pull_bytes_of_selection(
             &stored.manifest,
@@ -33378,8 +33493,8 @@ mod tests {
         assert_eq!(priced, stored_bytes);
         assert_eq!(
             pull_limit_sentence(
-                provider_capture::MAX_CAPTURE_BYTES + 87 * 1024 * 1024,
-                provider_capture::MAX_CAPTURE_BYTES
+                provider_capture::capture_budget_bytes() + 87 * 1024 * 1024,
+                provider_capture::capture_budget_bytes()
             ),
             "87 MB over the 512 MB pull limit — exclude sessions or files to pull."
         );

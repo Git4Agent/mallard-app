@@ -40,7 +40,11 @@ What Mallard does, in detail. The short introduction is the repository's
   Apply; they persist no executable plan or conversation recovery journal.
   Pulls create backups and retain result receipts.
 - Optionally syncs selected ordinary files and folders for non-Git projects.
-  Each file can be up to 100 MiB; the total selected Push is limited to 512 MiB.
+  Each file can be as large as the *Largest project file* setting, 512 MiB
+  by default with choices up to 1.5 GiB, and a file above 32 MiB is stored as 32 MiB
+  chunk objects, so no storage provider's per-object limit bounds it. The
+  total selected Push is limited to 512 MiB, or to that setting when it is
+  larger; a Push keeps each selected file in memory while it transfers.
   Files retained in storage without a local capture do not use that Push budget;
   the stored project can grow across pushes.
   Unselect leaves stored copies unchanged and excludes local edits from the Push;
@@ -48,6 +52,10 @@ What Mallard does, in detail. The short introduction is the repository's
   Scripts and executables sync as ordinary files without an executable-content
   warning. Credential-shaped content still requires explicit review, including
   in Library imports.
+  Files the scan refuses — larger than the per-file limit, symlinks, special
+  files — wait in a folded **Won't upload** group at the end of the Files
+  review, by reason, with their sizes and Show in Finder; a search opens it on
+  its matches.
   Git-managed project content continues to travel through Git.
 - Starts a new session in a project: **New session** at the end of the
   Sessions search row (in the empty list's box when there is none yet) runs

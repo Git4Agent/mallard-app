@@ -218,7 +218,7 @@ impl Error {
             ErrorKind::Conflict => "Mallard Cloud refused a stale request. Refresh and try again.",
             ErrorKind::AccountExists => "This account already has a Mallard Cloud repository for this project.",
             ErrorKind::Quota => "The Mallard Cloud repository is out of quota.",
-            ErrorKind::TooLarge => "An object exceeds the Mallard Cloud size limit of 100 MiB.",
+            ErrorKind::TooLarge => "An object exceeds the Mallard Cloud size limit of 512 MiB.",
             ErrorKind::Invalid => "Mallard Cloud rejected the request.",
             ErrorKind::Integrity => "Mallard Cloud rejected the object bytes: the digest does not match.",
             ErrorKind::RateLimit => "Mallard Cloud rate limit reached. Wait and try again.",

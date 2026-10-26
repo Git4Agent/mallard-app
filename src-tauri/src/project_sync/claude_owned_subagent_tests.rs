@@ -252,10 +252,11 @@ fn claude_owned_subagents_round_trip_update_and_missing_recovery() {
     let objects = snapshot
         .manifest
         .all_files()
-        .map(|(_, file)| {
+        .flat_map(|(_, file)| file.payload_objects())
+        .map(|object| {
             (
-                repository_object_key(&source.bundle_id, &file.object_key).unwrap(),
-                file.size,
+                repository_object_key(&source.bundle_id, &object.relative_key).unwrap(),
+                object.size,
             )
         })
         .collect::<Vec<_>>();

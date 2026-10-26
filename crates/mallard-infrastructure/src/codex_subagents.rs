@@ -397,7 +397,7 @@ pub fn observe_tree(
             total = total
                 .checked_add(child.discovery.mapping.source_file_size)
                 .ok_or("Codex tree size overflow")?;
-            if total > crate::provider_capture::MAX_CAPTURE_BYTES {
+            if total > crate::provider_capture::capture_budget_bytes() {
                 return Err("Codex tree exceeds capture limit".into());
             }
             let cutoff = installed
@@ -949,7 +949,7 @@ fn capture_tree_references(
     let mut pending = vec![(None, main_id.to_string(), references)];
     let mut identities = BTreeSet::from([main_id.to_string()]);
     let mut total = initial_bytes;
-    if total > crate::provider_capture::MAX_CAPTURE_BYTES {
+    if total > crate::provider_capture::capture_budget_bytes() {
         return Err("Codex tree exceeds capture limit".into());
     }
     while let Some((owner_key, owner_id, references)) = pending.pop() {
@@ -1002,7 +1002,7 @@ fn capture_tree_references(
                         .sum::<u64>(),
                 )
                 .ok_or("Codex tree size overflow")?;
-            if total > crate::provider_capture::MAX_CAPTURE_BYTES {
+            if total > crate::provider_capture::capture_budget_bytes() {
                 return Err("Codex tree exceeds capture limit".into());
             }
             if !resolved_boundary(&meta, &resolved) {

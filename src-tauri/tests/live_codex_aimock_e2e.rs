@@ -4305,7 +4305,10 @@ fn portable_conversation_rollout(
         entry.resource_id, conversation.resource_id,
         "path-bearing transcript belongs to another resource"
     );
-    let key = repository_object_key(bundle_id, &entry.object_key)
+    let key = repository_object_key(
+        bundle_id,
+        entry.object_key.as_deref().expect("a transcript is one object"),
+    )
         .expect("path-bearing transcript has an invalid object key");
     let bytes = read_bounded_file(
         &storage_root.join(key.as_str()),

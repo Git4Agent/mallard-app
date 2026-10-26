@@ -31,6 +31,19 @@ pub(crate) const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// selection; Pull Compare reports it with each row's stored size and Pull
 /// Apply enforces it on the bytes the selection installs.
 pub const MAX_CAPTURE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The most one Push captures or one Pull installs: `MAX_CAPTURE_BYTES`, or
+/// the project-file limit setting when that is larger, so a file the
+/// settings allow always fits one push on its own.
+pub fn capture_budget_bytes() -> u64 {
+    crate::app_settings::project_file_limit_bytes().max(MAX_CAPTURE_BYTES)
+}
+
+/// The largest ordinary project file this computer captures: the setting,
+/// never above the domain ceiling.
+pub fn project_file_limit_bytes() -> u64 {
+    crate::app_settings::project_file_limit_bytes().min(MAX_PROJECT_CONTENT_FILE_BYTES)
+}
 pub(crate) const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_METADATA_LINES: usize = 128;
 const MAX_TREE_DEPTH: usize = 32;
@@ -47,7 +60,7 @@ pub fn kind_primitive(kind: &ResourceKindCoordinate) -> Option<ResourceKindPrimi
 fn capture_file_limit(kind: &ResourceKindCoordinate) -> u64 {
     match kind_primitive(kind) {
         Some(ResourceKindPrimitive::Conversation) => mallard_domain::MAX_CONVERSATION_FILE_BYTES,
-        Some(ResourceKindPrimitive::ProjectContentFile) => MAX_PROJECT_CONTENT_FILE_BYTES,
+        Some(ResourceKindPrimitive::ProjectContentFile) => project_file_limit_bytes(),
         _ => MAX_FILE_BYTES,
     }
 }
@@ -100,7 +113,48 @@ pub enum ProjectContentCandidate {
     },
     Blocked {
         relative_path: String,
+        block: ProjectContentBlock,
     },
+}
+
+/// Why the walker refused an entry. The code travels to the review, which
+/// groups and words the refusal itself; `reason` is the backend's sentence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectContentBlock {
+    TooLarge { size: u64 },
+    Symlink,
+    SpecialFile,
+}
+
+impl ProjectContentBlock {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => "too_large",
+            Self::Symlink => "symlink",
+            Self::SpecialFile => "special_file",
+        }
+    }
+
+    /// The refused file's size, known only for one refused for its size.
+    pub fn size(self) -> Option<u64> {
+        match self {
+            Self::TooLarge { size } => Some(size),
+            Self::Symlink | Self::SpecialFile => None,
+        }
+    }
+
+    fn reason(self) -> String {
+        match self {
+            Self::TooLarge { .. } => format!(
+                "File exceeds the {} byte project-content limit",
+                project_file_limit_bytes()
+            ),
+            Self::Symlink => "Symlinks are not portable project content".to_string(),
+            Self::SpecialFile => {
+                "Sockets, devices, FIFOs, and other special files are not portable".to_string()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,10 +700,10 @@ fn capture_from_discovery_with_workers(
             total_bytes = total_bytes
                 .checked_add(content_len)
                 .ok_or_else(|| "capture size overflow".to_string())?;
-            if total_bytes > MAX_CAPTURE_BYTES {
+            if total_bytes > capture_budget_bytes() {
                 return Err(format!(
                     "selected resources exceed {} bytes",
-                    MAX_CAPTURE_BYTES
+                    capture_budget_bytes()
                 ));
             }
             if !owned_file_paths.insert(source.logical_path.clone()) {
@@ -1084,7 +1138,7 @@ fn install_provider_discovery(
         // is blocked here like an unreadable one: the activity page shows it
         // as unavailable with the reason, and no review ever offers it.
         let capture_bytes = capture_bytes_of_files(&files);
-        if blocked_reason.is_none() && capture_bytes > MAX_CAPTURE_BYTES {
+        if blocked_reason.is_none() && capture_bytes > capture_budget_bytes() {
             blocked_reason = Some(oversized_capture_reason(capture_bytes));
         }
         // Pull installs every file of a conversation in one bounded
@@ -1274,7 +1328,7 @@ fn discover_generic_project_content(
             add_blocked_project_content_candidate(
                 discovery,
                 &relative,
-                "Symlinks are not portable project content",
+                ProjectContentBlock::Symlink,
             )?;
             continue;
         }
@@ -1286,18 +1340,15 @@ fn discover_generic_project_content(
             add_blocked_project_content_candidate(
                 discovery,
                 &relative,
-                "Sockets, devices, FIFOs, and other special files are not portable",
+                ProjectContentBlock::SpecialFile,
             )?;
             continue;
         }
-        if meta.len() > MAX_PROJECT_CONTENT_FILE_BYTES {
+        if meta.len() > project_file_limit_bytes() {
             add_blocked_project_content_candidate(
                 discovery,
                 &relative,
-                &format!(
-                    "File exceeds the {} byte project-content limit",
-                    MAX_PROJECT_CONTENT_FILE_BYTES
-                ),
+                ProjectContentBlock::TooLarge { size: meta.len() },
             )?;
             continue;
         }
@@ -1368,7 +1419,7 @@ fn add_project_content_file(
         .map_err(|error| format!("reinspect '{}': {}", path.display(), error))?;
     if after.file_type().is_symlink()
         || !after.is_file()
-        || bytes.len() as u64 > MAX_PROJECT_CONTENT_FILE_BYTES
+        || bytes.len() as u64 > project_file_limit_bytes()
         || bytes.len() as u64 != before.len()
         || before.len() != after.len()
         || modified_secs(before) != modified_secs(&after)
@@ -1422,7 +1473,7 @@ fn add_project_content_file(
 fn add_blocked_project_content_candidate(
     discovery: &mut Discovery,
     relative: &str,
-    reason: &str,
+    block: ProjectContentBlock,
 ) -> Result<(), String> {
     validate_logical_project_relative(relative)?;
     discovery.blocked_count = discovery.blocked_count.saturating_add(1);
@@ -1438,10 +1489,11 @@ fn add_blocked_project_content_candidate(
                 display_name: relative.to_string(),
                 apply_policy: contracts::explicit_review(),
                 selected_by_default: false,
-                blocked_reason: Some(reason.to_string()),
+                blocked_reason: Some(block.reason()),
                 logical_paths: vec![format!("project/{}", relative)],
                 project_content: Some(ProjectContentCandidate::Blocked {
                     relative_path: relative.to_string(),
+                    block,
                 }),
             },
             files: Vec::new(),
@@ -1465,8 +1517,9 @@ fn read_project_content_bytes(path: &Path, expected_len: u64) -> Result<Vec<u8>,
     let file = options
         .open(path)
         .map_err(|error| format!("read '{}': {}", path.display(), error))?;
-    let mut bytes = Vec::with_capacity(expected_len.min(MAX_PROJECT_CONTENT_FILE_BYTES) as usize);
-    file.take(MAX_PROJECT_CONTENT_FILE_BYTES.saturating_add(1))
+    let limit = project_file_limit_bytes();
+    let mut bytes = Vec::with_capacity(expected_len.min(limit) as usize);
+    file.take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|error| format!("read '{}': {}", path.display(), error))?;
     Ok(bytes)
@@ -1791,7 +1844,7 @@ pub fn oversized_capture_reason(capture_bytes: u64) -> String {
     format!(
         "Too large to sync: {}; one push carries at most {}.",
         format_bytes(capture_bytes),
-        format_bytes(MAX_CAPTURE_BYTES)
+        format_bytes(capture_budget_bytes())
     )
 }
 
@@ -3375,15 +3428,53 @@ mod tests {
         assert!(error.contains("not a regular no-follow file"), "{error}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn project_content_blocks_name_their_kind_and_oversized_size() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        write(&project.join("kept.txt"), b"kept");
+        symlink(project.join("kept.txt"), project.join("link.txt")).unwrap();
+        fs::File::create(project.join("huge.bin"))
+            .unwrap()
+            .set_len(MAX_PROJECT_CONTENT_FILE_BYTES + 7)
+            .unwrap();
+
+        let mut request = CaptureRequest::for_project(&project);
+        request.include_project_content = true;
+        let inventory = discover_project(registry(), &request).unwrap();
+        let block = |path: &str| {
+            let resource = inventory
+                .resources
+                .iter()
+                .find(|resource| resource.display_name == path)
+                .unwrap();
+            match resource.project_content {
+                Some(ProjectContentCandidate::Blocked { block, .. }) => Some(block),
+                _ => None,
+            }
+        };
+        assert_eq!(block("kept.txt"), None);
+        assert_eq!(block("link.txt"), Some(ProjectContentBlock::Symlink));
+        let huge = block("huge.bin").unwrap();
+        assert_eq!(huge.code(), "too_large");
+        assert_eq!(huge.size(), Some(MAX_PROJECT_CONTENT_FILE_BYTES + 7));
+        assert_eq!(inventory.blocked_count, 2);
+    }
+
     #[test]
     fn project_content_size_and_depth_boundaries_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let at_limit = fs::File::create(project.join("at-limit.bin")).unwrap();
-        at_limit.set_len(100 * 1024 * 1024).unwrap();
+        at_limit.set_len(project_file_limit_bytes()).unwrap();
         let oversized = fs::File::create(project.join("oversized.bin")).unwrap();
-        oversized.set_len(100 * 1024 * 1024 + 1).unwrap();
+        oversized
+            .set_len(project_file_limit_bytes() + 1)
+            .unwrap();
         let mut deep = project.clone();
         for index in 0..=MAX_TREE_DEPTH {
             deep.push(format!("d{index}"));
@@ -3409,15 +3500,15 @@ mod tests {
         assert!(oversized
             .blocked_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("104857600 byte project-content limit")));
+            .is_some_and(|reason| reason.contains("536870912 byte project-content limit")));
         assert!(!oversized.selected_by_default);
         let selected =
             BTreeSet::from([at_limit.resource_id.clone(), oversized.resource_id.clone()]);
         let captured =
             capture_from_discovery(registry(), &request, &discovery, &selected, true).unwrap();
         assert_eq!(
-            captured.files["project/at-limit.bin"].bytes.len(),
-            100 * 1024 * 1024
+            captured.files["project/at-limit.bin"].bytes.len() as u64,
+            project_file_limit_bytes()
         );
         assert_eq!(
             captured.unavailable_resource_ids,

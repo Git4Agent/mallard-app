@@ -89,6 +89,9 @@ export interface AppSettings {
   timeline_preview_limit_bytes: number;
   comparison_workers: number;
   cloud_transfer_concurrency: number;
+  /** The largest ordinary project file a Push captures, in bytes; a larger
+   * value also raises the Push and Pull budget to it. */
+  project_file_limit_bytes: number;
 }
 
 /** `prepare_app_update`: a newer release is ready once its package is
@@ -1103,6 +1106,9 @@ export interface ProjectFileSyncEligibility {
 
 export type ProjectContentEntryType = "file" | "directory" | "blocked";
 
+/** Why the folder walk refused a local entry. */
+export type ProjectContentBlockedCode = "too_large" | "symlink" | "special_file";
+
 export interface ProjectContentEntry {
   descriptor: ProjectResourceDescriptor;
   entry_type: ProjectContentEntryType;
@@ -1125,6 +1131,7 @@ export interface ProjectContentEntry {
    *  not blocked, not left out at an earlier push. Never ticked for the user. */
   undecided: boolean;
   blocked_reason?: string | null;
+  blocked_code?: ProjectContentBlockedCode | null;
   warning_code?: string | null;
   warning_digest?: string | null;
 }
@@ -1141,6 +1148,8 @@ export interface ProjectContentInventory {
   entries: ProjectContentEntry[];
   ignored_count: number;
   blocked_count: number;
+  /** One file's capture limit, which a `too_large` entry exceeds. */
+  file_limit_bytes: number;
   warnings: string[];
   scanned_at: number;
 }

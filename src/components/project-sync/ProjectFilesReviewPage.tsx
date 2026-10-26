@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ParseKeys } from "i18next";
-import type { ProjectFileSyncEligibility } from "../../types";
+import type { ProjectContentBlockedCode, ProjectFileSyncEligibility } from "../../types";
 import { t, useTranslation } from "../../i18n";
 import Icon from "../Icons";
 import LoadingScaffold from "../LoadingScaffold";
@@ -38,6 +38,7 @@ export interface ProjectFileReviewRow {
    *  it; its row says New, and the Sessions step counts it while unticked. */
   undecided?: boolean;
   blockedReason?: string | null;
+  blockedCode?: ProjectContentBlockedCode | null;
   warningCode?: string | null;
   warningDigest?: string | null;
   operation?: "add" | "replace" | "create_directory" | "delete_file" | "delete_directory";
@@ -63,7 +64,12 @@ interface Props {
   scanned?: boolean;
   loading?: boolean;
   ignoredCount?: number;
-  blockedCount?: number;
+  /** Push: the local entries the folder walk refused, and the one-file limit
+   *  a `too_large` row exceeds. They are listed in one folded group after the
+   *  folders; nothing in it can be ticked or travels. */
+  blocked?: { rows: ProjectFileReviewRow[]; fileLimitBytes: number };
+  /** Show a refused file in Finder. */
+  onRevealPath?: (path: string) => void;
   warnings?: string[];
   disabled?: boolean;
   onScan?: () => void;
@@ -271,6 +277,48 @@ export function projectFileReviewCards(rows: ProjectFileReviewRow[]): ProjectFil
   ));
 }
 
+/** The refusals in the order the blocked group lists them: first the one a
+ *  person can act on. */
+const BLOCKED_ORDER: readonly ProjectContentBlockedCode[] = ["too_large", "symlink", "special_file"];
+
+/** Cards one reason shows before its Show more. */
+const BLOCKED_PREVIEW = 3;
+
+export interface BlockedReviewSection {
+  code: ProjectContentBlockedCode;
+  title: string;
+  rows: ProjectFileReviewRow[];
+}
+
+/** The blocked group's sections: the rows the query matches, by reason. Each
+ *  row carries its reason's own sentence, so its mark and its details speak
+ *  the interface language rather than the scanner's. */
+export function blockedReviewSections(
+  rows: ProjectFileReviewRow[],
+  query: string,
+  fileLimitBytes: number,
+): BlockedReviewSection[] {
+  const limit = formatBytes(fileLimitBytes);
+  const matching = query.trim() ? rows.filter((row) => nameMatchesSearch(row.relativePath, query)) : rows;
+  return BLOCKED_ORDER
+    .map((code) => ({
+      code,
+      title: t(`projects:files.blockedTitle.${code}`, { limit }),
+      rows: matching
+        .filter((row) => row.blockedCode === code)
+        .map((row) => ({ ...row, blockedReason: t(`projects:files.blockedSentence.${code}`, { limit }) })),
+    }))
+    .filter((section) => section.rows.length > 0);
+}
+
+/** "3 files · 1.2 GB": a group's count, with its size when it has one. */
+function filesFacts(rows: ProjectFileReviewRow[]): string {
+  const bytes = rows.reduce((sum, row) => sum + (row.size ?? 0), 0);
+  return bytes > 0
+    ? t("projects:files.groupFactsSize", { count: rows.length, size: formatBytes(bytes) })
+    : t("projects:files.groupFacts", { count: rows.length });
+}
+
 /** One directory band's worth of cards: the file rows directly inside it. */
 interface ReviewFileGroup {
   directory: string;
@@ -289,7 +337,8 @@ export default function ProjectFilesReviewPage({
   scanned = true,
   loading = false,
   ignoredCount = 0,
-  blockedCount = 0,
+  blocked,
+  onRevealPath,
   warnings = [],
   disabled = false,
   onScan,
@@ -305,6 +354,22 @@ export default function ProjectFilesReviewPage({
   const pageRef = useRef<HTMLElement>(null);
   const [revealed, setRevealed] = useState<ProjectFileReveal | null>(null);
   const eligible = eligibility.state === "eligible";
+
+  /* The blocked group opens folded. A search opens it on its matches — a
+     file the query names is never left hidden behind a fold — and closing
+     it then lasts until the query changes; clearing the query brings back
+     the person's own choice. */
+  const blockedListId = useId();
+  const [blockedOpen, setBlockedOpen] = useState(false);
+  const [blockedOpenInSearch, setBlockedOpenInSearch] = useState(true);
+  const [blockedUnfolded, setBlockedUnfolded] = useState<ReadonlySet<ProjectContentBlockedCode>>(new Set());
+  const searching = search.trim().length > 0;
+  const blockedExpanded = searching ? blockedOpenInSearch : blockedOpen;
+  const blockedSections = blocked ? blockedReviewSections(blocked.rows, search, blocked.fileLimitBytes) : [];
+  const changeSearch = (query: string) => {
+    setSearch(query);
+    setBlockedOpenInSearch(true);
+  };
 
   const cardRows = useMemo(() => projectFileReviewCards(rows), [rows]);
 
@@ -413,16 +478,17 @@ export default function ProjectFilesReviewPage({
     }
   };
 
-  const groupFacts = (directory: string): string => {
-    const files = subtreeRows(directory).filter((row) => row.entryType !== "directory");
-    const bytes = files.reduce((sum, row) => sum + (row.size ?? 0), 0);
-    return bytes > 0
-      ? t("files.groupFactsSize", { count: files.length, size: formatBytes(bytes) })
-      : t("files.groupFacts", { count: files.length });
-  };
+  const groupFacts = (directory: string): string => (
+    filesFacts(subtreeRows(directory).filter((row) => row.entryType !== "directory"))
+  );
 
-  const renderCard = (row: ProjectFileReviewRow) => {
+  /* A card in the blocked group is flat rather than under its folder, so it
+     carries its folder as a quiet prefix; its group already names the
+     refusal, so it wears no Blocked chip, and it offers Show in Finder —
+     the one thing a person can do about it from here. */
+  const renderCard = (row: ProjectFileReviewRow, inBlockedGroup = false) => {
     const isDirectory = row.entryType === "directory";
+    const directory = parentPath(row.relativePath);
     const selected = selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId);
     const required = requiredIds.has(row.resourceId);
     const removed = removalIds.has(row.resourceId);
@@ -462,12 +528,15 @@ export default function ProjectFilesReviewPage({
               <ThreadStatusIcon status={presentation.icon} size={18} />
             </span>
             {isDirectory && <Icon name="folder" size={14} aria-hidden="true" />}
-            <strong title={row.relativePath}>{fileName(row.relativePath)}</strong>
+            <strong title={row.relativePath}>
+              {inBlockedGroup && directory !== "" && <span>{directory}/</span>}
+              {fileName(row.relativePath)}
+            </strong>
             {/* Pull rows name their operation; push rows say nothing here —
                 the tick and the status mark already carry the state, so a
                 chip would just restate them. Blockers, required folders and
                 new files are the facts neither control speaks for. */}
-            {(row.blockedReason || mode === "pull" || (mode === "push" && required)) && (
+            {((row.blockedReason && !inBlockedGroup) || mode === "pull" || (mode === "push" && required)) && (
               <span className="sync-history-branch-state history-only" title={presentation.sentence}>
                 {row.blockedReason
                   ? t("files.blocked")
@@ -507,6 +576,17 @@ export default function ProjectFilesReviewPage({
                 <Icon name={removed ? "refresh" : "trash"} size={14} />
               </button>
             )}
+            {inBlockedGroup && projectRoot && onRevealPath && (
+              <button
+                type="button"
+                className="btn btn-ghost sync-history-launch-action"
+                title={t("files.reveal", { path: row.relativePath })}
+                aria-label={t("files.reveal", { path: row.relativePath })}
+                onClick={() => onRevealPath(`${projectRoot}/${row.relativePath}`)}
+              >
+                <Icon name="folder" size={14} />
+              </button>
+            )}
           </div>
         </div>
         <div className="sync-history-session-details">
@@ -523,7 +603,7 @@ export default function ProjectFilesReviewPage({
               {size != null
                 ? (
                   <span
-                    className="sync-history-thread-metric"
+                    className={`sync-history-thread-metric${row.blockedCode === "too_large" ? " over-limit" : ""}`}
                     data-tooltip={row.localPresent ? t("files.onDisk", { size }) : t("files.inStorageUnnamed", { size })}
                     tabIndex={0}
                   >
@@ -638,8 +718,66 @@ export default function ProjectFilesReviewPage({
           </span>
         )}
       >
-        {group.cards.map(renderCard)}
+        {group.cards.map((row) => renderCard(row))}
       </ListTile>
+    );
+  };
+
+  /* The files this Push leaves behind: one folded group after the folders,
+     its head a disclosure button that says how many, how large, and why —
+     so the count reads without opening it. Open, each reason is a section
+     that shows a few cards and offers the rest. */
+  const renderBlockedSection = (section: BlockedReviewSection) => {
+    const unfolded = blockedUnfolded.has(section.code);
+    const shown = section.rows.slice(0, unfolded ? PROJECT_FILE_CARD_RENDER_LIMIT : BLOCKED_PREVIEW);
+    return (
+      <section key={section.code} className="sync-project-files-blocked-reason" aria-label={section.title}>
+        <header>
+          <strong>{section.title}</strong>
+          <small>{filesFacts(section.rows)}</small>
+        </header>
+        {shown.map((row) => renderCard(row, true))}
+        {section.rows.length > shown.length && (unfolded
+          ? <div className="sync-project-file-limit">{t("files.limitShown", { limit: PROJECT_FILE_CARD_RENDER_LIMIT })}</div>
+          : (
+            <button
+              type="button"
+              className="sync-project-files-blocked-more"
+              onClick={() => setBlockedUnfolded((current) => new Set(current).add(section.code))}
+            >
+              {t("files.blockedShowMore", { count: section.rows.length - shown.length })}
+              <Icon name="chevron-down" size={12} />
+            </button>
+          ))}
+      </section>
+    );
+  };
+
+  const renderBlockedGroup = () => {
+    const rows = blockedSections.flatMap((section) => section.rows);
+    return (
+      <div className={`sync-list-tile sync-project-files-blocked${blockedExpanded ? " open" : ""}`}>
+        <button
+          type="button"
+          className="sync-list-tile-head"
+          aria-expanded={blockedExpanded}
+          aria-controls={blockedListId}
+          onClick={() => (searching ? setBlockedOpenInSearch : setBlockedOpen)((open) => !open)}
+        >
+          <Icon name={blockedExpanded ? "chevron-down" : "chevron-right"} size={14} />
+          <Icon name="ban" size={14} />
+          <strong>{t("files.blockedGroup")}</strong>
+          <small>{filesFacts(rows)}</small>
+          <span className="sync-project-files-blocked-breakdown">
+            {blockedSections
+              .map((section) => t(`files.blockedCount.${section.code}`, { count: section.rows.length }))
+              .join(" · ")}
+          </span>
+        </button>
+        <div id={blockedListId} className="sync-history-thread-list flat" hidden={!blockedExpanded}>
+          {blockedExpanded && blockedSections.map(renderBlockedSection)}
+        </div>
+      </div>
     );
   };
 
@@ -654,13 +792,13 @@ export default function ProjectFilesReviewPage({
           throwing the prepared review away. */}
       <NameSearchField
         query={search}
-        onChange={setSearch}
+        onChange={changeSearch}
         label={t("files.search")}
         matches={matchingCards.length}
         total={cardRows.length}
         noun={fileNoun}
         hiddenSelected={hiddenSelected}
-        disabled={rows.length === 0}
+        disabled={rows.length === 0 && !blocked?.rows.length}
         trailing={onScan && (
           <button type="button" className="btn btn-ghost" onClick={onScan} disabled={disabled || loading || !eligible}>
             <Icon name="refresh" size={14} className={loading ? "icon-spin" : undefined} /> {loading ? t("files.scanningShort") : t("files.rescan")}
@@ -679,7 +817,9 @@ export default function ProjectFilesReviewPage({
           <div className="sync-pull-empty"><Icon name="check-circle" size={16} /><span><strong>{t("files.noChanges")}</strong></span></div>
         )
       ) : matchingCards.length === 0 ? (
-        <div className="sync-history-state">{t("files.noMatches")}</div>
+        <div className="sync-history-state">
+          {blockedSections.length > 0 ? t("files.noUploadMatches") : t("files.noMatches")}
+        </div>
       ) : (
         <>
           {/* One box for every listed selected file with a finding — the
@@ -711,9 +851,14 @@ export default function ProjectFilesReviewPage({
         </>
       )}
 
-      {(ignoredCount > 0 || blockedCount > 0 || warnings.length > 0) && (
+      {eligible && blockedSections.length > 0 && renderBlockedGroup()}
+
+      {/* Blocked entries are listed above, so the line counts the rest. One
+          the walk refused before it had a path to list — too deep, or not
+          a portable name — is one of the scan warnings. */}
+      {(ignoredCount > 0 || warnings.length > 0) && (
         <details className="sync-project-files-scan-summary">
-          <summary>{t("files.scanSummary", { ignored: ignoredCount, blocked: blockedCount, count: warnings.length })}</summary>
+          <summary>{t("files.reviewScanSummary", { ignored: ignoredCount, count: warnings.length })}</summary>
           {warnings.map((warning) => <p key={warning}>{warning}</p>)}
         </details>
       )}

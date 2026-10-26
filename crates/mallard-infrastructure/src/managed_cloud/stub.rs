@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-const MAX_OBJECT_BYTES: usize = 100 * 1024 * 1024;
+const MAX_OBJECT_BYTES: usize = 512 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 const LISTING_PAGE: usize = 1_000;
@@ -153,6 +153,12 @@ fn keep_manifest_content(value: &Value, prefix: &str, keys: &mut BTreeSet<String
         Value::Object(fields) => {
             if let Some(key) = fields.get("object_key").and_then(Value::as_str) {
                 keys.insert(format!("{prefix}/{key}"));
+            }
+            // A split file names its chunk objects by digest alone.
+            if let Some(chunks) = fields.get("chunks").and_then(Value::as_array) {
+                for sha in chunks.iter().filter_map(|chunk| chunk["sha256"].as_str()) {
+                    keys.insert(format!("{prefix}/_objects/{sha}"));
+                }
             }
             if let Some(sha) = fields.get("transcript_sha256").and_then(Value::as_str) {
                 keys.insert(format!("{prefix}/_views/1-{sha}.json"));
@@ -1473,7 +1479,8 @@ fn index_record(state: &mut StubState, repository_id: &str, name: &RecordName, u
             serde_json::from_slice(&manifest_bytes).expect("a stored manifest");
         let mut references = manifest
             .all_files()
-            .map(|(_, entry)| format!("_objects/{}", entry.sha256))
+            .flat_map(|(_, entry)| entry.payload_objects())
+            .map(|object| object.relative_key)
             .collect::<Vec<_>>();
         for (_, scope) in manifest.provider_scopes() {
             for thread in scope.conversations.values() {
@@ -2423,7 +2430,7 @@ fn put_store(
         KeyClass::Marker => return error("key_invalid", "the marker is never written"),
         KeyClass::Object { sha256: expected } => {
             if too_large(MAX_OBJECT_BYTES) {
-                return error("object_too_large", "over 100 MiB");
+                return error("object_too_large", "over 512 MiB");
             }
             if expected != &sha256 {
                 return error("object_integrity_failed", "the key digest differs");
@@ -2636,4 +2643,44 @@ fn put_store(
         );
     }
     json(StatusCode::OK, json!({"stored": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cleanup and Discard keep what a listed manifest names: the object of
+    /// a single-object entry, every chunk of a split one, and the view a
+    /// transcript digest keys.
+    #[test]
+    fn a_manifest_keeps_its_chunks_alive() {
+        let manifest = json!({
+            "scopes": {
+                "project": {
+                    "files": {
+                        "project/small.md": {"sha256": "a".repeat(64), "size": 3, "object_key": format!("_objects/{}", "a".repeat(64))},
+                        "project/big.bin": {"sha256": "f".repeat(64), "size": 33554433, "chunks": [
+                            {"sha256": "b".repeat(64), "size": 33554432},
+                            {"sha256": "c".repeat(64), "size": 1}
+                        ]}
+                    }
+                },
+                "provider:codex": {
+                    "conversations": {"cloudthread-x": {"transcript_sha256": "d".repeat(64)}}
+                }
+            }
+        });
+        let mut keys = BTreeSet::new();
+        keep_manifest_content(&manifest, "content", &mut keys);
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                format!("content/_objects/{}", "a".repeat(64)),
+                format!("content/_objects/{}", "b".repeat(64)),
+                format!("content/_objects/{}", "c".repeat(64)),
+                format!("content/_views/1-{}.json", "d".repeat(64)),
+            ])
+        );
+        assert!(!keys.iter().any(|key| key.contains(&"f".repeat(64))));
+    }
 }

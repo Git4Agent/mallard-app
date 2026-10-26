@@ -1613,7 +1613,7 @@ pub async fn plan_bundle_restore(
     result.and_then(|plan| {
         PullReview::from_plan(
             plan,
-            mallard_infrastructure::provider_capture::MAX_CAPTURE_BYTES,
+            mallard_infrastructure::provider_capture::capture_budget_bytes(),
         )
     })
 }

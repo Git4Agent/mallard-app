@@ -79,6 +79,9 @@ export default {
     openLogsHint: "Open Logs when Push or Pull starts.",
     refreshOnFocus: "Refresh on window focus",
     refreshOnFocusHint: "Refresh projects and storage when you come back to Mallard.",
+    projectFileLimit: "Largest project file",
+    projectFileLimitLabel: "Largest project file to sync",
+    projectFileLimitHint: "Project files above this stay out of Push and Pull. A push or pull carries at most this much, or 512 MB, whichever is larger, and keeps each selected file in memory while it transfers.",
   },
   /** One row per provider CLI; `provider` is the backend's display name. */
   cli: {

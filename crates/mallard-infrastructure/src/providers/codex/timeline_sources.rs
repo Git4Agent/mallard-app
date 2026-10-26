@@ -139,7 +139,7 @@ impl TimelineSources {
             }
             total = total
                 .checked_add(source.length)
-                .filter(|total| *total <= crate::provider_capture::MAX_CAPTURE_BYTES)
+                .filter(|total| *total <= crate::provider_capture::capture_budget_bytes())
                 .ok_or("timeline history exceeds the byte limit")?;
             if !seen.insert(&source.relative_path) {
                 return Err("duplicate timeline source".into());

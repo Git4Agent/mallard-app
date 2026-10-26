@@ -1751,7 +1751,8 @@ The transcript file's `BundleFileEntry` names the object the session view is
 built from.
 
 **`BundleFileEntry`**: `resource_id`, `sha256`, `size`, `source_mtime`,
-`object_key` (`_objects/<sha256>`), optional `mode`.
+`object_key` (`_objects/<sha256>`) or, for a project file above 32 MiB, `chunks`
+(ordered `{ sha256, size }`, each an `_objects/<sha256>` object), optional `mode`.
 **`BundleDirectoryEntry`**: `resource_id`, optional `mode`, `source_mtime`.
 **`Tombstone`**: `target { kind, version, identity }`, optional
 `last_sha256`, `deleted_at`; target kinds `resource`, `file`,
