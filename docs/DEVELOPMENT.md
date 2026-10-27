@@ -248,8 +248,8 @@ URL, and fails closed for a missing, malformed, symlinked, oversized, or
 over-permissive file. `.env.local` is covered by the repository's `*.local`
 ignore rule and must never be committed.
 
-The current rollout fixtures have a hard `codex-cli 0.162.1` prerequisite. The
-test rejects another CLI version before making a model request; update the
+The current rollout fixtures require `codex-cli 0.164.0-alpha.11.1`. The test
+rejects another CLI version before making a model request; update the
 current-format fixture in place before moving the gate to another version.
 The resume checks accept Codex's unrecognized-configuration warning and the
 exact missing-metadata warning for the selected model only before the model
@@ -386,9 +386,9 @@ initialize its nested sandbox; the test still keeps Codex itself at
 detects the known nested-Seatbelt failure with a bounded, no-provider preflight
 before starting Cargo and prints a fixed ordinary-Terminal instruction.
 Implementation, protocol POCs, and the complete ignored live gate are verified.
-The current native-format gate requires Codex CLI `0.162.1`. The exact keyless
-gate passed on October 9, 2026 with `1 passed, 0 failed, 19 filtered` in 74.82
-seconds. Every model-shaped response came from the one local
+The current native-format gate requires Codex CLI `0.164.0-alpha.11.1`. The
+previous `0.162.1` keyless gate passed on October 9, 2026 with
+`1 passed, 0 failed, 19 filtered` in 74.82 seconds. Every model-shaped response came from the one local
 aimock child; the run used no provider account, credential, remote model, GPU,
 or external model request.
 
@@ -469,7 +469,7 @@ for the aimock topology, protocol POCs, exact accounting, and safety contract.
 ### Credentialless aimock Claude Code end-to-end test
 
 The Claude Code aimock suite is a separate ignored target for the real Claude
-CLI and Mallard's production Claude adapter. It runs against one strict
+CLI and Mallard's production Claude adapter. Each phase runs against its own strict
 [CopilotKit/aimock](https://github.com/CopilotKit/aimock) server on an
 ephemeral literal-IPv4 loopback port. It does not read `.env.local`, a user
 Claude home, or `.credentials.json`, and it needs no provider account, login,
@@ -488,7 +488,39 @@ Select the repeated Desktop-import scenario with:
 MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e -- --scenario desktop-import
 ```
 
-This separate scenario has 16 main conversation rounds, four simulated imports,
+The default sync target also runs a separate media phase in fresh non-Git
+projects. A native Claude Bash exchange changes from `Homer/` to `part5/`,
+then returns a parent-relative link to a tiny synthetic MP4 at the project
+root. The fixture also generates a **200 MB (200,000,000-byte)** binary file
+in A's temporary project. The reviewed Push includes both files and the
+conversation. The test verifies six distinct stored chunks, each chunk's
+size and SHA-256, and the restored file's exact size and full SHA-256 on B.
+Generation and digest checks use 64 KiB buffers; the large file is never
+committed to the repository. This transfer runs in the default and focused
+media scenarios, without additional model requests.
+
+The test checks A's nested cwd, the stored `/__mallard_root__/b;/part5` cwd, B's
+restored nested cwd, byte-identical media, and Session Detail's
+`working_directory: "part5"`. It builds the production schema-1 cloud view
+from the actual stored transcript and verifies the same directory and link.
+A native resume on B checks the complete history and relocated Bash command.
+All portable objects are scanned for local paths and credential markers.
+
+Run only this phase with:
+
+```sh
+MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e -- --scenario media
+```
+
+The media phase has its own strict mock and allows only Bash with one fixed,
+shell-quoted `cd` command and a fixed success marker. It uses two CLI turns,
+three model requests, and two hello probes. Together with the original sync
+phase, the default target runs 14 CLI turns, 16 model requests, and 14 probes.
+The video fixture has been decoded with FFmpeg; the automated test proves
+transport and link rendering, not browser playback. No FFmpeg installation
+is needed to run the tests.
+
+The Desktop-import scenario has 16 main conversation rounds, four simulated imports,
 and three further rounds for visible-edit refusal and Keep both. The mock emits
 thinking and redacted-thinking blocks through the real CLI. A test helper removes
 those blocks, deletes empty assistant rows, leaves parent links unchanged, and
@@ -506,8 +538,8 @@ The current native-format gate requires exactly Claude Code `2.1.266`,
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
 turn disables settings discovery, hooks, skills, plugins, and MCP discovery
-through explicit options. It uses `--permission-mode dontAsk` and a one-tool
-`Read` allow list. The test avoids `--bare`: Claude Code 2.1.266 does not await
+through explicit options. The original sync and Desktop-import phases use
+`--permission-mode dontAsk` and a one-tool `Read` allow list. The test avoids `--bare`: Claude Code 2.1.266 does not await
 the initial transcript recording operation in that mode. Claude requires a
 non-empty `ANTHROPIC_API_KEY` for this custom endpoint,
 so the child receives the fixed non-secret placeholder
@@ -527,7 +559,8 @@ authoritative Claude home. The flow then clears the whole disposable storage,
 proves both homes unchanged, republishes all three conversations at a fresh
 revision 1, and verifies one incremental cursor append.
 
-The accounting is exact: 12 Claude model-turn processes make 13 authenticated
+The original sync phase accounting is exact: 12 Claude model-turn processes
+make 13 authenticated
 `POST /v1/messages?beta=true` requests, because the first content tool round
 uses two Messages calls. Claude Code 2.1.266 also makes one credential-free
 `HEAD /api/hello` compatibility probe per process. The raw boundary therefore

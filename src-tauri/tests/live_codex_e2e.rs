@@ -114,7 +114,7 @@ const MAX_CAPTURE_HEADER_BYTES: usize = 32 * 1024;
 const MAX_CAPTURE_INPUT_ITEMS: usize = 4_096;
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TIMEOUT: Duration = Duration::from_secs(180);
-const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.162.1";
+const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.164.0-alpha.11.1";
 const EXPECTED_PAID_CODEX_TURNS: usize = 5;
 const EXPECTED_HEADLESS_RESUMES: usize = 20;
 const EXPECTED_CODEX_CLI_TURNS: usize = EXPECTED_PAID_CODEX_TURNS + EXPECTED_HEADLESS_RESUMES;
@@ -185,7 +185,7 @@ fn assert_supported_codex_version() {
     assert_eq!(
         version.trim(),
         EXPECTED_CODEX_VERSION,
-        "the live fixture requires Codex 0.162.1; update the current-format writer before running against another version"
+        "the live fixture requires Codex 0.164.0-alpha.11.1; update the current-format writer before running against another version"
     );
     assert_codex_home_has_no_sensitive_state(&codex_home, &[]);
     assert_process_home_has_no_sensitive_state(&process_home, &[]);
@@ -1824,7 +1824,7 @@ fn session_meta_record(
             "timestamp": "2026-08-18T00:00:00Z",
             "cwd": cwd.to_string_lossy(),
             "originator": "codex_exec",
-            "cli_version": "0.162.1",
+            "cli_version": "0.164.0-alpha.11.1",
             "source": "exec",
             "model_provider": PROVIDER_ID,
             "base_instructions": null,
@@ -4189,7 +4189,7 @@ fn is_generated_arg0_wrapper(relative: &Path) -> bool {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     });
     normal(0) == Some("tmp")
-        && normal(1) == Some("arg0")
+        && normal(1) == Some(codex_home::ARG0_DIRECTORY)
         && directory_is_valid
         && matches!(
             normal(3),

@@ -370,7 +370,7 @@ async function main() {
   try {
     const environment = await makeEnvironment(join(root, "preflight"));
     const versions = {};
-    for (const [command, expected] of [["codex", "codex-cli 0.162.1"], ["claude", "2.1.266 (Claude Code)"]]) {
+    for (const [command, expected] of [["codex", "codex-cli 0.164.0-alpha.11.1"], ["claude", "2.1.266 (Claude Code)"]]) {
       const output = await runCli(command, ["--version"], environment, root);
       check(output.trim() === expected, `${command}_version_mismatch`);
       versions[command] = expected;

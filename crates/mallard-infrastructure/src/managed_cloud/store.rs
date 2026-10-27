@@ -971,9 +971,10 @@ impl ManagedObjectStore {
             .map(|view| {
                 (
                     format!(
-                        "{REPOSITORY_PREFIX}/{bundle_id}/_views/{}-{}.json",
+                        "{REPOSITORY_PREFIX}/{bundle_id}/_views/{}-{}-{}.json",
                         super::views::VIEW_SCHEMA,
-                        view.source_sha256
+                        view.source_sha256,
+                        view.sha256
                     ),
                     view.bytes.clone(),
                 )

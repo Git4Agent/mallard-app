@@ -1392,6 +1392,33 @@ test("session links and media resolve from each message directory, including par
   assert.doesNotMatch(render(null), /href=|<video|<img/);
 });
 
+test("Claude's restored part5 reply renders the root video and rejects root escapes", () => {
+  const file = "Part5_The_Fall_of_Patroclus_zh.mp4";
+  const text = `MALLARD_CLAUDE_MEDIA_READY\n[${file}](../${file})`;
+  const render = (workingDirectory: string | null, body = text, available = true) => renderToStaticMarkup(
+    <SessionDetailMarkdown
+      workingDirectory={workingDirectory}
+      text={body}
+      onOpenProjectPath={() => undefined}
+      onLoadProjectMedia={() => undefined}
+      projectMedia={available ? {
+        [file]: { status: "loaded", src: `project-media://localhost/machine-b/Homer/${file}` },
+      } : {}}
+    />,
+  );
+  const restored = render("part5");
+  assert.match(restored, /href="Part5_The_Fall_of_Patroclus_zh\.mp4"/);
+  assert.match(restored, /<video[^>]+src="project-media:\/\/localhost\/machine-b\/Homer\/Part5_The_Fall_of_Patroclus_zh\.mp4"/);
+  assert.equal(restored.match(/<video /g)?.length, 1);
+  assert.doesNotMatch(restored, /__mallard_root__|machine-a/);
+  assert.doesNotMatch(render(null), /href=|<video/);
+  assert.doesNotMatch(render("."), /href=|<video/);
+  assert.doesNotMatch(render("part5", text, false), /<video/);
+  for (const link of [`../../${file}`, `%2e%2e/%2e%2e/${file}`]) {
+    assert.doesNotMatch(render("part5", `[escape](${link})`), /href=|<video/);
+  }
+});
+
 test("message-relative URLs cannot escape the project or decode a filename twice", () => {
   const html = renderToStaticMarkup(
     <SessionDetailMarkdown

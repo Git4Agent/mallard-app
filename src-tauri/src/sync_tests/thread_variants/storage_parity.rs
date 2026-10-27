@@ -918,9 +918,11 @@ async fn managed_cloud_noop_fast_forward_views_and_stale_writer_match_local_prot
     assert!(repository.objects.contains_key(&format!(
         ".mallard/v1/repositories/{bundle}/_objects/{transcript_sha}"
     )));
-    assert!(repository.objects.contains_key(&format!(
-        ".mallard/v1/repositories/{bundle}/_views/1-{transcript_sha}.json"
-    )));
+    let view_prefix = format!(".mallard/v1/repositories/{bundle}/_views/1-{transcript_sha}-");
+    assert_eq!(
+        repository.objects.keys().filter(|key| key.starts_with(&view_prefix)).count(),
+        1
+    );
     assert_eq!(
         repository
             .keys_under(&format!(".mallard/v1/repositories/_commits/{bundle}"))

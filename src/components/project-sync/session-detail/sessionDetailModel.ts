@@ -16,6 +16,7 @@ import { t, uiLocale } from "../../../i18n";
 import { syncDecisionReason, syncStatusDetail } from "../syncDetailText";
 import type { PushSessionFacts } from "../ProjectActivityPage";
 import { isSafeExternalMarkdownUrl, safeMarkdownUrl } from "../../markdown/markdownUrl";
+import { resolveProjectPath } from "../../markdown/projectPath";
 import {
   clockOptions,
   formatDateTime,
@@ -690,25 +691,13 @@ export function projectMarkdownDisplayPath(projectRoot: string, relativePath: st
  * Markdown URL sanitizer, which returns the decoded project-relative path. */
 export function sessionMarkdownUrl(url: string, workingDirectory: string | null): string {
   if (url.startsWith("#") || isSafeExternalMarkdownUrl(url)) return safeMarkdownUrl(url);
-  if (workingDirectory === null) return "";
   let path: string;
   try {
-    path = decodeURIComponent(url).replace(/\\/g, "/");
+    path = decodeURIComponent(url);
   } catch {
     return "";
   }
-  const unsafe = (value: string) => value.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(value) || /[\u0000-\u001f\u007f]/.test(value);
-  if (!path || unsafe(path) || unsafe(workingDirectory) || workingDirectory.includes("\\")) return "";
-  const parts = workingDirectory.split("/").filter((part) => part && part !== ".");
-  if (parts.includes("..")) return "";
-  for (const part of path.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length === 0) return "";
-      parts.pop();
-    } else parts.push(part);
-  }
-  return parts.map(encodeURIComponent).join("/");
+  return resolveProjectPath(path, workingDirectory)?.split("/").map(encodeURIComponent).join("/") ?? "";
 }
 
 /**

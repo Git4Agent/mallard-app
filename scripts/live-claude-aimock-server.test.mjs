@@ -35,7 +35,7 @@ function textScenario(overrides = {}) {
   };
 }
 
-function readScenarios() {
+function toolScenarios() {
   return [
     textScenario({
       id: "read_initial",
@@ -197,15 +197,16 @@ async function stopHarness(subject) {
 }
 
 test("scenario parser accepts the closed text and paired Read contracts", () => {
-  const parsed = parse(documentFor(readScenarios()));
+  const parsed = parse(documentFor(toolScenarios()));
   assert.equal(parsed.scenarios.length, 2);
   assert.equal(parsed.scenarios[0].response.kind, "read_tool");
   assert.equal(parsed.scenarios[1].require_tool_result, true);
-  assert.deepEqual(parsed.read_round, {
+  assert.deepEqual(parsed.tool_round, {
     prompt_marker: "TOOL_USER_R1",
     response_marker: "TOOL_ASSISTANT_BASE",
     call_id: readCallId,
-    file_path: readPath,
+    response: { kind: "read_tool", call_id: readCallId, file_path: readPath },
+    tool_name: "Read",
     result_marker: readMarker,
   });
 
@@ -240,23 +241,23 @@ test("scenario parser rejects unknown fields, duplicate identities, and bad coun
 });
 
 test("scenario parser rejects unsafe Read paths and invalid prompt pairs", () => {
-  const unsafe = readScenarios();
+  const unsafe = toolScenarios();
   unsafe[0].response.file_path = "relative/read-marker.txt";
   assert.throws(() => parse(documentFor(unsafe)), /read_file_path/u);
   unsafe[0].response.file_path = resolve("/");
   assert.throws(() => parse(documentFor(unsafe)), /read_file_path/u);
 
-  const unpaired = documentFor([readScenarios()[0]]);
-  assert.throws(() => parse(unpaired), /read_scenario_pair/u);
+  const unpaired = documentFor([toolScenarios()[0]]);
+  assert.throws(() => parse(unpaired), /tool_scenario_pair/u);
 
-  const wrongCall = readScenarios();
+  const wrongCall = toolScenarios();
   wrongCall[1].expected_tool_call_id = "different_call";
   assert.throws(() => parse(documentFor(wrongCall)), /duplicate_prompt_marker/u);
 });
 
 test("history validation requires exact markers, the Read round, and only Read exposure", () => {
   const scenarios = [
-    ...readScenarios(),
+    ...toolScenarios(),
     textScenario({
       id: "resume",
       prompt_marker: "MALLARD_CLAUDE_USER_R2",
@@ -301,7 +302,7 @@ test("history validation requires exact markers, the Read round, and only Read e
     normalizedRequest(messages),
   );
   assert.equal(accepted.history_match, true);
-  assert.equal(accepted.read_round_match, true);
+  assert.equal(accepted.tool_round_match, true);
   assert.equal(accepted.tools_ok, true);
 
   const relocatedMessages = structuredClone(messages);
@@ -314,7 +315,7 @@ test("history validation requires exact markers, the Read round, and only Read e
     normalizedRequest(relocatedMessages),
   );
   assert.equal(relocatedReplay.history_match, true);
-  assert.equal(relocatedReplay.read_round_match, true);
+  assert.equal(relocatedReplay.tool_round_match, true);
 
   const resultOnlyReplay = validateScenarioRequest(
     document,
@@ -322,7 +323,7 @@ test("history validation requires exact markers, the Read round, and only Read e
     normalizedRequest([messages[0], messages[2], messages[3], messages[4]]),
   );
   assert.equal(resultOnlyReplay.history_match, false);
-  assert.equal(resultOnlyReplay.read_round_match, false);
+  assert.equal(resultOnlyReplay.tool_round_match, false);
 
   const missingRead = validateScenarioRequest(
     document,
@@ -330,7 +331,7 @@ test("history validation requires exact markers, the Read round, and only Read e
     normalizedRequest([messages[0], messages[3], messages[4]]),
   );
   assert.equal(missingRead.history_match, false);
-  assert.equal(missingRead.read_round_match, false);
+  assert.equal(missingRead.tool_round_match, false);
 
   const extraTool = validateScenarioRequest(
     document,
@@ -362,7 +363,7 @@ test("history validation requires exact markers, the Read round, and only Read e
 });
 
 test("tool-result validation is scoped to the current turn and exact marker", () => {
-  const document = parse(documentFor(readScenarios()));
+  const document = parse(documentFor(toolScenarios()));
   const subject = document.scenarios[1];
   const toolCall = {
     role: "assistant",
@@ -480,7 +481,7 @@ test("standalone harness serves one strict Claude Messages scenario and emits a 
 });
 
 test("Claude wire response preserves the exact Read name, call id, and JSON arguments", async (t) => {
-  const subject = await startHarness(t, documentFor(readScenarios()));
+  const subject = await startHarness(t, documentFor(toolScenarios()));
   const initialMessages = [
     {
       role: "user",
@@ -534,9 +535,9 @@ test("Claude wire response preserves the exact Read name, call id, and JSON argu
   const audit = await stopHarness(subject);
   assert.equal(audit.request_count, 2);
   assert.equal(audit.all_scenarios_consumed_once, true);
-  assert.equal(audit.scenarios[0].read_round_match, true);
+  assert.equal(audit.scenarios[0].tool_round_match, true);
   assert.equal(audit.scenarios[1].tool_result_match, true);
-  assert.equal(audit.scenarios[1].read_round_match, true);
+  assert.equal(audit.scenarios[1].tool_round_match, true);
 });
 
 test("raw boundary audit fails an unexpected route and method omitted from the AIMock journal", async (t) => {
@@ -724,7 +725,7 @@ test("duplicate valid scenario returns 409 and makes both semantic and raw audit
 
 test("thinking responses are bounded and preserve the closed text and Read contracts", () => {
   const thinking = { reasoning: "synthetic reasoning", redacted_thinking: ["b3BhcXVl"] };
-  const rows = readScenarios();
+  const rows = toolScenarios();
   for (const row of rows) row.response.thinking = thinking;
   const parsed = parse(documentFor(rows));
   for (const row of parsed.scenarios) {
@@ -765,4 +766,71 @@ test("Claude stream carries thinking and redacted thinking before visible text",
   const audit = await stopHarness(subject);
   assert.equal(audit.all_scenarios_consumed_once, true);
   assert.equal(audit.raw_audit_ok, true);
+});
+
+test("media directory change admits only its fixed Bash command and exact relocated replay", () => {
+  const source = join(tmpdir(), "media-a", "Homer", "part5");
+  const destination = join(tmpdir(), "media-b", "Homer", "part5");
+  const scenarios = toolScenarios();
+  scenarios[0].response = {
+    kind: "change_directory", call_id: readCallId,
+    directory: source, restored_directory: destination,
+  };
+  scenarios[1].expected_tool_result_marker = "MALLARD_CLAUDE_CHANGED_DIRECTORY";
+  scenarios.push(textScenario({
+    id: "media_resume", prompt_marker: "MEDIA_USER_RESUME",
+    expected_history: [
+      { role: "user", marker: "TOOL_USER_R1" },
+      { role: "assistant", marker: "TOOL_ASSISTANT_BASE" },
+    ],
+  }));
+  const parsed = parse(documentFor(scenarios));
+  const response = fixedFixtureResponse(parsed, parsed.scenarios[0]);
+  const command = `cd '${source}' && printf 'MALLARD_CLAUDE_CHANGED_DIRECTORY\\n'`;
+  const restoredCommand = `cd '${destination}' && printf 'MALLARD_CLAUDE_CHANGED_DIRECTORY\\n'`;
+  assert.deepEqual(response.toolCalls, [{ id: readCallId, name: "Bash", arguments: JSON.stringify({ command }) }]);
+  const tools = [{ type: "function", function: { name: "Bash", parameters: {} } }];
+  const initial = [{ role: "user", content: "TOOL_USER_R1" }];
+  assert.equal(validateScenarioRequest(parsed, parsed.scenarios[0], normalizedRequest(initial, { tools })).history_match, true);
+  assert.equal(validateScenarioRequest(parsed, parsed.scenarios[0], normalizedRequest(initial)).tools_ok, false);
+  const call = (command) => ({ role: "assistant", content: "", tool_calls: [{
+    id: readCallId, type: "function", function: { name: "Bash", arguments: JSON.stringify({ command }) },
+  }] });
+  const result = { role: "tool", tool_call_id: readCallId, content: "MALLARD_CLAUDE_CHANGED_DIRECTORY\n" };
+  const turn = [...initial, call(command), result];
+  assert.equal(validateScenarioRequest(parsed, parsed.scenarios[1], normalizedRequest(turn, { tools })).history_match, true);
+  const resume = [...initial, call(restoredCommand), result,
+    { role: "assistant", content: "TOOL_ASSISTANT_BASE" }, { role: "user", content: "MEDIA_USER_RESUME" }];
+  assert.equal(validateScenarioRequest(parsed, parsed.scenarios[2], normalizedRequest(resume, { tools })).history_match, true);
+  for (const wrong of [command, `${restoredCommand} && touch unwanted`, "cd /outside"]) {
+    const changed = structuredClone(resume);
+    changed[1] = call(wrong);
+    assert.equal(validateScenarioRequest(parsed, parsed.scenarios[2], normalizedRequest(changed, { tools })).tool_round_match, false);
+  }
+  const extraCall = [...resume];
+  extraCall.splice(1, 0, call("touch unwanted"));
+  assert.equal(validateScenarioRequest(parsed, parsed.scenarios[2], normalizedRequest(extraCall, { tools })).tool_round_match, false);
+  const wrongMarker = structuredClone(scenarios);
+  wrongMarker[1].expected_tool_result_marker = "WRONG_MARKER";
+  assert.throws(() => parse(documentFor(wrongMarker)), /directory_result_marker/u);
+  const extraTool = normalizedRequest(initial, { tools: [...tools, { type: "function", function: { name: "Read" } }] });
+  assert.equal(validateScenarioRequest(parsed, parsed.scenarios[0], extraTool).tools_ok, false);
+  for (const change of [
+    { command: "arbitrary" }, { directory: "relative/part5" },
+    { directory: join(source, "nested") }, { restored_directory: `${destination}\n` },
+  ]) {
+    const malformed = structuredClone(scenarios);
+    Object.assign(malformed[0].response, change);
+    assert.throws(() => parse(documentFor(malformed)));
+  }
+});
+
+test("media directory paths are shell quoted, including apostrophes", () => {
+  const scenarios = toolScenarios();
+  const directory = join(tmpdir(), "Homer's story", "part5");
+  scenarios[0].response = { kind: "change_directory", call_id: readCallId, directory, restored_directory: directory };
+  scenarios[1].expected_tool_result_marker = "MALLARD_CLAUDE_CHANGED_DIRECTORY";
+  const parsed = parse(documentFor(scenarios));
+  const argument = JSON.parse(fixedFixtureResponse(parsed, parsed.scenarios[0]).toolCalls[0].arguments);
+  assert.equal(argument.command, `cd '${directory.replaceAll("'", "'\"'\"'")}' && printf 'MALLARD_CLAUDE_CHANGED_DIRECTORY\\n'`);
 });

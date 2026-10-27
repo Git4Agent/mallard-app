@@ -8,6 +8,12 @@ use walkdir::WalkDir;
 
 type FileInventory = BTreeMap<PathBuf, [u8; 32]>;
 
+pub const ARG0_DIRECTORY: &str = if cfg!(target_os = "macos") {
+    "arg0-macos"
+} else {
+    "arg0"
+};
+
 #[cfg(windows)]
 fn verified_runtime_copy(path: &Path, executable: &Path) -> [u8; 32] {
     use std::io::Read as _;
@@ -53,7 +59,7 @@ pub fn inventory(home: &Path) -> FileInventory {
         metadata.is_dir() && !metadata.file_type().is_symlink(),
         "isolated Codex home must be a no-follow directory"
     );
-    let scratch = home.join("tmp/arg0");
+    let scratch = home.join("tmp").join(ARG0_DIRECTORY);
     let mut inventory = BTreeMap::new();
     let mut entries_seen = 0;
     for entry in WalkDir::new(home)
@@ -179,7 +185,7 @@ mod tests {
     fn native_arg0_symlinks_are_excluded_only_from_the_home_inventory() {
         let home = fixture();
         let before = inventory(home.path());
-        let scratch = home.path().join("tmp/arg0/native");
+        let scratch = home.path().join("tmp").join(ARG0_DIRECTORY).join("native");
         fs::create_dir_all(&scratch).unwrap();
         // A dangling link proves the inventory does not read its target.
         std::os::unix::fs::symlink(
@@ -200,6 +206,7 @@ mod tests {
         for relative in [
             "sessions/linked.jsonl",
             "tmp/arg0",
+            "tmp/arg0-macos",
             "tmp/other",
             "session_index.jsonl",
         ] {
@@ -215,6 +222,28 @@ mod tests {
         let home = fixture();
         let _socket = std::os::unix::net::UnixListener::bind(home.path().join("socket")).unwrap();
         assert!(std::panic::catch_unwind(|| inventory(home.path())).is_err());
+    }
+
+    #[test]
+    fn native_arg0_wrapper_requires_the_current_namespace_and_known_helper() {
+        let directory = Path::new("tmp")
+            .join(ARG0_DIRECTORY)
+            .join("codex-arg0Fixture");
+        for name in ["apply_patch", "applypatch", "codex-execve-wrapper"] {
+            assert!(super::super::is_generated_arg0_wrapper(&directory.join(name)));
+        }
+        for name in ["other", "nested/apply_patch"] {
+            assert!(!super::super::is_generated_arg0_wrapper(&directory.join(name)));
+        }
+        let other_namespace = if cfg!(target_os = "macos") {
+            "arg0"
+        } else {
+            "arg0-macos"
+        };
+        let relative = Path::new("tmp")
+            .join(other_namespace)
+            .join("codex-arg0Fixture/apply_patch");
+        assert!(!super::super::is_generated_arg0_wrapper(&relative));
     }
 
     #[test]

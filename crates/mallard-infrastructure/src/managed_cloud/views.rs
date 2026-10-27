@@ -14,6 +14,7 @@ use crate::providers::traits::{
 };
 use crate::providers::{AgentProviderRegistry, SessionTimelineContext};
 use crate::session_detail::token_count;
+use crate::session_path_map::SessionPathMapper;
 use mallard_domain::{
     sha256_hex, BundleManifest, ConversationFileRole, NoticeSeverity, ProviderKey,
 };
@@ -21,7 +22,7 @@ use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The view's schema, which names its key: `_views/<schema>-<transcript sha256>.json`.
+/// Schema 1 includes each message's optional project-relative working directory.
 pub const VIEW_SCHEMA: u32 = 1;
 /// The service's view bounds (`LIMITS.viewBytes`, `LIMITS.viewEvents`).
 pub const VIEW_BYTES: usize = 8 * 1024 * 1024;
@@ -185,6 +186,15 @@ pub fn build_view(
     } else {
         Cow::Borrowed(transcript)
     };
+    // Only structural cwd fields are decoded for the native timeline reader.
+    // Message/tool text stays in portable wire form: no temporary host paths
+    // enter the published view, and explicit root links keep their meaning.
+    let mapper = SessionPathMapper::new(
+        root.to_str().ok_or("view workspace is not UTF-8")?,
+        None,
+        None,
+    )?;
+    let display_transcript = view_working_directories(&display_transcript, provider, &mapper)?;
     std::fs::write(&path, display_transcript)
         .map_err(|error| format!("view workspace: {error}"))?;
     let context = SessionTimelineContext {
@@ -290,6 +300,83 @@ pub fn build_view(
         }
         kept /= 2;
     }
+}
+
+fn view_working_directories(
+    transcript: &[u8],
+    provider: &ProviderKey,
+    mapper: &SessionPathMapper,
+) -> Result<Vec<u8>, String> {
+    if transcript.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
+        return Err("view transcript exceeds the bounded transcript limit".into());
+    }
+    let mut bytes = Vec::with_capacity(transcript.len());
+    for (index, record) in parsed_records(transcript).enumerate() {
+        if index >= MAX_CODEX_RECORDS {
+            return Err("view transcript has too many records".into());
+        }
+        let mut record = record.map_err(|_| "view transcript contains malformed JSON")?;
+        let directory_fields = if provider.as_str() == "claude" {
+            record.as_object_mut()
+        } else if matches!(
+            structural_record_type(&record),
+            Some("session_meta" | "turn_context")
+        ) {
+            record
+                .get_mut("payload")
+                .and_then(serde_json::Value::as_object_mut)
+        } else {
+            None
+        };
+        if let Some(fields) = directory_fields {
+            for key in ["cwd", "working_directory", "project_path"] {
+                if let Some(value) = fields.get_mut(key) {
+                    // The native parser still needs the recorded metadata when
+                    // it cannot establish a project cwd. An unmapped path cannot
+                    // match this view's temporary project root.
+                    if let Some(directory) = view_local_directory(value, mapper) {
+                        *value = serde_json::Value::String(directory);
+                    }
+                }
+            }
+        }
+        serde_json::to_writer(&mut bytes, &record).map_err(|_| "encode view transcript")?;
+        bytes.push(b'\n');
+        if bytes.len() as u64 > mallard_domain::MAX_CONVERSATION_FILE_BYTES {
+            return Err("view transcript exceeds the bounded transcript limit".into());
+        }
+    }
+    Ok(bytes)
+}
+
+fn view_local_directory(value: &serde_json::Value, mapper: &SessionPathMapper) -> Option<String> {
+    let wire = value.as_str()?;
+    // Only references produced by the path codec establish a directory.
+    // Outside paths and escaped literal markers must not become a cwd.
+    if wire.len() > 4096 || !wire.starts_with("/__mallard_root__/") {
+        return None;
+    }
+    let decoded = mapper.decode_record(value).ok()?;
+    let decoded = decoded.as_str()?;
+    let suffix = decoded.strip_prefix(mapper.root())?;
+    if !suffix.is_empty() && !suffix.starts_with(['/', '\\']) {
+        return None;
+    }
+    if suffix.chars().any(char::is_control) {
+        return None;
+    }
+    let parts = suffix
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>();
+    if parts.contains(&"..") {
+        return None;
+    }
+    Some(if parts.is_empty() {
+        mapper.root().to_owned()
+    } else {
+        format!("{}/{}", mapper.root(), parts.join("/"))
+    })
 }
 
 /// Push omits reproducible Codex display records. Recreate them only for
@@ -609,6 +696,89 @@ mod tests {
         );
         assert!(!value["events"].as_array().unwrap().is_empty());
         assert_eq!(view.events, value["events"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn claude_views_keep_each_message_directory_and_portable_text() {
+        let directories = [
+            ("/__mallard_root__/b;", Some(".")),
+            ("/__mallard_root__/b;/part5", Some("part5")),
+            ("/__mallard_root__/b;/part5/render", Some("part5/render")),
+            ("/__mallard_root__/b;/../outside", None),
+            ("/outside/project", None),
+        ];
+        let text = "[Video](../Part5_The_Fall_of_Patroclus_zh.mp4) /__mallard_root__/b;/literal";
+        let wire = directories
+            .iter()
+            .enumerate()
+            .map(|(index, (cwd, _))| {
+                json!({
+                    "type": "assistant", "uuid": format!("reply-{index}"), "sessionId": "claude-view", "cwd": cwd,
+                    "timestamp": format!("2026-08-07T00:00:0{index}Z"),
+                    "message": {"id": format!("message-{index}"), "role": "assistant", "content": [{"type": "text", "text": text}]}
+                }).to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let view = build_view(
+            AgentProviderRegistry::production(),
+            &ProviderKey::parse("claude").unwrap(),
+            "resource-claude",
+            "claude-view",
+            None,
+            wire.as_bytes(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&view.bytes).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(view.source_sha256, sha256_hex(wire.as_bytes()));
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(events.len(), directories.len());
+        for (event, (_, expected)) in events.iter().zip(directories) {
+            assert_eq!(event["working_directory"].as_str(), expected);
+            assert_eq!(event["text"], text);
+        }
+        // The temporary local root never becomes portable content.
+        assert!(!String::from_utf8_lossy(&view.bytes).contains("/project/part5"));
+    }
+
+    #[test]
+    fn codex_views_follow_turn_directories_and_keep_unknown_directories_unknown() {
+        let (_, _, value) = codex_view(vec![
+            json!({"type":"session_meta","payload":{"id":"wire-root","cwd":"/__mallard_root__/b;"}}),
+            json!({"timestamp":"2026-08-07T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"At root"}}),
+            json!({"type":"turn_context","payload":{"cwd":"/__mallard_root__/b;/part5"}}),
+            json!({"timestamp":"2026-08-07T00:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"[Video](../clip.mp4)"}}),
+            json!({"type":"turn_context","payload":{"cwd":"/outside/project"}}),
+            json!({"timestamp":"2026-08-07T00:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Unknown directory"}}),
+        ]);
+        let events = value["events"].as_array().unwrap();
+        assert_eq!(
+            events.iter().map(|event| event["working_directory"].as_str()).collect::<Vec<_>>(),
+            vec![Some("."), Some("part5"), None]
+        );
+        let (_, _, outside) = codex_view(vec![
+            json!({"type":"session_meta","payload":{"id":"wire-root","cwd":"/fixture/another-project"}}),
+            json!({"timestamp":"2026-08-07T00:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Unknown project"}}),
+        ]);
+        assert!(outside["events"][0]["working_directory"].is_null());
+    }
+
+    #[test]
+    fn view_directories_use_the_portable_codec_and_reject_escapes() {
+        let mapper = SessionPathMapper::new("/fixture/project", None, None).unwrap();
+        for tag in ["b", "c", "bt", "ct", "bs", "cs", "bj", "cj", "bx", "cx"] {
+            assert_eq!(view_local_directory(&json!(format!("/__mallard_root__/{tag};/part5")), &mapper),
+                Some("/fixture/project/part5".into()), "{tag}");
+        }
+        for value in ["/__mallard_root__/b;evil", "/__mallard_root__/b;/../outside", "/__mallard_root__/b;/a/../../outside",
+            "/__mallard_escape__/b;", "/__mallard_root__/unknown;/part5", "/absolute/path", "relative/path"] {
+            assert_eq!(view_local_directory(&json!(value), &mapper), None, "{value}");
+        }
+        // URI spellings are links, not native working directories.
+        for tag in ["bu", "cu", "be", "ce"] {
+            assert_eq!(view_local_directory(&json!(format!("/__mallard_root__/{tag};/part5")), &mapper), None);
+        }
     }
 
     #[test]

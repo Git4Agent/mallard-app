@@ -1,11 +1,13 @@
 //! Opt-in end-to-end coverage for two isolated Claude Code homes
 //! synchronizing through one real Mallard local-folder repository.
 //!
-//! The credentialless target owns one strict loopback aimock process, one
+//! The original sync phase owns one strict loopback aimock process, one
 //! bounded Claude version probe, and twelve public Claude model-turn CLI
 //! processes. It creates five source revisions, resolves Keep Both in both
 //! directions, reopens all three final histories from both replicas, resets
-//! and republishes storage, and proves one incremental cursor append.
+//! and republishes storage, and proves one incremental cursor append. It then
+//! runs a separate two-turn media phase with three model requests and two
+//! probes, verifying a nested cwd and reviewed video transport.
 //! A separately gated paid Tuzi target reuses the production Mallard oracles
 //! for a smaller three-turn create, relocated-resume, divergent-Pull, and
 //! storage-reset flow.
@@ -19,6 +21,9 @@ mod session_reconciliation;
 
 #[path = "support/claude_desktop_import.rs"]
 mod claude_desktop_import;
+
+#[path = "support/claude_media.rs"]
+mod claude_media;
 
 use mallard_domain::{
     ActionId, BundleId, CloudThreadId, ConversationMaterializationState, ConversationReviewAction,
@@ -649,6 +654,11 @@ struct AimockScenario {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum AimockResponse {
+    ChangeDirectory {
+        call_id: String,
+        directory: String,
+        restored_directory: String,
+    },
     Text {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -863,7 +873,7 @@ struct AimockScenarioAudit {
     current_marker_position: i64,
     history_match: bool,
     tool_result_match: bool,
-    read_round_match: bool,
+    tool_round_match: bool,
     mismatch_code: usize,
     mismatch_index: usize,
 }
@@ -1278,7 +1288,7 @@ fn validate_aimock_audit(
             || !scenario.content_type_json
             || !scenario.content_encoding_absent
             || !scenario.tools_ok
-            || !scenario.read_round_match
+            || !scenario.tool_round_match
             || scenario.mismatch_code != 0
             || scenario.mismatch_index != 0
             || scenario.expected_prior_history_count != scenario.observed_prior_history_count
@@ -1492,20 +1502,49 @@ fn run_claude(
     expected_response: &str,
 ) -> String {
     assert!(
-        !prompt.is_empty()
-            && prompt.len() <= MAX_PROMPT_BYTES
-            && prompt
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
-        "Claude prompt must be one bounded exact marker"
-    );
-    assert!(
         !expected_response.is_empty()
             && expected_response.len() <= 128
             && expected_response
                 .bytes()
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
         "Claude response marker is invalid"
+    );
+    run_claude_with_tool(
+        process_count,
+        provider,
+        claude_home,
+        process_home,
+        project_root,
+        session_id,
+        new_session,
+        prompt,
+        expected_response,
+        "Read",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_claude_with_tool(
+    process_count: &mut usize,
+    provider: &LocalAimockProvider,
+    claude_home: &Path,
+    process_home: &Path,
+    project_root: &Path,
+    session_id: &str,
+    new_session: bool,
+    prompt: &str,
+    expected_response: &str,
+    tool: &str,
+) -> String {
+    assert!(matches!(tool, "Read" | "Bash"));
+    assert!(!expected_response.is_empty() && expected_response.len() <= 32 * 1024);
+    assert!(
+        !prompt.is_empty()
+            && prompt.len() <= MAX_PROMPT_BYTES
+            && prompt
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
+        "Claude prompt must be one bounded exact marker"
     );
     assert!(
         !session_id.is_empty()
@@ -1537,10 +1576,15 @@ fn run_claude(
             MODEL,
             "--permission-mode",
             "dontAsk",
-            "--tools=Read",
+            "--tools",
+            tool,
         ])
         .map(OsString::from)
         .collect::<Vec<_>>();
+    // Only the media fixture exposes Bash; its mock emits one fixed cd command.
+    if tool == "Bash" {
+        arguments.push(OsString::from("--allowedTools=Bash"));
+    }
     if new_session {
         arguments.extend([OsString::from("--session-id"), OsString::from(session_id)]);
     } else {
@@ -5450,6 +5494,7 @@ fn live_claude_aimock_setup_push_pull_divergence() {
     aimock
         .finish(&sensitive)
         .expect("Claude aimock audit did not prove the exact model/probe request contract");
+    claude_media::run();
 }
 
 #[test]

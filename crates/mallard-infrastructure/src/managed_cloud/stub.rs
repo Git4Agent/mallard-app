@@ -160,9 +160,6 @@ fn keep_manifest_content(value: &Value, prefix: &str, keys: &mut BTreeSet<String
                     keys.insert(format!("{prefix}/_objects/{sha}"));
                 }
             }
-            if let Some(sha) = fields.get("transcript_sha256").and_then(Value::as_str) {
-                keys.insert(format!("{prefix}/_views/1-{sha}.json"));
-            }
             for child in fields.values() {
                 keep_manifest_content(child, prefix, keys);
             }
@@ -671,6 +668,13 @@ impl StubState {
                 let value: Value = serde_json::from_slice(&object.bytes).expect("stored manifest");
                 protected.insert(key);
                 keep_manifest_content(&value, &content, &mut protected);
+            }
+        }
+        for key in repository.objects.keys() {
+            if let Ok(KeyClass::View { sha256, .. }) = classify_key(repository, key) {
+                if protected.contains(&format!("{content}/_objects/{sha256}")) {
+                    protected.insert(key.clone());
+                }
             }
         }
         for key in repository.keys_under(&content) {
@@ -1220,7 +1224,11 @@ fn segments(path: &str) -> Vec<&str> {
 enum KeyClass {
     Marker,
     Object { sha256: String },
-    View { schema: u32, sha256: String },
+    View {
+        schema: u32,
+        sha256: String,
+        view_sha256: String,
+    },
     Manifest { revision: u64, commit_id: String },
     Tag,
     Claim { parent: String },
@@ -1297,12 +1305,16 @@ fn classify_key(repository: &Repository, key: &str) -> Result<KeyClass, String> 
             let schema: u32 = schema
                 .parse()
                 .map_err(|_| "the view key is outside the grammar".to_string())?;
-            if !hex64(sha256) {
+            let (sha256, view_sha256) = sha256
+                .split_once('-')
+                .ok_or("the view key is outside the grammar")?;
+            if !hex64(sha256) || !hex64(view_sha256) {
                 return Err("the view key is outside the grammar".to_string());
             }
             return Ok(KeyClass::View {
                 schema,
                 sha256: sha256.to_owned(),
+                view_sha256: view_sha256.to_owned(),
             });
         }
     } else if relative == "_tag.json" {
@@ -1492,7 +1504,12 @@ fn index_record(state: &mut StubState, repository_id: &str, name: &RecordName, u
                     continue;
                 };
                 if let Some(entry) = scope.files.get(&transcript.logical_path) {
-                    references.push(format!("_views/1-{}.json", entry.sha256));
+                    let content = format!("{}/", repository.content_prefix());
+                    let prefix = format!("{content}_views/1-{}-", entry.sha256);
+                    references.extend(
+                        repository.objects.keys().filter(|key| key.starts_with(&prefix))
+                            .filter_map(|key| key.strip_prefix(&content).map(str::to_owned)),
+                    );
                 }
             }
         }
@@ -2439,6 +2456,7 @@ fn put_store(
         KeyClass::View {
             schema,
             sha256: source,
+            view_sha256,
         } => {
             if too_large(MAX_MANIFEST_BYTES) {
                 return error("object_too_large", "over 8 MiB");
@@ -2447,7 +2465,11 @@ fn put_store(
                 Ok(value) => value,
                 Err(_) => return error("object_invalid", "view is not JSON"),
             };
-            if value["schema_version"].as_u64() != Some(u64::from(*schema))
+            if view_sha256 != &sha256 {
+                return error("object_integrity_failed", "the view digest differs");
+            }
+            if *schema != 1
+                || value["schema_version"].as_u64() != Some(u64::from(*schema))
                 || !value["resource_id"].is_string()
                 || !value["events"].is_array()
             {
@@ -2678,7 +2700,6 @@ mod tests {
                 format!("content/_objects/{}", "a".repeat(64)),
                 format!("content/_objects/{}", "b".repeat(64)),
                 format!("content/_objects/{}", "c".repeat(64)),
-                format!("content/_views/1-{}.json", "d".repeat(64)),
             ])
         );
         assert!(!keys.iter().any(|key| key.contains(&"f".repeat(64))));

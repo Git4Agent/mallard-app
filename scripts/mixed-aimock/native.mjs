@@ -29,7 +29,7 @@ export async function nativePreflight(replica) {
   const options = { cwd: replica.project, env: environment(replica.home, { CODEX_HOME: replica.codex, CLAUDE_CONFIG_DIR: replica.claude }) };
   const codex = (await runBounded("codex", ["--version"], options, 15_000)).trim();
   const claude = (await runBounded("claude", ["--version"], options, 15_000)).trim();
-  assert.equal(codex, "codex-cli 0.162.1", "Codex version pin");
+  assert.equal(codex, "codex-cli 0.164.0-alpha.11.1", "Codex version pin");
   assert.ok(claude === "2.1.266 (Claude Code)", "Claude version pin");
   const probe = process.platform === "win32" ? ["cmd.exe", "/d", "/c", "exit", "0"] : ["/usr/bin/true"];
   await runBounded("codex", ["sandbox", "--", ...probe], options, 15_000);

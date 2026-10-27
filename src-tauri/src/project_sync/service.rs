@@ -202,6 +202,14 @@ impl<'a> ProjectSyncService<'a> {
         Self { repository }
     }
 
+    pub fn inspect_project_files(
+        &self,
+        local_project_id: &LocalProjectId,
+        storage_id: &StorageId,
+    ) -> Result<ProjectContentInventory, String> {
+        inspect_project_files_with_repository(self.repository, local_project_id, storage_id)
+    }
+
     pub fn create_setup_draft(
         &self,
         project_root: &Path,

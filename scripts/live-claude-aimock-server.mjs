@@ -196,6 +196,18 @@ function validateThinking(value, label) {
   return value;
 }
 
+// The media fixture can only change directory and print this fixed marker.
+function changeDirectoryCommand(directory) {
+  const quoted = "'" + directory.replaceAll("'", "'\"'\"'") + "'";
+  return `cd ${quoted} && printf 'MALLARD_CLAUDE_CHANGED_DIRECTORY\\n'`;
+}
+
+function toolArguments(response, replay = false) {
+  return response.kind === "change_directory"
+    ? { command: changeDirectoryCommand(replay ? response.restored_directory : response.directory) }
+    : { file_path: response.file_path };
+}
+
 function validateResponse(value, label) {
   if (!isRecord(value) || typeof value.kind !== "string") {
     throw new Error(`${label}_shape`);
@@ -226,6 +238,17 @@ function validateResponse(value, label) {
       file_path: value.file_path,
       ...thinking,
     };
+  }
+  if (value.kind === "change_directory") {
+    assertExactKeys(value, ["kind", "call_id", "directory", "restored_directory"], label);
+    if (typeof value.call_id !== "string" || !CALL_ID_PATTERN.test(value.call_id)) {
+      throw new Error(`${label}_call_id`);
+    }
+    for (const directory of [value.directory, value.restored_directory]) {
+      validateReadPath(directory);
+      if (basename(directory) !== "part5" || /[\r\n]/u.test(directory)) throw new Error(`${label}_directory`);
+    }
+    return { ...value };
   }
   throw new Error(`${label}_kind`);
 }
@@ -348,7 +371,7 @@ function parseScenarioDocument(input) {
       group.length !== 2 ||
       !initial ||
       !final ||
-      initial.response.kind !== "read_tool" ||
+      !["read_tool", "change_directory"].includes(initial.response.kind) ||
       final.response.kind !== "text" ||
       final.expected_tool_call_id !== initial.response.call_id ||
       JSON.stringify(initial.expected_history) !==
@@ -358,28 +381,33 @@ function parseScenarioDocument(input) {
     }
   }
 
-  const readScenarios = scenarios.filter(
-    (scenario) => scenario.response.kind === "read_tool",
+  const toolScenarios = scenarios.filter(
+    (scenario) => scenario.response.kind !== "text",
   );
-  if (readScenarios.length > 1) {
-    throw new Error("read_scenario_count");
+  if (toolScenarios.length > 1) {
+    throw new Error("tool_scenario_count");
   }
-  let readRound = null;
-  if (readScenarios.length === 1) {
-    const initial = readScenarios[0];
+  let toolRound = null;
+  if (toolScenarios.length === 1) {
+    const initial = toolScenarios[0];
     const final = scenarios.find(
       (scenario) =>
         scenario.prompt_marker === initial.prompt_marker &&
         scenario.require_tool_result,
     );
     if (!final || final.response.kind !== "text") {
-      throw new Error("read_scenario_pair");
+      throw new Error("tool_scenario_pair");
     }
-    readRound = {
+    if (initial.response.kind === "change_directory" &&
+        final.expected_tool_result_marker !== "MALLARD_CLAUDE_CHANGED_DIRECTORY") {
+      throw new Error("directory_result_marker");
+    }
+    toolRound = {
       prompt_marker: initial.prompt_marker,
       response_marker: final.response.content,
       call_id: initial.response.call_id,
-      file_path: initial.response.file_path,
+      response: initial.response,
+      tool_name: initial.response.kind === "change_directory" ? "Bash" : "Read",
       result_marker: final.expected_tool_result_marker,
     };
   }
@@ -403,7 +431,7 @@ function parseScenarioDocument(input) {
     expected_request_count: value.expected_request_count,
     expected_probe_request_count: value.expected_probe_request_count,
     scenarios,
-    read_round: readRound,
+    tool_round: toolRound,
     marker_catalog: markerCatalog,
   };
 }
@@ -449,7 +477,7 @@ function messageText(message) {
     .join("");
 }
 
-function readToolCall(message, contract) {
+function toolCall(message, contract) {
   if (message?.role !== "assistant" || !Array.isArray(message.tool_calls)) {
     return false;
   }
@@ -460,13 +488,13 @@ function readToolCall(message, contract) {
   return (
     call?.id === contract.call_id &&
     call?.type === "function" &&
-    call?.function?.name === "Read" &&
+    call?.function?.name === contract.tool_name &&
     call?.function?.arguments ===
-      JSON.stringify({ file_path: contract.file_path })
+      JSON.stringify(toolArguments(contract.response))
   );
 }
 
-function replayedReadToolCall(message, contract) {
+function replayedToolCall(message, contract) {
   if (message?.role !== "assistant" || message.tool_calls?.length !== 1) {
     return false;
   }
@@ -474,7 +502,7 @@ function replayedReadToolCall(message, contract) {
   if (
     call?.id !== contract.call_id ||
     call?.type !== "function" ||
-    call?.function?.name !== "Read" ||
+    call?.function?.name !== contract.tool_name ||
     typeof call?.function?.arguments !== "string"
   ) {
     return false;
@@ -485,6 +513,9 @@ function replayedReadToolCall(message, contract) {
   } catch {
     return false;
   }
+  if (contract.response.kind === "change_directory") {
+    return JSON.stringify(argumentsValue) === JSON.stringify(toolArguments(contract.response, true));
+  }
   const filePath = argumentsValue?.file_path;
   return (
     isRecord(argumentsValue) &&
@@ -492,11 +523,11 @@ function replayedReadToolCall(message, contract) {
     isBoundedString(filePath, MAX_PATH_BYTES) &&
     isAbsolute(filePath) &&
     resolve(filePath) === filePath &&
-    basename(filePath) === basename(contract.file_path)
+    basename(filePath) === basename(contract.response.file_path)
   );
 }
 
-function readToolResult(message, contract) {
+function toolResult(message, contract) {
   return (
     message?.role === "tool" &&
     message.tool_call_id === contract.call_id &&
@@ -506,11 +537,13 @@ function readToolResult(message, contract) {
   );
 }
 
-function validateReadRound(request, scenario, contract) {
+function validateToolRound(request, scenario, contract) {
   if (contract === null) {
     return true;
   }
   const messages = request.messages;
+  const toolCallCount = messages.reduce((count, message) =>
+    count + (Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0), 0);
   const promptIndexes = messages.flatMap((message, index) =>
     message?.role === "user" &&
     boundedMarkerOccurrenceCount(
@@ -526,19 +559,20 @@ function validateReadRound(request, scenario, contract) {
       messageText(message) === contract.response_marker,
   );
   const toolCallIndexes = messages.flatMap((message, index) =>
-    readToolCall(message, contract) ? [index] : [],
+    toolCall(message, contract) ? [index] : [],
   );
   const replayedToolCallIndexes = messages.flatMap((message, index) =>
-    replayedReadToolCall(message, contract) ? [index] : [],
+    replayedToolCall(message, contract) ? [index] : [],
   );
   const toolResultIndexes = messages.flatMap((message, index) =>
-    readToolResult(message, contract) ? [index] : [],
+    toolResult(message, contract) ? [index] : [],
   );
 
-  if (scenario.response.kind === "read_tool") {
+  if (scenario.response.kind !== "text") {
     return (
       promptIndexes.length === 1 &&
       responseIndex === -1 &&
+      toolCallCount === 0 &&
       toolCallIndexes.length === 0 &&
       toolResultIndexes.length === 0
     );
@@ -550,30 +584,33 @@ function validateReadRound(request, scenario, contract) {
     return (
       promptIndexes.length === 1 &&
       responseIndex === -1 &&
+      toolCallCount === 1 &&
       toolCallIndexes.length === 1 &&
       toolResultIndexes.length === 1 &&
       promptIndexes[0] < toolCallIndexes[0] &&
       toolCallIndexes[0] < toolResultIndexes[0]
     );
   }
-  const historyContainsReadRound = scenario.expected_history.some(
+  const historyContainsToolRound = scenario.expected_history.some(
     (entry) =>
       entry.role === "user" && entry.marker === contract.prompt_marker,
   );
-  if (!historyContainsReadRound) {
+  if (!historyContainsToolRound) {
     return (
       promptIndexes.length === 0 &&
       responseIndex === -1 &&
+      toolCallCount === 0 &&
       toolCallIndexes.length === 0 &&
       toolResultIndexes.length === 0
     );
   }
-  // Pull path-maps the historical Read argument to the destination project.
+  // Pull path-maps historical tool arguments to the destination project.
   // The Rust flow checks that exact destination; the mock keeps the provider
-  // request strict on call identity, argument shape, and file name.
+  // request strict on call identity and arguments (the exact restored Bash command).
   return (
     promptIndexes.length === 1 &&
     responseIndex >= 0 &&
+    toolCallCount === 1 &&
     replayedToolCallIndexes.length === 1 &&
     toolResultIndexes.length === 1 &&
     promptIndexes[0] < replayedToolCallIndexes[0] &&
@@ -591,7 +628,7 @@ function validateScenarioRequest(document, scenario, request) {
     current_marker_position: -1,
     history_match: false,
     tool_result_match: false,
-    read_round_match: false,
+    tool_round_match: false,
     model_ok: false,
     stream_ok: false,
     tools_ok: false,
@@ -617,7 +654,7 @@ function validateScenarioRequest(document, scenario, request) {
     Array.isArray(request.tools) &&
     request.tools.length === 1 &&
     request.tools.length <= MAX_TOOLS &&
-    request.tools[0]?.function?.name === "Read";
+    request.tools[0]?.function?.name === (document.tool_round?.tool_name ?? "Read");
   if (!result.tools_ok) fail(10, Array.isArray(request.tools) ? request.tools.length : 0);
 
   const markers = [];
@@ -722,12 +759,12 @@ function validateScenarioRequest(document, scenario, request) {
     fail(9, currentTurnTools.length);
   }
 
-  result.read_round_match = validateReadRound(
+  result.tool_round_match = validateToolRound(
     request,
     scenario,
-    document.read_round,
+    document.tool_round,
   );
-  if (!result.read_round_match) {
+  if (!result.tool_round_match) {
     fail(11);
   }
   result.history_match = result.mismatch_code === 0;
@@ -751,9 +788,9 @@ function fixedFixtureResponse(document, scenario) {
     toolCalls: [
       {
         id: scenario.response.call_id,
-        name: "Read",
+        name: document.tool_round.tool_name,
         // aimock 1.39.0's Claude path requires the explicit JSON string.
-        arguments: JSON.stringify({ file_path: scenario.response.file_path }),
+        arguments: JSON.stringify(toolArguments(scenario.response)),
       },
     ],
     ...overrides,
@@ -1011,7 +1048,7 @@ function buildAudit(
         observation.valid_request_count === 1 &&
         observation.history_mismatch_count === 0,
       tool_result_match: validation?.tool_result_match ?? false,
-      read_round_match: validation?.read_round_match ?? false,
+      tool_round_match: validation?.tool_round_match ?? false,
       mismatch_code: mismatchCode,
       mismatch_index: validation?.mismatch_index ?? 0,
     };
