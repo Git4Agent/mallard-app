@@ -1,0 +1,82 @@
+name: CI
+
+# Runs the committed handoff checks from AGENTS.md on every pull request and
+# on every push to main, so a reviewer sees the result instead of rerunning it.
+# No secrets are read: pull requests from forks run with a read-only token.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same pull request supersedes the run still in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend:
+    name: Frontend build and integration tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check and build
+        run: npm run build
+
+      - name: Run frontend integration tests
+        run: npm run test:frontend-integration
+
+      - name: Test release configuration
+        run: npm run test:release-config
+
+  backend:
+    name: Backend integration tests
+    # The app ships for macOS and Windows; macOS is the primary release target.
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: ci
+          # Pull requests reuse the cache that main writes instead of each
+          # writing their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The Tauri crate embeds the built frontend, so tests need dist/.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run backend integration tests
+        run: npm run test:backend-integration
