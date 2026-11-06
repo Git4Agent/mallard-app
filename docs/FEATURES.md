@@ -185,6 +185,14 @@ video-size and project-path checks apply to every request. Images retain their
 8 MiB embedding limit. Media remains local project content; viewing a session
 does not transfer its linked files.
 
+Files Claude hands over through its `SendUserFile` tool show under that call
+in the order sent: a picture, a track or a clip inside the project plays in
+place, and any other project file opens from its name. The reply's text need
+not link them. The Replies filter includes these calls, as it does widgets;
+files outside the project are not indexed. Mallard Cloud views carry the same
+project-relative paths, so the website shows the files the selected version
+holds.
+
 ## Claude widgets in session detail
 
 Mallard displays complete SVG widgets from Claude's `mcp__visualize__show_widget`

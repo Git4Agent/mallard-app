@@ -66,6 +66,47 @@ pub(crate) fn is_wire_atom(text: &str) -> bool {
     TOKENS.contains(&text) || text == ESCAPED_ROOT_TOKEN || text == ESCAPED_ESCAPE_TOKEN
 }
 
+/// The spellings of a root that name a path. The URI spellings (`bu`, `cu`,
+/// `be`, `ce`) name a link.
+const PATH_TOKENS: [&str; 10] = [
+    ROOT_TOKEN,
+    "/__mallard_root__/c;",
+    "/__mallard_root__/bt;",
+    "/__mallard_root__/ct;",
+    "/__mallard_root__/bs;",
+    "/__mallard_root__/cs;",
+    "/__mallard_root__/bj;",
+    "/__mallard_root__/cj;",
+    "/__mallard_root__/bx;",
+    "/__mallard_root__/cx;",
+];
+
+/// The file a wire path names under the project root, as the segments under
+/// it: a root reference in a path spelling, then separators of either
+/// family, as a view's transcript carries a Windows push. The root itself,
+/// a climb, a marker among the segments, an escaped marker and a URI
+/// spelling name no file.
+pub fn wire_root_relative_segments(text: &str) -> Option<Vec<&str>> {
+    let suffix = PATH_TOKENS
+        .iter()
+        .find_map(|token| text.strip_prefix(token))?;
+    if !suffix.starts_with(['/', '\\']) {
+        return None;
+    }
+    let segments = suffix
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments
+            .iter()
+            .any(|segment| matches!(*segment, ".." | "__mallard_root__" | "__mallard_escape__"))
+    {
+        return None;
+    }
+    Some(segments)
+}
+
 /// The current user's home directory as mapper input. `dirs` reads `HOME`
 /// on Unix (so tests that set it keep working) and `USERPROFILE` on
 /// Windows, where `HOME` is normally unset.
@@ -974,5 +1015,40 @@ mod tests {
             w.decode_record(&from_posix).unwrap(),
             json!([r"C:\Users\Ada\proj/a", "file:///C:/Users/Ada/proj/b"])
         );
+    }
+
+    #[test]
+    fn wire_paths_name_files_under_the_root_in_every_path_spelling() {
+        for tag in ["b", "c", "bt", "ct", "bs", "cs", "bj", "cj", "bx", "cx"] {
+            assert_eq!(
+                wire_root_relative_segments(&format!("/__mallard_root__/{tag};/part5/clip.mp4")),
+                Some(vec!["part5", "clip.mp4"]),
+                "{tag}"
+            );
+        }
+        assert_eq!(
+            wire_root_relative_segments(r"/__mallard_root__/bj;\\part5\\clip.mp4"),
+            Some(vec!["part5", "clip.mp4"])
+        );
+        assert_eq!(
+            wire_root_relative_segments("/__mallard_root__/b;/./part5//clip.mp4"),
+            Some(vec!["part5", "clip.mp4"])
+        );
+        for text in [
+            "/__mallard_root__/b;",
+            "/__mallard_root__/b;/",
+            "/__mallard_root__/b;evil",
+            "/__mallard_root__/b;/../outside.mp4",
+            "/__mallard_root__/b;/part5/../../outside.mp4",
+            "/__mallard_root__/b;/__mallard_root__/c;/x",
+            "/__mallard_root__/bu;/part5/clip.mp4",
+            "/__mallard_root__/be;/part5/clip.mp4",
+            "/__mallard_root__/unknown;/part5",
+            "/__mallard_escape__/r/part5",
+            "/absolute/clip.mp4",
+            "part5/clip.mp4",
+        ] {
+            assert_eq!(wire_root_relative_segments(text), None, "{text}");
+        }
     }
 }

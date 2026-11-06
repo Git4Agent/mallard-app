@@ -16,6 +16,7 @@ use crate::providers::traits::{
     SessionTimelineQuery, SessionToolCallPreview, SessionToolCallStatus, SessionToolCategory,
     SessionToolIndexEntry,
 };
+use crate::session_path_map::wire_root_relative_segments;
 use mallard_domain::NoticeSeverity;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,8 +32,11 @@ fn max_line_bytes() -> usize {
 }
 const MAX_TIMELINE_EVENTS: usize = 50_000;
 const MAX_CLAUDE_RECORDS: usize = 100_000;
-/// Fixed at 1. Only the current parser is supported.
-pub(crate) const TIMELINE_PARSER_VERSION: u32 = 1;
+/// Only the current parser is supported; a cached index of an earlier one is
+/// rebuilt. 2: a `SendUserFile` call indexes the project files it delivered.
+pub(crate) const TIMELINE_PARSER_VERSION: u32 = 2;
+/// The most delivered files one call indexes.
+const MAX_DELIVERED_FILES: usize = 64;
 /// The suffix of a child transcript that its row is read from: the last
 /// record's clock and the final message. The same bound the scan window uses.
 const CHILD_TAIL_WINDOW_BYTES: u64 = 256 * 1024;
@@ -1246,6 +1250,12 @@ fn safe_project_relative_path(
     project_root: &Path,
     project_root_aliases: &[PathBuf],
 ) -> Option<String> {
+    // A Cloud view is indexed from the wire transcript, where the project
+    // root is the portable marker and no local path: the reference is
+    // already relative to the root.
+    if let Some(segments) = wire_root_relative_segments(path) {
+        return Some(segments.join("/"));
+    }
     let candidate = Path::new(path);
     let relative = if candidate.is_absolute() {
         most_specific_project_relative_path(candidate, project_root, project_root_aliases)?
@@ -1274,16 +1284,43 @@ fn safe_project_relative_path(
     )
 }
 
+/// The files Claude handed the person through `SendUserFile`.
+fn is_delivery_tool(native_name: &str) -> bool {
+    native_name == "SendUserFile"
+}
+
 fn affected_paths(
     input: &Value,
+    native_name: &str,
     category: SessionToolCategory,
     project_root: &Path,
     project_root_aliases: &[PathBuf],
 ) -> Vec<String> {
-    if category != SessionToolCategory::FileEdit {
-        return Vec::new();
-    }
     let mut paths = Vec::new();
+    if is_delivery_tool(native_name) {
+        // In the order they were handed over: the first names the row, and
+        // the page plays them in that order.
+        for file in input
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(MAX_DELIVERED_FILES)
+        {
+            if let Some(relative) =
+                safe_project_relative_path(file, project_root, project_root_aliases)
+            {
+                if !paths.contains(&relative) {
+                    paths.push(relative);
+                }
+            }
+        }
+        return paths;
+    }
+    if category != SessionToolCategory::FileEdit {
+        return paths;
+    }
     for key in ["file_path", "filePath", "notebook_path", "notebookPath"] {
         if let Some(path) = input.get(key).and_then(Value::as_str) {
             if let Some(relative) =
@@ -1456,6 +1493,13 @@ fn consume_claude_record(
                             .to_string();
                         let category = classify_claude_tool(&name);
                         let input = block.get("input").unwrap_or(&Value::Null);
+                        let paths = affected_paths(
+                            input,
+                            &name,
+                            category,
+                            context.project_root,
+                            context.project_root_aliases,
+                        );
                         builder.add_tool(
                             call_id,
                             name,
@@ -1464,12 +1508,7 @@ fn consume_claude_record(
                             timestamp,
                             source,
                             block_index,
-                            affected_paths(
-                                input,
-                                category,
-                                context.project_root,
-                                context.project_root_aliases,
-                            ),
+                            paths,
                             parent_event_id.clone(),
                         );
                     }
@@ -1762,25 +1801,26 @@ fn bounded_text(value: Option<String>, limit: usize) -> (Option<String>, bool) {
     (Some(preview), true)
 }
 
-/// A widget is visible output of the assistant. Replies include it without
-/// selecting general tool traffic; the stored event remains a tool call.
-pub(crate) fn is_reply_widget(
+/// Output the assistant put in front of the person: a widget it drew, or
+/// project files it handed over. Replies include it without selecting general
+/// tool traffic; the stored event remains a tool call.
+pub(crate) fn is_reply_output(
     entry: &SessionTimelineIndexEntry,
     query: &SessionTimelineQuery,
 ) -> bool {
     entry.kind == SessionTimelineEventKind::ToolCall
-        && entry
-            .tool
-            .as_ref()
-            .is_some_and(|tool| tool.native_name == "mcp__visualize__show_widget")
+        && entry.tool.as_ref().is_some_and(|tool| {
+            tool.native_name == "mcp__visualize__show_widget"
+                || (is_delivery_tool(&tool.native_name) && !tool.affected_paths.is_empty())
+        })
         && query
             .included_event_kinds
             .contains(&SessionTimelineEventKind::Response)
 }
 
 fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuery) -> bool {
-    let reply_widget = is_reply_widget(entry, query);
-    if !query.included_event_kinds.contains(&entry.kind) && !reply_widget {
+    let reply_output = is_reply_output(entry, query);
+    if !query.included_event_kinds.contains(&entry.kind) && !reply_output {
         return false;
     }
     if let Some(turn_id) = &query.turn_id {
@@ -1789,7 +1829,7 @@ fn matching_entry(entry: &SessionTimelineIndexEntry, query: &SessionTimelineQuer
         }
     }
     // Categories partition tool calls; an agent row answers to its own kind.
-    if entry.kind == SessionTimelineEventKind::AgentCall || reply_widget {
+    if entry.kind == SessionTimelineEventKind::AgentCall || reply_output {
         return true;
     }
     if let Some(tool) = &entry.tool {
@@ -2348,7 +2388,7 @@ mod tests {
         );
         let context = context(&root);
         let index = build_timeline_index(&transcript, &context).unwrap();
-        assert_eq!(index.parser_version, 1);
+        assert_eq!(index.parser_version, TIMELINE_PARSER_VERSION);
         let query = SessionTimelineQuery {
             start_index: None,
             limit: 50,
@@ -3060,6 +3100,87 @@ mod tests {
     }
 
     #[test]
+    fn delivered_files_index_as_project_paths_and_show_with_replies() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        fs::create_dir_all(&project_root).unwrap();
+        let transcript = temp.path().join("delivery.jsonl");
+        let film = project_root.join("The_Iliad_Complete.mp4");
+        let outside = temp.path().join("elsewhere/clip.mp4");
+        let files = json!([
+            film,
+            "./part5/clip.mp4",
+            "/__mallard_root__/b;/part5/poster.png",
+            outside,
+            "../escape.mp4",
+            film,
+            7,
+        ]);
+        write_jsonl(
+            &transcript,
+            vec![
+                json!({"type":"user","uuid":"u-1","sessionId":"session-1","cwd":project_root,"message":{"role":"user","content":"Show me the film"}}),
+                json!({"type":"assistant","uuid":"a-1","sessionId":"session-1","message":{"id":"msg-1","role":"assistant","stop_reason":"tool_use","content":[
+                    {"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"README.md"}},
+                    {"type":"tool_use","id":"send-1","name":"SendUserFile","input":{"files":files,"display":"render","status":"normal"}},
+                    {"type":"tool_use","id":"send-2","name":"SendUserFile","input":{"files":[outside],"status":"normal"}}
+                ]}}),
+                json!({"type":"user","uuid":"r-1","sessionId":"session-1","message":{"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"read-1","content":"# Homer"},
+                    {"type":"tool_result","tool_use_id":"send-1","content":"3 files delivered to user."},
+                    {"type":"tool_result","tool_use_id":"send-2","content":"1 file delivered to user."}
+                ]}}),
+                json!({"type":"assistant","uuid":"a-2","sessionId":"session-1","message":{"id":"msg-2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"I've attached the complete film above."}]}}),
+            ],
+        );
+
+        let index = build_timeline_index(&transcript, &context(&project_root)).unwrap();
+        let delivered = index
+            .events
+            .iter()
+            .filter_map(|entry| entry.tool.as_ref())
+            .find(|tool| tool.provider_call_id == "send-1")
+            .unwrap();
+        assert_eq!(
+            delivered.affected_paths,
+            vec![
+                "The_Iliad_Complete.mp4",
+                "part5/clip.mp4",
+                "part5/poster.png"
+            ]
+        );
+
+        // Replies show the files Claude handed over, not the Read beside them,
+        // and not a delivery of files outside the project.
+        let replies = SessionTimelineQuery {
+            start_index: None,
+            limit: 50,
+            included_event_kinds: BTreeSet::from([SessionTimelineEventKind::Response]),
+            included_tool_categories: BTreeSet::new(),
+            turn_id: None,
+        };
+        let page =
+            read_timeline_page(&transcript, &index, &replies, &context(&project_root)).unwrap();
+        let shown = page
+            .events
+            .iter()
+            .map(|event| {
+                event
+                    .tool
+                    .as_ref()
+                    .map_or(format!("{:?}", event.kind), |tool| {
+                        tool.provider_call_id.clone()
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shown, vec!["send-1", "Response"]);
+        let tool = page.events[0].tool.as_ref().unwrap();
+        assert_eq!(tool.summary, "The_Iliad_Complete.mp4");
+        assert_eq!(tool.affected_paths, delivered.affected_paths);
+        assert!(!tool.summary.contains(temp.path().to_str().unwrap()));
+    }
+
+    #[test]
     fn structured_tool_summaries_use_distinct_native_arguments() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().join("project");
@@ -3186,7 +3307,7 @@ mod tests {
                 "file-1",
                 "SendUserFile",
                 json!({"files":["./build/report.txt"],"status":"ready"}),
-                "./build/report.txt",
+                "build/report.txt",
             ),
             (
                 "browser-1",

@@ -782,6 +782,51 @@ mod tests {
     }
 
     #[test]
+    fn claude_views_index_delivered_files_from_the_wire_root() {
+        let records = [
+            json!({"type":"user","uuid":"u-1","sessionId":"claude-view","cwd":"/__mallard_root__/b;","timestamp":"2026-08-07T00:00:00Z","message":{"role":"user","content":"Show me the film"}}),
+            json!({"type":"assistant","uuid":"a-1","parentUuid":"u-1","sessionId":"claude-view","cwd":"/__mallard_root__/b;","timestamp":"2026-08-07T00:00:01Z","message":{"id":"message-1","role":"assistant","stop_reason":"tool_use","content":[
+                {"type":"tool_use","id":"send-1","name":"SendUserFile","input":{"files":[
+                    "/__mallard_root__/b;/The_Iliad_Complete.mp4",
+                    "/__mallard_root__/bt;/part5/clip.mp4",
+                    "/__mallard_root__/b;/../outside.mp4",
+                    "/elsewhere/outside/clip.mp4"
+                ],"display":"render"}}
+            ]}}),
+            json!({"type":"user","uuid":"r-1","parentUuid":"a-1","sessionId":"claude-view","cwd":"/__mallard_root__/b;","timestamp":"2026-08-07T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send-1","content":"2 files delivered to user."}]}}),
+            json!({"type":"assistant","uuid":"a-2","parentUuid":"r-1","sessionId":"claude-view","cwd":"/__mallard_root__/b;","timestamp":"2026-08-07T00:00:03Z","message":{"id":"message-2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"I've attached the complete film above."}]}}),
+        ];
+        let wire = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let view = build_view(
+            AgentProviderRegistry::production(),
+            &ProviderKey::parse("claude").unwrap(),
+            "resource-claude",
+            "claude-view",
+            None,
+            wire.as_bytes(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&view.bytes).unwrap();
+        let delivery = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["tool"]["native_name"] == "SendUserFile")
+            .unwrap();
+        assert_eq!(
+            delivery["tool"]["affected_paths"],
+            json!(["The_Iliad_Complete.mp4", "part5/clip.mp4"])
+        );
+        assert_eq!(delivery["tool"]["summary"], "The_Iliad_Complete.mp4");
+        // The temporary local root never becomes portable content.
+        assert!(!String::from_utf8_lossy(&view.bytes).contains("/project/"));
+    }
+
+    #[test]
     fn claude_transcripts_build_views_too() {
         let mut lines = Vec::new();
         lines.push(serde_json::json!({"type":"user","uuid":"u-1","sessionId":"claude-view","cwd":"/__mallard_root__","timestamp":"2026-08-07T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Read the source"}]}}).to_string());

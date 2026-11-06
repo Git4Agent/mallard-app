@@ -29,10 +29,13 @@ import {
   formatSessionStart,
   groupSessionEventsByDay,
   includedSessionEventKinds,
+  isClaudeDeliveryTool,
   markdownMediaFailureMessage,
+  markdownMediaKind,
   markdownPlayerKind,
   mergeSessionTimelinePages,
   projectMarkdownDisplayPath,
+  type ProjectMarkdownMediaState,
   readableToolPayload,
   sessionDetailFilterToggles,
   sessionEventCoverage,
@@ -336,6 +339,7 @@ function renderTimeline(
     providerDisplayName?: string;
     repositoryUrl?: string | null;
     startSettings?: SessionMessageSettings | null;
+    projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
   },
 ): string {
   return renderToStaticMarkup(
@@ -353,7 +357,7 @@ function renderTimeline(
       onLoadMore={() => undefined}
       onToolExpandedChange={() => undefined}
       onOpenProjectPath={() => undefined}
-      projectMedia={{}}
+      projectMedia={overrides?.projectMedia ?? {}}
       onLoadProjectMedia={() => undefined}
       projectRoot="/Users/example/HorrorGame"
       repositoryUrl={overrides?.repositoryUrl ?? null}
@@ -1417,6 +1421,46 @@ test("Claude's restored part5 reply renders the root video and rejects root esca
   for (const link of [`../../${file}`, `%2e%2e/%2e%2e/${file}`]) {
     assert.doesNotMatch(render("part5", `[escape](${link})`), /href=|<video/);
   }
+});
+
+test("the files a Claude call sent play and open under the call, with the replies", () => {
+  const delivery: SessionTimelineEvent = {
+    ...toolEvent,
+    event_id: "tool-send",
+    tool: {
+      ...toolEvent.tool!,
+      provider_call_id: "send-1",
+      native_name: "SendUserFile",
+      category: "other",
+      summary: "The_Iliad_Complete.mp4",
+      affected_paths: ["The_Iliad_Complete.mp4", "posters/part1.png", "The_Iliad_Complete.srt"],
+    },
+  };
+  const projectMedia = {
+    "The_Iliad_Complete.mp4": { status: "loaded" as const, src: "project-media://localhost/Homer/The_Iliad_Complete.mp4" },
+    "posters/part1.png": { status: "loaded" as const, src: "data:image/png;base64,poster" },
+  };
+  const html = renderTimeline([delivery], { provider: "claude", providerDisplayName: "Claude", projectMedia });
+  assert.match(html, /session-detail-tool-summary[^>]*>The_Iliad_Complete\.mp4</);
+  assert.match(html, /<video class="session-detail-markdown-video"[^>]+src="project-media:\/\/localhost\/Homer\/The_Iliad_Complete\.mp4" aria-label="The_Iliad_Complete\.mp4"/);
+  assert.match(html, /<img class="session-detail-markdown-image" src="data:image\/png;base64,poster" alt="part1\.png"/);
+  assert.match(html, /<a href="The_Iliad_Complete\.srt" class="session-detail-project-link"[^>]*>The_Iliad_Complete\.srt<\/a>/);
+  const order = ["<video", "<img", "The_Iliad_Complete.srt</a>"].map((mark) => html.indexOf(mark));
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  // A file that has not settled waits on its chip; one the boundary refused says why.
+  const pending = renderTimeline([delivery], { provider: "claude", projectMedia: {
+    "The_Iliad_Complete.mp4": { status: "failed", message: "Videos up to 500 MiB can play here." },
+  } });
+  assert.match(pending, /markdown-image-placeholder-state">Videos up to 500 MiB can play here\.</);
+  assert.match(pending, /markdown-image-placeholder is-loading/);
+  assert.doesNotMatch(pending, /<video|<img/);
+  // Another call's paths stay chips in its body, and a Codex row sends nothing.
+  assert.doesNotMatch(renderTimeline([{ ...delivery, tool: { ...delivery.tool!, native_name: "Read" } }], { provider: "claude", projectMedia }), /<video|session-detail-delivery/);
+  assert.doesNotMatch(renderTimeline([delivery], { provider: "codex", projectMedia }), /<video|session-detail-delivery/);
+  assert.equal(isClaudeDeliveryTool({ native_name: "SendUserFile", affected_paths: [] }), false);
+  assert.equal(markdownMediaKind("a/b.PNG"), "image");
+  assert.equal(markdownMediaKind("clip.mov"), "video");
+  assert.equal(markdownMediaKind("notes.srt"), null);
 });
 
 test("message-relative URLs cannot escape the project or decode a filename twice", () => {

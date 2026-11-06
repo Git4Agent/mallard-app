@@ -18432,6 +18432,7 @@ mod tests {
     include!("owned_subagent_tests.rs");
     include!("claude_owned_subagent_tests.rs");
     include!("claude_widget_tests.rs");
+    include!("claude_delivery_tests.rs");
     include!("project_session_delete_tests.rs");
     include!("optional_redaction_tests.rs");
     include!("child_sync_settings_tests.rs");

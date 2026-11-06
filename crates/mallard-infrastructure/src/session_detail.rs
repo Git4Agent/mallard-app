@@ -2003,8 +2003,8 @@ fn validate_slice_against_query(
             (None, None) => true,
             _ => false,
         };
-        let reply_widget = provider.as_str() == "claude"
-            && crate::providers::claude::history::is_reply_widget(source, query);
+        let reply_output = provider.as_str() == "claude"
+            && crate::providers::claude::history::is_reply_output(source, query);
         if event.kind != source.kind
             || event.ordinal != source.ordinal
             || event.timestamp != source.timestamp
@@ -2012,9 +2012,9 @@ fn validate_slice_against_query(
             || event.turn_id != source.turn_id
             || event.parent_event_id != source.parent_event_id
             || !tool_matches_index
-            || (!query.included_event_kinds.contains(&event.kind) && !reply_widget)
+            || (!query.included_event_kinds.contains(&event.kind) && !reply_output)
             || (event.kind == SessionTimelineEventKind::ToolCall
-                && !reply_widget
+                && !reply_output
                 && event
                     .tool
                     .as_ref()

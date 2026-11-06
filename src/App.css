@@ -10231,6 +10231,20 @@ button.catalog-row-action.destructive[aria-expanded="true"] {
   justify-items: start;
 }
 
+/* The files a call handed over show under its row, in the order sent. */
+.session-detail-delivery {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.session-detail-delivery > .session-detail-markdown-image,
+.session-detail-delivery > .session-detail-markdown-audio,
+.session-detail-delivery > .session-detail-markdown-video {
+  margin: 0;
+}
+
 .markdown-image-placeholder {
   display: inline-flex;
   align-items: center;

@@ -22,7 +22,9 @@ import {
   formatSessionCount,
   formatSessionDetailClock,
   formatSessionDuration,
+  isClaudeDeliveryTool,
   markdownMediaFailureMessage,
+  markdownMediaKind,
   markdownPlayerKind,
   projectMarkdownDisplayPath,
   type ProjectMarkdownMediaState,
@@ -116,6 +118,58 @@ function ProjectMarkdownPlayer({
     return <MarkdownImagePlaceholder label={label} kind={kind} detail={message} showDetail />;
   }
   return <MarkdownImagePlaceholder label={label} kind={kind} loading />;
+}
+
+/** The files Claude handed the person, under the call that sent them: a
+ * picture, a track or a clip shows in place, and any other file opens from
+ * its name. Nothing waits on the reply's text, which need not link them. */
+function DeliveredFiles({
+  paths,
+  projectMedia,
+  onLoadProjectMedia,
+  onOpenProjectPath,
+  projectRoot,
+}: {
+  paths: readonly string[];
+  projectMedia?: Readonly<Record<string, ProjectMarkdownMediaState>>;
+  onLoadProjectMedia?: (relativePath: string) => void;
+  onOpenProjectPath?: (relativePath: string) => void;
+  projectRoot: string;
+}) {
+  const { t } = useTranslation("session");
+  return (
+    <ProjectMediaContext.Provider value={projectMedia}>
+      <div className="session-detail-delivery">
+        {paths.map((path) => {
+          const name = path.slice(path.lastIndexOf("/") + 1);
+          const kind = markdownMediaKind(path);
+          if (kind) {
+            if (!onLoadProjectMedia) return <MarkdownImagePlaceholder key={path} label={name} kind={kind} />;
+            return kind === "image"
+              ? <ProjectMarkdownImage key={path} relativePath={path} alt={name} onLoadProjectMedia={onLoadProjectMedia} />
+              : <ProjectMarkdownPlayer key={path} relativePath={path} kind={kind} alt={name} onLoadProjectMedia={onLoadProjectMedia} />;
+          }
+          if (!onOpenProjectPath) return <code key={path}>{name}</code>;
+          const displayPath = projectMarkdownDisplayPath(projectRoot, path);
+          return (
+            <a
+              key={path}
+              href={path}
+              className="session-detail-project-link"
+              aria-label={t("media.openPath", { path: displayPath })}
+              data-tooltip={displayPath}
+              onClick={(clickEvent) => {
+                clickEvent.preventDefault();
+                onOpenProjectPath(path);
+              }}
+            >
+              {name}
+            </a>
+          );
+        })}
+      </div>
+    </ProjectMediaContext.Provider>
+  );
 }
 
 const BLOCKS = new Set(["p", "ul", "ol", "li", "blockquote", "pre", "table", "div", "h1", "h2", "h3", "h4", "h5", "h6"]);
@@ -688,12 +742,23 @@ export default function SessionDetailEvent({
         {event.kind === "tool_call" && provider === "claude" && event.tool && isClaudeWidgetTool(event.tool) ? (
           <ClaudeSvgWidget tool={event.tool} onCopy={writeClipboardText} />
         ) : event.kind === "tool_call" ? (
-          <SessionDetailToolCall
-            event={event}
-            expanded={expandedToolIds.has(event.event_id)}
-            detailState={toolDetails[event.event_id]}
-            onExpandedChange={onToolExpandedChange}
-          />
+          <>
+            <SessionDetailToolCall
+              event={event}
+              expanded={expandedToolIds.has(event.event_id)}
+              detailState={toolDetails[event.event_id]}
+              onExpandedChange={onToolExpandedChange}
+            />
+            {provider === "claude" && isClaudeDeliveryTool(event.tool) && (
+              <DeliveredFiles
+                paths={event.tool!.affected_paths}
+                projectMedia={projectMedia}
+                onLoadProjectMedia={onLoadProjectMedia}
+                onOpenProjectPath={onOpenProjectPath}
+                projectRoot={projectRoot}
+              />
+            )}
+          </>
         ) : event.kind === "agent_call" ? (
           <AgentRow event={event} onOpenSession={onOpenSession} />
         ) : event.kind === "checkpoint" ? (

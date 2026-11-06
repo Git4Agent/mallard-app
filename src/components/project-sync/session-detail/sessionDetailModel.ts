@@ -727,6 +727,22 @@ export function markdownPlayerKind(path: string): "audio" | "video" | null {
   return MARKDOWN_AUDIO_EXTENSIONS.has(extension) ? "audio" : MARKDOWN_VIDEO_EXTENSIONS.has(extension) ? "video" : null;
 }
 
+/** The pictures the image boundary decodes. */
+const MARKDOWN_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+
+/** A project path a session shows in place, by extension: a picture, a track or a clip. */
+export function markdownMediaKind(path: string): MarkdownMediaKind | null {
+  return MARKDOWN_IMAGE_EXTENSIONS.has(markdownExtension(path)) ? "image" : markdownPlayerKind(path);
+}
+
+/** A call that handed the person project files: the page shows them with
+ * the replies. The same rule the parser applies to the Replies query. */
+export function isClaudeDeliveryTool(
+  tool: Pick<SessionToolCallPreview, "native_name" | "affected_paths"> | null | undefined,
+): boolean {
+  return tool?.native_name === "SendUserFile" && tool.affected_paths.length > 0;
+}
+
 /** Why a picture does not show or a track or a clip does not play, in the file's own words. */
 export function markdownMediaFailureMessage(kind: MarkdownMediaKind, path: string, failure: SessionDetailFailure): string {
   const format = markdownExtension(path).toUpperCase();
