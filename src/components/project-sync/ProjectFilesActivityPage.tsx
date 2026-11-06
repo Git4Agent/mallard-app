@@ -1,4 +1,15 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  memo,
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type {
   ProjectContentEntry,
   ProjectContentInventory,
@@ -226,9 +237,44 @@ export function buildProjectFilesActivityProjection(
   ));
   return {
     matchingCount: matchingEntries.length,
+    /** The rows under the budget: the cloud tile's and every folder's. */
+    shownCount: visibleEntries.length,
     cloudEntries,
     localGroups: groupByDirectory(localEntries),
   };
+}
+
+/** A folder tile with the rows of it drawn so far. Its head speaks for the
+ *  whole folder, drawn or not. */
+interface DrawnGroup extends FileGroup {
+  drawn: ProjectContentEntry[];
+}
+
+/** The rows a long list draws with the page; the rest follow in a
+ *  transition behind them. */
+const FIRST_DRAW = 40;
+
+/** The first `limit` rows in page order — the cloud tile's, then each
+ *  folder's — and how many that is. A folder past the limit is not drawn at
+ *  all; one the limit cuts through draws the rows that fit. */
+function drawFirst(
+  cloudEntries: ProjectContentEntry[],
+  localGroups: FileGroup[],
+  limit: number,
+): { cloudEntries: ProjectContentEntry[]; localGroups: DrawnGroup[]; count: number } {
+  let remaining = limit;
+  const take = (entries: ProjectContentEntry[]) => {
+    const taken = remaining >= entries.length ? entries : entries.slice(0, remaining);
+    remaining -= taken.length;
+    return taken;
+  };
+  const drawnCloud = take(cloudEntries);
+  const drawnGroups: DrawnGroup[] = [];
+  for (const group of localGroups) {
+    if (remaining <= 0) break;
+    drawnGroups.push({ ...group, drawn: take(group.entries) });
+  }
+  return { cloudEntries: drawnCloud, localGroups: drawnGroups, count: limit - remaining };
 }
 
 function groupFacts(entries: ProjectContentEntry[]): string {
@@ -243,8 +289,13 @@ function groupFacts(entries: ProjectContentEntry[]): string {
  * session carries its messages and tokens, the rule, the details popover,
  * and the stamp closing the row. Rows in the merged cloud tile keep their
  * directory as a quiet prefix, so a nested storage-only file still says
- * where it lands. */
-function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevealPath, withPathPrefix = false }: {
+ * where it lands. Memoized: the face lists hundreds, and a scope or a
+ * keystroke must not redraw the rows that stay, so everything it shows
+ * arrives as a plain value or the scan's own entry and its callbacks are the
+ * face's stable ones. */
+const FileActivityCard = memo(function FileActivityCard({
+  entry, storageName, projectRoot, onOpenFile, onRevealPath, withPathPrefix = false,
+}: {
   entry: ProjectContentEntry;
   storageName: string;
   projectRoot: string;
@@ -356,7 +407,7 @@ function FileActivityCard({ entry, storageName, projectRoot, onOpenFile, onRevea
       </div>
     </article>
   );
-}
+});
 
 /** The list itself, a pure function of the scan the workspace holds. */
 export function ProjectFilesActivityView({
@@ -386,6 +437,8 @@ export function ProjectFilesActivityView({
   const [search, setSearch] = useState("");
   const [localStatusScope, setLocalStatusScope] = useState<StatusScope | null>(null);
   const pageRef = useRef<HTMLElement>(null);
+  /* The field and the scope bar answer at once; the list follows a beat
+     behind, in a render that yields to the next key or press. */
   const deferredSearch = useDeferredValue(search);
   /* Directory rows carry no bytes and no per-file identity, and the tiles
      already speak for the folders — files (and blocked candidates) are the
@@ -410,13 +463,49 @@ export function ProjectFilesActivityView({
      reader's back. */
   const scopeBarShown = fileEntries.length > 0 && (scopeCounts.size > 1 || chosenStatusScope !== null);
   const statusScope = scopeBarShown ? chosenStatusScope : null;
-  const { matchingCount, cloudEntries, localGroups } = useMemo(
-    () => buildProjectFilesActivityProjection(fileEntries, deferredSearch, statusScope),
-    [fileEntries, deferredSearch, statusScope],
+  const deferredStatusScope = useDeferredValue(statusScope);
+  const { matchingCount, shownCount, cloudEntries, localGroups } = useMemo(
+    () => buildProjectFilesActivityProjection(fileEntries, deferredSearch, deferredStatusScope),
+    [fileEntries, deferredSearch, deferredStatusScope],
   );
+  /* A long list draws in two steps: the first rows with the page, the rest
+     in a transition behind them — rendered in slices that yield to the
+     search and the scope bar, with a line under the drawn rows saying the
+     rest is on its way. The limit only grows, so a scope that narrows the
+     list draws it whole, and a list that grows back fills in behind. */
+  const [drawLimit, setDrawLimit] = useState(FIRST_DRAW);
+  const drawn = useMemo(
+    () => drawFirst(cloudEntries, localGroups, drawLimit),
+    [cloudEntries, localGroups, drawLimit],
+  );
+  const drawingRest = drawn.count < shownCount;
+  useEffect(() => {
+    if (!drawingRest) return;
+    startTransition(() => setDrawLimit(shownCount));
+  }, [drawingRest, shownCount]);
+  const listUpdating = drawingRest || search !== deferredSearch || statusScope !== deferredStatusScope;
   /* Releasing the scope brings rows back only if the name alone matches some. */
-  const scopeEmptiedList = statusScope !== null && matchingCount === 0
+  const scopeEmptiedList = deferredStatusScope !== null && matchingCount === 0
     && fileEntries.some((entry) => nameMatchesSearch(entry.relative_path, deferredSearch));
+  /* The cards are memoized on their values, and the callbacks the workspace
+     hands this face are new every render; each card gets one that stays and
+     calls the latest. The ref is updated after commit, before any click can
+     land. An absent callback stays absent: the card draws its control only
+     when there is one. */
+  const latest = useRef({ onOpenFile, onRevealPath });
+  useLayoutEffect(() => {
+    latest.current = { onOpenFile, onRevealPath };
+  });
+  const canOpen = onOpenFile !== undefined;
+  const canReveal = onRevealPath !== undefined;
+  const openFile = useMemo(
+    () => (canOpen ? (relativePath: string) => latest.current.onOpenFile?.(relativePath) : undefined),
+    [canOpen],
+  );
+  const revealPath = useMemo(
+    () => (canReveal ? (path: string) => latest.current.onRevealPath?.(path) : undefined),
+    [canReveal],
+  );
   /* The button leaves with the box it sits in, so focus goes to the field
      first, as the field's own clear does. */
   const clearStatusScope = () => {
@@ -474,7 +563,7 @@ export function ProjectFilesActivityView({
           matches={matchingCount}
           total={fileEntries.length}
           noun={fileNoun}
-          narrowed={statusScope !== null}
+          narrowed={deferredStatusScope !== null}
           leading={viewSwitch}
         />
       ) : switchRow}
@@ -507,27 +596,27 @@ export function ProjectFilesActivityView({
         </div>
       ) : (
         <>
-          {cloudEntries.length > 0 && (
+          {drawn.cloudEntries.length > 0 && (
             /* No counts and no phrase in the head — each row's badge already
                says "Pull to download it here" against the storage by name. */
             <ListTile icon="cloud" cloud label={(
               <Trans t={t} i18nKey="list.onlyIn" values={{ storage: storageName }}
                 components={{ name: <span className="sync-history-storage-name" /> }} />
             )}>
-              {cloudEntries.map((entry) => (
+              {drawn.cloudEntries.map((entry) => (
                 <FileActivityCard
                   key={entry.descriptor.resource_id}
                   entry={entry}
                   storageName={storageName}
                   projectRoot={inventory.project_root}
-                  onOpenFile={onOpenFile}
-                  onRevealPath={onRevealPath}
+                  onOpenFile={openFile}
+                  onRevealPath={revealPath}
                   withPathPrefix
                 />
               ))}
             </ListTile>
           )}
-          {localGroups.map((group) => (
+          {drawn.localGroups.map((group) => (
             /* "Project root" is chrome and keeps the pixel face; a path is
                the user's data and reads in the normal face, via the head's
                span carve-out. A plain folder: this face exists only for
@@ -538,19 +627,26 @@ export function ProjectFilesActivityView({
               label={group.directory === "" ? t("files.projectRoot") : <span>{group.directory}/</span>}
               facts={groupFacts(group.entries)}
             >
-              {group.entries.map((entry) => (
+              {group.drawn.map((entry) => (
                 <FileActivityCard
                   key={entry.descriptor.resource_id}
                   entry={entry}
                   storageName={storageName}
                   projectRoot={inventory.project_root}
-                  onOpenFile={onOpenFile}
-                  onRevealPath={onRevealPath}
+                  onOpenFile={openFile}
+                  onRevealPath={revealPath}
                 />
               ))}
             </ListTile>
           ))}
-          {matchingCount > PROJECT_FILE_CARD_RENDER_LIMIT && (
+          {/* The rest of the list is on its way: the first rows are up and
+              answer, and this line stands where the next ones will land. */}
+          {listUpdating && (
+            <div className="sync-project-file-limit sync-project-files-updating" role="status">
+              <span className="status-loader" /> {t("files.updatingList")}…
+            </div>
+          )}
+          {!listUpdating && matchingCount > PROJECT_FILE_CARD_RENDER_LIMIT && (
             <div className="sync-project-file-limit">
               {t(scopeBarShown ? "files.limitScope" : "files.limitSearch", {
                 limit: PROJECT_FILE_CARD_RENDER_LIMIT,
