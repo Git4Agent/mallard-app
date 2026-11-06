@@ -207,23 +207,20 @@ test("the activity list searches the full inventory but renders at most 500 file
     },
   }));
 
+  /* The page draws its first rows and says the rest follows (the long-list
+     test below); the budget itself is the projection's, so it is read
+     there. The "First 500 of 507" line waits for the drawn list. */
   const markup = renderView(inventoryWith([...directories, ...files]));
-  assert.equal(
-    markup.split("sync-history-thread-card").length - 1,
-    PROJECT_FILE_CARD_RENDER_LIMIT,
-    "cloud and local groups share one file-card budget",
-  );
-  assert.match(markup, /sync-project-file-limit/);
-  assert.match(
-    markup,
-    new RegExp(`First ${PROJECT_FILE_CARD_RENDER_LIMIT} of ${files.length} files shown\\. Search or choose a status to narrow the list\\.`),
-  );
+  assert.equal(markup.split("sync-history-thread-card").length - 1, 40, "the first rows land with the page");
+  assert.match(markup, /sync-project-files-updating/);
+  assert.doesNotMatch(markup, new RegExp(`First ${PROJECT_FILE_CARD_RENDER_LIMIT} of ${files.length} files shown`));
 
   const completeProjection = buildProjectFilesActivityProjection(files, "", null);
   const completeVisibleCount = completeProjection.cloudEntries.length
     + completeProjection.localGroups.reduce((sum, group) => sum + group.entries.length, 0);
   assert.equal(completeProjection.matchingCount, files.length);
-  assert.equal(completeVisibleCount, PROJECT_FILE_CARD_RENDER_LIMIT);
+  assert.equal(completeVisibleCount, PROJECT_FILE_CARD_RENDER_LIMIT, "cloud and local groups share one file-card budget");
+  assert.equal(completeProjection.shownCount, PROJECT_FILE_CARD_RENDER_LIMIT);
   assert.ok(completeProjection.cloudEntries.length > 0, "the bounded result retains cloud rows");
   assert.ok(completeProjection.localGroups.length > 0, "the bounded result retains local groups");
 
@@ -248,6 +245,29 @@ test("the activity list searches the full inventory but renders at most 500 file
 
   const source = readFileSync("src/components/project-sync/ProjectFilesActivityPage.tsx", "utf8");
   assert.match(source, /useDeferredValue\(search\)/, "large-inventory search uses deferred input");
+});
+
+test("a long Files list draws its first rows with the page and says the rest follows", () => {
+  const files = Array.from({ length: 60 }, (_, index) => (index < 6
+    ? entry(`cloud-${index}`, `archive/cloud-${index}.md`, "storage_only", { local_present: false, storage_present: true })
+    : entry(`file-${index}`, `docs/file-${String(index).padStart(2, "0")}.md`, "local_only")));
+  const markup = renderView(inventoryWith(files));
+  /* The first rows land with the page — the cloud tile's, then the folder's
+     — and the rest render in a transition behind them, under a line that
+     says so; the list is never drawn in one blocking pass. */
+  assert.equal(markup.split("sync-history-thread-card").length - 1, 40);
+  assert.ok(markup.includes("cloud-5.md") && markup.includes("file-39.md"), "the cloud tile and the folder's first rows are drawn");
+  assert.ok(!markup.includes("file-40.md"), "the rows past the first draw wait for the transition");
+  assert.match(markup, /sync-project-files-updating" role="status"><span class="status-loader"><\/span> Updating the list…/);
+  assert.doesNotMatch(markup, /First 500/);
+  // The folder tile speaks for the whole folder, drawn or not.
+  assert.match(markup, /54 files · 972 B/);
+  // The cards are memoized on the scan's entries and stable callbacks, so a
+  // scope or a keystroke redraws only the rows that change.
+  const source = readFileSync("src/components/project-sync/ProjectFilesActivityPage.tsx", "utf8");
+  assert.match(source, /const FileActivityCard = memo\(/);
+  assert.match(source, /useDeferredValue\(statusScope\)/);
+  assert.match(source, /startTransition\(\(\) => setDrawLimit\(shownCount\)\)/);
 });
 
 test("storage-only files lead the list under an Only-in-storage heading", () => {

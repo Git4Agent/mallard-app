@@ -382,6 +382,8 @@ export default {
     limitScope: "First {{limit}} of {{total}} files shown. Search or choose a status to narrow the list.",
     limitSearch: "First {{limit}} of {{total}} files shown. Search to narrow the list.",
     limitShown: "First {{limit}} shown. Search to narrow the list.",
+    /** Under the drawn cards while the rest of a long list renders. */
+    updatingList: "Updating the list",
     scanSummary_one: "{{ignored}} ignored · {{blocked}} blocked · {{count}} scan warning",
     scanSummary_other: "{{ignored}} ignored · {{blocked}} blocked · {{count}} scan warnings",
     /** The Push review's line: its blocked files are listed in their group. */
