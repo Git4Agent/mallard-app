@@ -562,12 +562,18 @@ svg[data-icon="lightbulb"] path:last-child {
   align-items: center;
   justify-content: space-between;
   padding: 0 14px 0 20px;
+  gap: 12px;
   min-height: 46px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
+/* The toolbar fits a 580px drawer, the workspace floor. Labels never wrap — a
+   CJK label wraps one glyph per line — and every control holds its width
+   except the search pill, which is the one that gives way before the row can
+   run under the actions. */
 .log-panel-heading {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -575,11 +581,14 @@ svg[data-icon="lightbulb"] path:last-child {
 }
 
 .log-panel-title {
+  flex-shrink: 0;
   color: var(--text-1);
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .log-panel-actions {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -605,6 +614,7 @@ svg[data-icon="lightbulb"] path:last-child {
 
 .log-type-filter {
   position: relative;
+  flex-shrink: 0;
   height: 28px;
   color: var(--text-3);
   font-family: var(--font);
@@ -625,6 +635,7 @@ svg[data-icon="lightbulb"] path:last-child {
   cursor: pointer;
   list-style: none;
   user-select: none;
+  white-space: nowrap;
 }
 
 .log-type-filter > summary::-webkit-details-marker { display: none; }
@@ -702,6 +713,7 @@ svg[data-icon="lightbulb"] path:last-child {
 
 .log-filter-control {
   position: relative;
+  flex-shrink: 0;
   height: 28px;
   padding-left: 10px;
   display: inline-flex;
@@ -714,6 +726,7 @@ svg[data-icon="lightbulb"] path:last-child {
   background: var(--bg-0);
   font-family: var(--font);
   font-size: var(--type-2xs);
+  white-space: nowrap;
 }
 
 /* No native stepper inside the pill: the select is flat and the wrapper
@@ -751,11 +764,22 @@ svg[data-icon="lightbulb"] path:last-child {
   outline-offset: 2px;
 }
 
+/* Wide enough for the longest placeholder ("搜索日志（仅匹配英文）" is 121px
+   of text); squeezed below that, it ends in an ellipsis instead of slicing a
+   glyph against the pill's edge. */
+.log-search-control {
+  flex: 0 1 172px;
+  min-width: 96px;
+  display: flex;
+}
+
 .log-search-control input {
-  width: 132px;
+  width: 100%;
+  min-width: 0;
   height: 28px;
   padding: 0 12px;
   font: var(--type-xs) var(--font);
+  text-overflow: ellipsis;
 }
 
 .log-search-control input::placeholder { color: var(--text-3); }
