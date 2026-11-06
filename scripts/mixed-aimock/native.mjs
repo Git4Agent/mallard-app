@@ -29,8 +29,8 @@ export async function nativePreflight(replica) {
   const options = { cwd: replica.project, env: environment(replica.home, { CODEX_HOME: replica.codex, CLAUDE_CONFIG_DIR: replica.claude }) };
   const codex = (await runBounded("codex", ["--version"], options, 15_000)).trim();
   const claude = (await runBounded("claude", ["--version"], options, 15_000)).trim();
-  assert.equal(codex, "codex-cli 0.164.0-alpha.11.1", "Codex version pin");
-  assert.ok(claude === "2.1.266 (Claude Code)", "Claude version pin");
+  assert.equal(codex, "codex-cli 0.167.0", "Codex version pin");
+  assert.ok(claude === "2.1.292 (Claude Code)", "Claude version pin");
   const probe = process.platform === "win32" ? ["cmd.exe", "/d", "/c", "exit", "0"] : ["/usr/bin/true"];
   await runBounded("codex", ["sandbox", "--", ...probe], options, 15_000);
   // The graph-fault checks require a real file symlink on every platform.
@@ -76,7 +76,7 @@ export class NativeDriver {
       scenarios.push(fixture); turns.push({ prompt, response });
       history.push({ role: "user", marker: prompt }, { role: "assistant", marker: response });
     }
-    const document = scenarioDocument(node.provider, scenarios, turns.length);
+    const document = scenarioDocument(node.provider, scenarios);
     const mock = await startMock(this.repository, join(this.root, "control", `batch-${++this.batch}`), node.provider, document);
     let server; const started = performance.now();
     try {
@@ -145,7 +145,7 @@ export class NativeDriver {
     const before = await digestFiles(authoritative);
     const prompt = `MIXED_${node.label}_USER_REOPEN_${suffix}`; const response = `MIXED_${node.label}_REOPEN_${suffix}`;
     const fixture = textScenario(node.provider, `reopen_${node.label.toLowerCase()}_${suffix.toLowerCase()}`, prompt, history, response);
-    const mock = await startMock(this.repository, join(this.root, "control", `batch-${++this.batch}`), node.provider, scenarioDocument(node.provider, [fixture], 1));
+    const mock = await startMock(this.repository, join(this.root, "control", `batch-${++this.batch}`), node.provider, scenarioDocument(node.provider, [fixture]));
     try {
       if (node.provider === "codex") {
         const output = await runBounded("codex", ["--ask-for-approval", "never", "exec", "--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",

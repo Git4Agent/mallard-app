@@ -503,11 +503,14 @@ test("the meter and the refusal count only the files a push would capture", () =
   // The scan ticks the stored file. Storage holds it as it is, so a push
   // without file work captures nothing and the meter counts nothing.
   assert.equal(files(["file-s"]), 0);
-  // With file work the backend captures every selected file, changed or not.
-  assert.equal(files(["file-s", "file-n"]), 5_000);
-  assert.equal(files(["file-s"], true), 4_000);
+  // With file work the backend captures the new and changed files only: a
+  // ticked file storage holds unchanged is retained, and never charged.
+  assert.equal(files(["file-s", "file-n"]), 1_000);
+  assert.equal(files(["file-s"], true), 0);
   assert.equal(files(["file-n"]), 1_000);
   assert.equal(files([], true), 0);
+  const edited: ProjectContentEntry = { ...stored, state: "local_ahead" };
+  assert.equal(pushBudgetTotal(new Set(["file-s", "file-n"]), compared, { ...scanned, entries: [edited, fresh] })?.projectFiles, 5_000);
 
   // A selection of files storage already holds sends nothing.
   const refusal = (selected: string[], projectFilesShown = false) => pushReviewDisabledReason({
@@ -1062,12 +1065,42 @@ test("file review details reuse the project copyable popover", () => {
     />,
   );
   assert.match(html, /aria-label="Show file info for doc\/test-design\.md"/);
-  assert.match(html, /aria-haspopup="dialog"/);
-  assert.match(html, /<strong>File info<\/strong>/);
-  assert.match(html, /<code>\/tmp\/project-a\/doc\/test-design\.md<\/code>/);
-  assert.match(html, /<span>Modified<\/span>/);
-  assert.match(html, />Copy all<\/button>/);
+  assert.match(html, /aria-haspopup="dialog" aria-expanded="false"/);
+  assert.match(html, /sync-history-debug-trigger/);
+  // Mounted only while open, as the Files face's test says.
+  assert.doesNotMatch(html, /aria-controls="project-file-details/);
+  assert.doesNotMatch(html, /sync-history-debug-popover|<strong>File info<\/strong>|>Copy all<\/button>/);
   assert.doesNotMatch(html, /sync-project-file-details/);
+});
+
+test("a long Files list draws its first cards with the page and says the rest follows", () => {
+  const rows: ProjectFileReviewRow[] = Array.from({ length: 60 }, (_, index) => ({
+    resourceId: `file-${index}`,
+    relativePath: `docs/file-${index}.md`,
+    entryType: "file",
+    state: "local_only",
+    size: 18,
+    localPresent: true,
+    storagePresent: false,
+  }));
+  const html = renderToStaticMarkup(
+    <ProjectFilesReviewPage
+      mode="push"
+      eligibility={{ state: "eligible", reason: "Not inside a Git work tree." }}
+      rows={rows}
+      selectedIds={new Set(["file-59"])}
+      onToggle={() => undefined}
+    />,
+  );
+  /* The first cards land with the page; the rest render in a transition
+     behind them, under a line that says so — the list is never drawn in
+     one blocking pass. */
+  assert.equal(html.match(/<article /g)?.length, 40);
+  assert.match(html, /sync-project-files-updating" role="status"><span class="status-loader"><\/span> Updating the list…</);
+  assert.doesNotMatch(html, /First 500 shown/);
+  // The folder tile speaks for the whole folder, drawn or not.
+  assert.match(html, /60 files · 1\.1 KB/);
+  assert.match(html, /<b>1<\/b>\/60/);
 });
 
 test("opening the files step scans by itself — no interstitial, just the scaffold", () => {

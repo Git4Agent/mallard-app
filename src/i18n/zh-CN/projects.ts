@@ -345,6 +345,7 @@ export default {
     limitScope: "仅显示前 {{limit}} 个文件（共 {{total}} 个）。可搜索或选择状态来缩小范围。",
     limitSearch: "仅显示前 {{limit}} 个文件（共 {{total}} 个）。可搜索来缩小范围。",
     limitShown: "仅显示前 {{limit}} 个。可搜索来缩小范围。",
+    updatingList: "正在更新列表",
     scanSummary_other: "{{ignored}} 个已忽略 · {{blocked}} 个已阻止 · {{count}} 个扫描警告",
     reviewScanSummary_other: "{{ignored}} 个已忽略 · {{count}} 个扫描警告",
     noUploadMatches: "没有可上传的匹配文件。",

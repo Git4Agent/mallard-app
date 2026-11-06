@@ -574,16 +574,17 @@ test("Files Select respects the 512 MB total including sessions and reserved con
   assert.match(html, /title="Select the 2 project files that fit within the 512 MB total push limit"/);
 });
 
-test("Files Select reserves unchanged files that will be recaptured and keeps existing choices first", () => {
+test("Files Select reserves changed stored files that will be recaptured and keeps existing choices first", () => {
   const session = entry("selected", { capture_bytes: 100 * MB });
   const reviewed = comparison({ entries: [session], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 20 * MB } });
-  const stored = { ...flaggedFile("stored.md", "", "").inventoryEntry, size: 300 * MB, state: "synced" as const, storage_present: true, selected_in_recipe: true };
+  // Edited since it was stored: the push captures it again, so it is charged.
+  const stored = { ...flaggedFile("stored.md", "", "").inventoryEntry, size: 300 * MB, state: "local_ahead" as const, storage_present: true, selected_in_recipe: true };
   const large = { ...flaggedFile("a.mov", "", "").inventoryEntry, size: 100 * MB };
   const chosen = { ...flaggedFile("z.md", "", "").inventoryEntry, size: 92 * MB };
   const scanned = { ...projectFiles, entries: [stored, large, chosen] };
   const candidates = new Set([large.descriptor.resource_id, chosen.descriptor.resource_id]);
   const initial = new Set([session.resource_id, stored.descriptor.resource_id]);
-  assert.equal(pushBudgetTotal(initial, reviewed, scanned)?.total, 120 * MB);
+  assert.equal(pushBudgetTotal(initial, reviewed, scanned)?.total, 420 * MB);
   const selected = selectPushProjectFilesWithinBudget(initial, candidates, reviewed, scanned);
   assert.equal(selected.has(large.descriptor.resource_id), false);
   assert.equal(selected.has(chosen.descriptor.resource_id), true);
@@ -691,6 +692,29 @@ test("Push captures only selected local replacements and does not charge retaine
   const sessionReview = comparison({ entries: [session], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
   assert.equal(pushBudgetTotal(sessionSelection, sessionReview, scanned)?.total, 100 * MB);
   assert.equal(pushReviewDisabledReason({ selected: sessionSelection, threadComparison: sessionReview, projectContentInventory: scanned, deletionApproved: true }), null);
+});
+
+test("a ticked file storage already holds unchanged is retained and spends no budget", () => {
+  /* The saved selection ticks every stored file. Each reads synced after a
+     push: the backend retains it rather than sending it again, so 480 MB of
+     synced files leave the whole budget to the new 40 MB file, and Files
+     Select adds it. Charging them would have filled a 512 MB push with files
+     that were not going anywhere, and a stored project near the limit could
+     never take another file. */
+  const { stored, added, scanned } = retainedProjectFiles();
+  const synced = stored.map((row) => ({ ...row, local_present: true, state: "synced" as const }));
+  const inventory = { ...scanned, entries: [...synced, added] };
+  const reviewed = comparison({ entries: [], capture_budget: { limit_bytes: LIMIT, reserved_bytes: 0 } });
+  const saved = new Set(synced.map((row) => row.descriptor.resource_id));
+  const selected = new Set([...saved, added.descriptor.resource_id]);
+  assert.equal(pushBudgetTotal(selected, reviewed, inventory)?.total, 40 * MB);
+  assert.equal(pushReviewDisabledReason({ selected, threadComparison: reviewed, projectContentInventory: inventory, deletionApproved: true }), null);
+  assert.deepEqual(selectPushProjectFilesWithinBudget(saved, new Set([added.descriptor.resource_id]), reviewed, inventory), selected);
+
+  // A synced file edited since the scan is captured again, and charged.
+  const edited = { ...synced[0], state: "local_ahead" as const };
+  const withEdit = { ...inventory, entries: [edited, ...synced.slice(1), added] };
+  assert.equal(pushBudgetTotal(selected, reviewed, withEdit)?.total, 136 * MB);
 });
 
 test("automatic selection takes the newest sessions that fit, even when every session was saved", () => {

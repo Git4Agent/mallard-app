@@ -91,7 +91,7 @@ fn scenarios(source: &Path, destination: &Path) -> AimockScenarioDocument {
         version: 1,
         model: MODEL.into(),
         expected_request_count: 3,
-        expected_probe_request_count: 2,
+        expected_probe_request_count: 0,
         scenarios: vec![
             initial,
             final_reply,
@@ -472,7 +472,7 @@ pub(super) fn run() {
     }
     aimock
         .finish(&sensitive)
-        .expect("media mock must account for exactly three requests and two probes");
+        .expect("media mock must account for exactly three model requests and no probes");
     println!("Claude media passed: native cwd change, portable cwd, restored video, 200 MB file, cloud view, native resume");
 }
 

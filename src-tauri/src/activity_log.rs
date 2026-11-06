@@ -15,25 +15,40 @@ use mallard_infrastructure::activity_log::day_for_timestamp;
 
 static PERSISTENCE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
-/// Keep Cloud upload evidence in the activity log, separate from the short
-/// command error used by the notice. Subscribe before commands can run.
+/// Keep what Mallard Cloud reports about its writes in the activity log:
+/// a failed upload's evidence, separate from the short command error used
+/// by the notice, and each finished transfer's size and timing, which say
+/// where a slow Push spent its time. Subscribe before commands can run.
 pub fn start_cloud_diagnostic_forwarder<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    let mut events = mallard_infrastructure::managed_cloud::diagnostics::upload_diagnostics();
+    use mallard_infrastructure::managed_cloud::diagnostics::{cloud_reports, CloudReport};
+    use tokio::sync::broadcast::error::RecvError;
+    let mut events = cloud_reports();
     std::thread::Builder::new()
         .name("mallard-cloud-diagnostics".to_string())
         .spawn(move || loop {
-            let message = match events.blocking_recv() {
-                Ok(message) => message,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    format!("Cloud upload diagnostics omitted {count} entries because the log queue was full.")
+            let (log_type, level, event, message) = match events.blocking_recv() {
+                Ok(CloudReport::UploadFailed(message)) => (
+                    ActivityLogType::Storage,
+                    "warning",
+                    "storage.cloud_upload_diagnostic",
+                    message,
+                ),
+                Ok(CloudReport::Transfer(message)) => {
+                    (ActivityLogType::Push, "info", "push.cloud_transfer", message)
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                Err(RecvError::Lagged(count)) => (
+                    ActivityLogType::Storage,
+                    "warning",
+                    "storage.cloud_upload_diagnostic",
+                    format!("Cloud upload diagnostics omitted {count} entries because the log queue was full."),
+                ),
+                Err(RecvError::Closed) => return,
             };
             emit_activity_log(
                 &app,
-                ActivityLogType::Storage,
-                "warning",
-                "storage.cloud_upload_diagnostic",
+                log_type,
+                level,
+                event,
                 &message,
                 None,
                 ActivityLogContext::default(),

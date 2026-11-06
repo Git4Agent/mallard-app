@@ -145,11 +145,11 @@ export function textScenario(provider, id, prompt, history, response) {
   };
 }
 
-export function scenarioDocument(provider, scenarios, probes) {
+export function scenarioDocument(provider, scenarios) {
   assert.ok(scenarios.length > 0 && scenarios.length <= 64, "mock request batch limit");
   const document = {
     version: 1, model: MODELS[provider], expected_request_count: scenarios.length,
-    ...(provider === "claude" ? { expected_probe_request_count: probes } : {}), scenarios,
+    ...(provider === "claude" ? { expected_probe_request_count: 0 } : {}), scenarios,
   };
   assert.ok(Buffer.byteLength(JSON.stringify(document)) <= 4 * 1024 * 1024, "mock document byte limit");
   return document;

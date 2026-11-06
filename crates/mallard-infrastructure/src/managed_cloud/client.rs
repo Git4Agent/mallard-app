@@ -15,10 +15,10 @@ use crate::storage_core::{
 };
 use bytes::Bytes;
 use mallard_domain::{generated_named_id, SecretValue};
-use reqwest::{header::HeaderValue, Client, Method, RequestBuilder, Response, StatusCode};
+use reqwest::{header::HeaderValue, Client, Method, RequestBuilder, Response, StatusCode, Version};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -878,6 +878,8 @@ struct Inner {
     origin: String,
     token: Option<SecretValue>,
     health: ConnectionHealthCell,
+    /// The HTTP version the latest answer arrived over.
+    protocol: Mutex<Option<Version>>,
 }
 
 #[derive(Clone)]
@@ -902,6 +904,7 @@ impl ManagedCloudClient {
                 origin: origin.to_owned(),
                 token,
                 health: ConnectionHealthCell::default(),
+                protocol: Mutex::new(None),
             }),
         })
     }
@@ -912,6 +915,19 @@ impl ManagedCloudClient {
 
     pub fn health(&self) -> Option<ConnectionHealth> {
         self.inner.health.get()
+    }
+
+    /// The HTTP version of the latest answer, for the transfer log: whether
+    /// parallel uploads are separate connections or streams of one.
+    pub fn protocol(&self) -> Option<&'static str> {
+        match (*self.inner.protocol.lock().ok()?)? {
+            Version::HTTP_09 => Some("HTTP/0.9"),
+            Version::HTTP_10 => Some("HTTP/1.0"),
+            Version::HTTP_11 => Some("HTTP/1.1"),
+            Version::HTTP_2 => Some("HTTP/2"),
+            Version::HTTP_3 => Some("HTTP/3"),
+            _ => None,
+        }
     }
 
     fn request(&self, method: Method, route: &'static str, path: &str) -> Result<RequestBuilder> {
@@ -938,7 +954,12 @@ impl ManagedCloudClient {
         request: RequestBuilder,
     ) -> Result<Response> {
         let response = match request.send().await {
-            Ok(response) => response,
+            Ok(response) => {
+                if let Ok(mut protocol) = self.inner.protocol.lock() {
+                    *protocol = Some(response.version());
+                }
+                response
+            }
             Err(failure) => {
                 self.inner.health.record(ConnectionHealth::failed(
                     ConnectionState::Unreachable,
@@ -1900,7 +1921,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_upload_diagnostics_reach_the_activity_log_without_retry() {
-        let mut diagnostics = super::super::diagnostics::upload_diagnostics();
+        let mut diagnostics = super::super::diagnostics::cloud_reports();
         let (client, requests, server) = upload_response(
             503,
             json!({"error": "temporarily_unavailable", "detail": "The bytes could not be stored; retry."}),
@@ -1933,7 +1954,11 @@ mod tests {
         }
         // Persist the actual diagnostic event in an isolated activity log.
         let failure = loop {
-            let message = diagnostics.try_recv().expect("upload diagnostic emitted");
+            let super::super::diagnostics::CloudReport::UploadFailed(message) =
+                diagnostics.try_recv().expect("upload diagnostic emitted")
+            else {
+                continue;
+            };
             if message.contains(&sha256) {
                 break message;
             }
@@ -2089,7 +2114,7 @@ mod tests {
                 stream.shutdown().await.unwrap();
             }
         });
-        let mut diagnostics = super::super::diagnostics::upload_diagnostics();
+        let mut diagnostics = super::super::diagnostics::cloud_reports();
         let client = ManagedCloudClient::new(&endpoint, None).unwrap();
         let bytes = Bytes::from_static(b"lost response fixture");
         let sha256 = mallard_domain::sha256_hex(&bytes);
@@ -2106,7 +2131,11 @@ mod tests {
         assert!(error.status.is_none());
         assert_eq!(error.message(), "The Mallard Cloud upload result is unknown. Refresh remote state, then try again later. (object upload; connection closed)");
         let diagnostic = loop {
-            let message = diagnostics.try_recv().expect("upload diagnostic emitted");
+            let super::super::diagnostics::CloudReport::UploadFailed(message) =
+                diagnostics.try_recv().expect("upload diagnostic emitted")
+            else {
+                continue;
+            };
             if message.contains(&sha256) {
                 break message;
             }

@@ -6,8 +6,8 @@
 //! processes. It creates five source revisions, resolves Keep Both in both
 //! directions, reopens all three final histories from both replicas, resets
 //! and republishes storage, and proves one incremental cursor append. It then
-//! runs a separate two-turn media phase with three model requests and two
-//! probes, verifying a nested cwd and reviewed video transport.
+//! runs a separate two-turn media phase with three model requests and no
+//! hello probes, verifying a nested cwd and reviewed video transport.
 //! A separately gated paid Tuzi target reuses the production Mallard oracles
 //! for a smaller three-turn create, relocated-resume, divergent-Pull, and
 //! storage-reset flow.
@@ -64,7 +64,7 @@ const MODEL: &str = "claude-sonnet-4-6";
 const LIVE_TUZI_TEST_GATE: &str = "MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E";
 const LIVE_TUZI_MODEL: &str = "claude-sonnet-5";
 const LIVE_TUZI_SOURCE_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000301";
-const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.266 (Claude Code)";
+const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.292 (Claude Code)";
 const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.266 (Claude Code)";
 const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
@@ -795,7 +795,7 @@ fn aimock_scenario_document(read_marker_path: &Path) -> AimockScenarioDocument {
         version: 1,
         model: MODEL.to_string(),
         expected_request_count: EXPECTED_AIMOCK_REQUESTS,
-        expected_probe_request_count: EXPECTED_CURSOR_APPEND_PROCESSES,
+        expected_probe_request_count: 0,
         scenarios,
     }
 }
@@ -4009,6 +4009,23 @@ fn relocated_lineage_of(
         let mut value = destination_mapper
             .decode_jsonl_line_verified(line)
             .expect("path-decode Claude transcript line");
+        // Native 2.1.292 environment attachments repeat fixture directories in
+        // rendered prose. The independent oracle relocates those copies too;
+        // the neutral mapper intentionally does not parse Claude's prose.
+        if value["type"] == "attachment" && value["attachment"]["type"] == "environment" {
+            if let Some(blocks) = value.get_mut("rendered").and_then(Value::as_array_mut) {
+                for block in blocks {
+                    if let Some(content) = block.get_mut("content") {
+                        if let Some(text) = content.as_str() {
+                            *content = Value::String(text.replace(
+                                source_root.to_str().unwrap(),
+                                destination_root.to_str().unwrap(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         if value.get("sessionId").and_then(Value::as_str) == Some(source_provider_thread_id) {
             value["sessionId"] = Value::String(destination_provider_thread_id.to_string());
         }

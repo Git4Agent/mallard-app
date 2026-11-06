@@ -5,18 +5,33 @@ use std::io;
 use std::sync::OnceLock;
 use tokio::sync::broadcast;
 
-fn events() -> &'static broadcast::Sender<String> {
-    static EVENTS: OnceLock<broadcast::Sender<String>> = OnceLock::new();
+/// What the desktop keeps in its activity log about Mallard Cloud writes.
+/// Every message is bounded and sanitized: counts, sizes, timings, the
+/// service's fixed codes; never a key, a path, or a credential.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloudReport {
+    /// A failed upload's facts.
+    UploadFailed(String),
+    /// One finished transfer: what was sent, how much, and how long it took.
+    Transfer(String),
+}
+
+fn events() -> &'static broadcast::Sender<CloudReport> {
+    static EVENTS: OnceLock<broadcast::Sender<CloudReport>> = OnceLock::new();
     EVENTS.get_or_init(|| broadcast::channel(64).0)
 }
 
-/// The desktop persists these bounded, sanitized upload facts locally.
-pub fn upload_diagnostics() -> broadcast::Receiver<String> {
+/// The desktop persists these locally, as it does every activity.
+pub fn cloud_reports() -> broadcast::Receiver<CloudReport> {
     events().subscribe()
 }
 
 pub(super) fn report_upload(message: String) {
-    let _ = events().send(message);
+    let _ = events().send(CloudReport::UploadFailed(message));
+}
+
+pub(super) fn report_transfer(message: String) {
+    let _ = events().send(CloudReport::Transfer(message));
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

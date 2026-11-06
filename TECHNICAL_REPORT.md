@@ -676,8 +676,10 @@ There is no generic object read/write ceiling: manifest sizes are exact
 integrity coordinates, while conversation/provider/project-content and
 aggregate capture limits remain product policy.
 The 512 MiB capture limit applies to one Push, not to the accumulated project
-snapshot. Retaining existing stored files without capturing local payloads does
-not consume this budget. Manifest counts and per-file bounds still apply.
+snapshot. A selected file whose stored copy is unchanged — the same content,
+path and mode — is retained from the stored manifest, not captured or sent
+again, and does not consume this budget; only new and changed files do.
+Manifest counts and per-file bounds still apply.
 A project file above 32 MiB travels as chunk objects of exactly 32 MiB, the
 last one shorter, listed in order on its manifest entry; a Pull verifies every
 chunk and then the whole file (`docs/PLAN_CHUNKED_PAYLOAD_OBJECTS.md`).

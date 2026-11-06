@@ -9,8 +9,8 @@
 //! | Engine key | Behaviour |
 //! | --- | --- |
 //! | `.mallard/_storage.json` read | the constant marker, synthesized: a store has no repository before a bundle names one; the Worker wrote the same bytes into every prefix |
-//! | `_objects/{sha}` write | staged in memory until the manifest arrives |
-//! | `_manifests/…` write | resolve the repository, or create it from the manifest; build the views from the staged transcripts; `PUT` every staged object and view, then the manifest |
+//! | `_objects/{sha}` write | kept in memory for the views, and `PUT` at once when the scope's repository is known; otherwise held until the manifest arrives |
+//! | `_manifests/…` write | resolve the repository, or create it from the manifest; build the views from the held transcripts; `PUT` every object not yet sent and every view, then the manifest |
 //! | `_commits/{bundle}/` listing | one listing request; the bundle's Cloud status is recorded from it. A repository that answers gone lists empty, or as the repository this account collaborates on in its place |
 //! | `_commits/` listing over every stream | refused: Mallard Cloud lists one repository at a time |
 //! | `_claims/…` claim | one `PUT`, no transport retry: written or already present is `Mine`, taken is read back |
@@ -25,6 +25,7 @@ use super::client::{
     CreateCatalogItem, CreateRepository, Error, ErrorKind, ManagedCloudClient, ManagedCloudStatus,
     PutOutcome, StoreKeyListing,
 };
+use super::diagnostics::report_transfer;
 use super::views::build_views_for_manifest;
 use crate::providers::AgentProviderRegistry;
 use crate::storage_core::publication::{MAX_RECORD_BYTES, REMOTE_CHANGED};
@@ -40,6 +41,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
 
@@ -273,6 +275,112 @@ struct Pin {
     id: Option<String>,
 }
 
+/// An object written before its manifest: its bytes, which the views are
+/// built from, and whether the repository holds it already.
+#[derive(Clone)]
+struct Staged {
+    bytes: Bytes,
+    sent: bool,
+}
+
+/// One object on its way into a repository: the desktop key, the digest
+/// the key or the view names, and the bytes.
+struct Transfer {
+    key: String,
+    sha256: String,
+    bytes: Bytes,
+}
+
+/// What a transfer settled: how many objects, how many bytes, and the
+/// object that took longest.
+#[derive(Default)]
+struct Sent {
+    objects: usize,
+    bytes: u64,
+    slowest: Option<(u64, Duration)>,
+}
+
+impl Sent {
+    fn record(&mut self, size: u64, took: Duration) {
+        self.objects += 1;
+        self.bytes = self.bytes.saturating_add(size);
+        if self.slowest.is_none_or(|(_, slowest)| took > slowest) {
+            self.slowest = Some((size, took));
+        }
+    }
+}
+
+/// The desktop key of an object under its scope's repository.
+fn object_key(scope: &Scope, sha256: &str) -> String {
+    match scope {
+        Scope::Project(bundle_id) => format!("{REPOSITORY_PREFIX}/{bundle_id}/_objects/{sha256}"),
+        Scope::Library(stream) => format!("{LIBRARY_PREFIX}/{stream}/_objects/{sha256}"),
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    }
+}
+
+/// The activity-log sentence for one finished transfer: counts, sizes and
+/// timings only, never a key or a digest. Enough to tell a saturated link
+/// (every object slow in proportion to its size) from a slow request
+/// (small objects taking as long as large ones).
+fn transfer_summary(
+    what: &str,
+    queued: usize,
+    sent: &Sent,
+    elapsed: Duration,
+    concurrency: usize,
+    protocol: Option<&str>,
+) -> String {
+    let seconds = elapsed.as_secs_f64();
+    let rate = if seconds > 0.0 {
+        sent.bytes as f64 / 1_000_000.0 / seconds
+    } else {
+        0.0
+    };
+    let count = if sent.objects == queued {
+        let plural = if sent.objects == 1 { "" } else { "s" };
+        format!("{} {what}{plural}", sent.objects)
+    } else {
+        format!("{} of {queued} {what}s", sent.objects)
+    };
+    let mut summary = format!(
+        "Mallard Cloud — sent {count}, {} in {seconds:.1}s ({rate:.1} MB/s), {concurrency} at a time over {}",
+        format_size(sent.bytes),
+        protocol.unwrap_or("HTTP")
+    );
+    if let Some((size, took)) = sent.slowest.filter(|_| sent.objects > 1) {
+        summary.push_str(&format!(
+            "; slowest {} in {:.1}s",
+            format_size(size),
+            took.as_secs_f64()
+        ));
+    }
+    summary
+}
+
+fn put_summary(what: &str, bytes: u64, elapsed: Duration) -> String {
+    format!(
+        "Mallard Cloud — {what} sent, {} in {:.2}s",
+        format_size(bytes),
+        elapsed.as_secs_f64()
+    )
+}
+
+fn build_summary(views: usize, elapsed: Duration) -> String {
+    format!(
+        "Mallard Cloud — built {views} session view{} in {:.1}s",
+        if views == 1 { "" } else { "s" },
+        elapsed.as_secs_f64()
+    )
+}
+
 struct Inner {
     client: ManagedCloudClient,
     runtime: Handle,
@@ -294,7 +402,7 @@ struct Inner {
     // Keep a superseded refresh from overwriting the next status observation.
     status_read: tokio::sync::Mutex<()>,
     /// Objects written before their manifest, per scope.
-    staged: Mutex<BTreeMap<Scope, BTreeMap<String, Bytes>>>,
+    staged: Mutex<BTreeMap<Scope, BTreeMap<String, Staged>>>,
     /// Latest listing revision, and the revision fixed for an active Push.
     revisions: Mutex<BTreeMap<String, u64>>,
     write_revisions: Mutex<BTreeMap<Scope, u64>>,
@@ -825,34 +933,67 @@ impl ManagedObjectStore {
         Ok(revision)
     }
 
-    async fn put_once(&self, scope: &Scope, key: &str, bytes: Bytes) -> Result<PutOutcome, String> {
+    /// One `PUT` of a tag, claim, or record into the scope's repository.
+    async fn put_once(
+        &self,
+        scope: &Scope,
+        what: &'static str,
+        key: &str,
+        bytes: Bytes,
+    ) -> Result<PutOutcome, String> {
         let repository_id = self.repository_for(scope).await?.ok_or_else(|| {
             "Cloud repository is unavailable. Push the item's manifest before its other objects."
                 .to_string()
         })?;
         let revision = self.write_revision(scope, &repository_id).await?;
-        let sha256 = sha256_hex(&bytes);
-        Ok(self
-            .inner
-            .client
-            .put_object(&repository_id, key, bytes, &sha256, revision)
-            .await?)
+        self.put_timed(&repository_id, what, key, bytes, revision)
+            .await
     }
 
-    /// `PUT` every transfer, `cloud_transfer_concurrency()` at a time. An
-    /// object the repository already holds is fine. On failure, stop queued
-    /// transfers and wait for active requests to finish.
+    /// One `PUT`, timed for the activity log.
+    async fn put_timed(
+        &self,
+        repository_id: &str,
+        what: &'static str,
+        key: &str,
+        bytes: Bytes,
+        revision: u64,
+    ) -> Result<PutOutcome, String> {
+        let size = bytes.len() as u64;
+        let sha256 = sha256_hex(&bytes);
+        let started = Instant::now();
+        let outcome = self
+            .inner
+            .client
+            .put_object(repository_id, key, bytes, &sha256, revision)
+            .await?;
+        report_transfer(put_summary(what, size, started.elapsed()));
+        Ok(outcome)
+    }
+
+    /// `PUT` every transfer, `cloud_transfer_concurrency()` at a time, each
+    /// settled object's size reported to `on_sent`. An object the
+    /// repository already holds is fine. On failure, stop queued transfers
+    /// and wait for active requests to finish. What was sent, and how
+    /// fast, is reported for the activity log.
     async fn transfer_all(
         &self,
         repository_id: &str,
-        transfers: Vec<(String, Bytes)>,
+        what: &'static str,
+        transfers: Vec<Transfer>,
         revision: u64,
+        on_sent: &mut dyn FnMut(u64),
     ) -> Result<(), String> {
+        if transfers.is_empty() {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let queued = transfers.len();
         let concurrency = crate::app_settings::cloud_transfer_concurrency().max(1);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
         let mut workers = tokio::task::JoinSet::new();
         let stopped = Arc::new(AtomicBool::new(false));
-        for (key, bytes) in transfers {
+        for transfer in transfers {
             let client = self.inner.client.clone();
             let repository_id = repository_id.to_owned();
             let semaphore = semaphore.clone();
@@ -863,33 +1004,57 @@ impl ManagedObjectStore {
                     .await
                     .map_err(|_| Error::local("v1/repositories/{id}/store/{key}"))?;
                 if stopped.load(Ordering::Acquire) {
-                    return Ok(());
+                    return Ok(None);
                 }
-                let sha256 = sha256_hex(&bytes);
+                let size = transfer.bytes.len() as u64;
+                let began = Instant::now();
                 let result = client
-                    .put_object(&repository_id, &key, bytes, &sha256, revision)
-                    .await
-                    .map(|_| ());
+                    .put_object(
+                        &repository_id,
+                        &transfer.key,
+                        transfer.bytes,
+                        &transfer.sha256,
+                        revision,
+                    )
+                    .await;
                 if result.is_err() {
                     stopped.store(true, Ordering::Release);
                 }
-                result
+                result.map(|_| Some((size, began.elapsed())))
             });
         }
+        let mut sent = Sent::default();
         let mut first_error = None;
         while let Some(joined) = workers.join_next().await {
             let outcome =
                 joined.unwrap_or_else(|_| Err(Error::local("v1/repositories/{id}/store/{key}")));
-            if let Err(error) = outcome {
-                stopped.store(true, Ordering::Release);
-                first_error.get_or_insert_with(|| error.message());
+            match outcome {
+                Ok(Some((size, took))) => {
+                    sent.record(size, took);
+                    on_sent(size);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stopped.store(true, Ordering::Release);
+                    first_error.get_or_insert_with(|| error.message());
+                }
             }
         }
         // Keep active requests alive until the Worker releases their admission.
+        if sent.objects > 0 {
+            report_transfer(transfer_summary(
+                what,
+                queued,
+                &sent,
+                started.elapsed(),
+                concurrency,
+                self.inner.client.protocol(),
+            ));
+        }
         first_error.map_or(Ok(()), Err)
     }
 
-    fn take_staged(&self, scope: &Scope) -> Result<BTreeMap<String, Bytes>, String> {
+    fn take_staged(&self, scope: &Scope) -> Result<BTreeMap<String, Staged>, String> {
         Ok(Self::lock(&self.inner.staged)?
             .get(scope)
             .cloned()
@@ -899,6 +1064,126 @@ impl ManagedObjectStore {
     fn clear_staged(&self, scope: &Scope) -> Result<(), String> {
         Self::lock(&self.inner.staged)?.remove(scope);
         Ok(())
+    }
+
+    /// Objects written before their manifest, one scope at a time: kept for
+    /// the views, and sent now when the scope's repository is known, each
+    /// settled object reported to `on_sent`. Without a repository (a first
+    /// push, or one whose repository answered gone) they wait for the
+    /// manifest write, which creates it and sends them.
+    async fn stage_objects(
+        &self,
+        scope: &Scope,
+        objects: Vec<(String, Bytes)>,
+        on_sent: &mut dyn FnMut(u64),
+    ) -> Result<(), String> {
+        if !Self::lock(&self.inner.staged)?.contains_key(scope) {
+            Self::lock(&self.inner.write_revisions)?.remove(scope);
+        }
+        let destination = match self.repository_for(scope).await? {
+            Some(repository_id) => {
+                let revision = self.write_revision(scope, &repository_id).await?;
+                Some((repository_id, revision))
+            }
+            None => None,
+        };
+        let sent = destination.is_some();
+        {
+            let mut staged = Self::lock(&self.inner.staged)?;
+            let scoped = staged.entry(scope.clone()).or_default();
+            for (sha256, bytes) in &objects {
+                scoped.insert(
+                    sha256.clone(),
+                    Staged {
+                        bytes: bytes.clone(),
+                        sent,
+                    },
+                );
+            }
+        }
+        let Some((repository_id, revision)) = destination else {
+            return Ok(());
+        };
+        let transfers = objects
+            .into_iter()
+            .map(|(sha256, bytes)| Transfer {
+                key: object_key(scope, &sha256),
+                sha256,
+                bytes,
+            })
+            .collect();
+        let result = self
+            .transfer_all(&repository_id, "object", transfers, revision, on_sent)
+            .await;
+        if result.is_err() {
+            self.clear_staged(scope)?;
+            Self::lock(&self.inner.write_revisions)?.remove(scope);
+        }
+        result
+    }
+
+    fn send_objects(
+        &self,
+        batch: &mut BTreeMap<Scope, Vec<(String, Bytes)>>,
+        on_sent: &mut dyn FnMut(u64),
+    ) -> Result<(), String> {
+        for (scope, objects) in std::mem::take(batch) {
+            self.inner
+                .runtime
+                .block_on(self.stage_objects(&scope, objects, on_sent))?;
+        }
+        Ok(())
+    }
+
+    /// One key that is not an object: a manifest, a tag, or a refusal.
+    fn put_one(
+        &self,
+        key: Key,
+        object_key: &ObjectKey,
+        bytes: Bytes,
+    ) -> Result<ImmutablePutOutcome, String> {
+        match key {
+            Key::Object { .. } => Err(format!(
+                "'{object_key}' travels with its scope's other objects"
+            )),
+            Key::Manifest { scope } => {
+                let result = self.inner.runtime.block_on(async {
+                    match &scope {
+                        Scope::Project(bundle_id) => {
+                            self.publish_manifest(bundle_id, object_key, bytes).await
+                        }
+                        Scope::Library(stream) => {
+                            self.publish_library_manifest(stream, object_key, bytes)
+                                .await
+                        }
+                    }
+                });
+                if result.is_err() {
+                    self.clear_staged(&scope)?;
+                    Self::lock(&self.inner.write_revisions)?.remove(&scope);
+                }
+                result.map(|()| ImmutablePutOutcome::Written)
+            }
+            Key::Tag { stream } => {
+                let outcome = self.inner.runtime.block_on(self.put_once(
+                    &Scope::Library(stream),
+                    "tag",
+                    object_key.as_str(),
+                    bytes,
+                ))?;
+                match outcome {
+                    PutOutcome::Written => Ok(ImmutablePutOutcome::Written),
+                    PutOutcome::AlreadyPresent => Ok(ImmutablePutOutcome::AlreadyPresent),
+                    PutOutcome::ClaimTaken => Err(format!("'{object_key}' is not a claim")),
+                }
+            }
+            Key::Marker => Ok(ImmutablePutOutcome::AlreadyPresent),
+            Key::Upload => Err("Mallard Cloud has no probe namespace".to_string()),
+            Key::Record { .. } => Err(format!(
+                "'{object_key}' is written as a publication record only"
+            )),
+            Key::Claim { .. } => Err(format!("'{object_key}' is written as a claim only")),
+        }
     }
 
     /// The bundle manifest write: resolve or create the repository, build
@@ -952,46 +1237,53 @@ impl ManagedObjectStore {
         }
         let revision = self.write_revision(&scope, &repository_id).await?;
         let staged = self.take_staged(&scope)?;
+        let transcripts = staged
+            .iter()
+            .map(|(sha256, object)| (sha256.clone(), object.bytes.clone()))
+            .collect();
+        let building = Instant::now();
         let views =
-            build_views_for_manifest(AgentProviderRegistry::production(), &manifest, &staged)?;
+            build_views_for_manifest(AgentProviderRegistry::production(), &manifest, &transcripts)?;
+        if !views.is_empty() {
+            report_transfer(build_summary(views.len(), building.elapsed()));
+        }
         // The objects first: the service admits a view only once the
-        // transcript it was built from is stored.
+        // transcript it was built from is stored. An object sent as it was
+        // written is not sent again.
         let objects = staged
             .iter()
-            .map(|(sha256, bytes)| {
-                (
-                    format!("{REPOSITORY_PREFIX}/{bundle_id}/_objects/{sha256}"),
-                    bytes.clone(),
-                )
+            .filter(|(_, object)| !object.sent)
+            .map(|(sha256, object)| Transfer {
+                key: object_key(&scope, sha256),
+                sha256: sha256.clone(),
+                bytes: object.bytes.clone(),
             })
             .collect();
-        self.transfer_all(&repository_id, objects, revision).await?;
+        self.transfer_all(&repository_id, "object", objects, revision, &mut |_| {})
+            .await?;
         let views = views
             .iter()
-            .map(|view| {
-                (
-                    format!(
-                        "{REPOSITORY_PREFIX}/{bundle_id}/_views/{}-{}-{}.json",
-                        super::views::VIEW_SCHEMA,
-                        view.source_sha256,
-                        view.sha256
-                    ),
-                    view.bytes.clone(),
-                )
+            .map(|view| Transfer {
+                key: format!(
+                    "{REPOSITORY_PREFIX}/{bundle_id}/_views/{}-{}-{}.json",
+                    super::views::VIEW_SCHEMA,
+                    view.source_sha256,
+                    view.sha256
+                ),
+                sha256: view.sha256.clone(),
+                bytes: view.bytes.clone(),
             })
             .collect();
-        self.transfer_all(&repository_id, views, revision).await?;
-        let sha256 = sha256_hex(&manifest_bytes);
-        self.inner
-            .client
-            .put_object(
-                &repository_id,
-                key.as_str(),
-                manifest_bytes,
-                &sha256,
-                revision,
-            )
+        self.transfer_all(&repository_id, "session view", views, revision, &mut |_| {})
             .await?;
+        self.put_timed(
+            &repository_id,
+            "manifest",
+            key.as_str(),
+            manifest_bytes,
+            revision,
+        )
+        .await?;
         self.clear_staged(&scope)
     }
 
@@ -1024,29 +1316,26 @@ impl ManagedObjectStore {
             Self::lock(&self.inner.write_revisions)?.remove(&scope);
         }
         let revision = self.write_revision(&scope, &repository_id).await?;
-        let staged = self.take_staged(&scope)?;
-        let transfers = staged
+        let transfers = self
+            .take_staged(&scope)?
             .into_iter()
-            .map(|(sha256, bytes)| {
-                (
-                    format!("{LIBRARY_PREFIX}/{stream}/_objects/{sha256}"),
-                    bytes,
-                )
+            .filter(|(_, object)| !object.sent)
+            .map(|(sha256, object)| Transfer {
+                key: object_key(&scope, &sha256),
+                sha256,
+                bytes: object.bytes,
             })
             .collect();
-        self.transfer_all(&repository_id, transfers, revision)
+        self.transfer_all(&repository_id, "object", transfers, revision, &mut |_| {})
             .await?;
-        let sha256 = sha256_hex(&manifest_bytes);
-        self.inner
-            .client
-            .put_object(
-                &repository_id,
-                key.as_str(),
-                manifest_bytes,
-                &sha256,
-                revision,
-            )
-            .await?;
+        self.put_timed(
+            &repository_id,
+            "manifest",
+            key.as_str(),
+            manifest_bytes,
+            revision,
+        )
+        .await?;
         self.clear_staged(&scope)
     }
 
@@ -1087,7 +1376,7 @@ impl ManagedObjectStore {
         key: &ObjectKey,
         bytes: Bytes,
     ) -> Result<ImmutablePutOutcome, String> {
-        let outcome = self.put_once(scope, key.as_str(), bytes).await;
+        let outcome = self.put_once(scope, "record", key.as_str(), bytes).await;
         Self::lock(&self.inner.write_revisions)?.remove(scope);
         match outcome? {
             PutOutcome::Written => Ok(ImmutablePutOutcome::Written),
@@ -1105,7 +1394,7 @@ impl ManagedObjectStore {
         key: &ObjectKey,
         bytes: Bytes,
     ) -> Result<ClaimOutcome, String> {
-        match self.put_once(scope, key.as_str(), bytes).await? {
+        match self.put_once(scope, "claim", key.as_str(), bytes).await? {
             PutOutcome::Written | PutOutcome::AlreadyPresent => Ok(ClaimOutcome::Mine),
             PutOutcome::ClaimTaken => {
                 let mut found = Vec::new();
@@ -1288,81 +1577,34 @@ impl ObjectStore for ManagedObjectStore {
         &self,
         objects: Vec<(ObjectKey, Bytes)>,
     ) -> Result<Vec<ImmutablePutOutcome>, String> {
+        self.put_many_with_progress(objects, &mut |_| {})
+    }
+
+    /// Objects travel together, a scope at a time, each settled object
+    /// reported to `on_stored`; every other key is one request in its turn.
+    fn put_many_with_progress(
+        &self,
+        objects: Vec<(ObjectKey, Bytes)>,
+        on_stored: &mut dyn FnMut(u64),
+    ) -> Result<Vec<ImmutablePutOutcome>, String> {
         let mut outcomes = Vec::with_capacity(objects.len());
+        let mut batch: BTreeMap<Scope, Vec<(String, Bytes)>> = BTreeMap::new();
         for (key, bytes) in objects {
             match classify(&key)? {
                 Key::Object { scope, sha256 } => {
                     if sha256_hex(&bytes) != sha256 {
                         return Err(format!("object '{key}' does not match its digest"));
                     }
-                    if !Self::lock(&self.inner.staged)?.contains_key(&scope) {
-                        Self::lock(&self.inner.write_revisions)?.remove(&scope);
-                        if let Some(repository_id) =
-                            self.inner.runtime.block_on(self.repository_for(&scope))?
-                        {
-                            self.inner
-                                .runtime
-                                .block_on(self.write_revision(&scope, &repository_id))?;
-                        }
-                    }
-                    Self::lock(&self.inner.staged)?
-                        .entry(scope)
-                        .or_default()
-                        .insert(sha256, bytes);
+                    batch.entry(scope).or_default().push((sha256, bytes));
                     outcomes.push(ImmutablePutOutcome::Written);
                 }
-                Key::Manifest {
-                    scope: Scope::Project(bundle_id),
-                } => {
-                    let result = self
-                        .inner
-                        .runtime
-                        .block_on(self.publish_manifest(&bundle_id, &key, bytes));
-                    if result.is_err() {
-                        let scope = Scope::Project(bundle_id);
-                        self.clear_staged(&scope)?;
-                        Self::lock(&self.inner.write_revisions)?.remove(&scope);
-                    }
-                    result?;
-                    outcomes.push(ImmutablePutOutcome::Written);
+                other => {
+                    self.send_objects(&mut batch, on_stored)?;
+                    outcomes.push(self.put_one(other, &key, bytes)?);
                 }
-                Key::Manifest {
-                    scope: Scope::Library(stream),
-                } => {
-                    let result = self
-                        .inner
-                        .runtime
-                        .block_on(self.publish_library_manifest(&stream, &key, bytes));
-                    if result.is_err() {
-                        let scope = Scope::Library(stream);
-                        self.clear_staged(&scope)?;
-                        Self::lock(&self.inner.write_revisions)?.remove(&scope);
-                    }
-                    result?;
-                    outcomes.push(ImmutablePutOutcome::Written);
-                }
-                Key::Tag { stream } => {
-                    let outcome = self.inner.runtime.block_on(self.put_once(
-                        &Scope::Library(stream),
-                        key.as_str(),
-                        bytes,
-                    ))?;
-                    outcomes.push(match outcome {
-                        PutOutcome::Written => ImmutablePutOutcome::Written,
-                        PutOutcome::AlreadyPresent => ImmutablePutOutcome::AlreadyPresent,
-                        PutOutcome::ClaimTaken => {
-                            return Err(format!("'{key}' is not a claim"));
-                        }
-                    });
-                }
-                Key::Marker => outcomes.push(ImmutablePutOutcome::AlreadyPresent),
-                Key::Upload => return Err("Mallard Cloud has no probe namespace".to_string()),
-                Key::Record { .. } => {
-                    return Err(format!("'{key}' is written as a publication record only"))
-                }
-                Key::Claim { .. } => return Err(format!("'{key}' is written as a claim only")),
             }
         }
+        self.send_objects(&mut batch, on_stored)?;
         Ok(outcomes)
     }
 
@@ -1496,10 +1738,16 @@ mod tests {
         .unwrap();
         let store = ManagedObjectStore::new(client, Handle::current());
         let transfers = (0..width * 2)
-            .map(|index| (format!("_objects/{index}"), Bytes::from_static(b"fixture")))
+            .map(|index| Transfer {
+                key: format!("_objects/{index}"),
+                sha256: sha256_hex(b"fixture"),
+                bytes: Bytes::from_static(b"fixture"),
+            })
             .collect();
-        let mut transfer =
-            tokio::spawn(async move { store.transfer_all("repository", transfers, 7).await });
+        let runtime = Handle::current();
+        let mut transfer = tokio::task::spawn_blocking(move || {
+            runtime.block_on(store.transfer_all("repository", "object", transfers, 7, &mut |_| {}))
+        });
         tokio::time::timeout(Duration::from_secs(10), ready.wait())
             .await
             .unwrap();
@@ -1523,6 +1771,43 @@ mod tests {
 
     fn bundle(number: u64) -> BundleId {
         BundleId::parse(format!("{number:032x}")).unwrap()
+    }
+
+    #[test]
+    fn transfer_summaries_hold_counts_and_timings_only() {
+        let mut sent = Sent::default();
+        sent.record(32_000_000, Duration::from_millis(12_300));
+        sent.record(1_000, Duration::from_millis(400));
+        assert_eq!(
+            transfer_summary("object", 3, &sent, Duration::from_secs(20), 6, Some("HTTP/1.1")),
+            "Mallard Cloud — sent 2 of 3 objects, 32.0 MB in 20.0s (1.6 MB/s), 6 at a time over HTTP/1.1; slowest 32.0 MB in 12.3s"
+        );
+        sent.record(5, Duration::from_millis(1));
+        assert_eq!(
+            transfer_summary("session view", 3, &sent, Duration::from_secs(20), 6, None),
+            "Mallard Cloud — sent 3 session views, 32.0 MB in 20.0s (1.6 MB/s), 6 at a time over HTTP; slowest 32.0 MB in 12.3s"
+        );
+        let mut one = Sent::default();
+        one.record(700, Duration::from_millis(50));
+        assert_eq!(
+            transfer_summary(
+                "object",
+                1,
+                &one,
+                Duration::from_millis(50),
+                6,
+                Some("HTTP/2")
+            ),
+            "Mallard Cloud — sent 1 object, 0.7 KB in 0.1s (0.0 MB/s), 6 at a time over HTTP/2"
+        );
+        assert_eq!(
+            put_summary("manifest", 120_000, Duration::from_millis(420)),
+            "Mallard Cloud — manifest sent, 120.0 KB in 0.42s"
+        );
+        assert_eq!(
+            build_summary(24, Duration::from_millis(3_210)),
+            "Mallard Cloud — built 24 session views in 3.2s"
+        );
     }
 
     #[test]
@@ -2003,6 +2288,119 @@ mod stub_tests {
         );
         assert_eq!(repository.private_revision, 1);
         assert!(repository.publications[0].summary["registration_only"] == true);
+    }
+
+    /// Objects go up as they are written, each reported, once the
+    /// repository is known. A first push holds them for the manifest write,
+    /// which creates the repository and sends them. Nothing is sent twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn objects_are_sent_as_they_are_written_once_the_repository_is_known() {
+        let stub = StubManagedCloud::start().await;
+        let (store, _) = store(&stub, "octocat").await;
+        let object_key = |bytes: &[u8]| {
+            ObjectKey::parse(format!(
+                "{REPOSITORY_PREFIX}/{}/_objects/{}",
+                bundle(31),
+                sha256_hex(bytes)
+            ))
+            .unwrap()
+        };
+        let object_line = |id: &str, bytes: &[u8]| {
+            format!(
+                "PUT /v1/repositories/{id}/store/{REPOSITORY_PREFIX}/{}/_objects/{}",
+                bundle(31),
+                sha256_hex(bytes)
+            )
+        };
+        let (one, two, three) = (
+            Bytes::from_static(b"first object"),
+            Bytes::from_static(b"second object"),
+            Bytes::from_static(b"third object"),
+        );
+        let first = manifest(identity(31), 1, 100);
+        // No repository yet: the objects wait, and nothing is reported.
+        let (root, reported) = blocking({
+            let store = store.clone();
+            let first = first.clone();
+            let (one, two) = (one.clone(), two.clone());
+            move || {
+                let mut reported = Vec::new();
+                store
+                    .put_many_with_progress(
+                        vec![
+                            (object_key(&one), one.clone()),
+                            (object_key(&two), two.clone()),
+                        ],
+                        &mut |size| reported.push(size),
+                    )
+                    .unwrap();
+                (stored(push(&store, &first, None, 1_000)), reported)
+            }
+        })
+        .await;
+        assert!(reported.is_empty());
+        let id = repository_id(&stub, 31);
+        let lines = stub.request_lines();
+        let position = |line: &str| {
+            lines
+                .iter()
+                .position(|seen| seen == line)
+                .unwrap_or_else(|| panic!("{line} in {lines:?}"))
+        };
+        let created = position("POST /v1/repositories");
+        let manifest_put = position(&format!(
+            "PUT /v1/repositories/{id}/store/{}",
+            manifest_key(&first)
+        ));
+        for bytes in [&one, &two] {
+            let sent = position(&object_line(&id, bytes));
+            assert!(created < sent && sent < manifest_put, "{lines:?}");
+        }
+
+        // Pinned, as a link does: the next push's objects go at once, each
+        // reported as it settles, before any manifest.
+        managed(&store).set_pin(&bundle(31), Some(&id), 0).unwrap();
+        stub.clear_log();
+        let reported = blocking({
+            let store = store.clone();
+            let three = three.clone();
+            move || {
+                let mut reported = Vec::new();
+                store
+                    .put_many_with_progress(
+                        vec![(object_key(&three), three.clone())],
+                        &mut |size| reported.push(size),
+                    )
+                    .unwrap();
+                reported
+            }
+        })
+        .await;
+        assert_eq!(reported, vec![three.len() as u64]);
+        assert_eq!(stub.request_lines(), vec![object_line(&id, &three)]);
+        stub.clear_log();
+        blocking({
+            let store = store.clone();
+            let second = manifest(identity(31), 2, 200);
+            move || stored(push(&store, &second, Some(&root), 2_000))
+        })
+        .await;
+        assert!(
+            stub.request_lines()
+                .iter()
+                .all(|line| !line.contains("/_objects/")),
+            "an object sent as it was written is not sent again"
+        );
+        let state = stub.state.lock().unwrap();
+        let repository = &state.repositories[&id];
+        for bytes in [&one, &two, &three] {
+            let key = format!(
+                "{REPOSITORY_PREFIX}/{}/_objects/{}",
+                bundle(31),
+                sha256_hex(bytes)
+            );
+            assert!(repository.objects.contains_key(&key), "{key}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -8340,6 +8340,8 @@ button.sync-history-branch-trigger:hover:not(:disabled),
   padding: 5px 12px 5px 40px;
 }
 .sync-project-file-limit { padding: 12px; color: var(--text-3); font-size: var(--type-2xs); text-align: center; }
+/* The line under a long list's first cards while the rest render. */
+.sync-project-files-updating { display: flex; align-items: center; justify-content: center; gap: 6px; }
 
 .sync-project-files-scan-summary {
   color: var(--text-2);

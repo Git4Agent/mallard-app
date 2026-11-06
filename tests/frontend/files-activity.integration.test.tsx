@@ -368,14 +368,13 @@ test("file details reuse the project copyable popover", () => {
     entry("file-design", "doc/test-design.md", "synced"),
   ]));
   assert.match(markup, /aria-label="Show file info for doc\/test-design\.md"/);
-  assert.match(markup, /aria-haspopup="dialog"/);
-  const controlledPanel = markup.match(/aria-controls="([^"]+)"/)?.[1];
-  assert.ok(controlledPanel);
-  assert.match(markup, new RegExp(`id="${controlledPanel}"`));
-  assert.match(markup, /<strong>File info<\/strong>/);
-  assert.doesNotMatch(markup, /Click a value to copy it\./);
-  assert.match(markup, /<code>\/tmp\/project-a\/doc\/test-design\.md<\/code>/);
-  assert.match(markup, />Copy all<\/button>/);
+  assert.match(markup, /aria-haspopup="dialog" aria-expanded="false"/);
+  assert.match(markup, /sync-history-debug-trigger/);
+  /* The panel is mounted only while open: a list of hundreds of rows would
+     otherwise carry a hidden dialog each. Closed, the trigger controls
+     nothing and no panel is in the page. */
+  assert.doesNotMatch(markup, /aria-controls="project-file-details/);
+  assert.doesNotMatch(markup, /sync-history-debug-popover|<strong>File info<\/strong>|>Copy all<\/button>/);
   assert.doesNotMatch(markup, /sync-project-file-details/);
 });
 

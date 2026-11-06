@@ -534,7 +534,11 @@ pub fn capture_children(
         let mut failure = None;
         let records = crate::conversation_codec::parsed_records(&bytes).inspect(|record| {
             if let Ok(record) = record {
-                match mapper.encode_record_with_origins(record, origins.record(&id, ordinal)) {
+                match super::path_encoding::encode_record(
+                    mapper,
+                    record,
+                    origins.record(&id, ordinal),
+                ) {
                     Ok(mapped) => {
                         output_origins.push(&id, mapped.origins);
                         match redaction.redact_record_gated(&mapped.wire).and_then(

@@ -606,8 +606,10 @@ export interface PushFileReview {
   filesShown?: boolean;
 }
 
-/** Only selected local files are captured. Retaining a stored copy spends
- *  none of this Push's capture budget. */
+/** Only selected local files that changed are captured. A stored copy is
+ *  retained whether its file is unticked or ticked and unchanged — the
+ *  backend sends neither again — so it spends none of this Push's capture
+ *  budget. */
 function pushProjectFileCaptureBytes(
   selected: ReadonlySet<string>,
   inventory: ProjectContentInventory | null | undefined,
@@ -616,7 +618,7 @@ function pushProjectFileCaptureBytes(
   let captured = 0;
   for (const entry of inventory?.entries ?? []) {
     const id = entry.descriptor.resource_id;
-    if (!entry.local_present || removals.has(id) || !selected.has(id)) continue;
+    if (!entry.local_present || entry.state === "synced" || removals.has(id) || !selected.has(id)) continue;
     captured += entry.size ?? 0;
   }
   return captured;
@@ -624,10 +626,10 @@ function pushProjectFileCaptureBytes(
 
 /** What the current selection would put into one push: the selected sessions
  *  by their capture bytes, the requirements the push always carries, and the
- *  selected project files by size — every one of them when the push has file
- *  work, since the backend then captures them all, and none when it has not.
- *  Null when the review carries no budget (a review prepared without a
- *  comparison, or a Pull). */
+ *  selected project files that changed, by size — when the push has file
+ *  work; a ticked file storage holds unchanged is retained, not captured —
+ *  and none when it has not. Null when the review carries no budget (a
+ *  review prepared without a comparison, or a Pull). */
 export function pushBudgetTotal(
   selected: ReadonlySet<string>,
   threadComparison?: ThreadSyncComparison | null,
@@ -932,8 +934,9 @@ export default function PushResourceWorkspace({
   const visibleProjectContentEntries = useMemo(
     () => (projectContentInventory?.entries ?? []).filter((entry) => (
       isPushReviewProjectContent(entry)
-      // File work captures selected unchanged files too. Keep their warning
-      // controls visible, including after the user marks them reviewed.
+      // A selected unchanged file with a finding still needs its review
+      // before Push, so keep its warning controls visible, including after
+      // the user marks it reviewed.
       || (capturesProjectFiles && entry.local_present && entry.state === "synced"
         && entry.warning_digest && effectiveSelected.has(entry.descriptor.resource_id)
         && !projectContentRemovals.has(entry.descriptor.resource_id))
@@ -1170,10 +1173,17 @@ export default function PushResourceWorkspace({
     projectContentInventory,
     effectiveSelected,
   );
-  const projectFileRows = visibleProjectContentEntries.map(projectFileReviewRow);
+  /* One row object per scanned entry, kept until the next scan: the Files
+     page memoizes its cards on the row, so a tick redraws its own card and
+     no other. */
+  const projectFileRowsByEntry = useMemo(
+    () => new Map((projectContentInventory?.entries ?? []).map((entry) => [entry, projectFileReviewRow(entry)] as const)),
+    [projectContentInventory],
+  );
+  const projectFileRows = visibleProjectContentEntries.map((entry) => projectFileRowsByEntry.get(entry)!);
   const blockedProjectFileRows = (projectContentInventory?.entries ?? [])
     .filter(isPushReviewBlockedContent)
-    .map(projectFileReviewRow);
+    .map((entry) => projectFileRowsByEntry.get(entry)!);
   const revealProjectPath = (path: string) => {
     onSessionActionError(null);
     void revealItemInDir(path).catch((reason) => onSessionActionError(errorMessage(reason)));

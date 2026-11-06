@@ -67,7 +67,7 @@ fn scenario_document(read_path: &Path) -> AimockScenarioDocument {
         version: 1,
         model: MODEL.into(),
         expected_request_count: scenarios.len(),
-        expected_probe_request_count: TOTAL_ROUNDS,
+        expected_probe_request_count: 0,
         scenarios,
     }
 }

@@ -636,35 +636,37 @@ test("raw auth audit rejects alternate credential headers even when AIMock accep
   assert.equal(audit.raw_audit_ok, false);
 });
 
-test("raw boundary admits the exact credential-free Claude HEAD hello probe budget", async (t) => {
-  const subject = await startHarness(t, documentFor(undefined, 1));
-  const probe = await fetch(`${subject.baseUrl}/api/hello`, { method: "HEAD" });
-  assert.ok(probe.status >= 400);
+for (const expectedProbes of [0, 1]) {
+  test(`raw boundary enforces the exact Claude hello probe budget of ${expectedProbes}`, async (t) => {
+    const subject = await startHarness(t, documentFor(undefined, expectedProbes));
+    const probe = await fetch(`${subject.baseUrl}/api/hello`, { method: "HEAD" });
+    assert.ok(probe.status >= 400);
 
-  const response = await postAnthropic(
-    subject.baseUrl,
-    anthropicBody([
-      {
-        role: "user",
-        content: [{ type: "text", text: "TEST_USER_CURRENT verify" }],
-      },
-    ]),
-  );
-  assert.equal(response.status, 200);
-  await response.text();
+    const response = await postAnthropic(
+      subject.baseUrl,
+      anthropicBody([
+        {
+          role: "user",
+          content: [{ type: "text", text: "TEST_USER_CURRENT verify" }],
+        },
+      ]),
+    );
+    assert.equal(response.status, 200);
+    await response.text();
 
-  const audit = await stopHarness(subject);
-  assert.equal(audit.expected_probe_request_count, 1);
-  assert.equal(audit.request_count, 1);
-  assert.equal(audit.raw_request_count, 2);
-  assert.equal(audit.raw_expected_request_count, 2);
-  assert.equal(audit.raw_model_request_count, 1);
-  assert.equal(audit.raw_probe_request_count, 1);
-  assert.equal(audit.raw_unexpected_request_count, 0);
-  assert.equal(audit.raw_auth_rejection_count, 0);
-  assert.equal(audit.raw_journal_reconciled, true);
-  assert.equal(audit.raw_audit_ok, true);
-});
+    const audit = await stopHarness(subject);
+    assert.equal(audit.expected_probe_request_count, expectedProbes);
+    assert.equal(audit.request_count, 1);
+    assert.equal(audit.raw_request_count, 2);
+    assert.equal(audit.raw_expected_request_count, 2);
+    assert.equal(audit.raw_model_request_count, 1);
+    assert.equal(audit.raw_probe_request_count, 1);
+    assert.equal(audit.raw_unexpected_request_count, 0);
+    assert.equal(audit.raw_auth_rejection_count, 0);
+    assert.equal(audit.raw_journal_reconciled, true);
+    assert.equal(audit.raw_audit_ok, expectedProbes === 1);
+  });
+}
 
 test("raw boundary rejects a Claude hello probe carrying any credential", async (t) => {
   const subject = await startHarness(t, documentFor(undefined, 1));

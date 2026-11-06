@@ -144,73 +144,76 @@ export default function ProjectFileDetailsMenu({
         aria-label={t("fileDetails.show", { path: relativePath })}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-controls={menuId}
+        aria-controls={open ? menuId : undefined}
         onClick={() => open ? closeMenu() : setOpen(true)}
       >
         <SessionRowIcon name="info" />
       </button>
-      <TopLayer>
-        <div
-          ref={panelRef}
-          id={menuId}
-          className="sync-history-debug-popover"
-          style={placement
-            ? {
-              top: `${placement.top}px`,
-              left: `${placement.left}px`,
-              width: `${placement.width}px`,
-              maxHeight: `${placement.maxHeight}px`,
-            }
-            : { visibility: "hidden" }}
-          role="dialog"
-          aria-label={t("fileDetails.dialog", { path: relativePath })}
-          hidden={!open}
-        >
-          <header>
-            <strong>{t("fileDetails.title")}</strong>
-          </header>
-          <div className="sync-history-debug-values">
-            {/* No aria-label: it would replace the row's content as the
-                accessible name, and the value is the one thing worth hearing.
-                Named from content instead, so the path or digest is announced
-                and stays navigable with a reading cursor. */}
-            {values.map((value) => (
-              <button
-                key={value.key}
-                type="button"
-                className="sync-history-debug-copy"
-                title={t(value.copy)}
-                onClick={() => void copyValue(value.key, value.value)}
+      {/* Mounted only while open: a review lists hundreds of rows, and a
+          hidden panel each would be thousands of nodes nobody sees. */}
+      {open && (
+        <TopLayer>
+          <div
+            ref={panelRef}
+            id={menuId}
+            className="sync-history-debug-popover"
+            style={placement
+              ? {
+                top: `${placement.top}px`,
+                left: `${placement.left}px`,
+                width: `${placement.width}px`,
+                maxHeight: `${placement.maxHeight}px`,
+              }
+              : { visibility: "hidden" }}
+            role="dialog"
+            aria-label={t("fileDetails.dialog", { path: relativePath })}
+          >
+            <header>
+              <strong>{t("fileDetails.title")}</strong>
+            </header>
+            <div className="sync-history-debug-values">
+              {/* No aria-label: it would replace the row's content as the
+                  accessible name, and the value is the one thing worth hearing.
+                  Named from content instead, so the path or digest is announced
+                  and stays navigable with a reading cursor. */}
+              {values.map((value) => (
+                <button
+                  key={value.key}
+                  type="button"
+                  className="sync-history-debug-copy"
+                  title={t(value.copy)}
+                  onClick={() => void copyValue(value.key, value.value)}
+                >
+                  <span>{t(value.label)}</span>
+                  <code>{value.value}</code>
+                  <small className={copied === value.key ? "copied" : undefined}>
+                    {copied === value.key ? t("common:copied") : t("common:copy")}
+                  </small>
+                </button>
+              ))}
+            </div>
+            <footer>
+              <span
+                className={`sync-history-debug-status${copyError ? " error" : copied ? " success" : ""}`}
+                role="status"
+                aria-live="polite"
               >
-                <span>{t(value.label)}</span>
-                <code>{value.value}</code>
-                <small className={copied === value.key ? "copied" : undefined}>
-                  {copied === value.key ? t("common:copied") : t("common:copy")}
-                </small>
+                {copyError ?? copiedLabel}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost sync-history-debug-copy-all"
+                onClick={() => void copyValue(
+                  "all",
+                  values.map((value) => t("fileDetails.line", { label: t(value.label), value: value.value })).join("\n"),
+                )}
+              >
+                {copied === "all" ? t("copiedAll") : t("copyAll")}
               </button>
-            ))}
+            </footer>
           </div>
-          <footer>
-            <span
-              className={`sync-history-debug-status${copyError ? " error" : copied ? " success" : ""}`}
-              role="status"
-              aria-live="polite"
-            >
-              {copyError ?? copiedLabel}
-            </span>
-            <button
-              type="button"
-              className="btn btn-ghost sync-history-debug-copy-all"
-              onClick={() => void copyValue(
-                "all",
-                values.map((value) => t("fileDetails.line", { label: t(value.label), value: value.value })).join("\n"),
-              )}
-            >
-              {copied === "all" ? t("copiedAll") : t("copyAll")}
-            </button>
-          </footer>
-        </div>
-      </TopLayer>
+        </TopLayer>
+      )}
     </div>
   );
 }

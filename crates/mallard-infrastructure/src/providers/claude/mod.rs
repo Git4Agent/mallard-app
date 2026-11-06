@@ -11,6 +11,7 @@ mod desktop_cli;
 pub mod discovery;
 pub mod history;
 pub mod materialization;
+mod path_encoding;
 pub mod publication;
 pub mod subagents;
 

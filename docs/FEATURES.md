@@ -45,8 +45,9 @@ What Mallard does, in detail. The short introduction is the repository's
   chunk objects, so no storage provider's per-object limit bounds it. The
   total selected Push is limited to 512 MiB, or to that setting when it is
   larger; a Push keeps each selected file in memory while it transfers.
-  Files retained in storage without a local capture do not use that Push budget;
-  the stored project can grow across pushes.
+  A file storage already holds unchanged is retained rather than sent again,
+  ticked or not, and does not use that Push budget; only new and changed
+  files do, so the stored project can grow across pushes.
   Unselect leaves stored copies unchanged and excludes local edits from the Push;
   Rescan preserves the selections made in the open review.
   Scripts and executables sync as ordinary files without an executable-content

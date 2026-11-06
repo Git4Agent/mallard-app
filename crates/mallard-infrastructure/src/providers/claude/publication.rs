@@ -59,9 +59,11 @@ pub fn encode_main_transcript(
                 let record = serde_json::from_str(line)
                     .map_err(|_| "Claude source transcript record is not JSON")?;
                 record_link(&mut child_links, &record, source_id)?;
-                let encoded = mapper
-                    .encode_record_with_origins(&record, saved.origin_of(&record)?)
-                    .map_err(|refusal| refusal.at(format_args!("Claude record {}", index + 1)))?;
+                let encoded =
+                    super::path_encoding::encode_record(mapper, &record, saved.origin_of(&record)?)
+                        .map_err(|refusal| {
+                            refusal.at(format_args!("Claude record {}", index + 1))
+                        })?;
                 source_ordinal += 1;
                 path_origins.push(source_id, encoded.origins);
                 let serialized = serde_json::to_string(&encoded.wire)

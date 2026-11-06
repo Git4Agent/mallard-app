@@ -117,7 +117,7 @@ for (const [provider, api] of [["codex", codex], ["claude", claude]]) {
     const text = body("MIXED_RESPONSE_PREVIOUS", 8192, source, destination);
     const history = [{ role: "user", marker: "MIXED_USER_PREVIOUS" }, { role: "assistant", marker: text }];
     const fixture = textScenario(provider, "body_check", "MIXED_USER_CURRENT", history, "MIXED_RESPONSE_CURRENT");
-    const doc = api.parseScenarioDocument(JSON.stringify(scenarioDocument(provider, [fixture], 1)));
+    const doc = api.parseScenarioDocument(JSON.stringify(scenarioDocument(provider, [fixture])));
     const request = { model: MODELS[provider], stream: true,
       messages: history.map((entry) => ({ role: entry.role, content: entry.marker })).concat({ role: "user", content: fixture.prompt_marker }),
       tools: [{ type: "function", function: { name: "Read" } }],
@@ -126,7 +126,7 @@ for (const [provider, api] of [["codex", codex], ["claude", claude]]) {
     request.messages[1].content = `${text.slice(0, -1)}?`;
     assert.equal(api.validateScenarioRequest(doc, doc.scenarios[0], request).history_match, false);
     fixture.response.content = `MIXED_RESPONSE_BIG\n${"x".repeat(32768)}`;
-    assert.throws(() => api.parseScenarioDocument(JSON.stringify(scenarioDocument(provider, [fixture], 1))));
+    assert.throws(() => api.parseScenarioDocument(JSON.stringify(scenarioDocument(provider, [fixture]))));
   });
 }
 
@@ -207,7 +207,7 @@ for (const provider of ["codex", "claude"]) {
     let mock;
     try {
       const fixture = textScenario(provider, "one", "MIXED_USER_ONE", [], "MIXED_RESPONSE_ONE");
-      mock = await startMock(resolve("."), join(root, "control"), provider, scenarioDocument(provider, [fixture], 0));
+      mock = await startMock(resolve("."), join(root, "control"), provider, scenarioDocument(provider, [fixture]));
       const request = provider === "codex" ? { model: MODELS.codex, stream: true, input: [{ role: "user", content: fixture.prompt_marker }] }
         : { model: MODELS.claude, stream: true, max_tokens: 128, messages: [{ role: "user", content: fixture.prompt_marker }], tools: [{ name: "Read", description: "Read a fixture", input_schema: { type: "object", properties: { file_path: { type: "string" } } } }] };
       const response = await fetch(`${mock.url}/${provider === "codex" ? "responses" : "messages?beta=true"}`, {
@@ -236,7 +236,7 @@ for (const provider of ["codex", "claude"]) {
     let mock;
     try {
       const fixtures = [1, 10].map((turn) => textScenario(provider, `turn_${turn}`, `MIXED_USER_TURN_${turn}`, [], `MIXED_RESPONSE_TURN_${turn}`));
-      mock = await startMock(resolve("."), join(root, "control"), provider, scenarioDocument(provider, fixtures, 0));
+      mock = await startMock(resolve("."), join(root, "control"), provider, scenarioDocument(provider, fixtures));
       // Request turn 10 first. A substring router incorrectly consumes turn 1.
       for (const fixture of [...fixtures].reverse()) {
         const request = provider === "codex" ? { model: MODELS.codex, stream: true, input: [{ role: "user", content: fixture.prompt_marker }] }

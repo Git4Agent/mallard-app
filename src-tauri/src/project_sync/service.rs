@@ -3107,6 +3107,32 @@ fn build_project_files_inventory(
     })
 }
 
+/// The project-content files of `discovery` that `stored` holds unchanged:
+/// the same content, path and mode, by the review digest the Files readout
+/// compares on. A Push retains them from the stored manifest instead of
+/// capturing and sending them again.
+fn unchanged_stored_project_files(
+    discovery: &provider_capture::Discovery,
+    stored: &BTreeMap<ResourceId, ProjectContentVersion>,
+) -> BTreeSet<ResourceId> {
+    discovery
+        .project_content_inventory()
+        .resources
+        .into_iter()
+        .filter_map(|candidate| {
+            let provider_capture::ProjectContentCandidate::File { review_digest, .. } =
+                candidate.project_content?
+            else {
+                return None;
+            };
+            let resource_id = ResourceId::parse(candidate.resource_id).ok()?;
+            let version = stored.get(&resource_id)?;
+            (version.entry_type == ProjectContentEntryType::File && version.digest == review_digest)
+                .then_some(resource_id)
+        })
+        .collect()
+}
+
 fn project_content_entry_rank(entry_type: ProjectContentEntryType) -> u8 {
     match entry_type {
         ProjectContentEntryType::Directory => 0,
@@ -11732,6 +11758,16 @@ pub(super) fn push_bundle_reviewed_with_progress(
         .filter(|resource_id| mallard_domain::is_project_content_resource_id(resource_id))
         .cloned()
         .collect::<BTreeSet<_>>();
+    // A selected file that storage already holds unchanged — the same bytes
+    // at the same path and mode, which the Files readout calls synced — is
+    // retained from the stored manifest as well, never read or sent again.
+    // Only new and changed files take this push's capture budget and its
+    // upload, so a stored project keeps growing past one push's limit.
+    for resource_id in unchanged_stored_project_files(&discovery, &remote_project_content) {
+        if selected_project_content_ids.contains(&resource_id) {
+            capture_recipe.entries.remove(&resource_id);
+        }
+    }
     let saved_project_content_entries = stored_destination_recipe
         .as_ref()
         .filter(|_| *push_scope == PushScope::Project)
@@ -23505,6 +23541,45 @@ mod tests {
             reviewed_link_state(&self.repo, &self.project.local_project_id, &self.storage_id).1
         }
 
+        /// Push with every scanned file ticked, as the saved selection ticks
+        /// them, reporting the upload as the desktop's progress emitter does.
+        fn push_all_files_with_progress(&self) -> (ProjectOperationResult, Vec<FetchProgress>) {
+            let files = self.files();
+            let review = prepare_push_review_with_repository(
+                &self.repo,
+                &self.project.local_project_id,
+                &self.storage_id,
+            )
+            .unwrap();
+            let mut approval = PushApproval::recommended(&review, &self.storage_id);
+            for entry in &files.entries {
+                if entry.local_present && entry.blocked_reason.is_none() {
+                    let resource_id = entry.descriptor.resource_id.clone();
+                    approval.recipe.entries.insert(
+                        resource_id.clone(),
+                        RecipeEntry {
+                            resource_id,
+                            apply_policy: contracts::explicit_review(),
+                            required: entry.entry_type == ProjectContentEntryType::Directory,
+                        },
+                    );
+                }
+            }
+            approval.project_content_review_token = files.review_token;
+            approval.project_files_shown = true;
+            let mut uploads = Vec::new();
+            let result = ProjectSyncService::new(&self.repo)
+                .push_reviewed_with_progress(
+                    &self.project.local_project_id,
+                    &self.storage_id,
+                    approval,
+                    &mut |progress| uploads.push(progress),
+                    &mut |_, _| {},
+                )
+                .unwrap();
+            (result, uploads)
+        }
+
         fn restore_scope_bases(&self, bases: &BTreeMap<SyncScopeKey, ScopeBase>) {
             self.repo
                 .mutate_config(|config| {
@@ -23665,6 +23740,59 @@ mod tests {
             .entries
             .iter()
             .all(|entry| entry.state == "synced"));
+    }
+
+    /// A ticked file that storage already holds unchanged is retained, not
+    /// read and sent again: with every stored file ticked, as the saved
+    /// selection ticks them, the next push's upload is the one file that
+    /// changed. Before, every push re-sent the whole selection, and a
+    /// stored project near the capture limit could never take another file.
+    #[test]
+    fn a_push_sends_only_the_project_files_that_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let world = FilesWorld::new(&temp, "retained-files-store");
+        world.write("notes.md", b"notes\n");
+        let first = world.push_files();
+        assert_eq!(first.revision, Some(2), "{}", first.message);
+        assert!(world
+            .files()
+            .entries
+            .iter()
+            .all(|entry| entry.state == "synced"));
+
+        // Every stored file ticked and unchanged: nothing to send.
+        let (unchanged, uploads) = world.push_all_files_with_progress();
+        assert_eq!(unchanged.revision, Some(2), "{}", unchanged.message);
+        assert!(uploads.is_empty(), "{uploads:?}");
+
+        world.write("draft.md", b"second draft\n");
+        let files = world.files();
+        assert_eq!(FilesWorld::state_of(&files, "draft.md"), "local_ahead");
+        assert_eq!(FilesWorld::state_of(&files, "notes.md"), "synced");
+        let (changed, uploads) = world.push_all_files_with_progress();
+        assert_eq!(changed.revision, Some(3), "{}", changed.message);
+        let sent = uploads.last().expect("the upload is reported");
+        assert_eq!(sent.total_objects, 1, "{uploads:?}");
+        assert_eq!(sent.total_bytes, b"second draft\n".len() as u64);
+        let files = world.files();
+        assert!(
+            files.entries.iter().all(|entry| entry.state == "synced"),
+            "{files:?}"
+        );
+        let (_, engine) = storage_engine(&world.repo, &world.storage_id).unwrap();
+        let stored = engine.inspect(&world.project.bundle_id).unwrap();
+        let stored = project_content_versions(&stored.manifest).unwrap();
+        let stored_file = |path: &str| {
+            stored
+                .values()
+                .find(|version| version.relative_path == path)
+                .unwrap_or_else(|| panic!("{path} is stored"))
+        };
+        assert_eq!(stored_file("notes.md").size, Some(b"notes\n".len() as u64));
+        assert_eq!(
+            stored_file("draft.md").size,
+            Some(b"second draft\n".len() as u64)
+        );
     }
 
     /// Story 2 with project files, rows F3, F4 and A7: another computer

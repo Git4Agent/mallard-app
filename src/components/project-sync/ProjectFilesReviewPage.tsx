@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, startTransition, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ParseKeys } from "i18next";
 import type { ProjectContentBlockedCode, ProjectFileSyncEligibility } from "../../types";
@@ -325,6 +325,231 @@ interface ReviewFileGroup {
   cards: ProjectFileReviewRow[];
 }
 
+/** The cards a long list draws with the page; the rest follow in a
+ *  transition behind them. */
+const FIRST_DRAW = 40;
+
+/** One card. Memoized: a review lists hundreds, and a tick on one must not
+ *  redraw the rest, so everything it shows arrives as a plain value and its
+ *  callbacks are the page's stable ones. In the blocked group it is flat
+ *  rather than under its folder, so it carries its folder as a quiet prefix;
+ *  its group already names the refusal, so it wears no Blocked chip, and it
+ *  offers Show in Finder — the one thing a person can do about it from here. */
+const ProjectFileReviewCard = memo(function ProjectFileReviewCard({
+  row,
+  mode,
+  projectRoot,
+  eligible,
+  disabled,
+  selected,
+  required,
+  removed,
+  warningAcknowledged,
+  revealed,
+  inBlockedGroup,
+  onToggle,
+  onToggleRemoval,
+  onReviewWarnings,
+  onReviewPull,
+  onRevealPath,
+}: {
+  row: ProjectFileReviewRow;
+  mode: Props["mode"];
+  projectRoot: string | null;
+  eligible: boolean;
+  disabled: boolean;
+  selected: boolean;
+  required: boolean;
+  removed: boolean;
+  warningAcknowledged: boolean;
+  revealed: boolean;
+  inBlockedGroup: boolean;
+  onToggle: (resourceId: string) => void;
+  onToggleRemoval?: (resourceId: string) => void;
+  onReviewWarnings?: (warningDigests: readonly string[], reviewed: boolean) => void;
+  onReviewPull?: () => void;
+  onRevealPath?: (path: string) => void;
+}) {
+  const { t } = useTranslation(["projects", "common"]);
+  const isDirectory = row.entryType === "directory";
+  const directory = parentPath(row.relativePath);
+  const selectable = rowIsSelectable(row, mode, eligible) && !removed;
+  const presentation = rowPresentation(row, mode);
+  const size = row.size == null ? null : formatBytes(row.size);
+  const displayMode = formatMode(row.mode);
+  const modified = row.sourceMtime == null ? null : formatFullDateTime(row.sourceMtime);
+  return (
+    <article
+      data-resource-id={row.resourceId}
+      className={`sync-history-thread-card catalog-card${removed ? " removal" : ""}${revealed ? " revealed" : ""}`}
+    >
+      <div className="sync-history-thread-topline">
+        <div className="sync-history-thread-title">
+          {selectable && !required && (
+            <label
+              className="sync-sync-row-choice"
+              title={t(selected ? "select.exclude" : mode === "pull" ? "select.apply" : "select.include", { name: row.relativePath })}
+            >
+              <input
+                type="checkbox"
+                aria-label={t(mode === "pull" ? "select.apply" : "select.include", { name: row.relativePath })}
+                checked={selected}
+                disabled={disabled}
+                onChange={() => onToggle(row.resourceId)}
+              />
+            </label>
+          )}
+          <span
+            className={`sync-thread-sync-indicator ${presentation.tone}`}
+            data-tooltip={presentation.sentence}
+            aria-label={presentation.sentence}
+            tabIndex={0}
+          >
+            <ThreadStatusIcon status={presentation.icon} size={18} />
+          </span>
+          {isDirectory && <Icon name="folder" size={14} aria-hidden="true" />}
+          <strong title={row.relativePath}>
+            {inBlockedGroup && directory !== "" && <span>{directory}/</span>}
+            {fileName(row.relativePath)}
+          </strong>
+          {/* Pull rows name their operation; push rows say nothing here —
+              the tick and the status mark already carry the state, so a
+              chip would just restate them. Blockers, required folders and
+              new files are the facts neither control speaks for. */}
+          {((row.blockedReason && !inBlockedGroup) || mode === "pull" || (mode === "push" && required)) && (
+            <span className="sync-history-branch-state history-only" title={presentation.sentence}>
+              {row.blockedReason
+                ? t("files.blocked")
+                : mode === "pull"
+                  ? pullOperationLabel(row)
+                  : t("files.requiredFolder")}
+            </span>
+          )}
+          {removed && (
+            <span className="sync-history-branch-state history-only">{t("files.removesFromStorage")}</span>
+          )}
+          {/* Why the row opened unticked: nobody has chosen for it yet. */}
+          {mode === "push" && row.undecided && (
+            <span
+              className="sync-history-branch-state current"
+              title={t("files.newTitle")}
+            >
+              {t("files.new")}
+            </span>
+          )}
+          {row.warningCode && (
+            <NoticeChip severity="warning">{projectFileWarningLabel(row.warningCode)}</NoticeChip>
+          )}
+        </div>
+        <div className="sync-history-thread-actions">
+          {mode === "push" && row.storagePresent && onToggleRemoval && (
+            <button
+              type="button"
+              className="btn btn-ghost sync-history-launch-action"
+              disabled={disabled || !eligible || required}
+              title={removed ? t("files.keepInStorage") : t("files.removeFromStorage")}
+              aria-label={removed
+                ? t("files.keepPathInStorage", { path: row.relativePath })
+                : t("files.removePathFromStorage", { path: row.relativePath })}
+              onClick={() => onToggleRemoval(row.resourceId)}
+            >
+              <Icon name={removed ? "refresh" : "trash"} size={14} />
+            </button>
+          )}
+          {inBlockedGroup && projectRoot && onRevealPath && (
+            <button
+              type="button"
+              className="btn btn-ghost sync-history-launch-action"
+              title={t("files.reveal", { path: row.relativePath })}
+              aria-label={t("files.reveal", { path: row.relativePath })}
+              onClick={() => onRevealPath(`${projectRoot}/${row.relativePath}`)}
+            >
+              <Icon name="folder" size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="sync-history-session-details">
+        <div className="sync-history-session-summary">
+          <div className="sync-history-thread-meta" aria-label={t("files.details", { path: row.relativePath })}>
+            <span
+              className="sync-history-thread-metric"
+              data-tooltip={t("files.kind", { kind: isDirectory ? t("files.folder") : fileKindLabel(row.relativePath) })}
+              tabIndex={0}
+            >
+              <SessionRowIcon name={isDirectory ? "folder" : "file"} />
+              <b>{isDirectory ? t("files.folder") : fileKindLabel(row.relativePath)}</b>
+            </span>
+            {size != null
+              ? (
+                <span
+                  className={`sync-history-thread-metric${row.blockedCode === "too_large" ? " over-limit" : ""}`}
+                  data-tooltip={row.localPresent ? t("files.onDisk", { size }) : t("files.inStorageUnnamed", { size })}
+                  tabIndex={0}
+                >
+                  <SessionRowIcon name="size" /><b>{size}</b>
+                </span>
+              )
+              : <span className="sync-history-thread-metric" aria-hidden="true" />}
+          </div>
+        <span className="sync-history-actions-divider" aria-hidden="true" />
+        <div className="sync-history-row-clickables">
+          <ProjectFileDetailsMenu
+            relativePath={row.relativePath}
+            projectRoot={projectRoot}
+            entryTypeLabel={isDirectory
+              ? t("fileDetails.directory")
+              : row.entryType === "blocked" ? t("fileDetails.blockedEntry") : t("fileDetails.regularFile")}
+            mode={displayMode}
+            modified={modified}
+            preservedCopyPath={row.preservedCopyPath}
+            blockedReason={row.blockedReason}
+          />
+        </div>
+          {row.sourceMtime != null && modified != null && (
+            <span
+              className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
+              data-tooltip={row.localPresent
+                ? t("files.modified", { when: modified })
+                : t("files.updatedInStorage", { when: modified })}
+              tabIndex={0}
+            >
+              <time dateTime={new Date(row.sourceMtime * 1_000).toISOString()}>{modified}</time>
+            </span>
+          )}
+        </div>
+      </div>
+      {row.warningDigest && row.warningCode && onReviewWarnings && (
+        <Acknowledgement
+          title={warningLead(row.warningCode)}
+          checked={warningAcknowledged}
+          disabled={disabled || !selected}
+          ariaLabel={t("files.reviewedLabel", { lead: warningLead(row.warningCode), path: row.relativePath })}
+          verbs={[t("files.markReviewed"), t("files.reviewed")]}
+          onChange={(checked) => onReviewWarnings([row.warningDigest!], checked)}
+        >
+          {`— ${row.relativePath}`}
+        </Acknowledgement>
+      )}
+      {mode === "push" && STORAGE_BLOCKING_STATES.has(row.state) && onReviewPull && (
+        /* Warning, not error: nothing has failed — the push has not run —
+           the row simply cannot be included until a Pull settles the
+           storage side. `inline` rather than `standing` because this marker
+           repeats per row, and a landmark each would hand a screen-reader
+           user dozens of regions to step through. */
+        <Notice
+          severity="warning"
+          timing="inline"
+          className="sync-project-file-conflict notice-strip"
+          action={<button type="button" className="btn btn-ghost" onClick={onReviewPull}>{t("files.openPull")}</button>}
+        >
+          {t("files.pullRequired")}
+        </Notice>
+      )}
+    </article>
+  );
+});
+
 export default function ProjectFilesReviewPage({
   mode,
   projectRoot = null,
@@ -351,6 +576,9 @@ export default function ProjectFilesReviewPage({
 }: Props) {
   const { t } = useTranslation(["projects", "common"]);
   const [search, setSearch] = useState("");
+  /* The field answers every keystroke; the list follows a beat behind, in a
+     render that yields to the next key. */
+  const deferredSearch = useDeferredValue(search);
   const pageRef = useRef<HTMLElement>(null);
   const [revealed, setRevealed] = useState<ProjectFileReveal | null>(null);
   const eligible = eligibility.state === "eligible";
@@ -363,9 +591,9 @@ export default function ProjectFilesReviewPage({
   const [blockedOpen, setBlockedOpen] = useState(false);
   const [blockedOpenInSearch, setBlockedOpenInSearch] = useState(true);
   const [blockedUnfolded, setBlockedUnfolded] = useState<ReadonlySet<ProjectContentBlockedCode>>(new Set());
-  const searching = search.trim().length > 0;
+  const searching = deferredSearch.trim().length > 0;
   const blockedExpanded = searching ? blockedOpenInSearch : blockedOpen;
-  const blockedSections = blocked ? blockedReviewSections(blocked.rows, search, blocked.fileLimitBytes) : [];
+  const blockedSections = blocked ? blockedReviewSections(blocked.rows, deferredSearch, blocked.fileLimitBytes) : [];
   const changeSearch = (query: string) => {
     setSearch(query);
     setBlockedOpenInSearch(true);
@@ -376,15 +604,31 @@ export default function ProjectFilesReviewPage({
   const { matchingCards, hiddenSelected } = useMemo(
     () => searchProjectFileReviewCards(
       cardRows,
-      search,
+      deferredSearch,
       (row) => selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId),
     ),
-    [cardRows, search, selectedIds, removalIds],
+    [cardRows, deferredSearch, selectedIds, removalIds],
   );
   const shownCards = useMemo(
     () => matchingCards.slice(0, PROJECT_FILE_CARD_RENDER_LIMIT),
     [matchingCards],
   );
+  /* A long list draws in two steps: the first cards with the page, the rest
+     in a transition behind them — rendered in slices that yield to the tick,
+     the tab and the search, with a line under the drawn cards saying the
+     rest is on its way. The limit only grows, so a tick never redraws the
+     list, and a list that shrinks is drawn whole. */
+  const [drawLimit, setDrawLimit] = useState(FIRST_DRAW);
+  const drawnCards = useMemo(
+    () => (drawLimit < shownCards.length ? shownCards.slice(0, drawLimit) : shownCards),
+    [drawLimit, shownCards],
+  );
+  const drawingRest = drawnCards.length < shownCards.length;
+  useEffect(() => {
+    if (!drawingRest) return;
+    startTransition(() => setDrawLimit(shownCards.length));
+  }, [drawingRest, shownCards.length]);
+  const listUpdating = drawingRest || search !== deferredSearch;
   // The step's own acknowledgement: what it covers, and how much of that is
   // already ticked.
   const flaggedSelected = useMemo(
@@ -399,7 +643,7 @@ export default function ProjectFilesReviewPage({
 
   const groups = useMemo<ReviewFileGroup[]>(() => {
     const byDirectory = new Map<string, ProjectFileReviewRow[]>();
-    for (const row of shownCards) {
+    for (const row of drawnCards) {
       const directory = parentPath(row.relativePath);
       if (!byDirectory.has(directory)) byDirectory.set(directory, []);
       byDirectory.get(directory)!.push(row);
@@ -407,7 +651,7 @@ export default function ProjectFilesReviewPage({
     return [...byDirectory.keys()]
       .sort((a, b) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)))
       .map((directory) => ({ directory, cards: byDirectory.get(directory)! }));
-  }, [shownCards]);
+  }, [drawnCards]);
 
   /* The blocker pill names a card. One the search hides, or one past the
      render limit, is brought into the list by searching for its own path. */
@@ -435,7 +679,7 @@ export default function ProjectFilesReviewPage({
     const control = card.querySelector<HTMLInputElement>(".notice-ack input")
       ?? card.querySelector<HTMLInputElement>(".sync-sync-row-choice input");
     control?.focus({ preventScroll: true });
-  }, [revealed, shownCards]);
+  }, [revealed, drawnCards]);
 
   // The card wears the pill's wash briefly, so the eye lands with the focus.
   useEffect(() => {
@@ -447,14 +691,27 @@ export default function ProjectFilesReviewPage({
   /* A folder tile's control covers its whole subtree — files and the
      directory resources riding along — the way the review header's controls
      cover the step. The root tile is the one exception: its scope is the
-     files directly at the root, because "" as a subtree would swallow the
+     entries directly at the root, because "" as a subtree would swallow the
      whole project. Counts speak for the selectable files; directories
-     select implicitly with them. */
-  const subtreeRows = (directory: string) => (directory === ""
-    ? rows.filter((row) => row.relativePath.lastIndexOf("/") < 0)
-    : rows.filter((row) => (
-      row.relativePath === directory || row.relativePath.startsWith(`${directory}/`)
-    )));
+     select implicitly with them. Indexed once per row set: every tile asks
+     for its subtree on every render, and a walk of all rows per tile was
+     most of a long list's render. */
+  const subtreeIndex = useMemo(() => {
+    const byDirectory = new Map<string, ProjectFileReviewRow[]>();
+    const add = (directory: string, row: ProjectFileReviewRow) => {
+      const members = byDirectory.get(directory);
+      if (members) members.push(row);
+      else byDirectory.set(directory, [row]);
+    };
+    for (const row of rows) {
+      if (row.entryType === "directory") add(row.relativePath, row);
+      const parent = parentPath(row.relativePath);
+      if (parent === "") add("", row);
+      for (let ancestor = parent; ancestor !== ""; ancestor = parentPath(ancestor)) add(ancestor, row);
+    }
+    return byDirectory;
+  }, [rows]);
+  const subtreeRows = (directory: string) => subtreeIndex.get(directory) ?? [];
   const subtreeSelection = (directory: string) => {
     const files = subtreeRows(directory).filter((row) => (
       row.entryType !== "directory" && rowIsSelectable(row, mode, eligible) && !removalIds.has(row.resourceId)
@@ -482,193 +739,47 @@ export default function ProjectFilesReviewPage({
     filesFacts(subtreeRows(directory).filter((row) => row.entryType !== "directory"))
   );
 
-  /* A card in the blocked group is flat rather than under its folder, so it
-     carries its folder as a quiet prefix; its group already names the
-     refusal, so it wears no Blocked chip, and it offers Show in Finder —
-     the one thing a person can do about it from here. */
-  const renderCard = (row: ProjectFileReviewRow, inBlockedGroup = false) => {
-    const isDirectory = row.entryType === "directory";
-    const directory = parentPath(row.relativePath);
-    const selected = selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId);
-    const required = requiredIds.has(row.resourceId);
-    const removed = removalIds.has(row.resourceId);
-    const selectable = rowIsSelectable(row, mode, eligible) && !removed;
-    const presentation = rowPresentation(row, mode);
-    const warningAcknowledged = !!row.warningDigest && acknowledgedWarningDigests.has(row.warningDigest);
-    const size = row.size == null ? null : formatBytes(row.size);
-    const displayMode = formatMode(row.mode);
-    return (
-      <article
-        key={row.resourceId}
-        data-resource-id={row.resourceId}
-        className={`sync-history-thread-card catalog-card${removed ? " removal" : ""}${revealed?.resourceId === row.resourceId ? " revealed" : ""}`}
-      >
-        <div className="sync-history-thread-topline">
-          <div className="sync-history-thread-title">
-            {selectable && !required && (
-              <label
-                className="sync-sync-row-choice"
-                title={t(selected ? "select.exclude" : mode === "pull" ? "select.apply" : "select.include", { name: row.relativePath })}
-              >
-                <input
-                  type="checkbox"
-                  aria-label={t(mode === "pull" ? "select.apply" : "select.include", { name: row.relativePath })}
-                  checked={selected}
-                  disabled={disabled}
-                  onChange={() => onToggle(row.resourceId)}
-                />
-              </label>
-            )}
-            <span
-              className={`sync-thread-sync-indicator ${presentation.tone}`}
-              data-tooltip={presentation.sentence}
-              aria-label={presentation.sentence}
-              tabIndex={0}
-            >
-              <ThreadStatusIcon status={presentation.icon} size={18} />
-            </span>
-            {isDirectory && <Icon name="folder" size={14} aria-hidden="true" />}
-            <strong title={row.relativePath}>
-              {inBlockedGroup && directory !== "" && <span>{directory}/</span>}
-              {fileName(row.relativePath)}
-            </strong>
-            {/* Pull rows name their operation; push rows say nothing here —
-                the tick and the status mark already carry the state, so a
-                chip would just restate them. Blockers, required folders and
-                new files are the facts neither control speaks for. */}
-            {((row.blockedReason && !inBlockedGroup) || mode === "pull" || (mode === "push" && required)) && (
-              <span className="sync-history-branch-state history-only" title={presentation.sentence}>
-                {row.blockedReason
-                  ? t("files.blocked")
-                  : mode === "pull"
-                    ? pullOperationLabel(row)
-                    : t("files.requiredFolder")}
-              </span>
-            )}
-            {removed && (
-              <span className="sync-history-branch-state history-only">{t("files.removesFromStorage")}</span>
-            )}
-            {/* Why the row opened unticked: nobody has chosen for it yet. */}
-            {mode === "push" && row.undecided && (
-              <span
-                className="sync-history-branch-state current"
-                title={t("files.newTitle")}
-              >
-                {t("files.new")}
-              </span>
-            )}
-            {row.warningCode && (
-              <NoticeChip severity="warning">{projectFileWarningLabel(row.warningCode)}</NoticeChip>
-            )}
-          </div>
-          <div className="sync-history-thread-actions">
-            {mode === "push" && row.storagePresent && onToggleRemoval && (
-              <button
-                type="button"
-                className="btn btn-ghost sync-history-launch-action"
-                disabled={disabled || !eligible || required}
-                title={removed ? t("files.keepInStorage") : t("files.removeFromStorage")}
-                aria-label={removed
-                  ? t("files.keepPathInStorage", { path: row.relativePath })
-                  : t("files.removePathFromStorage", { path: row.relativePath })}
-                onClick={() => onToggleRemoval(row.resourceId)}
-              >
-                <Icon name={removed ? "refresh" : "trash"} size={14} />
-              </button>
-            )}
-            {inBlockedGroup && projectRoot && onRevealPath && (
-              <button
-                type="button"
-                className="btn btn-ghost sync-history-launch-action"
-                title={t("files.reveal", { path: row.relativePath })}
-                aria-label={t("files.reveal", { path: row.relativePath })}
-                onClick={() => onRevealPath(`${projectRoot}/${row.relativePath}`)}
-              >
-                <Icon name="folder" size={14} />
-              </button>
-            )}
-          </div>
-        </div>
-        <div className="sync-history-session-details">
-          <div className="sync-history-session-summary">
-            <div className="sync-history-thread-meta" aria-label={t("files.details", { path: row.relativePath })}>
-              <span
-                className="sync-history-thread-metric"
-                data-tooltip={t("files.kind", { kind: isDirectory ? t("files.folder") : fileKindLabel(row.relativePath) })}
-                tabIndex={0}
-              >
-                <SessionRowIcon name={isDirectory ? "folder" : "file"} />
-                <b>{isDirectory ? t("files.folder") : fileKindLabel(row.relativePath)}</b>
-              </span>
-              {size != null
-                ? (
-                  <span
-                    className={`sync-history-thread-metric${row.blockedCode === "too_large" ? " over-limit" : ""}`}
-                    data-tooltip={row.localPresent ? t("files.onDisk", { size }) : t("files.inStorageUnnamed", { size })}
-                    tabIndex={0}
-                  >
-                    <SessionRowIcon name="size" /><b>{size}</b>
-                  </span>
-                )
-                : <span className="sync-history-thread-metric" aria-hidden="true" />}
-            </div>
-          <span className="sync-history-actions-divider" aria-hidden="true" />
-          <div className="sync-history-row-clickables">
-            <ProjectFileDetailsMenu
-              relativePath={row.relativePath}
-              projectRoot={projectRoot}
-              entryTypeLabel={isDirectory
-                ? t("fileDetails.directory")
-                : row.entryType === "blocked" ? t("fileDetails.blockedEntry") : t("fileDetails.regularFile")}
-              mode={displayMode}
-              modified={row.sourceMtime == null ? null : formatFullDateTime(row.sourceMtime)}
-              preservedCopyPath={row.preservedCopyPath}
-              blockedReason={row.blockedReason}
-            />
-          </div>
-            {row.sourceMtime != null && (
-              <span
-                className="sync-history-thread-metric sync-history-thread-time sync-history-thread-time-end"
-                data-tooltip={row.localPresent
-                  ? t("files.modified", { when: formatFullDateTime(row.sourceMtime) })
-                  : t("files.updatedInStorage", { when: formatFullDateTime(row.sourceMtime) })}
-                tabIndex={0}
-              >
-                <time dateTime={new Date(row.sourceMtime * 1_000).toISOString()}>{formatFullDateTime(row.sourceMtime)}</time>
-              </span>
-            )}
-          </div>
-        </div>
-        {row.warningDigest && row.warningCode && onReviewWarnings && (
-          <Acknowledgement
-            title={warningLead(row.warningCode)}
-            checked={warningAcknowledged}
-            disabled={disabled || !selected}
-            ariaLabel={t("files.reviewedLabel", { lead: warningLead(row.warningCode), path: row.relativePath })}
-            verbs={[t("files.markReviewed"), t("files.reviewed")]}
-            onChange={(checked) => onReviewWarnings([row.warningDigest!], checked)}
-          >
-            {`— ${row.relativePath}`}
-          </Acknowledgement>
-        )}
-        {mode === "push" && STORAGE_BLOCKING_STATES.has(row.state) && onReviewPull && (
-          /* Warning, not error: nothing has failed — the push has not run —
-             the row simply cannot be included until a Pull settles the
-             storage side. `inline` rather than `standing` because this marker
-             repeats per row, and a landmark each would hand a screen-reader
-             user dozens of regions to step through. */
-          <Notice
-            severity="warning"
-            timing="inline"
-            className="sync-project-file-conflict notice-strip"
-            action={<button type="button" className="btn btn-ghost" onClick={onReviewPull}>{t("files.openPull")}</button>}
-          >
-            {t("files.pullRequired")}
-          </Notice>
-        )}
-      </article>
-    );
-  };
+  /* The cards are memoized on their values, and the callbacks the parents
+     hand this page are new every render; each card gets one that stays and
+     calls the latest. The ref is updated after commit, before any click can
+     land. An absent callback stays absent: the card draws its control only
+     when there is one. */
+  const latest = useRef({ onToggle, onToggleRemoval, onReviewWarnings, onReviewPull, onRevealPath });
+  useLayoutEffect(() => {
+    latest.current = { onToggle, onToggleRemoval, onReviewWarnings, onReviewPull, onRevealPath };
+  });
+  const canRemove = onToggleRemoval !== undefined;
+  const canReviewWarnings = onReviewWarnings !== undefined;
+  const canReviewPull = onReviewPull !== undefined;
+  const canReveal = onRevealPath !== undefined;
+  const toggleCard = useCallback((resourceId: string) => latest.current.onToggle(resourceId), []);
+  const cardActions = useMemo(() => ({
+    onToggleRemoval: canRemove ? (resourceId: string) => latest.current.onToggleRemoval?.(resourceId) : undefined,
+    onReviewWarnings: canReviewWarnings
+      ? (warningDigests: readonly string[], reviewed: boolean) => latest.current.onReviewWarnings?.(warningDigests, reviewed)
+      : undefined,
+    onReviewPull: canReviewPull ? () => latest.current.onReviewPull?.() : undefined,
+    onRevealPath: canReveal ? (path: string) => latest.current.onRevealPath?.(path) : undefined,
+  }), [canRemove, canReviewWarnings, canReviewPull, canReveal]);
+
+  const renderCard = (row: ProjectFileReviewRow, inBlockedGroup = false) => (
+    <ProjectFileReviewCard
+      key={row.resourceId}
+      row={row}
+      mode={mode}
+      projectRoot={projectRoot}
+      eligible={eligible}
+      disabled={disabled}
+      selected={selectedIds.has(row.resourceId) && !removalIds.has(row.resourceId)}
+      required={requiredIds.has(row.resourceId)}
+      removed={removalIds.has(row.resourceId)}
+      warningAcknowledged={!!row.warningDigest && acknowledgedWarningDigests.has(row.warningDigest)}
+      revealed={revealed?.resourceId === row.resourceId}
+      inBlockedGroup={inBlockedGroup}
+      onToggle={toggleCard}
+      {...cardActions}
+    />
+  );
 
   /* The folder's own row control leads its strip: the same checkbox its rows
      wear — ticked, unticked, or a dash while the folder is partly selected —
@@ -845,7 +956,14 @@ export default function ProjectFilesReviewPage({
             </Acknowledgement>
           )}
           {groups.map(renderTile)}
-          {matchingCards.length > shownCards.length && (
+          {/* The rest of the list is on its way: the first cards are up and
+              answer, and this line stands where the next ones will land. */}
+          {listUpdating && (
+            <div className="sync-project-file-limit sync-project-files-updating" role="status">
+              <span className="status-loader" /> {t("files.updatingList")}…
+            </div>
+          )}
+          {!listUpdating && matchingCards.length > shownCards.length && (
             <div className="sync-project-file-limit">{t("files.limitShown", { limit: PROJECT_FILE_CARD_RENDER_LIMIT })}</div>
           )}
         </>

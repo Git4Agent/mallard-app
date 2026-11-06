@@ -386,7 +386,7 @@ initialize its nested sandbox; the test still keeps Codex itself at
 detects the known nested-Seatbelt failure with a bounded, no-provider preflight
 before starting Cargo and prints a fixed ordinary-Terminal instruction.
 Implementation, protocol POCs, and the complete ignored live gate are verified.
-The current native-format gate requires Codex CLI `0.164.0-alpha.11.1`. The
+The current native-format gate requires Codex CLI `0.167.0`. The
 previous `0.162.1` keyless gate passed on October 9, 2026 with
 `1 passed, 0 failed, 19 filtered` in 74.82 seconds. Every model-shaped response came from the one local
 aimock child; the run used no provider account, credential, remote model, GPU,
@@ -505,6 +505,10 @@ restored nested cwd, byte-identical media, and Session Detail's
 from the actual stored transcript and verifies the same directory and link.
 A native resume on B checks the complete history and relocated Bash command.
 All portable objects are scanned for local paths and credential markers.
+Claude 2.1.292 stores rendered environment reminders beside their structured
+attachments. The adapter relocates their exact working-directory lines from
+those structured fields and verifies lossless source restoration; the media
+flow checks that no source directory remains after Pull.
 
 Run only this phase with:
 
@@ -514,8 +518,8 @@ MALLARD_RUN_LIVE_CLAUDE_AIMOCK_E2E=1 npm run test:live-claude-aimock-e2e -- --sc
 
 The media phase has its own strict mock and allows only Bash with one fixed,
 shell-quoted `cd` command and a fixed success marker. It uses two CLI turns,
-three model requests, and two hello probes. Together with the original sync
-phase, the default target runs 14 CLI turns, 16 model requests, and 14 probes.
+three model requests, and no hello probes. Together with the original sync
+phase, the default target runs 14 CLI turns, 16 model requests, and no probes.
 The video fixture has been decoded with FFmpeg; the automated test proves
 transport and link rendering, not browser playback. No FFmpeg installation
 is needed to run the tests.
@@ -533,7 +537,7 @@ It simulates the file rewrite; it does not launch or validate Claude Desktop.
 The import after Pull is a required assertion, including the installed-cutoff
 boundary. No padding or metadata reset hides that failure.
 
-The current native-format gate requires exactly Claude Code `2.1.266`,
+The current native-format gate requires exactly Claude Code `2.1.292`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
@@ -562,9 +566,9 @@ revision 1, and verifies one incremental cursor append.
 The original sync phase accounting is exact: 12 Claude model-turn processes
 make 13 authenticated
 `POST /v1/messages?beta=true` requests, because the first content tool round
-uses two Messages calls. Claude Code 2.1.266 also makes one credential-free
-`HEAD /api/hello` compatibility probe per process. The raw boundary therefore
-requires exactly 25 requests: 13 model requests plus 12 probes. The Messages
+uses two Messages calls. Claude Code 2.1.292 makes no
+`HEAD /api/hello` probes. The raw boundary therefore requires exactly 13
+requests, all model requests, and rejects any extra probe. The Messages
 requests are separately reconciled with all 13 semantic aimock scenarios. Any
 duplicate scenario, other route or method, extra request, upgrade, wrong key,
 credential-bearing probe, history mismatch, or exposed tool makes the audit

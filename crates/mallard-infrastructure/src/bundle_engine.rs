@@ -1411,7 +1411,17 @@ impl<S: ObjectStore> BundleEngine<S> {
                 pending.push((key, bytes));
             }
             // One operation over every pending object: the store owns its
-            // transfer windows and reports each object as it is settled.
+            // transfer windows and reports each object as it is settled. The
+            // upload is announced before the first byte, so its clock starts
+            // with the transfer and not with the first object to settle.
+            if total_objects > 0 {
+                on_progress(FetchProgress {
+                    index: 0,
+                    total_objects,
+                    fetched_bytes: 0,
+                    total_bytes,
+                });
+            }
             let mut uploaded_objects = 0;
             let mut uploaded_bytes = 0_u64;
             self.store.put_many_with_progress(pending, &mut |size| {
@@ -5190,7 +5200,12 @@ mod tests {
         .unwrap();
         let first_token = engine.read_head(&id).unwrap().unwrap().1;
         let full_bytes = (b"tiny".len() + b"a considerably longer payload".len()) as u64;
-        assert_eq!(events.len(), 2);
+        // The upload is announced before its first object settles.
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].index, 0);
+        assert_eq!(events[0].fetched_bytes, 0);
+        assert_eq!(events[0].total_objects, 2);
+        assert_eq!(events[0].total_bytes, full_bytes);
         assert_eq!(events.last().unwrap().index, 2);
         assert_eq!(events.last().unwrap().total_objects, 2);
         assert_eq!(events.last().unwrap().fetched_bytes, full_bytes);
@@ -5226,10 +5241,11 @@ mod tests {
         )
         .unwrap();
         let changed_bytes = b"a different considerably longer payload".len() as u64;
-        assert_eq!(events.len(), 1, "unchanged payloads never enter the totals");
+        assert_eq!(events.len(), 2, "unchanged payloads never enter the totals");
         assert_eq!(events[0].total_objects, 1);
         assert_eq!(events[0].total_bytes, changed_bytes);
-        assert_eq!(events[0].fetched_bytes, changed_bytes);
+        assert_eq!(events[0].fetched_bytes, 0);
+        assert_eq!(events[1].fetched_bytes, changed_bytes);
     }
 
     #[test]
