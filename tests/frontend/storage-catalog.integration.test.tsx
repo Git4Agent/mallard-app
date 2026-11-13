@@ -1566,6 +1566,103 @@ test("a pet's chooser names every misfit in one sentence, and the backend checks
   assert.equal(cloudRoleWord({ role: "owner", visibility: "public" }), "Public · Owner");
 });
 
+test("pets are switched off: the API drops both formats from every read that lists a coordinate", async () => {
+  const { isSwitchedOff } = await import("../../src/components/storage-catalog/switchedOff");
+  const { cloudRepositoryMisfit } = await import("../../src/components/storage-catalog/CloudRepositoryChoice");
+  assert.deepEqual(
+    CAPABILITIES.filter(isSwitchedOff).map((capability) => capability.label),
+    ["Pets v1", "Pets v2"],
+  );
+
+  const petRepository = cloudRepository({ owner_login: "maya", name: "Mochi" });
+  const skillRepository = cloudRepository({
+    owner_login: "maya", name: "pdf-tools", resource_kind: "agent_skill", format: "agentskills.io.skill", format_version: 1, kind_label: "Skills",
+  });
+  const listingRow = (repository: CatalogCloudRepository) => ({
+    repository_id: repository.repository_id,
+    address: repository.address,
+    repository_class: "catalog",
+    catalog: {
+      provider: repository.provider,
+      resource_kind: repository.resource_kind,
+      format: repository.format,
+      format_version: repository.format_version,
+    },
+  });
+  const listing = { rows: [listingRow(petRepository), listingRow(skillRepository)], next_cursor: "next" };
+  const storageRepository = (capability: CatalogCapabilityDescriptor) => ({ ...scopeDto(capability, CONF2).scope, repository_id: capability.label });
+  // What the backend serves while it still registers both pet formats.
+  const served: Record<string, unknown> = {
+    list_catalog_capabilities: CAPABILITIES,
+    list_catalog_scopes: [
+      scopeDto(CODEX_SKILLS, CONF2),
+      scopeDto(CODEX_PETS_V1, CONF2, "catscope-2"),
+      scopeDto(CODEX_PETS_V2, CONF2, "catscope-3"),
+    ],
+    inspect_catalog_resource_profile: {
+      profile: CONF2,
+      holdings: [CODEX_SKILLS, CODEX_PETS_V1, CODEX_PETS_V2].map((capability) => ({ capability, count: 1, roots: [] })),
+    },
+    list_catalog_cloud_shared: [petRepository, skillRepository],
+    list_catalog_cloud_starred: listing,
+    list_catalog_cloud_public: listing,
+    list_catalog_storage_repositories: [CODEX_SKILLS, CODEX_PETS_V1, CODEX_PETS_V2].map(storageRepository),
+    resolve_catalog_cloud_repository: { kind: "found", repository: petRepository },
+    join_catalog_cloud_repository: { kind: "found", repository: skillRepository },
+  };
+  const host = globalThis as { isTauri?: boolean; window?: unknown };
+  const previous = { isTauri: host.isTauri, window: host.window };
+  host.isTauri = true;
+  host.window = { __TAURI_INTERNALS__: { invoke: async (command: string) => served[command] } };
+  try {
+    const capabilities = await storageCatalogApi.listCapabilities();
+    assert.deepEqual(
+      capabilities.map((capability) => `${capability.provider_label} ${capability.label}`),
+      ["Codex Skills", "Codex Plugins", "Claude Skills", "Claude Plugins"],
+    );
+    // So no door, Add choice or Kind card names a pet.
+    assert.deepEqual(catalogDoors(capabilities).map((door) => door.label), ["Skills", "Plugins"]);
+    assert.deepEqual(
+      catalogKindCards(capabilities, CONF2, [], null).map((card) => card.capability.label),
+      ["Skills", "Plugins"],
+    );
+    // A pet row added earlier is not listed; it is still on this computer.
+    assert.deepEqual((await storageCatalogApi.listScopes()).map((scope) => scope.label), ["Skills"]);
+    assert.deepEqual(
+      (await storageCatalogApi.inspectProfile(CONF2.profile_id)).holdings.map((holding) => holding.capability.label),
+      ["Skills"],
+    );
+    assert.deepEqual((await storageCatalogApi.listCloudShared("cloud")).map((row) => row.address), ["maya/pdf-tools"]);
+    for (const page of [
+      await storageCatalogApi.listCloudStarred(null, "cloud", null),
+      await storageCatalogApi.listCloudPublic(null, "cloud", "newest", null),
+    ]) {
+      assert.deepEqual(page.rows.map((row) => row.address), ["maya/pdf-tools"]);
+      assert.equal(page.next_cursor, "next", "the next page is still asked for");
+    }
+    assert.deepEqual(
+      (await storageCatalogApi.listStorageRepositories("local")).map((repository) => repository.repository_id),
+      ["Skills"],
+    );
+    // A pet's address still resolves, as a repository this app can't open.
+    const typed = await storageCatalogApi.resolveCloudRepository("cloud", "maya/Mochi");
+    assert.ok(typed.kind === "found");
+    assert.equal(typed.repository.available, false);
+    assert.equal(
+      cloudRepositoryMisfit(typed.repository, { kind: "door" }, capabilities),
+      "maya/Mochi is a Pets repository this app can't open.",
+    );
+    assert.deepEqual(
+      await storageCatalogApi.joinCloudRepository("cloud", "code"),
+      { kind: "found", repository: skillRepository },
+      "every other kind passes through untouched",
+    );
+  } finally {
+    host.isTauri = previous.isTauri;
+    host.window = previous.window;
+  }
+});
+
 test("a closed chooser drops its late answer, and a lookup never asks twice", async () => {
   const { createRequire } = await import("node:module");
   const { transformSync } = createRequire(`${process.cwd()}/package.json`)("esbuild") as typeof import("esbuild");

@@ -1,6 +1,7 @@
 import type { ManagedCloudStatus, ManagedCloudDiscardedDraft, ManagedCloudListingPage, ManagedCloudPublicSort } from "../managed-cloud/types";
 import type { CatalogSyncProgress, CatalogCloudPlace, CatalogCloudRepository, CatalogCloudResolution } from "./types";
 import { Channel, invoke } from "../../ipc";
+import { isSwitchedOff } from "./switchedOff";
 import type {
   CatalogActionResult,
   CatalogResourceRemovalPlan,
@@ -29,6 +30,24 @@ function progressChannel(receive: (progress: CatalogSyncProgress) => void) {
   return channel;
 }
 
+/* Every read that lists coordinates passes through one of these, so a kind
+   `switchedOff.ts` names never reaches a page. */
+const shown = <Row extends Pick<CatalogCoordinate, "resource_kind">>(rows: Row[]): Row[] =>
+  rows.filter((row) => !isSwitchedOff(row));
+
+const shownListing = (page: ManagedCloudListingPage): ManagedCloudListingPage => ({
+  ...page,
+  rows: page.rows.filter((row) => !row.catalog || !isSwitchedOff(row.catalog)),
+});
+
+/** A typed address or code that names a switched-off kind is found, and is
+ *  a repository this app can't open: the chooser says so. */
+const shownResolution = (resolution: CatalogCloudResolution): CatalogCloudResolution => (
+  resolution.kind === "found" && isSwitchedOff(resolution.repository)
+    ? { kind: "found", repository: { ...resolution.repository, available: false } }
+    : resolution
+);
+
 export const storageCatalogApi = {
   prepareRemoval: (scopeId: string, resourceId: string) =>
     invoke<CatalogResourceRemovalPlan>("prepare_catalog_resource_removal", { scopeId, resourceId }),
@@ -40,23 +59,23 @@ export const storageCatalogApi = {
   /** Someone else's item repositories this account belongs to that no row
    *  has saved, of every coordinate this build opens. */
   listCloudShared: (storageId: string) =>
-    invoke<CatalogCloudRepository[]>("list_catalog_cloud_shared", { storageId }),
+    invoke<CatalogCloudRepository[]>("list_catalog_cloud_shared", { storageId }).then(shown),
   /** Starred: the Catalog items the account starred on the website, of
    *  the row's coordinate, or of every coordinate this build opens when
    *  no row is named. One page. */
   listCloudStarred: (scopeId: string | null, storageId: string, cursor: string | null) =>
-    invoke<ManagedCloudListingPage>("list_catalog_cloud_starred", { scopeId, storageId, cursor }),
+    invoke<ManagedCloudListingPage>("list_catalog_cloud_starred", { scopeId, storageId, cursor }).then(shownListing),
   /** Public: the released items, newest first or by stars, one page. */
   listCloudPublic: (scopeId: string | null, storageId: string, sort: ManagedCloudPublicSort, cursor: string | null) =>
-    invoke<ManagedCloudListingPage>("list_catalog_cloud_public", { scopeId, storageId, sort, cursor }),
+    invoke<ManagedCloudListingPage>("list_catalog_cloud_public", { scopeId, storageId, sort, cursor }).then(shownListing),
   resolveCloudRepository: (storageId: string, address: string) =>
-    invoke<CatalogCloudResolution>("resolve_catalog_cloud_repository", { storageId, address }),
+    invoke<CatalogCloudResolution>("resolve_catalog_cloud_repository", { storageId, address }).then(shownResolution),
   /** The row on a storage that saved a repository, and its item; null when
    *  no row has. Reads this computer only. */
   findCloudRepository: (storageId: string, repositoryId: string) =>
     invoke<CatalogCloudPlace | null>("find_catalog_cloud_repository", { storageId, repositoryId }),
   joinCloudRepository: (storageId: string, code: string) =>
-    invoke<CatalogCloudResolution>("join_catalog_cloud_repository", { storageId, code }),
+    invoke<CatalogCloudResolution>("join_catalog_cloud_repository", { storageId, code }).then(shownResolution),
   /** Saves an item's repository; an item that has one keeps it. Nothing is
    *  pulled. */
   connectCloudRepository: (scopeId: string, storageId: string, resourceId: string, repositoryId: string, expectedLinkRevision: number) =>
@@ -69,10 +88,11 @@ export const storageCatalogApi = {
     invoke<ManagedCloudStatus>("get_catalog_cloud_status", { scopeId, storageId, resourceId, repositoryId }),
   discardCloudDraft: (scopeId: string, storageId: string, resourceId: string, repositoryId: string, expectedRevision: number) =>
     invoke<ManagedCloudDiscardedDraft>("discard_catalog_cloud_draft", { scopeId, storageId, resourceId, repositoryId, expectedRevision }),
-  /** Every capability this build registers, in the backend's display order.
-   * The frontend joins scopes and repositories to these by coordinate. */
+  /** Every capability this build registers and the app shows, in the
+   * backend's display order. The frontend joins scopes and repositories to
+   * these by coordinate. */
   listCapabilities: () =>
-    invoke<CatalogCapabilityDescriptor[]>("list_catalog_capabilities"),
+    invoke<CatalogCapabilityDescriptor[]>("list_catalog_capabilities").then(shown),
 
   listProfiles: () => invoke<CatalogProfile[]>("list_catalog_resource_profiles"),
 
@@ -93,7 +113,11 @@ export const storageCatalogApi = {
   /** One saved home for its setup page: what it holds per capability, the
    * rows that already exist, and the storage a Catalog row used last. */
   inspectProfile: (profileId: string) =>
-    invoke<CatalogProfileInspection>("inspect_catalog_resource_profile", { profileId }),
+    invoke<CatalogProfileInspection>("inspect_catalog_resource_profile", { profileId })
+      .then((inspection) => ({
+        ...inspection,
+        holdings: inspection.holdings.filter((holding) => !isSwitchedOff(holding.capability)),
+      })),
 
   /** Renames the profile everywhere it appears — every Catalog row using this
    * home relabels at once. */
@@ -113,7 +137,8 @@ export const storageCatalogApi = {
   openProfileTerminal: (profileId: string) =>
     invoke<void>("open_catalog_profile_in_terminal", { profileId }),
 
-  listScopes: () => invoke<CatalogScopeDto[]>("list_catalog_scopes"),
+  listScopes: () => invoke<CatalogScopeDto[]>("list_catalog_scopes")
+    .then((scopes) => scopes.filter((scope) => !isSwitchedOff(scope.scope))),
 
   /** Adding a row records a scope at one coordinate and nothing else — no
    * inventory, no provider CLI, no storage traffic. */
@@ -141,7 +166,7 @@ export const storageCatalogApi = {
   listStorageRepositories: (storageId: string) =>
     invoke<CatalogStorageRepository[]>("list_catalog_storage_repositories", {
       storageId,
-    }),
+    }).then(shown),
 
   /** The preview for a stored-only row, fetched from the storage on demand
    * and cached by digest; the codec of the row's format draws it. Called

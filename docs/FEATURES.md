@@ -101,7 +101,12 @@ What Mallard does, in detail. The short introduction is the repository's
 
 The first Library catalog supports Codex and Claude skills/plugins and Codex
 pet v1/v2. Pet formats are separate resources — and separate menu rows — and
-the user chooses the exact format to operate on. Skill discovery is limited to
+the user chooses the exact format to operate on. Pets are switched off in the
+desktop app for now (`src/components/storage-catalog/switchedOff.ts`): the
+backend still registers both formats, and the frontend drops them from every
+list it reads, so the Catalog offers no Pets door, row, or chooser entry, and
+a pet's link or address answers as a kind this app can't open. Pet rows added
+earlier stay on the computer, unlisted. Skill discovery is limited to
 `<CODEX_HOME>/skills`, `$HOME/.agents/skills` (default `~/.codex` config
 only), and `<CLAUDE_CONFIG_DIR>/skills`; project-local skill directories are
 not scanned.
