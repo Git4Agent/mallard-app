@@ -36214,12 +36214,14 @@ mod tests {
             .plan_bundle_restore(&storage_id, &bundle_id, &current_binding)
             .unwrap();
         assert!(fixed_point.conversation_actions.is_empty());
+        // Anchor Activity to 2026-08-11 so the dated fixture stays in its window.
+        let activity_window_end = 1_786_406_400;
         let unchanged_activity = get_project_activity_with_repository(
             &fixture.repo,
             &project_id,
             Some(&storage_id),
             None,
-            None,
+            Some(activity_window_end),
             Some(90),
             false,
         )
@@ -36285,7 +36287,7 @@ mod tests {
             &project_id,
             Some(&storage_id),
             None,
-            None,
+            Some(activity_window_end),
             Some(90),
             false,
         )

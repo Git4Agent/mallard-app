@@ -257,6 +257,17 @@ pub(super) fn run() {
     );
     let source = transcript_bytes(&homes[0], &projects[0], SESSION);
     assert_media_record(&source, projects[0].join("part5").to_str().unwrap());
+    assert!(
+        source.split(|byte| *byte == b'\n').any(|line| {
+            serde_json::from_slice::<Value>(line).is_ok_and(|record| {
+                record["type"] == "api-request-blob"
+                    && record["message"]
+                        .to_string()
+                        .contains(projects[0].to_str().unwrap())
+            })
+        }),
+        "native media fixture must include an API request copy of the source directory"
+    );
     push_media(&services[0], &a.project.local_project_id, &storage.id);
     assert_eq!(transcript_bytes(&homes[0], &projects[0], SESSION), source);
     let a_thread = logical_thread_id(&repositories[0], &a.project.local_project_id, SESSION);
