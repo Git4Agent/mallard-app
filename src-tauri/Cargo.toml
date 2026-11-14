@@ -18,13 +18,13 @@ tauri-build = { version = "2.7.0", features = [] }
 mallard-application = { path = "../crates/mallard-application" }
 mallard-domain = { path = "../crates/mallard-domain" }
 mallard-infrastructure = { path = "../crates/mallard-infrastructure" }
-tauri = { version = "2", features = [] }
+# The 2.12 test context initializes AppConfig fields added by tauri-utils 2.10.
+tauri = { version = "2.12.0", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
-# The `mallard://` scheme the website's Open in Mallard hands over. Held to
-# the 2.4 line: 2.5 and later need Tauri 2.12, and the app and
-# `@tauri-apps/api` are on 2.11. Raise it when Tauri is.
+# The `mallard://` scheme the website's Open in Mallard hands over. Keep
+# the existing 2.4 plugin line paired with single-instance below.
 tauri-plugin-deep-link = "~2.4.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -67,7 +67,7 @@ mallard-domain = { path = "../crates/mallard-domain", features = ["test-support"
 mallard-infrastructure = { path = "../crates/mallard-infrastructure", features = ["test-support"] }
 # `test` enables tauri::test::{mock_builder, MockRuntime} for the headless
 # integration tests in src/sync_tests/.
-tauri = { version = "2", features = ["test"] }
+tauri = { version = "2.12.0", features = ["test"] }
 # Stub S3 server.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
