@@ -7,6 +7,24 @@ import test from "node:test";
 const projectUrl = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, projectUrl), "utf8");
 
+test("Rust and JavaScript Tauri resolve to the same major/minor release", async () => {
+  const [cargoLock, packageLockSource] = await Promise.all([
+    read("Cargo.lock"),
+    read("package-lock.json"),
+  ]);
+  const rustVersions = [...cargoLock.matchAll(/\[\[package\]\]\s+name = "tauri"\s+version = "([^"]+)"/g)];
+  assert.equal(rustVersions.length, 1, "one resolved Rust Tauri version");
+  const apiVersion = JSON.parse(packageLockSource).packages["node_modules/@tauri-apps/api"].version;
+  const majorMinor = (version) => {
+    const match = version.match(/^(\d+\.\d+)\./);
+    assert.ok(match, `expected a semantic version, received ${version}`);
+    return match[1];
+  };
+
+  // The Tauri CLI rejects a mismatch before compiling or bundling the app.
+  assert.equal(majorMinor(apiVersion), majorMinor(rustVersions[0][1]));
+});
+
 test("release version is 1.0.9 in every source", async () => {
   const [tauriConfigSource, workspaceCargoSource, cargoSource, packageSource, packageLockSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
