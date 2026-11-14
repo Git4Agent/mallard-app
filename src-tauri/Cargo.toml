@@ -11,7 +11,8 @@ name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+# 2.7.0 handles Cargo 1.100's nested OUT_DIR when copying the CLI sidecar.
+tauri-build = { version = "2.7.0", features = [] }
 
 [dependencies]
 mallard-application = { path = "../crates/mallard-application" }
