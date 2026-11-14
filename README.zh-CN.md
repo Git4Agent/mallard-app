@@ -144,7 +144,7 @@ Mallard 对存储只有三个要求：List、Put 和 Get，不需要 Git 服务�
 
 ## 社区
 
-加入 [Discord](https://discord.gg/srnWNQUsB)，或使用微信扫描下方二维码，加入 Mallard 内测群。
+加入 [Discord](https://discord.gg/6XavSB9QT)，或使用微信扫描下方二维码，加入 Mallard 内测群。
 
 <a href="docs/readme/wechat-group.jpg"><img src="docs/readme/wechat-group.jpg" width="360" alt="Mallard 内测微信群二维码"></a>
 
