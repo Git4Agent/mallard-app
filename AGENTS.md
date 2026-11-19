@@ -27,9 +27,10 @@ that only works for now and is meant to be replaced
 ## Product and architecture
 
 Mallard is a review-first Tauri 2 desktop application that makes project-scoped
-Codex and Claude sessions and provider-home state — memory and session state
-under any bound `CODEX_HOME`/`CLAUDE_CONFIG_DIR` — portable between
-machines. It never captures agent configuration from inside the project
+Codex and Claude sessions, and the session state beside them under any bound
+`CODEX_HOME`/`CLAUDE_CONFIG_DIR`, portable between machines. It does not sync
+agent memory: memory a project shares belongs in its repository and travels
+through Git. It never captures agent configuration from inside the project
 directory; for non-Git projects, selected ordinary files can additionally
 travel as explicitly reviewed project content. The active stack is Rust 2021
 in the Tauri backend and React 19, strict TypeScript, and Vite 7 in the
@@ -174,6 +175,12 @@ Treat safety behavior as part of the product contract:
 - Keep credentials, checkout paths, provider-home paths, local exclusions,
   restore plans, receipts, backups, and trust decisions out of portable
   manifests.
+- Agent memory stays on the machine that wrote it. Never discover or capture
+  Claude's `projects/<bucket>/memory/`, never write into it on Pull, and keep
+  what Claude copies from it into a session — the `MEMORY.md` index and the
+  directory's path — out of the Claude wire
+  (`providers/claude/auto_memory.rs`). What a session itself read or wrote
+  there is conversation content and travels with the session.
 - Push publication must remain immutable and SHA-256 verified. There is no
   mutable head: a publication record is written last, with list-then-write,
   and the current snapshot is selected from the stream's record names. A

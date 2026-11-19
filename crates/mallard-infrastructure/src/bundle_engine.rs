@@ -19,7 +19,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::payload::PayloadBytes;
 use crate::portable_resources::PortableResourceRegistry;
 use crate::provider_capture::CapturedResources;
-use crate::providers::AgentProviderRegistry;
 use mallard_domain::portable::contracts;
 use mallard_domain::{
     self as domain, hex_lower, now_secs, sha256_hex, ActionId, ActionStatus, ApplyPolicyPrimitive,
@@ -1586,13 +1585,13 @@ impl<S: ObjectStore> BundleEngine<S> {
     /// Build the file-level restore plan for one verified snapshot.
     ///
     /// Conversation resources never appear here: the typed conversation
-    /// planner owns them for every provider. Provider-state files are
-    /// planned only for bound providers with a resolved home; unbound and
-    /// unknown provider scopes stay view-only and untouched.
-    #[allow(clippy::too_many_arguments)]
+    /// planner owns them for every provider. Provider state is never
+    /// planned: Mallard does not sync provider memory, so a file an earlier
+    /// version published under `state/providers/` stays in storage and is
+    /// neither offered nor written. Unbound and unknown provider scopes stay
+    /// view-only and untouched.
     pub fn build_restore_plan_from_snapshot(
         &self,
-        registry: &AgentProviderRegistry,
         snapshot: &BundleSnapshot,
         binding: &ProjectBinding,
         provider_homes: &BTreeMap<ProviderKey, String>,
@@ -1608,17 +1607,13 @@ impl<S: ObjectStore> BundleEngine<S> {
         let mut copy_claims = BTreeSet::<LogicalPath>::new();
 
         for (scope_key, scope) in &snapshot.manifest.scopes {
-            let scope_home = match scope_key {
-                SyncScopeKey::Project => None,
-                SyncScopeKey::Provider(provider) => {
-                    match provider_homes.get(provider) {
-                        Some(home) => Some((provider.clone(), home.clone())),
-                        // Unbound or unknown provider: every row stays
-                        // view-only and the scope is preserved untouched.
-                        None => continue,
-                    }
+            // An unbound or unknown provider: every row stays view-only
+            // and the scope is preserved untouched.
+            if let SyncScopeKey::Provider(provider) = scope_key {
+                if !provider_homes.contains_key(provider) {
+                    continue;
                 }
-            };
+            }
             // Registry validation: a scope whose contracts this build does
             // not register stays preserved and inert. Its rows say why.
             let resolved = match scope.resolve(scope_key, self.contracts.as_ref()) {
@@ -1685,17 +1680,17 @@ impl<S: ObjectStore> BundleEngine<S> {
                 let kind = resolved
                     .kind(&entry.resource_id)
                     .ok_or_else(|| format!("file '{}' has no resolved kind", logical_path))?;
-                if kind == ResourceKindPrimitive::Conversation {
+                // A provider scope holds conversations, which the typed
+                // planner owns, and provider state that an earlier version
+                // published (Claude memory). Mallard does not sync memory:
+                // that state stays in storage, and it is neither offered nor
+                // written, so it cannot hold a Pull's review open.
+                if kind == ResourceKindPrimitive::Conversation
+                    || matches!(scope_key, SyncScopeKey::Provider(_))
+                {
                     continue;
                 }
-                let target = match (&scope_home, kind) {
-                    (None, _) => map_project_logical_target(logical_path, binding)?,
-                    (Some((provider, home)), ResourceKindPrimitive::ProviderState) => {
-                        provider_state_target(registry, provider, home, binding, logical_path)
-                    }
-                    (Some(_), _) => None,
-                };
-                let Some(target) = target else {
+                let Some(target) = map_project_logical_target(logical_path, binding)? else {
                     planned_files.push(PlannedFile {
                         logical_path,
                         entry,
@@ -2137,14 +2132,17 @@ impl<S: ObjectStore> BundleEngine<S> {
 mod tests {
     use super::*;
     use crate::provider_capture::{
-        capture_recipe, discover_project, domain_resources, CaptureRequest,
+        capture_recipe, discover_project, domain_resources, CaptureRequest, CapturedFile,
+        CapturedResource, ResourceCandidate,
     };
+    use crate::providers::AgentProviderRegistry;
     use crate::storage_core::plain_store::PlainStore;
     use crate::storage_core::{
         DeleteOutcome, ImmutablePutOutcome, LocalObjectStore, ObjectKey, ObjectPrefix,
         StoreKeyPage, StoreListPage, StoredMetadata, REPOSITORY_COMMITS_PREFIX, REPOSITORY_PREFIX,
         STORAGE_MARKER_KEY,
     };
+    use mallard_domain::portable::{ApplyPolicyCoordinate, ResourceKindCoordinate};
     use mallard_domain::{LocalProjectId, RecipeEntry, ReplicaId, PAYLOAD_CHUNK_BYTES};
 
     fn bundle_id(number: u64) -> BundleId {
@@ -2203,15 +2201,7 @@ mod tests {
         let binding = active_binding(id, &target);
         let homes = BTreeMap::new();
         let plan = second
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &homes,
-                &BTreeMap::new(),
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &homes, &BTreeMap::new(), 100, 0)
             .unwrap();
         let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
         let mut bytes = second.byte_source(&snapshot, None);
@@ -2270,15 +2260,7 @@ mod tests {
         let binding = active_binding(id.clone(), &target);
         let homes = BTreeMap::new();
         let plan = second
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &homes,
-                &BTreeMap::new(),
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &homes, &BTreeMap::new(), 100, 0)
             .unwrap();
         let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
         let mut bytes = second.byte_source(&snapshot, None);
@@ -3101,32 +3083,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_restore_targets_use_the_saved_home_spelling() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        let home = temp.path().join("claude");
-        fs::create_dir(&project).unwrap();
-        fs::create_dir(&home).unwrap();
-        let binding = active_binding(bundle_id(3), &project);
-        let home = crate::local_paths::canonicalize(home).unwrap();
-        let home_text = home.to_string_lossy().into_owned();
-        let homes = BTreeMap::from([(claude_key(), home_text.clone())]);
-        let logical = LogicalPath::parse("state/providers/claude/memory/topic.md").unwrap();
-        let target =
-            provider_state_target(registry(), &claude_key(), &home_text, &binding, &logical)
-                .unwrap();
-        validate_target_for_logical(&target, &logical, &binding, &homes).unwrap();
-        let native_target = fs::canonicalize(&home)
-            .unwrap()
-            .join(target.strip_prefix(&home).unwrap());
-        validate_target_for_logical(&native_target, &logical, &binding, &homes).unwrap();
-        assert!(
-            validate_target_for_logical(&project.join("topic.md"), &logical, &binding, &homes)
-                .is_err()
-        );
-    }
-
-    #[test]
     fn restore_plan_remaps_project_files_and_apply_creates_backup() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source-project");
@@ -3166,7 +3122,6 @@ mod tests {
         let provider_homes = BTreeMap::new();
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &provider_homes,
@@ -3319,15 +3274,7 @@ mod tests {
             sha256_hex(b"reviewed v1"),
         )]);
         let plan = engine
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &BTreeMap::new(),
-                &bases,
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &BTreeMap::new(), &bases, 100, 0)
             .unwrap();
         let action = draft_write_action(&plan);
         assert_eq!(action.source_size, Some("storage v2".len() as u64));
@@ -3374,15 +3321,7 @@ mod tests {
             sha256_hex(b"reviewed v1"),
         )]);
         let plan = engine
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &BTreeMap::new(),
-                &bases,
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &BTreeMap::new(), &bases, 100, 0)
             .unwrap();
         assert!(preservation_pin(draft_write_action(&plan)).is_none());
     }
@@ -3396,7 +3335,6 @@ mod tests {
         write(&target.join("draft-local-copy.md"), b"local twist");
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &BTreeMap::new(),
@@ -3415,7 +3353,6 @@ mod tests {
         write(&target.join("draft-local-copy.md"), b"someone else's file");
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &BTreeMap::new(),
@@ -3438,7 +3375,6 @@ mod tests {
         let (engine, snapshot, binding) = diverged_project_fixture(&temp, b"local twist");
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &BTreeMap::new(),
@@ -4166,15 +4102,7 @@ mod tests {
         let binding = active_binding(id.clone(), &target);
         let homes = BTreeMap::new();
         let plan = engine
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &homes,
-                &BTreeMap::new(),
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &homes, &BTreeMap::new(), 100, 0)
             .unwrap();
         let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
         let mut bytes = engine.byte_source(&snapshot, None);
@@ -4404,15 +4332,7 @@ mod tests {
         let binding = active_binding(id, &target);
         let homes = BTreeMap::new();
         let plan = second
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &homes,
-                &BTreeMap::new(),
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &homes, &BTreeMap::new(), 100, 0)
             .unwrap();
         let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
         let mut bytes = second.byte_source(&snapshot, None);
@@ -5086,15 +5006,7 @@ mod tests {
         let binding = active_binding(id, &target);
         let homes = BTreeMap::new();
         let plan = second
-            .build_restore_plan_from_snapshot(
-                registry(),
-                &snapshot,
-                &binding,
-                &homes,
-                &BTreeMap::new(),
-                100,
-                0,
-            )
+            .build_restore_plan_from_snapshot(&snapshot, &binding, &homes, &BTreeMap::new(), 100, 0)
             .unwrap();
         let approved = plan.actions.iter().map(|a| a.action_id.clone()).collect();
         let mut bytes = second.byte_source(&snapshot, None);
@@ -5474,7 +5386,6 @@ mod tests {
         );
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &provider_homes,
@@ -5535,7 +5446,6 @@ mod tests {
         let snapshot = engine.inspect(&id).unwrap();
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &provider_homes,
@@ -5612,48 +5522,64 @@ mod tests {
         );
     }
 
+    /// One resource owning one file, as a capture: a manifest row that no
+    /// adapter in this build discovers.
+    fn captured_file_resource(
+        resource_id: &str,
+        kind: ResourceKindCoordinate,
+        provider: Option<ProviderKey>,
+        apply_policy: ApplyPolicyCoordinate,
+        logical_path: &str,
+        bytes: &[u8],
+    ) -> CapturedResources {
+        let mut captured = CapturedResources::default();
+        captured.resources.insert(
+            resource_id.to_string(),
+            CapturedResource {
+                descriptor: ResourceCandidate {
+                    resource_id: resource_id.to_string(),
+                    kind,
+                    provider,
+                    provider_resource_type: None,
+                    display_name: resource_id.to_string(),
+                    apply_policy,
+                    selected_by_default: true,
+                    blocked_reason: None,
+                    logical_paths: vec![logical_path.to_string()],
+                    project_content: None,
+                },
+                content_sha256: sha256_hex(bytes),
+            },
+        );
+        captured.files.insert(
+            logical_path.to_string(),
+            CapturedFile {
+                logical_path: logical_path.to_string(),
+                resource_id: resource_id.to_string(),
+                bytes: bytes.to_vec().into(),
+                source_stamp: None,
+                source_mtime: 10,
+                mode: 0o600,
+            },
+        );
+        captured
+    }
+
     #[test]
     fn restore_plan_skips_generic_files_already_matching_the_manifest() {
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source");
         let target = temp.path().join("target");
-        let source_claude = temp.path().join("source-claude");
-        let target_claude = temp.path().join("target-claude");
-        for directory in [&source, &target, &source_claude, &target_claude] {
-            fs::create_dir_all(directory).unwrap();
-        }
-        // Memory is only discovered from the project root's canonical
-        // bucket, and only once a session in it has proven ownership — the
-        // fixture needs one transcript beside the memory directory.
-        let source_canonical = fs::canonicalize(&source).unwrap();
-        let transcript = format!(
-            "{{\"type\":\"system\",\"sessionId\":\"session-m\",\"cwd\":{}}}\n",
-            serde_json::to_string(source_canonical.to_str().unwrap()).unwrap()
-        );
-        let bucket = crate::providers::claude::encode_claude_project_path(
-            source_canonical.to_str().unwrap(),
-        );
-        write(
-            &source_claude.join(format!("projects/{bucket}/session-m.jsonl")),
-            transcript.as_bytes(),
-        );
-        write(
-            &source_claude.join(format!("projects/{bucket}/memory/MEMORY.md")),
+        fs::create_dir_all(&target).unwrap();
+        let resource_id = "project:guide:notes";
+        let recipe = recipe_for([resource_id.to_string()]);
+        let captured = captured_file_resource(
+            resource_id,
+            contracts::requirement(),
+            None,
+            contracts::merge(),
+            "project/NOTES.md",
             b"remember the ducks",
         );
-        let request = CaptureRequest {
-            project_root: source.clone(),
-            provider_homes: BTreeMap::from([(claude_key(), source_claude)]),
-            include_project_content: false,
-            excluded_content_roots: Vec::new(),
-        };
-        let inventory = discover_project(registry(), &request).unwrap();
-        let resource = inventory
-            .resources
-            .iter()
-            .find(|resource| resource.resource_id.starts_with("claude:memory:"))
-            .unwrap();
-        let recipe = recipe_for([resource.resource_id.clone()]);
         let id = bundle_id(98);
         let engine = BundleEngine::open(
             LocalObjectStore::open(temp.path().join("store")).unwrap(),
@@ -5662,23 +5588,16 @@ mod tests {
         .unwrap();
         publish_captured(
             &engine,
-            identity(id.clone(), "Memory project"),
+            identity(id.clone(), "Generic file project"),
             &recipe,
-            &capture_recipe(registry(), &request, &recipe).unwrap(),
+            &captured,
             None,
             10,
         )
         .unwrap();
         let snapshot = engine.inspect(&id).unwrap();
         let binding = active_binding(id, &target);
-        let provider_homes = BTreeMap::from([(
-            claude_key(),
-            fs::canonicalize(&target_claude)
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string(),
-        )]);
+        let provider_homes = BTreeMap::new();
 
         let is_generic_write = |action: &RestoreAction| {
             matches!(
@@ -5688,7 +5607,6 @@ mod tests {
         };
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &provider_homes,
@@ -5702,15 +5620,14 @@ mod tests {
             .iter()
             .find(|action| is_generic_write(action))
             .unwrap();
-        let memory_target = PathBuf::from(action.target_path.clone().unwrap());
+        let generic_target = PathBuf::from(action.target_path.clone().unwrap());
 
         // The target already holds the manifest bytes: the plan stops asking,
         // so an all-deselected apply cannot strand the reviewed baseline
         // behind a write that would change nothing.
-        write(&memory_target, b"remember the ducks");
+        write(&generic_target, b"remember the ducks");
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &provider_homes,
@@ -5726,10 +5643,9 @@ mod tests {
         );
 
         // A drifted target is real work again.
-        write(&memory_target, b"remember the geese");
+        write(&generic_target, b"remember the geese");
         let plan = engine
             .build_restore_plan_from_snapshot(
-                registry(),
                 &snapshot,
                 &binding,
                 &provider_homes,
@@ -5739,6 +5655,92 @@ mod tests {
             )
             .unwrap();
         assert!(plan.actions.iter().any(is_generic_write));
+    }
+
+    /// Mallard does not sync provider memory. A storage an earlier version
+    /// pushed to can still hold Claude memory: its scope stays readable, the
+    /// Pull plan says nothing of it, and no action can write it into a
+    /// Claude home.
+    #[test]
+    fn provider_state_from_an_earlier_version_is_never_restored() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let target_claude = temp.path().join("target-claude");
+        for directory in [&target, &target_claude] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let resource_id = "claude:memory:root";
+        let logical_path = "state/providers/claude/memory/MEMORY.md";
+        let recipe = recipe_for([resource_id.to_string()]);
+        let captured = captured_file_resource(
+            resource_id,
+            contracts::provider_state(),
+            Some(claude_key()),
+            contracts::merge(),
+            logical_path,
+            b"remember the ducks",
+        );
+        let id = bundle_id(99);
+        let engine = BundleEngine::open(
+            LocalObjectStore::open(temp.path().join("store")).unwrap(),
+            storage_id(),
+        )
+        .unwrap();
+        publish_captured(
+            &engine,
+            identity(id.clone(), "Earlier memory project"),
+            &recipe,
+            &captured,
+            None,
+            10,
+        )
+        .unwrap();
+        let snapshot = engine.inspect(&id).unwrap();
+        let binding = active_binding(id, &target);
+        let provider_homes = BTreeMap::from([(
+            claude_key(),
+            fs::canonicalize(&target_claude)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        )]);
+
+        let plan = engine
+            .build_restore_plan_from_snapshot(
+                &snapshot,
+                &binding,
+                &provider_homes,
+                &std::collections::BTreeMap::new(),
+                100,
+                0,
+            )
+            .unwrap();
+        // Nothing is offered, so nothing is left unreviewed: the stored
+        // memory cannot keep a Pull from completing.
+        assert!(plan.actions.is_empty(), "{:?}", plan.actions);
+        let mut bytes = engine.byte_source(&snapshot, None);
+        let applied = engine
+            .apply_restore_plan_lazy(
+                &snapshot,
+                &mut bytes,
+                &binding,
+                &provider_homes,
+                &plan,
+                &BTreeSet::new(),
+                &temp.path().join("backups"),
+                101,
+            )
+            .unwrap();
+        assert!(applied.receipts.is_empty(), "{:?}", applied.receipts);
+        assert_eq!(fs::read_dir(&target_claude).unwrap().count(), 0);
+
+        // A provider-state path names no writable root, whatever asks.
+        let logical = LogicalPath::parse(logical_path).unwrap();
+        let forged = target_claude.join("projects/bucket/memory/MEMORY.md");
+        assert!(validate_target_for_logical(&forged, &logical, &binding)
+            .unwrap_err()
+            .contains("has no writable target root"));
     }
 
     /// Conversations belong exclusively to the typed pipeline now: a raw
@@ -6137,14 +6139,7 @@ fn preserve_local_project_copy(
         return Err("restore target changed after planning".to_string());
     }
     let copy_target = project_content_target(&pin.copy_logical_path, binding)?;
-    // The copy is project content by construction, so the containment guard
-    // needs no provider homes.
-    validate_target_for_logical(
-        &copy_target,
-        &pin.copy_logical_path,
-        binding,
-        &BTreeMap::new(),
-    )?;
+    validate_target_for_logical(&copy_target, &pin.copy_logical_path, binding)?;
     let existing = inspect_restore_target(&copy_target)?;
     match &existing.digest {
         Some(digest) if digest.as_str() == pin.local_content_sha256 => return Ok(()),
@@ -6190,23 +6185,6 @@ fn map_project_logical_target(
         )?));
     }
     Ok(None)
-}
-
-/// Map one provider-state logical path through the registered adapter. A
-/// mapping failure downgrades to a manual row rather than blocking the plan.
-fn provider_state_target(
-    registry: &AgentProviderRegistry,
-    provider: &ProviderKey,
-    provider_home: &str,
-    binding: &ProjectBinding,
-    logical_path: &LogicalPath,
-) -> Option<PathBuf> {
-    let prefix = mallard_domain::provider_state_path_prefix(provider);
-    let suffix = logical_path.as_str().strip_prefix(prefix.as_str())?;
-    let adapter = registry.get(provider)?;
-    adapter
-        .state_target(Path::new(provider_home), &binding.project_root, suffix)
-        .ok()
 }
 
 fn project_content_target(
@@ -6370,25 +6348,15 @@ fn validate_target_for_logical(
     target: &Path,
     logical_path: &LogicalPath,
     binding: &ProjectBinding,
-    provider_homes: &BTreeMap<ProviderKey, String>,
 ) -> Result<(), String> {
-    let root = if logical_path.as_str().starts_with("project/") {
-        PathBuf::from(&binding.canonical_project_root)
-    } else if let Some(provider) = provider_homes.keys().find(|provider| {
-        logical_path
-            .as_str()
-            .starts_with(&mallard_domain::provider_state_path_prefix(provider))
-    }) {
-        let home = provider_homes
-            .get(provider)
-            .expect("provider key came from this map");
-        PathBuf::from(home)
-    } else {
+    // The project folder is the only root a file action may write under.
+    if !logical_path.as_str().starts_with("project/") {
         return Err(format!(
             "logical path '{}' has no writable target root",
             logical_path
         ));
-    };
+    }
+    let root = PathBuf::from(&binding.canonical_project_root);
     let canonical_root = canonical_real_dir(&root, "restore root")?;
     if crate::local_paths::strip_prefix(target, &root).is_err() {
         return Err(format!(
@@ -7316,7 +7284,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             .collect::<Vec<_>>();
         ensure_actions.sort_by_key(|action| project_action_depth(action));
         for action in ensure_actions {
-            match self.prepare_project_directory(binding, provider_homes, action) {
+            match self.prepare_project_directory(binding, action) {
                 Ok(()) => prepared_directories.push(action),
                 Err(error) => receipts.push(receipt_for(
                     action,
@@ -7385,7 +7353,6 @@ impl<S: ObjectStore> BundleEngine<S> {
                         snapshot,
                         bytes,
                         binding,
-                        provider_homes,
                         action,
                         logical_path,
                         &plan_backup,
@@ -7412,7 +7379,6 @@ impl<S: ObjectStore> BundleEngine<S> {
         for action in approved_file_deletions {
             let receipt = self.apply_project_file_deletion(
                 binding,
-                provider_homes,
                 action,
                 &plan_backup,
                 applied_at,
@@ -7434,7 +7400,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             .sort_by_key(|action| std::cmp::Reverse(project_action_depth(action)));
         for action in approved_directory_deletions {
             let receipt =
-                self.apply_project_directory_deletion(binding, provider_homes, action, applied_at);
+                self.apply_project_directory_deletion(binding, action, applied_at);
             receipts.push(receipt.unwrap_or_else(|error| {
                 receipt_for(
                     action,
@@ -7449,8 +7415,7 @@ impl<S: ObjectStore> BundleEngine<S> {
 
         prepared_directories.sort_by_key(|action| std::cmp::Reverse(project_action_depth(action)));
         for action in prepared_directories {
-            let receipt =
-                self.finalize_project_directory(binding, provider_homes, action, applied_at);
+            let receipt = self.finalize_project_directory(binding, action, applied_at);
             receipts.push(receipt.unwrap_or_else(|error| {
                 receipt_for(
                     action,
@@ -7473,7 +7438,6 @@ impl<S: ObjectStore> BundleEngine<S> {
     fn prepare_project_directory(
         &self,
         binding: &ProjectBinding,
-        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
     ) -> Result<(), String> {
         let RestoreActionKind::EnsureProjectDirectory { logical_path, .. } = &action.kind else {
@@ -7483,7 +7447,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         if action.target_path.as_deref() != Some(path_text(&target)?.as_str()) {
             return Err("project directory target differs from the pinned plan".to_string());
         }
-        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
+        validate_target_for_logical(&target, logical_path, binding)?;
         match (
             inspect_project_directory_target(&target)?,
             action.expected_target_mode,
@@ -7520,7 +7484,6 @@ impl<S: ObjectStore> BundleEngine<S> {
     fn finalize_project_directory(
         &self,
         binding: &ProjectBinding,
-        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         applied_at: u64,
     ) -> Result<ApplyReceipt, String> {
@@ -7533,7 +7496,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             return Err("directory finalization received another action kind".to_string());
         };
         let target = project_content_target(logical_path, binding)?;
-        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
+        validate_target_for_logical(&target, logical_path, binding)?;
         if inspect_project_directory_target(&target)?.is_none() {
             return Err("project directory disappeared before finalization".to_string());
         }
@@ -7552,7 +7515,6 @@ impl<S: ObjectStore> BundleEngine<S> {
     fn apply_project_file_deletion(
         &self,
         binding: &ProjectBinding,
-        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         plan_backup: &Path,
         applied_at: u64,
@@ -7569,7 +7531,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         if action.target_path.as_deref() != Some(path_text(&target)?.as_str()) {
             return Err("project-file deletion target differs from the plan".to_string());
         }
-        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
+        validate_target_for_logical(&target, logical_path, binding)?;
         let before = inspect_restore_target(&target)?;
         let Some(before_digest) = before.digest.as_deref() else {
             return Ok(receipt_for(
@@ -7627,7 +7589,6 @@ impl<S: ObjectStore> BundleEngine<S> {
     fn apply_project_directory_deletion(
         &self,
         binding: &ProjectBinding,
-        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         applied_at: u64,
     ) -> Result<ApplyReceipt, String> {
@@ -7638,7 +7599,7 @@ impl<S: ObjectStore> BundleEngine<S> {
         if action.target_path.as_deref() != Some(path_text(&target)?.as_str()) {
             return Err("project-directory deletion target differs from the plan".to_string());
         }
-        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
+        validate_target_for_logical(&target, logical_path, binding)?;
         let Some(actual_mode) = inspect_project_directory_target(&target)? else {
             return Ok(receipt_for(
                 action,
@@ -7687,7 +7648,6 @@ impl<S: ObjectStore> BundleEngine<S> {
         snapshot: &BundleSnapshot,
         bytes: &mut dyn BundleBytes,
         binding: &ProjectBinding,
-        provider_homes: &BTreeMap<ProviderKey, String>,
         action: &RestoreAction,
         logical_path: &LogicalPath,
         plan_backup: &Path,
@@ -7720,7 +7680,7 @@ impl<S: ObjectStore> BundleEngine<S> {
             .as_deref()
             .map(PathBuf::from)
             .ok_or_else(|| "file restore action has no target".to_string())?;
-        validate_target_for_logical(&target, logical_path, binding, provider_homes)?;
+        validate_target_for_logical(&target, logical_path, binding)?;
         let before = inspect_restore_target(&target)?;
         match (&action.expected_target_sha256, &before.digest) {
             (None, None) => {}

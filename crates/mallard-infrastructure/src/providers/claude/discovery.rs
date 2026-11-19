@@ -1,14 +1,14 @@
-//! Claude session, sidecar, and memory discovery under one `CLAUDE_CONFIG_DIR`.
+//! Claude session and sidecar discovery under one `CLAUDE_CONFIG_DIR`.
+//! Claude's auto-memory under `projects/<bucket>/memory/` is machine-local
+//! and is never discovered.
 
-use super::materialization::encode_claude_project_path;
 use crate::provider_capture::{
-    canonical_existing_dir, collect_regular_tree_files, inspect_candidate_files,
-    inspect_candidate_files_with_limit, modified_secs, normalized_relative, provider_walk_entry,
-    session_home_is_project_root, MAX_METADATA_BYTES, MAX_METADATA_LINES,
+    canonical_existing_dir, inspect_candidate_files_with_limit, modified_secs, normalized_relative,
+    provider_walk_entry, session_home_is_project_root, MAX_METADATA_BYTES, MAX_METADATA_LINES,
 };
 use crate::providers::traits::{
-    DiscoveredProviderState, DiscoveredSession, DiscoveredSidecar, DiscoveredStateFile,
-    SessionDiscovery, SessionDiscoveryContext, SessionHomeSighting,
+    DiscoveredSession, DiscoveredSidecar, SessionDiscovery, SessionDiscoveryContext,
+    SessionHomeSighting,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read};
@@ -155,7 +155,7 @@ fn sidecar_session_id(
 /// The one project-owned session `is_requested` accepts. A transcript is
 /// named by its session, so the walk opens nothing until the requested
 /// session is found; its head then supplies the ownership evidence
-/// `discover` would have gathered. Sidecars and memory are not visited.
+/// `discover` would have gathered. Sidecars are not visited.
 pub(super) fn locate_session(
     context: &SessionDiscoveryContext<'_>,
     is_requested: &mut dyn FnMut(&str, &Path) -> Result<bool, String>,
@@ -227,7 +227,6 @@ pub(super) fn discover(
         return Ok(discovery);
     }
     let mut session_ids = BTreeSet::new();
-    let mut root_buckets = BTreeSet::<PathBuf>::new();
     let mut canonical_homes = BTreeMap::new();
     for entry in WalkDir::new(&projects)
         .follow_links(false)
@@ -261,20 +260,6 @@ pub(super) fn discover(
             continue;
         }
         session_ids.insert(meta.session_id.clone());
-        // The root bucket is the munged directory Claude itself uses for
-        // this project: its name must match the munge of the session's own
-        // recorded home. A foreign bucket holding a resumed-into-root
-        // session fails this self-consistency check, and its memory stays
-        // with its own directory-project.
-        if let (Some(parent), Some(home_text)) =
-            (entry.path().parent(), meta.authorized_home.to_str())
-        {
-            if parent.file_name().and_then(|name| name.to_str())
-                == Some(encode_claude_project_path(home_text).as_str())
-            {
-                root_buckets.insert(parent.to_path_buf());
-            }
-        }
         discovery.sessions.push(DiscoveredSession {
             session_id: meta.session_id.clone(),
             physical_path: entry.path().to_path_buf(),
@@ -337,49 +322,13 @@ pub(super) fn discover(
         }
     }
 
-    // Project memory lives in the canonical root bucket only, and only when
-    // an owned session proved that bucket (the munge is lossy). Distinct
-    // spellings of the same root can each carry a self-consistent bucket;
-    // one memory resource is emitted from the first, the rest are warned.
-    let mut root_buckets = root_buckets.into_iter();
-    if let Some(bucket) = root_buckets.next() {
-        for extra in root_buckets {
-            discovery.warnings.push(format!(
-                "ignored Claude memory in '{}'; using '{}'",
-                extra.display(),
-                bucket.display()
-            ));
-        }
-        let memory = bucket.join("memory");
-        if memory.exists() {
-            let files = collect_regular_tree_files(&canonical_home, memory.clone())?;
-            if !files.is_empty() {
-                let state_files = files
-                    .iter()
-                    .map(|path| {
-                        normalized_relative(&memory, path).map(|rel| DiscoveredStateFile {
-                            physical_path: path.clone(),
-                            logical_suffix: format!("memory/{}", rel),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                discovery.state_resources.push(DiscoveredProviderState {
-                    state_component: "root".to_string(),
-                    resource_type: "memory".to_string(),
-                    display_name: "Claude project memory".to_string(),
-                    merge_apply: true,
-                    files: state_files,
-                    blocked_reason: inspect_candidate_files(&canonical_home, &files).err(),
-                });
-            }
-        }
-    }
     Ok(discovery)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::claude::encode_claude_project_path;
 
     /// Only the requested transcript is opened. A session named the same in
     /// a foreign project directory is passed over once its head names

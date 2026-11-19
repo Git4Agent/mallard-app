@@ -3,6 +3,7 @@
 //! target planning, and safe session actions.
 
 pub mod actions;
+mod auto_memory;
 pub mod cli;
 pub mod codec;
 mod deletion;
@@ -34,6 +35,8 @@ pub use codec::{
     CLAUDE_LINEAGE_CODEC_KEY,
 };
 pub use materialization::encode_claude_project_path;
+#[cfg(any(test, feature = "test-support"))]
+pub use path_encoding::earlier_wire;
 
 pub fn provider_key() -> ProviderKey {
     ProviderKey::parse("claude").expect("static provider key")
@@ -386,15 +389,6 @@ impl SessionAdapter for ClaudeAdapter {
             .find(|target| target.role == mallard_domain::ConversationFileRole::Transcript)
             .ok_or("Claude parent transcript target is missing")?;
         subagents::child_path(&main.target_path, request.provider_session_id, child_id)
-    }
-
-    fn state_target(
-        &self,
-        provider_home: &Path,
-        project_root: &str,
-        logical_suffix: &str,
-    ) -> Result<PathBuf, String> {
-        materialization::state_target(provider_home, project_root, logical_suffix)
     }
 
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String> {

@@ -12480,7 +12480,6 @@ pub(super) fn plan_bundle_restore_with_progress(
             &snapshot.manifest,
         );
         engine.build_restore_plan_from_snapshot(
-            provider_registry(),
             &snapshot,
             &binding,
             &resolved.homes,
@@ -12635,7 +12634,6 @@ fn build_restore_plan_for_apply(
             &snapshot.manifest,
         );
         let mut plan = engine.build_restore_plan_from_snapshot(
-            provider_registry(),
             snapshot,
             binding,
             &resolved.homes,
@@ -30791,6 +30789,502 @@ mod tests {
         assert_eq!(comparison.entries[0].state, ThreadSyncState::Synced);
     }
 
+    /// A storage that an earlier version pushed Claude memory to keeps that
+    /// resource in its Claude scope. It must not stand in the way: a Pull
+    /// completes without offering or writing it, sessions go on syncing in
+    /// both directions, and nothing touches a memory directory.
+    #[test]
+    fn a_storage_holding_memory_from_an_earlier_version_still_syncs_sessions() {
+        use mallard_infrastructure::bundle_engine::{
+            CapturedBundleFile, PublishBundleRequest, PublishExpectation, ScopePublishInput,
+        };
+        use mallard_infrastructure::providers::claude::encode_claude_project_path;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("earlier-memory-resource").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let bundle_id = BundleId::parse("df29babc833808e68ad0efa4d01d7d71").unwrap();
+        let claude = ProviderKey::parse("claude").unwrap();
+        let claude_scope = SyncScopeKey::Provider(claude.clone());
+        let memory_id = ResourceId::parse("claude:memory:root").unwrap();
+        let memory_path = LogicalPath::parse("state/providers/claude/memory/MEMORY.md").unwrap();
+        let register = |name: &str| {
+            register_local_project_with_repository(
+                &repo,
+                RegisterLocalProjectRequest {
+                    display_name: name.to_string(),
+                    repository_fingerprint: Some("a".repeat(64)),
+                    bundle_id: Some(bundle_id.clone()),
+                },
+            )
+            .unwrap()
+        };
+        let binding_of = |project: &LocalProjectRegistration| {
+            repo.load_bindings()
+                .unwrap()
+                .active_for(&project.local_project_id)
+                .cloned()
+                .unwrap()
+        };
+        let state_of = |project: &LocalProjectRegistration| {
+            let comparison = get_project_thread_sync_comparison_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap();
+            assert_eq!(comparison.entries.len(), 1);
+            comparison.entries[0].state
+        };
+        let stored_scope = || {
+            let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+            engine
+                .inspect(&bundle_id)
+                .unwrap()
+                .manifest
+                .scope(&claude_scope)
+                .unwrap()
+                .clone()
+        };
+        let reviewed_revision = |project: &LocalProjectRegistration| {
+            repo.load_config()
+                .unwrap()
+                .links
+                .iter()
+                .find(|link| link.local_project_id == project.local_project_id)
+                .and_then(|link| link.scope_bases.get(&claude_scope).cloned())
+                .map(|base| base.scope_revision)
+        };
+        let session_file = |claude_home: &Path, root: &Path| {
+            let bucket = claude_home
+                .join("projects")
+                .join(encode_claude_project_path(&root.to_string_lossy()));
+            std::fs::read_dir(bucket)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                })
+                .unwrap()
+        };
+        let append = |path: &Path, uuid: &str, parent: &str, root: &Path, text: &str| {
+            let existing = std::fs::read_to_string(path).unwrap();
+            let first: serde_json::Value =
+                serde_json::from_str(existing.lines().next().unwrap()).unwrap();
+            let record = serde_json::json!({"type":"user","uuid":uuid,"parentUuid":parent,
+                "sessionId":first["sessionId"],"cwd":root.to_string_lossy(),
+                "message":{"role":"user","content":[{"type":"text","text":text}]}});
+            std::fs::write(path, format!("{existing}{record}\n")).unwrap();
+        };
+        // A whole-project Pull with nothing but the conversation rows it offers.
+        let pull = |project: &LocalProjectRegistration| {
+            let restore = ProjectSyncService::new(&repo)
+                .plan_bundle_restore(&storage_id, &bundle_id, &binding_of(project))
+                .unwrap();
+            assert!(
+                restore.actions.is_empty(),
+                "memory an earlier version stored is not offered: {:?}",
+                restore.actions
+            );
+            let approved = restore
+                .conversation_review
+                .iter()
+                .filter(|row| {
+                    matches!(
+                        row.action,
+                        ConversationReviewAction::CreateLocal
+                            | ConversationReviewAction::MaterializeCloud
+                    )
+                })
+                .filter_map(|row| row.action_id.clone())
+                .collect::<Vec<_>>();
+            let applied = ProjectSyncService::new(&repo)
+                .apply_bundle_restore(&restore, approved)
+                .unwrap();
+            assert!(
+                applied.success,
+                "{} — failed: {:?}",
+                applied.message, applied.failed_actions
+            );
+        };
+
+        // Machine A publishes one session.
+        let machine_a = register("resourceA");
+        let a_root = temp.path().join("proj-a");
+        let a_claude = temp.path().join("claude-a");
+        bind_and_link_claude_replica(&repo, &machine_a, &storage_id, &a_root, &a_claude);
+        let session_id = "claude-earlier-resource-session";
+        let a_bucket = encode_claude_project_path(&a_root.to_string_lossy());
+        let a_session_path = a_claude
+            .join("projects")
+            .join(&a_bucket)
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(a_session_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &a_session_path,
+            claude_test_transcript(
+                session_id,
+                &a_root,
+                &[
+                    ("u-1", None, "user", "hello"),
+                    ("a-1", Some("u-1"), "assistant", "hi"),
+                ],
+            ),
+        )
+        .unwrap();
+        push_bundle_with_repository(&repo, &machine_a.local_project_id, &storage_id).unwrap();
+
+        // Another computer, on a version through 1.0.9, pushes its Claude
+        // memory into the same scope.
+        {
+            let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+            let snapshot = engine.inspect(&bundle_id).unwrap();
+            let (_, head_token) = engine.read_head(&bundle_id).unwrap().unwrap();
+            let previous = snapshot.manifest.scope(&claude_scope).unwrap().clone();
+            let mut recipe = previous.recipe.clone();
+            recipe.revision += 1;
+            recipe.entries.insert(
+                memory_id.clone(),
+                RecipeEntry {
+                    resource_id: memory_id.clone(),
+                    apply_policy: contracts::merge(),
+                    required: false,
+                },
+            );
+            let mut resources = previous.resources.clone();
+            resources.insert(
+                memory_id.clone(),
+                ResourceDescriptor {
+                    resource_id: memory_id.clone(),
+                    kind: contracts::provider_state(),
+                    provider: Some(claude.clone()),
+                    provider_resource_type: Some(
+                        mallard_domain::ResourceTypeKey::parse("memory").unwrap(),
+                    ),
+                    display_name: "Claude project memory".to_string(),
+                    provenance: contracts::provenance_unknown(),
+                    apply_policy: contracts::merge(),
+                    codec_version: 1,
+                    attributes: mallard_domain::BoundedPortableObject::empty(),
+                },
+            );
+            engine
+                .publish(PublishBundleRequest {
+                    identity: snapshot.manifest.bundle.clone(),
+                    git_history: snapshot.manifest.git_history.clone(),
+                    published_by_origin: snapshot.manifest.published_by_origin.clone(),
+                    writable_scopes: BTreeMap::from([(
+                        claude_scope.clone(),
+                        ScopePublishInput {
+                            recipe,
+                            captured_with: previous.captured_with.clone(),
+                            conversations: previous.conversations.clone(),
+                            resources,
+                            retained_files: previous.files.clone(),
+                            captured_files: BTreeMap::from([(
+                                memory_path.clone(),
+                                CapturedBundleFile {
+                                    resource_id: memory_id.clone(),
+                                    bytes: b"OTHER-COMPUTER remember the swans\n".to_vec().into(),
+                                    source_mtime: 10,
+                                    mode: Some(0o600),
+                                },
+                            )]),
+                            directories: BTreeMap::new(),
+                            tombstones: previous.tombstones.clone(),
+                        },
+                    )]),
+                    reviewed_scope_pins: BTreeMap::from([(
+                        claude_scope.clone(),
+                        (previous.revision, previous.content_sha256.clone()),
+                    )]),
+                    expected_head: PublishExpectation::Match(
+                        Box::new(snapshot.clone()),
+                        head_token,
+                    ),
+                    updated_at: snapshot.manifest.updated_at + 1,
+                })
+                .unwrap();
+        }
+        let with_memory = stored_scope();
+        assert!(with_memory.files.contains_key(&memory_path));
+
+        // A pulls. The Pull is complete: A's reviewed version of the scope
+        // is the stored one, and no memory directory appeared.
+        pull(&machine_a);
+        assert_eq!(reviewed_revision(&machine_a), Some(with_memory.revision));
+        assert_eq!(state_of(&machine_a), ThreadSyncState::Synced);
+        let a_memory = a_claude.join("projects").join(&a_bucket).join("memory");
+        assert!(!a_memory.exists());
+
+        // A continues the session and pushes.
+        append(&a_session_path, "u-2", "a-1", &a_root, "continue from A");
+        let pushed =
+            push_bundle_with_repository(&repo, &machine_a.local_project_id, &storage_id).unwrap();
+        assert!(pushed.success, "{pushed:?}");
+        assert_eq!(state_of(&machine_a), ThreadSyncState::Synced);
+        assert!(!a_memory.exists());
+        // The stored memory is carried as it was: never updated from this
+        // computer, and not removed behind the other computer's back.
+        let after_push = stored_scope();
+        assert_eq!(
+            after_push.files.get(&memory_path),
+            with_memory.files.get(&memory_path)
+        );
+        assert!(after_push.tombstones.is_empty());
+
+        // Machine B joins on this version, takes the session, and pushes its
+        // own turn. Its Claude home gets the session and no memory.
+        let machine_b = register("resourceB");
+        let b_root = temp.path().join("proj-b");
+        let b_claude = temp.path().join("claude-b");
+        bind_and_link_claude_replica(&repo, &machine_b, &storage_id, &b_root, &b_claude);
+        pull(&machine_b);
+        assert_eq!(state_of(&machine_b), ThreadSyncState::Synced);
+        let b_session_path = session_file(&b_claude, &b_root);
+        assert!(std::fs::read_to_string(&b_session_path)
+            .unwrap()
+            .contains("continue from A"));
+        assert!(!b_session_path.parent().unwrap().join("memory").exists());
+        append(&b_session_path, "u-3", "u-2", &b_root, "continue from B");
+        let pushed =
+            push_bundle_with_repository(&repo, &machine_b.local_project_id, &storage_id).unwrap();
+        assert!(pushed.success, "{pushed:?}");
+        assert_eq!(state_of(&machine_b), ThreadSyncState::Synced);
+
+        // A takes B's turn. Still no memory directory on either computer.
+        pull(&machine_a);
+        assert!(std::fs::read_to_string(&a_session_path)
+            .unwrap()
+            .contains("continue from B"));
+        assert_eq!(state_of(&machine_a), ThreadSyncState::Synced);
+        assert!(!a_memory.exists());
+        assert!(!b_session_path.parent().unwrap().join("memory").exists());
+    }
+
+    /// A session that a version before the auto-memory removal published
+    /// holds Claude's memory text in storage. Nothing republishes it while it
+    /// is unchanged. Its next ordinary Push publishes all of it without the
+    /// memory, the other computer takes that as an ordinary update, and both
+    /// stay in step afterwards.
+    #[test]
+    fn a_session_published_with_memory_is_pushed_and_pulled_again_without_it() {
+        use mallard_infrastructure::providers::claude::{earlier_wire, encode_claude_project_path};
+        const A_MEMORY: &str = "A-ONLY remember the ducks";
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repository(&temp);
+        let storage_id = StorageId::parse("earlier-memory-store").unwrap();
+        add_local_storage(&repo, &storage_id, &temp.path().join("store"));
+        let bundle_id = BundleId::parse("df29babc833808e68ad0efa4d01d7d70").unwrap();
+        let register = |name: &str| {
+            register_local_project_with_repository(
+                &repo,
+                RegisterLocalProjectRequest {
+                    display_name: name.to_string(),
+                    repository_fingerprint: Some("a".repeat(64)),
+                    bundle_id: Some(bundle_id.clone()),
+                },
+            )
+            .unwrap()
+        };
+        let binding_of = |project: &LocalProjectRegistration| {
+            repo.load_bindings()
+                .unwrap()
+                .active_for(&project.local_project_id)
+                .cloned()
+                .unwrap()
+        };
+        let state_of = |project: &LocalProjectRegistration| {
+            let comparison = get_project_thread_sync_comparison_with_repository(
+                &repo,
+                &project.local_project_id,
+                &storage_id,
+            )
+            .unwrap();
+            assert_eq!(comparison.entries.len(), 1);
+            comparison.entries[0].state
+        };
+        // Whether any file of the current snapshot holds `needle`. Earlier
+        // snapshots are immutable and keep what they were published with.
+        let published = |needle: &str| {
+            let (_, engine) = storage_engine(&repo, &storage_id).unwrap();
+            let snapshot = engine.inspect(&bundle_id).unwrap();
+            let mut bytes = engine.byte_source(&snapshot, None);
+            let mut found = false;
+            for (path, _) in snapshot.manifest.all_files() {
+                let body = bytes
+                    .read_bounded(path, 1024 * 1024, "test payload")
+                    .unwrap();
+                found |= String::from_utf8_lossy(&body).contains(needle);
+            }
+            found
+        };
+        let session_file = |claude: &Path, root: &Path| {
+            let bucket = claude
+                .join("projects")
+                .join(encode_claude_project_path(&root.to_string_lossy()));
+            std::fs::read_dir(bucket)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                })
+                .unwrap()
+        };
+        let append = |path: &Path, uuid: &str, parent: &str, root: &Path, text: &str| {
+            let existing = std::fs::read_to_string(path).unwrap();
+            let first: serde_json::Value =
+                serde_json::from_str(existing.lines().next().unwrap()).unwrap();
+            let record = serde_json::json!({"type":"user","uuid":uuid,"parentUuid":parent,
+                "sessionId":first["sessionId"],"cwd":root.to_string_lossy(),
+                "message":{"role":"user","content":[{"type":"text","text":text}]}});
+            std::fs::write(path, format!("{existing}{record}\n")).unwrap();
+        };
+        let pull_update = |project: &LocalProjectRegistration| {
+            let restore = ProjectSyncService::new(&repo)
+                .plan_bundle_restore(&storage_id, &bundle_id, &binding_of(project))
+                .unwrap();
+            let update = restore
+                .conversation_review
+                .iter()
+                .find(|row| row.action == ConversationReviewAction::MaterializeCloud)
+                .cloned()
+                .expect("the published session is an ordinary update");
+            let applied = ProjectSyncService::new(&repo)
+                .apply_bundle_restore(&restore, vec![update.action_id.unwrap()])
+                .unwrap();
+            assert!(
+                applied.success,
+                "{} — failed: {:?}",
+                applied.message, applied.failed_actions
+            );
+        };
+
+        // Machine A: a session with Claude's copy of its memory index.
+        let machine_a = register("memoryA");
+        let a_root = temp.path().join("proj-a");
+        let a_claude = temp.path().join("claude-a");
+        bind_and_link_claude_replica(&repo, &machine_a, &storage_id, &a_root, &a_claude);
+        let session_id = "claude-earlier-memory-session";
+        let a_root_text = a_root.to_string_lossy().into_owned();
+        let a_bucket = encode_claude_project_path(&a_root_text);
+        let a_memory_text = format!("{}/projects/{a_bucket}/memory/", a_claude.to_string_lossy());
+        let reminder = format!(
+            "<system-reminder>\nCodebase and user instructions are shown below.\n\n\
+             Contents of {a_memory_text}MEMORY.md (user's auto-memory, persists across \
+             conversations):\n\n{A_MEMORY}\n</system-reminder>"
+        );
+        let mut transcript =
+            claude_test_transcript(session_id, &a_root, &[("u-1", None, "user", "hello")]);
+        for record in [
+            serde_json::json!({"type":"attachment","uuid":"m-1","parentUuid":"u-1",
+                "sessionId":session_id,"cwd":a_root_text,
+                "attachment":{"type":"instructions","files":[{"type":"AutoMem",
+                    "path":format!("{a_memory_text}MEMORY.md"),"content":A_MEMORY}]},
+                "rendered":[{"content":reminder}],"renderedRole":"user"}),
+            serde_json::json!({"type":"api-request-blob","sessionId":session_id,
+                "hash":"instructions","message":{"role":"user",
+                    "content":[{"type":"text","text":reminder}]}}),
+            serde_json::json!({"type":"assistant","uuid":"a-1","parentUuid":"m-1",
+                "sessionId":session_id,"cwd":a_root_text,
+                "message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}),
+        ] {
+            serde_json::to_writer(&mut transcript, &record).unwrap();
+            transcript.push(b'\n');
+        }
+        let a_session_path = a_claude
+            .join("projects")
+            .join(&a_bucket)
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(a_session_path.parent().unwrap()).unwrap();
+        std::fs::write(&a_session_path, &transcript).unwrap();
+
+        // Versions through 1.0.9 published the memory text, and the other
+        // computer pulled it.
+        let a_project_root = binding_of(&machine_a).project_root;
+        earlier_wire::set_earlier_version(&a_project_root, true);
+        push_bundle_with_repository(&repo, &machine_a.local_project_id, &storage_id).unwrap();
+        earlier_wire::set_earlier_version(&a_project_root, false);
+        assert!(published(A_MEMORY), "the earlier version published memory");
+        let machine_b = register("memoryB");
+        let b_root = temp.path().join("proj-b");
+        let b_claude = temp.path().join("claude-b");
+        bind_and_link_claude_replica(&repo, &machine_b, &storage_id, &b_root, &b_claude);
+        let restore = ProjectSyncService::new(&repo)
+            .plan_bundle_restore(&storage_id, &bundle_id, &binding_of(&machine_b))
+            .unwrap();
+        let create_local = restore
+            .conversation_review
+            .iter()
+            .find(|action| action.action == ConversationReviewAction::CreateLocal)
+            .cloned()
+            .expect("stored thread offers CreateLocal");
+        assert!(
+            ProjectSyncService::new(&repo)
+                .apply_bundle_restore(&restore, vec![create_local.action_id.unwrap()])
+                .unwrap()
+                .success
+        );
+        let b_session_path = session_file(&b_claude, &b_root);
+        assert!(std::fs::read_to_string(&b_session_path)
+            .unwrap()
+            .contains(A_MEMORY));
+
+        // Both computers now run this version. Unchanged, the session is in
+        // step on both, and nothing republishes it.
+        for machine in [&machine_a, &machine_b] {
+            assert_eq!(state_of(machine), ThreadSyncState::Synced);
+        }
+        let review =
+            prepare_push_review_with_repository(&repo, &machine_a.local_project_id, &storage_id)
+                .unwrap();
+        assert_eq!(
+            review.thread_comparison.as_ref().unwrap().entries[0]
+                .push_decision
+                .action,
+            ConversationReviewAction::NoChanges
+        );
+        assert!(published(A_MEMORY));
+
+        // A continues the session. The ordinary Push publishes all of it
+        // without the memory, and A's own transcript keeps what it had.
+        append(&a_session_path, "u-2", "a-1", &a_root, "continue from A");
+        push_bundle_with_repository(&repo, &machine_a.local_project_id, &storage_id).unwrap();
+        assert!(published("continue from A"));
+        for needle in [A_MEMORY, a_memory_text.as_str(), "auto-memory, persists"] {
+            assert!(!published(needle), "{needle}");
+        }
+        assert!(std::fs::read_to_string(&a_session_path)
+            .unwrap()
+            .contains(A_MEMORY));
+        assert_eq!(state_of(&machine_a), ThreadSyncState::Synced);
+
+        // B takes it as an ordinary update, continues it, and pushes.
+        pull_update(&machine_b);
+        let b_after = std::fs::read_to_string(&b_session_path).unwrap();
+        assert!(b_after.contains("continue from A"));
+        assert!(!b_after.contains(A_MEMORY));
+        assert_eq!(state_of(&machine_b), ThreadSyncState::Synced);
+        append(&b_session_path, "u-3", "u-2", &b_root, "continue from B");
+        push_bundle_with_repository(&repo, &machine_b.local_project_id, &storage_id).unwrap();
+        assert_eq!(state_of(&machine_b), ThreadSyncState::Synced);
+        assert!(published("continue from B"));
+        assert!(!published(A_MEMORY));
+
+        // A takes B's turn in the same way.
+        pull_update(&machine_a);
+        assert!(std::fs::read_to_string(&a_session_path)
+            .unwrap()
+            .contains("continue from B"));
+        assert_eq!(state_of(&machine_a), ThreadSyncState::Synced);
+    }
+
     /// The complete A→B→A redaction lifecycle for Claude, over the real
     /// push/pull machinery and a real local store: A pushes planted
     /// secrets, every byte in the store holds typed placeholders only, B
@@ -30870,12 +31364,48 @@ mod tests {
                 &format!("my key is {SECRET_A} and DB_PASSWORD={SECRET_A_PASSWORD}"),
             )],
         );
+        // What Claude injects about its auto-memory: the index in the
+        // instructions reminder and the directory in the system prompt, each
+        // with its copy in a request record. None of it may leave A.
+        const A_MEMORY: &str = "A-ONLY remember the ducks";
+        let a_memory_text = format!(
+            "{}/projects/{}/memory/",
+            a_claude.to_string_lossy(),
+            mallard_infrastructure::providers::claude::encode_claude_project_path(&a_root_text)
+        );
+        let memory_reminder = format!(
+            "<system-reminder>\nCodebase and user instructions are shown below.\n\n\
+             Contents of {a_memory_text}MEMORY.md (user's auto-memory, persists across \
+             conversations):\n\n{A_MEMORY}\n</system-reminder>"
+        );
+        let memory_prompt = format!(
+            "# Memory\n\nYou have a persistent file-based memory at `{a_memory_text}`. Write to it."
+        );
+        for record in [
+            serde_json::json!({"type":"attachment","uuid":"m-1","parentUuid":"u-1",
+                "sessionId":session_id,"cwd":a_root_text,
+                "attachment":{"type":"instructions","files":[{"type":"AutoMem",
+                    "path":format!("{a_memory_text}MEMORY.md"),"content":A_MEMORY}]},
+                "rendered":[{"content":memory_reminder}],"renderedRole":"user"}),
+            serde_json::json!({"type":"api-request-blob","sessionId":session_id,
+                "hash":"instructions","message":{"role":"user",
+                    "content":[{"type":"text","text":memory_reminder}]}}),
+            serde_json::json!({"type":"attachment","uuid":"m-2","parentUuid":"m-1",
+                "sessionId":session_id,"cwd":a_root_text,
+                "attachment":{"type":"prompt_snapshot","systemPrompt":[memory_prompt]}}),
+            serde_json::json!({"type":"api-request-shape","sessionId":session_id,
+                "shapeHash":"shape","shape":{"system":[{"type":"text","text":memory_prompt}],
+                    "tools":[]}}),
+        ] {
+            serde_json::to_writer(&mut transcript, &record).unwrap();
+            transcript.push(b'\n');
+        }
         serde_json::to_writer(
             &mut transcript,
             &serde_json::json!({
                 "type": "assistant",
                 "uuid": "a-1",
-                "parentUuid": "u-1",
+                "parentUuid": "m-2",
                 "sessionId": session_id,
                 "cwd": a_root_text,
                 "message": {"role": "assistant", "content": [
@@ -30890,9 +31420,7 @@ mod tests {
         )
         .unwrap();
         transcript.push(b'\n');
-        // Memory only rides in the root's canonical bucket (exact-home
-        // ownership): the bucket name must be the munge of the session's own
-        // recorded home.
+        // The bucket is the munge of the session's own recorded home.
         let a_bucket = format!(
             "projects/{}",
             mallard_infrastructure::providers::claude::encode_claude_project_path(&a_root_text)
@@ -30901,8 +31429,9 @@ mod tests {
         std::fs::create_dir_all(a_session_path.parent().unwrap()).unwrap();
         std::fs::write(&a_session_path, &transcript).unwrap();
         // The auxiliary artifacts ride along: a file-history snapshot of an
-        // edited .env (the densest secret store we ship), a todos list, and
-        // a project memory file — all captured in wire form.
+        // edited .env (the densest secret store we ship) and a todos list,
+        // both captured in wire form. Claude's auto-memory beside the
+        // session does not: it stays on this computer.
         let history_dir = a_claude.join("file-history").join(session_id);
         std::fs::create_dir_all(&history_dir).unwrap();
         std::fs::write(
@@ -30932,27 +31461,16 @@ mod tests {
             "Use the staging workflow.\n",
         )
         .unwrap();
-        // Reviewed push with the recommended recipe: conversations plus the
-        // provider-state memory resource.
+        // Reviewed push with the recommended recipe. Memory is not a
+        // resource: nothing in the review offers it.
         let review =
             prepare_push_review_with_repository(&repo, &machine_a.local_project_id, &storage_id)
                 .unwrap();
-        let mut recipe = recommended_review_recipe(&review, &storage_id);
-        let memory_resource = review
-            .inventory
-            .resources
-            .iter()
-            .find(|resource| resource.descriptor.kind == contracts::provider_state())
-            .map(|resource| resource.descriptor.resource_id.clone())
-            .expect("memory resource discovered");
-        recipe.entries.insert(
-            memory_resource.clone(),
-            RecipeEntry {
-                resource_id: memory_resource,
-                apply_policy: contracts::merge(),
-                required: false,
-            },
-        );
+        let recipe = recommended_review_recipe(&review, &storage_id);
+        assert!(review.inventory.resources.iter().all(|resource| {
+            resource.descriptor.kind != contracts::provider_state()
+                && !resource.descriptor.resource_id.as_str().contains("memory")
+        }));
         assert!(review
             .thread_comparison
             .as_ref()
@@ -30991,15 +31509,25 @@ mod tests {
             store_contains(&store_root, "rotate <anthropic-api-key>"),
             "todos sidecar must ship scrubbed"
         );
-        assert!(
-            store_contains(&store_root, "for staging"),
-            "provider-state memory must ship"
-        );
-        assert!(
-            store_contains(&store_root, "remember: DB_PASSWORD=<password> for staging"),
-            "provider-state memory must ship scrubbed"
-        );
+        // Memory stays on A: not its files, not the index Claude copied
+        // into the session, not the directory's path. The session keeps
+        // every record, and A's own transcript is untouched.
+        for needle in [
+            "for staging",
+            "Use the staging workflow.",
+            A_MEMORY,
+            "auto-memory, persists across conversations",
+            json_text(&a_claude.to_string_lossy()).trim_matches('"'),
+        ] {
+            assert!(!store_contains(&store_root, needle), "{needle}");
+        }
+        assert!(store_contains(
+            &store_root,
+            "You have a persistent file-based memory at `<auto-memory-dir>`"
+        ));
         let a_local = std::fs::read_to_string(&a_session_path).unwrap();
+        assert!(a_local.contains(A_MEMORY));
+        assert!(a_local.contains(&a_memory_text));
         assert!(a_local.contains(SECRET_A));
         assert!(a_local.contains(SECRET_A_PASSWORD));
         let local_history = std::fs::read_to_string(history_dir.join("env@v1")).unwrap();
@@ -31036,6 +31564,17 @@ mod tests {
             .active_for(&machine_b.local_project_id)
             .cloned()
             .unwrap();
+        // B has memory of its own for this project, written before the Pull.
+        let b_memory = b_claude
+            .join("projects")
+            .join(
+                mallard_infrastructure::providers::claude::encode_claude_project_path(
+                    &b_root.to_string_lossy(),
+                ),
+            )
+            .join("memory");
+        std::fs::create_dir_all(&b_memory).unwrap();
+        std::fs::write(b_memory.join("MEMORY.md"), "B-ONLY remember the geese\n").unwrap();
         let restore = ProjectSyncService::new(&repo)
             .plan_bundle_restore(&storage_id, &bundle_id, &b_binding)
             .unwrap();
@@ -31045,16 +31584,12 @@ mod tests {
             .find(|action| action.action == ConversationReviewAction::CreateLocal)
             .cloned()
             .expect("stored thread offers CreateLocal");
-        assert_eq!(
-            restore
-                .actions
-                .iter()
-                .filter(|action| matches!(action.kind, RestoreActionKind::MergeFile { .. }))
-                .count(),
-            2
+        assert!(
+            restore.actions.is_empty(),
+            "a session Pull writes nothing but the session: {:?}",
+            restore.actions
         );
-        // B adopts the whole bundle — the conversation plus the generic
-        // provider-state memory — so its own later push reviews clean.
+        // B adopts the whole bundle, so its own later push reviews clean.
         let applied = ProjectSyncService::new(&repo)
             .apply_bundle_restore(
                 &restore,
@@ -31099,6 +31634,16 @@ mod tests {
         }
         let b_session_path = find_session_file(&b_claude.join("projects")).unwrap();
         let b_installed = std::fs::read_to_string(&b_session_path).unwrap();
+        // B's memory is as B left it, and the session it received says
+        // nothing of A's.
+        assert_eq!(
+            std::fs::read_to_string(b_memory.join("MEMORY.md")).unwrap(),
+            "B-ONLY remember the geese\n"
+        );
+        assert_eq!(std::fs::read_dir(&b_memory).unwrap().count(), 1);
+        assert!(!b_installed.contains(A_MEMORY));
+        assert!(!b_installed.contains(json_text(&a_claude.to_string_lossy()).trim_matches('"')));
+        assert_eq!(b_installed.lines().count(), a_local.lines().count());
         assert!(!b_installed.contains(SECRET_A));
         assert!(!b_installed.contains(SECRET_A_PASSWORD));
         assert!(b_installed.contains("<anthropic-api-key>"));

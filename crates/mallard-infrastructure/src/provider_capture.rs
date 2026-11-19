@@ -1177,52 +1177,6 @@ fn install_provider_discovery(
             },
         )?;
     }
-    for state in result.state_resources {
-        let resource_id = format!(
-            "{}:{}:{}",
-            provider,
-            state.resource_type,
-            resource_id_component(&state.state_component)
-        );
-        let files = state
-            .files
-            .into_iter()
-            .map(|file| SourceFile {
-                physical_path: file.physical_path,
-                logical_path: format!("state/providers/{}/{}", provider, file.logical_suffix),
-            })
-            .collect::<Vec<_>>();
-        if files.is_empty() {
-            continue;
-        }
-        let logical_paths = files
-            .iter()
-            .map(|file| file.logical_path.clone())
-            .collect::<Vec<_>>();
-        insert_resource(
-            discovery,
-            DiscoveredResource {
-                descriptor: ResourceCandidate {
-                    resource_id,
-                    kind: contracts::provider_state(),
-                    provider: Some(provider.clone()),
-                    provider_resource_type: Some(state.resource_type),
-                    display_name: state.display_name,
-                    apply_policy: if state.merge_apply {
-                        contracts::merge()
-                    } else {
-                        contracts::safe_file()
-                    },
-                    selected_by_default: true,
-                    blocked_reason: state.blocked_reason,
-                    logical_paths,
-                    project_content: None,
-                },
-                files,
-                conversation: None,
-            },
-        )?;
-    }
     Ok(())
 }
 
@@ -1859,14 +1813,6 @@ fn capture_bytes_of_files(files: &[SourceFile]) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
-/// Inspect files under an approved root that the caller already canonicalized.
-pub(crate) fn inspect_candidate_files(
-    canonical_approved_root: &Path,
-    files: &[PathBuf],
-) -> Result<(), String> {
-    inspect_candidate_files_with_limit(canonical_approved_root, files, MAX_FILE_BYTES)
-}
-
 pub(crate) fn inspect_candidate_files_with_limit(
     canonical_approved_root: &Path,
     files: &[PathBuf],
@@ -2018,112 +1964,6 @@ fn validate_source_directory(
     Ok(())
 }
 
-pub(crate) fn collect_regular_tree_files(
-    approved_root: &Path,
-    tree: PathBuf,
-) -> Result<Vec<PathBuf>, String> {
-    let meta =
-        fs::symlink_metadata(&tree).map_err(|e| format!("inspect '{}': {}", tree.display(), e))?;
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "symlinked resource '{}' is not captured",
-            tree.display()
-        ));
-    }
-    if meta.is_file() {
-        inspect_candidate_files(approved_root, std::slice::from_ref(&tree))?;
-        return Ok(vec![tree]);
-    }
-    if !meta.is_dir() {
-        return Err(format!(
-            "special resource '{}' is not captured",
-            tree.display()
-        ));
-    }
-    preflight_resource_tree(&tree)?;
-    let mut result = Vec::new();
-    for entry in WalkDir::new(&tree)
-        .follow_links(false)
-        .max_depth(MAX_TREE_DEPTH)
-        .into_iter()
-        .filter_entry(resource_walk_entry)
-    {
-        let entry = entry.map_err(|e| format!("walk '{}': {}", tree.display(), e))?;
-        if entry.depth() == 0 {
-            continue;
-        }
-        if entry.file_type().is_symlink() {
-            return Err(format!(
-                "symlink '{}' blocks resource capture",
-                entry.path().display()
-            ));
-        }
-        if entry.file_type().is_file() {
-            result.push(entry.path().to_path_buf());
-            if result.len() > MAX_DISCOVERED_FILES {
-                return Err(format!("resource '{}' has too many files", tree.display()));
-            }
-        } else if !entry.file_type().is_dir() {
-            return Err(format!(
-                "special file '{}' blocks resource capture",
-                entry.path().display()
-            ));
-        }
-    }
-    result.sort();
-    if !result.is_empty() {
-        inspect_candidate_files(approved_root, &result)?;
-    }
-    Ok(result)
-}
-
-fn preflight_resource_tree(tree: &Path) -> Result<(), String> {
-    let mut walker = WalkDir::new(tree)
-        .follow_links(false)
-        .max_depth(MAX_TREE_DEPTH)
-        .into_iter();
-    while let Some(entry) = walker.next() {
-        let entry = entry.map_err(|e| format!("walk '{}': {}", tree.display(), e))?;
-        if entry.depth() == 0 {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        if matches!(name.as_str(), ".git" | ".svn" | ".hg") {
-            return Err(format!(
-                "nested VCS metadata '{}' blocks resource capture",
-                entry.path().display()
-            ));
-        }
-        if entry.file_type().is_symlink() {
-            return Err(format!(
-                "symlink '{}' blocks resource capture",
-                entry.path().display()
-            ));
-        }
-        if !entry.file_type().is_file() && !entry.file_type().is_dir() {
-            return Err(format!(
-                "special file '{}' blocks resource capture",
-                entry.path().display()
-            ));
-        }
-        if entry.file_type().is_dir()
-            && matches!(
-                name.as_str(),
-                "node_modules"
-                    | "target"
-                    | "cache"
-                    | "caches"
-                    | "plugins"
-                    | "marketplaces"
-                    | "repos"
-            )
-        {
-            walker.skip_current_dir();
-        }
-    }
-    Ok(())
-}
-
 fn reject_unsafe_ancestors(path: &Path, root: &Path) -> Result<(), String> {
     let canonical_path =
         fs::canonicalize(path).map_err(|e| format!("resolve '{}': {}", path.display(), e))?;
@@ -2266,21 +2106,6 @@ pub(crate) fn provider_walk_entry(entry: &DirEntry) -> bool {
             | "marketplaces"
             | "repos"
     )
-}
-
-fn resource_walk_entry(entry: &DirEntry) -> bool {
-    if entry.depth() == 0 {
-        return true;
-    }
-    let name = entry.file_name().to_string_lossy();
-    !denied_file_name(&name)
-        && name != ".git"
-        && name != ".svn"
-        && name != ".hg"
-        && !matches!(
-            name.to_ascii_lowercase().as_str(),
-            "node_modules" | "target" | "cache" | "caches" | "plugins" | "marketplaces" | "repos"
-        )
 }
 
 fn denied_file_name(name: &str) -> bool {

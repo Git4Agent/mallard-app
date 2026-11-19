@@ -734,7 +734,7 @@ pub struct ResourceDescriptor {
     pub kind: ResourceKindCoordinate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderKey>,
-    /// Presentation-only provider subtype (`session`, `memory`, `todo`, …).
+    /// Presentation-only provider subtype (`session`, `todo`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_resource_type: Option<ResourceTypeKey>,
     pub display_name: String,
@@ -3981,7 +3981,9 @@ pub fn cloud_conversation_sidecar_path(
 }
 
 /// The bounded namespace for provider state that is not owned by one
-/// conversation, such as provider memory.
+/// conversation. No adapter in this build writes into it: Mallard does not
+/// sync agent memory. A storage that an earlier version pushed Claude memory
+/// to still holds files here, and its scope must keep validating.
 pub fn provider_state_path_prefix(provider: &ProviderKey) -> String {
     format!("state/providers/{}/", provider.as_str())
 }

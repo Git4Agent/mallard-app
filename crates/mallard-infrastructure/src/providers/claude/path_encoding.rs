@@ -1,4 +1,6 @@
-//! Path encoding for Claude's structured attachments and their rendered text.
+//! The wire form of one Claude record: path encoding for Claude's structured
+//! attachments and their rendered text, then the removal of what Claude
+//! injected about its machine-local auto-memory.
 
 use crate::session_path_map::{EncodedRecord, SessionPathMapper};
 use crate::session_path_origins::{EncodeRefusal, RecordPathOrigins};
@@ -159,7 +161,24 @@ fn encode_request_content(
     Ok(changed)
 }
 
+/// The origins describe the path encoding of the whole source record. The
+/// auto-memory text goes afterwards, from every record alike, so a later
+/// Push replays the same origins to the same wire bytes.
 pub(super) fn encode_record(
+    mapper: &SessionPathMapper,
+    record: &Value,
+    previous: Option<&RecordPathOrigins>,
+) -> Result<EncodedRecord, EncodeRefusal> {
+    let mut encoded = encode_paths(mapper, record, previous)?;
+    #[cfg(any(test, feature = "test-support"))]
+    if earlier_wire::is_earlier_version(mapper.root()) {
+        return Ok(encoded);
+    }
+    super::auto_memory::omit(&mut encoded.wire);
+    Ok(encoded)
+}
+
+fn encode_paths(
     mapper: &SessionPathMapper,
     record: &Value,
     previous: Option<&RecordPathOrigins>,
@@ -184,6 +203,32 @@ pub(super) fn encode_record(
         encoded.changed = true;
     }
     Ok(encoded)
+}
+
+/// Tests of sessions that a version before the auto-memory removal
+/// published. Compiled for tests only.
+#[cfg(any(test, feature = "test-support"))]
+pub mod earlier_wire {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    static EARLIER_VERSION_ROOTS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+    /// Whether a Push from `project_root` keeps Claude's auto-memory text on
+    /// the wire, as versions through 1.0.9 did. Keyed by the project root so
+    /// that tests running side by side do not see each other's setting.
+    pub fn set_earlier_version(project_root: &str, earlier: bool) {
+        let mut roots = EARLIER_VERSION_ROOTS.lock().unwrap();
+        if earlier {
+            roots.insert(project_root.to_string());
+        } else {
+            roots.remove(project_root);
+        }
+    }
+
+    pub(super) fn is_earlier_version(project_root: &str) -> bool {
+        EARLIER_VERSION_ROOTS.lock().unwrap().contains(project_root)
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +331,67 @@ mod tests {
                     .unwrap()
                     .saved_record_changed
             );
+        }
+    }
+
+    /// Auto-memory is dropped from the wire of every record alike, and the
+    /// wire is the same from the source, from its saved origins, and from a
+    /// destination that pulled it.
+    #[test]
+    fn auto_memory_never_reaches_the_wire_and_republishes_to_the_same_bytes() {
+        let a = SessionPathMapper::new("/fixture/source", None, None).unwrap();
+        let b = SessionPathMapper::new("/fixture/destination", None, None).unwrap();
+        let directory = "/fixture/claude-a/projects/-fixture-source/memory/";
+        let reminder = format!(
+            "<system-reminder>\nCodebase and user instructions are shown below.\n\n\
+             Contents of /fixture/source/AGENTS.md (project instructions, checked into the \
+             codebase):\n\nRun /fixture/source/build.sh\n\n\
+             Contents of {directory}MEMORY.md (user's auto-memory, persists across \
+             conversations):\n\n- remember the ducks in /fixture/source/pond\n</system-reminder>"
+        );
+        let prompt = format!(
+            "# Memory\n\nYou have a persistent file-based memory at `{directory}`. Write to it."
+        );
+        for original in [
+            json!({"type":"attachment","uuid":"a1","parentUuid":null,"cwd":"/fixture/source",
+                "attachment":{"type":"instructions","files":[
+                    {"type":"Project","path":"/fixture/source/AGENTS.md",
+                        "content":"Run /fixture/source/build.sh"},
+                    {"type":"AutoMem","path":format!("{directory}MEMORY.md"),
+                        "content":"- remember the ducks in /fixture/source/pond"}]},
+                "rendered":[{"content":reminder}],"renderedRole":"user"}),
+            json!({"type":"api-request-blob","sessionId":"session","hash":"h",
+                "message":{"role":"user","content":[{"type":"text","text":reminder}]}}),
+            json!({"type":"attachment","uuid":"a2","parentUuid":"a1","cwd":"/fixture/source",
+                "attachment":{"type":"prompt_snapshot",
+                    "systemPrompt":["# Intro in /fixture/source", prompt]}}),
+            json!({"type":"api-request-shape","sessionId":"session","shapeHash":"h",
+                "shape":{"system":[{"type":"text",
+                    "text":format!("see /fixture/source/README.md\n\n{prompt}")}],"tools":[]}}),
+        ] {
+            let encoded = encode_record(&a, &original, None).unwrap();
+            let wire = encoded.wire.to_string();
+            for needle in ["/fixture/claude-a", "remember the ducks", "/fixture/source"] {
+                assert!(!wire.contains(needle), "{needle}: {wire}");
+            }
+            // The source keeps its record, and its saved origins replay to
+            // the same wire.
+            assert_eq!(
+                encode_record(&a, &original, Some(&encoded.origins))
+                    .unwrap()
+                    .wire,
+                encoded.wire
+            );
+            // A destination installs the wire as it is and publishes it
+            // unchanged, with the origins Pull saved or without them.
+            let restored = b.decode_record_with_origins(&encoded.wire).unwrap();
+            assert!(restored.local.to_string().contains("/fixture/destination"));
+            for origins in [Some(&restored.origins), None] {
+                assert_eq!(
+                    encode_record(&b, &restored.local, origins).unwrap().wire,
+                    encoded.wire
+                );
+            }
         }
     }
 

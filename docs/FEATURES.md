@@ -9,8 +9,8 @@ What Mallard does, in detail. The short introduction is the repository's
   history, so a team can explore the reasoning behind a diff.
 - Parses session summaries and conversation previews locally, with metrics for
   start and end times, user turns, tokens, agent messages, and tool calls.
-- Syncs selected project conversations and provider-home resources — memory
-  and session state — through Mallard Cloud (sign in with GitHub; private
+- Syncs selected project conversations and the session state beside them
+  through Mallard Cloud (sign in with GitHub; private
   snapshots, collaborators, and a website that shows released sessions and
   Library items), a local folder, Cloudflare R2, Dropbox, or Feishu Drive.
   Every storage holds the same immutable layout, and Mallard Cloud runs the

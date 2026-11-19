@@ -23,10 +23,9 @@ pub mod traits;
 pub use registry::AgentProviderRegistry;
 pub use traits::{
     agent_resource_id, shell_quote, AfterPullActionOffer, AfterPullOfferCode,
-    DiscoveredProviderState,
     DiscoveredSession, SessionAgentIndexEntry, SessionAgentMode, SessionAgentPreview,
     SessionAgentStatus, SessionChildIdentity, AGENT_RESOURCE_SEGMENT,
-    DiscoveredSidecar, DiscoveredStateFile, MaintenanceActionDescriptor, MaintenanceActionScope,
+    DiscoveredSidecar, MaintenanceActionDescriptor, MaintenanceActionScope,
     MaterializationTargetRequest, NewSessionRequest, NewSessionSurface, PlannedProviderTarget,
     ProjectOpenCommand, ProviderCli,
     ProviderDescriptor, SessionActionContext, SessionActionDescriptor, SessionActionKind,

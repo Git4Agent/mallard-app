@@ -82,8 +82,8 @@ change storage B.
 Every portable resource has a `ResourceDescriptor` with a stable ID, kind,
 scope, display name, portable provenance, apply policy, codec version, and
 bounded metadata. Current resource kinds include provider conversations,
-memory, requirement placeholders, and ordinary project-content
-files/directories.
+requirement placeholders, and ordinary project-content files/directories.
+Agent memory is not a resource.
 
 ## 4. Machine-local metadata
 
@@ -731,6 +731,10 @@ but a live R2/S3 project-content smoke test remains an external release check.
   best-effort source mtime.
 - A Push publishes a new immutable snapshot from the selected recipe; storage
   history is bundle versioning, not source control.
+- Agent memory is not synced. Memory a project shares belongs in its
+  repository. Claude's auto-memory under
+  `<CLAUDE_CONFIG_DIR>/projects/<bucket>/memory/` is never discovered,
+  captured, or written by a Pull.
 
 ## 15. Behavior reference
 
@@ -895,6 +899,37 @@ never replaced. Pull then keeps both copies. The activity page says which case
 applies: "Another computer cleared <storage>. Push again." or "… Pull, then
 push again."
 
+### Claude auto-memory stays local
+
+Claude Code copies its auto-memory into every session: the `MEMORY.md` index
+into the instructions reminder, and the memory directory's path into the
+system prompt. Each has a second copy in a request record. The Claude wire
+encoder removes exactly those copies after path encoding and before
+credential redaction, from the main transcript and from child transcripts:
+
+- `attachment` records lose their `AutoMem` file entries and the matching
+  block of the rendered reminder, and the path in `systemPrompt`;
+- `api-request-shape` records lose the path in `shape.system`; and
+- user-role `api-request-blob` records lose the copy of the reminder block.
+
+The path becomes the fixed text `<auto-memory-dir>`. The removal changes
+content only: every record keeps its line, its `uuid`, and its parent, so the
+local and wire forms count alike and Claude resumes the session. It is a pure
+function of one record, so a later Push of the same record gives the same
+bytes, and saved path origins stay valid. The local transcript is not
+changed. What a session itself read or wrote under the memory directory is
+conversation content and travels with the session.
+
+The destination's own memory is untouched by a Pull, and a resumed session
+loads the destination's memory. A session published by an earlier version
+keeps its stored copy until it is pushed again with new records. A storage an
+earlier version pushed to can still hold a `claude:memory:*` resource. Its
+files stay in storage and each Push carries them forward unchanged. Pull
+neither offers nor writes them, so they cannot keep a Pull from completing,
+and no file action can write under a provider home. The `provider_state`
+kind and the `merge` policy stay registered for this reason alone: a scope
+with an unregistered kind is not usable at all.
+
 ### Pull preparation, credential redaction, and path conversion
 
 Pull allocates Codex thread IDs locally during Apply. It uses the existing
@@ -919,7 +954,7 @@ remain in place. A preparation or installation failure affects that thread.
 
 Settings > Privacy controls **Credential redaction** for this machine. It is
 Off by default. On replaces detected credentials in exported sessions, child
-sessions, sidecars, provider-state content, and titles. Off preserves that
+sessions, sidecars, and titles. Off preserves that
 content. Exported content can then include API keys, tokens, and passwords.
 Credential-file exclusions and diagnostic sanitization remain active.
 

@@ -527,8 +527,10 @@ under:
 <CLAUDE_CONFIG_DIR>/projects/.../*.jsonl
 <CLAUDE_CONFIG_DIR>/file-history/...
 <CLAUDE_CONFIG_DIR>/todos/...
-<CLAUDE_CONFIG_DIR>/projects/.../memory/...
 ```
+
+Claude's auto-memory under `<CLAUDE_CONFIG_DIR>/projects/.../memory/` is not
+scanned: memory stays on the machine that wrote it.
 
 User-global agent customizations travel through the scope-rowed Library:
 standalone Codex and Claude Agent Skills from `<CODEX_HOME>/skills`,
@@ -916,7 +918,6 @@ project/<relative-project-path>
 state/claude/projects/<relative-cwd-key>/<session-file>
 state/claude/file-history/<relative-path>
 state/claude/todos/<relative-path>
-state/claude/memory/<relative-cwd-key>/<relative-path>
 ```
 
 Codex discovery initially observes paths under
@@ -1098,8 +1099,8 @@ After a clear the root's claim is free again for the next first version.
 
 ### Stored remotely
 
-- Selected raw payload bytes, including conversation transcripts, provider
-  memory, and explicitly approved non-Git project content.
+- Selected raw payload bytes, including conversation transcripts and
+  explicitly approved non-Git project content. Agent memory is never stored.
 - Bundle/project display name and optional repository fingerprint.
 - Selected recipe and apply policies.
 - Resource display names, portable provenance, project-relative cwd, and
