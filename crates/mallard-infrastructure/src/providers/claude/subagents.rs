@@ -974,6 +974,73 @@ mod tests {
         assert!(matches!(result, ClaudeTailRefresh::NeedsFullResolve { .. }));
     }
 
+    // Claude Code logs each request of a child beside its conversation, in
+    // records with no `uuid` and no `isSidechain`. An append that carries
+    // them extends the saved cursor to the state a full parse derives, and
+    // one that carries another agent's does not.
+    #[test]
+    fn child_incremental_matches_full_across_request_log_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("agent-agent.jsonl");
+        let initial = bytes(&[record("u1", None)]);
+        std::fs::write(&path, &initial).unwrap();
+        let context = ClaudeRecordContext::Child {
+            session_id: "parent",
+            agent_id: "agent",
+        };
+        let analysis = analyze_child(&initial, "parent", "agent");
+        let seed =
+            claude_history_tail::seed_claude_root_in_context(&path, &initial, &analysis, context)
+                .unwrap()
+                .unwrap();
+        fn log(kind: &str, agent: &str) -> Value {
+            json!({"type":kind,"sessionId":"parent","agentId":agent,"hash":"h"})
+        }
+        let refresh = |agent: &str| {
+            let all = bytes(&[
+                record("u1", None),
+                log("api-request-shape", "agent"),
+                log("api-request-blob", agent),
+                log("api-request", "agent"),
+                record("u2", Some("u1")),
+            ]);
+            std::fs::write(&path, &all).unwrap();
+            let window = jsonl_tail_io::read_tail_window(&path, &seed.mapping).unwrap();
+            let result = claude_history_tail::refresh_claude_tail_with_records(
+                &seed.layout,
+                &seed.observed_tail,
+                &seed.mapping,
+                &window,
+                context,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            (all, result)
+        };
+        let (all, result) = refresh("agent");
+        let ClaudeTailRefresh::Extended {
+            observed_tail,
+            mapping,
+        } = result
+        else {
+            panic!("expected incremental append")
+        };
+        assert_eq!(mapping.consumed_byte_offset, all.len() as u64);
+        assert_eq!(mapping.consumed_record_ordinal, 5);
+        assert_eq!(
+            SubagentContentState::from_tail(&observed_tail).unwrap(),
+            content_state(&analyze_child(&all, "parent", "agent")).unwrap()
+        );
+        let (all, result) = refresh("other");
+        assert!(matches!(
+            result,
+            ClaudeTailRefresh::Invalid {
+                reason: claude_history_tail::ClaudeTailInvalidReason::MalformedAppend
+            }
+        ));
+        assert!(content_state(&analyze_child(&all, "parent", "agent")).is_err());
+    }
+
     #[test]
     fn a_call_is_left_out_by_the_id_of_the_child_it_names() {
         use crate::owned_subagents::agent_card_fixtures::{

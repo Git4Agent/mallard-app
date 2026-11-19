@@ -11,7 +11,11 @@ cutover. There is no migration, compatibility reader, or feature flag.
   Filter inherited references before exact-path lookup. Keep the first key
   when an agent resumes. No pending-call map or nested discovery is added.
 - Validate session ID, agent ID, and `isSidechain` before child projection.
-  The main parser continues to exclude sidechain records.
+  The main parser continues to exclude sidechain records. A child record
+  without a `uuid` never joins the chain, so it may omit `isSidechain` but
+  not deny it: Claude Code's request log (`api-request`, `api-request-blob`,
+  `api-request-shape`) is written that way. It still owes both IDs and may
+  carry no agent reference.
 - Store each child's local and normalized state in the existing compact maps.
   Both providers use neutral child labels and the existing comparator/fold.
 - Push reviews membership and captures current bytes at Apply. A new member
@@ -60,8 +64,9 @@ are found while parsing parent records; there is no scan of all Claude projects.
 **Native Claude verification**
 
 Command: `node scripts/run-claude-owned-sync-native.mjs`.
-Claude version: **2.1.263**. The script uses temporary homes and projects,
-a loopback mock, placeholder credentials, and explicit tools.
+Claude version: **2.1.328**, run on 2026-11-19. The script uses temporary
+homes and projects, a loopback mock, placeholder credentials, and explicit
+tools.
 
 | Case | Parents | Direct children | Result |
 | --- | ---: | ---: | --- |
@@ -72,6 +77,13 @@ Each restored child resumed through a fresh CLI process. The mock observed
 its prior durable response. Source transcripts remained byte-identical.
 The async test removed source external output artifacts before destination
 resume. It does not claim to transfer a running process or temporary output.
+
+This Claude version logs each child request in the child transcript. Every
+child record, on the source and after restore and resume, met the identity
+rule: 336 records, of which 108 were request-log records. A restored
+`api-request-blob` keeps its native `hash` while its directory line is
+relocated; cold resume passed with it. Mallard does not interpret or
+recompute the request log's hashes.
 
 Synthetic tests also cover inherited references, repeated results, identity
 mismatch before projection, unsupported nesting, unsafe paths, incremental

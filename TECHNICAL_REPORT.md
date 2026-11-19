@@ -165,8 +165,10 @@ included structural references and retains omitted native references. The
 binding map recovers installed membership. Discovery scans past each
 installation cutoff for new children and checks authoritative parent metadata.
 Claude supports direct children only. A parent tool-result record supplies the
-child key and agent ID. Each child record must match its parent session ID,
-filename agent ID, and native sidechain flag. Child lookup uses the exact parent
+child key and agent ID. Each child record must match its parent session ID and
+filename agent ID. A record with a `uuid` must also carry the native sidechain
+flag; a record without one, such as Claude Code's request log, never joins the
+chain and may omit the flag but not deny it. Child lookup uses the exact parent
 directory. Claude Pull keeps the agent ID and allocates a new parent ID for
 Create local or Keep both. An update retains the installed identities.
 
