@@ -386,7 +386,7 @@ initialize its nested sandbox; the test still keeps Codex itself at
 detects the known nested-Seatbelt failure with a bounded, no-provider preflight
 before starting Cargo and prints a fixed ordinary-Terminal instruction.
 Implementation, protocol POCs, and the complete ignored live gate are verified.
-The current native-format gate requires Codex CLI `0.167.1`. The
+The current native-format gate requires Codex CLI `0.170.0`. The
 previous `0.162.1` keyless gate passed on October 9, 2026 with
 `1 passed, 0 failed, 19 filtered` in 74.82 seconds. Every model-shaped response came from the one local
 aimock child; the run used no provider account, credential, remote model, GPU,
@@ -505,11 +505,20 @@ restored nested cwd, byte-identical media, and Session Detail's
 from the actual stored transcript and verifies the same directory and link.
 A native resume on B checks the complete history and relocated Bash command.
 All portable objects are scanned for local paths and credential markers.
-Claude 2.1.322 stores rendered environment reminders beside their structured
+Claude 2.1.328 stores rendered environment reminders beside their structured
 attachments and repeats them in `api-request-blob` message records. The adapter
 relocates their generated working-directory lines, including the previous
 directory in environment updates, and verifies lossless source restoration.
 The media flow checks that no source directory remains after Pull.
+
+Each media replica starts with its own Claude auto-memory. The flow first
+checks that the native transcript holds Claude's copy of the memory index and
+names the memory directory, then that neither reaches storage or the other
+replica, that the Pull leaves the destination's memory as it was, and that the
+native resume on B loads B's memory. Private roots are searched in both the
+spelling Claude was given and the canonical one, because Claude keeps the
+spelling it was started with and the system temporary directory is an alias on
+macOS.
 
 Run only this phase with:
 
@@ -538,7 +547,7 @@ It simulates the file rewrite; it does not launch or validate Claude Desktop.
 The import after Pull is a required assertion, including the installed-cutoff
 boundary. No padding or metadata reset hides that failure.
 
-The current native-format gate requires exactly Claude Code `2.1.322`,
+The current native-format gate requires exactly Claude Code `2.1.328`,
 `@copilotkit/aimock` `1.39.0`, Node.js 20.15.0 or newer, and the mock model
 identifier `claude-sonnet-4-6`. The runner strips inherited provider,
 provider-home, endpoint, and proxy state before Cargo starts. Each Claude
@@ -567,7 +576,7 @@ revision 1, and verifies one incremental cursor append.
 The original sync phase accounting is exact: 12 Claude model-turn processes
 make 13 authenticated
 `POST /v1/messages?beta=true` requests, because the first content tool round
-uses two Messages calls. Claude Code 2.1.322 makes no
+uses two Messages calls. Claude Code 2.1.328 makes no
 `HEAD /api/hello` probes. The raw boundary therefore requires exactly 13
 requests, all model requests, and rejects any extra probe. The Messages
 requests are separately reconciled with all 13 semantic aimock scenarios. Any

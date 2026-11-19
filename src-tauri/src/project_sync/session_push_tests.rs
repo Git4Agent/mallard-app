@@ -160,7 +160,7 @@ fn session_push_limits_selection_and_acceptance_to_the_parent_and_approved_child
 }
 
 #[test]
-fn session_push_preserves_other_stored_sessions_and_provider_resources() {
+fn session_push_preserves_other_stored_sessions() {
     let temp = tempfile::tempdir().unwrap();
     let repo = repository(&temp);
     let storage = StorageId::parse("session-retention").unwrap();
@@ -221,21 +221,13 @@ fn session_push_preserves_other_stored_sessions_and_provider_resources() {
         .unwrap();
     let files =
         inspect_project_files_with_repository(&repo, &project.local_project_id, &storage).unwrap();
+    // Claude's auto-memory sits beside the sessions and is never offered.
+    assert!(review.inventory.resources.iter().all(|resource| !resource
+        .descriptor
+        .resource_id
+        .as_str()
+        .contains("memory")));
     let mut approval = PushApproval::recommended(&review, &storage);
-    let memory_resource = review
-        .inventory
-        .resources
-        .iter()
-        .find(|resource| resource.descriptor.resource_id.as_str() == "claude:memory:root")
-        .unwrap();
-    approval.recipe.entries.insert(
-        memory_resource.descriptor.resource_id.clone(),
-        RecipeEntry {
-            resource_id: memory_resource.descriptor.resource_id.clone(),
-            apply_policy: memory_resource.descriptor.apply_policy.clone(),
-            required: false,
-        },
-    );
     approval
         .recipe
         .entries
@@ -256,10 +248,10 @@ fn session_push_preserves_other_stored_sessions_and_provider_resources() {
         scope_before
             .files
             .keys()
-            .any(|path| path.as_str() == "state/providers/claude/memory/notes.md"),
-        "fixture must contain generic provider data"
+            .all(|path| !path.as_str().contains("memory")),
+        "Claude memory stays on this computer"
     );
-    std::fs::write(memory, "Local memory must stay local\n").unwrap();
+    std::fs::write(memory, "Changed memory still stays local\n").unwrap();
     std::fs::write(root.join("keep.txt"), "Local project change\n").unwrap();
     save_child_push(&repo, "claude", false);
     let resource_id = ResourceId::parse(format!("claude:session:{parent}")).unwrap();

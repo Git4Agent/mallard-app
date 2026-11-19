@@ -25,7 +25,7 @@ test("Rust and JavaScript Tauri resolve to the same major/minor release", async 
   assert.equal(majorMinor(apiVersion), majorMinor(rustVersions[0][1]));
 });
 
-test("release version is 1.0.9 in every source", async () => {
+test("release version is 1.0.10 in every source", async () => {
   const [tauriConfigSource, workspaceCargoSource, cargoSource, packageSource, packageLockSource] = await Promise.all([
     read("src-tauri/tauri.conf.json"),
     read("Cargo.toml"),
@@ -37,12 +37,12 @@ test("release version is 1.0.9 in every source", async () => {
   const packageConfig = JSON.parse(packageSource);
   const packageLock = JSON.parse(packageLockSource);
 
-  assert.equal(tauriConfig.version, "1.0.9");
-  assert.match(workspaceCargoSource, /^version = "1\.0\.9"$/m);
+  assert.equal(tauriConfig.version, "1.0.10");
+  assert.match(workspaceCargoSource, /^version = "1\.0\.10"$/m);
   assert.match(cargoSource, /^version\.workspace = true$/m);
-  assert.equal(packageConfig.version, "1.0.9");
-  assert.equal(packageLock.version, "1.0.9");
-  assert.equal(packageLock.packages[""].version, "1.0.9");
+  assert.equal(packageConfig.version, "1.0.10");
+  assert.equal(packageLock.version, "1.0.10");
+  assert.equal(packageLock.packages[""].version, "1.0.10");
 });
 
 // The signed updater was removed in af20e1a because no Apple signing existed

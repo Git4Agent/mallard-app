@@ -5,7 +5,6 @@
 
 use crate::providers::traits::{MaterializationTargetRequest, PlannedProviderTarget};
 use mallard_domain::ConversationFileRole;
-use std::path::{Path, PathBuf};
 
 /// Claude buckets sessions per working directory using a lossy
 /// alphanumeric-or-dash encoding of the absolute cwd.
@@ -90,30 +89,6 @@ pub(super) fn verify_sidecar(sidecar_kind: &str, bytes: &[u8]) -> Result<(), Str
         "file-history" => Ok(()),
         other => Err(format!("unsupported Claude sidecar kind '{}'", other)),
     }
-}
-
-/// Map one provider-state logical suffix (`memory/<rel>`) to its machine
-/// path in the project root's canonical bucket under the Claude home.
-pub(super) fn state_target(
-    provider_home: &Path,
-    project_root: &str,
-    logical_suffix: &str,
-) -> Result<PathBuf, String> {
-    let Some(remainder) = logical_suffix.strip_prefix("memory/") else {
-        return Err(format!(
-            "Claude state path '{}' is not project memory",
-            logical_suffix
-        ));
-    };
-    let bucket = encode_claude_project_path(project_root);
-    let mut target = provider_home.join("projects").join(bucket).join("memory");
-    for component in remainder.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
-            return Err(format!("unsafe Claude memory path '{}'", logical_suffix));
-        }
-        target.push(component);
-    }
-    Ok(target)
 }
 
 #[cfg(test)]

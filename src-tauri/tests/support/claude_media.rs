@@ -19,6 +19,37 @@ const RESPONSE: &str = "MALLARD_CLAUDE_MEDIA_READY\n[Part5_The_Fall_of_Patroclus
 const RESUME_PROMPT: &str = "MALLARD_CLAUDE_USER_MEDIA_RESUME";
 const RESUME_RESPONSE: &str = "MALLARD_CLAUDE_MEDIA_RESUMED";
 const CALL: &str = "mallard_claude_media_cd";
+// Each replica's own Claude auto-memory. Neither may leave its computer.
+const MEMORY_A: &str = "MALLARD_CLAUDE_MEDIA_MEMORY_A";
+const MEMORY_B: &str = "MALLARD_CLAUDE_MEDIA_MEMORY_B";
+
+/// Claude's auto-memory index for `project` under `home`.
+fn memory_index(home: &Path, project: &Path) -> PathBuf {
+    home.join("projects")
+        .join(encode_claude_project_path(
+            project.to_string_lossy().as_ref(),
+        ))
+        .join("memory")
+        .join("MEMORY.md")
+}
+
+fn memory_text(marker: &str) -> String {
+    format!("- {marker}\n")
+}
+
+fn seed_memory(home: &Path, project: &Path, marker: &str) {
+    let index = memory_index(home, project);
+    secure_directory(index.parent().unwrap());
+    write_private_new(&index, memory_text(marker).as_bytes());
+}
+
+/// A path as it was given and as the system resolves it. Claude keeps the
+/// spelling it was started with, so a search for one spelling alone passes
+/// wherever the temporary directory is an alias.
+fn both_spellings(path: &Path) -> [Vec<u8>; 2] {
+    [path.to_path_buf(), canonicalize(path).unwrap()]
+        .map(|spelling| spelling.to_string_lossy().as_bytes().to_vec())
+}
 
 fn write_large_file(path: &Path) -> String {
     let mut options = std::fs::OpenOptions::new();
@@ -219,6 +250,8 @@ pub(super) fn run() {
         secure_directory(path);
     }
     let projects = projects.map(|path| canonicalize(&path).unwrap());
+    seed_memory(&homes[0], &projects[0], MEMORY_A);
+    seed_memory(&homes[1], &projects[1], MEMORY_B);
     secure_directory(&projects[0].join("part5"));
     write_private_new(&projects[0].join(VIDEO), VIDEO_BYTES);
     println!("Claude media: generate and transfer exactly {LARGE_FILE_BYTES} bytes");
@@ -267,6 +300,24 @@ pub(super) fn run() {
             })
         }),
         "native media fixture must include an API request copy of the source directory"
+    );
+    // Claude itself copies its memory into the session: the index, and the
+    // directory's path as Claude was given it. Without both, the checks
+    // below would prove nothing.
+    assert!(
+        byte_slice_contains(&source, MEMORY_A.as_bytes()),
+        "native media fixture must include Claude's own copy of its memory index"
+    );
+    assert!(
+        byte_slice_contains(
+            &source,
+            memory_index(&homes[0], &projects[0])
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .as_bytes()
+        ),
+        "native media fixture must name Claude's memory directory"
     );
     push_media(&services[0], &a.project.local_project_id, &storage.id);
     assert_eq!(transcript_bytes(&homes[0], &projects[0], SESSION), source);
@@ -419,10 +470,23 @@ pub(super) fn run() {
     let b_session = provider_thread_id(&repositories[1], &b.project.local_project_id, &b_thread);
     let restored = transcript_bytes(&homes[1], &projects[1], &b_session);
     assert_media_record(&restored, projects[1].join("part5").to_str().unwrap());
-    assert_excludes(
-        &restored,
-        &[projects[0].to_string_lossy().as_bytes().to_vec()],
-        "restored media transcript",
+    let mut source_only = vec![
+        projects[0].to_string_lossy().as_bytes().to_vec(),
+        MEMORY_A.as_bytes().to_vec(),
+    ];
+    source_only.extend(both_spellings(&homes[0]));
+    assert_excludes(&restored, &source_only, "restored media transcript");
+    // The Pull wrote the session and nothing into the destination's memory.
+    let memory_b = memory_index(&homes[1], &projects[1]);
+    assert_eq!(
+        std::fs::read(&memory_b).unwrap(),
+        memory_text(MEMORY_B).as_bytes()
+    );
+    assert_eq!(
+        std::fs::read_dir(memory_b.parent().unwrap())
+            .unwrap()
+            .count(),
+        1
     );
     assert_detail(
         &services[1],
@@ -446,9 +510,21 @@ pub(super) fn run() {
         "Bash",
     );
     assert_eq!(processes, 2);
-    assert_media_record(
-        &transcript_bytes(&homes[1], &projects[1], &b_session),
-        projects[1].join("part5").to_str().unwrap(),
+    let resumed = transcript_bytes(&homes[1], &projects[1], &b_session);
+    assert_media_record(&resumed, projects[1].join("part5").to_str().unwrap());
+    // The resumed session runs on the destination's memory, never the source's.
+    assert!(
+        byte_slice_contains(&resumed, MEMORY_B.as_bytes()),
+        "native resume must load the destination's own memory"
+    );
+    assert_excludes(&resumed, &source_only, "resumed media transcript");
+    assert_eq!(
+        std::fs::read(&memory_b).unwrap(),
+        memory_text(MEMORY_B).as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(memory_index(&homes[0], &projects[0])).unwrap(),
+        memory_text(MEMORY_A).as_bytes()
     );
     assert_eq!(transcript_bytes(&homes[0], &projects[0], SESSION), source);
     let sensitive = vec![
@@ -461,13 +537,10 @@ pub(super) fn run() {
             .iter()
             .map(|path| path.to_string_lossy().as_bytes().to_vec()),
     );
-    private.push(
-        canonicalize(root.path())
-            .unwrap()
-            .to_string_lossy()
-            .as_bytes()
-            .to_vec(),
-    );
+    for path in [root.path(), homes[0].as_path(), homes[1].as_path()] {
+        private.extend(both_spellings(path));
+    }
+    private.extend([MEMORY_A, MEMORY_B].map(|marker| marker.as_bytes().to_vec()));
     assert_portable_state_is_safe(
         &services[0],
         &storage.id,

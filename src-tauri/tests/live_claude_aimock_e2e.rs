@@ -64,7 +64,7 @@ const MODEL: &str = "claude-sonnet-4-6";
 const LIVE_TUZI_TEST_GATE: &str = "MALLARD_RUN_LIVE_CLAUDE_TUZI_E2E";
 const LIVE_TUZI_MODEL: &str = "claude-sonnet-5";
 const LIVE_TUZI_SOURCE_SESSION_ID: &str = "018f3f2e-7b91-7ad0-8000-000000000301";
-const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.322 (Claude Code)";
+const EXPECTED_AIMOCK_CLAUDE_VERSION: &str = "2.1.328 (Claude Code)";
 const EXPECTED_TUZI_CLAUDE_VERSION: &str = "2.1.322 (Claude Code)";
 const PLACEHOLDER_API_KEY: &str = "mallard-local-aimock-placeholder";
 const INHERITED_SECRET_MARKER: &str = "mallard-inherited-secret-sentinel";
@@ -3953,12 +3953,14 @@ fn lineage_of(bytes: &[u8]) -> mallard_infrastructure::conversation_codec::Codec
     analysis.lineage
 }
 
-/// The lineage expected after local bytes are path-encoded, redacted, and
-/// decoded for a destination binding. The destination provider identity is
-/// restamped after decoding, as it is in the production Pull path.
+/// The lineage expected after local bytes are path-encoded, cleared of the
+/// source's auto-memory directory, redacted, and decoded for a destination
+/// binding. The destination provider identity is restamped after decoding,
+/// as it is in the production Pull path.
 fn relocated_lineage_of(
     bytes: &[u8],
     source_root: &Path,
+    source_claude_home: &Path,
     destination_root: &Path,
     process_home: &Path,
     source_provider_thread_id: &str,
@@ -3986,6 +3988,29 @@ fn relocated_lineage_of(
             );
         }
     }
+    // Claude names its auto-memory directory in the system prompt. The
+    // directory stays on the source: wherever the session names it, the wire
+    // has a placeholder. The reference finds it by its value, production by
+    // the sentence that names it, so a mention production missed fails here.
+    let memory_directory = source_claude_home
+        .join("projects")
+        .join(encode_claude_project_path(
+            source_root.to_str().expect("source project path is UTF-8"),
+        ))
+        .join("memory");
+    let memory_directory = memory_directory
+        .to_str()
+        .expect("Claude memory directory is UTF-8");
+    assert!(
+        encoded.contains(memory_directory),
+        "native Claude transcript must name its auto-memory directory"
+    );
+    let named = format!("{memory_directory}/");
+    let encoded = if encoded.contains(&format!("`{named}`")) {
+        encoded.replace(&named, "<auto-memory-dir>")
+    } else {
+        encoded.replace(memory_directory, "<auto-memory-dir>")
+    };
     let (redacted, _changed_lines) = mallard_infrastructure::credential_redaction::shared()
         .redact_jsonl_text(&encoded)
         .expect("transcript redacts cleanly");
@@ -4590,12 +4615,13 @@ fn live_claude_aimock_setup_push_pull_divergence() {
         relocated_lineage_of(
             &source_r1_bytes,
             &project_a,
+            &claude_home_a,
             &project_b,
             &process_home,
             SOURCE_SESSION_ID,
             &provider_primary_b,
         ),
-        "production Claude relocation changed lineage or semantics beyond path mapping and redaction"
+        "production Claude relocation changed lineage or semantics beyond path mapping, auto-memory removal, and redaction"
     );
     assert_excludes(
         &destination_r1_bytes,

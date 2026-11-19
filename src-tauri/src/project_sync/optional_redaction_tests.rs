@@ -57,6 +57,7 @@ fn optional_redaction_session_children_pull_adoption_and_republication() {
             let history = home.join("file-history").join(parent);
             std::fs::create_dir_all(&history).unwrap();
             std::fs::write(history.join("env@v1"), format!("access_token={SECRET}\n")).unwrap();
+            // Claude's auto-memory holds the secret as well and never ships.
             let memory = paths[0].parent().unwrap().join("memory");
             std::fs::create_dir_all(&memory).unwrap();
             std::fs::write(memory.join("notes.md"), format!("access_token={SECRET}\n")).unwrap();
@@ -73,20 +74,7 @@ fn optional_redaction_session_children_pull_adoption_and_republication() {
         }
         let service = ProjectSyncService::new(&repo);
         let push = |review: &PushReviewContext| {
-            let mut approval = PushApproval::recommended(review, &storage);
-            for resource in &review.inventory.resources {
-                if resource.descriptor.kind == contracts::provider_state() {
-                    let id = resource.descriptor.resource_id.clone();
-                    approval.recipe.entries.insert(
-                        id.clone(),
-                        RecipeEntry {
-                            resource_id: id,
-                            apply_policy: contracts::merge(),
-                            required: false,
-                        },
-                    );
-                }
-            }
+            let approval = PushApproval::recommended(review, &storage);
             let result = service
                 .push_reviewed(&source.local_project_id, &storage, approval)
                 .unwrap();
@@ -116,6 +104,10 @@ fn optional_redaction_session_children_pull_adoption_and_republication() {
             let mut bytes = engine.byte_source(snapshot, None);
             let mut planted_files = 0;
             for (path, _) in snapshot.manifest.all_files() {
+                assert!(
+                    !path.as_str().contains("memory"),
+                    "{provider}: {path}: memory stays on this computer"
+                );
                 let body = bytes
                     .read_bounded(path, 1024 * 1024, "test payload")
                     .unwrap();
@@ -129,7 +121,7 @@ fn optional_redaction_session_children_pull_adoption_and_republication() {
             }
             assert!(planted_files >= 2, "parent and child must ship");
             if provider == "claude" {
-                assert!(planted_files >= 4, "sidecar and provider state must ship");
+                assert!(planted_files >= 3, "the sidecar must ship");
             }
             let manifest = serde_json::to_string(&snapshot.manifest).unwrap();
             assert_eq!(

@@ -191,6 +191,76 @@ mod tests {
         }
     }
 
+    /// Dropping auto-memory changes content only: every record keeps its
+    /// line and its place in the conversation, so the local and wire forms
+    /// count alike, and a second Push of the same transcript is the same
+    /// bytes.
+    #[test]
+    fn auto_memory_is_dropped_without_changing_the_record_layout() {
+        let mapper = SessionPathMapper::new("/fixture/project", None, None).unwrap();
+        let directory = "/fixture/claude/projects/-fixture-project/memory/";
+        let reminder = format!(
+            "<system-reminder>\nCodebase and user instructions are shown below.\n\n\
+             Contents of {directory}MEMORY.md (user's auto-memory, persists across \
+             conversations):\n\nremember the ducks\n</system-reminder>"
+        );
+        let records = [
+            main_record(),
+            json!({"type":"attachment","uuid":"a1","parentUuid":"u1","sessionId":"parent",
+                "cwd":"/fixture/project","attachment":{"type":"instructions","files":[
+                    {"type":"AutoMem","path":format!("{directory}MEMORY.md"),
+                        "content":"remember the ducks"}]},
+                "rendered":[{"content":reminder}],"renderedRole":"user"}),
+            json!({"type":"api-request-blob","sessionId":"parent","hash":"h",
+                "message":{"role":"user","content":[{"type":"text","text":reminder}]}}),
+            json!({"type":"assistant","uuid":"m1","parentUuid":"a1","sessionId":"parent",
+                "message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}),
+        ];
+        let source = records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        let encode = |origins: &PathOrigins| {
+            encode_main_transcript(
+                source.as_bytes(),
+                "parent",
+                &mapper,
+                origins,
+                OriginLookup::ByPosition,
+                &mut shared().begin_run(),
+            )
+            .unwrap()
+        };
+        let first = encode(&PathOrigins::default());
+        let wire = std::str::from_utf8(first.bytes.as_bytes()).unwrap();
+        for needle in [
+            directory,
+            "remember the ducks",
+            "persists across conversations",
+        ] {
+            assert!(!wire.contains(needle), "{needle}: {wire}");
+        }
+        assert_eq!(wire.lines().count(), records.len());
+
+        let local = analyze_claude_transcript(source.as_bytes());
+        let chain = |analysis: &SessionAnalysis| {
+            analysis
+                .lineage
+                .chain()
+                .unwrap()
+                .iter()
+                .map(|message| message.message_id.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chain(&local), ["u1", "a1", "m1"]);
+        assert_eq!(chain(&first.analysis), chain(&local));
+        assert_eq!(first.analysis.record_count, local.record_count);
+
+        let second = encode(&first.path_origins);
+        assert_eq!(second.bytes.as_bytes(), first.bytes.as_bytes());
+        assert_eq!(second.path_origins, first.path_origins);
+    }
+
     #[test]
     fn streamed_splice_preserves_layout_final_analysis_and_emitted_byte_count() {
         let mapper = SessionPathMapper::new("/fixture/project", None, None).unwrap();

@@ -265,32 +265,10 @@ pub struct DiscoveredSidecar {
     pub blocked_reason: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct DiscoveredStateFile {
-    pub physical_path: PathBuf,
-    /// Path suffix under `state/providers/<key>/`.
-    pub logical_suffix: String,
-}
-
-/// Provider state not owned by one conversation (for example memory).
-#[derive(Clone, Debug)]
-pub struct DiscoveredProviderState {
-    /// Stable resource-id component for this state group.
-    pub state_component: String,
-    /// Presentation subtype recorded as `provider_resource_type`.
-    pub resource_type: String,
-    pub display_name: String,
-    /// Merge-applied state (memory) versus safe-file state.
-    pub merge_apply: bool,
-    pub files: Vec<DiscoveredStateFile>,
-    pub blocked_reason: Option<String>,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct SessionDiscovery {
     pub sessions: Vec<DiscoveredSession>,
     pub sidecars: Vec<DiscoveredSidecar>,
-    pub state_resources: Vec<DiscoveredProviderState>,
     pub warnings: Vec<String>,
     pub excluded_subagent_session_ids: BTreeSet<String>,
 }
@@ -1233,17 +1211,6 @@ pub trait SessionAdapter: Send + Sync {
     ) -> Result<PathBuf, String> {
         let _ = request;
         Err("provider does not support child transcripts".into())
-    }
-    /// Map one provider-state logical suffix (under
-    /// `state/providers/<key>/`) to its machine path. Providers without
-    /// provider-state resources refuse.
-    fn state_target(
-        &self,
-        _provider_home: &Path,
-        _project_root: &str,
-        _logical_suffix: &str,
-    ) -> Result<PathBuf, String> {
-        Err("provider has no provider-state resources".to_string())
     }
     /// Bounded full-file summary for Activity.
     fn summarize_file(&self, path: &Path) -> Result<SessionFileSummary, String>;

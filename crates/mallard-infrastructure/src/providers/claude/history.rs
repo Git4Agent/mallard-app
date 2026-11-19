@@ -128,10 +128,11 @@ pub(crate) fn summarize_file(path: &Path) -> Result<SessionFileSummary, String> 
     summarize_bytes(&bytes)
 }
 
-/// A child transcript's records are all sidechain records naming the parent
-/// session and the agent. Read as the child's own page, that sidechain is the
-/// main chain: the flag comes off, and a record that is not this child's is
-/// skipped rather than indexed under the wrong identity.
+/// A child transcript's conversation records are all sidechain records naming
+/// the parent session and the agent. Read as the child's own page, that
+/// sidechain is the main chain: the flag comes off, and a record that is not
+/// this child's conversation — another identity's, or the unflagged request
+/// log — is skipped rather than indexed.
 fn normalize_child_record(mut value: Value, child: &SessionChildIdentity) -> Option<Value> {
     let object = value.as_object_mut()?;
     if object.get("sessionId").and_then(Value::as_str)

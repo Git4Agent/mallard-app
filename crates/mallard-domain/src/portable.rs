@@ -138,6 +138,9 @@ impl TombstoneTargetEnvelope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ResourceKindPrimitive {
     Conversation,
+    /// Provider state outside a conversation. Nothing captures or restores
+    /// it now; it resolves so that a scope holding Claude memory from an
+    /// earlier version stays usable instead of failing as unregistered.
     ProviderState,
     ProjectContentFile,
     ProjectContentDirectory,

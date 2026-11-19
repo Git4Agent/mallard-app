@@ -210,7 +210,7 @@ export interface ProjectResourceDescriptor {
   resource_id: string;
   kind: ContractCoordinate;
   provider?: ProviderKey | null;
-  /** Presentation-only provider subtype (`session`, `memory`, `todo`, …). */
+  /** Presentation-only provider subtype (`session`, `todo`, …). */
   provider_resource_type?: string | null;
   display_name: string;
   provenance: ProvenanceEnvelope;

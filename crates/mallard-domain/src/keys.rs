@@ -86,7 +86,7 @@ bounded_key!(
 
 bounded_key!(
     /// Presentation-oriented provider resource subtype such as `session`,
-    /// `memory`, `todo`, or `file-history`. Core behavior keys off the
+    /// `todo`, or `file-history`. Core behavior keys off the
     /// registered resource kind, ownership, and adapter capabilities — never
     /// off this string.
     ResourceTypeKey,

@@ -18,6 +18,14 @@ function check(value, code) {
   if (!value) throw new Error(code);
 }
 
+// Mallard's child rule: every record names its parent and its agent. A record
+// with a uuid is a sidechain record; one without (the request log) may leave
+// the flag out, but may not deny it.
+function ownedRecord(record, childId, parentId) {
+  return record.agentId === childId && record.sessionId === parentId
+    && ("isSidechain" in record ? record.isSidechain === true : !("uuid" in record));
+}
+
 async function documents(root) {
   const found = [];
   let entries = 0;
@@ -123,7 +131,7 @@ async function runCase(LLMock, root, asynchronous) {
     for (const child of children) {
       const childId = child.records[0].agentId;
       const parentId = child.records[0].sessionId;
-      check(child.records.every((record) => record.agentId === childId && record.sessionId === parentId && record.isSidechain === true), "child_record_identity");
+      check(child.records.every((record) => ownedRecord(record, childId, parentId)), "child_record_identity");
       const link = parents.flatMap((parent) => parent.records).find((record) => record.toolUseResult?.agentId === childId);
       check(link && link.message.content.some((block) => block.type === "tool_result" && block.tool_use_id.startsWith("fixture_spawn_")), "single_record_link");
       sourceBytes.set(child.path, await readFile(child.path));

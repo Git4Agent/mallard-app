@@ -62,15 +62,26 @@ pub(crate) enum ClaudeRecordContext<'a> {
 }
 
 impl ClaudeRecordContext<'_> {
+    /// Every record of a child names the parent session and the agent. A
+    /// record with a `uuid` key is a transcript message and must also be a
+    /// sidechain record. A record without one can never join the chain
+    /// (`is_chain_record_in_context`), and Claude Code writes such records
+    /// without the flag — its request log: `api-request`, `api-request-blob`,
+    /// `api-request-shape` — so it may leave `isSidechain` out, but a flag
+    /// that is present must still be `true`.
     pub(crate) fn validate(self, value: &Value) -> Result<(), CodecUnknownReason> {
         if let Self::Child {
             session_id,
             agent_id,
         } = self
         {
+            let sidechain = match value.get("isSidechain") {
+                Some(flag) => flag.as_bool() == Some(true),
+                None => value.get("uuid").is_none(),
+            };
             if value.get("sessionId").and_then(Value::as_str) != Some(session_id)
                 || value.get("agentId").and_then(Value::as_str) != Some(agent_id)
-                || value.get("isSidechain").and_then(Value::as_bool) != Some(true)
+                || !sidechain
             {
                 return Err(CodecUnknownReason::InvalidChildIdentity);
             }
@@ -2108,6 +2119,138 @@ mod tests {
         assert!(analysis.is_resumable(), "{:?}", analysis.lineage);
         assert_eq!(analysis.lineage.chain().unwrap().len(), 2);
         assert_eq!(analysis.record_count, 4);
+    }
+
+    const CHILD: ClaudeRecordContext<'static> = ClaudeRecordContext::Child {
+        session_id: "parent",
+        agent_id: "agent",
+    };
+
+    /// One record of each request-log type, in the shape Claude Code 2.1.328
+    /// writes into a child transcript: `sessionId` and `agentId`, no `uuid`,
+    /// no `isSidechain`.
+    fn child_request_log() -> [Value; 3] {
+        [
+            json!({"type":"api-request-shape","sessionId":"parent","agentId":"agent",
+                "shapeHash":"shape-hash","timestamp":"2026-11-19T08:36:29.727Z",
+                "version":"2.1.328",
+                "shape":{"system":[{"type":"text","text":"system prompt"}],"tools":[]}}),
+            json!({"type":"api-request-blob","sessionId":"parent","agentId":"agent",
+                "hash":"blob-hash",
+                "message":{"role":"user","content":[{"type":"text","text":"child prompt"}]}}),
+            json!({"type":"api-request","sessionId":"parent","agentId":"agent",
+                "id":"request-id","timestamp":"2026-11-19T08:36:29.727Z","version":"2.1.328",
+                "querySource":"agent:custom:fixture","shapeHash":"shape-hash",
+                "params":{"model":"claude-sonnet-4-6","max_tokens":32000},
+                "keep":0,"tail":["blob-hash"],"requestDigest":"request-digest"}),
+        ]
+    }
+
+    fn child_message(uuid: &str, parent: Option<&str>, role: &str) -> Value {
+        json!({"type":role,"uuid":uuid,"parentUuid":parent,"isSidechain":true,
+            "sessionId":"parent","agentId":"agent","cwd":"/fixture/project",
+            "message":{"role":role,"content":[{"type":"text","text":uuid}]}})
+    }
+
+    fn analyze_child_records(records: &[Value]) -> SessionAnalysis {
+        let bytes = encode_records(records);
+        analyze_claude_records_in_context(
+            &bytes,
+            crate::conversation_codec::parsed_records(&bytes),
+            CHILD,
+        )
+    }
+
+    #[test]
+    fn child_admits_request_log_records_and_keeps_them_out_of_the_chain() {
+        let [shape, blob, request] = child_request_log();
+        for record in [&shape, &blob, &request] {
+            assert_eq!(CHILD.validate(record), Ok(()), "{record}");
+            assert!(matches!(
+                classify_claude_record_in_context(record.as_object().unwrap(), CHILD),
+                Ok(ClaudeRecordClass::NotChain)
+            ));
+            let mut flagged = record.clone();
+            flagged["isSidechain"] = json!(true);
+            assert_eq!(CHILD.validate(&flagged), Ok(()), "{flagged}");
+        }
+        let user = child_message("u1", None, "user");
+        let assistant = child_message("a1", Some("u1"), "assistant");
+        let plain = analyze_child_records(&[user.clone(), assistant.clone()]);
+        let logged = analyze_child_records(&[user, shape, blob, request, assistant]);
+        assert_eq!(chain_ids(&logged), ["u1", "a1"]);
+        assert_eq!(logged.record_count, 5);
+        assert!(logged.is_internal_subagent);
+        assert_eq!(logged.source_provider_session_id.as_deref(), Some("parent"));
+        // The request log is carried, not conversation: it changes no digest.
+        assert!(lineage_digests(&logged).is_some());
+        assert_eq!(lineage_digests(&logged), lineage_digests(&plain));
+    }
+
+    #[test]
+    fn child_refuses_a_request_log_record_that_is_not_its_own() {
+        let user = child_message("u1", None, "user");
+        for record in child_request_log() {
+            for (field, value) in [
+                ("sessionId", Some(json!("other"))),
+                ("sessionId", None),
+                ("agentId", Some(json!("other"))),
+                ("agentId", None),
+                ("isSidechain", Some(json!(false))),
+                ("isSidechain", Some(json!("true"))),
+                ("isSidechain", Some(Value::Null)),
+                // A `uuid` key makes it a transcript message: the flag is owed.
+                ("uuid", Some(json!("m1"))),
+                ("uuid", Some(Value::Null)),
+            ] {
+                let mut record = record.clone();
+                match value {
+                    Some(value) => record[field] = value,
+                    None => {
+                        record.as_object_mut().unwrap().remove(field);
+                    }
+                }
+                assert_eq!(
+                    CHILD.validate(&record),
+                    Err(CodecUnknownReason::InvalidChildIdentity),
+                    "{record}"
+                );
+                assert_eq!(
+                    analyze_child_records(&[user.clone(), record]).lineage,
+                    CodecLineage::Unknown {
+                        reason: CodecUnknownReason::InvalidChildIdentity
+                    }
+                );
+            }
+        }
+        // A conversation record still owes all three checks.
+        for field in ["sessionId", "agentId", "isSidechain"] {
+            let mut record = user.clone();
+            record.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                CHILD.validate(&record),
+                Err(CodecUnknownReason::InvalidChildIdentity),
+                "{record}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_request_log_record_cannot_carry_a_child_reference() {
+        let [_, blob, request] = child_request_log();
+        let mut call = blob;
+        call["message"] = json!({"role":"assistant","content":[
+            {"type":"tool_use","id":"call-1","name":"Agent","input":{"prompt":"nested"}}
+        ]});
+        let mut result = request;
+        result["toolUseResult"] = json!({"agentId":"nested"});
+        for record in [call, result] {
+            assert_eq!(
+                CHILD.validate(&record),
+                Err(CodecUnknownReason::UnsupportedChildReference),
+                "{record}"
+            );
+        }
     }
 
     /// Manual corpus gate: the shipped Rust analyzer must hold the
